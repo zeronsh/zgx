@@ -1970,6 +1970,11 @@ struct Node {
     text_size: TextSizeCache,
     advanced_layout: Option<Box<advanced_layout::AdvancedLayoutCache>>,
     arrange_dirty: bool,
+    /// Another kept result was promoted since it was placed: placed again
+    /// only if the current one isn't the one it was placed from.
+    swapped: bool,
+    /// The serial of the result it was last placed from.
+    arranged_serial: u32,
     /// Whether its size can depend on the available width and height it is
     /// measured under (`Scene::reads_available`): `READS_KNOWN` once worked
     /// out, cleared with its layout.
@@ -2511,6 +2516,9 @@ struct Measurement {
     /// Layout pass that produced this result. A dirty node may reuse only
     /// results from the pass in progress.
     pass: u64,
+    /// Which result this is (`Scene::next_serial`): a node placed from it
+    /// and promoted back to it needs no placing again.
+    serial: u32,
 }
 #[inline(never)]
 fn promote_measurement(
@@ -3329,6 +3337,8 @@ pub struct Scene {
     pending_layout_nodes: usize,
     layout_revision: u64,
     layout_pass: u64,
+    /// The last `Measurement::serial` given.
+    measurement_serial: u32,
     /// How deep the measure running now is (`crate::deep`).
     measure_depth: u32,
     /// Measures' working sets, one per level deep (`Scratch`).
@@ -3376,6 +3386,8 @@ pub struct Scene {
     /// `measure` calls, for tests of how much work layout does.
     #[cfg(test)]
     pub(crate) measure_calls: u64,
+    #[cfg(test)]
+    pub(crate) fresh_measures: u64,
     /// `arrange` calls, for tests of how much work layout does.
     #[cfg(test)]
     pub(crate) arrange_calls: u64,
@@ -3576,6 +3588,8 @@ impl Scene {
                     text_size: Default::default(),
                     advanced_layout: None,
                     arrange_dirty: true,
+                    swapped: false,
+                    arranged_serial: 0,
                     reads: std::cell::Cell::new(0),
                     isolated: false,
                     local: None,
@@ -3652,6 +3666,7 @@ impl Scene {
             pending_layout_nodes: 0,
             layout_revision: 0,
             layout_pass: 0,
+            measurement_serial: 0,
             measure_depth: 0,
             scratch: Vec::new(),
             content_revision: 0,
@@ -3668,6 +3683,8 @@ impl Scene {
             escaped: Vec::new(),
             #[cfg(test)]
             measure_calls: 0,
+            #[cfg(test)]
+            fresh_measures: 0,
             #[cfg(test)]
             arrange_calls: 0,
             #[cfg(test)]
@@ -7626,6 +7643,8 @@ impl Scene {
             text_size: Default::default(),
             advanced_layout: None,
             arrange_dirty: true,
+            swapped: false,
+            arranged_serial: 0,
             reads: std::cell::Cell::new(0),
             isolated: false,
             local: None,
@@ -12136,7 +12155,7 @@ impl Scene {
             // Checked just above.
             let node = self.tree_node_mut(id);
             let size = promote_measurement(&mut node.measurement, &mut node.alternates, index);
-            node.arrange_dirty = true;
+            node.swapped = true;
             return size;
         }
         if !full
@@ -12160,6 +12179,10 @@ impl Scene {
     fn measure_uncached(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
         // Timed for devtools' layout attribution while they trace.
         let _traced = crate::profile::layout_span(id);
+        #[cfg(test)]
+        {
+            self.fresh_measures += 1;
+        }
         // Checked by `measured`, its one caller.
         let node = self.tree_node(id);
         // Not `laid_out` here: joined to this test it's a mask on every
@@ -13021,7 +13044,7 @@ impl Scene {
     fn check_kept_in_place(&self, id: NodeId, at: Rect) {
         let node = self.tree_node(id);
         // Not arranged this pass (a probe's result, its own still current).
-        if node.arrange_dirty || node.dirty & LAYOUT != 0 || node.rtl {
+        if node.arrange_dirty || node.swapped || node.dirty & LAYOUT != 0 || node.rtl {
             return;
         }
         let Some(last) = node.measurement.as_ref() else {
@@ -13330,6 +13353,7 @@ impl Scene {
         // As `measure_uncached` leaves it: no advanced layout, and the last
         // result's lists, when this pass replaces it, kept for this one.
         let pass = self.layout_pass;
+        let serial = self.next_serial();
         // Most boxes never had an advanced result: one compare, nothing
         // dropped.
         let node = self.tree_node_mut(id);
@@ -13348,6 +13372,7 @@ impl Scene {
             last.constraints = constraints;
             last.size = size;
             last.pass = pass;
+            last.serial = serial;
             last.children.clear();
             node.arrange_dirty = true;
             return Some(size);
@@ -13670,6 +13695,12 @@ impl Scene {
         Some(outer)
     }
     /// Make a new result current, keeping earlier ones that are still valid.
+    /// A new `Measurement::serial`, never 0 (no result placed yet).
+    #[inline(always)]
+    fn next_serial(&mut self) -> u32 {
+        self.measurement_serial = self.measurement_serial.wrapping_add(1).max(1);
+        self.measurement_serial
+    }
     fn store_measurement(
         &mut self,
         id: NodeId,
@@ -13679,6 +13710,7 @@ impl Scene {
     ) {
         // `constraints` are as `measure` looks results up (`relevant`).
         let pass = self.layout_pass;
+        let serial = self.next_serial();
         let node = self.node_mut(id);
         let dirty = node.dirty & LAYOUT != 0;
         // A changed node's result from an earlier pass is stale (the retain
@@ -13727,6 +13759,7 @@ impl Scene {
             size,
             children,
             pass,
+            serial,
         });
         if overfull {
             self.overfull.push(id);
@@ -13765,7 +13798,7 @@ impl Scene {
         let cache = node.measurement.as_ref().unwrap();
         let bounds = Rect::new(x, y, cache.size.0, cache.size.1);
         let (arrange_dirty, rtl, childless) = (
-            node.arrange_dirty,
+            node.arrange_dirty || (node.swapped && cache.serial != node.arranged_serial),
             node.rtl,
             self.children_raw(node).is_empty(),
         );
@@ -13874,6 +13907,8 @@ impl Scene {
         let node = self.tree_node_mut(id);
         node.dirty &= !LAYOUT;
         node.arrange_dirty = false;
+        node.swapped = false;
+        node.arranged_serial = node.measurement.as_ref().map_or(0, |m| m.serial);
     }
     /// Whether `node`, laid out at `bounds` where its box was elsewhere,
     /// only grew or shrank in place, and nothing it paints itself depends
@@ -13932,7 +13967,8 @@ impl Scene {
         // A leaf's result places no children: measured as it is now.
         debug_assert!(cache.children.is_empty());
         let bounds = Rect::new(x, y, cache.size.0, cache.size.1);
-        if !node.arrange_dirty && node.bounds == bounds {
+        let swapped = node.swapped && cache.serial != node.arranged_serial;
+        if !node.arrange_dirty && !swapped && node.bounds == bounds {
             return;
         }
         let changed = node.bounds != bounds;
@@ -13965,6 +14001,8 @@ impl Scene {
         let node = self.tree_node_mut(id);
         node.dirty &= !LAYOUT;
         node.arrange_dirty = false;
+        node.swapped = false;
+        node.arranged_serial = node.measurement.as_ref().map_or(0, |m| m.serial);
     }
     /// A `snap` node placed at `x`, `y`: its edges on whole points, laid
     /// out again at the size between them if that differs.
@@ -17683,6 +17721,101 @@ mod tests {
             assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
         }
     }
+    /// A content-height column held by a one-cell grid (a script `presence`
+    /// with sizing of its own, through its `display: contents` wrappers)
+    /// lays out only its end as it grows, as it does in a plain column.
+    #[test]
+    fn a_column_in_a_one_cell_grid_lays_out_only_its_end() {
+        let build = |grid: bool| {
+            let mut scene = Scene::new(300.0, 2000.0);
+            scene.set_text_measurer(|text: &str, _: f32, limit: Option<f32>| {
+                let width = text.len() as f32 * 7.0;
+                let room = limit.unwrap_or(width).max(7.0);
+                (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+            });
+            let holder = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(240.0),
+                    layout_options: grid.then(|| {
+                        Arc::new(crate::layout::LayoutOptions {
+                            display: Some(crate::layout::Display::Grid),
+                            columns: Some(1),
+                            rows: Some(1),
+                            ..Default::default()
+                        })
+                    }),
+                    align: Align::Stretch,
+                    ..Style::default()
+                },
+            );
+            let region = scene.append(
+                holder,
+                NodeKind::Container(Layout::Column),
+                Style::default(),
+            );
+            scene.set_display_contents(region, true);
+            let entry = scene.append(
+                region,
+                NodeKind::Container(Layout::Column),
+                Style::default(),
+            );
+            scene.set_display_contents(entry, true);
+            let column = scene.append(
+                entry,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    gap: 8.0,
+                    ..Style::default()
+                },
+            );
+            let wrap = Style {
+                text_wrap: true,
+                ..Style::default()
+            };
+            let ids: Vec<_> = (0..200)
+                .map(|i| {
+                    scene.append(
+                        column,
+                        text(&format!("block {i} says a little")),
+                        wrap.clone(),
+                    )
+                })
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        // The most nodes placed and measured afresh by any one change.
+        let grows = |grid: bool| {
+            let (mut scene, column, ids) = build(grid);
+            let mut last = "the block a reply streams into".to_string();
+            let (mut placed, mut fresh) = (0, 0);
+            for _ in 0..3 {
+                last.push_str(" and then a good deal more of it");
+                scene.set_text(*ids.last().unwrap(), last.as_str());
+                let before = scene.fresh_measures;
+                placed = placed.max(scene.flush().layout_nodes);
+                fresh = fresh.max(scene.fresh_measures - before);
+            }
+            scene.append(column, text("a new block arrives"), Style::default());
+            let before = scene.fresh_measures;
+            placed = placed.max(scene.flush().layout_nodes);
+            (placed, fresh.max(scene.fresh_measures - before))
+        };
+        let plain = grows(false);
+        let in_grid = grows(true);
+        assert!(
+            plain.0 < 10 && plain.1 < 10,
+            "{plain:?} placed and measured in a plain column"
+        );
+        // Its probes (min- and max-content, then its width) measure the
+        // changed column, not the blocks it keeps, and place nothing again.
+        assert!(
+            in_grid.0 < 10 && in_grid.1 < 20,
+            "{in_grid:?} placed and measured of 200 blocks in a one-cell grid"
+        );
+    }
     /// A column streamed into every way its end can change: appended to,
     /// its last child growing, a child before it changing (laid out from
     /// there), its last removed, padded so its sums carry far: each time
@@ -19460,6 +19593,7 @@ mod measure_work_tests {
             size: (size, 0.),
             children: Vec::new(),
             pass: 0,
+            serial: 0,
         };
         let sizes = |list: &[Measurement]| list.iter().map(|m| m.size.0).collect::<Vec<_>>();
         for len in 1..=64 {
