@@ -468,7 +468,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   state [name] [--full]                  set <name> <json>
   click <target>       type <target> <text>      key <keys>
   hover <target|x,y>   right-click <target|x,y>  drag <from> <to|x,y>
-  scroll <target> <dy> command <id>
+  scroll <target> <dy> [dx] command <id>
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
@@ -630,6 +630,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
         "scroll" => {
             put("target", arg(1));
             put("dy", arg(2));
+            put("dx", arg(3));
         }
         "key" => put("keys", arg(1)),
         "command" => put("id", arg(1)),
@@ -678,7 +679,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let fields: Vec<(String, Value)> = fields
         .into_iter()
         .map(|(k, v)| match (&*k, &v) {
-            ("dy" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every", Value::Str(s)) => {
+            ("dy" | "dx" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every", Value::Str(s)) => {
                 (k, s.parse::<f64>().map(Value::Num).unwrap_or(v))
             }
             _ => (k, v),
@@ -879,7 +880,7 @@ const TOOLS: &[Tool] = &[
     (
         "zgx_scroll",
         "scroll",
-        &[("target", "string", true), ("dy", "number", true)],
+        &[("target", "string", true), ("dy", "number", true), ("dx", "number", false)],
         "Scroll the viewport under a node by dy points (down is positive).",
     ),
     (
