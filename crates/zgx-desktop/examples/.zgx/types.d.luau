@@ -1738,6 +1738,8 @@ export type CommandOptions = {
 	-- a focused web page or terminal, which otherwise get each key first
 	-- (as a browser keeps ⌘T from its pages). Not a plugin's to set.
 	reserved: boolean?,
+	-- Held, its shortcut runs it again on each auto-repeat; without it, once a press.
+	repeat: boolean?,
 	run: (() -> ...unknown)?,
 	-- A separator line in `menu` instead of a command.
 	separator: boolean?,
@@ -21968,6 +21970,8 @@ declare ui: {
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
 	command: (opts: CommandOptions) -> (),
+	-- Runs the command `id` as its shortcut would; whether there was one.
+	run_command: (id: string) -> boolean,
 	-- Keys ("cmd+shift+z") as this platform shows them: "⇧⌘Z" on macOS,
 	-- "Ctrl+Shift+Z" elsewhere (`cmd` is Command on macOS, Control
 	-- elsewhere); a lone modifier ("cmd") as itself, "⌘" or "Ctrl".

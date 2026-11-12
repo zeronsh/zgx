@@ -33,6 +33,8 @@ pub struct Command {
     pub key: Option<String>,
     /// A separator line, not a command.
     pub separator: bool,
+    /// Held, its shortcut runs it again on each auto-repeat (`repeat = true`); else once a press.
+    pub repeat: bool,
 }
 
 /// A command's shortcut zgx dropped because a command declared before it
@@ -365,6 +367,13 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
         lua.create_function(|_, keys: String| Ok(crate::lower::shortcut_label(&keys)))?,
     )?;
 
+    // As its shortcut would, from a script: a key a modal or field holds back can still reach its command.
+    let runner = commands.clone();
+    ui.set(
+        "run_command",
+        lua.create_function(move |_, id: String| Ok(runner.run(&id)))?,
+    )?;
+
     // Made once: a `&str` key is a new string pushed each declaration.
     let reserved_key = lua.create_string("reserved")?;
     ui.set(
@@ -390,6 +399,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                         menu,
                         key: None,
                         separator: true,
+                        repeat: false,
                     },
                     None,
                     None,
@@ -478,6 +488,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                     menu,
                     key,
                     separator: false,
+                    repeat: table.get::<Option<bool>>("repeat")?.unwrap_or(false),
                 },
                 Some((run, vm)),
                 plugin,

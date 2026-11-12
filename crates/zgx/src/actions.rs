@@ -102,6 +102,8 @@ pub struct KeyBinding {
     /// A physical key it binds instead of `sequence`'s key (`KeyBinding::code`).
     code: Option<Rc<str>>,
     reserved: bool,
+    /// Held down, it runs once: the key's auto-repeat is taken and dropped (`KeyBinding::once`).
+    once: bool,
 }
 impl KeyBinding {
     /// Bind one through four strokes. Invalid lengths are rejected without registration.
@@ -119,6 +121,7 @@ impl KeyBinding {
             context: None,
             code: None,
             reserved: false,
+            once: false,
         })
     }
     /// Bind the physical key `code` (as the DOM's `KeyboardEvent.code`
@@ -134,7 +137,14 @@ impl KeyBinding {
             context: None,
             code: Some(code),
             reserved: false,
+            once: false,
         }
+    }
+    /// Runs on the press alone: while the key is held its repeats are taken and do nothing, as a web
+    /// one-shot hotkey ignores `KeyboardEvent.repeat` (so they don't reach a field either).
+    pub fn once(mut self) -> Self {
+        self.once = true;
+        self
     }
     /// Whether it starts with `strokes`, the last pressed as the physical
     /// key `code`.
@@ -441,6 +451,10 @@ impl Registry {
                             continue;
                         }
                         if binding.sequence.len() == strokes.len() {
+                            if repeat && binding.once {
+                                candidates.push(Action::new(NoAction));
+                                break;
+                            }
                             candidates.push(binding.action.clone());
                             if binding.action.downcast_ref::<NoAction>().is_some() {
                                 break;

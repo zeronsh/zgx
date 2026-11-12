@@ -4356,9 +4356,10 @@ impl ScriptHost {
         lazy.ui(&["web"], move |lua, ui| node::install_web(lua, ui, webs));
         lazy.ui(&["menu_look"], crate::lower::install_menu_look);
         let commands = self.0.commands.clone();
-        lazy.ui(&["command", "shortcut_text"], move |lua, ui| {
-            command::install(lua, ui, commands)
-        });
+        lazy.ui(
+            &["command", "shortcut_text", "run_command"],
+            move |lua, ui| command::install(lua, ui, commands),
+        );
         let commands = self.0.commands.clone();
         lazy.ui(&["shortcut_owner"], move |lua, ui| {
             command::install_owner(lua, ui, commands)

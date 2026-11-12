@@ -89,13 +89,19 @@ fn link_menu_builds_a_link_s_menu_from_its_address_and_text() {
     );
     assert!(tree.contains("Show source"), "{tree}");
     assert!(!tree.contains("Copy Link"), "{tree}");
-    assert!(tree.contains("https://anara.com/cite/doc1?page=3|aaa"), "{tree}");
+    assert!(
+        tree.contains("https://anara.com/cite/doc1?page=3|aaa"),
+        "{tree}"
+    );
 }
 
 #[test]
 fn link_menu_giving_nothing_leaves_a_link_without_a_menu() {
     let tree = menu_at_link(r#"link_menu = function(e) return nil end,"#);
-    assert!(!tree.contains("Copy Link") && !tree.contains("menuitem"), "{tree}");
+    assert!(
+        !tree.contains("Copy Link") && !tree.contains("menuitem"),
+        "{tree}"
+    );
 }
 
 #[test]

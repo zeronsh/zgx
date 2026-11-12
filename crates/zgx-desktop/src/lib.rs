@@ -149,7 +149,7 @@ pub fn release_thread_heap() {
 
 pub use app_menu::{
     APPLICATION_MENU, AppMenu, AppMenuEntry, AppMenuError, KEY_ONLY_MENU, MenuAccelerator,
-    MenuAction, StandardItem, app_menu_bar, has_native_app_menu,
+    MenuAction, StandardItem, app_menu_bar, has_native_app_menu, repeats, set_repeating,
 };
 pub use composition::{CompositionLayer, WindowComposition};
 pub use file_dialog::{

@@ -35,6 +35,7 @@ pub fn install_connector(host: &ScriptHost) {
 
 /// Menus in the order the script first names them, items in its order.
 pub fn menus(commands: &[Command]) -> Vec<AppMenu> {
+    zgx_desktop::set_repeating(commands.iter().filter(|c| c.repeat).map(|c| c.id.clone()));
     let mut menus: Vec<AppMenu> = Vec::new();
     let mut keys_only = AppMenu::new(zgx_desktop::KEY_ONLY_MENU, []);
     for command in commands {
@@ -825,6 +826,7 @@ mod tests {
             menu: menu.into(),
             key: key.map(Into::into),
             separator: false,
+            repeat: false,
         }
     }
     fn shape(menu: &AppMenu) -> Vec<String> {

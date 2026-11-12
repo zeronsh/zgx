@@ -1085,6 +1085,10 @@ impl Application {
         {
             let wake = proxy.clone();
             muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
+                // AppKit runs a key equivalent again on each auto-repeat
+                if key_repeat_now() && !crate::app_menu::repeats(&event.id.0) {
+                    return;
+                }
                 let _ = wake.send_event(Event::NativeMenuAction(crate::MenuAction(event.id.0)));
             }));
             let wake = proxy.clone();
@@ -10903,4 +10907,16 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<WindowHandle>();
     }
+}
+
+/// Whether the event AppKit is handling is a held key's auto-repeat (a menu's key equivalent runs on each).
+#[cfg(target_os = "macos")]
+fn key_repeat_now() -> bool {
+    use objc2_app_kit::{NSApplication, NSEventType};
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    NSApplication::sharedApplication(mtm)
+        .currentEvent()
+        .is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat())
 }

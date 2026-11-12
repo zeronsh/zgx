@@ -557,6 +557,24 @@ fn entries(
 
 /// The menus' shortcuts as key bindings; those on a `reserved` keystroke
 /// (`Application::reserved_shortcuts`) reserved, a letter in either case.
+/// Actions whose shortcut runs again while held (`set_repeating`); every other runs once a press.
+static REPEATING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The menu actions a held shortcut repeats (a script command's `repeat = true`): the rest take one
+/// run a press, as web one-shot hotkeys ignore `KeyboardEvent.repeat`. Set before the menus are made.
+pub fn set_repeating(actions: impl IntoIterator<Item = String>) {
+    *REPEATING.lock().unwrap_or_else(|e| e.into_inner()) = actions.into_iter().collect();
+}
+
+/// Whether `action` runs again on its shortcut's auto-repeat.
+pub fn repeats(action: &str) -> bool {
+    REPEATING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|a| a == action)
+}
+
 pub(crate) fn keymap(
     menus: &[AppMenu],
     reserved: &[zgx::actions::Keystroke],
@@ -575,6 +593,11 @@ pub(crate) fn keymap(
         let reserve = reserved_stroke(&stroke);
         let binding =
             KeyBinding::new([stroke], Action::new(action.clone())).expect("single menu shortcut");
+        let binding = if repeats(&action.0) {
+            binding
+        } else {
+            binding.once()
+        };
         if reserve { binding.reserved() } else { binding }
     };
     fn collect(
@@ -2204,6 +2227,54 @@ mod dynamic_tests {
             repeat: false,
         });
         assert_eq!(*output.borrow(), ["search"]);
+    }
+    /// Held, a shortcut runs its command once, as web one-shot hotkeys ignore repeats; one marked
+    /// repeating (`set_repeating`) runs on each repeat, as ⌘[ steps back through history.
+    #[test]
+    fn a_held_shortcut_runs_once_unless_its_command_repeats() {
+        let mut ui = Ui::new(400., 300.);
+        let root = ui.scene.borrow().root();
+        let output = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let fallback = output.clone();
+        let _listener = ui.input.listen(root, move |event| {
+            if event.phase != EventPhase::Capture
+                && !event.default_prevented()
+                && let InputEvent::Action(action) = &event.event
+                && let Some(action) = action.downcast_ref::<MenuAction>()
+            {
+                fallback.borrow_mut().push(action.0.clone());
+                event.prevent_default();
+            }
+        });
+        set_repeating(["held_back".to_string()]);
+        let primary = |c: &str| MenuAccelerator::primary(Key::Character(c.into()));
+        let model = vec![AppMenu::new(
+            KEY_ONLY_MENU,
+            [
+                AppMenuEntry::item("Search", "held_search").accelerator(primary("k")),
+                AppMenuEntry::item("Back", "held_back").accelerator(primary("[")),
+            ],
+        )];
+        let _binding = ui.input.bind_keys(root, keymap(&model, &[]));
+        ui.prepare_frame();
+        let modifiers = Modifiers {
+            control: !cfg!(target_os = "macos"),
+            meta: cfg!(target_os = "macos"),
+            ..Default::default()
+        };
+        for key in ["k", "["] {
+            for repeat in [false, true, true] {
+                ui.dispatch(InputEvent::KeyDown {
+                    key: Key::Character(key.into()),
+                    modifiers,
+                    repeat,
+                });
+            }
+        }
+        assert_eq!(
+            *output.borrow(),
+            ["held_search", "held_back", "held_back", "held_back"]
+        );
     }
     #[test]
     fn replacement_unregisters_shortcuts_and_focused_action_can_override() {
