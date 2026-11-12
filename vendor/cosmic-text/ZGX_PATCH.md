@@ -524,3 +524,12 @@ it reuses) and the font searches' caches (matches, first fonts and
 fallbacks, `scanned`, codepoint support, weight axes, monospace ids, the
 parsed-font table). Walked when asked; nothing is counted as text shapes.
 zgx-gpu's `shaping_counts_the_buffers_and_caches_it_keeps` checks it.
+
+## Tracking, and a baseline where a browser puts it
+
+A face is shaped with its optical size as its point size, so harfrust reads
+the `trak` table (SF's tracking) at the size the text is drawn; without one
+it read the table at 12 points, Core Text's fallback. And a line's baseline
+sits where Blink's line box puts it: ascent and descent rounded to whole
+pixels, the half-leading floored, so a baseline is on a pixel whatever the
+font size and line height. zgx-gpu's `tests/text_metrics.rs` checks both.

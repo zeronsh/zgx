@@ -176,3 +176,86 @@ fn past_four_the_oldest_wait() {
     assert_eq!(with_role(&ui, Role::Alert).len(), 4);
     assert!(!texts(&ui).contains(&"Toast 0".to_owned()));
 }
+
+fn host_with_fields(ui: &mut Ui, executor: &Rc<RefCell<LocalExecutor>>) {
+    ui.mount(provide(
+        TaskRunner::from_executor(executor.clone()),
+        column()
+            .w_full()
+            .h_full()
+            .child(button().accessible_label("First").child(text("First")))
+            .child(button().accessible_label("Second").child(text("Second")))
+            .child(toast_host()),
+    ));
+    ui.prepare_frame();
+}
+fn button_named(ui: &Ui, label: &str) -> NodeId {
+    with_role(ui, Role::Button)
+        .into_iter()
+        .find(|n| ui.semantics.borrow().get(*n).unwrap().label == label)
+        .unwrap_or_else(|| panic!("no {label} button"))
+}
+fn click(ui: &mut Ui, node: NodeId) {
+    let b = ui.scene.borrow().bounds(node);
+    let (x, y) = (b.x + 4., b.y + 4.);
+    let button = PointerButton::Primary;
+    ui.dispatch(InputEvent::PointerDown { x, y, button });
+    ui.dispatch(InputEvent::PointerUp { x, y, button });
+    ui.prepare_frame();
+    ui.prepare_frame();
+}
+
+#[test]
+fn a_pointer_press_on_a_toast_leaves_focus_where_it_was() {
+    let mut ui = Ui::new(800., 600.);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    host_with_fields(&mut ui, &executor);
+    let toaster = Toaster::of(&ui.runtime);
+    let first = button_named(&ui, "First");
+    ui.input.focus(&ui.scene, Some(first));
+    toaster.show(Toast::new("Moved").action("Undo", || {}));
+    toaster.show(Toast::new("Saved"));
+    ui.prepare_frame();
+    ui.prepare_frame();
+    assert_eq!(ui.input.focused(), Some(first));
+    // The card, its action and its Dismiss take the click, not the focus.
+    click(&mut ui, with_role(&ui, Role::Status)[0]);
+    assert_eq!(ui.input.focused(), Some(first), "a press on the card");
+    click(&mut ui, button_named(&ui, "Undo"));
+    assert_eq!(ui.input.focused(), Some(first), "its action removed it");
+    assert_eq!(toaster.showing().len(), 1);
+    click(&mut ui, button_named(&ui, "Dismiss"));
+    assert!(toaster.showing().is_empty());
+    assert_eq!(ui.input.focused(), Some(first), "its Dismiss removed it");
+}
+
+#[test]
+fn a_keyboard_dismissal_leaves_focus_on_a_live_control() {
+    let mut ui = Ui::new(800., 600.);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    host_with_fields(&mut ui, &executor);
+    let toaster = Toaster::of(&ui.runtime);
+    toaster.show(Toast::new("Connected"));
+    ui.prepare_frame();
+    ui.prepare_frame();
+    let key = |ui: &mut Ui, key: Key| {
+        ui.dispatch(InputEvent::KeyDown {
+            key,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        });
+        ui.prepare_frame();
+    };
+    key(&mut ui, Key::Function(8));
+    assert_eq!(ui.input.focused(), Some(with_role(&ui, Role::Status)[0]));
+    key(&mut ui, Key::Tab);
+    assert_eq!(ui.input.focused(), Some(button_named(&ui, "Dismiss")));
+    key(&mut ui, Key::Enter);
+    ui.prepare_frame();
+    assert!(toaster.showing().is_empty());
+    let focused = ui.input.focused().expect("focus lands on a control");
+    assert!(
+        [button_named(&ui, "First"), button_named(&ui, "Second")].contains(&focused),
+        "focus went to one of the page's buttons"
+    );
+}
