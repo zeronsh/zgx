@@ -16,6 +16,10 @@
 //! `WINDOW <number>` first says which it is (its `CGWindowID`, for
 //! `screencapture -l`). `--hold` keeps the window open at the end, for
 //! looking at it. Then `TRAFFIC_LIGHTS_DONE`.
+//!
+//! After `resized` it resizes the window in 90 steps while counting, after each
+//! frame Core Animation commits, the frames where the close button was not at
+//! `--at`: `LIVE_RESIZE samples=<n> wrong=<n> first_wrong=<x,y>`.
 use std::time::Duration;
 use zgx::compose::prelude::*;
 use zgx_desktop::{Application, Titlebar, WindowOptions};
@@ -81,6 +85,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.set_inner_size(720., 460.);
                 pause(800).await;
                 report("resized");
+                state::watch_frames(at);
+                for step in 0..90 {
+                    let grow = if step < 45 { step } else { 90 - step } as f32;
+                    window.set_inner_size(640. + grow * 4., 400. + grow * 2.);
+                    pause(16).await;
+                }
+                pause(200).await;
+                println!("{}", state::watched());
                 window.set_theme(Some(zgx::theme::Appearance::Dark));
                 pause(600).await;
                 report("dark");
@@ -121,6 +133,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod state {
     use objc2::{MainThreadMarker, rc::Retained};
     use objc2_app_kit::{NSApplication, NSWindow, NSWindowButton};
+    use std::{
+        ffi::c_void,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     fn ours() -> Option<Retained<NSWindow>> {
         let app = NSApplication::sharedApplication(MainThreadMarker::new()?);
@@ -152,6 +171,74 @@ mod state {
             frame.size.height,
             close.isHidden()
         )
+    }
+
+    static SAMPLES: AtomicUsize = AtomicUsize::new(0);
+    static WRONG: AtomicUsize = AtomicUsize::new(0);
+    static FIRST_WRONG: Mutex<String> = Mutex::new(String::new());
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFRunLoopCommonModes: *const c_void;
+        fn CFRunLoopGetMain() -> *mut c_void;
+        fn CFRunLoopObserverCreateWithHandler(
+            allocator: *const c_void,
+            activities: usize,
+            repeats: u8,
+            order: isize,
+            block: *const c_void,
+        ) -> *mut c_void;
+        fn CFRunLoopAddObserver(run_loop: *mut c_void, observer: *mut c_void, mode: *const c_void);
+    }
+
+    /// Samples the close button after each frame Core Animation commits
+    /// (a run-loop observer just after its own, before the loop waits):
+    /// what a frame shows is where the button stood then. Counts the
+    /// frames where it was not at `at`.
+    pub fn watch_frames(at: (f64, f64)) {
+        let block = block2::RcBlock::new(move |_observer: *mut c_void, _activity: usize| {
+            let Some((x, y)) = close_xy() else {
+                return;
+            };
+            SAMPLES.fetch_add(1, Ordering::Relaxed);
+            if (x - at.0).abs() > 0.5 || (y - at.1).abs() > 0.5 {
+                if WRONG.fetch_add(1, Ordering::Relaxed) == 0 {
+                    *FIRST_WRONG.lock().unwrap() = format!("{x:.1},{y:.1}");
+                }
+            }
+        });
+        // kCFRunLoopBeforeWaiting, repeating, after Core Animation's commit (order 2000000).
+        // SAFETY: CoreFoundation's observer API with a block that lives as long as the process.
+        unsafe {
+            let observer = CFRunLoopObserverCreateWithHandler(
+                std::ptr::null(),
+                1 << 5,
+                1,
+                2_000_001,
+                &*block as *const _ as *const c_void,
+            );
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+        }
+        std::mem::forget(block);
+    }
+
+    pub fn watched() -> String {
+        format!(
+            "LIVE_RESIZE samples={} wrong={} first_wrong={}",
+            SAMPLES.load(Ordering::Relaxed),
+            WRONG.load(Ordering::Relaxed),
+            FIRST_WRONG.lock().unwrap()
+        )
+    }
+
+    fn close_xy() -> Option<(f64, f64)> {
+        let window = ours()?;
+        let close = window.standardWindowButton(NSWindowButton::CloseButton)?;
+        let frame = close.convertRect_toView(close.bounds(), None);
+        Some((
+            frame.origin.x,
+            window.frame().size.height - (frame.origin.y + frame.size.height),
+        ))
     }
 
     /// The app hidden, or shown again: its window resigns key and becomes
@@ -189,4 +276,8 @@ mod state {
     }
     pub fn hide(_: bool) {}
     pub fn toggle() {}
+    pub fn watch_frames(_: (f64, f64)) {}
+    pub fn watched() -> String {
+        "LIVE_RESIZE samples=0 wrong=0 first_wrong=".into()
+    }
 }
