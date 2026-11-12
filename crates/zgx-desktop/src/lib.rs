@@ -63,7 +63,11 @@ mod mimalloc_tag_tests {
             .expect("vmmap runs");
         let summary = String::from_utf8_lossy(&summary.stdout);
         drop(held);
-        assert!(summary.contains("Memory Tag 240"), "{summary}");
+        // macOS 27's vmmap names tag 240 "App-Specific Tag 1"
+        assert!(
+            summary.contains("Memory Tag 240") || summary.contains("App-Specific Tag 1 "),
+            "{summary}"
+        );
     }
 }
 pub mod app_menu;
