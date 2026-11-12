@@ -5015,8 +5015,8 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after) = match span.extras.take() {
-                None => (None, None, None, false, -1.),
+            let (hover, icon, menu, plain, room_after, outset) = match span.extras.take() {
+                None => (None, None, None, false, -1., 0.),
                 Some(extras) => {
                     let extras = *extras;
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
@@ -5033,6 +5033,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         extras.menu,
                         extras.plain,
                         if apart { end } else { -1. },
+                        extras.outset,
                     )
                 }
             };
@@ -5136,6 +5137,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     strikethrough: None,
                     padding: [span.padding[0] / 2., span.padding[1]],
                     radius: span.radius,
+                    outset: 0.,
                     range,
                     font: font.clone(),
                     font_size,
@@ -5154,6 +5156,7 @@ fn paragraph_effect<const LOCATING: bool>(
                             span.padding[1],
                         ],
                         radius: span.radius,
+                        outset: 0.,
                         range: range.clone(),
                         font: font.clone(),
                         font_size,
@@ -5220,6 +5223,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     span.padding
                 },
                 radius: span.radius,
+                outset,
                 range: start..text_end,
                 font: font.clone(),
                 font_size,
@@ -5234,6 +5238,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     strikethrough: None,
                     padding: [room_after / 2., span.padding[1]],
                     radius: span.radius,
+                    outset: 0.,
                     range: text_end..content.len(),
                     font,
                     font_size,

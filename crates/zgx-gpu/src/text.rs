@@ -2756,9 +2756,10 @@ pub fn rich_decorations_in<'a>(
                     // A padded or rounded background hugs the text (CSS's
                     // content area, about 0.92 em above the baseline and
                     // 0.24 below) plus its padding; a plain one fills the line.
-                    let bounds = if run.padding != [0.; 2] || run.radius > 0. {
+                    let bounds = if run.padding != [0.; 2] || run.radius > 0. || run.outset > 0. {
                         let (above, below) = (run.font_size * 0.92, run.font_size * 0.24);
                         let top = line.line_y - above - run.padding[1];
+                        let (left, right) = (left - run.outset, right + run.outset);
                         Rect::new(left, top, right - left, above + below + 2. * run.padding[1])
                     } else {
                         Rect::new(left, line.line_top, right - left, line.line_height)

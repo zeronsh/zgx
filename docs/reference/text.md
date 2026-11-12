@@ -73,6 +73,7 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `lang` | `string` | the paragraph's | the language the run is in: a quote's Han characters in its language's fonts. A plain value, not followed |
 | `padding` | `number` or `{ across, down }` | `0` | room around the run: across, before and after it (it takes space in the line); with `bg`, the background hugs the text plus this instead of filling the line, an inline code chip |
 | `radius` | `number` | `0` | the background's corner radius |
+| `outset` | `number` | `0` | how far the background reaches past the text on each side, taking no room (CSS's negative inline margin under the same padding): a search match's mark, its text where unmarked text would be |
 | `underline_offset` | `number` | a tenth of the text size | how far below the baseline the underline sits (CSS's `text-underline-offset`) |
 | `underline_style` | `"solid"`, `"double"`, `"dotted"`, `"dashed"`, `"wavy"` | `"solid"` | how the underline is drawn (CSS's `text-decoration-style`): `"wavy"` marks a spelling mistake or a diagnostic. The software raster draws them all solid |
 | `underline_color` | `Color` | the text's | its colour, or a token (`"$danger"`) |
