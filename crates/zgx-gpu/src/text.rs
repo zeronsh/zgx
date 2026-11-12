@@ -2894,6 +2894,19 @@ mod wash_tests {
             .collect()
     }
 
+    /// A span's `outset` widens its wash on each side without moving the text.
+    #[test]
+    fn an_outset_widens_the_wash_without_taking_room() {
+        let red = Color(255, 0, 0, 255);
+        let plain = RichText::new("find me", vec![run(0..7, Some((red, [0., 2.])))]).unwrap();
+        let mut marked = run(0..7, Some((red, [0., 2.])));
+        marked.outset = 3.;
+        let marked = RichText::new("find me", vec![marked]).unwrap();
+        let (a, b) = (washes(&plain)[0], washes(&marked)[0]);
+        assert!((b.width - a.width - 6.).abs() < 0.01, "{a:?} {b:?}");
+        assert!((a.x - b.x - 3.).abs() < 0.01, "{a:?} {b:?}");
+    }
+
     /// A chip with an icon is runs of its own (the icon's room, its text,
     /// the padding after it): they wash as one, not three. Spans side by
     /// side, the same colour, each keep theirs.
