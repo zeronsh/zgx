@@ -73,6 +73,10 @@ struct Server {
     urls: RefCell<Vec<String>>,
     /// Attempts still to refuse.
     refuse: Cell<u32>,
+    /// While set, a connection waits before it opens: what a test reads
+    /// first is then "connecting", however long the first frame took (the
+    /// open comes after a 1 ms timer, which a slow mount outlasts).
+    opening_held: Cell<bool>,
     /// While held, it takes nothing the script sends.
     held: Cell<bool>,
     /// What it received.
@@ -97,6 +101,10 @@ impl Server {
         self.held.set(held);
         self.poke();
     }
+    fn hold_opening(&self, held: bool) {
+        self.opening_held.set(held);
+        self.poke();
+    }
 }
 
 fn connector(
@@ -111,6 +119,14 @@ fn connector(
                 server.refuse.set(server.refuse.get() - 1);
                 return Err("connection refused".into());
             }
+            std::future::poll_fn(|cx| match server.opening_held.get() {
+                true => {
+                    *server.waker.borrow_mut() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+                false => Poll::Ready(()),
+            })
+            .await;
             socket.opened();
             server.open.set(server.open.get() + 1);
             let generation = server.open.get();
@@ -182,12 +198,16 @@ fn wait_for(h: &mut Harness, id: &str, text: &str) {
 #[test]
 fn messages_go_each_way_once_it_opens() {
     let server = Rc::new(Server::default());
+    // Held until the first status is read: the test, not the runner's
+    // speed, decides that it is read while connecting.
+    server.hold_opening(true);
     let mut h = app(&server);
     assert!(
         h.text("status").starts_with("connecting"),
         "{}",
         h.text("status")
     );
+    server.hold_opening(false);
     wait_for(&mut h, "status", "open 0 0");
     wait_for(&mut h, "log", "first;");
     h.click("send");
