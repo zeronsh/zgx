@@ -677,6 +677,14 @@ pub(crate) fn shader_params(
     }
     Ok(params)
 }
+/// The most `ui.decode_image` takes: what `ui.image` reads of a file.
+const IMAGE_LIMIT: usize = 64 << 20;
+/// `ui.decode_image`'s picture: its bytes from base64, decoded as
+/// `ui.image` decodes a file's.
+fn decode_image(encoded: &[u8]) -> Result<Arc<zgx::image::ImageData>, String> {
+    let bytes = crate::b64::decode(encoded, IMAGE_LIMIT, "a picture")?;
+    crate::gpu::decode_image_kept(Arc::from(bytes)).map_err(|e| format!("a picture: {e}"))
+}
 /// `ui.bitmap(w, h, fn)`: pixels made by a script, for masks.
 #[derive(Clone)]
 pub(crate) struct BitmapUd(pub Arc<zgx::image::ImageData>);
@@ -6624,6 +6632,30 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let image = zgx::image::ImageData::new(w, h, pixels)
                 .map_err(|e| mlua::Error::runtime(format!("ui.bitmap: {e}")))?;
             Ok(BitmapUd(Arc::new(image)))
+        })?,
+    )?;
+    // A picture from its bytes in base64 (a PNG, JPEG or GIF a server or the
+    // host's call handed over), read off the main thread: a promise of a
+    // `Bitmap`, drawn as `ui.image` draws a file (a PNG or JPEG decoded
+    // when shown, at the size shown).
+    ui.set(
+        "decode_image",
+        lua.create_function(|lua, encoded: mlua::LuaString| {
+            let encoded = encoded.as_bytes().to_vec();
+            let (tell, mut heard) =
+                zgx::task::latest::<Result<Arc<zgx::image::ImageData>, String>>();
+            let promise = crate::calls::pending(lua, "decode_image".into())?;
+            // No threads in the browser (wasm32): decoded here (and not
+            // at all there yet).
+            #[cfg(target_arch = "wasm32")]
+            tell.send(decode_image(&encoded));
+            #[cfg(not(target_arch = "wasm32"))]
+            std::thread::spawn(move || tell.send(decode_image(&encoded)));
+            crate::calls::settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+                let image = heard.recv().await.ok_or("the decoding thread stopped")??;
+                Ok(Value::Image(image))
+            })?;
+            Ok(crate::calls::PromiseUd(promise))
         })?,
     )?;
 

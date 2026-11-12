@@ -22151,6 +22151,10 @@ declare ui: {
 	spring_to: (state: State<number>, target: number, opts: SpringToOptions?) -> () -> number,
 	-- White pixels with the alpha `alpha(x, y)` gives (0 to 1), for masks.
 	bitmap: (w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap,
+	-- A picture's bytes in base64 (a PNG, JPEG or GIF a server or the host
+	-- handed over), decoded off the main thread: a promise of a `Bitmap` for
+	-- `ui.image`'s `src`.
+	decode_image: (base64: string) -> Promise<Bitmap>,
 	-- A WGSL fill: `fn fill(input: FillInput) -> vec4<f32>`, with input.p,
 	-- input.size, input.time, input.scale and input.params (four vec4s).
 	shader: (source: string, opts: { fps: number? }?) -> Shader,
