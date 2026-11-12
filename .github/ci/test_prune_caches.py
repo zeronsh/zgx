@@ -46,5 +46,29 @@ class PruneTests(unittest.TestCase):
         self.assertIsNone(prune_caches.family("luau-tools-stylua-2.6.0-luau-lsp-1.70.1-linux-x86_64"))
 
 
+class PerfBaseWorkflowTests(unittest.TestCase):
+    def test_the_token_that_deletes_caches_never_meets_built_code(self):
+        """perf-base.yml: the job that builds (and runs dependencies' build scripts) can't
+        write; the one with `actions: write` only runs gh and prune_caches.py. No checkout
+        keeps its token."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        path = pathlib.Path(__file__).resolve().parents[1] / "workflows" / "perf-base.yml"
+        jobs = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+        writers = {name for name, job in jobs.items() if (job.get("permissions") or {}).get("actions") == "write"}
+        self.assertEqual(writers, {"prune"})
+        prune = jobs["prune"]
+        self.assertFalse(any("rust" in step.get("uses", "") or "gate.py" in step.get("run", "")
+                             for step in prune["steps"]))
+        self.assertTrue(any("prune_caches.py" in step.get("run", "") for step in prune["steps"]))
+        self.assertNotIn("actions", jobs["perf"]["permissions"])
+        for name, job in jobs.items():
+            for step in job["steps"]:
+                if step.get("uses", "").startswith("actions/checkout@"):
+                    self.assertIs((step.get("with") or {}).get("persist-credentials"), False, name)
+
+
 if __name__ == "__main__":
     unittest.main()
