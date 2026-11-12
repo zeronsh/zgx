@@ -75,7 +75,7 @@ pub(crate) enum PopupInput {
     /// The screens changed (a monitor, the taskbar), or popups can have no
     /// windows of their own after all: `popup_screens` again. (Windows'; AppKit
     /// and X11 popups follow screens as their windows move.)
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     Screens,
 }
 
@@ -1138,6 +1138,31 @@ mod macos {
                 send(PopupInput::Dismiss);
             }
         });
+        // A topmost layer shows with its window's Space: its popups'
+        // host looks again as the Space changes.
+        let spaces = block2::RcBlock::new(|_: std::ptr::NonNull<NSNotification>| {
+            let parents: Vec<Sink> = PARENTS.with(|parents| {
+                parents
+                    .borrow()
+                    .iter()
+                    .map(|(_, send)| send.clone())
+                    .collect()
+            });
+            for send in parents {
+                send(PopupInput::Screens);
+            }
+        });
+        let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: AppKit's own notification name, observed as below.
+        unsafe {
+            let observer = workspace.addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWorkspaceActiveSpaceDidChangeNotification),
+                None,
+                None,
+                &spaces,
+            );
+            std::mem::forget(observer);
+        }
         let center = NSNotificationCenter::defaultCenter();
         // SAFETY: AppKit's own notification names; with no queue given the
         // block runs where AppKit posts them (the main thread), and the
@@ -1255,6 +1280,16 @@ mod macos {
     }
     /// The level drag images show at (`kCGDraggingWindowLevel`), over menus.
     const DRAGGING_LEVEL: isize = 500;
+    /// The level of a topmost layer (`PopupRole::Topmost`): over a drag's
+    /// image, the highest of the app's other windows.
+    const TOPMOST_LEVEL: isize = DRAGGING_LEVEL + 1;
+    // A topmost layer is above every other window the app stacks: drag
+    // images, tooltips, then menus and popovers.
+    const _: () = assert!(
+        TOPMOST_LEVEL > DRAGGING_LEVEL
+            && DRAGGING_LEVEL > TOOLTIP_LEVEL
+            && TOOLTIP_LEVEL > NSPopUpMenuWindowLevel
+    );
     /// The level AppKit shows its tooltips at (`NSToolTipPanel`'s, read).
     const TOOLTIP_LEVEL: isize = 103;
     /// Move `window`'s top-left to `origin` (global, top-down from the
@@ -1521,6 +1556,11 @@ mod macos {
                 .iter()
                 .filter(|root| Some(**root) != unshown)
                 .filter_map(|root| scene.popup_bounds(*root).map(|bounds| (*root, bounds)))
+                .map(|(root, bounds)| match scene.popup_role(root) {
+                    // Its window's whole content, as the layer fills it.
+                    Some(zgx::scene::PopupRole::Topmost) => (root, scene.bounds(scene.root())),
+                    _ => (root, bounds),
+                })
                 .collect();
             self.frames
                 .borrow_mut()
@@ -1639,6 +1679,27 @@ mod macos {
                     Some((dx, dy, x, y)) => Rect::new(x + dx, y + dy, rect.width, rect.height),
                     None => rect,
                 };
+                let topmost = scene.popup_role(root) == Some(zgx::scene::PopupRole::Topmost);
+                // Shown while its window is: not on another Space, not
+                // minimised (a topmost layer is no child of it).
+                if topmost && !new {
+                    let shown = parent.isVisible() && parent.isOnActiveSpace();
+                    if shown != panel.window.isVisible() {
+                        if shown {
+                            panel.window.orderFront(None);
+                        } else {
+                            panel.window.orderOut(None);
+                        }
+                    }
+                }
+                // Its window moved.
+                if topmost && !new {
+                    let at = parent
+                        .convertRectToScreen(content.convertRect_toView(local(frame, zoom), None));
+                    if panel.window.frame() != at {
+                        panel.rect = None;
+                    }
+                }
                 let moved = panel.rect != Some(frame);
                 let material = Material::of(scene, semantics, root, preview.is_some())
                     .map(|material| material.moved(frame.x - rect.x, frame.y - rect.y));
@@ -1666,7 +1727,7 @@ mod macos {
                 panel.back(material, frame);
                 panel.place(&parent, &content, frame);
                 if panel.preview.is_none() {
-                    let shadow = window_shadow(scene, root);
+                    let shadow = !topmost && window_shadow(scene, root);
                     if panel.window.hasShadow() != shadow {
                         panel.window.setHasShadow(shadow);
                     }
@@ -1712,6 +1773,9 @@ mod macos {
                             }
                             Some(zgx::scene::PopupRole::Tooltip) => {
                                 panel.window.setLevel(TOOLTIP_LEVEL);
+                            }
+                            Some(zgx::scene::PopupRole::Topmost) => {
+                                panel.window.setLevel(TOPMOST_LEVEL);
                             }
                             _ => panel.window.setLevel(NSPopUpMenuWindowLevel),
                         }
