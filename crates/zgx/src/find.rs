@@ -114,6 +114,9 @@ pub(crate) struct Session {
     previous_focus: Option<NodeId>,
     /// The bar asked for this, to do once its event is done.
     asked: Option<Ask>,
+    /// The scene's content when the query was last looked for, and when:
+    /// text mounted since (a long document still building) is counted again.
+    searched: Option<(u64, Instant)>,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Ask {
@@ -182,6 +185,7 @@ impl Ui {
                 bar: None,
                 previous_focus,
                 asked: None,
+                searched: None,
             });
             let bar = self.mount(bar(self, status, typed));
             if let Some(session) = self.storage.find.borrow_mut().as_mut() {
@@ -246,6 +250,7 @@ impl Ui {
             session.segments = segments;
             session.current = None;
             session.marked_at = None;
+            session.searched = None;
             session.typed.clone()
         });
         // The bar shows what is looked for (its own search then finds it
@@ -258,6 +263,7 @@ impl Ui {
         // The first slice of the lists' rows now, so a short list is counted
         // at once.
         self.count_rows(Instant::now() + SLICE);
+        self.mark_searched();
         let any = self
             .storage
             .find
@@ -268,6 +274,41 @@ impl Ui {
             self.go_to(0);
         } else {
             self.after_find_change();
+        }
+    }
+    fn mark_searched(&self) {
+        let at = self.scene.borrow().content_revision();
+        if let Some(session) = self.storage.find.borrow_mut().as_mut() {
+            session.searched = Some((at, Instant::now()));
+        }
+    }
+    /// The query looked for again in text mounted since (`next_step`), the
+    /// current match kept: what was found before it is where it was.
+    fn recount(&mut self) {
+        let Some(folded) = self.storage.find.borrow().as_ref().map(|s| s.folded.clone()) else {
+            return;
+        };
+        let segments = self.collect(&folded);
+        let first = {
+            let mut find = self.storage.find.borrow_mut();
+            let Some(session) = find.as_mut() else {
+                return;
+            };
+            session.segments = segments;
+            session.marked_at = None;
+            let count = session.count();
+            session.current = session.current.filter(|&at| at < count);
+            session.current.is_none() && count > 0
+        };
+        self.count_rows(Instant::now() + SLICE);
+        self.mark_searched();
+        if first {
+            self.go_to(0);
+        } else if let Some(session) = self.storage.find.borrow().as_ref() {
+            let status = status_of(session);
+            if session.status.with_untracked(|s| *s != status) {
+                session.status.set(status);
+            }
         }
     }
     /// Find what is selected (selected text, else a field's selection), as
@@ -922,17 +963,34 @@ pub(crate) fn sync(ui: &Ui) {
     }
 }
 
-/// While rows are left to count, now: the next slice is due.
+/// While rows are left to count, now: the next slice is due. Once counted,
+/// when text mounted since the search (a document still building): a
+/// recount, at most every `RECOUNT_EVERY`.
 pub(crate) fn next_step(ui: &Ui) -> Option<Instant> {
     let session = ui.storage.find.borrow();
     let session = session.as_ref()?;
-    (!session.done()).then(Instant::now)
+    if !session.done() {
+        return Some(Instant::now());
+    }
+    let (at, when) = session.searched?;
+    (!session.folded.is_empty() && at != ui.scene.borrow().content_revision())
+        .then(|| when + RECOUNT_EVERY)
 }
+/// How often an open search counts again while the page's text changes.
+const RECOUNT_EVERY: Duration = Duration::from_millis(250);
 
 /// Count the next slice of rows: whether any were.
 pub(crate) fn advance(ui: &Ui, now: Instant) -> bool {
-    if next_step(ui).is_none() {
+    let Some(due) = next_step(ui) else {
         return false;
+    };
+    let counting = ui.storage.find.borrow().as_ref().is_some_and(|s| !s.done());
+    if !counting {
+        if now < due {
+            return false;
+        }
+        ui.shared().recount();
+        return true;
     }
     let counted = ui.count_rows(now + SLICE);
     if counted {

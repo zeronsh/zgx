@@ -84,3 +84,22 @@ fn a_long_text_shows_its_start_at_once_and_the_rest_over_frames() {
         "first frame {start}, all {all}"
     );
 }
+
+#[test]
+fn find_opened_while_a_long_text_builds_counts_what_comes_after() {
+    let text: String = (0..1_000).map(|i| format!("Paragraph {i}, a needle.\n\n")).collect();
+    let code = format!("return ui.column {{ ui.markdown_view {{ id = \"md\", w = 300, literal = true, {text:?} }} }}");
+    let code: &'static str = Box::leak(code.into_boxed_str());
+    let mut h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
+    h.ui.prepare_frame();
+    h.ui.find_text("needle");
+    let early = h.ui.find_status().count;
+    assert!(early > 0 && early < 1_000, "{early}");
+    for _ in 0..8 {
+        h.frames(10);
+        std::thread::sleep(std::time::Duration::from_millis(260));
+        h.frames(1);
+    }
+    assert_eq!(h.ui.find_status().count, 1_000);
+    assert_eq!(h.ui.find_status().current, Some(0));
+}
