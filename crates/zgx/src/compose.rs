@@ -5188,6 +5188,7 @@ fn paragraph_effect<const LOCATING: bool>(
             if link || menu.is_some() {
                 links.push(crate::compose_rich::Link {
                     range: start..content.len(),
+                    hit_start: icon_at.as_ref().map_or(start, |icon| icon.start),
                     action: span.action,
                     href: span.href,
                     styled_hover,

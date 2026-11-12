@@ -54,6 +54,8 @@ impl PartialEq for SpanMenu {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Link {
     pub range: Range<usize>,
+    /// Where its box starts: its icon's placeholder when it has one, so a press on the icon is a press on the link.
+    pub hit_start: usize,
     pub action: Option<InlineAction>,
     /// Where it goes (`TextSpan::href`): a click opens it, its context menu
     /// opens or copies it.
@@ -856,7 +858,7 @@ pub(crate) fn mount_links(
             engine,
             data.links
                 .iter()
-                .map(|l| l.range.clone())
+                .map(|l| l.hit_start..l.range.end)
                 .collect::<Vec<_>>(),
         );
         if geometry_key.as_ref() != Some(&key) {
@@ -876,7 +878,7 @@ pub(crate) fn mount_links(
                     .iter()
                     .map(|link| {
                         layout
-                            .selection(link.range.clone())
+                            .selection(link.hit_start..link.range.end)
                             .into_iter()
                             .filter_map(|rect| {
                                 rect.intersection(Rect::new(0., 0., bounds.width, bounds.height))

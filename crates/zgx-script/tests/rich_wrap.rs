@@ -80,11 +80,34 @@ fn a_box_wider_than_the_paragraph_overflows_it_and_the_lines_wrap_at_its_width()
 fn a_chip_with_no_break_inside_stays_whole() {
     let mut h = paragraph(300., "", "");
     let split = boxes(&h.tree());
-    assert!(split.iter().any(|b| b.2 < 20.), "the plain label breaks after its icon: {split:?}");
-    let whole = r##"ui.span { "\u{2060}Aho\u{a0}et\u{a0}al.,\u{a0}2007", literal = true, padding = { 4, 2 }, bg = "#dddddd",
+    assert!(split.iter().any(|b| b.2 < 60.), "the plain label breaks inside: {split:?}");
+    let whole = r##"ui.span { "Aho\u{a0}et\u{a0}al.,\u{a0}2007", literal = true, padding = { 4, 2 }, bg = "#dddddd",
         icon = { src = "x.svg", size = 14, gap = 2 }, on_click = function() return true end },"##;
     let mut h = paragraph(300., "", whole);
     let tree = h.tree();
     let chips = boxes(&tree);
     assert!(chips.iter().any(|b| b.2 > 100.), "the whole chip is on one line: {chips:?}\n{tree}");
+}
+
+#[test]
+fn a_press_on_a_chip_s_icon_is_a_press_on_the_chip() {
+    let code = r##"local clicked = ui.state("clicked", "no")
+return ui.column { w = 300,
+    ui.rich { id = "p", wrap = true, w_full = true, text_size = 16, line_height = 24,
+        ui.span { "4", literal = true, padding = { 4, 2 }, bg = "#dddddd",
+            icon = { src = "x.svg", size = 14, gap = 2 }, on_click = function() clicked:set("yes") return true end },
+        " after",
+    },
+    ui.text { id = "clicked", function() return clicked:get() end },
+}"##;
+    let mut h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
+    h.ui.prepare_frame();
+    h.settle();
+    h.ui.prepare_frame();
+    let tree = h.tree();
+    let chip = boxes(&tree)[0];
+    assert!(chip.2 >= 14., "the chip's box takes its icon: {chip:?}\n{tree}");
+    zgx_script::driver::click_at(&mut h.ui, zgx::scene::Rect::new(chip.0, chip.1, 6., chip.3));
+    h.settle();
+    assert_eq!(h.text("clicked"), "yes");
 }
