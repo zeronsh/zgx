@@ -2151,8 +2151,15 @@ mod rich_tests {
             line_clamp: std::num::NonZeroU32::new(1),
         });
         let buffer = rich_buffer(&mut fonts, &rich, Some(120.), None);
-        let shown: String = buffer.lines.iter().map(|line| line.text().to_owned()).collect();
-        assert!(shown.ends_with("b…"), "cut inside the long word, not after `aa`: {shown:?}");
+        let shown: String = buffer
+            .lines
+            .iter()
+            .map(|line| line.text().to_owned())
+            .collect();
+        assert!(
+            shown.ends_with("b…"),
+            "cut inside the long word, not after `aa`: {shown:?}"
+        );
     }
     #[test]
     fn display_line_clamp_shapes_ellipsis_and_excludes_hidden_link_geometry() {
