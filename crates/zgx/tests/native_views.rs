@@ -237,6 +237,49 @@ fn only_paint_after_and_over_a_native_view_goes_on_the_overlay() {
     assert_eq!(base.len() + overlay.len(), items.len());
 }
 
+/// A card beside a page, its shadow reaching the page, holds a page of its own:
+/// the card (its fill) stays under that page, not lifted over it by the shadow.
+#[test]
+fn a_shadow_reaching_a_native_view_does_not_lift_the_box_over_its_own_page() {
+    use zgx::scene::{BoxShadow, Color, Transform};
+    let mut ui = Ui::new(1000., 600.);
+    let natives = supported();
+    let dock = WebView::new(&ui.runtime, WebViewOptions::default());
+    let held = WebView::new(&ui.runtime, WebViewOptions::default());
+    let shadow = BoxShadow {
+        color: Color(0, 0, 0, 14),
+        offset: Transform { x: 0., y: 2. },
+        blur_radius: 11.,
+        spread: 0.,
+    };
+    let view = ui.mount(provide(
+        natives.clone(),
+        row()
+            .w(1000.)
+            .h(600.)
+            .child(web_view(&dock).id("dock_page").w(500.).h_full())
+            .child(
+                column()
+                    .id("card")
+                    .w(400.)
+                    .h_full()
+                    .ml(7.)
+                    .bg(rgb(0xfcfcfc))
+                    .rounded(15.)
+                    .shadow(shadow)
+                    .child(web_view(&held).id("card_page").w_full().h_full()),
+            ),
+    ));
+    ui.prepare_frame();
+    let (split, _) = split(&ui, &natives, &PlaneSplit::default());
+    let id = |name: &str| view.find(name).unwrap();
+    assert!(
+        !split.in_overlay(id("card")),
+        "the card's shadow reaches the dock's page, its box does not"
+    );
+    assert_eq!(natives.nodes().len(), 2);
+}
+
 #[test]
 fn glass_over_a_native_view_gets_a_platform_backdrop_shaped_to_the_node() {
     let mut ui = Ui::new(1000., 600.);
