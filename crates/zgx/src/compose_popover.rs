@@ -174,8 +174,11 @@ pub(crate) fn mount_dismissing(
                 .input
                 .pointer_target(&scene, x, y)
                 .filter(|target| scene.contains(*target));
+            // (A topmost layer's control is the app's, not outside it.)
             let on_it = target.is_some_and(|target| {
-                scene.is_within(target, overlay) || scene.is_within(target, anchor)
+                scene.is_within(target, overlay)
+                    || scene.is_within(target, anchor)
+                    || scene.is_in_topmost(target)
             });
             in_panel || on_it
         };

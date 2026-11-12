@@ -4375,6 +4375,10 @@ impl Host {
         self.context
             .ui
             .set_popup_screens(crate::popup_window::popup_screens(&window));
+        // Only AppKit's panels stack above every other popup window.
+        self.context
+            .ui
+            .set_topmost_windows(cfg!(target_os = "macos") && crate::popup_window::enabled());
         self.content_origin = crate::popup_window::content_origin(&window);
         self.window_number = crate::popup_window::window_number(&window);
         self.frame_paced = matches!(
@@ -4932,6 +4936,10 @@ impl Host {
                 | WindowEvent::ScaleFactorChanged { .. }
         ) && let Some(window) = &self.window
         {
+            // A topmost layer follows its window as it moves.
+            if matches!(event, WindowEvent::Moved(_)) && self.popups.showing() {
+                window.request_redraw();
+            }
             let held = self.chrome_held();
             self.context
                 .window_info
@@ -6112,6 +6120,8 @@ impl Host {
                     self.context
                         .ui
                         .set_popup_screens(crate::popup_window::popup_screens(window));
+                    // A topmost layer's panel follows its window's Space.
+                    window.request_redraw();
                 }
                 Ok(())
             }
