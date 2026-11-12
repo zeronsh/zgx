@@ -958,7 +958,9 @@ impl RareStyles {
         if let Some(theirs) = other.outline {
             // a width alone keeps the colour (or its token) already here
             self.outline = Some(match (theirs, self.outline) {
-                (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => Some((width, mine)),
+                (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => {
+                    Some((width, mine))
+                }
                 _ => theirs,
             });
         }
@@ -3541,6 +3543,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_outline_width_alone_keeps_the_colour_it_lands_on() {
+        let mut base = Styles::new().outline(2., Color(9, 8, 7, 255));
+        base.merge(&Styles::new().outline_width(4.));
+        assert_eq!(base.rare().outline, Some(Some((4., Color(9, 8, 7, 255)))));
+        // A patch with a colour of its own still replaces it.
+        base.merge(&Styles::new().outline(1., Color(1, 2, 3, 255)));
+        assert_eq!(base.rare().outline, Some(Some((1., Color(1, 2, 3, 255)))));
+        // With nothing under it the width carries no colour yet.
+        let mut bare = Styles::new();
+        bare.merge(&Styles::new().outline_width(3.));
+        assert_eq!(bare.rare().outline, Some(Some((3., OUTLINE_COLOR_UNSET))));
+    }
 
     /// A style setting none of the properties few set (`Overflow`) holds
     /// no allocation for them, nor does one given their paint unset; one
