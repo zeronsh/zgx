@@ -733,6 +733,7 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
             font,
             anchor,
             baseline: TextBaseline::Top,
+            width: f32::INFINITY,
         });
     }
     canvas

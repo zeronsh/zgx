@@ -2379,29 +2379,38 @@ impl CanvasLabels {
                 color: text.color,
                 font_size: text.size,
             };
+            // A paragraph's box is as wide as it wraps to.
+            let wrap = text.wrap();
+            let style = || crate::scene::Style {
+                absolute: true,
+                width: wrap,
+                text_wrap: wrap.is_some(),
+                ..Default::default()
+            };
             let node = match self.nodes.get_mut(index) {
                 Some((node, shown)) => {
                     scene.set_kind(*node, kind);
+                    if shown.width != text.width {
+                        scene.set_style(*node, style());
+                    }
                     *shown = text.clone();
                     *node
                 }
                 None => {
-                    let node = scene.append_held(
-                        group,
-                        kind,
-                        crate::scene::Style {
-                            absolute: true,
-                            ..Default::default()
-                        },
-                    );
+                    let node = scene.append_held(group, kind, style());
                     self.nodes.push((node, text.clone()));
                     node
                 }
             };
             scene.set_font(node, text.font.clone());
-            let size = match (text.anchor, text.baseline) {
-                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top) => (0., 0.),
-                _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
+            let size = match (text.anchor, text.baseline, wrap) {
+                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top, _) => (0., 0.),
+                (_, crate::canvas::TextBaseline::Top, Some(width)) => (width, 0.),
+                _ => {
+                    let (width, height) =
+                        scene.measure_text_with_font(&text.text, text.size, wrap, &text.font);
+                    (wrap.unwrap_or(width), height)
+                }
             };
             let (x, y) = text.origin(size);
             scene.set_transform(node, crate::scene::Transform { x, y });
@@ -9477,6 +9486,7 @@ mod canvas_label_tests {
                         font: Default::default(),
                         anchor: TextAnchor::Start,
                         baseline: TextBaseline::Top,
+                        width: f32::INFINITY,
                     });
                 }
                 canvas

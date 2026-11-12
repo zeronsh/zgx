@@ -543,10 +543,10 @@ pub enum TextBaseline {
     /// Its line's bottom.
     Bottom,
 }
-/// A line of text on a canvas. It is shaped and drawn as any text is, over
-/// the canvas's shapes whatever their order: no clip of the canvas applies,
-/// and assistive technology doesn't read it (a canvas's `label` speaks for
-/// the drawing).
+/// A line of text on a canvas, or a paragraph wrapped to `width`. It is
+/// shaped and drawn as any text is, over the canvas's shapes whatever their
+/// order: no clip of the canvas applies, and assistive technology doesn't
+/// read it (a canvas's `label` speaks for the drawing).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanvasText {
     /// The text.
@@ -565,8 +565,19 @@ pub struct CanvasText {
     pub anchor: TextAnchor,
     /// Where `y` falls down it.
     pub baseline: TextBaseline,
+    /// Wrapped to lines at most this wide, in a box this wide that `anchor`
+    /// places (`font.align` aligns the lines in it); `f32::INFINITY` (any
+    /// width not finite and above 0), one line, or one per `\n`. A bare
+    /// `f32`: it fits in the struct's padding, so a line of text costs what
+    /// it did before paragraphs ([`CanvasText::wrap`]).
+    pub width: f32,
 }
 impl CanvasText {
+    /// The width it wraps to, if it wraps.
+    #[inline]
+    pub fn wrap(&self) -> Option<f32> {
+        (self.width.is_finite() && self.width > 0.).then_some(self.width)
+    }
     /// Its top left, given its size.
     pub(crate) fn origin(&self, (width, height): (f32, f32)) -> (f32, f32) {
         let x = match self.anchor {
@@ -606,11 +617,21 @@ pub fn measure_text(
     size: f32,
     font: &crate::text_layout::FontStyle,
 ) -> Option<(f32, f32)> {
+    measure_text_in(text, size, None, font)
+}
+/// [`measure_text`] wrapped to lines at most `width` wide, as a
+/// [`CanvasText`] with that `width` draws it: a paragraph's height.
+pub fn measure_text_in(
+    text: &str,
+    size: f32,
+    width: Option<f32>,
+    font: &crate::text_layout::FontStyle,
+) -> Option<(f32, f32)> {
     DRAWING_FOR.with(|slot| {
         let scene = slot.borrow();
         let scene = scene.as_ref()?;
         let scene = scene.try_borrow().ok()?;
-        Some(scene.measure_text_with_font(text, size, None, font))
+        Some(scene.measure_text_with_font(text, size, width, font))
     })
 }
 
