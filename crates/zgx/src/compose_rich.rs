@@ -20,6 +20,21 @@ impl PartialEq for InlineAction {
         Rc::ptr_eq(&self.0, &other.0)
     }
 }
+/// Told as the pointer comes onto a link span and leaves it, with the span's
+/// first line box in the window (`TextSpan::on_hover`): where a hover card
+/// opens.
+#[derive(Clone)]
+pub struct SpanHoverHook(Rc<dyn Fn(bool, crate::scene::Rect)>);
+impl std::fmt::Debug for SpanHoverHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SpanHoverHook")
+    }
+}
+impl PartialEq for SpanHoverHook {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
 /// A span's own context menu (`TextSpan::context_menu`).
 #[derive(Clone)]
 pub(crate) struct SpanMenu(Rc<RefCell<MenuBuild>>);
@@ -47,6 +62,8 @@ pub(crate) struct Link {
     pub styled_hover: bool,
     /// Its own context menu, in place of a link's.
     pub menu: Option<SpanMenu>,
+    /// Told of the pointer coming and going (`TextSpan::on_hover`).
+    pub on_hover: Option<SpanHoverHook>,
 }
 impl Link {
     /// A link, not a run with only a menu: focusable, with a ring.
@@ -154,6 +171,8 @@ pub(crate) struct SpanExtras {
     pub outset: f32,
     /// A picture in place of its text (`TextSpan::inline_svg`).
     pub inline: Option<InlineSvg>,
+    /// Told of the pointer coming and going (`TextSpan::on_hover`).
+    pub on_hover: Option<SpanHoverHook>,
 }
 /// A picture standing in a line as a word does (`TextSpan::inline_svg`):
 /// sized in ems of the span's text, its baseline on the line's, tinted
@@ -232,6 +251,13 @@ pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
     }
 }
 impl TextSpan {
+    /// Told as the pointer comes onto the span (`true`) and leaves it
+    /// (`false`), with its first line box in the window: a link's hover
+    /// card (a citation's source) opens and closes by it.
+    pub fn on_hover(mut self, hook: impl Fn(bool, crate::scene::Rect) + 'static) -> Self {
+        self.extras.get_or_insert_default().on_hover = Some(SpanHoverHook(Rc::new(hook)));
+        self
+    }
     /// `svg` in place of the text, in the line as an inline box
     /// (`InlineSvg`): a formula among words. The text is what it reads as.
     pub fn inline_svg(mut self, svg: InlineSvg) -> Self {
@@ -524,6 +550,7 @@ struct LinkTarget {
     action: Option<InlineAction>,
     href: Option<Arc<str>>,
     menu: Option<SpanMenu>,
+    on_hover: Option<SpanHoverHook>,
 }
 impl LinkTarget {
     fn of(link: &Link) -> Self {
@@ -531,8 +558,26 @@ impl LinkTarget {
             action: link.action.clone(),
             href: link.href.clone(),
             menu: link.menu.clone(),
+            on_hover: link.on_hover.clone(),
         }
     }
+}
+/// A link's hover hook told, with its box in the window, outside the event.
+fn tell_hover(
+    target: &Rc<RefCell<LinkTarget>>,
+    weak: &crate::widgets::WeakUi,
+    node: crate::scene::NodeId,
+    inside: bool,
+) {
+    let Some(hook) = target.borrow().on_hover.clone() else {
+        return;
+    };
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    let bounds = ui.scene.borrow().bounds(node);
+    drop(ui);
+    (hook.0)(inside, bounds);
 }
 /// Open Link (a web or mail link) and Copy Link for `url`.
 pub(crate) fn link_items(
@@ -981,12 +1026,14 @@ pub(crate) fn mount_links(
                         InputEvent::PointerEnter => {
                             hovered.set(true);
                             under.set(Some(index));
+                            tell_hover(&callback, &weak, node, true);
                         }
                         InputEvent::PointerLeave | InputEvent::PointerCancel => {
                             hovered.set(false);
                             if under.with_untracked(|h| *h == Some(index)) {
                                 under.set(None);
                             }
+                            tell_hover(&callback, &weak, node, false);
                         }
                         _ => return,
                     }

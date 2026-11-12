@@ -8801,6 +8801,21 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                 }
                 let rare = span.rare.as_deref();
+                if let Some(hook) = rare.and_then(|rare| rare.on_hover.clone()) {
+                    let vm = vm.clone();
+                    out = out.on_hover(move |inside, b| {
+                        let told = vm.lua.create_table().and_then(|t| {
+                            t.set("x", b.x)?;
+                            t.set("y", b.y)?;
+                            t.set("w", b.width)?;
+                            t.set("h", b.height)?;
+                            vm.call::<()>(&hook, (inside, t))
+                        });
+                        if let Err(error) = told {
+                            vm.report(error);
+                        }
+                    });
+                }
                 if let Some(rare) = rare {
                     if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
                         out = out.padding_end(end);

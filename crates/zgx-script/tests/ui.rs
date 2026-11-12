@@ -1234,6 +1234,45 @@ fn an_image_takes_a_position() {
 }
 
 #[test]
+fn a_link_span_tells_its_hover_hook_where_it_is() {
+    let mut h = Harness::inline(
+        r##"local told = ui.state("told", "")
+return ui.column { w = 300,
+    ui.rich { id = "p",
+        ui.span { "Read ", literal = true },
+        ui.span { "[1]", literal = true, on_click = function() end, on_hover = function(inside, box)
+            told:set(`{inside}:{math.floor(box.x)}:{math.floor(box.w)}`)
+        end } },
+    ui.text { id = "told", function() return told:get() end } }"##,
+    );
+    h.frames(2);
+    let p = h.find("p").unwrap();
+    let b = h.ui.scene.borrow().bounds(p);
+    let mut entered = String::new();
+    for x in (20..120).step_by(3) {
+        h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+            x: b.x + x as f32,
+            y: b.y + b.height / 2.,
+        });
+        h.frames(1);
+        entered = h.text("told");
+        if entered.starts_with("true") {
+            break;
+        }
+    }
+    let parts: Vec<&str> = entered.split(':').collect();
+    assert_eq!(parts.first(), Some(&"true"), "{entered}");
+    let (x, w): (f32, f32) = (parts[1].parse().unwrap(), parts[2].parse().unwrap());
+    assert!(x > b.x + 10. && w > 5., "the link's own box: {entered}");
+    h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+        x: b.x + 1.,
+        y: b.y + b.height / 2.,
+    });
+    h.frames(1);
+    assert!(h.text("told").starts_with("false"), "{}", h.text("told"));
+}
+
+#[test]
 fn a_link_span_takes_its_hover_background_under_the_pointer() {
     use zgx::scene::NodeKind;
     let mut h = Harness::inline(

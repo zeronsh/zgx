@@ -5080,8 +5080,9 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after, outset) = match span.extras.take() {
-                None => (None, None, None, false, -1., 0.),
+            let (hover, icon, menu, plain, room_after, outset, on_hover) = match span.extras.take()
+            {
+                None => (None, None, None, false, -1., 0., None),
                 Some(extras) => {
                     let extras = *extras;
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
@@ -5099,6 +5100,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         extras.plain,
                         if apart { end } else { -1. },
                         extras.outset,
+                        extras.on_hover,
                     )
                 }
             };
@@ -5152,6 +5154,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     href: span.href,
                     styled_hover,
                     menu,
+                    on_hover,
                 });
             }
             let mut font = base.font_in(Some(&theme));
