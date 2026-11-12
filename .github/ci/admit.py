@@ -214,9 +214,23 @@ class Holding:
 class Snapshot:
     waiters: list[Waiter] = field(default_factory=list)
     holding: list[Holding] = field(default_factory=list)
-    priority: set[int] = field(default_factory=set)  # pull requests labelled ci:priority
-    locked: set[int] = field(default_factory=set)  # pull requests holding a ci:lock
-    lock_times: dict[int, str] = field(default_factory=dict)  # when each lock's label was added
+    # Pull requests by Scheduler.key: a number in this repository, `owner/repo#n` in a peer.
+    priority: set[int | str] = field(default_factory=set)  # pull requests labelled ci:priority
+    locked: set[int | str] = field(default_factory=set)  # pull requests holding a ci:lock
+    lock_times: dict[int | str, str] = field(default_factory=dict)  # when each lock's label was added
+
+
+def listed(keys: set) -> list:
+    """Pull request keys in a stable order: numbers and a peer's `owner/repo#n` don't compare."""
+    return sorted(keys, key=str)
+
+
+def waiting_line(waited: float, decision: Decision, snap: Snapshot, ignored: list[int], quota: int) -> str:
+    """The wait loop's status line (outside its try: whatever it prints mustn't raise)."""
+    return (f"[{waited / 60:5.1f} min] position {decision.position}, in use {decision.used}, "
+            f"needed ahead {decision.ahead}, {len(snap.waiters)} waiting, "
+            f"priority {listed(snap.priority) or '-'}, locked {listed(snap.locked) or '-'}, "
+            f"ignored (not taking their turn) {ignored or '-'}, API quota left {quota}")
 
 
 @dataclass
@@ -709,10 +723,7 @@ def main() -> int:
         ignored = sorted(w.run_id for w in snap.waiters if w.ignored)
         state = (decision.position, tuple(decision.used.values()), tuple(decision.ahead.values()), tuple(ignored))
         if state != last:
-            print(f"[{waited / 60:5.1f} min] position {decision.position}, in use {decision.used}, "
-                  f"needed ahead {decision.ahead}, {len(snap.waiters)} waiting, "
-                  f"priority {sorted(snap.priority) or '-'}, locked {sorted(snap.locked) or '-'}, "
-                  f"ignored (not taking their turn) {ignored or '-'}, API quota left {api.remaining}")
+            print(waiting_line(waited, decision, snap, ignored, api.remaining))
             last = state
         if decision.admit:
             summary(f"Admitted after {waited / 60:.1f} min (reservation `{os.environ['CI_RESERVATION']}`, "

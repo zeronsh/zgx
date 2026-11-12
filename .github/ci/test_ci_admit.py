@@ -325,6 +325,19 @@ class PriorityAndLockTests(unittest.TestCase):
         snap.holding = [held_(pr=90, linux=1)]
         self.assertTrue(decide(2, full, snap, big).admit)
 
+    def test_labels_from_this_repository_and_a_peer_are_listed_together(self):
+        # The wait loop's status line lists them; ints and `owner/repo#n` don't compare.
+        keys = {77, "zeronsh/zeron#1356", 5, "zeronsh/zeron#1357"}
+        self.assertEqual(admit.listed(keys), [5, 77, "zeronsh/zeron#1356", "zeronsh/zeron#1357"])
+        snap = Snapshot([waiter(1, 1, pr=77, linux=2), waiter(2, 2, pr="zeronsh/zeron#1356", linux=2)], [],
+                        priority=keys, locked={90, "zeronsh/zeron#1357"},
+                        lock_times={90: "2026-10-27T10:00:00Z", "zeronsh/zeron#1357": "2026-10-27T10:05:00Z"})
+        decision = decide(1, need(linux=2), snap, self.BIG)
+        self.assertTrue(decision.admit)
+        line = admit.waiting_line(60.0, decision, snap, [], 900)
+        self.assertIn("priority [5, 77, 'zeronsh/zeron#1356', 'zeronsh/zeron#1357']", line)
+        self.assertIn("locked [90, 'zeronsh/zeron#1357']", line)
+
     def test_an_unverified_claim_is_an_ordinary_run(self):
         snap = Snapshot([waiter(1, 1, linux=2), waiter(2, 2, pr=None, linux=2)], [], priority={77})
         self.assertEqual(decide(2, need(linux=2), snap, self.BIG).position, 1)
