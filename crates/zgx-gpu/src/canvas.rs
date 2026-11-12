@@ -185,6 +185,104 @@ fn off_frame(job: Job) {
     });
     let _ = sender.lock().unwrap_or_else(|p| p.into_inner()).send(job);
 }
+/// The fonts a window's text is shaped in, as its context was given them
+/// (`GpuContext::add_font`, and `replace_font`, which replaces its
+/// families' faces), and how many there have been: what a canvas drawing
+/// its text into its raster (`Canvas::raster_text`) shapes it with, as the
+/// window shapes its text nodes.
+#[derive(Clone, Default)]
+pub struct CanvasFonts(Arc<Mutex<FontsGiven>>);
+/// How many fonts have been given, and each with whether it replaces its
+/// families' faces.
+type FontsGiven = (u64, Vec<(crate::text::FontData, bool)>);
+impl CanvasFonts {
+    pub(crate) fn add(&self, font: &crate::text::FontData, replace: bool) {
+        let mut held = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        held.0 += 1;
+        held.1.push((font.clone(), replace));
+    }
+}
+/// Where each of a drawing's texts lays out (`label_box`).
+type Boxes = Arc<[(f32, f32, (f32, f32))]>;
+/// What a canvas's text is drawn into its raster with: the CPU's text
+/// rasterizer, in the system's fonts and the window's (made again when
+/// those change), and each drawing's text boxes, measured once. Shared with
+/// the thread making zooms off the frame.
+#[derive(Default)]
+struct TextRaster {
+    fonts: CanvasFonts,
+    loaded: Option<u64>,
+    raster: Option<crate::text::CpuTextRaster>,
+    boxes: HashMap<usize, (Weak<Canvas>, Boxes)>,
+}
+type SharedText = Arc<Mutex<TextRaster>>;
+impl TextRaster {
+    fn raster(&mut self) -> &mut crate::text::CpuTextRaster {
+        let (serial, fonts) = {
+            let held = self.fonts.0.lock().unwrap_or_else(|p| p.into_inner());
+            (held.0, held.1.clone())
+        };
+        if self.raster.is_none() || self.loaded != Some(serial) {
+            let mut text = crate::text::CpuTextRaster::default();
+            for (font, replace) in &fonts {
+                match replace {
+                    true => text.replace_font(font),
+                    false => text.register_font(font),
+                }
+            }
+            self.raster = Some(text);
+            self.loaded = Some(serial);
+            self.boxes.clear();
+        }
+        self.raster.as_mut().expect("made just now")
+    }
+    /// `canvas`'s text boxes, measured the first time it is asked.
+    fn boxes(&mut self, canvas: &Arc<Canvas>) -> Boxes {
+        self.raster();
+        let key = Arc::as_ptr(canvas) as usize;
+        if let Some((drawing, boxes)) = self.boxes.get(&key)
+            && drawing.upgrade().is_some_and(|d| Arc::ptr_eq(&d, canvas))
+        {
+            return boxes.clone();
+        }
+        self.boxes.retain(|_, (drawing, _)| drawing.strong_count() > 0);
+        let text = self.raster.as_mut().expect("made above");
+        let boxes: Boxes = canvas
+            .texts()
+            .iter()
+            .map(|label| label_box(label, text))
+            .collect();
+        self.boxes
+            .insert(key, (Arc::downgrade(canvas), boxes.clone()));
+        boxes
+    }
+}
+/// What `canvas`'s text covers (x0, y0, x1, y1, in its points), a line's
+/// size around its box for what its glyphs reach past it: `None` for none,
+/// or if it is not drawn into the raster.
+fn text_bounds(canvas: &Arc<Canvas>, text: &SharedText) -> Option<[f32; 4]> {
+    if !canvas.rasters_text() || canvas.texts().is_empty() {
+        return None;
+    }
+    let boxes = text.lock().unwrap_or_else(|p| p.into_inner()).boxes(canvas);
+    let mut out: Option<[f32; 4]> = None;
+    for (index, (x, y, (w, h))) in boxes.iter().enumerate() {
+        let reach = canvas.texts()[index].size;
+        let t = canvas.text_transform(index);
+        for (px, py) in [(*x, *y), (x + w, *y), (*x, y + h), (x + w, y + h)] {
+            let (px, py) = t.point(px, py);
+            if !px.is_finite() || !py.is_finite() {
+                continue;
+            }
+            let [x0, y0, x1, y1] = out.get_or_insert([px, py, px, py]);
+            *x0 = x0.min(px - reach);
+            *y0 = y0.min(py - reach);
+            *x1 = x1.max(px + reach);
+            *y1 = y1.max(py + reach);
+        }
+    }
+    out
+}
 fn intersect(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [
         a[0].max(b[0]),
@@ -243,9 +341,14 @@ fn panned_region(
     view: zgx::scene::CanvasView,
     size: [i32; 2],
     scale: f32,
+    text: Option<[f32; 4]>,
 ) -> Panned {
+    let bounds = match (painted_bounds(canvas), text) {
+        (Some(a), Some(b)) => Some([a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]),
+        (a, b) => a.or(b),
+    };
     // Two pixels more each way, for antialiasing.
-    let painted = painted_bounds(canvas).map_or([0; 4], |[x0, y0, x1, y1]| {
+    let painted = bounds.map_or([0; 4], |[x0, y0, x1, y1]| {
         let at = |v: f32, offset: f32| ((v * view.scale + offset) * scale) as f64;
         let clamp = |v: f64| v.clamp(i32::MIN as f64 / 2., i32::MAX as f64 / 2.) as i32;
         [
@@ -311,11 +414,12 @@ impl Panned {
 /// under `view` at `scale`, its pixels where `old` (the region `pixels`
 /// hold) has them taken from there: only what is new is rasterized.
 fn rasterize_region(
-    canvas: &Canvas,
+    canvas: &Arc<Canvas>,
     view: zgx::scene::CanvasView,
     scale: f32,
     region: [i32; 4],
     old: Option<([i32; 4], &ImageData)>,
+    text: &SharedText,
 ) -> Result<ImageData, GpuError> {
     if is_empty(region) {
         // Nothing shows: a pixel, never drawn.
@@ -326,7 +430,13 @@ fn rasterize_region(
     }
     let [x0, y0, x1, y1] = region;
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    let drawn = |[ax, ay, bx, by]: [i32; 4]| {
+    // Its text in its raster: drawn with its shapes, in their layers.
+    let mut labels = (canvas.rasters_text() && !canvas.texts().is_empty()).then(|| {
+        let mut held = text.lock().unwrap_or_else(|p| p.into_inner());
+        let boxes = held.boxes(canvas);
+        (held, boxes)
+    });
+    let mut drawn = |[ax, ay, bx, by]: [i32; 4]| {
         let transform = sk::Transform::from_translate(-ax as f32, -ay as f32).pre_concat(
             sk::Transform::from_row(
                 view.scale * scale,
@@ -337,7 +447,21 @@ fn rasterize_region(
                 view.y * scale,
             ),
         );
-        rasterize_at(canvas, (bx - ax) as u32, (by - ay) as u32, transform)
+        let (w, h) = ((bx - ax) as u32, (by - ay) as u32);
+        match &mut labels {
+            None => rasterize_at(canvas, w, h, transform),
+            Some((held, boxes)) => {
+                let pixmap = sk::Pixmap::new(w, h)
+                    .ok_or_else(|| GpuError("canvas allocation failed".into()))?;
+                let at = Placed {
+                    view,
+                    scale,
+                    origin: (ax, ay),
+                    transform,
+                };
+                straight(paint_with_text(canvas, pixmap, &at, boxes, held.raster())?)
+            }
+        }
     };
     let kept = old
         .map(|(at, pixels)| (intersect(at, region), at, pixels))
@@ -402,8 +526,19 @@ pub struct CanvasCache {
     bytes: usize,
     clock: u64,
     rasterizations: u64,
+    /// What canvases drawing their text into their raster draw it with.
+    text: SharedText,
 }
 impl CanvasCache {
+    /// Draw the text of canvases that draw it into their raster
+    /// (`Canvas::raster_text`) in `fonts` (and the system's), as the window
+    /// shapes its text.
+    pub fn set_fonts(&mut self, fonts: &CanvasFonts) {
+        let mut held = self.text.lock().unwrap_or_else(|p| p.into_inner());
+        if !Arc::ptr_eq(&held.fonts.0, &fonts.0) {
+            held.fonts = fonts.clone();
+        }
+    }
     /// Forget the rasters of nodes that are gone or no longer draw one.
     pub fn retain(&mut self, scene: &Scene) {
         self.entries.retain(|id, _| draws_raster(scene, *id));
@@ -639,9 +774,11 @@ impl CanvasCache {
             if let std::collections::hash_map::Entry::Vacant(slot) = self.zooms.entry(node) {
                 let done: Arc<Mutex<Option<Made>>> = Arc::default();
                 let (filled, drawing) = (done.clone(), canvas.clone());
+                let text = self.text.clone();
                 off_frame(Box::new(move || {
-                    let panned = panned_region(&drawing, view, size, scale);
-                    let made = rasterize_region(&drawing, view, scale, panned.region, None)
+                    let bounds = text_bounds(&drawing, &text);
+                    let panned = panned_region(&drawing, view, size, scale, bounds);
+                    let made = rasterize_region(&drawing, view, scale, panned.region, None, &text)
                         .map(|image| (panned, image));
                     *filled.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
                     zgx::image::wake_waiting();
@@ -667,12 +804,15 @@ impl CanvasCache {
                     scale,
                     panned.region,
                     Some((old.region, pixels)),
+                    &self.text,
                 )?;
                 (*drawn, panned, image, *shift)
             }
             None => {
-                let panned = panned_region(canvas, view, size, scale);
-                let image = rasterize_region(canvas, view, scale, panned.region, None)?;
+                let bounds = text_bounds(canvas, &self.text);
+                let panned = panned_region(canvas, view, size, scale, bounds);
+                let image =
+                    rasterize_region(canvas, view, scale, panned.region, None, &self.text)?;
                 (view, panned, image, [0, 0])
             }
         };
@@ -942,7 +1082,13 @@ pub fn picture(
                 at: boxes[index],
                 transform: canvas.text_transform(index),
             };
-            draw_label(&mut pixmap, &label, clip, view, scale, transform, text);
+            let at = Placed {
+                view,
+                scale,
+                origin: (0, 0),
+                transform,
+            };
+            draw_label(&mut pixmap, &label, clip, &at, text);
         }
     }
     straight(pixmap)
@@ -954,6 +1100,63 @@ struct Label<'a> {
     at: (f32, f32, (f32, f32)),
     transform: zgx::affine::Affine,
 }
+/// Where a drawing lands in a pixmap: under `view` at `scale`, the
+/// pixmap's top left `origin` pixels into that, `transform` mapping the
+/// drawing's points to the pixmap's pixels.
+#[derive(Clone, Copy)]
+struct Placed {
+    view: zgx::scene::CanvasView,
+    scale: f32,
+    origin: (i32, i32),
+    transform: sk::Transform,
+}
+/// `canvas`'s shapes and text in their layers (`Canvas::layers`), as
+/// `picture` draws them, into `pixmap` placed `at`: each text cut by its
+/// clip's box and mapped by its transform. A text that can't reach the
+/// pixmap is left out (a strip a pan uncovers draws what falls in it).
+fn paint_with_text(
+    canvas: &Canvas,
+    mut pixmap: sk::Pixmap,
+    at: &Placed,
+    boxes: &[(f32, f32, (f32, f32))],
+    text: &mut crate::text::CpuTextRaster,
+) -> Result<sk::Pixmap, GpuError> {
+    let mut sizes = boxes.iter().map(|(_, _, size)| *size);
+    let layers = canvas.layers(|_| sizes.next().unwrap_or_default());
+    let clips = canvas.text_clips();
+    let (view, scale) = (at.view, at.scale);
+    let zoom = scale * view.scale;
+    let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
+    for layer in &layers {
+        pixmap = match layers.len() {
+            1 => paint_into(canvas, pixmap, at.transform)?,
+            _ => paint_into(&canvas.layer(layer), pixmap, at.transform)?,
+        };
+        for index in layer.texts.clone() {
+            let label = Label {
+                text: &canvas.texts()[index],
+                at: boxes[index],
+                transform: canvas.text_transform(index),
+            };
+            if label.transform == zgx::affine::Affine::IDENTITY {
+                let (x, y, (tw, th)) = label.at;
+                let reach = label.text.size * zoom + 2.;
+                let left = (view.x + x * view.scale) * scale - at.origin.0 as f32;
+                let top = (view.y + y * view.scale) * scale - at.origin.1 as f32;
+                if left + tw * zoom + reach < 0.
+                    || top + th * zoom + reach < 0.
+                    || left - reach > w
+                    || top - reach > h
+                {
+                    continue;
+                }
+            }
+            let clip = clips.get(index).copied().flatten();
+            draw_label(&mut pixmap, &label, clip, at, text);
+        }
+    }
+    Ok(pixmap)
+}
 /// `label` drawn over `pixmap` (whose pixels `transform` maps the canvas's
 /// points to), cut by `clip`'s box, as a window shows it: its glyphs placed
 /// as the GPU places them, on whole pixels below 2x.
@@ -961,11 +1164,15 @@ fn draw_label(
     pixmap: &mut sk::Pixmap,
     label: &Label,
     clip: Option<zgx::canvas::TextClip>,
-    view: zgx::scene::CanvasView,
-    scale: f32,
-    transform: sk::Transform,
+    at: &Placed,
     text: &mut crate::text::CpuTextRaster,
 ) {
+    let Placed {
+        view,
+        scale,
+        origin,
+        transform,
+    } = *at;
     let (x, y, size) = label.at;
     let zoom = scale * view.scale;
     let glyphs = text.rasterize_scaled(
@@ -986,8 +1193,8 @@ fn draw_label(
         Some(mask)
     });
     if label.transform == zgx::affine::Affine::IDENTITY {
-        let left = ((view.x + x * view.scale) * scale).round() as i32;
-        let top = ((view.y + y * view.scale) * scale).round() as i32;
+        let left = ((view.x + x * view.scale) * scale).round() as i32 - origin.0;
+        let top = ((view.y + y * view.scale) * scale).round() as i32 - origin.1;
         blend_glyphs(
             pixmap,
             (left, top),
