@@ -3,7 +3,7 @@
 use crate::GpuError;
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 use tiny_skia as sk;
 use zgx::{
@@ -49,6 +49,10 @@ pub struct Placement {
     pub rect: [f32; 4],
     /// Which part of the raster.
     pub uv: [f32; 4],
+    /// Whether it is a raster of another zoom, scaled, while this zoom's is
+    /// made off the frame: the host is woken when it is
+    /// (`zgx::image::wake_waiting`), to draw again.
+    pub scaled: bool,
 }
 /// The most pixels a panned raster's region takes (its bytes the budget).
 const REGION_PIXELS: i64 = BUDGET as i64 / 4;
@@ -82,6 +86,7 @@ impl Panned {
             return Some(Placement {
                 rect: [0.; 4],
                 uv: [0.; 4],
+                scaled: false,
             });
         }
         let (x, y) = (
@@ -100,8 +105,85 @@ impl Panned {
                 w * scale / rw,
                 h * scale / rh,
             ],
+            scaled: false,
         })
     }
+    /// Where it shows, drawn under `drawn`, scaled and moved to stand for
+    /// the drawing under `view` (another zoom), in a box `width` by
+    /// `height` points at `scale`.
+    fn scaled(
+        &self,
+        drawn: zgx::scene::CanvasView,
+        view: zgx::scene::CanvasView,
+        width: f32,
+        height: f32,
+        scale: f32,
+    ) -> Placement {
+        let k = view.scale / drawn.scale;
+        let (ox, oy) = (
+            (view.x - drawn.x * k) * scale,
+            (view.y - drawn.y * k) * scale,
+        );
+        let [x0, y0, x1, y1] = self.region.map(|v| v as f32);
+        let at = [x0 * k + ox, y0 * k + oy, x1 * k + ox, y1 * k + oy];
+        let shown = [
+            at[0].max(0.),
+            at[1].max(0.),
+            at[2].min(width * scale),
+            at[3].min(height * scale),
+        ];
+        if is_empty(self.region) || shown[0] >= shown[2] || shown[1] >= shown[3] {
+            return Placement {
+                rect: [0.; 4],
+                uv: [0.; 4],
+                scaled: true,
+            };
+        }
+        let (w, h) = (at[2] - at[0], at[3] - at[1]);
+        Placement {
+            rect: [
+                shown[0] / scale,
+                shown[1] / scale,
+                (shown[2] - shown[0]) / scale,
+                (shown[3] - shown[1]) / scale,
+            ],
+            uv: [
+                (shown[0] - at[0]) / w,
+                (shown[1] - at[1]) / h,
+                (shown[2] - shown[0]) / w,
+                (shown[3] - shown[1]) / h,
+            ],
+            scaled: true,
+        }
+    }
+}
+/// A raster for a new zoom being made off the frame (`get_panned`).
+struct Zoom {
+    canvas: Arc<Canvas>,
+    view: zgx::scene::CanvasView,
+    /// The box's width and height, in points, and its scale.
+    size: (f32, f32, f32),
+    /// The region and its pixels, once made.
+    done: Arc<Mutex<Option<Made>>>,
+}
+type Made = Result<(Panned, ImageData), GpuError>;
+type Job = Box<dyn FnOnce() + Send>;
+/// Run `job` on the thread rasterizing zooms, one at a time.
+fn off_frame(job: Job) {
+    static WORKER: OnceLock<Mutex<std::sync::mpsc::Sender<Job>>> = OnceLock::new();
+    let sender = WORKER.get_or_init(|| {
+        let (send, receive) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("zgx canvas zoom".into())
+            .spawn(move || {
+                for job in receive {
+                    job();
+                }
+            })
+            .expect("a canvas rasterizing thread");
+        Mutex::new(send)
+    });
+    let _ = sender.lock().unwrap_or_else(|p| p.into_inner()).send(job);
 }
 fn intersect(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [
@@ -328,6 +410,8 @@ impl Entry {
 #[derive(Default)]
 pub struct CanvasCache {
     entries: HashMap<NodeId, Entry>,
+    /// Rasters for new zooms being made off the frame, by node.
+    zooms: HashMap<NodeId, Zoom>,
     bytes: usize,
     clock: u64,
     rasterizations: u64,
@@ -336,6 +420,7 @@ impl CanvasCache {
     /// Forget the rasters of nodes that are gone or no longer draw one.
     pub fn retain(&mut self, scene: &Scene) {
         self.entries.retain(|id, _| draws_raster(scene, *id));
+        self.zooms.retain(|id, _| draws_raster(scene, *id));
         self.bytes = self.entries.values().map(|e| e.bytes).sum();
     }
     /// Whether it holds no raster.
@@ -345,7 +430,9 @@ impl CanvasCache {
     /// `retain` for the nodes `changed` alone (`Scene::resource_changes`).
     pub fn retain_changed(&mut self, scene: &Scene, changed: &[NodeId]) {
         for &node in changed {
-            if self.entries.contains_key(&node) && !draws_raster(scene, node) {
+            if (self.entries.contains_key(&node) || self.zooms.contains_key(&node))
+                && !draws_raster(scene, node)
+            {
                 self.forget(node);
             }
         }
@@ -353,6 +440,7 @@ impl CanvasCache {
     /// Forget the rasters of nodes `keep` says no to.
     pub fn retain_nodes(&mut self, keep: impl Fn(NodeId) -> bool) {
         self.entries.retain(|id, _| keep(*id));
+        self.zooms.retain(|id, _| keep(*id));
         self.bytes = self.entries.values().map(|e| e.bytes).sum();
     }
     /// The image ids of the rasters it holds.
@@ -371,6 +459,7 @@ impl CanvasCache {
     }
     /// Rasterize `node` again on its next request (its texture was lost).
     pub fn forget(&mut self, node: NodeId) {
+        self.zooms.remove(&node);
         if let Some(entry) = self.entries.remove(&node) {
             self.bytes -= entry.bytes;
         }
@@ -457,8 +546,11 @@ impl CanvasCache {
     /// `Placement` says in its `width` by `height` point box at `scale`. A
     /// pan moves the raster, in whole device pixels, rasterizing nothing;
     /// one onto more of the drawing rasterizes what it shows anew alone,
-    /// kept beside the rest (to the limits). A zoom or a change rasterizes
-    /// what shows, as `get_viewed` does.
+    /// kept beside the rest (to the limits). A change rasterizes what
+    /// shows, as `get_viewed` does. So does a zoom if `wait`; else the
+    /// raster of the zoom before shows scaled (`Placement::scaled`) while
+    /// this zoom's is made off the frame, and is swapped for it once made.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_panned(
         &mut self,
         node: NodeId,
@@ -467,6 +559,7 @@ impl CanvasCache {
         width: f32,
         height: f32,
         scale: f32,
+        wait: bool,
     ) -> Result<(Raster, Placement), GpuError> {
         if ![width, height, scale, view.x, view.y, view.scale]
             .iter()
@@ -486,6 +579,34 @@ impl CanvasCache {
             (height * scale).ceil() as i32,
         ];
         self.clock = self.clock.wrapping_add(1);
+        let same = |drawing: &Arc<Canvas>| Arc::ptr_eq(drawing, canvas) || **drawing == **canvas;
+        // A zoom's raster made off the frame: the raster from now on, if
+        // still of this drawing (else dropped). One that failed is made
+        // here instead, its error returned.
+        let mut wait = wait;
+        let landed = self
+            .zooms
+            .get(&node)
+            .and_then(|zoom| zoom.done.lock().unwrap_or_else(|p| p.into_inner()).take());
+        if let Some(made) = landed {
+            let zoom = self.zooms.remove(&node).expect("in flight");
+            match made {
+                Ok((panned, image))
+                    if zoom.size == (width, height, scale) && same(&zoom.canvas) =>
+                {
+                    self.store(
+                        node,
+                        canvas,
+                        Arc::new(image),
+                        zoom.size,
+                        zoom.view,
+                        Some(panned),
+                    );
+                }
+                Ok(_) => {}
+                Err(_) => wait = true,
+            }
+        }
         // The raster at this zoom, and how far the view moved since.
         let mut kept = None;
         if let Some(entry) = self.entries.get_mut(&node)
@@ -511,6 +632,42 @@ impl CanvasCache {
                 .pixels
                 .clone()
                 .map(|pixels| (entry.view, panned, pixels, shift));
+        }
+        // Zoomed: the raster of the zoom before, scaled, while this one's
+        // is made off the frame (unless one is already being made).
+        if !wait
+            && let Some(entry) = self.entries.get_mut(&node)
+            && let Some(panned) = entry.panned
+            && entry.view.scale != view.scale
+            && entry.width == width
+            && entry.height == height
+            && entry.scale == scale
+            && entry.canvas.upgrade().is_some_and(|old| same(&old))
+        {
+            entry.used = self.clock;
+            let shown = (
+                entry.raster(),
+                panned.scaled(entry.view, view, width, height, scale),
+            );
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.zooms.entry(node) {
+                let done: Arc<Mutex<Option<Made>>> = Arc::default();
+                let (filled, drawing) = (done.clone(), canvas.clone());
+                off_frame(Box::new(move || {
+                    let panned = panned_region(&drawing, view, size, scale);
+                    let made = rasterize_region(&drawing, view, scale, panned.region, None)
+                        .map(|image| (panned, image));
+                    *filled.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
+                    zgx::image::wake_waiting();
+                }));
+                let zoom = Zoom {
+                    canvas: canvas.clone(),
+                    view,
+                    size: (width, height, scale),
+                    done,
+                };
+                slot.insert(zoom);
+            }
+            return Ok(shown);
         }
         // Panned past what it holds: what is new drawn beside what it
         // holds. Else (a zoom, a change) what shows, as a box's raster.
@@ -1090,7 +1247,15 @@ impl HeadlessCanvases {
                 counts.0 += 1;
             } else if self
                 .cache
-                .get_panned(item.id, canvas, view, bounds.width, bounds.height, scale)
+                .get_panned(
+                    item.id,
+                    canvas,
+                    view,
+                    bounds.width,
+                    bounds.height,
+                    scale,
+                    true,
+                )
                 .is_ok()
             {
                 counts.1 += 1;
