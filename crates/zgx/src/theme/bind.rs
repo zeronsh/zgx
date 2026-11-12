@@ -476,7 +476,11 @@ fn sets(styles: &Styles, field: Field) -> u8 {
         Field::FontFamily => all(styles.font_family.is_some()),
         Field::Shadow => all(styles.rare().shadow.is_some() || styles.rare().shadows.is_some()),
         Field::InsetShadow => all(styles.rare().inset_shadows.is_some()),
-        Field::OutlineColor => all(styles.rare().outline.is_some()),
+        Field::OutlineColor => all(match styles.rare().outline {
+            Some(Some((_, color))) => color != crate::style::OUTLINE_COLOR_UNSET,
+            Some(None) => true,
+            None => false,
+        }),
         Field::OutlineInnerColor => all(styles
             .rare()
             .cold

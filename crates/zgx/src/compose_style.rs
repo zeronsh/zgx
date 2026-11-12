@@ -1875,7 +1875,11 @@ fn apply_resolved(
             if let Some(value) = resolved.rare().outline {
                 quad.outline = value.map(|(width, color)| crate::scene::Outline {
                     width,
-                    color,
+                    color: if color == crate::style::OUTLINE_COLOR_UNSET {
+                        Color(0, 0, 0, 255)
+                    } else {
+                        color
+                    },
                     offset: 0.,
                 });
             }
