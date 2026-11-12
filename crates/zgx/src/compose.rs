@@ -4787,6 +4787,7 @@ fn mount_portal_panel(
         autofocus.unwrap_or(true),
         keeps_focus,
         on_dismiss,
+        environment.services.get::<TaskRunner>(),
     );
     // An unnamed popover or menu is named by its trigger, as a browser's
     // popover target is (`aria-labelledby`).
@@ -5004,6 +5005,10 @@ pub struct MenuLook {
     pub hover: Option<Styles>,
     /// An item with keyboard focus, in place of the platform's.
     pub focus: Option<Styles>,
+    /// A menu's panel fades in this long as it opens, and out as it closes,
+    /// as a web page's menus do: opened from the keyboard it shows at once,
+    /// and closed by choosing an item it goes at once.
+    pub fade: Option<std::time::Duration>,
 }
 thread_local! { static MENU_LOOK: RefCell<Rc<MenuLook>> = RefCell::default(); }
 /// Gives every menu built after it `look` (`ui.menu_look`).
@@ -5012,6 +5017,10 @@ pub fn set_menu_look(look: MenuLook) {
 }
 fn menu_look() -> Rc<MenuLook> {
     MENU_LOOK.with(|now| now.borrow().clone())
+}
+/// How long a menu fades (`MenuLook::fade`).
+pub(crate) fn menu_fade() -> Option<std::time::Duration> {
+    menu_look().fade
 }
 fn menu_hover_look() -> Styles {
     menu_look()

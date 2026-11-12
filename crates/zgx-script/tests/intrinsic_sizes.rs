@@ -94,3 +94,45 @@ fn a_menu_look_styles_items_that_do_not_style_themselves() {
     assert_eq!(h.error(), None);
     assert_eq!((plain, own), (24., 40.));
 }
+
+/// With `ui.menu_look { fade }`, a menu fades out as Escape closes it (still
+/// drawn just after, gone once the fade ends) and goes at once when an item
+/// is chosen, as a web page's menus do.
+#[test]
+fn a_menu_fades_out_unless_an_item_was_chosen() {
+    let mut h = Harness::inline(
+        r##"ui.menu_look { fade = 100 }
+        local open = ui.state("open", true)
+        return ui.column { p = 20,
+            ui.menu { open = open, w = 160, anchor = ui.button { id = "anchor", w = 40, h = 20, "a" },
+                ui.menu_item { id = "go", "Go" } } }"##,
+    );
+    let drawn = |h: &mut Harness| {
+        h.ui.prepare_frame();
+        h.find("go").is_some_and(|n| {
+            h.ui.scene
+                .borrow()
+                .visible_bounds(n)
+                .is_some_and(|b| b.width > 0.)
+        })
+    };
+    h.frames(3);
+    std::thread::sleep(std::time::Duration::from_millis(130));
+    h.frames(3);
+    assert!(drawn(&mut h), "open");
+    h.key(zgx::input::Key::Escape);
+    h.frames(1);
+    assert!(drawn(&mut h), "fading out after Escape");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    h.frames(3);
+    assert!(!drawn(&mut h), "gone once faded");
+    h.host.set_state("open", zgx_script::Value::Bool(true)).unwrap();
+    h.frames(3);
+    std::thread::sleep(std::time::Duration::from_millis(130));
+    h.frames(3);
+    assert!(drawn(&mut h), "open again");
+    h.click("go");
+    h.frames(2);
+    zgx::compose::set_menu_look(Default::default());
+    assert!(!drawn(&mut h), "a chosen item closes it at once");
+}

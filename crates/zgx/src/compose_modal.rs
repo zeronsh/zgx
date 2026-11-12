@@ -82,6 +82,8 @@ pub(crate) fn activate(
     layer: bool,
     // Run as the person closes it (Escape, the backdrop).
     on_dismiss: Option<std::rc::Rc<dyn Fn()>>,
+    // Runs a menu's fade (`MenuLook::fade`).
+    runner: Option<std::rc::Rc<crate::compose::TaskRunner>>,
 ) {
     if layer {
         ui.input.set_layer(portal.overlay, true);
@@ -177,6 +179,14 @@ pub(crate) fn activate(
         .collect::<Vec<_>>();
     let weak = ui.downgrade();
     let visible = portal.visible.clone();
+    let fade = (role == Role::Menu)
+        .then(crate::compose::menu_fade)
+        .flatten()
+        .filter(|d| !d.is_zero());
+    let themes = crate::theme::Themes::of(&ui.runtime);
+    let shown = std::rc::Rc::new(std::cell::Cell::new(false));
+    let fading: std::rc::Rc<std::cell::RefCell<Option<crate::compose::TaskToken>>> = Default::default();
+    ui.retain(owner, fading.clone());
     ui.bind(owner, move || {
         let blocked = disabled.iter().any(|disabled| disabled.get());
         let requested = open.get();
@@ -191,13 +201,68 @@ pub(crate) fn activate(
         if !ui.scene.borrow().contains(overlay) {
             return;
         }
+        // A menu fades in as it opens (at once from the keyboard) and out as
+        // it closes (at once when an item was chosen), as menu.tsx's does.
+        let was_shown = shown.replace(desired);
+        let picked = !desired && PICKED.with(|picked| picked.replace(false));
+        let fade = fade.filter(|_| !themes.system_preferences().reduced_motion);
+        fading.borrow_mut().take();
+        let fades = match (fade, &runner) {
+            (Some(duration), Some(runner)) if desired && !was_shown && !crate::input::keyboard_in_use() => {
+                Some((duration, runner, 0., 1.))
+            }
+            (Some(duration), Some(runner)) if !desired && was_shown && !picked => {
+                Some((duration, runner, 1., 0.))
+            }
+            _ => None,
+        };
+        let fading_out = fades.is_some() && !desired;
+        // Shown while focus moves into it (a scope pushes only into what shows);
+        // the fade starts once it has.
         ui.scene.borrow_mut().set_effects(
             overlay,
             Effects {
-                opacity: if desired { 1. } else { 0. },
+                opacity: if desired || fading_out { 1. } else { 0. },
                 ..Default::default()
             },
         );
+        let start_fade = |ui: &Ui| {
+            let Some((duration, runner, from, to)) = fades else {
+                return;
+            };
+            {
+                let mut scene = ui.scene.borrow_mut();
+                let mut effects = scene.effects(overlay);
+                effects.opacity = from;
+                scene.set_effects(overlay, effects);
+            }
+            let (scene, visible) = (ui.scene.clone(), visible.clone());
+            let started = crate::clock::now();
+            *fading.borrow_mut() = Some(runner.spawn(Box::pin(async move {
+                loop {
+                    let done = (crate::clock::since(started).as_secs_f32() / duration.as_secs_f32()).min(1.);
+                    // Metal's ease-out, cubic-bezier(0.16, 1, 0.3, 1), near enough
+                    let eased = 1. - (1. - done).powi(4);
+                    let opacity = from + (to - from) * eased;
+                    {
+                        let mut scene = scene.borrow_mut();
+                        if !scene.contains(overlay) {
+                            return;
+                        }
+                        let mut effects = scene.effects(overlay);
+                        effects.opacity = opacity;
+                        scene.set_effects(overlay, effects);
+                    }
+                    if done >= 1. {
+                        break;
+                    }
+                    crate::timer::sleep(std::time::Duration::from_millis(8)).await;
+                }
+                if to == 0. {
+                    visible.set(false);
+                }
+            })));
+        };
         ui.input.set_options(
             overlay,
             NodeInput {
@@ -295,9 +360,13 @@ pub(crate) fn activate(
             }
             visible.set(ui.scene.borrow().contains(overlay));
         } else {
-            visible.set(false);
+            // Fading out, it stays shown until the fade ends (and takes no input).
+            if !fading_out {
+                visible.set(false);
+            }
             unwind(&ui, overlay);
         }
+        start_fade(&ui);
     });
 }
 /// Synchronously close presentation during pointer handoff, even inside a batch.
@@ -472,4 +541,13 @@ pub(crate) fn place(ui: &mut Ui, owner: NodeId, position: NodeId, at: ModalPlace
             );
         }
     });
+}
+
+thread_local! {
+    static PICKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// The menu closing now closes because an item was chosen: it goes at once,
+/// not fading (`MenuLook::fade`), as menu.tsx's does.
+pub(crate) fn closing_by_pick() {
+    PICKED.with(|picked| picked.set(true));
 }

@@ -21820,7 +21820,8 @@ declare ui: {
 	shortcut_text: (keys: string) -> string,
 	-- The look every menu takes that doesn't style itself, zgx's own (a link's, an editor's) among them: its
 	-- panel, each item, an item under the pointer and one with keyboard focus, in plain values.
-	menu_look: (look: { panel: Styles?, item: Styles?, hover: Styles?, focus: Styles? }) -> (),
+	-- `fade`: ms a menu fades in as it opens and out as it closes (at once from the keyboard, and when an item is chosen).
+	menu_look: (look: { panel: Styles?, item: Styles?, hover: Styles?, focus: Styles?, fade: number? }) -> (),
 	-- Whether the last input was the keyboard's (a key that moves or types since the last press), as
 	-- `:focus-visible` reads it: what it opens can skip its fade, as a menu opened from the keyboard does.
 	keyboard_in_use: () -> boolean,

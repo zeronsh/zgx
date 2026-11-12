@@ -73,6 +73,7 @@ impl MenuContext {
         }
     }
     pub(crate) fn close_chain(&self) {
+        crate::compose_modal::closing_by_pick();
         self.open.set(false);
         if let Some(parent) = &self.parent {
             parent.close_chain();

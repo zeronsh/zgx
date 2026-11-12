@@ -9118,6 +9118,10 @@ pub(crate) fn install_menu_look(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Resu
                 item: part("item")?.unwrap_or_default(),
                 hover: part("hover")?,
                 focus: part("focus")?,
+                fade: look
+                    .get::<Option<f64>>("fade")?
+                    .filter(|ms| ms.is_finite() && *ms > 0.)
+                    .map(|ms| std::time::Duration::from_secs_f64(ms / 1000.)),
             });
             Ok(())
         })?,
