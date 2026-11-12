@@ -14,8 +14,9 @@ pub enum Titlebar {
     Standard,
     /// Transparent, without the title: content runs under it, the window
     /// buttons (the traffic lights) inset over it in a 40-point strip, as
-    /// Electron's `hiddenInset`; a zoomed window's strip is 40 of its zoomed
-    /// points, the traffic lights centred in it (`zoom_buttons`). Mark the strip `View::window_drag` so it
+    /// Electron's `hiddenInset`, or where `WindowOptions::traffic_lights`
+    /// puts them; a zoomed window's strip is 40 of its zoomed points, the
+    /// traffic lights centred in it (`place_buttons`). Mark the strip `View::window_drag` so it
     /// moves the window. On Windows, zgx draws Windows 11's caption buttons
     /// over the content's top right (46 by 32 points of the display each,
     /// whatever the window's zoom, or as tall as `WindowOptions::caption_height`;
@@ -170,19 +171,112 @@ pub(crate) fn set_glass(window: &winit::window::Window, glass: Option<Glass>) {
 }
 
 /// Place an inset title bar's window buttons for a window zoomed to `zoom`
-/// (`Ui::zoom`): on macOS the traffic lights, which AppKit places in points
-/// the zoom does not touch, move to where the zoomed content's strip has
-/// them (centred in 40 × zoom points, as far in as the zoom makes AppKit's
-/// inset), so a title bar laid out around them lines up at any zoom. Back at
-/// 100%, AppKit's places. AppKit lays them out again as the window resizes:
-/// the host calls this after.
-pub(crate) fn zoom_buttons(window: &winit::window::Window, titlebar: Titlebar, zoom: f64) {
+/// (`Ui::zoom`), the close button's top left at `traffic_lights` if the app
+/// asks (`WindowOptions::traffic_lights`): on macOS the traffic lights,
+/// which AppKit places in points the zoom does not touch, move to where the
+/// zoomed content has them (`button_places`), so a title bar laid out
+/// around them lines up at any zoom. Back at 100% with no place asked,
+/// AppKit's places. AppKit lays them out again as the window resizes and
+/// leaves full screen: the host calls this after.
+pub(crate) fn place_buttons(
+    window: &winit::window::Window,
+    titlebar: Titlebar,
+    zoom: f64,
+    traffic_lights: Option<(f64, f64)>,
+) {
     #[cfg(target_os = "macos")]
     if titlebar == Titlebar::Inset {
-        mac::zoom_buttons(window, zoom);
+        mac::place_buttons(window, zoom, traffic_lights);
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (window, titlebar, zoom);
+    let _ = (window, titlebar, zoom, traffic_lights);
+}
+
+/// AppKit's own places for a window's traffic lights, in its frame's
+/// points: the first's left, the step from one to the next, the centres'
+/// distance below the top, and the title bar container's height. Kept from
+/// before zgx first moves them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct Buttons {
+    left: f64,
+    step: f64,
+    centre: f64,
+    container: f64,
+}
+
+/// Where the traffic lights go, in the window's points (`place_buttons`):
+/// the first's left, their centres' distance below the window's top, and
+/// how tall their container is (at least AppKit's, and as tall as they
+/// reach). Zoomed, AppKit's inset scales with the content and they stay
+/// centred in its 40 × zoom-point strip; with `position` (the close
+/// button's top left in the content's points, `button` tall in the
+/// window's), they sit where the zoomed content has that point, centred on
+/// the row a button there centres on at 100%. The step between them is
+/// AppKit's, as the buttons keep their size. `None`: AppKit's places (100%,
+/// no place asked).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn button_places(
+    base: Buttons,
+    button: f64,
+    zoom: f64,
+    position: Option<(f64, f64)>,
+) -> Option<(f64, f64, f64)> {
+    if zoom == 1. && position.is_none() {
+        return None;
+    }
+    let (left, centre) = position.map_or((base.left, base.centre), |(x, y)| (x, y + button / 2.));
+    let (left, centre) = (left * zoom, centre * zoom);
+    let container = (centre + button / 2. + 4.).max(base.container);
+    Some((left, centre, container))
+}
+
+#[cfg(test)]
+mod button_tests {
+    use super::{Buttons, button_places};
+
+    const APPKIT: Buttons = Buttons {
+        left: 13.,
+        step: 20.,
+        centre: 20.,
+        container: 40.,
+    };
+
+    #[test]
+    fn at_100_percent_with_no_place_asked_appkit_places_the_traffic_lights() {
+        assert_eq!(button_places(APPKIT, 16., 1., None), None);
+    }
+
+    #[test]
+    fn zoomed_the_traffic_lights_stay_centred_in_the_zoomed_strip() {
+        assert_eq!(
+            button_places(APPKIT, 16., 1.25, None),
+            Some((16.25, 25., 40.))
+        );
+        assert_eq!(button_places(APPKIT, 16., 2., None), Some((26., 40., 52.)));
+    }
+
+    #[test]
+    fn an_asked_place_puts_the_close_buttons_top_left_there() {
+        // Electron's `trafficLightPosition: { x: 18, y: 22 }`: a 60-point row.
+        assert_eq!(
+            button_places(APPKIT, 16., 1., Some((18., 22.))),
+            Some((18., 30., 42.))
+        );
+        // Above AppKit's own, the container keeps AppKit's height.
+        assert_eq!(
+            button_places(APPKIT, 16., 1., Some((10., 4.))),
+            Some((10., 12., 40.))
+        );
+    }
+
+    #[test]
+    fn an_asked_place_zooms_with_the_content_centred_on_its_row() {
+        assert_eq!(
+            button_places(APPKIT, 16., 1.5, Some((18., 22.))),
+            Some((27., 45., 57.))
+        );
+    }
 }
 
 /// The title bar's free area and the window's buttons in it, in points
@@ -2595,28 +2689,16 @@ mod mac {
         window.invalidateShadow();
     }
 
-    /// The title bar's free strip and the traffic lights in it, in points
-    /// from the content's top left. From the buttons' own frames and the
-    /// title bar's own height, so a toolbar's taller bar, a right-to-left
-    /// layout (buttons at the right, the strip left of them) and hidden
-    /// buttons come out as AppKit lays them out. None in fullscreen.
-    /// AppKit's own places for a window's traffic lights, in its frame's
-    /// points: the first's left, the step from one to the next, the
-    /// centres' distance below the top, and the title bar container's
-    /// height. Kept from before zgx first moves them.
-    #[derive(Clone, Copy)]
-    struct Buttons {
-        left: f64,
-        step: f64,
-        centre: f64,
-        container: f64,
-    }
     thread_local! {
-        static BUTTONS: std::cell::RefCell<std::collections::HashMap<isize, Buttons>> =
+        static BUTTONS: std::cell::RefCell<std::collections::HashMap<isize, super::Buttons>> =
             Default::default();
     }
 
-    pub(super) fn zoom_buttons(window: &winit::window::Window, zoom: f64) {
+    pub(super) fn place_buttons(
+        window: &winit::window::Window,
+        zoom: f64,
+        position: Option<(f64, f64)>,
+    ) {
         use objc2_foundation::{NSPoint, NSRect, NSSize};
         let Some(window) = ns_window(window) else {
             return;
@@ -2653,7 +2735,7 @@ mod mac {
         let base = BUTTONS.with_borrow_mut(|known| {
             *known.entry(number).or_insert_with(|| {
                 let (first, second) = (in_window(close), in_window(next));
-                Buttons {
+                super::Buttons {
                     left: first.origin.x,
                     step: second.origin.x - first.origin.x,
                     centre: height - (first.origin.y + first.size.height / 2.),
@@ -2661,12 +2743,12 @@ mod mac {
                 }
             })
         });
+        let size = close.frame().size;
+        let places = super::button_places(base, size.height, zoom, position);
+        let (left, centre, wanted) = places.unwrap_or((base.left, base.centre, base.container));
         // Room for them: the container at the window's top (placed from the
         // window's height, not its own frame: a resize moves it later) and at
         // least as tall as they reach.
-        let size = close.frame().size;
-        let reach = (base.centre * zoom + size.height / 2. + 4.).max(base.container);
-        let wanted = if zoom == 1. { base.container } else { reach };
         // SAFETY: as above, a set back pointer is a live superview.
         if let Some(frame_view) = unsafe { container.superview() } {
             let bounds = frame_view.bounds();
@@ -2680,8 +2762,8 @@ mod mac {
             }
         }
         for (index, button) in buttons.iter().enumerate() {
-            let x = base.left * zoom + base.step * index as f64;
-            let y = height - base.centre * zoom - size.height / 2.;
+            let x = left + base.step * index as f64;
+            let y = height - centre - size.height / 2.;
             // SAFETY: as above, a set back pointer is a live superview.
             let Some(bar) = (unsafe { button.superview() }) else {
                 continue;
@@ -2693,11 +2775,18 @@ mod mac {
         }
         // Back in AppKit's places: read them again next time (another window
         // may take this one's number).
-        if zoom == 1. {
+        if places.is_none() {
             BUTTONS.with_borrow_mut(|known| known.remove(&number));
         }
     }
 
+    /// The title bar's free strip and the traffic lights in it, in points
+    /// from the content's top left. From the buttons' own frames and the
+    /// title bar's own height, so a toolbar's taller bar, a right-to-left
+    /// layout (buttons at the right, the strip left of them), hidden
+    /// buttons and buttons zgx moved (`place_buttons`: the strip then as
+    /// tall as centres them, if that is taller) come out as they are laid
+    /// out. None in fullscreen.
     pub(super) fn titlebar_area(
         window: &winit::window::Window,
     ) -> (Option<zgx::scene::Rect>, Option<zgx::scene::Rect>) {
@@ -2751,6 +2840,7 @@ mod mac {
                 None => rect,
             });
         }
+        let bar = controls.map_or(bar, |c| bar.max(c.y * 2. + c.height));
         let area = match controls {
             // Right to left: the buttons at the right, the strip before them.
             Some(c) if c.x > width / 2. => Rect::new(0., 0., c.x.max(0.), bar),
