@@ -444,12 +444,19 @@ impl<T: 'static> EventLoop<T> {
         // `MsgWaitForMultipleObjectsEx`.
         //
         runner.prepare_wait();
-        let woken = wait_for_messages_impl(
-            &mut self.high_resolution_timer,
-            self.proxy_wake.as_deref(),
-            runner.control_flow(),
-            timeout,
-        );
+        // zgx patch: an exit asked for as the loop went idle (in `resumed`,
+        // which the first `prepare_wait` delivers, or in `about_to_wait`)
+        // ends it without waiting. Waited on, the loop slept until some
+        // message came: on a desktop where none does, for good.
+        let woken = match runner.exit_code() {
+            Some(_) => 0,
+            None => wait_for_messages_impl(
+                &mut self.high_resolution_timer,
+                self.proxy_wake.as_deref(),
+                runner.control_flow(),
+                timeout,
+            ),
+        };
         // Before we potentially exit, make sure to consistently emit an event for the wake up
         runner.wakeup();
         // zgx patch: a proxy's event, taken as its posted messages would have been.
