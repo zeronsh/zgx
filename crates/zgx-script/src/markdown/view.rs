@@ -207,6 +207,24 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
         )
 }
 
+/// A table at its natural width: each column as wide as its widest cell on one line, shared across rows; wider
+/// than the view, it scrolls sideways rather than squeezing its columns.
+fn table(head: Vec<View>, rows: Vec<Vec<View>>, cx: &mut Context) -> View {
+    let columns = rows.iter().map(Vec::len).chain(std::iter::once(head.len())).max().unwrap_or(0);
+    let tracks = format!("repeat({}, auto)", columns.max(1))
+        .parse()
+        .expect("a track list");
+    let mut grid = div().grid().grid_template_columns(tracks).gap_x(12.).gap_y(4.).shrink_0();
+    let pad = |mut cells: Vec<View>| {
+        cells.resize_with(columns, div);
+        cells
+    };
+    for cell in pad(head).into_iter().chain(rows.into_iter().flat_map(pad)) {
+        grid = grid.child(column().text_wrap(false).child(cell));
+    }
+    zgx::compose::scroll_x(cx.state(0_f32)).w_full().child(grid)
+}
+
 fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
     let kind = text_of(b.field("t"));
     match kind.as_str() {
@@ -269,22 +287,19 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
             .children(static_blocks(b.field("b"), options, cx)),
         "hr" => div().w_full().h(1.).my(4.).bg(themed("border.subtle")),
         "table" => {
-            let line = |cells: Option<&Value>, bold: bool| {
-                let mut out = row().gap(12.);
-                for cell in cells.map(|c| c.list().to_vec()).unwrap_or_default() {
-                    out = out.child(column().w(160.).child(static_runs(Some(&cell), bold)));
-                }
-                out
+            let cells = |row: Option<&Value>, bold: bool| -> Vec<View> {
+                row.map(|c| c.list().to_vec())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|cell| static_runs(Some(cell), bold).text_wrap(false).into())
+                    .collect()
             };
-            let mut table = column().gap(4.).child(line(b.field("head"), true));
-            for cells in b
-                .field("rows")
-                .map(|r| r.list().to_vec())
-                .unwrap_or_default()
-            {
-                table = table.child(line(Some(&cells), false));
-            }
-            table
+            let rows = b.field("rows").map(|r| r.list().to_vec()).unwrap_or_default();
+            table(
+                cells(b.field("head"), true),
+                rows.iter().map(|r| cells(Some(r), false)).collect(),
+                cx,
+            )
         }
         "img" => text(text_of(b.field("alt"))).text_color(themed("text.secondary")),
         _ => static_runs(b.field("s"), false).into(),
@@ -613,31 +628,25 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
             .child(block_list(field_cell(&cell, "b", cx), options)),
         "hr" => div().w_full().h(1.).my(4.).bg(themed("border.subtle")),
         "table" => {
-            let line = |cells: Option<&Value>, bold: bool| {
-                let mut out = row().gap(12.);
-                for cell in cells.map(|c| c.list().to_vec()).unwrap_or_default() {
-                    let runs = cell
-                        .list()
-                        .iter()
-                        .map(|r| span(r, bold))
-                        .collect::<Vec<_>>();
-                    out = out.child(
-                        column()
-                            .w(160.)
-                            .child(zgx::compose::rich_text().children(runs).text_wrap(true)),
-                    );
-                }
-                out
+            let cells = |row: Option<&Value>, bold: bool| -> Vec<View> {
+                row.map(|c| c.list().to_vec())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|cell| {
+                        let runs = cell.list().iter().map(|r| span(r, bold)).collect::<Vec<_>>();
+                        zgx::compose::rich_text().children(runs).text_wrap(false).into()
+                    })
+                    .collect()
             };
-            let mut table = column().gap(4.).child(line(b.field("head"), true));
-            for cells in b
-                .field("rows")
-                .map(|r| r.list().to_vec())
-                .unwrap_or_default()
-            {
-                table = table.child(line(Some(&cells), false));
-            }
-            table
+            let (head, rows) = cell.with(|b| {
+                let rows: Vec<Value> = b.field("rows").map(|r| r.list().to_vec()).unwrap_or_default();
+                (b.field("head").cloned(), rows)
+            });
+            table(
+                cells(head.as_ref(), true),
+                rows.iter().map(|r| cells(Some(r), false)).collect(),
+                cx,
+            )
         }
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),

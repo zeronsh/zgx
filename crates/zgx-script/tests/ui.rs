@@ -4659,27 +4659,23 @@ fn a_list_of_data_takes_no_count() {
 }
 
 #[test]
-fn a_markdown_table_row_is_as_tall_as_its_own_cells() {
+fn a_markdown_table_wider_than_its_view_keeps_its_columns_and_scrolls() {
+    // A note's 13-column table in a 420pt reading pane: columns as wide as their cells, as a browser's are.
     let mut h = Harness::inline(
-        r##"local head, rule, base, big = {}, {}, { "base" }, { "big" }
-        for i = 1, 13 do
-            table.insert(head, `Column {i} header long enough to wrap onto several lines`)
-            table.insert(rule, "---")
-            if i > 1 then
-                table.insert(base, tostring(i))
-                table.insert(big, tostring(i * 2))
-            end
-        end
-        local function line(cells) return "| " .. table.concat(cells, " | ") .. " |" end
-        local md = ui.state("md", table.concat({ line(head), line(rule), line(base), line(big) }, "\n"))
-        return ui.column { w = 800, h = 600, ui.scroll { grow = 1, w_full = true, min_h = 0,
+        r##"local md = ui.state("md", table.concat({
+            "| Model | Layers ($$N$$) | $$d_{model}$$ | $$d_{ff}$$ | Heads ($$h$$) | $$d_k = d_v$$ | $$P_{drop}$$ | $$\\epsilon_{ls}$$ | Params | Train steps | Step time | Wall time | FLOPs (EN-DE) |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| base | 6 | 512 | 2048 | 8 | 64 | 0.1 | 0.1 | 65M | 100K | 0.4 s | 12 h | $$3.3 \\times 10^{18}$$ |",
+            "| big | 6 | 1024 | 4096 | 16 | 64 | 0.3 | 0.1 | 213M | 300K | 1.0 s | 3.5 days | $$2.3 \\times 10^{19}$$ |",
+        }, "\n"))
+        return ui.column { w = 420, h = 600, ui.scroll { grow = 1, w_full = true, min_h = 0,
             ui.column { w_full = true, items = "center",
                 ui.column { w_full = true, max_w = 768, p = 32, text_size = 14, line_height = 22,
                     ui.markdown_view { function() return md:get() end, w_full = true } } } } }"##,
     );
     h.frames(1);
     h.texts();
-    let top = |h: &mut Harness, want: &str| -> (f32, f32) {
+    let place = |h: &mut Harness, want: &str| -> zgx::scene::Rect {
         let scene = h.ui.scene.borrow();
         let mut stack = vec![scene.root()];
         while let Some(n) = stack.pop() {
@@ -4689,19 +4685,21 @@ fn a_markdown_table_row_is_as_tall_as_its_own_cells() {
                 _ => None,
             };
             if text.as_deref() == Some(want) {
-                let b = scene.bounds(n);
-                return (b.y, b.height);
+                return scene.bounds(n);
             }
             stack.extend(scene.children(n).iter().copied());
         }
         panic!("no `{want}`")
     };
-    let (base, line) = top(&mut h, "base");
-    let (big, _) = top(&mut h, "big");
-    let (_, head) = top(&mut h, "Column 1 header long enough to wrap onto several lines");
-    assert!(head > line * 3., "the header wraps ({head}pt), so the test means something");
-    // One line of body text and the row gap apart: the wrapped header's height is its own row's alone.
-    assert!(big - base < line * 2., "rows {base} and {big} for a {line}pt line");
+    let base = place(&mut h, "base");
+    let big = place(&mut h, "big");
+    let flops = place(&mut h, "$$3.3 \\times 10^{18}$$");
+    let head = place(&mut h, "FLOPs (EN-DE)");
+    let line = base.height;
+    assert!(big.y - base.y < line * 2., "one-line rows {} and {} apart for a {line}pt line", base.y, big.y);
+    assert!(flops.height < line * 1.5, "the last column keeps its natural width, one line ({}pt)", flops.height);
+    assert!(flops.x > 420., "it lies past the view's edge, to scroll to ({}pt)", flops.x);
+    assert!(head.height < line * 1.5, "the header's cells keep theirs too ({}pt)", head.height);
     assert_eq!(h.error(), None);
 }
 
