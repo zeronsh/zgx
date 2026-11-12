@@ -20,6 +20,10 @@ serde_json = { version = "1", optional = true }
 # glTF 2.0 models (`Model`, `World::add_model`): `.glb` and `.gltf` files,
 # their textures PNG or JPEG.
 gltf = ["dep:serde_json", "zgx-gpu/png", "zgx-gpu/jpeg"]
+# `scroll_glass_bench` counts the allocations a frame makes (a counting
+# global allocator): off by default, so the gate, which builds default
+# features, counts the same program either way.
+count-allocs = []
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop", default-features = false }

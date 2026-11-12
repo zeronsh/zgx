@@ -23,6 +23,41 @@ use zgx_gpu::GpuRenderer;
 #[path = "../../zgx-desktop/examples/support/headless_font.rs"]
 mod headless_font;
 
+/// Allocations counted (`--features count-allocs`): what a steady scroll's
+/// frame allocates, and reallocates, should be near nothing.
+#[cfg(feature = "count-allocs")]
+mod counting {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        sync::atomic::{AtomicU64, Ordering::Relaxed},
+    };
+    pub static ALLOCS: AtomicU64 = AtomicU64::new(0);
+    pub static REALLOCS: AtomicU64 = AtomicU64::new(0);
+    struct Counting;
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCS.fetch_add(1, Relaxed);
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            ALLOCS.fetch_add(1, Relaxed);
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            REALLOCS.fetch_add(1, Relaxed);
+            unsafe { System.realloc(ptr, layout, size) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+    pub fn now() -> (u64, u64) {
+        (ALLOCS.load(Relaxed), REALLOCS.load(Relaxed))
+    }
+}
+
 const WIDTH: f32 = 1240.;
 const HEIGHT: f32 = 800.;
 /// The composer's height: with its shadow and blur, a band of 133 points
@@ -231,6 +266,8 @@ fn main() {
             .child(div().absolute().size(WIDTH, HEIGHT).child(composer)),
     );
     let (mut damaged, mut items) = (0_u64, 0_usize);
+    #[cfg(feature = "count-allocs")]
+    let mut counted = (0_u64, 0_u64);
     let mut at = 0_f32;
     let mut down = true;
     for frame in 0..frames {
@@ -243,15 +280,33 @@ fn main() {
             }
             offset.set(at);
         }
+        // From the second frame: the first mounts everything.
+        #[cfg(feature = "count-allocs")]
+        let before = counting::now();
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
         let stats = gpu
             .render(&ui.scene.borrow(), &report.damage)
             .expect("a frame");
         damaged += stats.damaged_pixels;
+        #[cfg(feature = "count-allocs")]
+        if frame > 0 {
+            let after = counting::now();
+            counted.0 += after.0 - before.0;
+            counted.1 += after.1 - before.1;
+        }
         items += stats.instances;
     }
     let per = frames.max(1) as f64;
+    #[cfg(feature = "count-allocs")]
+    {
+        let scrolled = frames.saturating_sub(1).max(1) as f64;
+        println!(
+            "allocations a scrolled frame: {:.1}, reallocations {:.1}",
+            counted.0 as f64 / scrolled,
+            counted.1 as f64 / scrolled
+        );
+    }
     let watched = kept.borrow();
     println!(
         "scroll under glass: {frames} frames, {} scene nodes, observers made: {} bounds, {} sizes, {} visible, \
