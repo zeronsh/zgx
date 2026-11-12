@@ -772,8 +772,24 @@ jobs:
       # exactly instead cost 1-8% GPU on Metal or 0.6-1.2% CPU on fx cells, so
       # zgx doesn't pay it for a software rasterizer.
       # The app-shader HLSL generator's register map and the FXC child's
-      # job and cache key (dx12_fill, fxc_child: Windows-only modules).
-      - run: cargo test -p zgx-gpu --lib --locked -- dx12_fill fxc_child
+      # job and cache key (dx12_fill, fxc_child: Windows-only modules), and
+      # draw.wgsl's stages compiled ahead (dx12_precompiled): FXC's bytecode
+      # of their HLSL today. Stale ones are kept for a machine without FXC.
+      - name: Direct3D 12 shaders compiled ahead
+        run: cargo test -p zgx-gpu --lib --locked -- dx12_fill fxc_child dx12_precompiled
+        env:
+          ZGX_SHADER_OUT: ${{ runner.temp }}\zgx-dxbc
+      - name: Keep the Direct3D 12 shaders compiled afresh
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dx12-precompiled
+          retention-days: 7
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}\zgx-dxbc
+      # draw.wgsl's precompiled stages are wgpu's own bytecode and draw its
+      # frames (a process of its own: it sets wgpu's environment).
+      - run: cargo test -p zgx-gpu --test precompiled_d3d12 --locked
       # Direct3D 11 (the `d3d11` feature, on WARP) draws what Direct3D 12
       # does, byte for byte: the suite's scenes and every ready-made shader
       # fill and layer shader, each compiled cold by FXC in its child

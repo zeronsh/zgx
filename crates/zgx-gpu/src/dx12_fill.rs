@@ -123,6 +123,74 @@ pub(crate) fn options(layout: Layout) -> hlsl::Options {
     }
 }
 
+/// The constant buffers `layout`'s groups hold: wgpu-hal puts its special
+/// constants (first vertex and instance) in the register after them.
+#[cfg(test)]
+fn constant_buffers(layout: Layout) -> u32 {
+    groups(layout)
+        .iter()
+        .flatten()
+        .filter(|entry| matches!(entry, Entry::Uniform(_)))
+        .count() as u32
+}
+
+/// `source`'s entry `entry` of `stage` as HLSL for `layout`, written as
+/// wgpu-hal writes a pipeline stage (`load_shader`): the module reduced to
+/// that entry (`process_overrides`), a vertex stage's outputs written for
+/// the inputs of `fragment`, the fragment entry it is drawn with, and the
+/// special constants after the layout's constant buffers. Its name in the
+/// HLSL too.
+#[cfg(test)]
+pub(crate) fn stage_hlsl(
+    source: &str,
+    stage: naga::ShaderStage,
+    entry: &str,
+    fragment: Option<&str>,
+    layout: Layout,
+) -> Result<(String, String), String> {
+    let module = naga::front::wgsl::parse_str(source).map_err(|e| e.to_string())?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|e| e.to_string())?;
+    let fragment = fragment
+        .map(|name| {
+            hlsl::FragmentEntryPoint::new(&module, name)
+                .ok_or_else(|| format!("no fragment entry point `{name}`"))
+        })
+        .transpose()?;
+    let (reduced, reduced_info) = naga::back::pipeline_constants::process_overrides(
+        &module,
+        &info,
+        Some((stage, entry)),
+        &Default::default(),
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    let mut options = options(layout);
+    options.special_constants_binding = Some(hlsl::BindTarget {
+        space: 0,
+        register: constant_buffers(layout),
+        binding_array_size: None,
+        dynamic_storage_buffer_offsets_index: None,
+        restrict_indexing: false,
+    });
+    let pipeline = hlsl::PipelineOptions {
+        entry_point: Some((stage, entry.to_owned())),
+    };
+    let mut hlsl = String::new();
+    let mut reflection = hlsl::Writer::new(&mut hlsl, &options, &pipeline)
+        .write(&reduced, &reduced_info, fragment.as_ref())
+        .map_err(|e| e.to_string())?;
+    let name = reflection
+        .entry_point_names
+        .pop()
+        .ok_or("no entry point")?
+        .map_err(|e| e.to_string())?;
+    Ok((hlsl, name))
+}
+
 /// `source`'s fragment entry `entry` as HLSL for `layout`, and its name in
 /// the HLSL.
 pub(crate) fn fragment_hlsl(

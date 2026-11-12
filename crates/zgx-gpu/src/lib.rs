@@ -18,6 +18,8 @@ mod d3d11_frame;
 #[cfg(windows)]
 mod dx12_fill;
 #[cfg(windows)]
+mod dx12_precompiled;
+#[cfg(windows)]
 mod dxgi;
 #[cfg(windows)]
 mod dxgi_present;
@@ -629,6 +631,26 @@ fn shading(quad: &Quad, scale: f32) -> Shading {
         Shading::Basic
     }
 }
+/// draw.wgsl's stages: its module, or on Direct3D 12 each stage compiled
+/// ahead of time (`dx12_precompiled`).
+enum QuadShader {
+    Wgsl(wgpu::ShaderModule),
+    #[cfg(windows)]
+    Precompiled(dx12_precompiled::Stages),
+}
+impl QuadShader {
+    /// The modules of the stages `vertex` and `fragment`.
+    fn stages(&self, vertex: &str, fragment: &str) -> (&wgpu::ShaderModule, &wgpu::ShaderModule) {
+        match self {
+            Self::Wgsl(module) => {
+                let _ = (vertex, fragment);
+                (module, module)
+            }
+            #[cfg(windows)]
+            Self::Precompiled(stages) => (stages.get(vertex), stages.get(fragment)),
+        }
+    }
+}
 /// The quad pipelines, each compiled on first use: a software rasterizer
 /// compiles a pipeline into megabytes of code, and plain interfaces never
 /// need the full shader there.
@@ -636,7 +658,12 @@ struct QuadPipelines {
     device: wgpu::Device,
     /// Their module (draw.wgsl), made with the first pipeline: a window
     /// whose frames Metal encodes directly (metal_frame.rs) needs none.
-    shader: std::cell::OnceCell<wgpu::ShaderModule>,
+    shader: std::cell::OnceCell<QuadShader>,
+    /// Windows: draw.wgsl's stages compiled ahead of time
+    /// (`dx12_precompiled`), where wgpu would compile them with FXC and the
+    /// same flags.
+    #[cfg(windows)]
+    precompiled: bool,
     layout: wgpu::PipelineLayout,
     full: std::cell::OnceCell<wgpu::RenderPipeline>,
     full_clear: std::cell::OnceCell<wgpu::RenderPipeline>,
@@ -690,13 +717,19 @@ impl QuadPipelines {
             )
         })
     }
-    fn shader(&self) -> &wgpu::ShaderModule {
+    fn shader(&self) -> &QuadShader {
         self.shader.get_or_init(|| {
-            self.device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("quads"),
-                    source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
-                })
+            #[cfg(windows)]
+            if self.precompiled {
+                return QuadShader::Precompiled(dx12_precompiled::Stages::new(&self.device));
+            }
+            QuadShader::Wgsl(
+                self.device
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("quads"),
+                        source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
+                    }),
+            )
         })
     }
     fn polylines(&self) -> &Polylines {
@@ -4167,8 +4200,11 @@ impl GpuContext {
             descriptor.backend_options.dx12.shader_compiler = compiler.clone();
             descriptor.backend_options.noop.enable = noop;
             descriptor.flags = instance_flags(descriptor.flags, !cfg!(debug_assertions));
+            // The environment's flags (`WGPU_DEBUG` and the rest) before
+            // they are read below.
+            descriptor = descriptor.with_env();
             // Which compiler an app's shaders meet on Direct3D 12, and its
-            // flags (`app_fragment`).
+            // flags (`app_fragment`, `precompiled_quads`).
             #[cfg(windows)]
             APP_SHADER_FXC.get_or_init(|| {
                 (
@@ -4182,7 +4218,7 @@ impl GpuContext {
             {
                 descriptor = descriptor.with_display_handle(Box::new(window.clone()));
             }
-            let instance = wgpu::Instance::new(descriptor.with_env());
+            let instance = wgpu::Instance::new(descriptor);
             // No driver for these backends: the next.
             let surface = match window
                 .clone()
@@ -4364,6 +4400,8 @@ impl GpuContext {
         let quads = QuadPipelines {
             device: device.clone(),
             shader: Default::default(),
+            #[cfg(windows)]
+            precompiled: precompiled_quads(&info, &device),
             layout: quad_layout.clone(),
             full: Default::default(),
             full_clear: Default::default(),
@@ -7910,6 +7948,15 @@ impl GpuRenderer {
     /// renderer's have no deadline and nothing to wake.
     fn waits_for_shaders(&self) -> bool {
         self.debug_waits_for_shaders || self.offscreen_waits && !self.presents()
+    }
+    /// Whether its quads draw with draw.wgsl's stages compiled ahead of
+    /// time (`dx12_precompiled`). For tests.
+    #[doc(hidden)]
+    pub fn debug_quads_precompiled(&self) -> bool {
+        #[cfg(windows)]
+        return self.context.inner.quads.precompiled;
+        #[cfg(not(windows))]
+        false
     }
     /// What Direct3D 11 frames have left out so far, each kind once
     /// (`ZGX_D3D11`, the `d3d11` feature). For tests.
@@ -19007,7 +19054,7 @@ fn rgba(c: Color, opacity: f32) -> [f32; 4] {
 /// (`Deferred::direct`).
 fn drawable_pipeline(
     device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
+    shader: &QuadShader,
     layout: &wgpu::PipelineLayout,
     blend: bool,
     format: wgpu::TextureFormat,
@@ -19015,12 +19062,18 @@ fn drawable_pipeline(
 ) -> wgpu::RenderPipeline {
     let all = wgpu::vertex_attr_array![0=>Float32x4,1=>Float32x4,2=>Float32x4,3=>Float32x4,4=>Float32x4,5=>Float32x4,6=>Float32x4,7=>Float32x4];
     let basic_attributes = [all[0], all[1], all[2], all[4]];
+    let (vertex, fragment) = if basic {
+        ("vs_basic", "fs_basic")
+    } else {
+        ("vs", "fs")
+    };
+    let (vertex_module, fragment_module) = shader.stages(vertex, fragment);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("quads to the drawable"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some(if basic { "vs_basic" } else { "vs" }),
+            module: vertex_module,
+            entry_point: Some(vertex),
             compilation_options: Default::default(),
             buffers: &[wgpu::VertexBufferLayout {
                 array_stride: 128,
@@ -19032,8 +19085,8 @@ fn drawable_pipeline(
         depth_stencil: None,
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some(if basic { "fs_basic" } else { "fs" }),
+            module: fragment_module,
+            entry_point: Some(fragment),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -19073,7 +19126,7 @@ const BEHIND: wgpu::BlendState = {
 };
 fn quad_pipeline(
     device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
+    shader: &QuadShader,
     layout: &wgpu::PipelineLayout,
     blend: Option<wgpu::BlendState>,
     drawable: Option<wgpu::TextureFormat>,
@@ -19090,12 +19143,21 @@ fn quad_pipeline(
         })
     };
     let targets = [target(FORMAT), drawable.and_then(target)];
+    let vertex = if basic { "vs_basic" } else { "vs" };
+    // Single-pass presentation draws with the full shader alone.
+    let fragment = match (basic, drawable.is_some()) {
+        (true, true) => "fs_basic_both",
+        (true, false) => "fs_basic",
+        (false, true) => "fs_both",
+        (false, false) => "fs",
+    };
+    let (vertex_module, fragment_module) = shader.stages(vertex, fragment);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("quads"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some(if basic { "vs_basic" } else { "vs" }),
+            module: vertex_module,
+            entry_point: Some(vertex),
             compilation_options: Default::default(),
             buffers: &[wgpu::VertexBufferLayout {
                 array_stride: 128,
@@ -19107,14 +19169,8 @@ fn quad_pipeline(
         depth_stencil: None,
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
-            module: shader,
-            // Single-pass presentation draws with the full shader alone.
-            entry_point: Some(match (basic, drawable.is_some()) {
-                (true, true) => "fs_basic_both",
-                (true, false) => "fs_basic",
-                (false, true) => "fs_both",
-                (false, false) => "fs",
-            }),
+            module: fragment_module,
+            entry_point: Some(fragment),
             compilation_options: Default::default(),
             targets: if drawable.is_some() {
                 &targets
@@ -19133,6 +19189,42 @@ fn quad_pipeline(
 /// instance's `DEBUG`): an app's shaders then compile in a child.
 #[cfg(windows)]
 static APP_SHADER_FXC: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+/// Tests: draw.wgsl's stages compiled by wgpu, not ahead (`dx12_precompiled`).
+static PRECOMPILED_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Tests: whether quads draw with draw.wgsl's stages compiled ahead of time
+/// where they can (on by default), or as wgpu compiles them; for renderers
+/// made after.
+#[doc(hidden)]
+pub fn debug_precompiled_shaders(on: bool) {
+    PRECOMPILED_OFF.store(!on, std::sync::atomic::Ordering::Relaxed);
+}
+/// draw.wgsl's stages compiled ahead of time (`dx12_precompiled`): each
+/// entry point and its bytecode. For tests.
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn debug_precompiled_stages() -> Vec<(&'static str, &'static [u8])> {
+    dx12_precompiled::STAGES
+        .iter()
+        .map(|stage| (stage.entry, stage.code))
+        .collect()
+}
+/// Whether the quads draw with draw.wgsl's stages compiled ahead of time
+/// (`dx12_precompiled`): on Direct3D 12 with bytecode passed through, where
+/// wgpu would compile them with FXC and the flags they were compiled with
+/// (no `DEBUG`), so frames are the same bytes; and where the repository
+/// holds their bytecode.
+#[cfg(windows)]
+fn precompiled_quads(info: &wgpu::AdapterInfo, device: &wgpu::Device) -> bool {
+    info.backend == wgpu::Backend::Dx12
+        && device
+            .features()
+            .contains(wgpu::Features::PASSTHROUGH_SHADERS)
+        && APP_SHADER_FXC.get() == Some(&(true, false))
+        && !PRECOMPILED_OFF.load(std::sync::atomic::Ordering::Relaxed)
+        && dx12_precompiled::STAGES
+            .iter()
+            .all(|stage| !stage.code.is_empty())
+}
 /// Tests: an app's shaders built in the process (wgpu's naga and FXC) when
 /// set, through a child (`app_fragment`) when not.
 static APP_SHADERS_IN_PROCESS: std::sync::atomic::AtomicBool =
