@@ -5065,6 +5065,7 @@ dependencies = [
  "zgx",
  "zgx-desktop",
  "zgx-gpu",
+ "zgx-workload",
 ]
 
 [[package]]

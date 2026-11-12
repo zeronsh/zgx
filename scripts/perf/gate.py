@@ -204,6 +204,11 @@ SCENES = [
     ('fx-layer', 'zgx-3d', 'fx_bench', {'SCENE': 'layer', 'ZGX_GPU_NOOP': '1'}),
     ('fx-reader', 'zgx-3d', 'fx_bench', {'SCENE': 'reader', 'ZGX_GPU_NOOP': '1'}),
     ('fx-passes', 'zgx-3d', 'passes_bench', {'ZGX_GPU_NOOP': '1'}),
+    # A fast scroll through a long transcript of deep rows built as it shows
+    # them, under a frosted composer and an edge fade, rows watching their
+    # size, bounds and visibility: the world geometry those observers and the
+    # lists read, and the paint walk of the strip and band each frame draws.
+    ('scroll-glass', 'zgx-3d', 'scroll_glass_bench', {'ZGX_GPU_NOOP': '1'}),
     # A video's frames (zgx-video's `examples/bench`): its script, animations,
     # timers and shader clock stepped on a virtual clock (`zgx::clock`), each
     # frame drawn whole by wgpu's no-op backend. What making video costs;
