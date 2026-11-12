@@ -274,6 +274,126 @@ fn path(path: &Path) -> Option<sk::Path> {
     }
     builder.finish()
 }
+/// `image` drawn in `rect` as `fit` fills it, centred, cut to `rect`
+/// rounded by `radius`, at `opacity` (`Draw::Image`). A picture with no
+/// pixels to read (a GPU view's frame) draws nothing.
+fn draw_image(
+    pixmap: &mut sk::Pixmap,
+    image: &ImageData,
+    (rect, fit, radius, opacity): (zgx::scene::Rect, zgx::style::ObjectFit, f32, f32),
+    transform: sk::Transform,
+    clip: Option<&sk::Mask>,
+) -> Result<(), GpuError> {
+    use zgx::style::ObjectFit;
+    if ![rect.x, rect.y, rect.width, rect.height, radius, opacity]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(GpuError("invalid canvas image".into()));
+    }
+    let (source_w, source_h) = (image.width() as f32, image.height() as f32);
+    let pixels = image.pixels();
+    if rect.width <= 0.
+        || rect.height <= 0.
+        || opacity <= 0.
+        || pixels.len() != image.width() as usize * image.height() as usize * 4
+    {
+        return Ok(());
+    }
+    // As `ui.image` fits its pixels (a pixel a point at `None`).
+    let (horizontal, vertical) = (rect.width / source_w, rect.height / source_h);
+    let (width, height) = match fit {
+        ObjectFit::Fill => (rect.width, rect.height),
+        ObjectFit::None => (source_w, source_h),
+        fit => {
+            let scale = match fit {
+                ObjectFit::Cover => horizontal.max(vertical),
+                ObjectFit::ScaleDown => horizontal.min(vertical).min(1.),
+                _ => horizontal.min(vertical),
+            };
+            (source_w * scale, source_h * scale)
+        }
+    };
+    let placed = zgx::scene::Rect::new(
+        rect.x + (rect.width - width) / 2.,
+        rect.y + (rect.height - height) / 2.,
+        width,
+        height,
+    );
+    let Some(shown) = placed.intersection(rect) else {
+        return Ok(());
+    };
+    let mut premultiplied = pixels.to_vec();
+    if !image.is_premultiplied() {
+        for p in premultiplied.as_chunks_mut::<4>().0 {
+            let alpha = u16::from(p[3]);
+            for channel in &mut p[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
+    }
+    let size = sk::IntSize::from_wh(image.width(), image.height())
+        .ok_or_else(|| GpuError("invalid canvas image".into()))?;
+    let picture = sk::Pixmap::from_vec(premultiplied, size)
+        .ok_or_else(|| GpuError("invalid canvas image".into()))?;
+    // Sampled linearly, as the GPU samples `ui.image`'s pixels (bicubic took
+    // three times as long here).
+    let paint = sk::Paint {
+        shader: sk::Pattern::new(
+            picture.as_ref(),
+            sk::SpreadMode::Pad,
+            sk::FilterQuality::Bilinear,
+            opacity.min(1.),
+            sk::Transform::from_row(
+                width / source_w,
+                0.,
+                0.,
+                height / source_h,
+                placed.x,
+                placed.y,
+            ),
+        ),
+        ..Default::default()
+    };
+    let shown_path = sk::PathBuilder::from_rect(
+        sk::Rect::from_xywh(shown.x, shown.y, shown.width, shown.height)
+            .ok_or_else(|| GpuError("invalid canvas image".into()))?,
+    );
+    if radius <= 0. {
+        pixmap.fill_path(&shown_path, &paint, sk::FillRule::Winding, transform, clip);
+        return Ok(());
+    }
+    let Some(corners) = Path::rounded_rect(rect, radius)
+        .ok()
+        .as_ref()
+        .and_then(path)
+    else {
+        return Ok(());
+    };
+    if shown == rect {
+        pixmap.fill_path(&corners, &paint, sk::FillRule::Winding, transform, clip);
+        return Ok(());
+    }
+    // Smaller than its box (`Contain`): the picture, cut by the box's corners.
+    let mut mask = match clip {
+        Some(clip) => clip.clone(),
+        None => {
+            let mut mask = sk::Mask::new(pixmap.width(), pixmap.height())
+                .ok_or_else(|| GpuError("canvas allocation failed".into()))?;
+            mask.data_mut().fill(255);
+            mask
+        }
+    };
+    mask.intersect_path(&corners, sk::FillRule::Winding, true, transform);
+    pixmap.fill_path(
+        &shown_path,
+        &paint,
+        sk::FillRule::Winding,
+        transform,
+        Some(&mask),
+    );
+    Ok(())
+}
 /// A renderer's canvas work on the CPU, with no GPU: for benches that count
 /// instructions and draw nothing (the CPU gate), so a canvas that stops
 /// drawing as shapes shows there. Each canvas a frame damages is found as
@@ -416,6 +536,22 @@ pub fn rasterize_viewed(
                 if masks.pop().is_none() {
                     return Err(GpuError("unbalanced canvas restore".into()));
                 }
+                continue;
+            }
+            Draw::Image {
+                image,
+                rect,
+                fit,
+                radius,
+                opacity,
+            } => {
+                draw_image(
+                    &mut pixmap,
+                    image,
+                    (*rect, *fit, *radius, *opacity),
+                    transform,
+                    masks.last(),
+                )?;
                 continue;
             }
             _ => {}
@@ -607,5 +743,126 @@ mod lifetime_tests {
         assert_eq!(cache.entries.len(), MAX_ENTRIES);
         assert_eq!(cache.bytes(), MAX_ENTRIES * 4);
         assert!(!cache.entries.contains_key(&first.unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use zgx::{scene::Rect, style::ObjectFit};
+    /// An 8×4 picture, its left half red and its right half blue: sampled
+    /// a few pixels from the middle, each colour alone.
+    fn picture() -> Arc<ImageData> {
+        let pixels = (0..32)
+            .flat_map(|i| match i % 8 < 4 {
+                true => [255, 0, 0, 255],
+                false => [0, 0, 255, 255],
+            })
+            .collect::<Vec<u8>>();
+        Arc::new(ImageData::new(8, 4, pixels).unwrap())
+    }
+    /// `draw` rasterized at 20 by 10 points, one pixel a point.
+    fn drawn(draw: impl FnOnce(&mut Canvas)) -> ImageData {
+        let mut canvas = Canvas::new();
+        draw(&mut canvas);
+        rasterize(&canvas, 20., 10., 1.).unwrap()
+    }
+    fn at(image: &ImageData, x: u32, y: u32) -> [u8; 4] {
+        let i = (y * image.width() + x) as usize * 4;
+        image.pixels()[i..i + 4].try_into().unwrap()
+    }
+    #[test]
+    fn a_picture_fills_its_box_as_its_fit_says() {
+        let fill = drawn(|c| {
+            c.image(
+                picture(),
+                Rect::new(0., 0., 20., 10.),
+                ObjectFit::Fill,
+                0.,
+                1.,
+            );
+        });
+        assert_eq!(at(&fill, 2, 5), [255, 0, 0, 255]);
+        assert_eq!(at(&fill, 17, 5), [0, 0, 255, 255]);
+        // Cover: 20 by 10 in a 10 by 10 box, its middle shown, cut to it.
+        let cover = drawn(|c| {
+            c.image(
+                picture(),
+                Rect::new(0., 0., 10., 10.),
+                ObjectFit::Cover,
+                0.,
+                1.,
+            );
+        });
+        assert_eq!(at(&cover, 1, 5), [255, 0, 0, 255]);
+        assert_eq!(at(&cover, 9, 5), [0, 0, 255, 255]);
+        assert_eq!(at(&cover, 15, 5)[3], 0, "nothing past the box");
+        // Contain: 10 by 5, centred down the box, nothing above or below.
+        let contain = drawn(|c| {
+            c.image(
+                picture(),
+                Rect::new(0., 0., 10., 10.),
+                ObjectFit::Contain,
+                0.,
+                1.,
+            );
+        });
+        assert_eq!(at(&contain, 2, 5), [255, 0, 0, 255]);
+        assert_eq!(at(&contain, 2, 1)[3], 0);
+        assert_eq!(at(&contain, 2, 8)[3], 0);
+    }
+    #[test]
+    fn a_picture_is_cut_to_its_corners_faded_and_clipped() {
+        let rounded = drawn(|c| {
+            c.image(
+                picture(),
+                Rect::new(0., 0., 20., 10.),
+                ObjectFit::Fill,
+                5.,
+                1.,
+            );
+        });
+        assert_eq!(at(&rounded, 0, 0)[3], 0, "its corner cut");
+        assert_eq!(at(&rounded, 10, 5)[3], 255);
+        // Smaller than its box, still cut where it reaches a corner.
+        let contained = drawn(|c| {
+            c.image(
+                picture(),
+                Rect::new(0., 0., 20., 10.),
+                ObjectFit::Contain,
+                5.,
+                1.,
+            );
+        });
+        assert_eq!(at(&contained, 0, 0)[3], 0);
+        assert_eq!(at(&contained, 10, 5)[3], 255);
+        let faded = drawn(|c| {
+            c.image(
+                picture(),
+                Rect::new(0., 0., 20., 10.),
+                ObjectFit::Fill,
+                0.,
+                0.5,
+            );
+        });
+        let alpha = at(&faded, 2, 5)[3];
+        assert!((126..=129).contains(&alpha), "{alpha}");
+        assert_eq!(at(&faded, 2, 5)[..3], [255, 0, 0], "its colour kept");
+        let clipped = drawn(|c| {
+            c.clip(
+                Path::rectangle(Rect::new(0., 0., 10., 10.)),
+                FillRule::Winding,
+            );
+            c.image(
+                picture(),
+                Rect::new(0., 0., 20., 10.),
+                ObjectFit::Fill,
+                0.,
+                1.,
+            );
+            c.restore();
+        });
+        assert_eq!(at(&clipped, 2, 5), [255, 0, 0, 255]);
+        assert_eq!(at(&clipped, 17, 5)[3], 0, "outside the clip");
     }
 }
