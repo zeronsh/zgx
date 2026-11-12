@@ -1,9 +1,10 @@
 //! What Direct3D 11 (`ZGX_D3D11=1`, the `d3d11` feature) leaves out of a
 //! frame rather than fail it, and what still fails it
 //! (`GpuRenderer::d3d11_leave_out`): a drop shadow, a backdrop blur (not
-//! its box opaque), a layer shader reading the backdrop, a content blur and
-//! a blend mode all draw, and none of them is left out. `ZGX_D3D11` is read once a process, so this
-//! test is one of its own, setting it first.
+//! its box opaque), a layer shader reading the backdrop, a content blur, a
+//! blend mode and a layer shader's passes all draw, and none of them is
+//! left out; a layer shader reading a picture is. `ZGX_D3D11` is read once a
+//! process, so this test is one of its own, setting it first.
 #[cfg(windows)]
 use zgx::scene::*;
 #[cfg(windows)]
@@ -186,8 +187,8 @@ fn main() {
         .expect("a frame with a blend mode draws");
     assert_ne!(blended, plain, "the blend mode drew nothing");
 
-    // A layer shader with inputs (a pass): left out, its layer composited
-    // as painted (Direct3D 11 runs no passes yet), named once.
+    // A layer shader reading a pass: drawn through it (shader_passes runs
+    // under Direct3D 11 too), red where its layer is.
     let with_pass = zgx::decoration::FillShader::with_inputs(
         "fn layer(input: LayerInput) -> vec4<f32> {
     return vec4(zgx_count(vec2(0.5)).r, 0.0, 0.0, 1.0);
@@ -207,10 +208,31 @@ fn main() {
         },
     );
     let passed = draw(|scene, id| scene.set_layer_shader(id, Some(with_pass)))
-        .expect("a frame with a layer shader with inputs draws");
+        .expect("a frame with a layer shader reading a pass draws");
     assert_eq!(
-        passed, layered,
-        "a layer shader with inputs draws its layer as painted"
+        at(&passed, 120, 120),
+        [255, 0, 0, 255],
+        "its pass wasn't read"
+    );
+    // One reading a picture: left out, its layer composited as painted
+    // (Direct3D 11 has no pictures for shaders yet), named once.
+    let picture =
+        std::sync::Arc::new(zgx::image::ImageData::new(1, 1, vec![10, 200, 30, 255]).unwrap());
+    let with_picture = zgx::decoration::FillShader::with_inputs(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    return vec4(zgx_photo(vec2(0.5)).rgb, 1.0);
+}",
+        None,
+        zgx::decoration::ShaderInputs {
+            images: vec![("photo".into(), picture)],
+            ..Default::default()
+        },
+    );
+    let pictured = draw(|scene, id| scene.set_layer_shader(id, Some(with_picture)))
+        .expect("a frame with a layer shader reading a picture draws");
+    assert_eq!(
+        pictured, layered,
+        "a layer shader reading a picture draws its layer as painted"
     );
 
     // A GPU view draws (`view_host`): its painter's colour, on the views'
@@ -265,8 +287,12 @@ fn main() {
         !left_out.contains(&"images a GPU view draws"),
         "a GPU view was left out: {left_out:?}"
     );
-    let kind = "layer shaders with inputs (passes, pictures, GPU views): drawn as painted";
-    assert_eq!(left_out, [kind], "only shaders with inputs are left out");
+    let kind = "layer shaders reading pictures or GPU views: drawn as painted";
+    assert_eq!(
+        left_out,
+        [kind],
+        "only shaders reading pictures or views are left out"
+    );
     println!("d3d11_left_out: {left_out:?}");
 }
 

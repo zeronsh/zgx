@@ -9,7 +9,7 @@
 //! so a chain draws the same everywhere.
 use crate::{GpuRenderer, compile};
 use std::sync::Arc;
-use zgx::decoration::{FillShader, PassFormat, PassSize, ShaderInputs};
+use zgx::decoration::{FillShader, PassFormat, PassSize, ShaderInputs, ShaderPass, ShaderUniforms};
 
 /// The group a layer shader's inputs bind at.
 pub(crate) const GROUP: u32 = 3;
@@ -67,7 +67,7 @@ pub(crate) fn textures(inputs: &ShaderInputs) -> u32 {
     (inputs.passes.len() + inputs.images.len() + inputs.views.len()) as u32
 }
 /// The module a pass's `run` becomes.
-fn pass_source(user: &str, inputs: &ShaderInputs) -> String {
+pub(crate) fn pass_source(user: &str, inputs: &ShaderInputs) -> String {
     format!(
         "struct PassInput {{ uv:vec2<f32>, pixel:vec2<f32>, size:vec2<f32>, time:f32, dt:f32, step:u32, frame:u32, scale:f32, area:vec4<f32>, params:array<vec4<f32>,4> }}
 struct ZgxPass {{ size:vec2<f32>, time:f32, dt:f32, area:vec4<f32>, step:f32, frame:f32, scale:f32, pad:f32, params:array<vec4<f32>,4> }}
@@ -85,7 +85,7 @@ struct ZgxPass {{ size:vec2<f32>, time:f32, dt:f32, area:vec4<f32>, step:f32, fr
     )
 }
 /// A layer shader's module with its inputs.
-fn composite_source(shader: &FillShader, inputs: &ShaderInputs) -> String {
+pub(crate) fn composite_source(shader: &FillShader, inputs: &ShaderInputs) -> String {
     crate::filter_source(&format!(
         "{}{}",
         declarations(GROUP, &names(inputs)),
@@ -462,6 +462,75 @@ impl Chain {
     }
 }
 
+/// The texels `declared` draws into this frame for a box `area` at `scale`,
+/// at most `max` a side.
+fn pass_size(declared: &ShaderPass, area: zgx::scene::Rect, scale: f32, max: u32) -> (u32, u32) {
+    match declared.size {
+        PassSize::Pixels(width, height) => (width.clamp(1, max), height.clamp(1, max)),
+        PassSize::OfBox(of) => (
+            ((area.width * scale * of).ceil() as u32).clamp(1, max),
+            ((area.height * scale * of).ceil() as u32).clamp(1, max),
+        ),
+    }
+}
+/// The bytes `declared`'s textures hold at `size`.
+fn pass_bytes(declared: &ShaderPass, (width, height): (u32, u32)) -> u64 {
+    let texel = match declared.format {
+        PassFormat::Rgba8 => 4,
+        PassFormat::Rgba16Float => 8,
+    };
+    let count = if declared.feedback { 2 } else { 1 };
+    u64::from(width) * u64::from(height) * texel * count
+}
+/// The boxes tagged `tag` where they are this frame, as `zgx_rects` holds
+/// them: how many, then each box and its radii (`held` reused).
+fn rects_data(
+    scene: &zgx::scene::Scene,
+    tag: u64,
+    held: &mut Vec<(zgx::scene::Rect, [f32; 4])>,
+) -> Vec<[f32; 4]> {
+    held.clear();
+    scene.geometry_of(tag, held);
+    held.truncate(MOST_RECTS);
+    let mut data = Vec::with_capacity(1 + held.len() * 2);
+    data.push([held.len() as f32, 0., 0., 0.]);
+    for (rect, radii) in held.iter() {
+        data.push([rect.x, rect.y, rect.width, rect.height]);
+        data.push(*radii);
+    }
+    data
+}
+/// One step's `ZgxPass` (112 bytes): a pass of `size` texels, for a box
+/// `area` at `scale`.
+fn step_block(
+    (width, height): (u32, u32),
+    uniforms: &ShaderUniforms,
+    dt: f32,
+    area: zgx::scene::Rect,
+    (step, frames): (u32, u32),
+    scale: f32,
+) -> [f32; 28] {
+    let mut block = [0f32; 28];
+    block[..12].copy_from_slice(&[
+        width as f32,
+        height as f32,
+        uniforms.time,
+        dt,
+        area.x,
+        area.y,
+        area.width,
+        area.height,
+        step as f32,
+        frames as f32,
+        scale,
+        0.,
+    ]);
+    for (index, value) in uniforms.params.iter().flatten().enumerate() {
+        block[12 + index] = *value;
+    }
+    block
+}
+
 /// Make `(pass, chain)`'s textures for `size`, if it hasn't them. How many
 /// bytes of them it holds.
 fn sized(device: &wgpu::Device, pass: &mut Pass, size: (u32, u32), both: bool) {
@@ -653,15 +722,19 @@ impl GpuRenderer {
         let Some(inputs) = shader.inputs() else {
             return true;
         };
-        // Direct3D 11 runs no passes yet (its wgpu device is the no-op one,
-        // which would leave the shader reading zeros): the layer composites
-        // as painted, the kind named once.
+        // Direct3D 11 runs passes and reads boxes with its own device (its
+        // wgpu device is the no-op one). Pictures and GPU views it has none
+        // of yet, which would leave the shader reading zeros: such a layer
+        // composites as painted, the kind named once.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
-            crate::d3d11_frame::left_out(
-                "layer shaders with inputs (passes, pictures, GPU views): drawn as painted",
-            );
-            return false;
+            if !inputs.images.is_empty() || !inputs.views.is_empty() {
+                crate::d3d11_frame::left_out(
+                    "layer shaders reading pictures or GPU views: drawn as painted",
+                );
+                return false;
+            }
+            return self.run_passes_d3d11(scene, area, shader, layer);
         }
         let wait = self.waits_for_shaders();
         let frame = self.image_frame;
@@ -720,19 +793,8 @@ impl GpuRenderer {
         let max = device.limits().max_texture_dimension_2d;
         let mut bytes = 0u64;
         for (pass, declared) in chain.passes.iter_mut().zip(&inputs.passes) {
-            let size = match declared.size {
-                PassSize::Pixels(width, height) => (width.clamp(1, max), height.clamp(1, max)),
-                PassSize::OfBox(of) => (
-                    ((area.width * scale * of).ceil() as u32).clamp(1, max),
-                    ((area.height * scale * of).ceil() as u32).clamp(1, max),
-                ),
-            };
-            let texel = match declared.format {
-                PassFormat::Rgba8 => 4,
-                PassFormat::Rgba16Float => 8,
-            };
-            let count = if declared.feedback { 2 } else { 1 };
-            bytes += u64::from(size.0) * u64::from(size.1) * texel * count;
+            let size = pass_size(declared, area, scale, max);
+            bytes += pass_bytes(declared, size);
             if bytes > MOST_BYTES {
                 eprintln!("zgx: a shader's passes exceed {MOST_BYTES} bytes: it draws nothing");
                 return false;
@@ -742,15 +804,7 @@ impl GpuRenderer {
         // The boxes it reads.
         if let Some(tag) = inputs.geometry {
             let mut held = std::mem::take(&mut chain.rects_held);
-            held.clear();
-            scene.geometry_of(tag, &mut held);
-            held.truncate(MOST_RECTS);
-            let mut data = Vec::with_capacity(1 + held.len() * 2);
-            data.push([held.len() as f32, 0., 0., 0.]);
-            for (rect, radii) in &held {
-                data.push([rect.x, rect.y, rect.width, rect.height]);
-                data.push(*radii);
-            }
+            let data = rects_data(scene, tag, &mut held);
             queue.write_buffer(&chain.rects, 0, bytemuck::cast_slice(&data));
             chain.rects_held = held;
         }
@@ -774,26 +828,8 @@ impl GpuRenderer {
                 continue;
             }
             for step in 0..steps {
-                let pass = &chain.passes[at];
-                let [width, height] = [pass.size.0 as f32, pass.size.1 as f32];
-                let mut block = [0f32; 28];
-                block[..12].copy_from_slice(&[
-                    width,
-                    height,
-                    uniforms.time,
-                    dt,
-                    area.x,
-                    area.y,
-                    area.width,
-                    area.height,
-                    step as f32,
-                    chain.frames as f32,
-                    scale,
-                    0.,
-                ]);
-                for (index, value) in uniforms.params.iter().flatten().enumerate() {
-                    block[12 + index] = *value;
-                }
+                let size = chain.passes[at].size;
+                let block = step_block(size, &uniforms, dt, area, (step, chain.frames), scale);
                 let at_byte = offset as usize;
                 stream[at_byte..at_byte + 112].copy_from_slice(bytemuck::cast_slice(&block));
                 let inputs_bind = chain.bind_inputs(Some(at));
@@ -847,6 +883,91 @@ impl GpuRenderer {
                 return false;
             }
         }
+        true
+    }
+    /// `run_passes` with Direct3D 11 (`d3d11_frame::Chain`), for a shader
+    /// reading passes and boxes alone: the same textures, steps and
+    /// uniforms, drawn on its immediate context ahead of the frame.
+    #[cfg(d3d11)]
+    #[cold]
+    #[inline(never)]
+    fn run_passes_d3d11(
+        &mut self,
+        scene: &zgx::scene::Scene,
+        area: zgx::scene::Rect,
+        shader: &Arc<FillShader>,
+        layer: &zgx::scene::LayerShader,
+    ) -> bool {
+        let inputs = shader.inputs().expect("checked by the caller");
+        let wait = self.waits_for_shaders();
+        let (frame, scale) = (self.image_frame, self.scale);
+        let state = self.d3d11.as_mut().expect("checked by the caller");
+        let device = state.device.clone();
+        let chain = match state.chains.entry(shader.id()) {
+            std::collections::hash_map::Entry::Occupied(chain) => chain.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let passes = (inputs.passes.iter())
+                    .map(|pass| (pass_source(&pass.source, inputs), pass.format))
+                    .collect();
+                let rect_bytes = (1 + 2 * MOST_RECTS) * 16;
+                match crate::d3d11_frame::Chain::new(&device, passes, rect_bytes, wait) {
+                    Ok(chain) => entry.insert(chain),
+                    Err(error) => {
+                        eprintln!("zgx: {error}");
+                        return false;
+                    }
+                }
+            }
+        };
+        match chain.ready(&device, wait) {
+            Some(true) => {}
+            Some(false) => return false,
+            None => {
+                self.images_awaited = true;
+                return false;
+            }
+        }
+        if chain.last_frame == frame && chain.bound.is_some() {
+            return true;
+        }
+        chain.last_frame = frame;
+        let mut bytes = 0u64;
+        for (at, declared) in inputs.passes.iter().enumerate() {
+            let size = pass_size(declared, area, scale, crate::d3d11_frame::MOST_TEXELS);
+            bytes += pass_bytes(declared, size);
+            if bytes > MOST_BYTES {
+                eprintln!("zgx: a shader's passes exceed {MOST_BYTES} bytes: it draws nothing");
+                return false;
+            }
+            if let Err(error) = chain.sized(&device, at, size, declared.feedback) {
+                eprintln!("zgx: {error}");
+                return false;
+            }
+        }
+        if let Some(tag) = inputs.geometry {
+            let mut held = std::mem::take(&mut chain.rects_held);
+            let data = rects_data(scene, tag, &mut held);
+            chain.write_rects(&device, bytemuck::cast_slice(&data));
+            chain.rects_held = held;
+        }
+        let now = layer.uniforms.time;
+        let dt = chain
+            .last
+            .map_or(0., |last| (now - last).clamp(0., LONGEST_STEP));
+        chain.last = Some(now);
+        for (at, declared) in inputs.passes.iter().enumerate() {
+            if declared.once && chain.drawn(at) {
+                continue;
+            }
+            for step in 0..declared.steps.max(1) {
+                let size = chain.size(at);
+                let block =
+                    step_block(size, &layer.uniforms, dt, area, (step, chain.frames), scale);
+                chain.draw(&device, at, &block);
+            }
+        }
+        chain.frames = chain.frames.wrapping_add(1);
+        chain.end(&device);
         true
     }
 }
