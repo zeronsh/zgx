@@ -13497,7 +13497,10 @@ impl Scene {
                                 .measure_mounted(&text.min_content_lines(), None),
                         }
                     } else {
-                        self.rich_measurer.measure_mounted(text, limit)
+                        let (w, h) = self.rich_measurer.measure_mounted(text, limit);
+                        // As a CSS block's lines: an inline box wider than the room overflows it, and the lines
+                        // stay wrapped at the room rather than at that box's width.
+                        (limit.map_or(w, |room| w.min(room)), h)
                     };
                     TextSizes::remember(&self.node(id).text_size, limit, revision, size);
                     size

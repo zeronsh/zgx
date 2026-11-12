@@ -83,6 +83,8 @@ mod markdown_lazy;
 mod markdown_links;
 #[path = "../markdown_math.rs"]
 mod markdown_math;
+#[path = "../rich_wrap.rs"]
+mod rich_wrap;
 #[path = "../mentions.rs"]
 mod mentions;
 #[path = "../modal_focus.rs"]
