@@ -92,6 +92,7 @@ const BLEND_FS: &[u8] = include_bytes!("dxbc/blend_zgx_blended.dxbc");
 /// blur.wgsl's stages, with `crate::BLUR_MIX` (the backdrop blur, `Frame::blur`).
 const BLUR_VS: &[u8] = include_bytes!("dxbc/blur_vs.dxbc");
 const BLUR_REDUCE: &[u8] = include_bytes!("dxbc/blur_fs_reduce.dxbc");
+const BLUR_REDUCE4: &[u8] = include_bytes!("dxbc/blur_fs_reduce4.dxbc");
 const BLUR_ACROSS: &[u8] = include_bytes!("dxbc/blur_fs_across.dxbc");
 const BLUR_DOWN: &[u8] = include_bytes!("dxbc/blur_fs_down.dxbc");
 const BLUR_FS: &[u8] = include_bytes!("dxbc/blur_fs.dxbc");
@@ -224,6 +225,8 @@ struct Pipeline {
 struct BlurPipelines {
     vertex: ID3D11VertexShader,
     reduce: ID3D11PixelShader,
+    /// A factor-8 reduce's first half (`fs_reduce4`), into the halves.
+    halves: ID3D11PixelShader,
     across: ID3D11PixelShader,
     down: ID3D11PixelShader,
     vertical: ID3D11PixelShader,
@@ -282,6 +285,7 @@ impl BlurPipelines {
             index: index?,
             vertex: vertex?,
             reduce: pixel(BLUR_REDUCE)?,
+            halves: pixel(BLUR_REDUCE4)?,
             across: pixel(BLUR_ACROSS)?,
             down: pixel(BLUR_DOWN)?,
             vertical: pixel(BLUR_FS)?,
@@ -609,6 +613,11 @@ impl Device {
         let mut padded = bytes.to_vec();
         padded.resize(bytes.len().max(16).next_multiple_of(16), 0);
         Ok(raw_buffer(&self.device, padded.len(), Some(&padded))?.1)
+    }
+    /// A factor-8 reduce's halves, `width` by `height` texels (twice the
+    /// atlas's), RGBA16F as the atlas.
+    pub(crate) fn blur_halves(&self, width: u32, height: u32) -> Result<Surface, GpuError> {
+        self.surface_as(width, height, true, DXGI_FORMAT_R16G16B16A16_FLOAT)
     }
     /// The backdrop blur's atlas pair, `width` by `height` texels.
     pub(crate) fn blur_atlas(&self, width: u32, height: u32) -> Result<[Surface; 2], GpuError> {
@@ -1163,6 +1172,10 @@ pub(crate) struct State {
     /// The backdrop blur's atlas pair (`Frame::blur`), RGBA16F at the size
     /// the batches' plans want, as Direct3D 12's `BlurScratch`.
     pub(crate) blur_atlas: Option<[Surface; 2]>,
+    /// A factor-8 reduce's halves, where a batch has such a slot, at the
+    /// size of Direct3D 12's `GpuRenderer::blur_halves` (fitted to the
+    /// batches, not twice the whole atlas).
+    pub(crate) blur_halves: Option<Surface>,
     /// The effect atlas's scratch twin and blank mask (`crate::effects`),
     /// under the shell's scratch texture they stand with; the atlas itself
     /// is among `textures`, which its composites sample.
@@ -1200,6 +1213,7 @@ impl State {
             backdrop: None,
             popup_backdrop: None,
             blur_atlas: None,
+            blur_halves: None,
             effects: None,
         })
     }
@@ -1530,6 +1544,8 @@ pub(crate) struct Frame<'a> {
 pub(crate) struct BlurSlot {
     pub(crate) texels: Scissor,
     pub(crate) blurred: bool,
+    /// Its place in the halves, twice its texels, where it reduces by 8.
+    pub(crate) halves: Option<Scissor>,
 }
 
 impl Frame<'_> {
@@ -1540,11 +1556,13 @@ impl Frame<'_> {
     /// scissor; `blurs` and `slots` the batch's records. A popup's blurs
     /// reduce from its window's frame (`backdrop`) and its copies from its
     /// own target, as Direct3D 12's do. Whether it could (its stages made).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn blur(
         &mut self,
         target: &Surface,
         backdrop: Option<&Surface>,
         atlas: &[Surface; 2],
+        halves: Option<&Surface>,
         records: [&ID3D11ShaderResourceView; 2],
         slots: &[BlurSlot],
         copies: bool,
@@ -1558,11 +1576,28 @@ impl Frame<'_> {
             return false;
         };
         let srv = |surface: &Surface| surface.srv.clone().expect("sampled");
+        // A factor-8 slot's reduce first sums its 4x4 squares into the
+        // halves (`fs_reduce4`), which the reduce then reads (blur.wgsl).
+        let halves = halves.filter(|_| slots.iter().any(|slot| slot.halves.is_some()));
+        if let Some(halves) = halves {
+            let draws = (slots.iter().enumerate())
+                .filter_map(|(k, slot)| slot.halves.map(|place| (k as u32, place)));
+            self.blur_draw(
+                blur,
+                halves,
+                false,
+                &blur.halves,
+                &blur.replace,
+                [&srv(backdrop.unwrap_or(target)), &srv(&atlas[1])],
+                records,
+                draws,
+            );
+        }
         let passes = [
             (
                 &blur.reduce,
                 srv(backdrop.unwrap_or(target)),
-                srv(&atlas[1]),
+                srv(halves.unwrap_or(&atlas[1])),
                 &atlas[0],
                 backdrop.is_some(),
                 false,
@@ -2335,6 +2370,7 @@ mod tests {
                 &[
                     ("vs", "vs_5_0", BLUR_VS),
                     ("fs_reduce", "ps_5_0", BLUR_REDUCE),
+                    ("fs_reduce4", "ps_5_0", BLUR_REDUCE4),
                     ("fs_across", "ps_5_0", BLUR_ACROSS),
                     ("fs_down", "ps_5_0", BLUR_DOWN),
                     ("fs", "ps_5_0", BLUR_FS),
