@@ -22271,10 +22271,12 @@ declare ui: {
 	-- A count on the app's icon (the Dock's, the taskbar's, a dock's);
 	-- 0 or nil takes it off. Whether the system shows one.
 	badge: (count: number | string | nil) -> boolean,
-	-- A file the user picked, read as text off the main thread: a promise.
-	read_file: (file: File | string) -> Promise<string>,
-	-- Write `text` to a file the user picked (beside it, then over it).
-	write_file: (file: File | string, text: string) -> Promise<nil>,
+	-- A file the user picked, read off the main thread: a promise of its
+	-- text, or with `base64 = true` of every byte in base64 (a picture).
+	read_file: (file: File | string, opts: { base64: boolean? }?) -> Promise<string>,
+	-- Write to a file the user picked (beside it, then over it): a string's
+	-- bytes as they are (any byte), or `{ base64 = … }`'s (a PNG).
+	write_file: (file: File | string, data: string | { base64: string }) -> Promise<nil>,
 	-- A TrueType or OpenType font file (a path from the script's directory,
 	-- a plugin's inside it, or a File the user picked), or a font's bytes in
 	-- base64 (`{ base64 = … }`), added to every window's text: a promise of
