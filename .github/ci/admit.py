@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Vendored from zeronsh/zeron: scripts/ci/admit.py at 381543b16, unchanged below
+# Vendored from zeronsh/zeron: scripts/ci/admit.py at 95500a27f, unchanged below
 # this header. zeron's and zgx's CI share the organization's hosted runners
 # through one admission queue, so the two copies must stay in sync: change it in
 # zeron first, then copy it here whole (keeping this header) and update the hash.
 # .github/ci/test_ci_plan.py checks everything below the header against it.
-# upstream sha256: 51e1e5dec4516b92c677040a73cd8f40d9a9cc7b841f63f08d7b48ddaba312e9
+# upstream sha256: d235deb0a0fb355bdc7e67388ca808eedf2fd5efcc9f5f82109e4466f1c1d732
 """Admission control for CI runs: a run starts only when all its runners are free.
 
 GitHub queues every job of every run as soon as it can, so under load each run
@@ -711,7 +711,7 @@ def main() -> int:
         if state != last:
             print(f"[{waited / 60:5.1f} min] position {decision.position}, in use {decision.used}, "
                   f"needed ahead {decision.ahead}, {len(snap.waiters)} waiting, "
-                  f"priority {sorted(snap.priority) or '-'}, locked {sorted(snap.locked) or '-'}, "
+                  f"priority {sorted(map(str, snap.priority)) or '-'}, locked {sorted(map(str, snap.locked)) or '-'}, "
                   f"ignored (not taking their turn) {ignored or '-'}, API quota left {api.remaining}")
             last = state
         if decision.admit:
