@@ -5,7 +5,8 @@ use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 /// `key`'s glyph image: swash's, or for a face whose shapes swash can't
 /// draw (macOS 26's PingFang, `hvgl` only) Core Text's. Asked only where
 /// swash gave none: a glyph cache miss with nothing to show.
-pub(crate) fn glyph_image(
+#[doc(hidden)]
+pub fn glyph_image(
     swash: &mut cosmic_text::SwashCache,
     fonts: &mut FontSystem,
     key: cosmic_text::CacheKey,
@@ -118,7 +119,8 @@ fn font_features(settings: &[([u8; 4], u32)]) -> cosmic_text::FontFeatures {
 // Inlined where it is called, as it was before `spaced` took the rare part
 // out of it (LTO had stopped inlining it into the text cache).
 #[inline(always)]
-pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> {
+#[doc(hidden)]
+pub fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> {
     use zgx::text_layout::FontFamily;
     let family = match &font.family {
         FontFamily::SansSerif => Family::SansSerif,
@@ -2101,7 +2103,7 @@ mod rich_tests {
             "zgx test regular",
         );
         renamed(
-            include_bytes!("../tests/fonts/Geist-500-subset.ttf"),
+            include_bytes!("../../zgx-gpu/tests/fonts/Geist-500-subset.ttf"),
             first_fallback,
         );
         let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
