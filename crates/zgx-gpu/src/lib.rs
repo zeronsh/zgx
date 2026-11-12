@@ -7967,6 +7967,13 @@ impl GpuRenderer {
     pub fn debug_wait_for_shaders(&mut self) {
         self.debug_waits_for_shaders = true;
     }
+    /// Have this offscreen renderer's frames go on without what is made off
+    /// them (a shader compiling, a new zoom's canvas raster), as a window's
+    /// do: a test of what they show meanwhile.
+    #[doc(hidden)]
+    pub fn debug_go_without(&mut self) {
+        self.offscreen_waits = false;
+    }
     /// Whether `shader`'s fill can draw: its pipeline compiled, else started
     /// compiling if new (`start_fill`). A window's frame goes on without
     /// one still compiling, drawing the box's colour, and draws again once
@@ -9693,17 +9700,23 @@ impl GpuRenderer {
                         } else {
                             let before = self.canvases.rasterizations();
                             let (width, height, scale) = (bounds.width, bounds.height, self.scale);
-                            // Drawn to be panned: where the view puts it.
+                            // Drawn to be panned: where the view puts it. A
+                            // new zoom's raster is made off a window's frame
+                            // (the zoom before's scaled meanwhile).
+                            let wait = self.waits_for_shaders();
                             let mut placed = None;
                             let id = self.canvas_texture(item.id, &mut stats, |cache| {
-                                let (raster, placement) = cache
-                                    .get_panned(item.id, canvas, view, width, height, scale)?;
+                                let (raster, placement) = cache.get_panned(
+                                    item.id, canvas, view, width, height, scale, wait,
+                                )?;
                                 placed = Some(placement);
                                 Ok(raster)
                             })?;
                             stats.canvas_rasterizations +=
                                 (self.canvases.rasterizations() - before) as usize;
-                            let canvas::Placement { rect, uv } = placed.expect("placed");
+                            let canvas::Placement { rect, uv, scaled } = placed.expect("placed");
+                            // Drawn again once that raster is made.
+                            self.images_awaited |= scaled;
                             if rect[2] > 0. && rect[3] > 0. {
                                 canvas_image = Some(id);
                                 quads.push(Quad {
