@@ -779,6 +779,12 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
         let parser = RefCell::new(Incremental::new(options.parse.clone()));
         let top = cx.runtime().signal(Value::List(Vec::new().into()));
         let blocks = top.clone();
+        let reveal = Rc::new(Reveal::default());
+        let tasks = cx.tasks();
+        let frames = cx
+            .try_service::<zgx::frame::FrameClock>()
+            .map(|f| (*f).clone());
+        let revealing = reveal.clone();
         cx.retain(cx.runtime().effect(move || {
             let mut parser = parser.borrow_mut();
             match source() {
@@ -786,11 +792,71 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
                 Source::Held(value) => parser.set_value(&value),
             }
             let parsed = parser.blocks();
+            let shown = revealing.show(parsed);
             blocks.mutate(|was| {
-                *was = Value::List(parsed.into());
+                *was = Value::List(shown.into());
                 true
             });
+            if revealing.pending() && !revealing.ticking.replace(true) {
+                let (reveal, blocks, frames) = (revealing.clone(), blocks.clone(), frames.clone());
+                tasks.spawn(async move {
+                    while reveal.pending() {
+                        match &frames {
+                            Some(frames) => drop(frames.next().await),
+                            None => zgx::timer::sleep(REVEAL_TICK).await,
+                        }
+                        let shown = reveal.more();
+                        blocks.mutate(|was| {
+                            *was = Value::List(shown.into());
+                            true
+                        });
+                    }
+                    reveal.ticking.set(false);
+                });
+            }
         }));
         block_list(top, &options).gap(10.)
     })
+}
+
+/// A long text landing whole shows its first blocks at once and the rest a
+/// chunk a frame, so opening a long document never builds it in one frame.
+/// Appends (a reply streaming in) show at once.
+#[derive(Default)]
+struct Reveal {
+    all: RefCell<Vec<Value>>,
+    shown: std::cell::Cell<usize>,
+    ticking: std::cell::Cell<bool>,
+}
+/// Blocks shown at once when a long text lands: more than a screenful.
+const REVEAL_FIRST: usize = 60;
+/// Blocks added each frame after them, and how often without a frame clock.
+const REVEAL_CHUNK: usize = 120;
+const REVEAL_TICK: Duration = Duration::from_millis(8);
+impl Reveal {
+    fn show(&self, all: Vec<Value>) -> Vec<Value> {
+        // Another text, not this one grown: from its start again.
+        if self.all.borrow().first() != all.first() {
+            self.shown.set(0);
+        }
+        let shown = self.shown.get().min(all.len());
+        let next = if all.len() > shown + REVEAL_FIRST {
+            (shown.max(REVEAL_FIRST)).min(all.len())
+        } else {
+            all.len()
+        };
+        self.shown.set(next);
+        let out = all[..next].to_vec();
+        *self.all.borrow_mut() = all;
+        out
+    }
+    fn more(&self) -> Vec<Value> {
+        let all = self.all.borrow();
+        let next = (self.shown.get() + REVEAL_CHUNK).min(all.len());
+        self.shown.set(next);
+        all[..next].to_vec()
+    }
+    fn pending(&self) -> bool {
+        self.shown.get() < self.all.borrow().len()
+    }
 }

@@ -64,3 +64,23 @@ fn without_on_math_dollars_are_text() {
     let mut h = app("costs $5 and $6", "");
     assert!(h.tree().contains("costs $5 and $6"), "{}", h.tree());
 }
+
+#[test]
+fn a_long_text_shows_its_start_at_once_and_the_rest_over_frames() {
+    let text: String = (0..1_000).map(|i| format!("Paragraph {i}.\n\n")).collect();
+    let code = format!(
+        "return ui.column {{ ui.markdown_view {{ id = \"md\", w = 300, literal = true, {text:?} }} }}"
+    );
+    let code: &'static str = Box::leak(code.into_boxed_str());
+    let mut h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
+    h.ui.prepare_frame();
+    let first = h.tree();
+    assert!(first.contains("Paragraph 0."), "{first}");
+    let start = h.bounds("md").height;
+    h.frames(60);
+    let all = h.bounds("md").height;
+    assert!(
+        start > 600. && start * 8. < all,
+        "first frame {start}, all {all}"
+    );
+}
