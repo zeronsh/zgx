@@ -812,8 +812,7 @@ impl Observer {
         });
     }
     fn failed(&self, view: &WKWebView, error: &NSError) {
-        // NSURLErrorCancelled: a new navigation replaced this one.
-        if error.code() == -999 {
+        if load_cancelled(&error.domain().to_string(), error.code()) {
             return;
         }
         // The URL that failed, not the page still showing (for a provisional
@@ -842,6 +841,16 @@ impl Observer {
             });
         });
         self.changed();
+    }
+}
+
+/// A load that was replaced, not one that failed: a newer navigation (NSURLErrorCancelled), a
+/// policy decision that took the frame over (FrameLoadInterruptedByPolicyChange) or a plug-in that took the load.
+fn load_cancelled(domain: &str, code: isize) -> bool {
+    match domain {
+        "NSURLErrorDomain" => code == -999,
+        "WebKitErrorDomain" => matches!(code, 102 | 204),
+        _ => false,
     }
 }
 
@@ -1414,7 +1423,7 @@ pub(crate) fn backend(web: &WebView, mtm: MainThreadMarker) -> Rc<dyn WebViewBac
 
 #[cfg(test)]
 mod tests {
-    use super::json;
+    use super::{json, load_cancelled};
     use objc2::{msg_send, rc::Retained, runtime::AnyObject};
     use objc2_foundation::{NSData, NSError};
 
@@ -1439,5 +1448,15 @@ mod tests {
         let back: serde_json::Value = serde_json::from_str(&json(Some(&object))).unwrap();
         let expected: serde_json::Value = serde_json::from_slice(text).unwrap();
         assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn redirects_and_policy_takeovers_are_not_failures() {
+        assert!(load_cancelled("NSURLErrorDomain", -999));
+        assert!(load_cancelled("WebKitErrorDomain", 102));
+        assert!(load_cancelled("WebKitErrorDomain", 204));
+        assert!(!load_cancelled("NSURLErrorDomain", -1003));
+        assert!(!load_cancelled("NSURLErrorDomain", 102));
+        assert!(!load_cancelled("WebKitErrorDomain", 101));
     }
 }
