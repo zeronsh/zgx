@@ -1423,8 +1423,8 @@ declare extern type Canvas with
 	-- Clips what follows to the path, until `restore`.
 	function clip(self, path: Path): ()
 	function restore(self): ()
-	-- A line of text at (x, y), or a paragraph wrapped to `opts.width`,
-	-- over the shapes whatever their order.
+	-- A line of text at (x, y), or a paragraph wrapped to `opts.width`, in
+	-- the drawing's order, cut by the open clips' box.
 	function text(self, text: string, x: number, y: number, opts: CanvasTextOptions?): ()
 	-- Its width and height, for placing what goes around it.
 	function measure_text(self, text: string, opts: CanvasTextOptions?): (number, number)
