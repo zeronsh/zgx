@@ -4591,6 +4591,26 @@ impl Ui {
         self.storage.dispatching.set(false);
         Ok(result)
     }
+    /// When input that acts (a press or release, a key, text, an action)
+    /// was last dispatched: the frames it makes answer someone, and a host
+    /// draws each at once and shows it as soon as it's ready, rather than on
+    /// the refresh's tick and the cadence of frames before (zgx-desktop's
+    /// refresh grid). Renderer plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn acted_at(&self) -> Option<Instant> {
+        let ui = Rc::as_ptr(&self.storage) as usize;
+        ACTED
+            .with(Cell::get)
+            .and_then(|(by, at)| (by == ui).then_some(at))
+    }
+    /// Input that acts is being dispatched (`acted_at`). Cold and out of
+    /// line: `route`'s inlined body stays as it was for every other event.
+    #[cold]
+    #[inline(never)]
+    fn mark_acted(&self) {
+        let ui = Rc::as_ptr(&self.storage) as usize;
+        ACTED.with(|acted| acted.set(Some((ui, Instant::now()))));
+    }
     /// Whether the wheel being dispatched is a platform's, in the window's
     /// points, rather than one the engine made in a scroll view's own.
     pub(crate) fn wheel_in_window(&self) -> bool {
@@ -4609,6 +4629,9 @@ impl Ui {
         ),
         dispatch: impl FnOnce(&Self, InputEvent) -> crate::input::DispatchResult,
     ) -> crate::input::DispatchResult {
+        if acts(&event) {
+            self.mark_acted();
+        }
         let elastic = self.storage.elastic.borrow().enabled;
         let event = match event {
             InputEvent::ScrollGesture(phase) => {
@@ -8076,6 +8099,36 @@ fn input_draw_pending(node: NodeId, scene: &Rc<RefCell<Scene>>) -> bool {
                     .is_some_and(|storage| Rc::ptr_eq(&storage.scene, scene))
         })
     })
+}
+
+thread_local! {
+    /// The `Ui` that last dispatched input that acts (its storage's
+    /// address), and when (`Ui::acted_at`): kept here rather than in
+    /// `UiStorage`, whose layout the hot paths read (a field there moved
+    /// headless scenes that never act by up to 0.12%). Another window's input
+    /// takes its place: the one before had acted already.
+    static ACTED: Cell<Option<(usize, Instant)>> = const { Cell::new(None) };
+}
+/// Whether `event` is input that acts (a press or its release, where a
+/// click lands, a key, text, an action), which a frame answers: not a
+/// pointer passing over, nor focus moving, nor a scroll, which keeps the
+/// refresh's pace and has a liveness of its own (`Ui::acted_at`).
+fn acts(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::PointerDown { .. }
+            | InputEvent::PointerUp { .. }
+            | InputEvent::KeyDown { .. }
+            | InputEvent::Text(_)
+            | InputEvent::ImePreedit { .. }
+            | InputEvent::ImeCommit(_)
+            | InputEvent::Action(_)
+            | InputEvent::Activate
+            | InputEvent::Increment
+            | InputEvent::Decrement
+            | InputEvent::SetValue(_)
+            | InputEvent::SetNumericValue(_)
+    )
 }
 
 #[cfg(test)]
