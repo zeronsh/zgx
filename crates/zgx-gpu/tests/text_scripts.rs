@@ -1362,3 +1362,29 @@ fn a_family_that_is_not_installed_falls_to_the_system_font_at_the_weight_asked()
     );
     assert!(w400 < w450 && w450 < w500, "{w400} {w450} {w500}");
 }
+
+/// Kana that a line break opportunity separates kern as they do shaped
+/// together, as Core Text and Chrome set them (Hiragino Sans W3's `kern` makes
+/// ォ before ル 12.48 at 13 px, イ before ル 12.35; the line 154.83).
+#[cfg(target_os = "macos")]
+#[test]
+fn kana_pairs_kern_across_break_opportunities() {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+    let gpu = zgx_gpu::GpuRenderer::new(64, 64).unwrap();
+    let fonts_rc = gpu.text_system();
+    let mut fonts = fonts_rc.borrow_mut();
+    if !fonts
+        .db()
+        .faces()
+        .any(|f| f.post_script_name == "HiraginoSans-W3")
+    {
+        eprintln!("no Hiragino Sans W3: nothing checked");
+        return;
+    }
+    let mut buffer = Buffer::new(&mut fonts, Metrics::new(13., 20.));
+    let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
+    buffer.set_text("フォルダにファイルを追加", &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(&mut fonts, false);
+    let width = buffer.layout_runs().next().unwrap().line_w;
+    assert!((width - 154.83).abs() < 0.01, "{width}");
+}

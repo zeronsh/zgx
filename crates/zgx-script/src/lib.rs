@@ -86,7 +86,7 @@ mod rules;
 pub mod scaffold;
 #[cfg(feature = "scene3d")]
 mod scene3d;
-pub use host_views::host_view;
+pub use host_views::{host_view, remove_host_view};
 mod socket;
 mod sorted;
 mod sources;

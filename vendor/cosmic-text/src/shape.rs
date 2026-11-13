@@ -1165,6 +1165,60 @@ fn shape_skip(
     }
 }
 
+/// zgx patch: the pair kerning a font's GPOS asks of two kana that a line
+/// break opportunity separates (as Chrome and Core Text shape across it),
+/// in em: how much the first glyph's advance changes beside the second.
+fn kana_pair_kerning(
+    font_system: &mut FontSystem,
+    attrs_list: &AttrsList,
+    span: &str,
+    span_start: usize,
+    end_lb: usize,
+) -> f32 {
+    if end_lb == 0 || end_lb >= span.len() {
+        return 0.;
+    }
+    let (Some(c1), Some(c2)) = (span[..end_lb].chars().last(), span[end_lb..].chars().next()) else {
+        return 0.;
+    };
+    let kana = |c: char| {
+        matches!(
+            unicode_script::Script::from(c),
+            unicode_script::Script::Hiragana | unicode_script::Script::Katakana
+        )
+    };
+    if !kana(c1) || !kana(c2) {
+        return 0.;
+    }
+    let pair = format!("{c1}{c2}");
+    let attrs = attrs_list.get_span(span_start + end_lb);
+    let fonts = font_system.get_font_matches(&attrs);
+    let families = [&attrs.family];
+    let mut iter = FontFallbackIter::new(
+        font_system,
+        &fonts,
+        &families,
+        &[],
+        &pair,
+        attrs.weight,
+        attrs.optical,
+    );
+    let Some(font) = iter.next() else {
+        return 0.;
+    };
+    let scratch = iter.shape_caches();
+    let (mut both, mut alone) = (Vec::new(), Vec::new());
+    shape_fallback(scratch, &mut both, &font, &pair, attrs_list, 0, pair.len(), false);
+    let first = &pair[..c1.len_utf8()];
+    shape_fallback(scratch, &mut alone, &font, first, attrs_list, 0, first.len(), false);
+    match (both.first(), alone.first()) {
+        (Some(b), Some(a)) if both.len() == 2 && alone.len() == 1 && b.glyph_id == a.glyph_id => {
+            b.x_advance - a.x_advance
+        }
+        _ => 0.,
+    }
+}
+
 #[cfg(feature = "swash")]
 fn shape_skip_glyphs(
     glyphs: &mut Vec<ShapeGlyph>,
@@ -1944,6 +1998,8 @@ impl ShapeSpan {
                 }
             }
 
+            let kana_kern = kana_pair_kerning(font_system, attrs_list, span, span_range.start, end_lb);
+
             let mut start_lb = end_lb;
             for (i, c) in span[start_word..end_lb].char_indices().rev() {
                 // TODO: Not all whitespace characters are linebreakable, e.g. 00A0 (No-break
@@ -1968,6 +2024,11 @@ impl ShapeSpan {
                     shaping,
                 );
                 words.push(word);
+                if start_lb == end_lb && kana_kern != 0. {
+                    if let Some(last) = words.last_mut().and_then(|w| w.glyphs.last_mut()) {
+                        last.x_advance += kana_kern;
+                    }
+                }
             }
             if start_lb < end_lb {
                 for (i, c) in span[start_lb..end_lb].char_indices() {
