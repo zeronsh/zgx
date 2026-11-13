@@ -751,6 +751,10 @@ impl UserData for Mounted {
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>())
         });
+        methods.add_method("gc", |_, m, ()| {
+            let reports = m.app()?.host.gc_report(&Default::default());
+            Ok(reports.iter().map(|vm| vm.after).sum::<usize>() / 1024)
+        });
         methods.add_method("retained_states", |_, m, ()| {
             let query = crate::GcQuery {
                 retained: Some("State".into()),

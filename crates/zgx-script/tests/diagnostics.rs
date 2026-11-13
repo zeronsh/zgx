@@ -715,3 +715,97 @@ return ui.column { ui.each(ids, function(id) return Tab { id = id } end) }"##;
         after - before
     );
 }
+
+const SOAK: &str = r##"
+local step = ui.state("step", 0)
+local mode = ui.state("mode", "plain")
+local heap = ui.state("heap", 0)
+ui.effect(function()
+	if step:get() % 2 == 0 then heap:set(math.floor(collectgarbage("count"))) end
+end)
+local Box = ui.component(function(props)
+	local big = table.create(2000, props.n)
+	local m = mode:peek()
+	if m == "plain" then
+		return ui.column { ui.text { "open" } }
+	elseif m == "key" then
+		return ui.column { on_key = function(_e) return #big > 0 end, ui.text { "open" } }
+	elseif m == "fn" then
+		return ui.column { pr = function() return #big > 0 and 1 or 0 end, ui.text { "open" } }
+	elseif m == "hover" then
+		local on = ui.state("h", false)
+		return ui.column { ui.div { w = 20, h = 20, on_hover = function(x) on:set(x and #big > 0) end } }
+	elseif m == "build" then
+		local open = ui.state("o", false)
+		return ui.column { ui.popover { open = open, anchor = ui.button { "a" }, build = function() return ui.text { tostring(#big) } end } }
+	elseif m == "use_state" then
+		local s = ui.use_state(big)
+		return ui.column { ui.text { function() return tostring(#s:get()) end } }
+	end
+	return ui.column { on_mount = function() local _ = #big end, ui.text { "open" } }
+end)
+return ui.column { w = 400, h = 300,
+	ui.presence(function()
+		local s = step:get()
+		return if s % 2 == 1 then tostring(s) else ""
+	end, function(key)
+		return if key == "" then ui.text { "closed" } else Box { n = tonumber(key) or 0 }
+	end),
+}"##;
+
+fn collected_heap_growth(mode: &str, cycles: i64) -> (usize, usize, usize) {
+    let mut h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", SOAK));
+    h.host
+        .set_state("mode", zgx_script::Value::from(mode))
+        .unwrap();
+    h.settle();
+    let mut step = 0.;
+    let mut cycle = |h: &mut Harness| {
+        for _ in 0..2 {
+            step += 1.;
+            h.host
+                .set_state("step", zgx_script::Value::Num(step))
+                .unwrap();
+            h.settle();
+            h.frames(2);
+        }
+    };
+    for _ in 0..20 {
+        cycle(&mut h);
+    }
+    let before = h.host.gc_report(&Default::default())[0].after;
+    let mut peak = 0;
+    for _ in 0..cycles {
+        cycle(&mut h);
+        if let Some(zgx_script::Value::Num(n)) = h
+            .host
+            .states()
+            .into_iter()
+            .find(|(k, _)| k.ends_with("heap"))
+            .map(|(_, v)| v)
+        {
+            peak = peak.max(n as usize);
+        }
+    }
+    let r = &h.host.gc_report(&Default::default())[0];
+    (before, r.after, peak)
+}
+
+/// What a component that unmounts holds (a handler, a function prop, a state
+/// over a large table) goes with it: the collected heap stays flat across
+/// mounts, and the uncollected one stays within a few times what is live.
+#[test]
+fn unmounted_components_let_go_of_what_their_closures_held() {
+    for mode in ["key", "fn", "use_state", "mount", "hover", "build"] {
+        let (before, after, peak) = collected_heap_growth(mode, 400);
+        assert!(
+            after < before + 64 * 1024,
+            "`{mode}`: 400 mounts left {} KB more after a collection",
+            after.saturating_sub(before) / 1024
+        );
+        assert!(
+            peak < 6 * 1024,
+            "`{mode}`: the heap reached {peak} KB between collections"
+        );
+    }
+}

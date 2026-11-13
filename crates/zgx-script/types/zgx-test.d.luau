@@ -69,6 +69,8 @@ declare extern type TestApp with
 	function wait(self, target: string, options: { text: string?, gone: boolean?, timeout_ms: number? }?): boolean
 	-- Every named state's name (`ui.state`, `ui.persist`, `ui.shared`), in name order.
 	function states(self): { string }
+	-- A full collection in each VM; the heap the scripts hold after it, in KB.
+	function gc(self): number
 	-- How many States the scripts hold after a full collection, as `zgx inspect gc --retained State` counts them.
 	function retained_states(self): number
 	-- A named state's value (`ui.state`, `ui.persist`, `ui.shared`).

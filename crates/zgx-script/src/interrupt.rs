@@ -111,8 +111,13 @@ pub(crate) struct Watch {
     /// just short of it by the second.
     alarm_tightens: Cell<bool>,
 }
-/// `LUA_GCSETGOAL`, in percent: Luau's own.
-pub(crate) const GC_GOAL_DEFAULT: c_int = 200;
+/// `LUA_GCSETGOAL`, in percent: a VM's own, tighter than Luau's 200 (mounting
+/// and unmounting a component that holds a large table left a heap of 13
+/// times what it held, collected only two cycles late).
+pub(crate) const GC_GOAL_DEFAULT: c_int = 150;
+/// `LUA_GCSETSTEPMUL`, in percent: the collector's work per allocated byte,
+/// Luau's own being 200.
+const GC_STEP_MUL: c_int = 400;
 /// The heap past which the collector's goal is a host's large-heap goal
 /// (`ScriptHost::large_heap_goal`); it goes back below three quarters of
 /// this.
@@ -669,6 +674,14 @@ fn install_on(
         Cell::new(std::ptr::null_mut()),
         Cell::new(std::ptr::null_mut()),
     );
+    // SAFETY: the VM's state, valid while `exec_raw` runs; these only set
+    // the collector's pace.
+    let _ = unsafe {
+        lua.exec_raw::<()>((), |state| {
+            ffi::lua_gc(state, ffi::LUA_GCSETGOAL, GC_GOAL_DEFAULT);
+            ffi::lua_gc(state, ffi::LUA_GCSETSTEPMUL, GC_STEP_MUL);
+        })
+    };
     // SAFETY: `exec_raw` hands the closure the VM's state, valid while it
     // runs. `lua_mainthread` and `lua_callbacks` only read the VM's global
     // state, and `lua_callbacks` points into it, live as long as the VM:
@@ -952,7 +965,7 @@ mod tests {
     /// doesn't switch back and forth.
     #[test]
     fn the_collector_tightens_for_a_large_heap_alone() {
-        let large = 150;
+        let large = 120;
         assert_eq!(
             collector_goal_for(8 << 20, false, large),
             None,
@@ -984,7 +997,7 @@ mod tests {
         let limit = 1 << 30;
         lua.set_memory_limit(limit).unwrap();
         let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
-        let installed = install(&lua, deadline, limit, Some(150));
+        let installed = install(&lua, deadline, limit, Some(120));
         // An outermost call, as `Vm::guard` makes one, up to its end.
         let call = |code: &str| {
             installed.publish(Some(Deadline::start(Duration::from_secs(60)).due()));
@@ -1008,7 +1021,7 @@ mod tests {
         assert_eq!(luau_goal(&installed), GC_GOAL_DEFAULT);
         installed.publish(None);
         assert!(installed.goal_is_tight());
-        assert_eq!(luau_goal(&installed), 150);
+        assert_eq!(luau_goal(&installed), 120);
         // No full collection for crossing the line: `collect_at` is far off.
         assert_eq!(installed.watch.live.get(), 0);
         // Freed, collected between calls, settled: Luau's own again.

@@ -4752,7 +4752,7 @@ mod tests {
             let current = host.0.current.borrow().clone().expect("loaded");
             current._vms[0].interrupt.goal_is_tight()
         };
-        let asked = ScriptHost::inline(&runtime, "large", script).large_heap_goal(150);
+        let asked = ScriptHost::inline(&runtime, "large", script).large_heap_goal(120);
         assert!(tight(&asked), "tightened past the line");
         let default = ScriptHost::inline(&runtime, "large", script);
         assert!(!tight(&default), "Luau's own without the option");
