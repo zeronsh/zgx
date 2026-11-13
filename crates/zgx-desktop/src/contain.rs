@@ -186,9 +186,13 @@ fn logged_first(issue: &str) -> bool {
     LOGGED.with(|logged| logged.borrow_mut().insert(issue.to_string()))
 }
 /// What a window's banner says of what it heard since the last call: its
-/// errors, and what the renderer went on without in `debug` builds alone.
-pub(crate) fn banner(issues: &WindowIssues, debug: bool) -> Vec<String> {
+/// errors, and what the renderer went on without in `debug` builds alone;
+/// nothing where the app turned the banner off (`WindowOptions::error_banner`).
+pub(crate) fn banner(issues: &WindowIssues, debug: bool, shown: bool) -> Vec<String> {
     let heard = std::mem::take(&mut *issues.borrow_mut());
+    if !shown {
+        return Vec::new();
+    }
     heard
         .into_iter()
         .filter(|(kind, _)| *kind != zgx::issues::IssueKind::Degraded || debug)
@@ -337,6 +341,32 @@ mod tests {
         assert_eq!(degradations().len(), 1);
     }
 
+    /// An app that says failures its own way: an error still reaches its
+    /// listeners and is taken from the window, but no banner shows it.
+    #[test]
+    fn an_app_without_the_banner_still_hears_errors_and_shows_none() {
+        let runtime = zgx::reactive::Runtime::new();
+        let (_listener, issues) = window_issues(&runtime);
+        let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let hears = heard.clone();
+        let _app = zgx::issues::on_issue(&runtime, move |issue| {
+            hears.borrow_mut().push(issue.to_string())
+        });
+        zgx::issues::report(
+            &runtime,
+            "missing component provider for zgx::frame::FrameClock",
+        );
+        assert!(banner(&issues, false, false).is_empty());
+        assert!(
+            banner(&issues, false, true).is_empty(),
+            "taken, not kept for a later banner"
+        );
+        assert_eq!(
+            *heard.borrow(),
+            ["missing component provider for zgx::frame::FrameClock"]
+        );
+    }
+
     /// A budget miss drawing window A: logged, heard by A's listeners as a
     /// degradation, in A's banner in debug builds alone, and never in B's.
     /// An error (a script's) is in A's banner either way.
@@ -350,21 +380,24 @@ mod tests {
         let _app = zgx::issues::on_issue_kind(&a, move |kind, _| hears.borrow_mut().push(kind));
         queue_issue("the images one frame draws exceed the 64 MiB budget".into());
         report_issues(&a);
-        assert!(banner(&b_issues, true).is_empty(), "nothing in B's banner");
+        assert!(
+            banner(&b_issues, true, true).is_empty(),
+            "nothing in B's banner"
+        );
         let (debug, release) = (a_issues.clone(), a_issues.clone());
         assert!(
-            banner(&release, false).is_empty(),
+            banner(&release, false, true).is_empty(),
             "nothing in A's in release"
         );
         queue_issue("a layer went coarser".into());
         report_issues(&a);
         assert_eq!(
-            banner(&debug, true),
+            banner(&debug, true, true),
             ["a layer went coarser"],
             "A's, in debug"
         );
         zgx::issues::report(&a, "a script failed");
-        assert_eq!(banner(&a_issues, false), ["a script failed"]);
+        assert_eq!(banner(&a_issues, false, true), ["a script failed"]);
         use zgx::issues::IssueKind::{Degraded, Error};
         assert_eq!(
             *kinds.borrow(),
