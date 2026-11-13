@@ -627,3 +627,52 @@ return ui.column { ui.show(function() return on:get() end, Probe {}) }"##;
         "{found:?}"
     );
 }
+
+/// A timer ends when what made it unmounts, not when it next falls due: what
+/// its callback holds is let go at once (a component's polling `ui.every`
+/// of a minute, a toast's `ui.after` of five, kept a tab's states that long).
+#[test]
+fn a_timer_of_an_unmounted_component_lets_go_of_what_it_holds_at_once() {
+    let code = r##"
+local on = ui.state("on", false)
+local Probe = ui.component(function()
+    local s = ui.use_state(0)
+    ui.every(60000, function() s:set(s:peek() + 1) end)
+    ui.after(300000, function() s:set(0) end)
+    return ui.div { id = "p", w = 10, h = 10 }
+end)
+return ui.column { ui.show(function() return on:get() end, Probe {}) }"##;
+    let mut h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    let mut shown = false;
+    let mut toggle = |h: &mut Harness| {
+        shown = !shown;
+        h.host
+            .set_state("on", zgx_script::Value::Bool(shown))
+            .unwrap();
+        h.settle();
+        h.frames(2);
+    };
+    for _ in 0..4 {
+        toggle(&mut h);
+    }
+    let _ = h.host.gc_report(&zgx_script::GcQuery {
+        mark: true,
+        ..Default::default()
+    });
+    for _ in 0..40 {
+        toggle(&mut h);
+    }
+    let found = &h.host.gc_report(&zgx_script::GcQuery {
+        retained: Some("State".into()),
+        since_mark: true,
+        ..Default::default()
+    })[0]
+        .found;
+    assert!(
+        found.matched <= 2,
+        "40 mounts left {} states held by timers: {:?}",
+        found.matched,
+        found.holders.first().map(|h| &h.path)
+    );
+}
