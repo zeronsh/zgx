@@ -1,10 +1,12 @@
 //! Real programs on a real pseudoterminal: an editor, a pager, a process
-//! viewer, a multiplexer, git's TUIs and prompts, a fuzzy finder, each
-//! started by a session, driven by the keys the view would send and read
-//! back from the screen. Ignored by default, as they need the programs
-//! installed: `cargo test -p zgx-terminal --lib real_programs -- --ignored`
-//! runs them. `ZGX_TUI_PATH` is put before `PATH`, for programs installed
-//! beside the system's (a newer nvim, lazygit).
+//! viewer, a multiplexer, git's TUIs and prompts, a fuzzy finder, and on
+//! Windows PowerShell, cmd, Git Bash and WSL through ConPTY, each started by
+//! a session, driven by the keys the view would send and read back from the
+//! screen. Ignored by default, as they need the programs installed:
+//! `cargo test -p zgx-terminal --lib real_programs -- --ignored` runs them.
+//! `ZGX_TUI_PATH` is put before `PATH`, for programs installed beside the
+//! system's (a newer nvim, lazygit); `ZGX_GIT_BASH` names Git Bash's
+//! `bash.exe` (Windows' own `bash.exe` is WSL's).
 use super::{GridSize, Session, SessionOptions};
 use crate::keys::{self, KeyEvent};
 use alacritty_terminal::{
@@ -35,33 +37,44 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// What separates `PATH`'s directories.
+const SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
 /// `PATH` with `ZGX_TUI_PATH` before it.
 fn path() -> String {
     let system = std::env::var("PATH").unwrap_or_default();
     match std::env::var("ZGX_TUI_PATH") {
-        Ok(extra) => format!("{extra}:{system}"),
+        Ok(extra) => format!("{extra}{SEPARATOR}{system}"),
         Err(_) => system,
     }
 }
 
-/// Whether `program` is on `path()`; a run of one that isn't fails, so a
-/// probe can't pass by running nothing.
+/// Whether `program` is on `path()` (as `program.exe` on Windows); a run of
+/// one that isn't fails, so a probe can't pass by running nothing.
 fn require(program: &str) {
-    let found = path()
-        .split(':')
-        .any(|dir| Path::new(dir).join(program).is_file());
+    let found = path().split(SEPARATOR).any(|dir| {
+        let dir = Path::new(dir);
+        dir.join(program).is_file()
+            || (cfg!(windows) && dir.join(format!("{program}.exe")).is_file())
+    });
     assert!(found, "{program} isn't installed (ZGX_TUI_PATH, PATH)");
 }
 
 impl Run {
-    /// `command` run by `/bin/sh -c` in `dir`.
+    /// `command` run in `dir` (by `/bin/sh -c` on Unix, as a command line on
+    /// Windows).
     fn start(dir: PathBuf, command: &str) -> Self {
-        Self::start_with(dir, command, |_| {})
+        Self::start_with(dir, command, &[], |_| {})
     }
 
-    /// `command` run by `/bin/sh -c` in `dir`, its home set up by `prepare`
+    /// `command` run in `dir` with `env` added, its home set up by `prepare`
     /// first.
-    fn start_with(dir: PathBuf, command: &str, prepare: impl FnOnce(&Path)) -> Self {
+    fn start_with(
+        dir: PathBuf,
+        command: &str,
+        env: &[(&str, &str)],
+        prepare: impl FnOnce(&Path),
+    ) -> Self {
         let home = dir.with_extension("home");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -74,7 +87,13 @@ impl Run {
                 ("PATH".into(), path()),
                 ("LANG".into(), "C.UTF-8".into()),
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ],
+            ]
+            .into_iter()
+            .chain(
+                env.iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string())),
+            )
+            .collect(),
             ..SessionOptions::default()
         };
         let size = GridSize {
@@ -163,6 +182,7 @@ impl Run {
         self.key_with(key, Modifiers::default());
     }
 
+    #[cfg(unix)]
     fn ctrl(&self, character: &str) {
         let control = Modifiers {
             control: true,
@@ -196,12 +216,14 @@ impl Drop for Run {
 }
 
 /// A file of `lines` numbered lines.
+#[cfg(unix)]
 fn numbered(dir: &Path, name: &str, lines: usize) {
     let text: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
     std::fs::write(dir.join(name), text).unwrap();
 }
 
 /// git, quietly, in `dir`.
+#[cfg(unix)]
 fn git(dir: &Path, arguments: &[&str]) {
     let status = std::process::Command::new("git")
         .args(["-c", "user.name=zgx", "-c", "user.email=zgx@example.com"])
@@ -215,6 +237,7 @@ fn git(dir: &Path, arguments: &[&str]) {
 }
 
 /// A repository with one commit, and a change to its file.
+#[cfg(unix)]
 fn repository(name: &str) -> PathBuf {
     let dir = scratch(name);
     git(&dir, &["init", "-q", "-b", "main"]);
@@ -231,14 +254,16 @@ fn repository(name: &str) -> PathBuf {
 }
 
 /// vim: the alternate screen while it runs, text typed in insert mode,
-/// `:wq` writing the file, and the shell's screen back once it ends.
+/// `:wq` writing the file, and the shell's screen back once it ends (on
+/// Unix, where a shell prints a line before it).
 fn edits_and_writes(editor: &str, arguments: &str) {
     require(editor);
     let dir = scratch(editor);
-    let run = Run::start(
-        dir.clone(),
-        &format!("printf 'before\\n'; {editor} {arguments} notes.txt"),
-    );
+    let command = match cfg!(unix) {
+        true => format!("printf 'before\\n'; {editor} {arguments} notes.txt"),
+        false => format!("{editor} {arguments} notes.txt"),
+    };
+    let run = Run::start(dir.clone(), &command);
     run.until("the editor's screen", |run| {
         run.mode().contains(TermMode::ALT_SCREEN) && run.screen().contains('~')
     });
@@ -248,14 +273,20 @@ fn edits_and_writes(editor: &str, arguments: &str) {
     run.type_text(":wq");
     run.key(Key::Enter);
     assert_eq!(run.exits(), 0, "{}", run.screen());
+    // Windows' editors end lines with CR LF.
     assert_eq!(
-        std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
-        "hello from zgx\n"
+        std::fs::read_to_string(dir.join("notes.txt"))
+            .unwrap()
+            .trim_end(),
+        "hello from zgx"
     );
     assert!(!run.mode().contains(TermMode::ALT_SCREEN));
-    assert_eq!(run.rows()[0], "before", "the shell's screen back");
+    if cfg!(unix) {
+        assert_eq!(run.rows()[0], "before", "the shell's screen back");
+    }
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "runs vim, which may not be installed"]
 fn vim_edits_and_writes() {
@@ -268,18 +299,22 @@ fn nvim_edits_and_writes() {
     edits_and_writes("nvim", "--clean");
 }
 
-/// nvim, where `COLORTERM` isn't set (over ssh), asks the terminal for
-/// direct colour (XTGETTCAP, then DECRQSS) and turns its own colours on
-/// once it hears it can.
+/// nvim, where `COLORTERM` isn't set (over ssh; empty, which it takes
+/// alike), asks the terminal for direct colour (XTGETTCAP, then DECRQSS)
+/// and turns its own colours on once it hears it can.
 #[test]
 #[ignore = "runs nvim, which may not be installed"]
 fn nvim_hears_direct_colour() {
     require("nvim");
     let dir = scratch("nvim-caps");
-    let run = Run::start(
+    // Double quotes around the argument: one command line for `sh` and for
+    // Windows' own parsing.
+    let run = Run::start_with(
         dir.clone(),
-        "env -u COLORTERM nvim --clean +'lua vim.defer_fn(function() \
-         vim.fn.writefile({tostring(vim.o.termguicolors)}, \"caps\") end, 1000)'",
+        "nvim --clean \"+lua vim.defer_fn(function() \
+         vim.fn.writefile({tostring(vim.o.termguicolors)}, 'caps') end, 1000)\"",
+        &[("COLORTERM", "")],
+        |_| {},
     );
     run.until("nvim's screen", |run| run.screen().contains('~'));
     let start = Instant::now();
@@ -302,6 +337,7 @@ fn nvim_hears_direct_colour() {
 }
 
 /// less: a page at a time, a search, and the screen given back.
+#[cfg(unix)]
 #[test]
 #[ignore = "runs less, which may not be installed"]
 fn less_pages_and_searches() {
@@ -324,6 +360,7 @@ fn less_pages_and_searches() {
 }
 
 /// htop: its meters and process table drawn, sorted by a key, and quit.
+#[cfg(unix)]
 #[test]
 #[ignore = "runs htop, which may not be installed"]
 fn htop_draws_and_quits() {
@@ -337,6 +374,7 @@ fn htop_draws_and_quits() {
 
 /// tmux: a session inside the terminal, its status line on the last row,
 /// a window split, and a command's output in each pane.
+#[cfg(unix)]
 #[test]
 #[ignore = "runs tmux, which may not be installed"]
 fn tmux_splits_and_shows_both_panes() {
@@ -371,6 +409,7 @@ fn tmux_splits_and_shows_both_panes() {
 
 /// lazygit: its panels over a repository, a file staged with Space, a
 /// commit typed into its prompt.
+#[cfg(unix)]
 #[test]
 #[ignore = "runs lazygit, which may not be installed"]
 fn lazygit_stages_and_commits() {
@@ -378,7 +417,7 @@ fn lazygit_stages_and_commits() {
     let dir = repository("lazygit");
     // No first run's welcome or release notes over the panels: they show
     // while the state's versions are below lazygit's.
-    let run = Run::start_with(dir.clone(), "lazygit", |home| {
+    let run = Run::start_with(dir.clone(), "lazygit", &[], |home| {
         let state = home.join(".local/state/lazygit");
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(
@@ -410,6 +449,7 @@ fn lazygit_stages_and_commits() {
 }
 
 /// `git add -p`: a hunk shown in colour and staged with `y`.
+#[cfg(unix)]
 #[test]
 #[ignore = "runs git, which may not be installed"]
 fn git_add_patch_stages_a_hunk() {
@@ -429,6 +469,7 @@ fn git_add_patch_stages_a_hunk() {
 }
 
 /// fzf: a list filtered as a query is typed, and the choice printed.
+#[cfg(unix)]
 #[test]
 #[ignore = "runs fzf, which may not be installed"]
 fn fzf_filters_and_chooses() {
@@ -448,4 +489,112 @@ fn fzf_filters_and_chooses() {
         "cherry\n"
     );
     assert!(run.screen().contains("done"));
+}
+
+/// PowerShell 7 and PSReadLine through ConPTY: a command typed runs, Tab
+/// completes a cmdlet's name, Up brings the last command back from the
+/// history, Escape clears the line, and `exit` ends it.
+#[cfg(windows)]
+#[test]
+#[ignore = "runs pwsh, which may not be installed"]
+fn powershell_runs_completes_and_recalls() {
+    require("pwsh");
+    let run = Run::start(scratch("pwsh"), "pwsh -NoLogo -NoProfile");
+    run.shows("PS ");
+    run.type_text("Write-Output ('zgx' + 6*7)");
+    run.key(Key::Enter);
+    run.shows("zgx42");
+    run.type_text("Get-ChildIt");
+    run.key(Key::Tab);
+    run.shows("Get-ChildItem");
+    run.key(Key::Escape);
+    run.until("the line cleared", |run| {
+        !run.screen().contains("Get-ChildItem")
+    });
+    run.key(Key::ArrowUp);
+    run.until("the last command recalled", |run| {
+        let line = "Write-Output ('zgx' + 6*7)";
+        run.rows().iter().filter(|row| row.contains(line)).count() >= 2
+    });
+    run.key(Key::Escape);
+    run.type_text("exit");
+    run.key(Key::Enter);
+    assert_eq!(run.exits(), 0, "{}", run.screen());
+}
+
+/// cmd through ConPTY: commands joined with `&` run in turn, and `exit`
+/// ends it.
+#[cfg(windows)]
+#[test]
+#[ignore = "runs cmd"]
+fn cmd_runs_commands() {
+    require("cmd");
+    let run = Run::start(scratch("cmd"), "cmd /q /k prompt $G");
+    run.shows(">");
+    run.type_text("echo zgx & set /a 6*7");
+    run.key(Key::Enter);
+    run.shows("zgx");
+    run.until("the sum", |run| {
+        run.rows().iter().any(|row| row.starts_with("42"))
+    });
+    run.type_text("exit");
+    run.key(Key::Enter);
+    assert_eq!(run.exits(), 0, "{}", run.screen());
+}
+
+/// Git Bash (MSYS2) through ConPTY: a command runs, and less pages a long
+/// list, searches it and gives the screen back.
+#[cfg(windows)]
+#[test]
+#[ignore = "runs Git Bash, which may not be installed"]
+fn git_bash_runs_and_pages() {
+    let bash = std::env::var("ZGX_GIT_BASH")
+        .unwrap_or_else(|_| r"C:\Program Files\Git\bin\bash.exe".into());
+    assert!(
+        Path::new(&bash).is_file(),
+        "Git Bash isn't at {bash} (ZGX_GIT_BASH)"
+    );
+    let run = Run::start(
+        scratch("git-bash"),
+        &format!("\"{bash}\" --norc --noprofile -i"),
+    );
+    run.shows("$");
+    run.type_text("echo zgx$((6*7))");
+    run.key(Key::Enter);
+    run.shows("zgx42");
+    run.type_text("seq 1 200 | less");
+    run.key(Key::Enter);
+    run.until("less's first page", |run| run.rows()[0] == "1");
+    run.key(Key::Space);
+    run.until("the next page", |run| run.rows()[0] != "1");
+    run.type_text("/150");
+    run.key(Key::Enter);
+    run.until("the match at the top", |run| run.rows()[0] == "150");
+    run.type_text("q");
+    run.until("the shell back", |run| run.screen().contains("zgx42"));
+    run.type_text("exit");
+    run.key(Key::Enter);
+    assert_eq!(run.exits(), 0, "{}", run.screen());
+}
+
+/// WSL through ConPTY: a Linux shell runs a command, and less pages in it.
+#[cfg(windows)]
+#[test]
+#[ignore = "runs wsl, which may not be installed"]
+fn wsl_runs_a_linux_shell() {
+    require("wsl");
+    let run = Run::start(scratch("wsl"), "wsl.exe -e sh");
+    run.shows("$");
+    run.type_text("uname -s; echo zgx$((6*7))");
+    run.key(Key::Enter);
+    run.shows("Linux");
+    run.shows("zgx42");
+    run.type_text("seq 1 200 | less");
+    run.key(Key::Enter);
+    run.until("less's first page", |run| run.rows()[0] == "1");
+    run.type_text("q");
+    run.until("the shell back", |run| run.screen().contains("zgx42"));
+    run.type_text("exit");
+    run.key(Key::Enter);
+    assert_eq!(run.exits(), 0, "{}", run.screen());
 }
