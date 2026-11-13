@@ -280,6 +280,28 @@ fn main() {
             middle[1] > 180 && middle[0] < 90 && middle[2] < 140,
             "the GPU view didn't draw its painter's colour: {middle:?}"
         );
+
+        // A layer shader reading the view by name: drawn through it, the
+        // painter's colour (its frame painted after the passes, ahead of
+        // the frame sampling it).
+        let with_view = zgx::decoration::FillShader::with_inputs(
+            "fn layer(input: LayerInput) -> vec4<f32> {
+    return vec4(zgx_app(vec2(0.5)).rgb, 1.0);
+}",
+            None,
+            zgx::decoration::ShaderInputs {
+                views: vec![("app".into(), painter.id())],
+                ..Default::default()
+            },
+        );
+        let viewed = draw(|scene, id| scene.set_layer_shader(id, Some(with_view)))
+            .expect("a frame with a layer shader reading a GPU view draws");
+        let [r, g, b, a] = at(&viewed, 120, 120);
+        assert!(
+            g > 180 && r < 90 && b < 140 && a == 255,
+            "its GPU view wasn't read: {:?}",
+            [r, g, b, a]
+        );
     }
 
     let left_out = GpuRenderer::debug_d3d11_left_out();
