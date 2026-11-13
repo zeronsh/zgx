@@ -3938,6 +3938,62 @@ const POWER: wgpu::PowerPreference = wgpu::PowerPreference::LowPower;
 pub(crate) fn fallback_adapter_forced() -> bool {
     std::env::var_os("WGPU_FORCE_FALLBACK_ADAPTER").is_some_and(|value| value == "1")
 }
+/// Whether the only adapter the GPU renderer could draw with is a software
+/// one, found without opening a device (whose driver keeps its memory once
+/// made): `WGPU_FORCE_FALLBACK_ADAPTER=1`; on Linux no render node
+/// (`/dev/dri/renderD*`), so Mesa draws with llvmpipe or lavapipe; on
+/// Windows no DXGI adapter but software ones (WARP, the Basic Render
+/// Driver). macOS always has a GPU. Read once.
+#[doc(hidden)]
+pub fn software_only() -> bool {
+    static ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ONLY.get_or_init(|| fallback_adapter_forced() || no_hardware_adapter())
+}
+#[cfg(target_os = "linux")]
+fn no_hardware_adapter() -> bool {
+    !std::fs::read_dir("/dev/dri").is_ok_and(|nodes| {
+        nodes
+            .flatten()
+            .any(|node| node.file_name().to_string_lossy().starts_with("renderD"))
+    })
+}
+#[cfg(windows)]
+fn no_hardware_adapter() -> bool {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIFactory1,
+    };
+    // SAFETY: a factory made and its adapters' descriptions read; nothing
+    // opened on them.
+    unsafe {
+        let Ok(factory) = CreateDXGIFactory2::<IDXGIFactory1>(DXGI_CREATE_FACTORY_FLAGS(0)) else {
+            return false;
+        };
+        let adapters = (0..)
+            .map_while(|index| factory.EnumAdapters1(index).ok())
+            .filter_map(|adapter| adapter.GetDesc1().ok())
+            .map(|desc| (desc.VendorId, desc.DeviceId, desc.Flags));
+        only_software(adapters)
+    }
+}
+/// Whether DXGI's adapters, each its vendor id, device id and flags, are
+/// all software ones (`DXGI_ADAPTER_FLAG_SOFTWARE`, or the Basic Render
+/// Driver: Microsoft's vendor id and WARP's device id), and there is one.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn only_software(adapters: impl IntoIterator<Item = (u32, u32, u32)>) -> bool {
+    const SOFTWARE: u32 = 2;
+    let mut any = false;
+    for (vendor, device, flags) in adapters {
+        any = true;
+        if flags & SOFTWARE == 0 && !(vendor == 0x1414 && device == 0x8c) {
+            return false;
+        }
+    }
+    any
+}
+#[cfg(not(any(target_os = "linux", windows)))]
+fn no_hardware_adapter() -> bool {
+    false
+}
 /// The adapter DXGI ranks first for `POWER`, a GPU before software, with a
 /// device opened on it alone (none when Direct3D 12 isn't the instance's
 /// backend). wgpu's
@@ -4223,6 +4279,11 @@ struct GpuContextInner {
     d3d11: Option<Rc<d3d11_frame::Device>>,
 }
 impl GpuContext {
+    /// Whether `other` is this context (a clone of it), not another.
+    #[doc(hidden)]
+    pub fn same_as(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
     /// A context on the system's GPU, found without a window.
     pub fn new() -> Result<Self, GpuError> {
         Self::create(None)
@@ -23502,5 +23563,27 @@ mod copy_refusal_tests {
         );
         assert_eq!(refused, None);
         assert!(!around, "the walk around the content was taken");
+    }
+}
+
+#[cfg(test)]
+mod software_only_tests {
+    use super::only_software;
+
+    /// WARP alone (as DXGI lists it on a machine without a GPU, with its
+    /// software flag or, for the Basic Render Driver, by its ids) is
+    /// software only; a GPU beside it, or no adapter at all, is not.
+    #[test]
+    fn only_software_adapters_are_software_only() {
+        let warp = (0x1414, 0x8c, 2);
+        let basic_render = (0x1414, 0x8c, 0);
+        let rtx = (0x10de, 0x2684, 0);
+        assert!(only_software([warp]));
+        assert!(only_software([basic_render]));
+        assert!(!only_software([rtx, warp]));
+        assert!(!only_software([warp, rtx]));
+        assert!(!only_software([]));
+        // A software adapter of another vendor's (flagged).
+        assert!(only_software([(0x1af4, 1, 2)]));
     }
 }

@@ -114,6 +114,11 @@ pub struct WindowOptions {
     /// and reported alike. `None` (the default) is Windows' 32 points of the
     /// display, whatever the zoom. Other platforms place their own.
     pub caption_height: Option<f64>,
+    /// Which renderer it draws with (`None`, the default: `ZGX_RENDERER`'s
+    /// choice, else the GPU's): the software raster, always or where the
+    /// only adapter is a software one.
+    #[doc(hidden)]
+    pub renderer: Option<crate::RendererChoice>,
 }
 /// A window's smallest and largest sizes are the same.
 #[cfg(any(windows, test))]
@@ -152,6 +157,7 @@ impl Default for WindowOptions {
             covers_display: false,
             visible: true,
             caption_height: None,
+            renderer: None,
         }
     }
 }
@@ -1735,6 +1741,9 @@ struct Host {
     context: WindowContext,
     window: Option<Arc<Window>>,
     renderer: Option<GpuRenderer>,
+    /// The software raster it draws with instead, where the GPU renderer's
+    /// adapter is a software one (`raster_window`): `renderer` is then none.
+    raster: Option<crate::raster_window::RasterWindow>,
     /// When to try making a renderer again after the GPU device was lost
     /// (`recover_renderer`), while none could be made.
     renderer_retry: Option<std::time::Instant>,
@@ -2215,6 +2224,7 @@ impl Host {
             context,
             window: None,
             renderer: None,
+            raster: None,
             renderer_retry: None,
             error_banner: None,
             render_fault: None,
@@ -2935,10 +2945,15 @@ impl Host {
         self.sync_ime_cancellation();
         if let Some(color) = self.theme_background.take()
             && self.applied_background != Some(color)
-            && let Some(renderer) = &mut self.renderer
+            && (self.renderer.is_some() || self.raster.is_some())
         {
             self.applied_background = Some(color);
-            renderer.set_background(color);
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_background(color);
+            }
+            if let Some(raster) = &mut self.raster {
+                raster.set_background(color);
+            }
             self.force = true;
             self.hidden_background(&window, color);
         }
@@ -3071,6 +3086,35 @@ impl Host {
                         undrawn = true;
                         #[cfg(target_os = "macos")]
                         renderer.hide_loops();
+                    }
+                } else if let Some(raster) = &mut self.raster {
+                    // Drawn and shown at once (`raster_window`), contained
+                    // as the GPU renderer's frames are.
+                    self.frames_tried += 1;
+                    window.pre_present_notify();
+                    let rendered = crate::contain::run_frame(
+                        &mut self.render_fault,
+                        self.frames_tried,
+                        std::time::Instant::now(),
+                        "the window's frame",
+                        |message| faults.push(message.to_string()),
+                        || {
+                            raster
+                                .render(&scene, damage)
+                                .map_err(|error| zgx_gpu::GpuError(error.to_string()))
+                        },
+                    );
+                    crate::contain::report_issues(&self.context.ui.runtime);
+                    match rendered {
+                        Some(result) => {
+                            result?;
+                            first_mark(&FIRST_RENDER, "first frame rendered");
+                            self.native.render(&scene, damage)?;
+                            // Shown: the next waits for the compositor's
+                            // frame, as a GPU present's does.
+                            self.present_ready = false;
+                        }
+                        None => undrawn = true,
                     }
                 }
                 self.force = undrawn;
@@ -3931,6 +3975,55 @@ impl Host {
             .push(renderer.context());
         Ok(renderer)
     }
+    /// The GPU renderer the window draws with, or none when it draws on the
+    /// software raster (`raster_window`), as asked (`WindowOptions::renderer`,
+    /// `ZGX_RENDERER`): always, or (`Auto`) where the only adapter is a
+    /// software one. Opaque 1x windows only.
+    fn make_window_renderer(
+        &mut self,
+        window: &Arc<Window>,
+    ) -> Result<Option<GpuRenderer>, Box<dyn Error>> {
+        use crate::raster_window::{RasterWindow, RendererChoice, can_draw, software_adapter};
+        let choice = self
+            .options
+            .renderer
+            .unwrap_or_else(RendererChoice::from_env);
+        let drawable = can_draw(self.options.is_transparent(), window.scale_factor());
+        // Software alone, known without a device (`zgx_gpu::software_only`):
+        // none made. Otherwise a renderer, let go below if its adapter is
+        // software after all (a driver that falls back to llvmpipe): its
+        // driver keeps some memory, but each frame costs a fraction.
+        let renderer = match (choice, drawable) {
+            (RendererChoice::Raster, true) => None,
+            (RendererChoice::Auto, true) if zgx_gpu::software_only() => None,
+            _ => Some(self.make_renderer(window)?),
+        };
+        let renderer = match renderer {
+            Some(renderer)
+                if choice == RendererChoice::Auto && drawable && {
+                    let info = renderer.adapter_info();
+                    software_adapter(&info.name, info.device_type)
+                } =>
+            {
+                let context = renderer.context();
+                drop(renderer);
+                self.context
+                    .windows
+                    .gpu_contexts
+                    .borrow_mut()
+                    .retain(|kept| !kept.same_as(&context));
+                None
+            }
+            renderer => renderer,
+        };
+        if renderer.is_none() {
+            let fonts = self.context.windows.fonts.borrow().clone();
+            let language = self.context.windows.text_language.borrow().clone();
+            self.raster = Some(RasterWindow::new(window, &fonts, language.as_deref())?);
+            zgx::profile::mark("raster window made");
+        }
+        Ok(renderer)
+    }
     /// This window's issues since the last call: errors in its banner, and
     /// what the renderer went on without (`IssueKind::Degraded`) there in
     /// debug builds alone; release builds have logged them, once.
@@ -3981,6 +4074,15 @@ impl Host {
         }
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+    /// The screens its popups show on in windows of their own
+    /// (`popup_window::popup_screens`), none while it draws on the raster:
+    /// popup windows are drawn by GPU renderers, so its popups draw in it.
+    fn popup_screens(&self, window: &Window) -> Vec<zgx::scene::Rect> {
+        match self.raster {
+            Some(_) => Vec::new(),
+            None => crate::popup_window::popup_screens(window),
         }
     }
     /// The GPU device was lost (a driver reset, a GPU removed): a renderer
@@ -4202,7 +4304,7 @@ impl Host {
                 )
             });
         zgx::profile::mark("window created");
-        let mut renderer = self.make_renderer(&window)?;
+        let mut renderer = self.make_window_renderer(&window)?;
         zgx::profile::mark("renderer made");
         self.display_scale = window.scale_factor();
         // At the zoom it was left at, kept with its frame (before the zoom's
@@ -4220,9 +4322,13 @@ impl Host {
         // applied, and returns before telling them).
         crate::popup_window::set_zoom(window.id(), self.context.ui.zoom());
         self.scale_factor = self.content_scale();
-        renderer.set_scale_factor(self.scale_factor as f32);
+        if let Some(renderer) = &mut renderer {
+            renderer.set_scale_factor(self.scale_factor as f32);
+        }
         #[cfg(target_os = "macos")]
-        renderer.set_zoom(self.context.ui.zoom());
+        if let Some(renderer) = &mut renderer {
+            renderer.set_zoom(self.context.ui.zoom());
+        }
         self.context
             .ui
             .scene
@@ -4240,15 +4346,30 @@ impl Host {
             size,
             self.scale_factor,
         ) {
-            renderer.resize(size.width, size.height);
+            match (&mut renderer, &mut self.raster) {
+                (Some(renderer), _) => {
+                    renderer.resize(size.width, size.height);
+                }
+                (None, Some(raster)) => {
+                    raster.resize(size.width, size.height);
+                }
+                (None, None) => {}
+            }
         }
         let themes = self.context.ui.theme().clone();
         // Glass windows are transparent too (`WindowOptions::is_transparent`).
         if self.options.is_transparent() {
-            renderer.set_background(zgx::scene::Color(0, 0, 0, 0));
+            if let Some(renderer) = &mut renderer {
+                renderer.set_background(zgx::scene::Color(0, 0, 0, 0));
+            }
         } else {
             let background = themes.root().color_untracked(zgx::theme::tok::BACKGROUND);
-            renderer.set_background(background);
+            if let Some(renderer) = &mut renderer {
+                renderer.set_background(background);
+            }
+            if let Some(raster) = &mut self.raster {
+                raster.set_background(background);
+            }
             self.applied_background = Some(background);
             self.hidden_background(&window, background);
             if self._background_effect.is_none() {
@@ -4276,14 +4397,19 @@ impl Host {
         self.context
             .ui
             .set_elastic_scrolling(cfg!(target_os = "macos"));
-        renderer.install_text(&mut self.context.ui.scene.borrow_mut());
+        match (&renderer, &self.raster) {
+            (Some(renderer), _) => renderer.install_text(&mut self.context.ui.scene.borrow_mut()),
+            (None, Some(raster)) => raster.install_text(&mut self.context.ui.scene.borrow_mut()),
+            (None, None) => {}
+        }
         self.context.ui.refresh_text_geometry();
         zgx::profile::mark("text installed");
         #[cfg(target_os = "macos")]
-        renderer.set_display_key(&self.display_key);
-        #[cfg(target_os = "macos")]
-        renderer.set_plane_waker(self.plane_waker());
-        self.renderer = Some(renderer);
+        if let Some(renderer) = &mut renderer {
+            renderer.set_display_key(&self.display_key);
+            renderer.set_plane_waker(self.plane_waker());
+        }
+        self.renderer = renderer;
         self.adapter = adapter;
         window.set_maximized(self.state.maximized);
         // Not shown yet, an X11 window's state is its own to set.
@@ -4331,7 +4457,7 @@ impl Host {
             .refresh(&window, self.options.titlebar);
         self.context
             .ui
-            .set_popup_screens(crate::popup_window::popup_screens(&window));
+            .set_popup_screens(self.popup_screens(&window));
         self.content_origin = crate::popup_window::content_origin(&window);
         self.window_number = crate::popup_window::window_number(&window);
         self.frame_paced = matches!(
@@ -4574,6 +4700,9 @@ impl Host {
                     if let Some(renderer) = &mut self.renderer {
                         renderer.resize(size.width, size.height);
                     }
+                    if let Some(raster) = &mut self.raster {
+                        raster.resize(size.width, size.height);
+                    }
                     self.force = true;
                     self.presentation.expose();
                 }
@@ -4786,6 +4915,7 @@ impl Host {
         self.ime_target = None;
         self.adapter = None;
         self.renderer = None;
+        self.raster = None;
         self.presentation = Presentation::default();
         self.native_occluded = false;
         self.present_ready = false;
@@ -4895,7 +5025,7 @@ impl Host {
                 .refresh_holding(window, self.options.titlebar, held);
             self.context
                 .ui
-                .set_popup_screens(crate::popup_window::popup_screens(window));
+                .set_popup_screens(self.popup_screens(window));
             self.content_origin = crate::popup_window::content_origin(window);
             let window = window.clone();
             self.refresh_frame_interval(&window);
@@ -5029,6 +5159,10 @@ impl Host {
                     .renderer
                     .as_mut()
                     .is_some_and(|renderer| renderer.resize(size.width, size.height))
+                    || self
+                        .raster
+                        .as_mut()
+                        .is_some_and(|raster| raster.resize(size.width, size.height))
                     || self.context.viewport.with_untracked(|v| *v != viewport))
                 {
                     // AppKit reports the size again as a window shows and as
@@ -5066,6 +5200,20 @@ impl Host {
                 }
                 if let Some(renderer) = &mut self.renderer {
                     renderer.set_scale_factor(scale_factor as f32);
+                }
+                // The raster draws at 1x alone: at another scale, the GPU.
+                if self.raster.is_some()
+                    && !crate::raster_window::can_draw(self.options.is_transparent(), scale_factor)
+                {
+                    self.raster = None;
+                    self.recover_renderer();
+                    // Its popups in windows of their own again, where the
+                    // platform shows them so.
+                    if let Some(window) = self.window.clone() {
+                        self.context
+                            .ui
+                            .set_popup_screens(self.popup_screens(&window));
+                    }
                 }
                 self.context
                     .ui
@@ -6090,7 +6238,7 @@ impl Host {
                 if let Some(window) = &self.window {
                     self.context
                         .ui
-                        .set_popup_screens(crate::popup_window::popup_screens(window));
+                        .set_popup_screens(self.popup_screens(window));
                 }
                 Ok(())
             }
@@ -6970,6 +7118,7 @@ impl Drop for Host {
         // it would leave AppKit's records of the observation behind, a
         // few hundred bytes for every window ever closed.
         self.renderer = None;
+        self.raster = None;
         #[cfg(target_os = "macos")]
         if let Some(window) = &self.window {
             detach_metal_layers(window);
@@ -7957,6 +8106,11 @@ impl WindowManager {
                     if let Some(renderer) = &mut host.renderer {
                         renderer.fonts_replaced();
                     }
+                    if let Some(raster) = &mut host.raster {
+                        let fonts = host.context.windows.fonts.borrow().clone();
+                        let language = host.context.windows.text_language.borrow().clone();
+                        raster.fonts_replaced(&fonts, language.as_deref());
+                    }
                     host.context.ui.scene.borrow_mut().fonts_replaced();
                     host.context.ui.refresh_text_geometry();
                     if let Some(window) = &host.window {
@@ -8073,7 +8227,7 @@ impl WindowManager {
                     if let Some(window) = &host.window {
                         host.context
                             .ui
-                            .set_popup_screens(crate::popup_window::popup_screens(window));
+                            .set_popup_screens(host.popup_screens(window));
                     }
                 }
             }
