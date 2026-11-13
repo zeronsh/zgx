@@ -731,8 +731,7 @@ impl EditorHandle {
         if !width.is_finite() || width <= 0. || self.hint.secure.get() {
             return None;
         }
-        let scene = self.scene.borrow();
-        if !scene.contains(self.node) || self.natural.key.borrow().is_none() {
+        if !self.scene.borrow().contains(self.node) || self.natural.key.borrow().is_none() {
             return None;
         }
         let revision = self.natural.revision.get();
@@ -742,41 +741,49 @@ impl EditorHandle {
         {
             return Some(sample);
         }
-        let e = self.editor.borrow();
-        let mut source = e
-            .long_text()
-            .cloned()
-            .unwrap_or_else(|| self.natural.wrapped.text_of(&e.text()));
-        if let Some(preedit) = e.preedit() {
-            source.replace_range(e.selection().range(), &preedit.text);
-        }
-        let (_, size, font) = self.typography.borrow().clone();
-        let font = editor_font(&scene, self.node, &font);
-        // Separate width caches keep a query from evicting viewport shaping.
-        // Both use the editor's rich/plain shapers and span highlighter.
-        let unwrapped = long_layout(
-            &self.natural.unwrapped,
-            &scene,
-            || source.clone(),
-            Some(revision),
-            size,
-            None,
-            &font,
-        );
+        // The layouts are made with the scene and model borrowed, and their
+        // lines shaped with neither: a script highlighter runs as a line is,
+        // and may edit or measure this editor.
+        let (unwrapped, wrapped) = {
+            let scene = self.scene.borrow();
+            let e = self.editor.borrow();
+            let mut source = e
+                .long_text()
+                .cloned()
+                .unwrap_or_else(|| self.natural.wrapped.text_of(&e.text()));
+            if let Some(preedit) = e.preedit() {
+                source.replace_range(e.selection().range(), &preedit.text);
+            }
+            drop(e);
+            let (_, size, font) = self.typography.borrow().clone();
+            let font = editor_font(&scene, self.node, &font);
+            // Separate width caches keep a query from evicting viewport shaping.
+            // Both use the editor's rich/plain shapers and span highlighter.
+            let unwrapped = long_layout(
+                &self.natural.unwrapped,
+                &scene,
+                || source.clone(),
+                Some(revision),
+                size,
+                None,
+                &font,
+            );
+            let wrapped = long_layout(
+                &self.natural.wrapped,
+                &scene,
+                || source,
+                Some(revision),
+                size,
+                Some(width),
+                &font,
+            );
+            (unwrapped, wrapped)
+        };
         let mut unwrapped_width = 0f32;
         for i in 0..unwrapped.line_count() {
             self.natural.unwrapped.spans(&unwrapped, i);
             unwrapped_width = unwrapped_width.max(unwrapped.line(i).size().0);
         }
-        let wrapped = long_layout(
-            &self.natural.wrapped,
-            &scene,
-            || source,
-            Some(revision),
-            size,
-            Some(width),
-            &font,
-        );
         let mut wrapped_height = 0.;
         for i in 0..wrapped.line_count() {
             self.natural.wrapped.spans(&wrapped, i);

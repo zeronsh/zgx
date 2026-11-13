@@ -85,3 +85,64 @@ fn natural_metrics_are_reactive_after_layout_and_independent_of_viewport() {
     assert_eq!(metric(&h), narrow, "no idle notifications or layout cycle");
     assert_eq!(h.error(), None);
 }
+
+#[test]
+fn a_loop_of_widths_is_stopped_by_the_script_budget() {
+    // Each new width lays out every line: on the clock, a loop of them ends
+    // as any runaway loop does. Off it, the loop's own instructions are all
+    // that count, and its 2,000 layouts (seconds) finish unchecked.
+    let h = Harness::inline(
+        r#"
+        local ref = ui.ref()
+        local go = ui.state("go", false)
+        local text = string.rep("a line of words that wraps at some width\n", 2000)
+        ui.effect(function()
+            if not go:get() then return end
+            local el = ref:peek()
+            for i = 1, 2000 do
+                el:text_metrics(100 + i / 1000)
+            end
+        end)
+        return ui.textarea { ref = ref, value = text, w = 300, h = 100 }
+    "#,
+    );
+    h.frames(3);
+    h.host.set_state("go", Value::Bool(true)).unwrap();
+    h.frames(1);
+    let error = h.error().unwrap_or_default();
+    assert!(error.contains("time budget"), "{error}");
+}
+
+#[test]
+fn a_highlighter_may_edit_its_editor_while_it_is_measured() {
+    let h = Harness::inline(
+        r##"
+        local ref = ui.ref()
+        local el = nil
+        local editing = ui.state("editing", false)
+        local metrics = ui.state("metrics", nil)
+        ui.effect(function()
+            el = ref:get()
+            if el and editing:get() then
+                metrics:set(el:text_metrics(91))
+            end
+        end)
+        local edits = 0
+        return ui.textarea { ref = ref, value = ui.state("text", "abc def\nghi"), w = 300, h = 100,
+            highlight = function(line, state)
+                -- Once, as the measurement shapes the line (the view's own
+                -- layout calling one that edits is another matter).
+                if el and editing:peek() and edits < 1 then
+                    edits += 1
+                    el:replace_selection("x")
+                end
+                return { { 1, 2, "#ff0000", weight = 700 } }, state
+            end }
+    "##,
+    );
+    h.frames(3);
+    h.host.set_state("editing", Value::Bool(true)).unwrap();
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    assert!(metric(&h).field("wrapped_height").is_some());
+}

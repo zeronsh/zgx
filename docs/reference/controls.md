@@ -83,6 +83,14 @@ A field with nothing to undo lets ⌘Z go on to the app's commands, and with not
 
 Its element (`on_mount`, a [ref](state.md#refs)) selects text: `el:select_all()`, `el:set_selection(a, b)`, `local a, b = el:selection()`, in characters, or in bytes from 0 as `string.find` counts them, `el:set_selection_bytes(a, b)` and `el:selection_bytes()` (a selection set so scrolls into view, focused or not); `el:replace_selection(text)` types `text` over the selection, one step of undo; `ui.editor.scroll_to_line(el, n, { align })` puts line `n`, from 1, at the `"start"`, `"center"` or `"end"` of the view, or as near as shows it (`"nearest"`, the default), its caret left where it is; `ui.editor.undo(el)` and `ui.editor.redo(el)` step its history as ⌘Z and ⌘⇧Z do, answering whether there was a step, and `ui.editor.can_undo(el)` and `ui.editor.can_redo(el)` say whether there is one (for an app's own stack across panes, with `ui.command { key = "cmd+z", reserved = true }`); `ui.editor.offset_at(el, x, y)` is the byte, from 0, a click at those window points would put the caret at, for a drop that goes where the pointer is or a link in the text ([events](events.md#elements)). Each sees the text a handler just set, and leaves its state holding what it changed.
 
+### Text metrics
+
+`el:text_metrics(width)` measures the editor's text as if it were laid out `width` points wide, whatever its own size: `{ width, unwrapped_width, wrapped_height, line_height, revision, exact = true }`, in points, without borders, padding, the line-number gutter or the placeholder (an empty field measures one empty line, as does a final line break). `unwrapped_width` is its widest hard line, `wrapped_height` its height wrapped at `width`. It is nil for an element that is not an editor, one not mounted, a password field, and a `width` that is not a positive, finite number. Rust has it as `EditorHandle::text_metrics`.
+
+It measures what shows: styled spans that shape (`weight`, `italic`), and an IME composition in place of the selection, though not committed (moving only the composition's cursor is no change). Read in an effect or a computed, it runs again when the text or its typography changes, once laid out, not for focus, selection, scrolling or the field's own size; read through a ref's `get()`, as it mounts and unmounts too. `revision` changes with what it measures.
+
+The first query at a new width, or after an edit, lays out every line (in a cache of its own, so the field's view keeps its own lines); asking again is free. A long document pays for that on each edit it is asked after, so keep `width` steady while the field animates. That time is the calling script's, counted in its budget: a loop measuring at width after width is stopped as any runaway loop is.
+
 ### Styled spans
 
 A `highlight` span is `{ from, to, color }` (`color` may be left out), with these by name:
@@ -433,26 +441,3 @@ return ui.column {
 - `ui.computed` makes a read-only derived value for a `progress`; a slider or input bound to a computed would have its edits overwritten when the inputs change.
 - Inputs are 240 points wide whatever their text; a long value scrolls inside. Use `w_full = true` (or a stretching parent) for a field that fills its row.
 - Controls take no children, except `button`.
-
-### Natural editor text metrics
-
-`el:text_metrics(content_width)` returns `{ width, unwrapped_width,
-wrapped_height, line_height, revision, exact = true }`, or nil for non-editors,
-unmounted or password editors, and non-finite/non-positive widths. Rust uses
-`EditorHandle::text_metrics`. Dimensions are local points, excluding borders,
-padding, line-number gutter and placeholder. A trailing empty line contributes
-a line. The displayed IME preedit replaces the selection without committing it;
-changing only the composition cursor keeps the same revision.
-
-A call in an effect/computed follows content and typography changes, published
-after layout. It does not follow the viewport's size, scroll, focus, selection
-or caret blink. Use a ref's `get()` to follow mount/unmount as well. Measurements
-use the editor's plain/rich shapers, font fallback and span-highlighter routes;
-the requested width is independent of the allocated textarea width and height.
-
-Results are exact, including long documents. The first query per revision/width
-visits all hard lines using retained line-shaping caches; unchanged queries are
-constant-time. This is an opt-in full-content operation: large virtualized
-editors should avoid requesting full metrics on each edit unless needed. Keep
-the requested width stable during geometry animations. The viewport keeps its
-own line cache so a natural-width query cannot evict its wrapping geometry.
