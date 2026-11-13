@@ -6421,3 +6421,22 @@ fn a_list_whose_heights_are_no_list_of_numbers_says_so() {
         );
     }
 }
+
+/// A component's props carry nodes anywhere, in named slots.
+#[test]
+fn a_component_takes_nodes_nested_in_its_props() {
+    let mut h = Harness::inline(
+        r##"local Card = ui.component(function(props)
+            local items = {}
+            for i, n in props.attachments do items[i] = n end
+            return ui.column { id = "card", props.editor.input, ui.column(items) }
+        end)
+        return Card { attachments = { ui.text { id = "a1", "one" }, ui.text { id = "a2", "two" } },
+            editor = { input = ui.text { id = "in", "typed" } } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    for id in ["in", "a1", "a2"] {
+        assert!(h.find(id).is_some(), "{id}");
+    }
+}
