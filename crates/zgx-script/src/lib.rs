@@ -1055,6 +1055,21 @@ pub(crate) type Exposed = Rc<RefCell<HashMap<String, Option<Capability>>>>;
 /// Shared keys plugins read but may not write (`expose_shared_read`).
 pub(crate) type ReadOnly = Rc<RefCell<std::collections::HashSet<String>>>;
 
+/// What a host offers its scripts, by name (`ScriptHost::registry`), each
+/// list sorted.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Registry {
+    /// Its actions (`ScriptHost::action`).
+    pub actions: Vec<String>,
+    /// Its functions (`ScriptHost::function`).
+    pub functions: Vec<String>,
+    /// Its async actions (`ScriptHost::async_action`).
+    pub async_actions: Vec<String>,
+    /// Its shared keys: the host's (`ScriptHost::shared`) and those its
+    /// scripts made (`ui.shared`).
+    pub shared: Vec<String>,
+}
 /// Where a host's files come from: the disk, or a bundle compiled into the
 /// app (which reads nothing from the disk).
 #[derive(Clone, Copy)]
@@ -2331,6 +2346,31 @@ impl ScriptHost {
         self.0.persist.save();
     }
 
+    /// What the host offers its scripts, by name, each list sorted: its
+    /// actions (`action`), functions (`function`), async actions
+    /// (`async_action`) and shared keys (`shared`), those scripts made as
+    /// they ran included. For an app to keep a record of what its scripts
+    /// can reach (a checked-in list that a change shows in review).
+    #[doc(hidden)]
+    pub fn registry(&self) -> Registry {
+        fn sorted<V>(map: &HashMap<String, V>) -> Vec<String> {
+            let mut names: Vec<String> = map.keys().cloned().collect();
+            names.sort();
+            names
+        }
+        Registry {
+            actions: sorted(&self.0.actions.borrow()),
+            functions: sorted(&self.0.functions.borrow()),
+            async_actions: sorted(&self.0.async_actions.borrow()),
+            shared: self
+                .0
+                .shared
+                .entries()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect(),
+        }
+    }
     /// Registers a Rust function scripts can bind with `ui.action(name, arg)`.
     pub fn action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
         self.0
