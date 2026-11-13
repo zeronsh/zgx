@@ -562,10 +562,17 @@ pub(crate) fn install(
     }
     ui.set(
         "write_file",
-        lua.create_function(move |lua, (file, data): (mlua::Value, mlua::Value)| {
+        lua.create_function(move |lua, (file, data, opts): (mlua::Value, mlua::Value, Option<mlua::Table>)| {
             if !files {
                 return Err(denied("ui.write_file", "Files"));
             }
+            // `append = true`: onto the end of the file instead of over it,
+            // to write a big file in parts (await each part: they're
+            // written in the order they finish).
+            let append = match &opts {
+                Some(opts) => opts.get::<Option<bool>>("append")?.unwrap_or(false),
+                None => false,
+            };
             let path = chosen(&picked, &file, "ui.write_file")?;
             crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
             // A string's bytes as they are (any byte, not only UTF-8), or
@@ -592,6 +599,16 @@ pub(crate) fn install(
                     true => crate::b64::decode(&bytes, WRITE_LIMIT, &path.display().to_string())?,
                     false => bytes,
                 };
+                if append {
+                    use std::io::Write as _;
+                    return std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .and_then(|mut f| f.write_all(&bytes))
+                        .map(|()| None)
+                        .map_err(|e| format!("{}: {e}", path.display()));
+                }
                 // Beside it, then over it: never half a file.
                 let temp = path.with_extension("zgx-write");
                 std::fs::write(&temp, bytes)

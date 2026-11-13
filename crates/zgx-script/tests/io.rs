@@ -82,6 +82,15 @@ return ui.column {
     ui.button { id = "sneak", w = 40, h = 20, "x", on_click = function()
         ui.read_file("/etc/hosts")
     end },
+    ui.button { id = "parts", w = 40, h = 20, "p", on_click = function()
+        ui.task(function()
+            local file = ui.save_file({ name = "out.txt" }):await()
+            ui.write_file(file, "head|"):await()
+            ui.write_file(file, "middle|", { append = true }):await()
+            ui.write_file(file, { base64 = "dGFpbA==" }, { append = true }):await()
+            shown:set("parts written")
+        end)
+    end },
 }
 "#;
 
@@ -240,6 +249,20 @@ fn a_saved_file_takes_any_bytes() {
         h.text("label")
     );
     assert!(!dir.join("out.txt").exists());
+}
+
+#[test]
+fn a_file_is_written_in_parts_with_append() {
+    let dir = dir("append");
+    let mut h = app(&dir, APP, None);
+    h.click("parts");
+    wait_for(&mut h, "parts written");
+    assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap(), "head|middle|tail");
+    // Without append, a write replaces it whole again.
+    h.click("save");
+    wait_for(&mut h, "wrote out.txt");
+    assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap(), "saved text");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// A dialog the person never answers, telling when the host drops it.
