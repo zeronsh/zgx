@@ -104,6 +104,84 @@ pub use surface::PresentationStatus;
 /// these. A new major version of wgpu is a new major version of zgx-gpu.
 pub use wgpu;
 
+/// Whether all of `clip`'s edges (logical) fall on whole device pixels.
+fn on_pixel_grid(clip: Rect, scale: f32) -> bool {
+    let whole = |value: f32| {
+        let scaled = value * scale;
+        (scaled - scaled.round()).abs() < 1e-3
+    };
+    whole(clip.x) && whole(clip.y) && whole(clip.x + clip.width) && whole(clip.y + clip.height)
+}
+/// The whole device pixels inside `clip` (logical), as left, top, right and
+/// bottom: for a view between device pixels (a zoomed window), what a scroll
+/// copy may move. Out of line: a view on the pixel grid never asks.
+#[cold]
+#[inline(never)]
+fn pixels_inward(clip: Rect, scale: f32) -> (i32, i32, i32, i32) {
+    let inward = |value: f32, up: bool| {
+        let scaled = value * scale;
+        let near = scaled.round();
+        (if (scaled - near).abs() < 1e-3 {
+            near
+        } else if up {
+            scaled.ceil()
+        } else {
+            scaled.floor()
+        }) as i32
+    };
+    (
+        inward(clip.x, true),
+        inward(clip.y, true),
+        inward(clip.x + clip.width, false),
+        inward(clip.y + clip.height, false),
+    )
+}
+/// The strips of `clip` (logical) outside the whole device pixels inside it,
+/// which a scroll copy of those pixels leaves to repaint. Out of line: only a
+/// view between device pixels has any.
+#[cold]
+#[inline(never)]
+fn edge_slivers(clip: Rect, scale: f32) -> Vec<Rect> {
+    // Each part pixel repaints whole, past the clip's edge too.
+    let snap = |value: f32, up: bool| {
+        let scaled = value * scale;
+        let near = scaled.round();
+        (if (scaled - near).abs() < 1e-3 {
+            near
+        } else if up {
+            scaled.ceil()
+        } else {
+            scaled.floor()
+        }) / scale
+    };
+    let (left, top) = (snap(clip.x, true), snap(clip.y, true));
+    let (right, bottom) = (
+        snap(clip.x + clip.width, false),
+        snap(clip.y + clip.height, false),
+    );
+    let (outer_left, outer_top) = (snap(clip.x, false), snap(clip.y, false));
+    let (outer_right, outer_bottom) = (
+        snap(clip.x + clip.width, true),
+        snap(clip.y + clip.height, true),
+    );
+    let width = outer_right - outer_left;
+    let height = outer_bottom - outer_top;
+    let mut out = Vec::new();
+    if top > outer_top {
+        out.push(Rect::new(outer_left, outer_top, width, top - outer_top));
+    }
+    if outer_bottom > bottom {
+        out.push(Rect::new(outer_left, bottom, width, outer_bottom - bottom));
+    }
+    if left > outer_left {
+        out.push(Rect::new(outer_left, outer_top, left - outer_left, height));
+    }
+    if outer_right > right {
+        out.push(Rect::new(right, outer_top, outer_right - right, height));
+    }
+    out
+}
+
 /// The corner radius of find's marks behind text.
 const MARK_RADIUS: f32 = 2.;
 const MAX_ATLAS: u32 = 2048;
@@ -13128,7 +13206,7 @@ impl GpuRenderer {
                 let scaled = value * self.scale;
                 ((scaled - scaled.round()).abs() < 1e-3).then_some(scaled.round() as i32)
             };
-            // The copy of `clip`'s pixels the move makes, if whole.
+            // The copy of `clip`'s pixels the move makes, if the move is whole.
             let pixels_of = |clip: Rect| {
                 let clip = clip.intersection(Rect::new(
                     0.,
@@ -13136,9 +13214,19 @@ impl GpuRenderer {
                     self.width as f32 / self.scale,
                     self.height as f32 / self.scale,
                 ))?;
-                let (x, y) = (whole(clip.x)?, whole(clip.y)?);
-                let (right, bottom) = (whole(clip.x + clip.width)?, whole(clip.y + clip.height)?);
                 let (dx, dy) = (whole(scroll.dx)?, whole(scroll.dy)?);
+                // On the pixel grid (most views), its own edges; between
+                // device pixels (a zoomed window), the whole pixels inside
+                // it, its part-pixel edges repainted (`edge_slivers`).
+                let (x, y, right, bottom) = match (
+                    whole(clip.x),
+                    whole(clip.y),
+                    whole(clip.x + clip.width),
+                    whole(clip.y + clip.height),
+                ) {
+                    (Some(x), Some(y), Some(right), Some(bottom)) => (x, y, right, bottom),
+                    _ => pixels_inward(clip, self.scale),
+                };
                 // Destination: the clip minus the exposed strip; source: the
                 // same pixels before the move.
                 let (x0, x1) = (x.max(x + dx), right.min(right + dx));
@@ -13236,6 +13324,9 @@ impl GpuRenderer {
                                 );
                             }
                             repaint.append(&mut carried);
+                            if !on_pixel_grid(scroll.clip, self.scale) {
+                                repaint.extend(edge_slivers(scroll.clip, self.scale));
+                            }
                             copies.push(copy);
                             self.scroll_copied.set(self.scroll_copied.get() + 1);
                         }
