@@ -65,6 +65,13 @@ pub static BAKED_LOOPS: Switch = Switch::new(
     "small declared loops play from frames drawn once (macOS); off, they draw each tick",
 );
 
+/// Whether declared loops play from frames drawn once (`BAKED_LOOPS`): not
+/// under a virtual or frozen clock (`crate::clock`), whose time they would
+/// not follow: they draw each tick, at that time.
+pub fn baked_loops() -> bool {
+    BAKED_LOOPS.on() && !crate::clock::is_virtual()
+}
+
 /// Every switch.
 pub static ALL: [&Switch; 4] = [&SCROLL_COPY, &REFRESH_GRID, &PARTIAL_REPAINT, &BAKED_LOOPS];
 

@@ -576,6 +576,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   frames  [n=10] [runs=5] [all] [since] [keep]   the last frames that did anything: their phases, GPU
                                                  time, notes, what ran and why (since: a mark or frame)
   mark    [name=mark]                            mark now: `frames since=name` reads what follows
+  clock   [freeze|thaw|advance <ms>]             freeze every animation, timer and caret at one time (also ZGX_FREEZE_TIME=1 at launch), move it by hand, or let it run
   switch  [name] [on]                            list fast paths, or switch one on or off, to compare
   search  [query] [next] [prev] [all] [n=5] [close]  find in page: the count, the current match, the first n
   zoom    [to: in|out|reset|1.5|150%]            the window's zoom (Cmd/Ctrl +, -, 0) and its viewport in points
@@ -1229,6 +1230,39 @@ impl Session {
                     ]),
                 ))
             }
+            "clock" => (|| {
+                let action = text("action").unwrap_or_default();
+                match action.as_str() {
+                    "" | "state" => {}
+                    "freeze" => zgx::clock::freeze(),
+                    "thaw" => zgx::clock::thaw(),
+                    "advance" => {
+                        let ms = number("ms").ok_or("`clock advance` takes `ms`")?;
+                        let by = std::time::Duration::from_secs_f64(ms.max(0.) / 1000.);
+                        if !zgx::clock::advance_frozen(by, || {}) {
+                            return Err("the clock isn't frozen (`clock freeze` first)".into());
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "`clock` takes freeze, thaw, advance <ms> or nothing, not `{other}`"
+                        ));
+                    }
+                }
+                let elapsed = zgx::clock::frozen_elapsed();
+                let text = match elapsed {
+                    Some(elapsed) => format!("frozen, {} ms in", elapsed.as_millis()),
+                    None => "running".to_string(),
+                };
+                let data = Value::record([
+                    ("frozen", Value::Bool(elapsed.is_some())),
+                    (
+                        "elapsed_ms",
+                        elapsed.map_or(Value::Nil, |e| Value::Num(e.as_secs_f64() * 1000.)),
+                    ),
+                ]);
+                Ok((text, data))
+            })(),
             "switch" => (|| {
                 let set = match field("on") {
                     None => None,

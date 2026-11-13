@@ -1028,6 +1028,12 @@ impl Application {
     /// return once the application quits.
     pub fn run(self, build: impl FnOnce(&mut WindowContext)) -> Result<(), Box<dyn Error>> {
         zgx::profile::mark("run");
+        // `ZGX_FREEZE_TIME=1`: every animation, timer, caret and frame stands
+        // at one time until `zgx inspect clock advance` moves it, so a
+        // screenshot run is the same each time.
+        if zgx::env::var_os("ZGX_FREEZE_TIME").is_some_and(|v| !v.is_empty() && v != "0") {
+            zgx::clock::freeze();
+        }
         // Who the app is to the system's notifications and badge.
         crate::notify::set_identity(crate::notify::Identity {
             application_id: self.application_id.clone(),

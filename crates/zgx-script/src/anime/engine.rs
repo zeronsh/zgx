@@ -484,8 +484,7 @@ impl Clip {
         let Baking::From(from) = self.baking.get() else {
             return;
         };
-        if std::time::Instant::now() < from || !zgx::switches::BAKED_LOOPS.on() || !self.can_bake()
-        {
+        if std::time::Instant::now() < from || !zgx::switches::baked_loops() || !self.can_bake() {
             return;
         }
         let first = self.tracks.borrow().first().map(|t| t.target.clone());
