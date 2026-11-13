@@ -130,6 +130,9 @@ impl InlineEdges {
 /// fractional shares, matching GPUI's `grid_cols`/`grid_rows` public surface.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LayoutOptions {
+    /// The width its children's percentages resolve against, in place of
+    /// its own: a scroll view's content takes its viewport's.
+    pub percent_basis_width: Option<f32>,
     /// Flex, grid, or out of layout (CSS `display`).
     pub display: Option<Display>,
     /// `Some(false)` keeps its room in layout but paints none of it and

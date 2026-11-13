@@ -150,3 +150,48 @@ fn a_percent_width_in_a_capped_scroll_resolves_against_the_viewport() {
     assert_eq!(bounds(&ui, "list", &view).width, 500.);
     assert_eq!(bounds(&ui, "row", &view).width, 500., "fills the viewport");
 }
+
+/// A percentage in a sideways scroll's content is of its viewport (CSS's
+/// scrollport), and wider content still scrolls.
+fn sideways(
+    explicit_w: bool,
+    inner_w: f32,
+) -> (Ui, zgx::compose::ViewHandle, zgx::reactive::Signal<f32>) {
+    let mut ui = Ui::new(800., 800.);
+    let offset = ui.signal(0.);
+    let mut view = scroll_x(offset.clone()).id("list").max_h(192.);
+    if explicit_w {
+        view = view.w(500.);
+    }
+    let handle = ui.mount(
+        column().w(500.).child(
+            view.child(
+                div()
+                    .id("row")
+                    .min_w_percent(100.)
+                    .h(40.)
+                    .child(div().w(inner_w).h(40.)),
+            ),
+        ),
+    );
+    ui.prepare_frame();
+    (ui, handle, offset)
+}
+
+#[test]
+fn a_percent_min_width_in_a_sideways_scroll_spans_the_viewport() {
+    for explicit in [false, true] {
+        let (ui, view, _) = sideways(explicit, 100.);
+        assert_eq!(bounds(&ui, "list", &view).width, 500., "{explicit}");
+        assert_eq!(bounds(&ui, "row", &view).width, 500., "{explicit}");
+    }
+}
+
+#[test]
+fn wider_content_in_a_sideways_scroll_still_scrolls() {
+    for explicit in [false, true] {
+        let (ui, view, _) = sideways(explicit, 900.);
+        assert_eq!(bounds(&ui, "list", &view).width, 500., "{explicit}");
+        assert_eq!(bounds(&ui, "row", &view).width, 900., "{explicit}");
+    }
+}

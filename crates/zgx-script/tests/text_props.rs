@@ -402,3 +402,29 @@ fn a_percent_min_width_in_a_capped_scroll_fills_the_viewport() {
     assert_eq!(scene.bounds(s).width, 500.);
     assert_eq!(scene.bounds(r).width, 500.);
 }
+
+/// A `min_w = "100%"` row in a `scroll_x` given only a `max_h` fills its viewport.
+#[test]
+fn a_percent_min_width_in_a_sideways_scroll_fills_the_viewport() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            w = 500,
+            ui.scroll_x {
+                id = "s",
+                max_h = 100,
+                ui.row {
+                    id = "r",
+                    min_w = "100%",
+                    justify = "center",
+                    ui.column { w = 100, h = 40 },
+                },
+            },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let (s, r) = (h.find("s").unwrap(), h.find("r").unwrap());
+    let scene = h.ui.scene.borrow();
+    assert_eq!(scene.bounds(s).width, 500.);
+    assert_eq!(scene.bounds(r).width, 500.);
+}

@@ -8001,6 +8001,14 @@ fn mount_scroll(
         content_style.height = (horizontal && !fitted).then_some(height);
         content_style.height_percent = fitted.then_some(1.);
         content_style.flex_shrink = 0.;
+        let mut options = content_style
+            .layout_options
+            .as_deref()
+            .copied()
+            .unwrap_or_default();
+        options.percent_basis_width = horizontal.then_some(width);
+        content_style.layout_options =
+            (options != Default::default()).then(|| std::sync::Arc::new(options));
         scene.set_style(content, content_style);
         let rtl = rtl_of(&scene);
         // Fitting (resized, or its content shrank), it can't scroll and

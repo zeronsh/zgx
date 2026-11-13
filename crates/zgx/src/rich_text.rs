@@ -800,6 +800,17 @@ impl RichText {
         self.remade(lines, runs).unwrap_or_else(|_| self.clone())
     }
 }
+/// `text` with a line feed in place of the space at each of `spaces`.
+pub(crate) fn line_feeds(text: &str, spaces: &[usize]) -> Arc<str> {
+    let mut bytes = text.as_bytes().to_vec();
+    for &at in spaces {
+        if bytes.get(at) == Some(&b' ') {
+            bytes[at] = b'\n';
+        }
+    }
+    String::from_utf8(bytes).map_or_else(|_| text.into(), Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     /// A grid in a rich run reads as no tracking: the estimate's 0.6 em.
@@ -1024,15 +1035,4 @@ mod tests {
             assert!(RichText::new("x", vec![r]).is_err());
         }
     }
-}
-
-/// `text` with a line feed in place of the space at each of `spaces`.
-pub(crate) fn line_feeds(text: &str, spaces: &[usize]) -> Arc<str> {
-    let mut bytes = text.as_bytes().to_vec();
-    for &at in spaces {
-        if bytes.get(at) == Some(&b' ') {
-            bytes[at] = b'\n';
-        }
-    }
-    String::from_utf8(bytes).map_or_else(|_| text.into(), Into::into)
 }

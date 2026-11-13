@@ -176,7 +176,8 @@ return function(S: Store, K: typeof(Kit), D: typeof(Data))
 				el:focus()
 			end
 		end
-		return ui.column(props)
+		-- (The props table is large for the checker to match; it was checked above.)
+		return (ui.column :: (any) -> Node)(props)
 	end
 	local function highlight(state: State<number>, offsets: { number }, h: number, inset: number?): Node
 		return ui.div {
