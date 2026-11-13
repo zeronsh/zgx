@@ -5364,6 +5364,7 @@ impl Ui {
         let focus = focused.clone();
         let draw_caret_width = self.storage.caret_width.clone();
         let draw_blink = self.storage.caret_blink.clone();
+        let draw_window_active = self.observe_window_active();
         let scroll_for_draw = scroll.clone();
         let reveal_caret = Rc::new(Cell::new(true));
         let draw_reveal_caret = reveal_caret.clone();
@@ -5883,6 +5884,7 @@ impl Ui {
             let mut effects = s.effects(caret);
             // Read-only text shows a selection but no caret.
             let caret_shown = *focus.borrow()
+                && draw_window_active.get()
                 && !draw_read_only.get()
                 && e.preedit().is_none_or(|preedit| preedit.cursor.is_some());
             // Shown, it paints unless the host draws it (`Ui::native_caret`).

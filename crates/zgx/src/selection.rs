@@ -2066,6 +2066,9 @@ impl Ui {
         {
             window_active.set(active);
         }
+        if self.window_is_active() != active {
+            crate::caret_blink::window_active_changed(self, active);
+        }
         let changed = {
             let mut state = self.selection_state().borrow_mut();
             let changed = state.inactive == active;
