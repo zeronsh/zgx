@@ -243,17 +243,21 @@ struct TermDamageState {
     last_cursor: Point,
 
     /// zgx: lines the whole screen scrolled up since the damage was reset,
-    /// with the lines' damage moved up with them (`Term::scrolled`).
+    /// with the lines' damage moved up with them (`Term::scrolled`): line
+    /// `i`'s damage is at `lines[i + scrolled]`, a window sliding down
+    /// `lines` (`ordered` puts it back at the start), so a scroll is a count
+    /// and marking a line one addition.
     scrolled: usize,
 
-    /// zgx: where line 0's damage is in `lines`, which scrolling rotates
-    /// rather than moves (`ordered` puts them back).
-    base: usize,
+    /// zgx: the screen's lines; `lines` holds a third of them more (`slack`),
+    /// room for the window to slide before the damage is whole.
+    screen: usize,
+    slack: usize,
 }
 
 impl TermDamageState {
     fn new(num_cols: usize, num_lines: usize) -> Self {
-        let lines = (0..num_lines)
+        let lines = (0..window(num_lines))
             .map(|line| LineDamageBounds::undamaged(line, num_cols))
             .collect();
 
@@ -262,7 +266,8 @@ impl TermDamageState {
             lines,
             last_cursor: Default::default(),
             scrolled: 0,
-            base: 0,
+            screen: num_lines,
+            slack: window(num_lines) - num_lines,
         }
     }
 
@@ -272,11 +277,12 @@ impl TermDamageState {
         self.last_cursor = Default::default();
         self.full = true;
         self.scrolled = 0;
-        self.base = 0;
+        self.screen = num_lines;
+        self.slack = window(num_lines) - num_lines;
 
         self.lines.clear();
-        self.lines.reserve(num_lines);
-        for line in 0..num_lines {
+        self.lines.reserve(window(num_lines));
+        for line in 0..window(num_lines) {
             self.lines.push(LineDamageBounds::undamaged(line, num_cols));
         }
     }
@@ -290,25 +296,21 @@ impl TermDamageState {
     /// Expand `line`'s damage to span at least `left` to `right` column.
     #[inline]
     fn damage_line(&mut self, line: usize, left: usize, right: usize) {
-        let mut at = line + self.base;
-        if at >= self.lines.len() {
-            at -= self.lines.len();
-        }
-        self.lines[at].expand(left, right);
+        self.lines[line + self.scrolled].expand(left, right);
     }
 
-    /// zgx: the lines' damage in order again, after scrolling turned it:
-    /// the places the top lines left are the new bottom lines', damaged
-    /// whole.
+    /// zgx: the screen's lines' damage at the start of `lines` again, after
+    /// scrolling slid it down: the lines new at the bottom (where nothing
+    /// was marked before they came) damaged whole.
     fn ordered(&mut self, num_cols: usize) {
-        if self.base == 0 {
+        let scrolled = self.scrolled;
+        if scrolled == 0 {
             return;
         }
-        self.lines.rotate_left(self.base);
-        self.base = 0;
-        let count = self.lines.len();
-        for (row, line) in self.lines.iter_mut().enumerate() {
-            *line = if row + self.scrolled >= count {
+        let screen = self.screen;
+        self.lines.copy_within(scrolled..scrolled + screen, 0);
+        for (row, line) in self.lines[..screen].iter_mut().enumerate() {
+            *line = if row + scrolled >= screen {
                 LineDamageBounds::new(row, 0, num_cols.saturating_sub(1))
             } else {
                 LineDamageBounds::new(row, line.left, line.right)
@@ -318,36 +320,37 @@ impl TermDamageState {
 
     /// Reset information about terminal damage.
     fn reset(&mut self, num_cols: usize) {
-        // Every line is reset: turned back is only for damage read. (A
-        // scroll changes no line's number, so they stay where they are.)
-        self.base = 0;
+        // Every line is reset, the window's slack too: put back in order is
+        // only for damage read. (A scroll changes no line's number, so they
+        // stay where they are.)
         self.full = false;
         self.scrolled = 0;
         self.lines.iter_mut().for_each(|line| line.reset(num_cols));
     }
 
     /// zgx: the whole screen scrolled up `lines`: each line's damage moves up
-    /// with its line (the list turns: `base`), the lines new at the bottom
-    /// are damaged whole (`ordered`), and the old cursor moves up too. Whole
-    /// damage, if they are all new. A count and an offset: no line is read.
+    /// with its line (the window slides: `scrolled`), the lines new at the
+    /// bottom are damaged whole and the old cursor moves up (as the damage
+    /// is read: `ordered`, `Term::damage`). A count: no line is read.
     fn scroll_up(&mut self, lines: usize) {
         // Past a third of the screen's lines since the last reset, the rest
         // go too: a frame bringing that many builds most rows anyway, and
         // one refilling the screen (output pouring in) then turns its
         // damage for a third of its scrolls, not all of them.
-        let count = self.lines.len();
-        if self.scrolled + lines > count / 3 {
+        // The window has that third's room to slide in.
+        let scrolled = self.scrolled + lines;
+        if scrolled > self.slack {
             self.full = true;
             return;
         }
-        self.base += lines;
-        if self.base >= count {
-            self.base -= count;
-        }
-        // Off the top, it damages the first row (a needless redraw at most).
-        self.last_cursor.line = cmp::max(self.last_cursor.line - lines as i32, Line(0));
-        self.scrolled += lines;
+        self.scrolled = scrolled;
     }
+}
+
+/// zgx: the damage lines kept for a screen of `lines`: a third more, the
+/// room a scroll slides the screen's damage down before it is whole.
+fn window(lines: usize) -> usize {
+    lines + lines / 3
 }
 
 pub struct Term<T> {
@@ -583,6 +586,12 @@ impl<T> Term<T> {
             return TermDamage::Full;
         }
 
+        // zgx: the old cursor moved up with its line as the screen scrolled
+        // (off the top, it damages the first row: a needless redraw at most).
+        let mut previous_cursor = previous_cursor;
+        let scrolled = self.damage.scrolled as i32;
+        previous_cursor.line = cmp::max(previous_cursor.line - scrolled, Line(0));
+
         // Add information about old cursor position and new one if they are not the same, so we
         // cover everything that was produced by `Term::input`.
         if self.damage.last_cursor != previous_cursor {
@@ -599,7 +608,11 @@ impl<T> Term<T> {
         let columns = self.columns();
         self.damage.ordered(columns);
         let display_offset = self.grid().display_offset();
-        TermDamage::Partial(TermDamageIterator::new(&self.damage.lines, display_offset))
+        let screen = self.damage.screen;
+        TermDamage::Partial(TermDamageIterator::new(
+            &self.damage.lines[..screen],
+            display_offset,
+        ))
     }
 
     /// zgx: whether a scroll from the top turns the damage (`ring_ok`), after
@@ -1021,14 +1034,15 @@ impl<T> Term<T> {
         }
         // zgx: the whole screen, its newest lines shown, moves its lines'
         // damage up with them: an embedder moves what it drew of them, and
-        // draws only the lines new at the bottom (`scrolled`).
-        if self.damage.full {
-            return;
-        }
-        if self.ring_ok && origin == Line(0) {
-            self.damage.scroll_up(lines);
-        } else {
-            self.mark_fully_damaged();
+        // draws only the lines new at the bottom (`scrolled`): a count and a
+        // compare. Once the damage is whole (a third of the screen into a
+        // frame), a line feed pays one test, as it paid one store before.
+        if !self.damage.full {
+            if self.ring_ok && origin == Line(0) {
+                self.damage.scroll_up(lines);
+            } else {
+                self.mark_fully_damaged();
+            }
         }
     }
 
