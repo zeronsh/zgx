@@ -678,14 +678,7 @@ impl GpuRenderer {
     ) {
         let (uniform, plain) = self.viewport_uniform(band.viewport);
         let viewport = match regions {
-            Some((offset, size)) => self.viewport_group(
-                &uniform,
-                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: vertices,
-                    offset,
-                    size: wgpu::BufferSize::new(size),
-                }),
-            ),
+            Some(place) => self.regions_group(&uniform, vertices, place),
             None => plain,
         };
         stats.render_passes += 1;

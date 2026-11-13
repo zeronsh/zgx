@@ -2934,6 +2934,8 @@ struct Deferred {
 /// `GpuRenderer::blur`).
 struct VerticalBlur {
     bind: wgpu::BindGroup,
+    /// Where its records lie in the frame's buffer (`bind`'s offsets).
+    offsets: [u32; 2],
     /// The filter (its index in the batch) and output of each draw.
     draws: Vec<(u32, Scissor)>,
     /// Drawn with `BlurPipelines::mix` (else over a copy of each area).
@@ -3034,12 +3036,15 @@ impl BlurPipelines {
             },
             count: None,
         };
+        // The frame's records, in its vertex buffer at offsets that move
+        // from frame to frame: given as each pass binds its group, so the
+        // groups last (`BlurScratch::groups`).
         let records = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
+                has_dynamic_offset: true,
                 min_binding_size: None,
             },
             count: None,
@@ -3184,6 +3189,47 @@ impl BlurPipelines {
 /// need, the blur passes rendering from one into the other.
 struct BlurScratch {
     atlas: [wgpu::Texture; 2],
+    /// Its atlas's views, made with it.
+    views: [wgpu::TextureView; 2],
+    /// The halves' view (`GpuRenderer::blur_halves`), made once for each.
+    halves: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// The passes' bind groups, by what they bind: made once, not each
+    /// frame (each a trip through wgpu's validation).
+    groups: Vec<BlurGroups>,
+}
+impl BlurScratch {
+    fn new(atlas: [wgpu::Texture; 2]) -> Self {
+        let views = atlas
+            .each_ref()
+            .map(|texture| texture.create_view(&Default::default()));
+        Self {
+            atlas,
+            views,
+            halves: None,
+            groups: Vec::new(),
+        }
+    }
+}
+/// A batch's blur bind groups for records in `records` (at most
+/// `capacity` bytes of each part, at the offsets a pass binds them with),
+/// reading `source` (the frame, or a popup's backdrop) and the halves'
+/// `halves` view.
+struct BlurGroups {
+    records: wgpu::Buffer,
+    capacity: [u64; 2],
+    source: wgpu::TextureView,
+    halves: Option<wgpu::TextureView>,
+    /// The frame (`source`) read, the second atlas beside it.
+    from_source: wgpu::BindGroup,
+    /// The frame read, the halves beside it (binding 1: what a factor-8
+    /// reduce adds its second half from).
+    from_halves: Option<wgpu::BindGroup>,
+    /// The first atlas read (across, and the blur drawn back).
+    from_first: wgpu::BindGroup,
+    /// The second atlas read (down).
+    from_second: wgpu::BindGroup,
+    /// The window's own frame read (a popup's originals), made if needed.
+    from_frame: Option<wgpu::BindGroup>,
 }
 /// The spare retained target with the views and bind groups it needs.
 struct Retained {
@@ -4719,6 +4765,12 @@ pub struct GpuRenderer {
     failed_svgs: rustc_hash::FxHashSet<u64>,
     /// The viewport of the target currently being rendered.
     viewport_bind: Option<wgpu::BindGroup>,
+    /// Viewport groups binding the frame's regions (`regions_group`), by
+    /// uniform, buffer and the regions' place in it, the latest last.
+    regions_groups: Vec<(wgpu::Buffer, wgpu::Buffer, (u64, u64), wgpu::BindGroup)>,
+    /// The device's `min_storage_buffer_offset_alignment`, read once: the
+    /// limits come whole, through wgpu, each time they are asked.
+    storage_align: usize,
     /// Reused upload memory for per-frame vertices; `write_buffer` would
     /// allocate and free a staging buffer every frame.
     belt: RefCell<wgpu::util::StagingBelt>,
@@ -5592,6 +5644,8 @@ impl GpuRenderer {
             node_ramps: FxHashMap::default(),
             failed_svgs: Default::default(),
             viewport_bind: None,
+            regions_groups: Vec::new(),
+            storage_align: device.limits().min_storage_buffer_offset_alignment as usize,
             belt: RefCell::new(wgpu::util::StagingBelt::new(device.clone(), 256 * 1024)),
             mapped: context
                 .inner
@@ -6369,6 +6423,10 @@ impl GpuRenderer {
         self.height = height;
         self.spare = None;
         self.target_copy_bind = None;
+        // Its blur groups read the target's view, made again for the size.
+        if let Some(scratch) = &mut self.blur_scratch {
+            scratch.groups.clear();
+        }
         // A surface of the renderer's own becomes the target
         // (`begin_layer_frame`), resized there on Windows.
         #[cfg(own_surfaces)]
@@ -8435,6 +8493,44 @@ impl GpuRenderer {
             self.backdrops.insert(size, (texture, bind));
         }
         &self.backdrops[&size]
+    }
+    /// The viewport group binding `uniform` and the regions at `place`
+    /// (offset and size) in `vertices`: one made for them before (a frame
+    /// whose quads kept their size puts its regions where the last did), or
+    /// made now, the oldest of a few let go (and those for a buffer no
+    /// longer drawn from). Bound plainly, not at a dynamic offset: wgpu
+    /// keeps a pass's dynamic offsets in a list it allocates each pass.
+    #[inline(never)]
+    pub(crate) fn regions_group(
+        &mut self,
+        uniform: &wgpu::Buffer,
+        vertices: &wgpu::Buffer,
+        place: (u64, u64),
+    ) -> wgpu::BindGroup {
+        if let Some((.., group)) = self
+            .regions_groups
+            .iter()
+            .find(|(u, v, at, _)| u == uniform && v == vertices && *at == place)
+        {
+            return group.clone();
+        }
+        let (current, mapped) = (&self.vertices, &self.mapped);
+        self.regions_groups.retain(|(_, v, ..)| {
+            v == current || mapped.as_ref().is_some_and(|ring| ring.borrow().holds(v))
+        });
+        if self.regions_groups.len() >= 8 {
+            self.regions_groups.remove(0);
+        }
+        let group = self.viewport_group(
+            uniform,
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: vertices,
+                offset: place.0,
+                size: wgpu::BufferSize::new(place.1),
+            }),
+        );
+        (self.regions_groups).push((uniform.clone(), vertices.clone(), place, group.clone()));
+        group
     }
     /// Group 1 of the quad pipelines: the viewport `uniform` and `regions`.
     fn viewport_group(
@@ -11510,7 +11606,7 @@ impl GpuRenderer {
             .map(|(_, members)| self.plan_blur(&batch_filters(&draws, &regions, members)))
             .collect();
         let bytes: &[u8] = bytemuck::cast_slice(&quads);
-        let align = self.device.limits().min_storage_buffer_offset_alignment as usize;
+        let align = self.storage_align;
         // Each part at an aligned offset in the buffer.
         let mut records = Vec::new();
         let mut record = |part: &[u8]| {
@@ -11523,7 +11619,7 @@ impl GpuRenderer {
         let region_range = (!clips.is_empty()).then(|| record(bytemuck::cast_slice(&clips)));
         // The polyline strokes' points too, bound as group 2 where drawn.
         let points_range = polylines.then(|| record(bytemuck::cast_slice(&points)));
-        let ranges: Vec<Option<[(u64, u64); 2]>> = plans
+        let mut ranges: Vec<Option<[(u64, u64); 2]>> = plans
             .iter()
             .map(|plan| {
                 let plan = plan.as_ref()?;
@@ -11534,6 +11630,9 @@ impl GpuRenderer {
                 ])
             })
             .collect();
+        if ranges.iter().any(Option::is_some) {
+            pad_blur_records(bytes.len(), &mut records, &mut ranges);
+        }
         let needed = bytes.len() + records.len();
         let vertices = if let Some(mapped) = &mut self.mapped {
             let mapped = mapped.get_mut();
@@ -11583,12 +11682,7 @@ impl GpuRenderer {
                 ))
                 .map(|(uniform, _)| uniform.clone())
                 .expect("selected above");
-            let regions = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &vertices,
-                offset,
-                size: wgpu::BufferSize::new(size),
-            });
-            self.viewport_bind = Some(self.viewport_group(&uniform, regions));
+            self.viewport_bind = Some(self.regions_group(&uniform, &vertices, (offset, size)));
         }
         let points_bind = points_range.map(|(offset, size)| {
             let polylines = self.context.inner.quads.polylines();
@@ -12612,12 +12706,13 @@ impl GpuRenderer {
         }
         let records = plans
             .iter()
-            .map(|plan| {
+            .enumerate()
+            .map(|(batch, plan)| {
                 let Some(plan) = plan else { return Ok(None) };
                 let slots: Vec<SlotRecord> = plan.slots.iter().map(|slot| slot.0).collect();
                 Ok(Some([
-                    device.records(bytemuck::cast_slice(&plan.blurs))?,
-                    device.records(bytemuck::cast_slice(&slots))?,
+                    state.set_blur_records(batch, 0, bytemuck::cast_slice(&plan.blurs))?,
+                    state.set_blur_records(batch, 1, bytemuck::cast_slice(&slots))?,
                 ]))
             })
             .collect::<Result<Vec<_>, GpuError>>()?;
@@ -14000,7 +14095,8 @@ impl GpuRenderer {
         if !self.plan_halves(&slots, (width, height), limit) {
             return None;
         }
-        let atlas = self.blur_scratch.take().map(|scratch| scratch.atlas);
+        let kept = self.blur_scratch.take();
+        let atlas = kept.as_ref().map(|scratch| scratch.atlas.clone());
         let atlas = [0, 1].map(|i| match &atlas {
             Some(atlas) if atlas[i].width() >= width && atlas[i].height() >= height => {
                 atlas[i].clone()
@@ -14017,7 +14113,11 @@ impl GpuRenderer {
                 )
             }
         });
-        self.blur_scratch = Some(BlurScratch { atlas });
+        // Its views and groups kept while its atlas is.
+        self.blur_scratch = Some(match kept {
+            Some(kept) if kept.atlas == atlas => kept,
+            _ => BlurScratch::new(atlas),
+        });
         Some(BlurPlan {
             blurs,
             slots,
@@ -14029,6 +14129,60 @@ impl GpuRenderer {
     /// across and down passes, every slot of the batch drawn in each. Its
     /// records lie in `buffer` (offset and size of the filters', then the
     /// slots').
+    /// The blur's bind groups for records in `records` (each part at most
+    /// `capacity` bytes) read from `source`: those made for them before,
+    /// or made now (and those for a buffer no longer drawn from let go).
+    /// Binding 1 goes unread except by the copy mix, but may never be the
+    /// pass's own target.
+    #[inline(never)]
+    fn blur_groups(
+        &mut self,
+        records: &wgpu::Buffer,
+        capacity: [u64; 2],
+        source: &wgpu::TextureView,
+    ) -> usize {
+        let scratch = self.blur_scratch.as_mut().expect("planned");
+        if scratch.halves.as_ref().map(|(texture, _)| texture) != self.blur_halves.as_ref() {
+            scratch.halves = (self.blur_halves.as_ref())
+                .map(|texture| (texture.clone(), texture.create_view(&Default::default())));
+        }
+        let halves = scratch.halves.as_ref().map(|(_, view)| view);
+        if let Some(found) = scratch.groups.iter().position(|groups| {
+            groups.records == *records
+                && groups.capacity == capacity
+                && groups.source == *source
+                && groups.halves.as_ref() == halves
+        }) {
+            return found;
+        }
+        let (vertices, mapped) = (&self.vertices, &self.mapped);
+        scratch.groups.retain(|groups| {
+            groups.records == *vertices
+                || mapped
+                    .as_ref()
+                    .is_some_and(|ring| ring.borrow().holds(&groups.records))
+        });
+        let pipelines = self.blur_pipelines.as_ref().expect("created first");
+        let device = &self.device;
+        let views = &scratch.views;
+        let group = |from: &wgpu::TextureView| {
+            blur_group(device, pipelines, from, &views[1], records, capacity)
+        };
+        let groups = BlurGroups {
+            records: records.clone(),
+            capacity,
+            source: source.clone(),
+            halves: halves.cloned(),
+            from_source: group(source),
+            from_halves: halves
+                .map(|halves| blur_group(device, pipelines, source, halves, records, capacity)),
+            from_first: blur_group(device, pipelines, &views[0], &views[0], records, capacity),
+            from_second: blur_group(device, pipelines, &views[1], &views[1], records, capacity),
+            from_frame: (*source != self.view).then(|| group(&self.view)),
+        };
+        scratch.groups.push(groups);
+        scratch.groups.len() - 1
+    }
     fn blur(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -14047,72 +14201,27 @@ impl GpuRenderer {
         if self.blur_pipelines.is_none() {
             self.blur_pipelines = Some(BlurPipelines::new(&self.device));
         }
-        let atlas = &self.blur_scratch.as_ref().expect("planned").atlas;
-        let views = atlas
-            .each_ref()
-            .map(|texture| texture.create_view(&Default::default()));
-        let records = |(offset, size): (u64, u64)| {
-            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer,
-                offset,
-                size: wgpu::BufferSize::new(size),
-            })
-        };
+        // A popup blurs its window's frame (`set_backdrop`), but what it mixes
+        // the blur over stays its own: past a rounded box's curve, its target
+        // (its shadow), not the window's pixels.
+        let backdrop = self.backdrop.as_ref().map(|(_, view)| view.clone());
+        let source = backdrop.clone().unwrap_or_else(|| self.view.clone());
+        let offsets = ranges.map(|(offset, _)| offset as u32);
+        let group = self.blur_groups(buffer, ranges.map(|(_, capacity)| capacity), &source);
         let pipelines = self.blur_pipelines.as_ref().expect("created above");
-        // Binding 1 goes unread except by the copy mix, but may never be the
-        // pass's own target.
-        let bind = |source: &wgpu::TextureView, other: &wgpu::TextureView| {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("backdrop blur"),
-                layout: &pipelines.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(source),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(other),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: records(ranges[0]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: records(ranges[1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&pipelines.linear),
-                    },
-                ],
-            })
-        };
+        let scratch = self.blur_scratch.as_ref().expect("planned");
+        let (views, groups) = (&scratch.views, &scratch.groups[group]);
         // Whole-area passes: what any output draws depends on the area alone,
         // so a partly damaged filter matches a fresh frame. Copies land in
         // the first atlas with the averages and stay there.
         let copies = slots.iter().any(|slot| !slot.2);
-        // A popup blurs its window's frame (`set_backdrop`), but what it mixes
-        // the blur over stays its own: past a rounded box's curve, its target
-        // (its shadow), not the window's pixels.
-        let backdrop = self.backdrop.as_ref().map(|(_, view)| view);
-        let source = backdrop.unwrap_or(&self.view);
-        let halves = self.blur_halves.as_ref();
+        let halves = scratch.halves.as_ref().map(|(_, view)| view);
         let passes = [
             (
                 "blur reduce",
                 &pipelines.reduce,
                 // After a factor-8 batch's halves pass, reading them.
-                halves_pass(
-                    encoder,
-                    pipelines,
-                    halves,
-                    slots,
-                    &|other| bind(source, other),
-                    &views[1],
-                    stats,
-                ),
+                halves_pass(encoder, pipelines, halves, slots, groups, &offsets, stats),
                 &views[0],
                 backdrop.is_some(),
                 false,
@@ -14120,7 +14229,7 @@ impl GpuRenderer {
             (
                 "blur across",
                 &pipelines.across,
-                bind(&views[0], &views[0]),
+                &groups.from_first,
                 &views[1],
                 true,
                 false,
@@ -14128,7 +14237,7 @@ impl GpuRenderer {
             (
                 "blur down",
                 &pipelines.down,
-                bind(&views[1], &views[1]),
+                &groups.from_second,
                 &views[0],
                 true,
                 copies,
@@ -14153,7 +14262,7 @@ impl GpuRenderer {
                 ..Default::default()
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, group, &[]);
+            pass.set_bind_group(0, *group, &offsets);
             for (k, (record, (w, h), blurred)) in slots.iter().enumerate() {
                 if *w == 0 || *h == 0 || (*blurred_only && !blurred) {
                     continue;
@@ -14166,7 +14275,7 @@ impl GpuRenderer {
         stats.render_passes += passes.len();
         stats.blur_passes += passes.len();
         if backdrop.is_some() && copies {
-            let group = bind(&self.view, &views[1]);
+            let group = groups.from_frame.as_ref().expect("made with a backdrop");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("blur originals"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -14181,7 +14290,7 @@ impl GpuRenderer {
                 ..Default::default()
             });
             pass.set_pipeline(&pipelines.reduce);
-            pass.set_bind_group(0, &group, &[]);
+            pass.set_bind_group(0, group, &offsets);
             for (k, (record, (w, h), blurred)) in slots.iter().enumerate() {
                 if *w == 0 || *h == 0 || *blurred {
                     continue;
@@ -14195,7 +14304,8 @@ impl GpuRenderer {
             stats.blur_passes += 1;
         }
         Some(VerticalBlur {
-            bind: bind(&views[0], &views[0]),
+            bind: groups.from_first.clone(),
+            offsets,
             draws: draws.clone(),
             mixed,
         })
@@ -14209,7 +14319,7 @@ impl GpuRenderer {
         stats: &mut GpuStats,
     ) {
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &blur.bind, &[]);
+        pass.set_bind_group(0, &blur.bind, &blur.offsets);
         for &(index, (x, y, width, height)) in &blur.draws {
             pass.set_scissor_rect(x, y, width, height);
             pass.draw(0..3, index..index + 1);
@@ -16948,6 +17058,12 @@ impl GpuRenderer {
         font_cache_check();
         self.blur_scratch = None;
         self.blur_halves = None;
+        // The bind groups kept for the frame's regions, made again as needed.
+        self.regions_groups = Vec::new();
+        #[cfg(d3d11)]
+        if let Some(state) = &mut self.d3d11 {
+            state.blur_records = Vec::new();
+        }
         // A frame's quads and draws: the next frame makes them again.
         self.frame_quads = Vec::new();
         self.frame_points = Vec::new();
@@ -18022,28 +18138,29 @@ fn written(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView)
 /// steps adds no 8-bit banding to smooth frost.
 /// Encode a batch's halves pass where any of its slots reduces by 8 (its
 /// factor-8 slots' first halves into `halves`, cleared: `fs_reduce4`), and
-/// give the reduce's bind group: reading them, or `other` where there's no
-/// such pass. Out of `blur`'s body.
+/// give the reduce's bind group: reading them, or the source where there's
+/// no such pass. Out of `blur`'s body.
 #[inline(never)]
-fn halves_pass(
+fn halves_pass<'a>(
     encoder: &mut wgpu::CommandEncoder,
     pipelines: &BlurPipelines,
-    halves: Option<&wgpu::Texture>,
+    halves: Option<&wgpu::TextureView>,
     slots: &[(SlotRecord, (u32, u32), bool)],
-    bind: &dyn Fn(&wgpu::TextureView) -> wgpu::BindGroup,
-    other: &wgpu::TextureView,
+    groups: &'a BlurGroups,
+    offsets: &[u32; 2],
     stats: &mut GpuStats,
-) -> wgpu::BindGroup {
+) -> &'a wgpu::BindGroup {
     let halved = halved(slots);
-    let Some(halves) = halves.filter(|_| halved.iter().any(Option::is_some)) else {
-        return bind(other);
+    let (Some(view), Some(reading)) = (
+        halves.filter(|_| halved.iter().any(Option::is_some)),
+        groups.from_halves.as_ref(),
+    ) else {
+        return &groups.from_source;
     };
-    let view = halves.create_view(&Default::default());
-    let group = bind(other);
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("blur reduce halves"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &view,
+            view,
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
@@ -18054,7 +18171,7 @@ fn halves_pass(
         ..Default::default()
     });
     pass.set_pipeline(&pipelines.halves);
-    pass.set_bind_group(0, &group, &[]);
+    pass.set_bind_group(0, &groups.from_source, offsets);
     for (k, rect) in halved.iter().enumerate() {
         let Some((x, y, w, h)) = *rect else { continue };
         pass.set_scissor_rect(x, y, w, h);
@@ -18063,7 +18180,74 @@ fn halves_pass(
     }
     drop(pass);
     stats.render_passes += 1;
-    bind(&view)
+    reading
+}
+/// The filters' records are bound at their offsets as passes bind their
+/// groups (`GpuRenderer::blur_groups`): each group binds a part's capacity,
+/// a power of two, so the groups last while parts stay within it. Each of
+/// `ranges` (offsets in the frame's buffer, after `quad_bytes` of quads)
+/// becomes its offset and capacity, and `records` grows to hold that much
+/// past each. Out of the frame's body: frames without a blur never come here.
+#[cold]
+#[inline(never)]
+fn pad_blur_records(
+    quad_bytes: usize,
+    records: &mut Vec<u8>,
+    ranges: &mut [Option<[(u64, u64); 2]>],
+) {
+    let mut reach = 0;
+    for (offset, size) in ranges.iter_mut().flatten().flatten() {
+        *size = size.next_power_of_two().max(256);
+        reach = reach.max((*offset + *size) as usize);
+    }
+    if reach > quad_bytes + records.len() {
+        records.resize(reach - quad_bytes, 0);
+    }
+}
+/// A blur pass's bind group (`BlurPipelines::layout`): `source` and
+/// `other` read, the records' two parts in `records` up to `capacity`
+/// bytes each, at the offsets the pass binds it with.
+fn blur_group(
+    device: &wgpu::Device,
+    pipelines: &BlurPipelines,
+    source: &wgpu::TextureView,
+    other: &wgpu::TextureView,
+    records: &wgpu::Buffer,
+    capacity: [u64; 2],
+) -> wgpu::BindGroup {
+    let part = |size: u64| {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: records,
+            offset: 0,
+            size: wgpu::BufferSize::new(size),
+        })
+    };
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("backdrop blur"),
+        layout: &pipelines.layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(source),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(other),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: part(capacity[0]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: part(capacity[1]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(&pipelines.linear),
+            },
+        ],
+    })
 }
 /// Each slot's place in the halves (`GpuRenderer::blur_halves`), twice its own,
 /// where it is blurred at factor 8.

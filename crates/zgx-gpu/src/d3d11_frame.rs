@@ -627,14 +627,6 @@ impl Device {
     ) -> Result<Surface, GpuError> {
         self.surface_as(width, height, target, DXGI_FORMAT_B8G8R8A8_UNORM)
     }
-    /// A backdrop blur batch's records (`crate::BlurRecord`s or
-    /// `crate::SlotRecord`s as bytes), as the raw buffer blur.wgsl reads.
-    pub(crate) fn records(&self, bytes: &[u8]) -> Result<ID3D11ShaderResourceView, GpuError> {
-        // `raw_buffer` copies all it makes from what it is given: padded.
-        let mut padded = bytes.to_vec();
-        padded.resize(bytes.len().max(16).next_multiple_of(16), 0);
-        Ok(raw_buffer(&self.device, padded.len(), Some(&padded))?.1)
-    }
     /// A factor-8 reduce's halves, `width` by `height` texels (twice the
     /// atlas's), RGBA16F as the atlas.
     pub(crate) fn blur_halves(&self, width: u32, height: u32) -> Result<Surface, GpuError> {
@@ -1462,6 +1454,9 @@ pub(crate) struct State {
     regions: Option<(ID3D11Buffer, ID3D11ShaderResourceView, usize)>,
     /// The frame's polyline points, the buffer's size.
     points: Option<(ID3D11Buffer, ID3D11ShaderResourceView, usize)>,
+    /// The backdrop blur batches' records, two parts each (`set_blur_records`):
+    /// kept from frame to frame, grown as they must be, as `points` is.
+    pub(crate) blur_records: Vec<Option<(ID3D11Buffer, ID3D11ShaderResourceView, usize)>>,
     /// What `regions` holds: most frames clip with the last one's, and
     /// write nothing.
     last_regions: Vec<u8>,
@@ -1526,6 +1521,7 @@ impl State {
             ring: Ring::default(),
             regions: None,
             points: None,
+            blur_records: Vec::new(),
             last_regions: Vec::new(),
             atlas: None,
             target: None,
@@ -1579,6 +1575,54 @@ impl State {
         Ok(())
     }
 
+    /// Blur batch `batch`'s records, part `part` (`crate::BlurRecord`s or
+    /// `crate::SlotRecord`s as bytes), as the raw buffer blur.wgsl reads:
+    /// written into the buffer kept for them, made or grown first if it
+    /// must be. Each batch and part has its own (a frame's batches write
+    /// none twice); the next frame's write comes after this frame's draws
+    /// on the immediate context (`UpdateSubresource` on a default buffer,
+    /// never mapped), so they read what this frame wrote.
+    pub(crate) fn set_blur_records(
+        &mut self,
+        batch: usize,
+        part: usize,
+        bytes: &[u8],
+    ) -> Result<ID3D11ShaderResourceView, GpuError> {
+        let index = batch * 2 + part;
+        let len = bytes.len().max(16).next_multiple_of(16);
+        if self.blur_records.len() <= index {
+            self.blur_records.resize_with(index + 1, || None);
+        }
+        let slot = &mut self.blur_records[index];
+        if slot.as_ref().is_none_or(|(_, _, capacity)| *capacity < len) {
+            let capacity = len.next_power_of_two().max(256);
+            let (buffer, view) = raw_buffer(&self.device.device, capacity, None)?;
+            *slot = Some((buffer, view, capacity));
+        }
+        let (buffer, view, _) = slot.as_ref().expect("made above");
+        if !bytes.is_empty() {
+            let area = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: bytes.len() as u32,
+                bottom: 1,
+                back: 1,
+            };
+            // SAFETY: `bytes.len()` bytes into a buffer at least as large.
+            unsafe {
+                self.device.context.UpdateSubresource(
+                    buffer,
+                    0,
+                    Some(&area),
+                    bytes.as_ptr().cast(),
+                    0,
+                    0,
+                )
+            };
+        }
+        Ok(view.clone())
+    }
     /// The frame's viewport and clip regions (`crate::Region`s as bytes).
     pub(crate) fn set_frame(&mut self, viewport: [f32; 4], regions: &[u8]) -> Result<(), GpuError> {
         let context = &self.device.context;
