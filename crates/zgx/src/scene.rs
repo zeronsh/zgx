@@ -5252,6 +5252,9 @@ impl Scene {
     }
     /// Whether `id` is a scroll view or a list: its viewport, its first
     /// child, holds its scrolled content.
+    pub fn is_scroll_view(&self, id: NodeId) -> bool {
+        self.scrolls(id)
+    }
     fn scrolls(&self, id: NodeId) -> bool {
         let node = self.node(id);
         let Some(viewport) = self.children_raw(node).first() else {

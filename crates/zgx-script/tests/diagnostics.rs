@@ -348,3 +348,30 @@ fn a_repeated_error_reaches_the_error_hook_each_time() {
     assert_eq!(seen.borrow().len(), 2, "{:?}", seen.borrow());
     assert!(seen.borrow().iter().all(|e| e.contains("same-boom")));
 }
+
+/// A scroll view given only a cap (`max_h`) scrolls: its content taller than
+/// the cap is not an overflow that "does not scroll".
+#[test]
+fn a_scroll_view_capped_by_max_h_is_not_flagged_as_overflowing() {
+    let inspector = Inspector::off();
+    let code = r#"return ui.column {
+    w = 300,
+    ui.scroll {
+        id = "s", w_full = true, max_h = 100,
+        ui.column { ui.div { w = 100, h = 300, shrink = 0 } },
+    },
+}
+"#;
+    let mut h = Harness::inspected(
+        |runtime| ScriptHost::inline(runtime, "app", code),
+        &inspector,
+    );
+    inspector.set_enabled(true);
+    h.settle();
+    h.ui.prepare_frame();
+    let scroll = h.find("s").unwrap();
+    assert_eq!(h.ui.scene.borrow().bounds(scroll).height, 100.);
+    inspector.update(&h.ui, None);
+    let warnings = inspector.warnings();
+    assert!(warnings.is_empty(), "{warnings:#?}");
+}

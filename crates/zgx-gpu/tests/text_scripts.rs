@@ -1200,3 +1200,58 @@ fn a_pure_japanese_line_stands_on_the_text_fonts_baseline_with_the_real_faces() 
         assert_eq!(run.line_y, 15., "pure Japanese at 13/20");
     }
 }
+
+/// Hebrew and Arabic fall back to the system's own SF Hebrew and SF Arabic
+/// (hidden, variable faces), as Core Text's cascade and Chrome have it, and
+/// weights between the named ones draw at their own axis value: 450 is
+/// wider than 400 and narrower than 500.
+#[cfg(target_os = "macos")]
+#[test]
+fn hebrew_and_arabic_fall_back_to_the_variable_sf_faces_at_their_own_weights() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_system_fonts();
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "en-US".into(),
+        db,
+        cosmic_text::PlatformFallback,
+    );
+    // The system font (SF Pro, which has neither script).
+    let system = fonts
+        .db()
+        .faces()
+        .find(|f| f.post_script_name.starts_with(".SFNS-"))
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let Some(system) = system else {
+        eprintln!("SF Pro isn't here: nothing checked");
+        return;
+    };
+    let width_and_family = |fonts: &mut cosmic_text::FontSystem, text: &str, weight: u16| {
+        let mut buffer = cosmic_text::Buffer::new(fonts, cosmic_text::Metrics::new(16., 20.));
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::Name(&system))
+            .weight(cosmic_text::Weight(weight));
+        buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        let run = buffer.layout_runs().next().expect("a line");
+        let family = fonts
+            .db()
+            .face(run.glyphs[0].font_id)
+            .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
+            .unwrap_or_default();
+        (run.line_w, family)
+    };
+    for (text, family) in [
+        ("שלום עולם טוב", ".SF Hebrew"),
+        ("مرحبا بالعالم الجميل", ".SF Arabic"),
+    ] {
+        let (w400, got) = width_and_family(&mut fonts, text, 400);
+        if got != family {
+            eprintln!("{family} isn't installed here ({got}): nothing checked");
+            continue;
+        }
+        let (w450, _) = width_and_family(&mut fonts, text, 450);
+        let (w500, f500) = width_and_family(&mut fonts, text, 500);
+        assert_eq!(f500, family, "medium stays in the same face");
+        assert!(w400 < w450 && w450 < w500, "{family}: {w400} {w450} {w500}");
+    }
+}
