@@ -207,11 +207,14 @@ fn a_changed_drawing_shows_at_once_and_tiles_keep_to_their_budget() {
     cache
         .get_panned(node, &canvas, at, W, H, 2., false)
         .unwrap();
-    settled(&mut cache, node, &canvas, at, 2.);
+    let before = settled(&mut cache, node, &canvas, at, 2.);
     let changed = board(250);
     let mut out = Vec::new();
-    let awaiting = (cache.get_tiles(node, &changed, at, W, H, 2., false, 0, &mut out)).unwrap();
-    assert!(!awaiting, "a change is drawn before it shows");
+    (cache.get_tiles(node, &changed, at, W, H, 2., false, 0, &mut out)).unwrap();
+    // Each cell its new tile, or its old one until that lands: never none.
+    assert_eq!(out.len(), before.len(), "every cell shows at once");
+    composed(&out, 2.);
+    let out = settled(&mut cache, node, &changed, at, 2.);
     assert!(same(
         &composed(&out, 2.),
         &raster(&changed, at, [0, 0], 2.),
@@ -229,6 +232,155 @@ fn a_changed_drawing_shows_at_once_and_tiles_keep_to_their_budget() {
     assert!(
         !cache.take_retired().is_empty(),
         "evicted tiles' textures go"
+    );
+}
+/// `board`'s cards, each a part of its own (as `each` items are), card
+/// `odd` (if any) another colour.
+fn parted(odd: Option<usize>) -> Arc<Canvas> {
+    let mut canvas = Canvas::new();
+    for row in 0..9 {
+        for col in 0..12 {
+            let (x, y) = (col as f32 * 157.3 + 3.7, row as f32 * 131.9 + 5.2);
+            let card = Rect::new(x, y, 120.4, 101.7);
+            let shade = if odd == Some(row * 12 + col) { 250 } else { 90 };
+            let mut part = Canvas::new();
+            part.clip(Path::rounded_rect(card, 9.5).unwrap(), FillRule::Winding);
+            part.fill(
+                Path::rounded_rect(card, 9.5).unwrap(),
+                Color(shade, (col * 20) as u8, (row * 25) as u8, 255),
+            );
+            part.restore();
+            canvas.extend(&part);
+        }
+    }
+    Arc::new(canvas)
+}
+/// Each tile shown, by where it is: its image.
+fn by_place(out: &[(Raster, Placement)]) -> Vec<([i32; 4], u64)> {
+    out.iter()
+        .map(|(r, p)| (p.rect.map(|v| (v * 4.).round() as i32), r.id))
+        .collect()
+}
+#[test]
+fn a_change_to_one_part_is_told_where_it_is_and_shows_once_made() {
+    let canvas = parted(None);
+    // Card 14 (row 1, column 2) another colour: there alone.
+    let changed = parted(Some(14));
+    let text = SharedText::default();
+    let card = [
+        2. * 157.3 + 3.7,
+        131.9 + 5.2,
+        2. * 157.3 + 3.7 + 120.4,
+        131.9 + 5.2 + 101.7,
+    ];
+    let Some(Some(at)) = changed_region(&canvas, &changed, &text) else {
+        panic!("told by its parts");
+    };
+    assert!(
+        at.iter().zip(card).all(|(a, c)| (a - c).abs() < 1.),
+        "{at:?} is card 14's {card:?}"
+    );
+    let equal = parted(None);
+    assert_eq!(
+        changed_region(&canvas, &equal, &text),
+        Some(None),
+        "nowhere"
+    );
+    assert_eq!(
+        changed_region(&board(1), &board(2), &text),
+        None,
+        "no parts: can't tell"
+    );
+    // Zoomed, in tiles: the change shows once its tiles are made, the
+    // drawing as its raster.
+    let node = node();
+    let mut cache = CanvasCache::default();
+    let first = view(-10., -10., 1.);
+    cache
+        .get_panned(node, &canvas, first, W, H, 1., false)
+        .unwrap();
+    let zoomed = view(-200.5, -120.25, 1.3);
+    cache
+        .get_panned(node, &canvas, zoomed, W, H, 1., false)
+        .unwrap();
+    let before = settled(&mut cache, node, &canvas, zoomed, 1.);
+    let after = settled(&mut cache, node, &changed, zoomed, 1.);
+    assert_eq!(before.len(), after.len());
+    assert!(same(
+        &composed(&after, 1.),
+        &raster(&changed, zoomed, [0, 0], 1.),
+        1.
+    ));
+}
+/// A drawing whose every tile takes long to make: blurred shadows all over.
+fn slow(shade: u8) -> Arc<Canvas> {
+    let mut canvas = Canvas::new();
+    for row in 0..8 {
+        for col in 0..10 {
+            let card = Rect::new(col as f32 * 90., row as f32 * 70., 80., 60.);
+            for _ in 0..4 {
+                canvas.shadow(
+                    Path::rounded_rect(card, 8.).unwrap(),
+                    Color(0, 0, 0, 40),
+                    Point { x: 0., y: 6. },
+                    24.,
+                    4.,
+                );
+            }
+            canvas.fill(
+                Path::rounded_rect(card, 8.).unwrap(),
+                Color(shade, 120, 200, 255),
+            );
+        }
+    }
+    Arc::new(canvas)
+}
+#[test]
+fn a_large_change_shows_the_old_tiles_while_its_own_are_made_off_the_frame() {
+    let canvas = slow(10);
+    let node = node();
+    let mut cache = CanvasCache::default();
+    let at = view(0., 0., 1.);
+    cache
+        .get_panned(node, &canvas, at, W, H, 2., false)
+        .unwrap();
+    let zoomed = view(-30., -20., 1.25);
+    cache
+        .get_panned(node, &canvas, zoomed, W, H, 2., false)
+        .unwrap();
+    let before = by_place(&settled(&mut cache, node, &canvas, zoomed, 2.));
+    // All of it another colour: every tile to make again, which takes far
+    // longer than a frame waits.
+    let changed = slow(240);
+    let mut out = Vec::new();
+    let begun = Instant::now();
+    let awaiting = (cache.get_tiles(node, &changed, zoomed, W, H, 2., false, 0, &mut out)).unwrap();
+    let took = begun.elapsed();
+    assert!(
+        took < CHANGE_WAIT + Duration::from_millis(150),
+        "the frame waits little for a change ({took:?})"
+    );
+    assert!(awaiting, "drawn again as its tiles land");
+    assert_eq!(
+        by_place(&out).len(),
+        before.len(),
+        "the old tiles shown meanwhile"
+    );
+    composed(&out, 2.);
+    // Then the change's own tiles, as a cache that never saw the old one
+    // makes them (blurs reach past a tile's margin: not the raster's).
+    let out = settled(&mut cache, node, &changed, zoomed, 2.);
+    let mut fresh = CanvasCache::default();
+    fresh
+        .get_panned(node, &changed, at, W, H, 2., false)
+        .unwrap();
+    fresh
+        .get_panned(node, &changed, zoomed, W, H, 2., false)
+        .unwrap();
+    let theirs = settled(&mut fresh, node, &changed, zoomed, 2.);
+    assert!(
+        composed(&out, 2.) == composed(&theirs, 2.),
+        "the change's tiles"
     );
 }
 /// A gradient under a clip, ellipses and strokes: tiles as its raster.

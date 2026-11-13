@@ -362,6 +362,44 @@ impl TextRaster {
             .insert(key, (Arc::downgrade(canvas), boxes.clone()));
         boxes
     }
+    /// `canvas`'s text boxes (`boxes`), those of its first `first` and last
+    /// `last` texts taken from `old`'s (the same texts there, its first and
+    /// last), if measured: a drawing changed in part measures its new words
+    /// alone.
+    fn boxes_after(
+        &mut self,
+        canvas: &Arc<Canvas>,
+        old: &Arc<Canvas>,
+        first: usize,
+        last: usize,
+    ) -> Boxes {
+        self.raster();
+        let cached = |boxes: &HashMap<usize, (Weak<Canvas>, Boxes)>, canvas: &Arc<Canvas>| {
+            (boxes.get(&(Arc::as_ptr(canvas) as usize)))
+                .filter(|(drawing, _)| drawing.upgrade().is_some_and(|d| Arc::ptr_eq(&d, canvas)))
+                .map(|(_, boxes)| boxes.clone())
+        };
+        if let Some(boxes) = cached(&self.boxes, canvas) {
+            return boxes;
+        }
+        let (n, was) = (canvas.texts().len(), old.texts().len());
+        let Some(before) = cached(&self.boxes, old).filter(|_| first + last <= n.min(was)) else {
+            return self.boxes(canvas);
+        };
+        let text = self.raster.as_mut().expect("made above");
+        let boxes: Boxes = (canvas.texts().iter().enumerate())
+            .map(|(at, label)| match at {
+                at if at < first => before[at],
+                at if at >= n - last => before[was - (n - at)],
+                _ => label_box(label, text),
+            })
+            .collect();
+        self.boxes.insert(
+            Arc::as_ptr(canvas) as usize,
+            (Arc::downgrade(canvas), boxes.clone()),
+        );
+        boxes
+    }
     /// What each of `canvas`'s parts paints within, its text too if drawn
     /// into its raster: found the first time it is asked.
     fn part_bounds(&mut self, canvas: &Arc<Canvas>) -> PartBounds {

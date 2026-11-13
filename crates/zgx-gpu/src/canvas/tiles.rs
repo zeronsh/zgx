@@ -35,14 +35,19 @@ const FINEST: f32 = 4.;
 const UPLOAD_BUDGET: Duration = Duration::from_millis(4);
 /// How many frames a tile's texture is kept unshown.
 const TEXTURE_FRAMES: u8 = 8;
+/// How long a frame waits, at most, for the tiles a change to the drawing
+/// shows (made on the tile threads): a small change shows at once, a large
+/// one over the next frames, its old tiles shown meanwhile.
+const CHANGE_WAIT: Duration = Duration::from_millis(8);
 type View = zgx::scene::CanvasView;
 /// A tile: its level's zoom (bits), column and row.
 type Key = (u32, i32, i32);
 
 /// A canvas's tiles, by level, and those being made.
 pub(super) struct Pyramid {
-    /// The drawing its tiles are of.
-    drawing: Weak<Canvas>,
+    /// The drawing its tiles are of (held: what a change changed is told
+    /// from it, `changed_region`).
+    drawing: Arc<Canvas>,
     /// The box's scale its tiles are at.
     scale: f32,
     /// What the drawing paints within, its text too (in its points).
@@ -90,6 +95,9 @@ struct Level {
 struct Tile {
     image: Arc<ImageData>,
     used: u64,
+    /// Of a drawing before, where it changed since: shown until its
+    /// cell's tile of this drawing lands.
+    stale: bool,
 }
 type MadeTile = Result<ImageData, GpuError>;
 /// Tiles made off the frame, for the frame to take.
@@ -291,6 +299,70 @@ fn scaled_part(
         scaled: true,
     })
 }
+/// Where `new`, drawn in place of `old`, paints otherwise (in their points),
+/// told by their parts (`Canvas::parts`: each `each` item's, its clips
+/// balanced): what the parts between the same first ones and the same last
+/// ones paint, in either. Elsewhere the same parts paint, in the same order
+/// under the same clips (but for texts in layers joined past their most,
+/// `Canvas::layers`, which hang on all of the drawing). `Some(None)`:
+/// nowhere. `None` where it can't be told: a drawing not all parts. The
+/// same parts' text boxes are kept for `new` (its words measured alone).
+fn changed_region(
+    old: &Arc<Canvas>,
+    new: &Arc<Canvas>,
+    text: &SharedText,
+) -> Option<Option<[f32; 4]>> {
+    if old.rasters_text() != new.rasters_text() || !all_parts(old) || !all_parts(new) {
+        return None;
+    }
+    let (a, b) = (old.parts(), new.parts());
+    let same = |i: usize, j: usize| {
+        let (p, q) = (&a[i], &b[j]);
+        old.commands()[p.commands.clone()] == new.commands()[q.commands.clone()]
+            && old.texts()[p.texts.clone()] == new.texts()[q.texts.clone()]
+            && p.texts.clone().zip(q.texts.clone()).all(|(s, t)| {
+                old.text_transform(s) == new.text_transform(t)
+                    && old.text_after(s).checked_sub(p.commands.start)
+                        == new.text_after(t).checked_sub(q.commands.start)
+            })
+    };
+    let most = a.len().min(b.len());
+    let first = (0..most).take_while(|&k| same(k, k)).count();
+    let last = (0..most - first)
+        .take_while(|&k| same(a.len() - 1 - k, b.len() - 1 - k))
+        .count();
+    let mut held = text.lock().unwrap_or_else(|p| p.into_inner());
+    if new.rasters_text() && !new.texts().is_empty() {
+        let texts_first = first.checked_sub(1).map_or(0, |at| a[at].texts.end);
+        let texts_last = match last {
+            0 => 0,
+            _ => old.texts().len() - a[a.len() - last].texts.start,
+        };
+        held.boxes_after(new, old, texts_first, texts_last);
+    }
+    let mut out: Option<[f32; 4]> = None;
+    for (canvas, parts) in [(old, first..a.len() - last), (new, first..b.len() - last)] {
+        let bounds = held.part_bounds(canvas);
+        for [x0, y0, x1, y1] in parts.filter_map(|at| bounds.get(at).copied().flatten()) {
+            let o = out.get_or_insert([x0, y0, x1, y1]);
+            *o = [o[0].min(x0), o[1].min(y0), o[2].max(x1), o[3].max(y1)];
+        }
+    }
+    Some(out)
+}
+/// Whether all of `canvas` is in its parts, one after another.
+fn all_parts(canvas: &Canvas) -> bool {
+    let (mut commands, mut texts) = (0, 0);
+    for part in canvas.parts() {
+        if part.commands.start != commands || part.texts.start != texts {
+            return false;
+        }
+        (commands, texts) = (part.commands.end, part.texts.end);
+    }
+    !canvas.parts().is_empty()
+        && commands == canvas.commands().len()
+        && texts == canvas.texts().len()
+}
 impl Pyramid {
     /// The images it showed last, which must keep their textures.
     pub(super) fn shown(&self) -> impl Iterator<Item = u64> + '_ {
@@ -341,11 +413,7 @@ impl Pyramid {
             {
                 self.tasks.remove(&task.key);
             }
-            if !self
-                .drawing
-                .upgrade()
-                .is_some_and(|d| Arc::ptr_eq(&d, &task.canvas))
-            {
+            if !Arc::ptr_eq(&self.drawing, &task.canvas) {
                 continue;
             }
             let Some(level) = self.levels.iter_mut().find(|level| level.view == task.view) else {
@@ -356,6 +424,7 @@ impl Pyramid {
                     let tile = Tile {
                         image: Arc::new(image),
                         used: clock,
+                        stale: false,
                     };
                     self.bytes += TILE_BYTES;
                     if let Some(old) = level.tiles.insert((task.key.1, task.key.2), tile) {
@@ -480,7 +549,7 @@ impl CanvasCache {
         let shapes = painted_bounds(canvas);
         let words = text_bounds(canvas, &self.text);
         let pyramid = Pyramid {
-            drawing: Arc::downgrade(canvas),
+            drawing: canvas.clone(),
             scale: entry.scale,
             bounds: match (shapes, words) {
                 (Some(a), Some(b)) => Some([
@@ -555,17 +624,18 @@ impl CanvasCache {
         };
         let now = Instant::now();
         p.take_landed(clock);
-        // Another scale or drawing: none of its tiles stand.
-        let same = match p.drawing.upgrade() {
-            Some(d) if Arc::ptr_eq(&d, canvas) => true,
-            Some(d) if *d == **canvas => {
-                p.drawing = Arc::downgrade(canvas);
-                true
-            }
-            _ => false,
-        };
-        let changed = !same || p.scale != scale;
-        if changed {
+        let same = Arc::ptr_eq(&p.drawing, canvas) || *p.drawing == **canvas;
+        if same {
+            p.drawing = canvas.clone();
+        }
+        // Another scale: none of its tiles stand. Another drawing: its tiles
+        // are stale, shown until made again (off the frame), those where it
+        // changed (`changed_region`) first.
+        let rescaled = p.scale != scale;
+        let redrawn = !same && !rescaled;
+        let changed = !same || rescaled;
+        let mut differs = Some(None);
+        if rescaled {
             p.cancel_all();
             self.retired.extend(p.ids());
             if let Some(s) = p.stand_in.take() {
@@ -574,9 +644,23 @@ impl CanvasCache {
             p.pinned.clear();
             p.levels.clear();
             p.bytes = 0;
+        } else if redrawn {
+            p.cancel_all();
+            differs = changed_region(&p.drawing, canvas, &self.text);
+            // (Where it paints the same, only texts in layers joined past
+            // their most may differ: remade too, but not waited for.)
+            if differs != Some(None) {
+                for level in &mut p.levels {
+                    for tile in level.tiles.values_mut() {
+                        tile.stale = true;
+                    }
+                }
+            }
+        }
+        if changed {
             p.failed.clear();
             p.scale = scale;
-            p.drawing = Arc::downgrade(canvas);
+            p.drawing = canvas.clone();
             let shapes = painted_bounds(canvas);
             let words = text_bounds(canvas, &self.text);
             p.bounds = match (shapes, words) {
@@ -588,12 +672,15 @@ impl CanvasCache {
                 ]),
                 (a, b) => a.or(b),
             };
+            for level in &mut p.levels {
+                level.painted = device_bounds(p.bounds, level.view, scale);
+            }
         }
         if p.zoom.0 != view.scale {
             p.zoom = (view.scale, now);
         }
         // The level of this zoom: made once the zoom holds still (or at
-        // once ×2 from every level, or to wait, or for a change).
+        // once ×2 from every level, or to wait, or at another scale).
         let mut current = p.levels.iter().position(|l| l.view.scale == view.scale);
         if current.is_none() {
             let ratio = |a: f32, b: f32| (a / b).max(b / a);
@@ -601,7 +688,7 @@ impl CanvasCache {
                 .map(|l| ratio(l.view.scale, view.scale))
                 .fold(f32::INFINITY, f32::min);
             let due = p.zoom.1 + REFINE_AFTER;
-            if wait || changed || nearest >= 2. || now >= due {
+            if wait || rescaled || nearest >= 2. || now >= due {
                 p.levels.insert(
                     0,
                     Level {
@@ -693,9 +780,10 @@ impl CanvasCache {
                 }
                 ring.sort_by(|a, b| distance(a).total_cmp(&distance(b)));
             }
+            let made = |cell: &(i32, i32)| level.tiles.get(cell).is_some_and(|t| !t.stale);
             for cell in cells.iter().chain(&ring) {
                 let key = (bits, cell.0, cell.1);
-                if level.tiles.contains_key(cell) || p.failed.contains(&key) {
+                if made(cell) || p.failed.contains(&key) {
                     continue;
                 }
                 let task = p.tasks.entry(key).or_insert_with(|| {
@@ -714,12 +802,19 @@ impl CanvasCache {
                 });
                 wanted.push(task.clone());
             }
-            let visible = wanted.len().min(
-                cells
-                    .iter()
-                    .filter(|c| !level.tiles.contains_key(c))
-                    .count(),
-            );
+            let visible = wanted.len().min(cells.iter().filter(|c| !made(c)).count());
+            // A change's: those it reaches first, the frame waiting for them.
+            let mut hot = 0;
+            if redrawn {
+                let hit = differs.map(|r| r.map(|r| device_bounds(Some(r), level.view, scale)));
+                let reaches = |t: &Arc<Task>| match hit {
+                    None => true,
+                    Some(None) => false,
+                    Some(Some(hit)) => !is_empty(intersect(t.region, hit)),
+                };
+                wanted[..visible].sort_by_key(|t| !reaches(t));
+                hot = wanted[..visible].iter().filter(|t| reaches(t)).count();
+            }
             // Those no longer wanted, if not begun, go.
             let keep: std::collections::HashSet<Key> = wanted.iter().map(|t| t.key).collect();
             p.tasks.retain(|key, task| {
@@ -742,8 +837,28 @@ impl CanvasCache {
                 drop(queue);
                 pool.ready.notify_all();
             }
+            // A change: those that show where it is, made on the tile
+            // threads, the frame waiting a little for them (those not made
+            // by then land later, the old tiles shown meanwhile).
+            if redrawn && !wait && hot > 0 {
+                let deadline = Instant::now() + CHANGE_WAIT;
+                let now_wanted = &wanted[..hot];
+                let mut held = p.landed.made.lock().unwrap_or_else(|p| p.into_inner());
+                while !now_wanted.iter().all(|t| t.done.load(Ordering::Acquire)) {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    held = (p.landed.cond)
+                        .wait_timeout(held, left)
+                        .unwrap_or_else(|p| p.into_inner())
+                        .0;
+                }
+                drop(held);
+                p.take_landed(clock);
+            }
             // Made now: those that show, this thread helping.
-            if (wait || changed) && visible > 0 {
+            if (wait || rescaled) && visible > 0 {
                 let now_wanted = &wanted[..visible];
                 for task in now_wanted.iter().rev() {
                     if task.claim() {
@@ -790,9 +905,10 @@ impl CanvasCache {
         others.sort_by(|a, b| off(a).total_cmp(&off(b)));
         let mut awaiting = false;
         // Tiles shown with a texture, or to be uploaded this frame: few,
-        // but all of a change's (it shows at once, as a raster's does).
+        // but all to wait for or at another scale (it shows at once, as a
+        // raster's does).
         let mut fresh = 0;
-        let most = match wait || changed {
+        let most = match wait || rescaled {
             true => usize::MAX,
             false => self.tile_uploads(frame),
         };
@@ -819,6 +935,7 @@ impl CanvasCache {
             {
                 fresh += usize::from(!p.textured.contains_key(&tile.image.id()));
                 tile.used = clock;
+                awaiting |= tile.stale;
                 let (x, y) = (c[0] as f32 / scale, c[1] as f32 / scale);
                 let w = ((c[2] - c[0]) as f32 / scale).min(width - x);
                 let h = ((c[3] - c[1]) as f32 / scale).min(height - y);
