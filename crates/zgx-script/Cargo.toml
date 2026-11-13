@@ -98,6 +98,10 @@ name = "script_layout_bench"
 path = "examples/layout_bench.rs"
 
 [[example]]
+name = "stream_bench"
+path = "examples/stream_bench.rs"
+
+[[example]]
 name = "script_web_view"
 path = "examples/web_view.rs"
 

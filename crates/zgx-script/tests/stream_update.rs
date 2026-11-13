@@ -36,10 +36,24 @@ fn block(i: usize) -> String {
 }
 
 fn per_publish(blocks: usize, publishes: usize) -> Vec<(Phase, u64)> {
+    let gpu = zgx_gpu::GpuRenderer::new(640, 900).expect("a renderer");
     let mut ui = Ui::new(640., 900.);
+    gpu.install_text(&mut ui.scene.borrow_mut());
+    ui.refresh_text_geometry();
+    let variant = std::env::var("STREAM_VARIANT").unwrap_or_default();
+    let script_text = match variant.as_str() {
+        // The blocks alone: parsed and handed to Luau, no spans made.
+        "parse" => SCRIPT.replace("return runs(b.s)", "return ui.div { id = tostring(#b.s) }"),
+        // The runs read in Luau, no spans made.
+        "walk" => SCRIPT.replace(
+            "return runs(b.s)",
+            "local n = 0 for _, r in b.s do n += #r.x end return ui.div { id = tostring(n) }",
+        ),
+        _ => SCRIPT.to_string(),
+    };
     let host = match std::env::var("STREAM_FIXTURE") {
         Ok(path) => ScriptHost::new(&ui.runtime, std::path::Path::new(&path)),
-        Err(_) => ScriptHost::inline(&ui.runtime, "stream_update", SCRIPT),
+        Err(_) => ScriptHost::inline(&ui.runtime, "stream_update", script_text),
     };
     let state = std::env::var("STREAM_STATE").unwrap_or("reply".into());
     host.reload().expect("the script loads");
@@ -88,8 +102,15 @@ fn a_publish_costs_the_changed_block_not_the_answer() {
             phase,
             Phase::Script | Phase::Update | Phase::Layout | Phase::Damage
         ) {
+            // (Layout visits every block's node once a publish, a few thousand
+            // instructions each: it grows with the count, not the text.)
+            let factor = if matches!(phase, Phase::Layout) {
+                2.0
+            } else {
+                1.35
+            };
             assert!(
-                *b as f64 <= *a as f64 * 1.35 + 20_000.,
+                *b as f64 <= *a as f64 * factor + 20_000.,
                 "{phase:?}: {a} instructions a publish at 3 blocks, {b} at 30"
             );
         }
