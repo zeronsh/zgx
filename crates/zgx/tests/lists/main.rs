@@ -20,6 +20,8 @@ mod elastic_scrolling;
 mod keyboard_scrolling;
 #[path = "../list_build_ahead.rs"]
 mod list_build_ahead;
+#[path = "../list_resize_drag.rs"]
+mod list_resize_drag;
 #[path = "../list_wheel_lines.rs"]
 mod list_wheel_lines;
 #[path = "../navigation_swipes.rs"]
