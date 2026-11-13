@@ -533,3 +533,61 @@ return ui.column {{
         );
     }
 }
+
+/// A component whose build reaches its own factory (a recursive component,
+/// a module table holding both) leaves nothing behind when it unmounts: the
+/// factory held a handle to its build inside its own userdata, a root the
+/// collector could not see past, so each mount's states and closures stayed.
+#[test]
+fn a_component_that_reaches_its_own_factory_leaves_no_states_when_it_unmounts() {
+    let code = r##"
+local on = ui.state("on", false)
+local Outer = ui.component(function()
+    local Inner
+    local shared = ui.use_state(0)
+    Inner = ui.component(function(props)
+        local hovered = ui.state("hovered", false)
+        local _ = shared:peek()
+        local depth = props.depth or 0
+        return ui.div { id = "p", w = 50, h = 50,
+            on_hover = function(inside) hovered:set(inside) end,
+            bg = function() return if hovered:get() then "#112233" else "#000000" end,
+            if depth < 1 then Inner { depth = depth + 1 } else nil }
+    end)
+    return Inner {}
+end)
+return ui.column { ui.show(function() return on:get() end, Outer {}) }"##;
+    let mut h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    let mut shown = false;
+    let mut toggle = |h: &mut Harness| {
+        shown = !shown;
+        h.host
+            .set_state("on", zgx_script::Value::Bool(shown))
+            .unwrap();
+        h.settle();
+        h.frames(2);
+    };
+    for _ in 0..10 {
+        toggle(&mut h);
+    }
+    let _ = h.host.gc_report(&zgx_script::GcQuery {
+        mark: true,
+        ..Default::default()
+    });
+    for _ in 0..100 {
+        toggle(&mut h);
+    }
+    let found = &h.host.gc_report(&zgx_script::GcQuery {
+        retained: Some("State".into()),
+        since_mark: true,
+        ..Default::default()
+    })[0]
+        .found;
+    assert!(
+        found.matched <= 4,
+        "100 mounts left {} states: {:?}",
+        found.matched,
+        found.holders.first().map(|h| &h.path)
+    );
+}

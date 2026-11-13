@@ -877,6 +877,11 @@ impl Runtime {
                 .sum::<usize>();
         report.add("reactive", "owned values", Some(values), Some(owned_bytes));
     }
+    /// How many values effects own (`own`): resources kept for what made
+    /// them, until it goes.
+    pub fn owned_count(&self) -> usize {
+        self.inner.owned.borrow().values().map(Vec::len).sum()
+    }
     /// How many effects are alive (not stopped).
     pub fn effect_count(&self) -> usize {
         self.inner.effects.borrow().len() - self.inner.stopped.get()

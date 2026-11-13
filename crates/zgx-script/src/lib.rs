@@ -4953,6 +4953,10 @@ pub struct GcVm {
     /// userdata the VM holds: more of the first after full collections
     /// than of the second are held from Rust.
     pub live_nodes: (usize, usize),
+    /// Lua values Rust holds handles to, the effects alive and the values
+    /// effects own: counts that keep climbing after full collections name a
+    /// Rust holder.
+    pub rust_holds: (usize, usize, usize),
 }
 
 fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
@@ -4974,6 +4978,11 @@ fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
         report.app_resources = (kept.len(), done);
     }
     report.live_nodes.0 = node::LIVE_NODES.load(std::sync::atomic::Ordering::Relaxed);
+    report.rust_holds = (
+        vm.lua.handles_alive(),
+        vm.runtime.effect_count(),
+        vm.runtime.owned_count(),
+    );
     let Ok(dump) = vm.lua.heap_dump() else {
         return report;
     };

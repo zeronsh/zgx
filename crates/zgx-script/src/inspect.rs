@@ -783,6 +783,10 @@ impl Session {
                         vm.app_resources.0, vm.app_resources.1
                     ));
                     lines.push(format!(
+                        "  Rust holds: {} Lua values, {} effects alive, {} owned values",
+                        vm.rust_holds.0, vm.rust_holds.1, vm.rust_holds.2
+                    ));
+                    lines.push(format!(
                         "  nodes alive: {} (script nodes the VM holds: {})",
                         vm.live_nodes.0, vm.live_nodes.1
                     ));

@@ -6445,39 +6445,56 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // Components: `local Card = ui.component(function(props) … end)`, then
-    // `Card { title = "…", child, … }`.
-    ui.set(
-        "component",
-        lua.create_function(|lua, build: Function| {
-            lua.create_function(move |lua, props: Option<Table>| {
-                let props = match props {
-                    Some(p) => p,
-                    None => lua.create_table()?,
-                };
-                // Children stay in the props table's array part and are
-                // also given as `props.children`.
-                let kids = lua.create_table()?;
-                for (i, child) in array_items(&props)?.into_iter().enumerate() {
-                    kids.raw_set(i + 1, child)?;
-                }
-                props.raw_set("children", kids)?;
-                let mut node = Node::new(
-                    owner(lua)?,
-                    Kind::Component {
-                        build: build.clone(),
-                        props: props.clone(),
-                    },
-                );
-                if let Some(id) = props.get::<Option<String>>("id")? {
-                    node.id = Some(id.into());
-                }
-                if let Some(class) = props.get::<Option<String>>("class")? {
-                    node.classes = class.split_whitespace().map(Rc::from).collect();
-                }
-                node_ud(lua, node)
-            })
-        })?,
-    )?;
+    // `Card { title = "…", child, … }`. The factory is a Luau closure over
+    // `build`, not a Rust closure holding a handle to it: a handle held
+    // inside a function's own userdata is a root the collector can't see
+    // past, so a `build` that reaches its own factory (a recursive
+    // component, a module table) would never be collected.
+    let make_component =
+        lua.create_function(|lua, (build, props): (Function, Option<Table>)| {
+            let props = match props {
+                Some(p) => p,
+                None => lua.create_table()?,
+            };
+            // Children stay in the props table's array part and are
+            // also given as `props.children`.
+            let kids = lua.create_table()?;
+            for (i, child) in array_items(&props)?.into_iter().enumerate() {
+                kids.raw_set(i + 1, child)?;
+            }
+            props.raw_set("children", kids)?;
+            let mut node = Node::new(
+                owner(lua)?,
+                Kind::Component {
+                    build,
+                    props: props.clone(),
+                },
+            );
+            if let Some(id) = props.get::<Option<String>>("id")? {
+                node.id = Some(id.into());
+            }
+            if let Some(class) = props.get::<Option<String>>("class")? {
+                node.classes = class.split_whitespace().map(Rc::from).collect();
+            }
+            node_ud(lua, node)
+        })?;
+    let component: Function = lua
+        .load(
+            r#"
+local make = ...
+return function(build)
+    if type(build) ~= "function" then
+        error("ui.component takes a function: bad argument #1, " .. typeof(build) .. " given", 2)
+    end
+    return function(props)
+        return make(build, props)
+    end
+end
+"#,
+        )
+        .set_name("=component")
+        .call(make_component)?;
+    ui.set("component", component)?;
     // `local` is a Luau keyword: component state is `ui.use_state`.
     ui.set(
         "use_state",
