@@ -133,6 +133,9 @@ pub struct SpanIcon {
     pub size: f32,
     /// The room between it and the text.
     pub gap: f32,
+    /// Room on each side of it, inline only: no well, no taller line (CSS
+    /// `margin: 0 Npx` on an inline image).
+    pub margin: f32,
     /// Its colour, or a colour token; `None` paints it as the SVG says.
     pub tint: Option<crate::theme::Themed<Color>>,
     /// A well under it (a file chip's): its fill, a colour or a token;
@@ -752,10 +755,9 @@ impl SpanLocator {
         }
         let (local_x, local_y) = scene.local_point(self.paragraph, x, y);
         let bounds = scene.bounds(self.paragraph);
-        let (wrap, inset) = scene.text_wrap(self.paragraph, bounds.width);
-        let layout = crate::text_layout::Inset::around(
-            scene.shape_rich_text(&content.rich, Some(wrap)),
-            inset,
+        let layout = scene.shape_rich_text(
+            &scene.fit_rich(self.paragraph, bounds.width, &content.rich),
+            Some(bounds.width),
         );
         let at = layout.hit_test(local_x, local_y);
         // At a run's end the offset is the next one's start too: the one
@@ -877,13 +879,12 @@ pub(crate) fn mount_links(
             geometry = if data.links.is_empty() {
                 Vec::new()
             } else {
-                // At the width its lines wrap at, where they show
-                // (balanced). A change of balance moves `engine`.
+                // As its lines break where they show (fitted). A change of
+                // fit moves `engine`.
                 let scene = ui.scene.borrow();
-                let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-                let layout = crate::text_layout::Inset::around(
-                    scene.shape_rich_text(&data.rich, Some(wrap)),
-                    inset,
+                let layout = scene.shape_rich_text(
+                    &scene.fit_rich(paragraph, bounds.width, &data.rich),
+                    Some(bounds.width),
                 );
                 drop(scene);
                 data.links
@@ -1206,10 +1207,9 @@ pub(crate) fn mount_icons(
         if geometry_key.as_ref() != Some(&key) {
             let scene = ui.scene.borrow();
             // As links' (above).
-            let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-            let layout = crate::text_layout::Inset::around(
-                scene.shape_rich_text(&data.rich, Some(wrap)),
-                inset,
+            let layout = scene.shape_rich_text(
+                &scene.fit_rich(paragraph, bounds.width, &data.rich),
+                Some(bounds.width),
             );
             let placed = if data.icons.iter().any(|icon| icon.boxed.is_some()) {
                 layout.inline_boxes()

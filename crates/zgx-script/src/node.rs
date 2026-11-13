@@ -1566,6 +1566,8 @@ pub(crate) struct SpanIcon {
     pub src: String,
     pub size: f32,
     pub gap: f32,
+    /// Room on each side of it, without a well or a taller line.
+    pub margin: f32,
     /// A colour, or `"currentColor"` (the span's text colour).
     pub tint: Option<Value>,
     /// The well the icon sits on: its fill (a colour or token), its
@@ -1891,7 +1893,7 @@ pub(crate) enum Ty {
     Gradient,
     Radial,
     Corners,
-    /// Wrapping: a boolean, or `"balance"`.
+    /// Wrapping: a boolean, `"balance"` or `"pretty"`.
     Wrap,
 }
 
@@ -2849,8 +2851,8 @@ pub(crate) fn lit(value: &Value, ty: Ty) -> Option<Lit> {
     Some(match (ty, value) {
         (Ty::Num, v) => Lit::Num(v.as_f64()? as f32),
         (Ty::Bool, v) => Lit::Bool(v.truthy()),
-        // `wrap = "balance"`: wrapped, its lines balanced.
-        (Ty::Wrap, Value::Str(s)) if &**s == "balance" => Lit::Str(s.clone()),
+        // `wrap = "balance"` or `"pretty"`: wrapped, its lines fitted as Chrome does.
+        (Ty::Wrap, Value::Str(s)) if matches!(&**s, "balance" | "pretty") => Lit::Str(s.clone()),
         (Ty::Wrap, v) => Lit::Bool(v.truthy()),
         // An SVG's `tint`: the text colour the node inherits (see `lower`).
         (Ty::Color, Value::Str(s)) if s.eq_ignore_ascii_case("currentcolor") => Lit::Str(s.clone()),
@@ -5091,6 +5093,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         src,
                         size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
                         gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
+                        margin: icon.get::<Option<f32>>("margin")?.unwrap_or(0.).max(0.),
                         tint: (!matches!(tint, Value::Nil)).then_some(tint),
                         bg: (!matches!(bg, Value::Nil)).then_some(bg),
                         radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),

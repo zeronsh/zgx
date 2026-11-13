@@ -2059,6 +2059,8 @@ struct Local {
     maps: bool,
 }
 /// What few scenes have, by node; each entry goes with its node.
+/// A fitted text's key, and the spaces it breaks at (`Scene::fitted_breaks`).
+type FittedSpaces = (u64, Option<Arc<[usize]>>);
 #[derive(Default)]
 struct ColdMaps {
     /// Absolute nodes moved by an inset alone since the last layout
@@ -2089,12 +2091,12 @@ struct ColdMaps {
     column_kept: Vec<KeptChildren>,
     /// Sizes worked out from the containing block (`set_size_calcs`).
     size_calcs: NodeMap<std::sync::Arc<crate::size_calc::SizeCalcs>>,
-    /// Nodes that balance their text's lines, or not (`set_text_balance`),
-    /// for what they hold.
-    balanced: NodeMap<bool>,
-    /// The width each balanced text wraps at, for what it was worked out
-    /// from.
-    balanced_widths: std::cell::RefCell<NodeMap<(u64, f32)>>,
+    /// Nodes that fit their text's lines (`set_text_fit`), or are said not
+    /// to, for what they hold.
+    balanced: NodeMap<Option<crate::text_wrap::TextWrap>>,
+    /// Where each fitted text breaks its lines (the spaces that become line
+    /// breaks), for what it was worked out from.
+    balanced_widths: std::cell::RefCell<NodeMap<FittedSpaces>>,
     /// The min-content and max-content widths of those of them that size
     /// themselves by what they hold, as their parent last measured them.
     content_widths: NodeMap<(f32, f32)>,
@@ -8246,7 +8248,11 @@ impl Scene {
     /// asked; `None` takes its parent's. Whether it changed anything.
     #[cold]
     #[inline(never)]
-    pub fn set_text_balance(&mut self, id: NodeId, balance: Option<bool>) -> bool {
+    pub fn set_text_fit(
+        &mut self,
+        id: NodeId,
+        balance: Option<Option<crate::text_wrap::TextWrap>>,
+    ) -> bool {
         let held = (self.cold.as_ref()).and_then(|cold| cold.balanced.get(&id).copied());
         if held == balance || !self.contains(id) {
             return false;
@@ -8421,86 +8427,83 @@ impl Scene {
     pub fn language_revision(&self) -> u64 {
         self.cold.as_ref().map_or(0, |cold| cold.language_revision)
     }
-    /// The width text `id` wraps at in a box `width` wide, and how far right
-    /// of the box's left edge its lines start: `(width, 0)`, unless its lines
-    /// are balanced (`set_text_balance`), when they wrap narrower and, centred
-    /// or right-aligned, are aligned in the box, not in that narrower width.
-    /// Renderers, and the layouts selection, find and accessibility read,
-    /// lay text out at the width and draw it the inset to the right.
-    #[inline]
-    pub fn text_wrap(&self, id: NodeId, width: f32) -> (f32, f32) {
-        match &self.cold {
-            Some(cold) if !cold.balanced.is_empty() => self.balanced_wrap(cold, id, width),
-            _ => (width, 0.),
+    /// The spaces of text `id` that break its lines in a box `width` wide, if
+    /// it is fitted (`set_text_fit`) and Chrome's fit differs from greedy
+    /// breaking: their byte offsets. Layout and renderers lay the text out
+    /// with a line feed at each, the box and its line count as they were.
+    pub fn fitted_breaks(&self, id: NodeId, width: f32) -> Option<Arc<[usize]>> {
+        let cold = self
+            .cold
+            .as_ref()
+            .filter(|cold| !cold.balanced.is_empty())?;
+        self.fitted_spaces(cold, id, width)
+    }
+    /// Rich text `id` as it shows in a box `width` wide: `rich` with its
+    /// fitted breaks (`fitted_breaks`), if it has any.
+    pub fn fit_rich(
+        &self,
+        id: NodeId,
+        width: f32,
+        rich: &Arc<crate::rich_text::RichText>,
+    ) -> Arc<crate::rich_text::RichText> {
+        match self.fitted_breaks(id, width) {
+            Some(spaces) => Arc::new(rich.with_line_feeds(&spaces)),
+            None => rich.clone(),
         }
     }
-    #[cold]
-    #[inline(never)]
-    fn balanced_wrap(&self, cold: &ColdMaps, id: NodeId, width: f32) -> (f32, f32) {
-        use crate::text_layout::TextAlign;
-        let wrap = self.balanced_width(cold, id, width);
-        if wrap >= width {
-            return (width, 0.);
+    /// Plain text `id` as it shows in a box `width` wide (`fit_rich`'s).
+    pub fn fit_str(&self, id: NodeId, width: f32, text: &Arc<str>) -> Arc<str> {
+        match self.fitted_breaks(id, width) {
+            Some(spaces) => crate::rich_text::line_feeds(text, &spaces),
+            None => text.clone(),
         }
-        let align = match &self.node(id).kind {
-            NodeKind::Text { .. } => self.node(id).font.align,
-            NodeKind::RichText { text } => {
-                (text.runs().first()).map_or(TextAlign::Start, |run| run.font.align)
-            }
-            _ => return (width, 0.),
-        };
-        let inset = (width - wrap)
-            * match align {
-                TextAlign::Center => 0.5,
-                TextAlign::Right | TextAlign::End => 1.,
-                TextAlign::Start | TextAlign::Left => 0.,
-            };
-        (wrap, inset)
     }
-    /// Text `id` shaped as it shows in a box `width` wide: at its wrap
-    /// width, its lines where they are drawn (`text_wrap`).
+    /// Text `id` shaped as it shows in a box `width` wide: with its fitted
+    /// breaks.
     pub(crate) fn shape_node_text(
         &self,
         id: NodeId,
         width: f32,
     ) -> Option<Box<dyn crate::text_layout::TextLayout>> {
-        let (wrap, inset) = self.text_wrap(id, width);
-        let layout = match self.kind(id) {
+        Some(match self.kind(id) {
             NodeKind::Text {
                 text, font_size, ..
-            } => self.shape_text_with_font(text, *font_size, Some(wrap), self.font(id)),
-            NodeKind::RichText { text } => self.shape_rich_text(text, Some(wrap)),
+            } => self.shape_text_with_font(
+                &self.fit_str(id, width, text),
+                *font_size,
+                Some(width),
+                self.font(id),
+            ),
+            NodeKind::RichText { text } => {
+                self.shape_rich_text(&self.fit_rich(id, width, text), Some(width))
+            }
             _ => return None,
-        };
-        Some(crate::text_layout::Inset::around(layout, inset))
+        })
     }
-    fn balanced_width(&self, cold: &ColdMaps, id: NodeId, width: f32) -> f32 {
+    #[cold]
+    #[inline(never)]
+    fn fitted_spaces(&self, cold: &ColdMaps, id: NodeId, width: f32) -> Option<Arc<[usize]>> {
         use std::hash::{Hash, Hasher};
         if !matches!(
             self.node(id).kind,
             NodeKind::Text { .. } | NodeKind::RichText { .. }
         ) {
-            return width;
+            return None;
         }
         // As the nearest of it and its ancestors that says.
-        let mut at = Some(id);
-        let balanced = loop {
-            match at {
-                Some(node) => match cold.balanced.get(&node) {
-                    Some(balanced) => break *balanced,
-                    None => at = self.node(node).parent,
-                },
-                None => break false,
+        let mut at = id;
+        let wrap = loop {
+            if let Some(wrap) = cold.balanced.get(&at) {
+                break (*wrap)?;
             }
+            at = self.node(at).parent?;
         };
-        if !balanced {
-            return width;
-        }
         // What it was worked out from: the box's width, the shaper, and the
         // text with its font.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         width.to_bits().hash(&mut hasher);
         self.text_shaper_revision.hash(&mut hasher);
+        wrap.hash(&mut hasher);
         match &self.node(id).kind {
             NodeKind::Text {
                 text, font_size, ..
@@ -8510,80 +8513,47 @@ impl Scene {
                 self.node(id).font.hash(&mut hasher);
             }
             NodeKind::RichText { text } => (Arc::as_ptr(text) as usize).hash(&mut hasher),
-            _ => return width,
+            _ => return None,
         }
         let key = hasher.finish();
-        if let Some((at, balanced)) = cold.balanced_widths.borrow().get(&id)
+        if let Some((at, spaces)) = cold.balanced_widths.borrow().get(&id)
             && *at == key
         {
-            return *balanced;
+            return spaces.clone();
         }
-        let balanced = self.balance_lines(id, width);
+        let spaces = self.fit_spaces(id, width, wrap).map(Arc::from);
         let mut widths = cold.balanced_widths.borrow_mut();
         // Those of texts long gone go too, now and then.
         if widths.len() >= 1024 {
             widths.clear();
         }
-        widths.insert(id, (key, balanced));
-        balanced
+        widths.insert(id, (key, spaces.clone()));
+        spaces
     }
-    /// The narrowest width under `width` at which text `id` takes as many
-    /// lines as at `width` (`width` itself for one line, or more than six).
-    fn balance_lines(&self, id: NodeId, width: f32) -> f32 {
-        let height = |limit: Option<f32>| self.wrapped_size(id, limit).1;
-        let (full, line) = (height(Some(width)), height(None));
-        if !(width.is_finite() && width > 0.) || line <= 0. {
-            return width;
-        }
-        let lines = (full / line).round();
-        if !(2. ..=6.).contains(&lines) {
-            return width;
-        }
-        // As narrow as the longest line, unwrapped, over the lines: no
-        // narrower keeps their count.
-        let single = self.wrapped_size(id, None).0;
-        let (mut narrow, mut wide) = ((single / lines).min(width), width);
-        while wide - narrow > 0.5 {
-            let middle = (narrow + wide) * 0.5;
-            if height(Some(middle)) <= full + 0.01 {
-                wide = middle;
-            } else {
-                narrow = middle;
-            }
-        }
-        wide
-    }
-    /// Text `id` laid out at `limit` (`None`: unwrapped), as layout measures it.
-    fn wrapped_size(&self, id: NodeId, limit: Option<f32>) -> (f32, f32) {
-        let node = self.node(id);
-        match &node.kind {
+    /// Where Chrome breaks text `id`'s lines in `width`, from its layout
+    /// unwrapped.
+    fn fit_spaces(
+        &self,
+        id: NodeId,
+        width: f32,
+        wrap: crate::text_wrap::TextWrap,
+    ) -> Option<Vec<usize>> {
+        let (text, layout, size): (&str, _, f32) = match &self.node(id).kind {
             NodeKind::Text {
                 text, font_size, ..
-            } => {
-                if node.style.text_options != Default::default() {
-                    let runs = if text.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![crate::rich_text::TextRun {
-                            range: 0..text.len(),
-                            font: node.font.clone(),
-                            font_size: *font_size,
-                            ..Default::default()
-                        }]
-                    };
-                    let rich = crate::rich_text::RichText::new(text.clone(), runs)
-                        .unwrap()
-                        .with_options(node.style.text_options);
-                    return self.rich_measurer.measure_mounted(&rich, limit);
-                }
-                match &self.font_measurer {
-                    Some(measure) => measure(text, *font_size, limit, &node.font),
-                    None => self.measure_text_with_font(text, *font_size, limit, &node.font),
-                }
-            }
-            NodeKind::RichText { text } => self.rich_measurer.measure_mounted(text, limit),
-            _ => (0., 0.),
-        }
+            } => (
+                text,
+                self.shape_text_with_font(text, *font_size, None, self.font(id)),
+                *font_size,
+            ),
+            NodeKind::RichText { text } => (
+                text.text(),
+                self.shape_rich_text(text, None),
+                text.runs().first().map_or(16., |run| run.font_size),
+            ),
+            _ => return None,
+        };
+        crate::text_wrap::fitted_spaces(text, &*layout, width, size, wrap)
     }
     /// Work what `sizes` sets of `id`'s size out from its containing block,
     /// over its style's. Such a node has layout options, which a parent lays

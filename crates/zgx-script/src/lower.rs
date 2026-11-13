@@ -8968,6 +8968,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         svg,
                         size: icon.size,
                         gap: icon.gap,
+                        margin: icon.margin,
                         tint,
                         bg: icon.bg.as_ref().and_then(crate::node::themed_color),
                         radius: icon.radius,
@@ -9722,6 +9723,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         }),
         (Font, Lit::Str(v)) => s.font_family(font_family(v)),
         (Wrap, Lit::Bool(v)) => s.text_wrap(*v),
+        (Wrap, Lit::Str(v)) if &**v == "pretty" => s.text_pretty(true),
         (Wrap, Lit::Str(_)) => s.text_balance(true),
         // The ellipsis alone: text with one and no clamp keeps one line, so
         // `lines` wins however the two are set, in whichever order.

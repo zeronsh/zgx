@@ -5429,7 +5429,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     let lead = span.padding[0];
                     box_labels.push("".into());
                     boxes.push(crate::rich_text::InlineBox {
-                        width: lead + icon.size + icon.gap,
+                        width: lead + icon.margin + icon.size + icon.gap + icon.margin,
                         height: icon.size,
                         baseline: icon.size,
                         ..crate::rich_text::InlineBox::new(range.start)
@@ -5466,7 +5466,7 @@ fn paragraph_effect<const LOCATING: bool>(
                             None => icon.svg,
                         },
                         size: icon.size,
-                        inset: lead,
+                        inset: lead + icon.margin,
                         well: None,
                         boxed: Some(icon.size),
                     });
@@ -5480,7 +5480,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         underline: None,
                         strikethrough: None,
                         padding: [
-                            (lead + icon.size + 2. * pad + icon.gap) / 2.,
+                            (lead + icon.size + 2. * pad + icon.gap + 2. * icon.margin) / 2.,
                             span.padding[1],
                         ],
                         radius: span.radius,
@@ -5510,7 +5510,7 @@ fn paragraph_effect<const LOCATING: bool>(
                             None => icon.svg,
                         },
                         size: icon.size,
-                        inset: lead,
+                        inset: lead + icon.margin,
                         well: icon.bg.and_then(|bg| {
                             let color = match bg {
                                 crate::theme::Themed::Value(color) => Some(color),
@@ -7964,11 +7964,13 @@ fn mount_scroll(
         // it holds (its measured height would be its content's, circularly:
         // 0), or as a parent stretching it makes it: the viewport and the
         // content take all of a definite height, none of an indefinite one.
-        let (unsized_w, unsized_h) = {
+        let (unsized_w, unsized_h, capped_w, capped_h) = {
             let style = scene.style(root);
             (
                 style.width.is_none() && style.width_percent.is_none(),
                 style.height.is_none() && style.height_percent.is_none(),
+                style.max_width.is_some(),
+                style.max_height.is_some(),
             )
         };
         let fitted = horizontal && unsized_h;
@@ -7976,7 +7978,7 @@ fn mount_scroll(
         // `max_h`, `max_w`), it is as large as what it holds up to the cap:
         // the viewport and its content are in flow there, taking their
         // own size, and the cap cuts the root.
-        let (grows_w, grows_h) = (unsized_w, unsized_h && !horizontal);
+        let (grows_w, grows_h) = (unsized_w && capped_w, unsized_h && capped_h && !horizontal);
         // (Fitted, it's as tall as what it holds: in its flow. As wide as a
         // scroll view that knows its width, with no word from here as that
         // changes; else what it holds is what sizes that.)

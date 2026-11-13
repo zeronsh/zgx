@@ -364,7 +364,7 @@ return ui.div {
 | `bold`, `italic` | `boolean` | `false` | |
 | `align` | `"start" \| "left" \| "center" \| "right"` | `"start"` | |
 | `font` | `string` | the system's | `"mono"` (`"monospace"`), `"sans"` (`"sans-serif"`), `"serif"`, or a family name the host registered |
-| `wrap` | `boolean \| "balance"` | `false` | wrap at the box's width. `"balance"` also balances the lines (CSS's `text-wrap: balance`): they break at the narrowest width that keeps as many, so a heading's last line isn't left short, for up to six lines, the box as it was. It's inherited: on a container, the text in it balances |
+| `wrap` | `boolean \| "balance" \| "pretty"` | `false` | wrap at the box's width. `"balance"` and `"pretty"` also fit the lines as Chrome's `text-wrap: balance` and `pretty` do (its own line-breaking scorer, so the same widths break in the same places): `"balance"` evens up to six lines; `"pretty"` fits the last four lines of a paragraph again when the last is a short word. The box and its line count are as they were. A paragraph whose fitted breaks fall other than at a space (after an inline icon, between ideographs) breaks greedily. It's inherited: on a container, the text in it is fitted |
 | `truncate` | `boolean` | `false` | end the text with "…" where it overflows: on one line, or on the last of `lines` when that is set, here or on a parent |
 | `lines` | `number` | all | clamp to that many lines |
 | `line_height` | `number` | the font's | points |

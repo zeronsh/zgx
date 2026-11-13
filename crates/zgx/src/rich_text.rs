@@ -335,6 +335,14 @@ impl RichText {
             runs,
         })
     }
+    /// The text with a line feed in place of each space at `spaces` (byte
+    /// offsets): the same bytes, so offsets, runs and boxes hold.
+    pub fn with_line_feeds(&self, spaces: &[usize]) -> Self {
+        Self {
+            text: line_feeds(&self.text, spaces),
+            ..self.clone()
+        }
+    }
     /// With inline `boxes` (see [`InlineBox`]), in order of their offsets.
     /// Errs unless each is at an [`INLINE_BOX_CHAR`] that is a run of its
     /// own. Sizes that aren't finite are zero; no boxes, none.
@@ -1016,4 +1024,15 @@ mod tests {
             assert!(RichText::new("x", vec![r]).is_err());
         }
     }
+}
+
+/// `text` with a line feed in place of the space at each of `spaces`.
+pub(crate) fn line_feeds(text: &str, spaces: &[usize]) -> Arc<str> {
+    let mut bytes = text.as_bytes().to_vec();
+    for &at in spaces {
+        if bytes.get(at) == Some(&b' ') {
+            bytes[at] = b'\n';
+        }
+    }
+    String::from_utf8(bytes).map_or_else(|_| text.into(), Into::into)
 }

@@ -283,6 +283,9 @@ fn final_focus_none_leaves_nothing_focused() {
 
 /// A paragraph of one word with a 56 point icon, in a 14 point font on a 20 point line.
 fn icon_line(align: IconAlign) -> (f32, zgx::scene::Rect, zgx::scene::Rect) {
+    icon_line_with(align, 0.)
+}
+fn icon_line_with(align: IconAlign, margin: f32) -> (f32, zgx::scene::Rect, zgx::scene::Rect) {
     let mut ui = Ui::new(400., 200.);
     let svg = std::sync::Arc::new(SvgData::new(&b"<svg viewBox='0 0 24 24'/>"[..]).unwrap());
     let view = ui.mount(
@@ -290,6 +293,7 @@ fn icon_line(align: IconAlign) -> (f32, zgx::scene::Rect, zgx::scene::Rect) {
             svg,
             size: 56.,
             gap: 4.,
+            margin,
             tint: None,
             bg: None,
             radius: 0.,
@@ -351,4 +355,24 @@ fn a_baseline_icon_stands_on_the_text_baseline_and_grows_the_line() {
         ((icon.y + icon.height) - (paragraph.y + height - 5.8)).abs() < 1.5,
         "its bottom edge is on the baseline: {icon:?} {paragraph:?} {height}"
     );
+}
+
+#[test]
+fn an_icon_margin_adds_room_each_side_without_a_taller_line() {
+    for align in [IconAlign::Baseline, IconAlign::Center] {
+        let (h0, p0, i0) = icon_line_with(align, 0.);
+        let (h2, p2, i2) = icon_line_with(align, 2.);
+        assert!(
+            (h2 - h0).abs() < 0.01,
+            "{align:?}: the line as tall: {h0} {h2}"
+        );
+        assert!(
+            ((i2.x - p2.x) - (i0.x - p0.x) - 2.).abs() < 0.01,
+            "{align:?}: the icon 2 in from its room's start: {i0:?} {i2:?}"
+        );
+        assert!(
+            ((p2.width - p0.width) - 4.).abs() < 0.01 || align == IconAlign::Center,
+            "{align:?}: 2 each side of the box: {p0:?} {p2:?}"
+        );
+    }
 }

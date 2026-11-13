@@ -2113,7 +2113,7 @@ export type Styles = {
 	italic: boolean?,
 	align: TextAlign?,
 	font: Font?,
-	wrap: (boolean | "balance")?,
+	wrap: (boolean | "balance" | "pretty")?,
 	truncate: boolean?,
 	lines: number?,
 	line_height: Num?,
@@ -2298,7 +2298,7 @@ export type StyleProps = {
 	italic: Reactive<boolean>?,
 	align: Reactive<TextAlign>?,
 	font: Reactive<Font>?,
-	wrap: Reactive<boolean | "balance">?,
+	wrap: Reactive<boolean | "balance" | "pretty">?,
 	truncate: Reactive<boolean>?,
 	lines: Reactive<number>?,
 	line_height: Reactive<Num>?,
@@ -3191,7 +3191,7 @@ export type Props_bold = Reactive<boolean>?
 export type Props_italic = Reactive<boolean>?
 export type Props_align = Reactive<TextAlign>?
 export type Props_font = Reactive<Font>?
-export type Props_wrap = Reactive<boolean | "balance">?
+export type Props_wrap = Reactive<boolean | "balance" | "pretty">?
 export type Props_truncate = Reactive<boolean>?
 export type Props_lines = Reactive<number>?
 export type Props_line_height = Reactive<Num>?
@@ -5623,6 +5623,9 @@ export type SpanProps = {
 		code: string?,
 		size: number?,
 		gap: number?,
+		-- Room on each side of it (0), inline only: no well, no taller line,
+		-- as CSS's `margin: 0 Npx` on an inline image.
+		margin: number?,
 		tint: Color?,
 		bg: Color?,
 		radius: number?,

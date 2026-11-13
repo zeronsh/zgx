@@ -10215,16 +10215,22 @@ impl GpuRenderer {
                     }
                     kind @ (NodeKind::Text { .. } | NodeKind::RichText { .. }) => {
                         let rich = match kind {
-                            NodeKind::RichText { text } => Some(text.clone()),
+                            NodeKind::RichText { text } => {
+                                Some(scene.fit_rich(item.id, bounds.width, text))
+                            }
                             _ => None,
                         };
                         let rich_content = rich.as_ref().map(|r| r.text_arc());
+                        let fitted_text = match kind {
+                            NodeKind::Text { text, .. } => {
+                                Some(scene.fit_str(item.id, bounds.width, text))
+                            }
+                            _ => None,
+                        };
                         let (text, color, font_size) = match kind {
                             NodeKind::Text {
-                                text,
-                                color,
-                                font_size,
-                            } => (text, *color, *font_size),
+                                color, font_size, ..
+                            } => (fitted_text.as_ref().unwrap(), *color, *font_size),
                             NodeKind::RichText { .. } => (
                                 rich_content.as_ref().unwrap(),
                                 zgx::scene::Color(255, 255, 255, 255),
@@ -10240,9 +10246,7 @@ impl GpuRenderer {
                         // highlights) keeps glyph positions, so the cached shape
                         // is recoloured instead of re-shaped; then whether it is
                         // stale.
-                        // Its lines wrap at its box's width, or narrower if
-                        // they are balanced.
-                        let (wrap, inset) = scene.text_wrap(item.id, bounds.width);
+                        let wrap = bounds.width;
                         let stale = self.shapes.get_mut(&item.id).is_none_or(|shaped| {
                             if let Some(new) = &rich
                                 && let Some(old) = &shaped.rich
@@ -10454,9 +10458,7 @@ impl GpuRenderer {
                         }
                         let snap = |value: f32| (value * self.scale).round() / self.scale;
                         let (x, y) = (snap(bounds.x), snap(bounds.y));
-                        // Its glyphs' origin: right of its box's, its lines
-                        // balanced and centred or right-aligned.
-                        let glyph_x = snap(bounds.x + inset);
+                        let glyph_x = snap(bounds.x);
                         // Partly outside its clip (a long document scrolled in a
                         // view): its lines that reach the clip, as quads made this
                         // frame (`visible_glyphs`), rather than every glyph's.
@@ -10585,9 +10587,7 @@ impl GpuRenderer {
                                             (cached.paint[1] > 0.5)
                                                 .then(|| {
                                                     highlight.glyph_color(
-                                                        inset
-                                                            + cached.rect[0]
-                                                            + cached.rect[2] * 0.5,
+                                                        cached.rect[0] + cached.rect[2] * 0.5,
                                                         cached.rect[1] + cached.rect[3] * 0.5,
                                                     )
                                                 })
@@ -10632,7 +10632,7 @@ impl GpuRenderer {
                                             .filter(|_| cached.paint[1] > 0.5)
                                             .and_then(|h| {
                                                 h.glyph_color(
-                                                    inset + cached.rect[0] + cached.rect[2] * 0.5,
+                                                    cached.rect[0] + cached.rect[2] * 0.5,
                                                     cached.rect[1] + cached.rect[3] * 0.5,
                                                 )
                                             });

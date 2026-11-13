@@ -291,20 +291,8 @@ impl Raster {
                         #[cfg(target_os = "macos")]
                         NodeKind::NativeSurface(_) => {} // Native GPU-only source; no CPU readback.
                         NodeKind::RichText { text } => {
-                            let (wrap, inset) = scene.text_wrap(item.id, item.bounds.width);
-                            let bounds = Rect {
-                                x: item.bounds.x + inset,
-                                width: wrap,
-                                ..item.bounds
-                            };
-                            if inset != 0.
-                                && let Some(selected) = &mut self.selected
-                            {
-                                for rect in &mut selected.rects {
-                                    rect.x -= inset;
-                                }
-                            }
-                            self.rich_text(text, bounds, clip, item.effects)
+                            let text = &scene.fit_rich(item.id, item.bounds.width, text);
+                            self.rich_text(text, item.bounds, clip, item.effects)
                         }
                         NodeKind::Text {
                             text,
@@ -312,21 +300,8 @@ impl Raster {
                             font_size,
                         } => {
                             let color = &tint(*color, item.color());
-                            // At the width its lines wrap at, where they show:
-                            // right of its box, balanced and centred.
-                            let (wrap, inset) = scene.text_wrap(item.id, item.bounds.width);
-                            let bounds = Rect {
-                                x: item.bounds.x + inset,
-                                width: wrap,
-                                ..item.bounds
-                            };
-                            if inset != 0.
-                                && let Some(selected) = &mut self.selected
-                            {
-                                for rect in &mut selected.rects {
-                                    rect.x -= inset;
-                                }
-                            }
+                            let text = &scene.fit_str(item.id, item.bounds.width, text);
+                            let bounds = item.bounds;
                             if item.text_options != Default::default() {
                                 let runs = if text.is_empty() {
                                     Vec::new()

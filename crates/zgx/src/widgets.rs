@@ -4483,7 +4483,7 @@ impl Ui {
     pub(crate) fn observe_text_geometry_revision(&self) -> Signal<u64> {
         self.storage.text_geometry_revision.clone()
     }
-    /// Text's lines moved in a box that did not (`Scene::set_text_balance`):
+    /// Text's lines moved in a box that did not (`Scene::set_text_fit`):
     /// what follows text geometry (`observe_text_geometry_revision`) looks
     /// again.
     pub(crate) fn text_geometry_moved(&self) {

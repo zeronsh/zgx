@@ -16,14 +16,14 @@ mod links;
 mod selectable_text;
 #[path = "../system_preferences.rs"]
 mod system_preferences;
-#[path = "../text_balance.rs"]
-mod text_balance;
 #[path = "../text_hyphens.rs"]
 mod text_hyphens;
 #[path = "../text_lang.rs"]
 mod text_lang;
 #[path = "../text_range_area.rs"]
 mod text_range_area;
+#[path = "../text_wrap.rs"]
+mod text_wrap;
 #[path = "../theme.rs"]
 mod theme;
 #[path = "../zoomed_text_geometry.rs"]

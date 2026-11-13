@@ -40,7 +40,7 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `italic` | `boolean` | `false` | |
 | `font` | `string` | the host's | `"mono"` (or `"monospace"`), `"sans"`, `"serif"`, or a family name |
 | `align` | `"start" \| "left" \| "center" \| "right"` | `"start"` | within the text's own box |
-| `wrap` | `boolean \| "balance"` | `false` | wrap at the box's width; `"balance"` balances the lines, as CSS's `text-wrap: balance` (see [properties](properties.md)) |
+| `wrap` | `boolean \| "balance" \| "pretty"` | `false` | wrap at the box's width; `"balance"` and `"pretty"` fit the lines as Chrome does for CSS's `text-wrap` (see [properties](properties.md)) |
 | `lines` | `number` | none | at most this many lines |
 | `truncate` | `boolean` | `false` | end the text with "…" where it overflows: on one line, or on the last of `lines` when that is set, here or on a parent |
 | `line_height` | `number` | the font's | points |

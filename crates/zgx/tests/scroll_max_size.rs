@@ -1,5 +1,6 @@
 //! A scroll view given only a cap is as large as its content up to it, as CSS's overflow box is,
 //! not as large as its default size (320 by 240).
+use zgx::scene::Align;
 use zgx::{compose::prelude::*, scene::Rect, widgets::Ui};
 
 fn bounds(ui: &Ui, id: &str, view: &zgx::compose::ViewHandle) -> Rect {
@@ -127,4 +128,25 @@ fn a_capped_scroll_still_scrolls_what_passes_its_cap() {
     });
     ui.prepare_frame();
     assert_eq!(offset.get(), 208., "to the end of 400 in a 192 view");
+}
+
+#[test]
+fn a_percent_width_in_a_capped_scroll_resolves_against_the_viewport() {
+    let mut ui = Ui::new(800., 800.);
+    let offset = ui.signal(0.);
+    let view = ui.mount(
+        column().w(500.).child(
+            scroll(offset).id("list").max_h(192.).child(
+                div()
+                    .id("row")
+                    .align_self(Align::Start)
+                    .min_w_percent(100.)
+                    .h(40.)
+                    .child(div().w(100.).h(40.)),
+            ),
+        ),
+    );
+    ui.prepare_frame();
+    assert_eq!(bounds(&ui, "list", &view).width, 500.);
+    assert_eq!(bounds(&ui, "row", &view).width, 500., "fills the viewport");
 }

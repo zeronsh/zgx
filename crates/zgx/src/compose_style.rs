@@ -2021,7 +2021,7 @@ fn apply_rare(
         scene.set_display_contents(node, cold.is_some_and(|cold| cold.display_contents));
         scene.set_sticky(node, cold.and_then(|cold| cold.sticky_top));
         scene.set_size_calcs(node, cold.and_then(|cold| cold.size_calcs.as_ref()));
-        if scene.set_text_balance(node, cold.and_then(|cold| cold.text_balance)) {
+        if scene.set_text_fit(node, cold.and_then(|cold| cold.text_fit)) {
             // Lines moved in boxes that did not: what follows their geometry
             // (links, icons) looks again.
             ui.text_geometry_moved();
