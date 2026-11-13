@@ -507,10 +507,17 @@ return ui.div {}
 "##,
             );
             let heard = sink.clone();
-            host.action("done", move |value| heard.borrow_mut().push(("done".into(), value)));
+            host.action("done", move |value| {
+                heard.borrow_mut().push(("done".into(), value))
+            });
             host
         },
-        move |view| zgx::compose::provide(zgx::platform::PlatformService(Rc::new(SavesTo(to.clone()))), view),
+        move |view| {
+            zgx::compose::provide(
+                zgx::platform::PlatformService(Rc::new(SavesTo(to.clone()))),
+                view,
+            )
+        },
     );
     // (Three 4320 by 2700 pictures, slow in a debug build: its own wait.)
     let deadline = Instant::now() + Duration::from_secs(180);
@@ -529,7 +536,10 @@ return ui.div {}
     // The last write, a JPEG: its frame 4320 by 2700 pixels.
     let jpeg = std::fs::read(&saves).unwrap();
     assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF]);
-    let sof = jpeg.windows(2).position(|w| w[0] == 0xFF && (w[1] == 0xC0 || w[1] == 0xC2)).unwrap();
+    let sof = jpeg
+        .windows(2)
+        .position(|w| w[0] == 0xFF && (w[1] == 0xC0 || w[1] == 0xC2))
+        .unwrap();
     let size = |i: usize| u16::from_be_bytes([jpeg[i], jpeg[i + 1]]);
     assert_eq!((size(sof + 7), size(sof + 5)), (4320, 2700));
     assert!(!saves.with_extension("zgx-write").exists());

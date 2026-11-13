@@ -1484,7 +1484,15 @@ pub fn picture_up_to(
     text: &mut crate::text::CpuTextRaster,
     budget: usize,
 ) -> Result<ImageData, GpuError> {
-    let mut pixmap = paint_up_to(&Canvas::new(), view, width, height, scale, background, budget)?;
+    let mut pixmap = paint_up_to(
+        &Canvas::new(),
+        view,
+        width,
+        height,
+        scale,
+        background,
+        budget,
+    )?;
     if canvas.commands().len() > 65536 {
         return Err(GpuError(
             "invalid canvas dimensions or command count".into(),
@@ -1868,7 +1876,10 @@ fn paint_up_to(
             .checked_mul(4)
             .is_none_or(|bytes| bytes > budget as u64)
     {
-        return Err(GpuError(format!("canvas raster exceeds {} MiB", budget >> 20)));
+        return Err(GpuError(format!(
+            "canvas raster exceeds {} MiB",
+            budget >> 20
+        )));
     }
     let mut pixmap =
         sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
@@ -1920,7 +1931,11 @@ fn paint_into(
     // Clips' masks: BUDGET in all, or for a picture bigger than that (one
     // for a file, `picture_up_to`) twice its pixels' bytes.
     let pixels = u64::from(w) * u64::from(h) * 4;
-    let mask_budget = if pixels > BUDGET as u64 { pixels * 2 } else { BUDGET as u64 };
+    let mask_budget = if pixels > BUDGET as u64 {
+        pixels * 2
+    } else {
+        BUDGET as u64
+    };
     let mut masks: Vec<sk::Mask> = Vec::new();
     for command in canvas.commands() {
         match command {
