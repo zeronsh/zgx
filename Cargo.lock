@@ -5280,6 +5280,7 @@ dependencies = [
  "wasm-bindgen-test",
  "web-sys",
  "zgx",
+ "zgx-script",
 ]
 
 [[package]]
@@ -5359,7 +5360,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-mlua"
-version = "0.12.8"
+version = "0.12.9"
 dependencies = [
  "bstr",
  "either",
@@ -5404,6 +5405,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "unicase",
+ "web-time",
  "windows",
  "zgx",
  "zgx-3d",

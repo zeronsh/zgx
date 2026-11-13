@@ -1,6 +1,6 @@
 # zgx in the browser: `zgx-dom`
 
-`zgx-dom` mounts a Rust-composed zgx view as real browser DOM, from WebAssembly. The browser lays it out, measures and shapes its text, scrolls it, selects in it, handles IME and reads it to assistive technology; zgx's reactive graph, which already knows what changed, writes only the nodes that read it. It is new and partial: Rust views built with `zgx::compose` mount, and Luau scripts (`zgx-script`) do not yet. Most zgx apps are Luau, so until Luau runs on wasm this serves Rust-composed interfaces. GPU content shows as a labelled placeholder ([what doesn't map](#what-doesnt-map)).
+`zgx-dom` mounts a Rust-composed zgx view as real browser DOM, from WebAssembly. The browser lays it out, measures and shapes its text, scrolls it, selects in it, handles IME and reads it to assistive technology; zgx's reactive graph, which already knows what changed, writes only the nodes that read it. It is new and partial: Rust views built with `zgx::compose` mount, and so do Luau apps (`zgx-script`, with zgx-dom's `luau` feature: [Luau in the browser](#luau-in-the-browser)). GPU content shows as a labelled placeholder ([what doesn't map](#what-doesnt-map)).
 
 ```rust,ignore
 use zgx::{compose::prelude::*, reactive::Runtime};
@@ -40,6 +40,19 @@ There is no virtual DOM and nothing is diffed. Each dynamic part of a view (a bo
 - **Block-level ownership** (as Ripple's blocks): each keyed row, switch branch and virtualized row is a block that owns its nodes, effects, handlers and nested regions, and goes as one.
 - **Reads apart from writes**: scroll positions are read in the next animation frame, all of them before any write they cause; ResizeObserver and IntersectionObserver reports are applied together in the task's one flush; input applies at once, so the next read sees it.
 
+## Luau in the browser
+
+With zgx-dom's `luau` feature, a Luau app runs in the browser: zgx-script's host loads the script (`ScriptHost::inline` for source, `ScriptHost::bundled` for scripts compiled into the app with `include_bundle!`), Luau's VM runs it, and zgx-dom mounts the view it returns, its state bound to the nodes that show it as in a Rust view.
+
+```rust,ignore
+let runtime = zgx::reactive::Runtime::new();
+let script = zgx_script::ScriptHost::inline(&runtime, "app.luau", APP);
+script.reload()?;
+std::mem::forget(zgx_dom::mount_in_body(&runtime, script.view()));
+```
+
+Luau is C++, so it is built with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) (34 or later): source `crates/zgx-dom/luau-env.sh` with `WASI_SDK` naming it, and the wasm32 build compiles Luau against the wasi sysroot's libc and libc++, with WebAssembly exception handling (Luau throws on a script error; browsers have it: Chrome 137, Firefox 131, Safari 18.4 and later), and links them. Native builds read none of it. In the module, zgx-script answers wasi-libc's system calls itself (no environment, no files, the browser's clock) and runs C++'s static constructors before the first VM, so the page needs no WASI host. Without threads, a script call's time budget is checked by the VM's interrupt from the call's start, rather than by a watchdog thread setting it when the budget nears. zgx-script's renderer dependency (zgx-gpu, for image decoding and shader checks) isn't linked for wasm32.
+
 ## Layout and styles
 
 zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `column` is `display: flex; flex-direction: column`, a `row` a row, an `overlay` a one-cell grid, and `grid` CSS grid (zgx's track lists are CSS's syntax). Sizes are border-box, children stretch and shrink and stop at `min-width: auto` as in zgx, and an `absolute` view positions against its parent (made `position: relative` for it) unless a nearer ancestor is `relative`; padding, margins, gaps, insets, percentages, flex grow, shrink, basis and wrap, alignment, `absolute` and `sticky_top`, right to left, `display_contents`, `z`, aspect ratio, min and max sizes, backgrounds and linear gradients, borders and their styles, corner radii, shadows, outlines, opacity, transforms, filters, backdrop blur and edge fades all become their CSS. Typography inherits as CSS inherits, from the theme's text colour, size and family at the root.
@@ -67,7 +80,7 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
-- **Luau** (`zgx-script`): its VM is C++ built with `cc`, and it depends on zgx-gpu; running it in the browser needs Luau built for wasm and that dependency split off.
+- **Luau apps' host services**: `ui.fetch`, sockets, files, plugins from the disk, hot reload and `zgx check` need hosts zgx-dom doesn't have yet; images in Luau apps show their labels (zgx-script decodes them with zgx-gpu, which isn't linked in the browser).
 - **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, menus, popovers, modals and tooltips (the Popover API and `<dialog>` fit), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 

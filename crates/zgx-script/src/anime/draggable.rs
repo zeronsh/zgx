@@ -9,6 +9,7 @@ use super::{
     target::{Key, Target},
     value::V,
 };
+use crate::time::Instant;
 use crate::{
     Vm,
     element::Element,
@@ -18,7 +19,6 @@ use mlua::{Function, Lua, MetaMethod, Table, UserData, UserDataMethods};
 use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
-    time::Instant,
 };
 use zgx::input::{EventContext, InputEvent, PointerButton};
 

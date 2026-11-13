@@ -323,6 +323,31 @@ jobs:
           CHROMEDRIVER="$(command -v chromedriver || echo "$CHROMEWEBDRIVER/chromedriver")" \
             CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
             cargo test -p zgx-dom --target wasm32-unknown-unknown --locked
+      # Luau apps in the browser (zgx-dom's `luau`): Luau's C++ built with
+      # wasi-sdk (`luau-env.sh`), kept between runs and fetched with
+      # retries; its tests in release, as a debug Luau VM takes too long to
+      # load and run in a browser.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/wasi-sdk-34.0
+          key: wasi-sdk-34.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Luau on wasm32
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WASM_BINDGEN: ${{ steps.wasm-bindgen.outputs.version }}
+        run: |
+          sdk="$HOME/.local/wasi-sdk-34.0"
+          if [ ! -x "$sdk/bin/clang" ]; then
+            scripts/fetch_release.sh WebAssembly/wasi-sdk wasi-sdk-34 wasi-sdk-34.0-x86_64-linux.tar.gz "$sdk.tar.gz"
+            mkdir -p "$sdk"
+            tar xzf "$sdk.tar.gz" -C "$sdk" --strip-components=1
+          fi
+          export WASI_SDK="$sdk"
+          . crates/zgx-dom/luau-env.sh
+          cargo clippy -p zgx-dom --features luau --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+          CHROMEDRIVER="$(command -v chromedriver || echo "$CHROMEWEBDRIVER/chromedriver")" \
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$HOME/.local/wasm-bindgen-$WASM_BINDGEN/bin/wasm-bindgen-test-runner" \
+            cargo test --release -p zgx-dom --features luau --test luau --target wasm32-unknown-unknown --locked
       # zgx-script's tests with all its features, as an app built by zgx-run
       # has them (scene3d, i18n, gltf, inspect): ICU's plural rules change
       # what the i18n lint finds, and each feature may add lazy `ui`

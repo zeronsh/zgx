@@ -50,7 +50,11 @@
 //! `Lua::exec_raw` closure runs inside. A Rust panic must not reach Luau's
 //! frames: it would unwind past `lua_pcall` without restoring the VM's call
 //! state.
+// The watchdog's thread, and what it alone runs, are not built for the
+// browser, which has no threads (`Interrupts::publish`).
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 use crate::Deadline;
+use crate::time::Instant;
 use mlua::{Lua, ffi};
 use std::{
     cell::{Cell, RefCell},
@@ -60,7 +64,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicPtr, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// Luau's interrupt slot as Rust writes it: the same size and alignment as
@@ -307,14 +311,19 @@ impl Watchdog {
             #[cfg(test)]
             wakes: AtomicU64::new(0),
         }));
-        let thread = std::thread::Builder::new()
-            .name("zgx script watchdog".into())
-            .spawn(move || {
-                prompt_wakes();
-                watchdog.run()
-            })
-            .expect("the script watchdog thread");
-        let _ = watchdog.thread.set(thread.thread().clone());
+        // In the browser (wasm32) there are no threads: calls set their own
+        // interrupt (`Interrupts::publish`).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let thread = std::thread::Builder::new()
+                .name("zgx script watchdog".into())
+                .spawn(move || {
+                    prompt_wakes();
+                    watchdog.run()
+                })
+                .expect("the script watchdog thread");
+            let _ = watchdog.thread.set(thread.thread().clone());
+        }
         watchdog
     }
     /// A call due at `due` started: wake if that is before the next wake.
@@ -610,8 +619,22 @@ impl Installed {
                 // Set early (`EARLY`): the check decides when the budget is
                 // spent, so the stop stays as prompt as the check's.
                 let due = nanos(deadline).saturating_sub(EARLY).max(1);
-                alarm.due.store(due, Ordering::SeqCst);
-                self.watchdog.wake_by(due);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    alarm.due.store(due, Ordering::SeqCst);
+                    self.watchdog.wake_by(due);
+                }
+                // No threads in the browser, so no watchdog: the call starts
+                // with its interrupt set, as the watchdog would have set it,
+                // and the check counts its budget out.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    alarm.due.store(due | FIRED, Ordering::SeqCst);
+                    alarm
+                        .fired_at
+                        .store(nanos(Instant::now()), Ordering::SeqCst);
+                    alarm.set(true);
+                }
             }
             None => {
                 alarm.due.store(0, Ordering::SeqCst);
