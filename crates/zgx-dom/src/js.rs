@@ -13,4 +13,5 @@ extern "C" {
     pub(crate) fn zgx_adopt(id: u32, element: &web_sys::Element);
     pub(crate) fn zgx_apply(memory: &JsValue, ops: u32, ops_len: u32, text: u32, text_len: u32);
     pub(crate) fn zgx_live_nodes() -> u32;
+    pub(crate) fn zgx_measure(font: &str, text: &str) -> Box<[f64]>;
 }

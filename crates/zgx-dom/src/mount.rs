@@ -862,7 +862,14 @@ fn mount_canvas(
         if width <= 0. || height <= 0. {
             return;
         }
-        let drawn = draw((width, height));
+        // `canvas::measure_text` measures as Canvas 2D will draw.
+        let drawn = __dom::drawing_with(
+            |text, size, font| {
+                let at = js::zgx_measure(&__dom::font_css(font, size), text);
+                (at[0] as f32, at[1] as f32)
+            },
+            || draw((width, height)),
+        );
         if last
             .as_ref()
             .is_some_and(|(at, was)| *at == (width, height) && *was == drawn)

@@ -483,3 +483,13 @@ function paint(node, width, height, count, r) {
     ctx.fillText(text, x, y);
   }
 }
+
+// A text's width and height in `font`, as Canvas 2D draws it
+// (`canvas::measure_text` while a canvas draws).
+let measurer = null;
+export function zgx_measure(font, text) {
+  if (!measurer) measurer = document.createElement("canvas").getContext("2d");
+  measurer.font = font;
+  const m = measurer.measureText(text);
+  return new Float64Array([m.width, m.fontBoundingBoxAscent + m.fontBoundingBoxDescent]);
+}

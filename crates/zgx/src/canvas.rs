@@ -588,6 +588,14 @@ thread_local! {
     static DRAWING_FOR: RefCell<Option<Rc<RefCell<crate::scene::Scene>>>> =
         const { RefCell::new(None) };
 }
+/// How a DOM host measures text (`TextMeasure`'s width and height).
+#[cfg(feature = "dom")]
+pub(crate) type DomMeasure = Box<dyn Fn(&str, f32, &crate::text_layout::FontStyle) -> (f32, f32)>;
+#[cfg(feature = "dom")]
+thread_local! {
+    /// While a canvas draws in the DOM: what `measure_text` measures with.
+    pub(crate) static DOM_MEASURE: RefCell<Option<DomMeasure>> = const { RefCell::new(None) };
+}
 /// Runs `draw` with `scene` as what `measure_text` measures in.
 pub(crate) fn drawing_for<R>(
     scene: &Rc<RefCell<crate::scene::Scene>>,
@@ -606,6 +614,12 @@ pub fn measure_text(
     size: f32,
     font: &crate::text_layout::FontStyle,
 ) -> Option<(f32, f32)> {
+    #[cfg(feature = "dom")]
+    if let Some(measured) =
+        DOM_MEASURE.with(|slot| slot.borrow().as_ref().map(|m| m(text, size, font)))
+    {
+        return Some(measured);
+    }
     DRAWING_FOR.with(|slot| {
         let scene = slot.borrow();
         let scene = scene.as_ref()?;
