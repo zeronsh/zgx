@@ -341,7 +341,7 @@ async fn a_lazy_panel_is_built_the_first_time_it_opens() {
                 .lazy()
                 .child(zgx::compose::component(move |_| {
                     count.set(count.get() + 1);
-                    menu_item("New").into()
+                    menu_item("New")
                 }))
                 .child(menu_item("Open")),
         ),
