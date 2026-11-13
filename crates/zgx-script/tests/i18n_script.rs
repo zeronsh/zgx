@@ -602,3 +602,31 @@ fn lint_findings_never_cover_the_interface() {
     assert!(h.find("lint-findings").is_some(), "the strip");
     assert!(h.find("script-error").is_none(), "still no error card");
 }
+
+/// `ui.locale.format_*` follow the locale shown and give Intl's text (the
+/// parity of the formatters themselves is in zgx's `intl_parity`).
+#[cfg(feature = "i18n-intl")]
+#[test]
+fn locale_formatters_follow_the_locale_shown() {
+    let code = r#"
+ui.i18n { dir = "locales", source = "en" }
+local out = {}
+for _, tag in { "en", "de", "ja" } do
+    ui.locale:set(tag)
+    out[#out + 1] = ui.locale:format_list({ "a", "b", "c" }, { type = "disjunction" })
+    out[#out + 1] = ui.locale:format_number(1234.5, { style = "currency", currency = "EUR" })
+    out[#out + 1] = ui.locale:format_date(1794497445000, { dateStyle = "long", timeZone = "UTC" })
+    out[#out + 1] = ui.locale:format_relative(-1, "day", { numeric = "auto" })
+end
+return ui.text { table.concat(out, "|"), id = "t" }
+"#;
+    let path = app("intl", code, &[("en", EN), ("de", "{}"), ("ja", "{}")]);
+    let mut h = harness(&path);
+    assert_eq!(h.error(), None);
+    h.ui.prepare_frame();
+    let text = h.text("t");
+    assert_eq!(
+        text,
+        "a, b, or c|€1,234.50|November 12, 2026|yesterday|a, b oder c|1.234,50\u{a0}€|12. November 2026|gestern|a、b、またはc|€1,234.50|2026年11月12日|昨日"
+    );
+}

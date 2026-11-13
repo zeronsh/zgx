@@ -814,6 +814,51 @@ declare extern type Locale with
 	function get(self): string?
 	function peek(self): string?
 	function set(self, locale: string?): ()
+	-- `Intl`-style text in the locale shown, with ECMA-402's option names (and
+	-- Chrome's output for them). Times are milliseconds since 1970 (a JS
+	-- `Date`'s); `timeZone` is "UTC" or the machine's.
+	-- `{ type = "conjunction" | "disjunction" | "unit", style = "long" | "short" | "narrow" }`.
+	function format_list(self, items: { string }, options: { type: string?, style: string? }?): string
+	-- `style` "decimal", "percent" or "currency" (with `currency = "USD"`),
+	-- `minimumFractionDigits`, `maximumFractionDigits`, `useGrouping`.
+	function format_number(
+		self,
+		n: number,
+		options: {
+			style: string?,
+			currency: string?,
+			minimumFractionDigits: number?,
+			maximumFractionDigits: number?,
+			useGrouping: boolean?,
+		}?
+	): string
+	-- `dateStyle` / `timeStyle` ("full", "long", "medium", "short"), or the
+	-- components `weekday`, `year`, `month`, `day`, `hour`, `minute`,
+	-- `second` ("long", "short", "narrow", "numeric", "2-digit").
+	function format_date(
+		self,
+		t: number,
+		options: {
+			dateStyle: string?,
+			timeStyle: string?,
+			weekday: string?,
+			year: string?,
+			month: string?,
+			day: string?,
+			hour: string?,
+			minute: string?,
+			second: string?,
+			hour12: boolean?,
+			timeZone: string?,
+		}?
+	): string
+	-- `unit` "second" … "year"; `numeric` "always" or "auto" ("yesterday").
+	function format_relative(
+		self,
+		delta: number,
+		unit: string,
+		options: { numeric: string?, style: string? }?
+	): string
 end
 -- `ui.span { … }`: a run of rich text, used once.
 declare extern type Span with

@@ -15,6 +15,8 @@
 //! ```
 mod catalog;
 mod format;
+#[cfg(feature = "i18n-intl")]
+pub mod intl;
 mod locale;
 mod message;
 

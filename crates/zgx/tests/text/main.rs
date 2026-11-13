@@ -10,6 +10,9 @@ mod find_in_page;
 mod i18n;
 #[path = "../inspect.rs"]
 mod inspect;
+#[cfg(feature = "i18n-intl")]
+#[path = "../intl_parity.rs"]
+mod intl_parity;
 #[path = "../links.rs"]
 mod links;
 #[path = "../selectable_text.rs"]

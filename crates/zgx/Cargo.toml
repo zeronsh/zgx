@@ -33,6 +33,9 @@ icu_locale_core = { version = "~2.4", default-features = false, optional = true 
 fixed_decimal = { version = "0.7", default-features = false, features = ["ryu"], optional = true }
 icu_datetime = { version = "~2.4", default-features = false, features = ["compiled_data"], optional = true }
 icu_calendar = { version = "~2.4", default-features = false, features = ["compiled_data"], optional = true }
+writeable = { version = "0.6", optional = true }
+icu_list = { version = "~2.4", default-features = false, features = ["compiled_data"], optional = true }
+icu_experimental = { version = "0.7", default-features = false, features = ["compiled_data"], optional = true }
 # Find in page folds accents and composed forms (`find`).
 unicode-normalization = "0.1.24"
 taffy = { package = "zgx-taffy", version = "=0.9.2", path = "../../vendor/taffy", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "content_size"] }
@@ -58,6 +61,8 @@ hyphens = []
 i18n = ["dep:icu_plurals", "dep:icu_decimal", "dep:icu_locale_core", "dep:fixed_decimal"]
 # Localized dates from ICU4X (several MB of data); without it, ISO 8601.
 i18n-dates = ["i18n", "dep:icu_datetime", "dep:icu_calendar"]
+# `ui.locale.format_list`, `format_number` with a currency or percent, and `format_relative`.
+i18n-intl = ["i18n-dates", "dep:icu_list", "dep:icu_experimental", "dep:writeable"]
 # `ZGX_PROFILE=1` also times styles and text within their phases: a check
 # in every style and text run, so only in builds that ask for it.
 profile-nested = []
@@ -71,6 +76,9 @@ trace = []
 [target.'cfg(target_os = "ios")'.dependencies]
 libc = "0.2"
 psm = "0.1.32"
+
+[dev-dependencies]
+serde_json = "1"
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
