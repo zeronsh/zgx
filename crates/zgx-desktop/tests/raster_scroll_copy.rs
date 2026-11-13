@@ -5,7 +5,12 @@
 //! around the view (an overlay staying put, rounded corners), and with one
 //! scroll inside another. Before, a scroll repainted its whole view, 13 ms a
 //! frame for a 1280 by 800 transcript.
-use zgx::{compose::prelude::*, reactive::Signal, scene::Rect, widgets::Ui};
+use zgx::{
+    compose::prelude::*,
+    reactive::Signal,
+    scene::{BoxShadow, Color, Rect, Transform},
+    widgets::Ui,
+};
 use zgx_desktop::raster::Raster;
 
 const W: f32 = 320.;
@@ -263,4 +268,50 @@ fn a_move_between_pixels_repaints_and_matches_a_frame_drawn_whole() {
         "between pixels",
     );
     assert_eq!(kept.scroll_copies(), 0, "a move between pixels copied");
+}
+
+/// A frosted composer floating at the view's foot, its shadow reaching past
+/// the band the copy keeps clear of its blur (three times the blur) into what
+/// the copy moves: the composer repaints where it is and where the copy put
+/// it, blurring what moved under it afresh, and the rest is copied.
+#[test]
+fn a_frosted_composer_whose_shadow_reaches_into_the_view_repaints_what_the_copy_carried() {
+    let mut ui = Ui::new(W, H);
+    let offset = ui.signal(0_f32);
+    ui.mount(
+        overlay()
+            .w(W)
+            .h(H)
+            .bg(rgb(0x000000))
+            .child(
+                scroll(offset.clone())
+                    .scrollbar(false)
+                    .w(W)
+                    .h(H)
+                    .bg(rgb(0x101820))
+                    .child(rows(60, 20.)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(20.)
+                    .top(H - 60.)
+                    .w(W - 40.)
+                    .h(40.)
+                    .rounded(12.)
+                    .bg(rgba(0xf0f0f528))
+                    .backdrop_blur(10.)
+                    .shadow(BoxShadow {
+                        color: Color(0, 0, 0, 90),
+                        offset: Transform { x: 0., y: 6. },
+                        blur_radius: 16.,
+                        spread: 0.,
+                    }),
+            ),
+    );
+    let mut kept = Raster::new(W as usize, H as usize);
+    frame(&mut ui, &mut kept, "first");
+    let steps = [20., 7., 33., -9., -14., 3., 24., 24.];
+    scrolled(&mut ui, &mut kept, &offset, &steps, "under the composer");
+    assert!(kept.scroll_copies() > 0, "no move copied");
 }

@@ -1210,9 +1210,15 @@ fn copy_blocker_of(
             // Something that stays put over the view (a composer floating
             // on a transcript): the copy moves the view's pixels, its among
             // them, so it repaints where it is, as the copy left what was
-            // under it, and where the copy put it. Only a blur reads past
-            // its own box, so a blurred one still repaints the whole view.
-            if item.isolated || item.effects.blur_radius > 0. {
+            // under it, and where the copy put it. A backdrop blur reads
+            // within its own box (its area is its bounds in its clip:
+            // `plan_blur`), which its ink holds: repainting there draws what
+            // moved under it first, which it blurs afresh. So does a layer
+            // (its ink its subtree's, a shader's bleed with it). Only one
+            // reading what lies under it (a blend, a shader reading the
+            // backdrop as far as its reach) may read past that: it still
+            // repaints the whole view.
+            if item.isolated && reads_under(scene, item.id) {
                 return Some(Some(CopyBlocker::Over(item.id)));
             }
             carried.push(ink);
@@ -23277,8 +23283,9 @@ mod copy_refusal_tests {
                 },
                 |_, _| {},
             ),
-            // A layer that stays put over the view: moving the view's pixels
-            // would move its.
+            // A layer that stays put over the view, mixing with what lies
+            // under it (a blend): what it reads moves under it, and may lie
+            // past its own ink.
             Case::Over => refusal_around(
                 |view| {
                     overlay().w(240.).h(180.).child(view).child(
@@ -23288,7 +23295,7 @@ mod copy_refusal_tests {
                             .top(40.)
                             .size(30., 30.)
                             .bg(rgb(0xffffff))
-                            .rotate(0.3),
+                            .blend(zgx::scene::BlendMode::Multiply),
                     )
                 },
                 |_, _| {},
