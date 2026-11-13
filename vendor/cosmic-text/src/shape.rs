@@ -322,6 +322,14 @@ fn shape_fallback(
         if cfg!(target_os = "macos") && attrs.optical > 0 && font.is_color() {
             x_advance *= apple_emoji_advance(attrs.optical) / f32::from(attrs.optical);
         }
+        if cfg!(target_os = "macos")
+            && attrs.optical > 0
+            && info.glyph_id != 0
+            && (0.99..1.01).contains(&x_advance)
+        {
+            let c = line[start_glyph..].chars().next().unwrap_or(' ');
+            x_advance *= apple_cjk_advance(c, attrs.optical);
+        }
         x_advance += attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
         let y_advance = pos.y_advance as f32 / font_scale;
         let x_offset = pos.x_offset as f32 / font_scale;
@@ -1182,6 +1190,51 @@ fn apple_emoji_advance(size: u16) -> f32 {
         6..=24 => f32::from(SMALL[usize::from(size) - 6]),
         _ => f32::from(size),
     }
+}
+
+/// zgx: how much of an em a full-width CJK glyph advances on macOS at a font
+/// size, as Chrome lays system-ui out (CoreText's PingFang UI faces, optically
+/// sized): ideographs and CJK punctuation, and kana apart, as a table of
+/// (size, ratio) from where each takes over. Scales a full-width advance.
+fn apple_cjk_advance(c: char, size: u16) -> f32 {
+    use unicode_script::Script;
+    const HAN: [(u16, f32); 11] = [
+        (0, 0.9605),
+        (12, 0.9596),
+        (13, 0.9587),
+        (17, 0.9577),
+        (22, 0.9521),
+        (32, 0.9483),
+        (36, 0.9474),
+        (40, 0.9463),
+        (48, 0.9442),
+        (60, 0.9436),
+        (u16::MAX, 0.9436),
+    ];
+    const KANA: [(u16, f32); 11] = [
+        (0, 0.9832),
+        (12, 0.9827),
+        (13, 0.9822),
+        (17, 0.9817),
+        (20, 0.9487),
+        (22, 0.9459),
+        (32, 0.9440),
+        (36, 0.9436),
+        (40, 0.9430),
+        (48, 0.9420),
+        (60, 0.9417),
+    ];
+    let table = match Script::from(c) {
+        Script::Hiragana | Script::Katakana => &KANA,
+        Script::Han => &HAN,
+        Script::Common if ('\u{3000}'..='\u{303F}').contains(&c) => &HAN,
+        _ => return 1.,
+    };
+    table
+        .iter()
+        .rev()
+        .find(|(from, _)| *from <= size)
+        .map_or(1., |(_, ratio)| *ratio)
 }
 
 /// zgx patch: the pair kerning the font `glyph` was shaped in gives it (its
