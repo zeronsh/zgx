@@ -1112,10 +1112,18 @@ impl Application {
         winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut event_loop, false);
         // A probe's window beside someone's work: shown, not taken to the front.
         #[cfg(target_os = "macos")]
-        if zgx::env::var_os("ZGX_NO_ACTIVATE").is_some() {
+        if zgx::env::var_os("ZGX_NO_ACTIVATE").is_some() || *crate::window_chrome::OFFSCREEN {
             winit::platform::macos::EventLoopBuilderExtMacOS::with_activate_ignoring_other_apps(
                 &mut event_loop,
                 false,
+            );
+        }
+        // Offscreen: no Dock icon and no place in Cmd-Tab either.
+        #[cfg(target_os = "macos")]
+        if *crate::window_chrome::OFFSCREEN {
+            winit::platform::macos::EventLoopBuilderExtMacOS::with_activation_policy(
+                &mut event_loop,
+                winit::platform::macos::ActivationPolicy::Accessory,
             );
         }
         let event_loop = event_loop.build()?;
@@ -1244,6 +1252,7 @@ impl Default for Application {
 /// `Occluded` and a covered window goes on drawing with or without it.
 static RENDER_WHEN_COVERED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
     zgx::env::var_os("ZGX_RENDER_WHEN_COVERED").is_some_and(|v| !v.is_empty() && v != "0")
+        || *crate::window_chrome::OFFSCREEN
 });
 /// What a window's next trim is for (`Host::trim_at`): the trim of what
 /// animation alone used, or what goes later at rest (`Rest`).
@@ -4355,6 +4364,9 @@ impl Host {
         );
         // Left maximized, it opens so (`frame_autosave`).
         self.state.maximized |= placed.maximized;
+        if *crate::window_chrome::OFFSCREEN {
+            crate::window_chrome::send_offscreen(&window);
+        }
         let radius = crate::window_chrome::apply(
             &window,
             self.options.titlebar,
