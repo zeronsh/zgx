@@ -439,3 +439,109 @@ fn a_drawing_renders_to_a_jpeg_or_a_webp() {
     // A format it doesn't make: refused as asked.
     assert_eq!(wait(&h, &heard, "bad"), Value::Bool(false));
 }
+
+/// A platform whose save dialog answers with `saves`.
+struct SavesTo(std::path::PathBuf);
+impl zgx::platform::Platform for SavesTo {
+    fn clipboard_text(&self) -> Option<String> {
+        None
+    }
+    fn set_clipboard_text(&self, _: String) -> bool {
+        false
+    }
+    fn open_files(
+        &self,
+        _: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Vec<std::path::PathBuf>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn save_file(
+        &self,
+        _: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Option<std::path::PathBuf>, String>> {
+        let path = self.0.clone();
+        Box::pin(async move { Ok(Some(path)) })
+    }
+}
+
+#[test]
+fn a_big_drawing_renders_straight_to_a_picked_file() {
+    let dir = std::env::temp_dir().join(format!("zgx-render-file-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let saves = dir.join("board.png");
+    let heard: Heard = Rc::default();
+    let sink = heard.clone();
+    let to = saves.clone();
+    let h = Harness::wrapped(
+        move |runtime| {
+            let host = ScriptHost::inline(
+                runtime,
+                "app",
+                r##"
+local function board(c, w, h)
+    c:rect(0, 0, w, h, "#ffffff")
+    -- Clips inside clips and a shadow the board's size: at 3x each mask
+    -- and the shadow are over the 32 MiB a window's picture keeps to.
+    for _ = 1, 4 do
+        c:clip(ui.path():move(0, 0):line(w, 0):line(w, h):line(0, h):close())
+    end
+    c:shadow(ui.path():move(20, 20):line(w - 20, 20):line(w - 20, h - 20):line(20, h - 20):close(), { y = 8, blur = 24 })
+    c:rect(100, 100, 400, 200, "#ff0000", 16)
+    for _ = 1, 4 do
+        c:restore()
+    end
+end
+ui.task(function()
+    -- A 1440 by 900 board at 3x is 46 MiB of pixels: more than a picture
+    -- given back may be, written to a file all the same.
+    local given = pcall(function()
+        ui.render_canvas(board, { width = 1440, height = 900, scale = 3 }):await()
+    end)
+    local file = ui.save_file({ name = "board.png" }):await()
+    local made = ui.render_canvas(board, { width = 1440, height = 900, scale = 3, file = file }):await()
+    ui.render_canvas(board, { width = 1440, height = 900, scale = 3, file = file, format = "jpeg" }):await()
+    local sneaky = pcall(ui.render_canvas, board, { width = 8, height = 8, file = "/tmp/elsewhere.png" })
+    ui.invoke("done", `{given} {made == nil} {sneaky}`)
+end)
+return ui.div {}
+"##,
+            );
+            let heard = sink.clone();
+            host.action("done", move |value| {
+                heard.borrow_mut().push(("done".into(), value))
+            });
+            host
+        },
+        move |view| {
+            zgx::compose::provide(
+                zgx::platform::PlatformService(Rc::new(SavesTo(to.clone()))),
+                view,
+            )
+        },
+    );
+    // (Three 4320 by 2700 pictures, slow in a debug build: its own wait.)
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let done = loop {
+        h.settle();
+        if let Some((_, value)) = heard.borrow().iter().find(|(n, _)| n == "done") {
+            break value.clone();
+        }
+        if let Some(e) = h.host.error().with_untracked(|e| e.clone()) {
+            panic!("script error: {e}");
+        }
+        assert!(Instant::now() < deadline, "no `done`");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(done, Value::Str("false true false".into()));
+    // The last write, a JPEG: its frame 4320 by 2700 pixels.
+    let jpeg = std::fs::read(&saves).unwrap();
+    assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF]);
+    let sof = jpeg
+        .windows(2)
+        .position(|w| w[0] == 0xFF && (w[1] == 0xC0 || w[1] == 0xC2))
+        .unwrap();
+    let size = |i: usize| u16::from_be_bytes([jpeg[i], jpeg[i + 1]]);
+    assert_eq!((size(sof + 7), size(sof + 5)), (4320, 2700));
+    assert!(!saves.with_extension("zgx-write").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}

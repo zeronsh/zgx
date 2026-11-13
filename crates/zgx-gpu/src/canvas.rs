@@ -1247,11 +1247,13 @@ fn draw_shadow(
         return Ok(());
     }
     let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+    // BUDGET, or as much as the picture it falls on when that's bigger.
+    let budget = (BUDGET as u64).max(u64::from(pixmap.width()) * u64::from(pixmap.height()) * 4);
     if (u64::from(w) * u64::from(h))
         .checked_mul(4)
-        .is_none_or(|bytes| bytes > BUDGET as u64)
+        .is_none_or(|bytes| bytes > budget)
     {
-        return Err(GpuError("canvas shadow exceeds 32 MiB".into()));
+        return Err(GpuError("canvas shadow exceeds its budget".into()));
     }
     let mut cast =
         sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
@@ -1464,7 +1466,33 @@ pub fn picture(
     background: Option<zgx::scene::Color>,
     text: &mut crate::text::CpuTextRaster,
 ) -> Result<ImageData, GpuError> {
-    let mut pixmap = paint(&Canvas::new(), view, width, height, scale, background)?;
+    picture_up_to(canvas, view, width, height, scale, background, text, BUDGET)
+}
+/// The most a picture made for a file may take (`picture_up_to`): 256 MiB of
+/// pixels, 8192 by 8192 or a 1440 by 900 screen at 4x.
+pub const FILE_BUDGET: usize = 256 * 1024 * 1024;
+/// `picture` with its own cap on the raster's bytes: a picture written to a
+/// file (`FILE_BUDGET`) isn't one a window keeps.
+#[allow(clippy::too_many_arguments)]
+pub fn picture_up_to(
+    canvas: &Canvas,
+    view: zgx::scene::CanvasView,
+    width: f32,
+    height: f32,
+    scale: f32,
+    background: Option<zgx::scene::Color>,
+    text: &mut crate::text::CpuTextRaster,
+    budget: usize,
+) -> Result<ImageData, GpuError> {
+    let mut pixmap = paint_up_to(
+        &Canvas::new(),
+        view,
+        width,
+        height,
+        scale,
+        background,
+        budget,
+    )?;
     if canvas.commands().len() > 65536 {
         return Err(GpuError(
             "invalid canvas dimensions or command count".into(),
@@ -1819,6 +1847,18 @@ fn paint(
     scale: f32,
     background: Option<zgx::scene::Color>,
 ) -> Result<sk::Pixmap, GpuError> {
+    paint_up_to(canvas, view, width, height, scale, background, BUDGET)
+}
+/// `paint` with its own cap on the raster's bytes (`picture_up_to`).
+fn paint_up_to(
+    canvas: &Canvas,
+    view: zgx::scene::CanvasView,
+    width: f32,
+    height: f32,
+    scale: f32,
+    background: Option<zgx::scene::Color>,
+    budget: usize,
+) -> Result<sk::Pixmap, GpuError> {
     if ![width, height, scale]
         .iter()
         .all(|v| v.is_finite() && *v > 0.)
@@ -1834,9 +1874,12 @@ fn paint(
         || h == 0
         || (u64::from(w) * u64::from(h))
             .checked_mul(4)
-            .is_none_or(|bytes| bytes > BUDGET as u64)
+            .is_none_or(|bytes| bytes > budget as u64)
     {
-        return Err(GpuError("canvas raster exceeds 32 MiB".into()));
+        return Err(GpuError(format!(
+            "canvas raster exceeds {} MiB",
+            budget >> 20
+        )));
     }
     let mut pixmap =
         sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
@@ -1885,6 +1928,14 @@ fn paint_into(
     transform: sk::Transform,
 ) -> Result<sk::Pixmap, GpuError> {
     let (w, h) = (pixmap.width(), pixmap.height());
+    // Clips' masks: BUDGET in all, or for a picture bigger than that (one
+    // for a file, `picture_up_to`) twice its pixels' bytes.
+    let pixels = u64::from(w) * u64::from(h) * 4;
+    let mask_budget = if pixels > BUDGET as u64 {
+        pixels * 2
+    } else {
+        BUDGET as u64
+    };
     let mut masks: Vec<sk::Mask> = Vec::new();
     for command in canvas.commands() {
         match command {
@@ -1892,7 +1943,7 @@ fn paint_into(
                 if masks.len() >= 16
                     || (u64::from(w) * u64::from(h))
                         .checked_mul((masks.len() + 1) as u64)
-                        .is_none_or(|bytes| bytes > BUDGET as u64)
+                        .is_none_or(|bytes| bytes > mask_budget)
                 {
                     return Err(GpuError("canvas clip stack exceeds budget".into()));
                 }
