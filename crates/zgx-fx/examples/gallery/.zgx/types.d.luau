@@ -1251,8 +1251,10 @@ export type Control = {
 	w: number,
 	h: number,
 	disabled: boolean,
-	-- Nil where it cannot be selected or opened.
+	-- Nil where it cannot be selected, checked or opened. `checked`: a
+	-- checkbox, radio, switch, or a checked or radio menu item, on or off.
 	selected: boolean?,
+	checked: boolean?,
 	expanded: boolean?,
 	focused: boolean,
 	-- Names it for `ui.press` while it is there.

@@ -397,3 +397,30 @@ fn a_ring_round_an_opaque_box_leaves_no_seam_at_a_fractional_edge() {
         }
     }
 }
+
+#[test]
+fn a_border_over_an_opaque_fill_keeps_the_edges_coverage() {
+    // The border is drawn with its fill: at an edge inside a pixel the pixel has the coverage the edge
+    // gives it (a box starting 0.3 into a pixel covers 0.7 of it), not more for the fill and border each.
+    let _gpu = gpu_fixture();
+    for border in [1., 3.] {
+        for shift in [(0.5, 0.5), (0.25, 0.25), (0.75, 0.25)] {
+            let spec = Box {
+                size: (80., 40.),
+                radius: 12.,
+                border,
+                ..Default::default()
+            };
+            let p = draw(spec, 1., 1.5, shift);
+            let x = (50. + shift.0) as i32;
+            let top = 20. + shift.1;
+            let row = top.floor() as i32;
+            let alpha = p[((row * SIZE as i32 + x) * 4 + 3) as usize] as f32;
+            let expected = 255. * (1. - top.fract());
+            assert!(
+                (alpha - expected).abs() <= 8.,
+                "border {border} at {shift:?}: the edge pixel has alpha {alpha}, its coverage {expected}"
+            );
+        }
+    }
+}
