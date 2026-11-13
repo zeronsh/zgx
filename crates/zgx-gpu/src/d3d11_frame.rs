@@ -21,8 +21,8 @@
 //! fills and layer shaders not reading the backdrop, their pixel stage
 //! compiled off the frame (`Device::start_app_shader`) from the module
 //! Direct3D 12's is, with the passes and tagged boxes a layer shader reads
-//! and pictures a layer shader reads (`Chain`; one reading GPU views
-//! composites as painted). A
+//! pictures and GPU views a layer shader reads (`Chain`; the views painted
+//! on the views' own device, `crate::view_host`). A
 //! frame needing more fails, naming what it lacks: there is no Direct3D 12
 //! to fall back to.
 //!
@@ -1164,13 +1164,15 @@ pub(crate) struct Chain {
     passes: Vec<Pass>,
     /// The pictures it reads by name, uploaded once as passes.rs's are.
     pictures: Vec<Surface>,
+    /// The GPU views it reads by name.
+    pub(crate) views: Vec<ChainView>,
     /// Bound where a pass reads itself and keeps no last result.
     nothing: Surface,
     rects: (ID3D11Buffer, ID3D11ShaderResourceView),
     /// One step's `ZgxPass`, written before each draw.
     uniforms: ID3D11Buffer,
     /// What the layer shader binds at `INPUTS`: the boxes, the passes'
-    /// latest and the pictures.
+    /// latest, the pictures and the views.
     pub(crate) bound: Option<Vec<Option<ID3D11ShaderResourceView>>>,
     pub(crate) rects_held: Vec<(zgx::scene::Rect, [f32; 4])>,
     /// The shader's time when it last ran, and frames so far.
@@ -1178,6 +1180,14 @@ pub(crate) struct Chain {
     pub(crate) frames: u32,
     /// The pass-time it last ran at (passes.rs `Chain::last_frame`).
     pub(crate) last_frame: u64,
+}
+/// A GPU view a layer shader reads (`GpuView::id`), and the texture its
+/// painter draws into each frame, made at the box's size: the views'
+/// device's, shared with Direct3D 11 (`crate::view_host`).
+pub(crate) struct ChainView {
+    pub(crate) view: u64,
+    pub(crate) size: (u32, u32),
+    pub(crate) made: Option<(wgpu::Texture, Surface)>,
 }
 struct Pass {
     /// Its vertex and pixel stages' DXBC, compiling or compiled, and the
@@ -1196,12 +1206,13 @@ struct Pass {
 
 impl Chain {
     /// A chain for `passes` (each pass's module, `passes::pass_source`, and
-    /// its format) and `pictures`, its stages compiling off the frame unless
-    /// `here`, with `rect_bytes` of boxes, zeroed.
+    /// its format), `pictures` and `views`, its stages compiling off the
+    /// frame unless `here`, with `rect_bytes` of boxes, zeroed.
     pub(crate) fn new(
         device: &Device,
         passes: Vec<(String, zgx::decoration::PassFormat)>,
         pictures: &[(String, std::sync::Arc<zgx::image::ImageData>)],
+        views: &[(String, u64)],
         rect_bytes: usize,
         here: bool,
     ) -> Result<Self, GpuError> {
@@ -1260,6 +1271,13 @@ impl Chain {
         Ok(Self {
             passes,
             pictures,
+            views: (views.iter())
+                .map(|(_, view)| ChainView {
+                    view: *view,
+                    size: (0, 0),
+                    made: None,
+                })
+                .collect(),
             nothing: device.surface_as(1, 1, false, DXGI_FORMAT_R8G8B8A8_UNORM)?,
             rects: raw_buffer(&device.device, rect_bytes, Some(&vec![0; rect_bytes]))?,
             uniforms: uniforms
@@ -1367,7 +1385,7 @@ impl Chain {
 
     /// What binds at `INPUTS`: the boxes, then each pass's latest result,
     /// but `writing`'s own texture where it keeps no last result, then the
-    /// pictures (passes.rs `Chain::bind_inputs`).
+    /// pictures and the views (passes.rs `Chain::bind_inputs`).
     fn inputs(&self, writing: Option<usize>) -> Vec<Option<ID3D11ShaderResourceView>> {
         let nothing = || self.nothing.srv.clone();
         let mut bound = vec![Some(self.rects.1.clone())];
@@ -1378,6 +1396,10 @@ impl Chain {
             });
         }
         bound.extend(self.pictures.iter().map(|picture| picture.srv.clone()));
+        bound.extend((self.views.iter()).map(|view| match &view.made {
+            Some((_, surface)) => surface.srv.clone(),
+            None => nothing(),
+        }));
         bound
     }
 

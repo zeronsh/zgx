@@ -872,7 +872,6 @@ jobs:
         shell: bash
         run: |
           skips=(
-            an_apps_view_is_drawn_with_its_device_and_sampled_by_name    # GPU views read by layer shaders: left out on D3D11
             backdrop_readers_apart_share_one_copy_and_pass               # counts copies: D3D11 makes 2 where D3D12 shares 1
             draws_around_a_reader_sharing_a_copy_do_not_draw_over_it     # counts copies: D3D11 makes 2 where D3D12 shares 1
             a_child_fxc_cannot_survive_fails_that_shader_alone           # Direct3D 12's FXC child process
