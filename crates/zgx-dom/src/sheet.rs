@@ -24,6 +24,7 @@ pub(crate) const BASE_CSS: &str = "\
 .zt{display:block;box-sizing:border-box;}\
 .zs0{user-select:none;}.zs1{user-select:text;}\
 .zu{align-items:center;justify-content:center;border:1px dashed currentColor;opacity:.6;min-height:24px;}\
+.zcv{position:absolute;left:0;top:0;width:100%;height:100%;display:block;}\
 ";
 
 /// `base`'s own declarations, folded into a look's rule so its elements

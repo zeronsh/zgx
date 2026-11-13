@@ -30,6 +30,7 @@ pub(crate) const CLASS_NAME: u32 = 24;
 pub(crate) const CLASS_ADD: u32 = 25;
 pub(crate) const VISIBLE: u32 = 26;
 pub(crate) const TRUNCATE: u32 = 27;
+pub(crate) const PAINT: u32 = 32;
 
 /// Words a frame holds before it applies what it has (`Ops::op`).
 pub(crate) const EARLY: usize = 1 << 12;

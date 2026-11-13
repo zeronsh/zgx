@@ -815,6 +815,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
             });
         }
         ElementKind::Region(region) => mount_region(region, id, scope, block),
+        ElementKind::Canvas(draw) => mount_canvas(draw, id, runtime, block),
         ElementKind::Unsupported(name) => ops::with(|ops| {
             let text = block.node(ops);
             ops.op_str(ops::TEXT, text, &format!("{name}: not shown in the DOM"));
@@ -824,6 +825,62 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
         }),
         ElementKind::Box(_) | ElementKind::Button => {}
     }
+}
+
+/// A drawing (`canvas`): a `<canvas>` filling the element, drawn with
+/// Canvas 2D at the element's size (a ResizeObserver's) and the screen's
+/// pixel ratio, again as the size or what the drawing reads changes, and
+/// only when the commands differ from the last drawn.
+fn mount_canvas(
+    mut draw: Box<dyn FnMut((f32, f32)) -> zgx::canvas::Canvas>,
+    id: u32,
+    runtime: &Runtime,
+    block: &mut Block,
+) {
+    let size = runtime.signal((0_f32, 0_f32));
+    let surface = ops::with(|ops| {
+        let surface = block.node(ops);
+        ops.op(&[ops::CREATE, surface, Tag::Canvas as u32]);
+        let class = sheet::plain(ops, "zcv");
+        ops.op(&[ops::CLASS, surface, class]);
+        ops.op(&[ops::APPEND, id, surface]);
+        // It holds the canvas, positioned over it.
+        let class = sheet::plain(ops, "zr");
+        ops.op(&[ops::CLASS_ADD, id, class]);
+        surface
+    });
+    let write = size.clone();
+    block.on(id, ops::ON_RESIZE, move |event| {
+        if let Event::Resize(width, height, _, _) = event {
+            write.set((width, height));
+        }
+    });
+    let mut last: Option<((f32, f32), zgx::canvas::Canvas)> = None;
+    block.effect(runtime, move || {
+        let (width, height) = size.get();
+        // Measured first: until then there's nothing to draw at.
+        if width <= 0. || height <= 0. {
+            return;
+        }
+        let drawn = draw((width, height));
+        if last
+            .as_ref()
+            .is_some_and(|(at, was)| *at == (width, height) && *was == drawn)
+        {
+            return;
+        }
+        ops::with(|ops| {
+            ops.op(&[
+                ops::PAINT,
+                surface,
+                width.to_bits(),
+                height.to_bits(),
+                crate::canvas::count(&drawn),
+            ]);
+            crate::canvas::encode(ops, &drawn);
+        });
+        last = Some(((width, height), drawn));
+    });
 }
 
 fn mount_region(region: Region, holder: u32, scope: &Scope, block: &mut Block) {

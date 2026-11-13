@@ -130,6 +130,7 @@ function observeVisible(node, handler, margin) {
 
 export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
   const ops = new Uint32Array(memory.buffer, opsPtr, opsLen);
+  const floats = new Float32Array(memory.buffer, opsPtr, opsLen);
   const text = strLen ? decoder.decode(new Uint8Array(memory.buffer, strPtr, strLen)) : "";
   let i = 0;
   const str = () => {
@@ -317,6 +318,15 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         observeVisible(node, handler, margin);
         break;
       }
+      case 32: { // PAINT canvas width height count commands…
+        const node = nodes[ops[i++]];
+        const width = floats[i++];
+        const height = floats[i++];
+        const count = ops[i++];
+        const reader = { next: () => ops[i++], num: () => floats[i++], str };
+        paint(node, width, height, count, reader);
+        break;
+      }
       default:
         throw new Error("zgx-dom: unknown op " + ops[i - 1]);
     }
@@ -328,4 +338,148 @@ export function zgx_live_nodes() {
   let n = 0;
   for (const node of nodes) if (node !== undefined) n++;
   return n;
+}
+
+// A canvas's drawing (`src/canvas.rs`) with Canvas 2D, at its size in CSS
+// pixels and the screen's pixel ratio. Text goes over the shapes, unclipped.
+function rgba(word) {
+  return "rgba(" + (word >>> 24) + "," + ((word >>> 16) & 255) + "," + ((word >>> 8) & 255) + "," + (word & 255) / 255 + ")";
+}
+
+function paint(node, width, height, count, r) {
+  const ratio = devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(width * ratio));
+  const h = Math.max(1, Math.round(height * ratio));
+  if (node.width !== w) node.width = w;
+  if (node.height !== h) node.height = h;
+  const ctx = node.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const path = () => {
+    const p = new Path2D();
+    switch (r.next()) {
+      case 0: {
+        const x = r.num(), y = r.num(), pw = r.num(), ph = r.num(), radius = r.num();
+        if (radius > 0) p.roundRect(x, y, pw, ph, radius);
+        else p.rect(x, y, pw, ph);
+        break;
+      }
+      case 1: {
+        const x = r.num(), y = r.num(), pw = r.num(), ph = r.num();
+        p.ellipse(x + pw / 2, y + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
+        break;
+      }
+      case 2:
+        p.moveTo(r.num(), r.num());
+        p.lineTo(r.num(), r.num());
+        break;
+      default: {
+        const n = r.next();
+        for (let k = 0; k < n; k++) {
+          switch (r.next()) {
+            case 0:
+              p.moveTo(r.num(), r.num());
+              break;
+            case 1:
+              p.lineTo(r.num(), r.num());
+              break;
+            case 2:
+              p.quadraticCurveTo(r.num(), r.num(), r.num(), r.num());
+              break;
+            case 3:
+              p.bezierCurveTo(r.num(), r.num(), r.num(), r.num(), r.num(), r.num());
+              break;
+            default:
+              p.closePath();
+          }
+        }
+      }
+    }
+    return p;
+  };
+  const brush = () => {
+    switch (r.next()) {
+      case 0:
+        return rgba(r.next());
+      case 1: {
+        const g = ctx.createLinearGradient(r.num(), r.num(), r.num(), r.num());
+        const n = r.next();
+        for (let k = 0; k < n; k++) g.addColorStop(r.num(), rgba(r.next()));
+        return g;
+      }
+      default: {
+        // Diagonal stripes: a tile of one, repeated.
+        const background = rgba(r.next()), foreground = rgba(r.next());
+        const spacing = Math.max(1, r.num()), stripe = r.num();
+        const size = Math.max(1, Math.round(spacing * ratio));
+        const tile = document.createElement("canvas");
+        tile.width = tile.height = size;
+        const t = tile.getContext("2d");
+        t.fillStyle = background;
+        t.fillRect(0, 0, size, size);
+        t.strokeStyle = foreground;
+        t.lineWidth = stripe * ratio;
+        t.beginPath();
+        for (const at of [-size, 0, size]) {
+          t.moveTo(at, size);
+          t.lineTo(at + size, 0);
+        }
+        t.stroke();
+        const pattern = ctx.createPattern(tile, "repeat");
+        pattern.setTransform(new DOMMatrix([1 / ratio, 0, 0, 1 / ratio, 0, 0]));
+        return pattern;
+      }
+    }
+  };
+  const caps = ["butt", "round", "square"];
+  const joins = ["miter", "round", "bevel"];
+  let depth = 0;
+  const texts = [];
+  for (let c = 0; c < count; c++) {
+    switch (r.next()) {
+      case 1: {
+        const rule = r.next() === 1 ? "evenodd" : "nonzero";
+        ctx.fillStyle = brush();
+        ctx.fill(path(), rule);
+        break;
+      }
+      case 2: {
+        ctx.lineWidth = r.num();
+        ctx.lineCap = caps[r.next()];
+        ctx.lineJoin = joins[r.next()];
+        ctx.miterLimit = r.num();
+        const dashes = [];
+        for (let n = r.next(); n > 0; n--) dashes.push(r.num());
+        ctx.setLineDash(dashes);
+        ctx.lineDashOffset = r.num();
+        ctx.strokeStyle = brush();
+        ctx.stroke(path());
+        break;
+      }
+      case 3: {
+        const rule = r.next() === 1 ? "evenodd" : "nonzero";
+        ctx.save();
+        depth++;
+        ctx.clip(path(), rule);
+        break;
+      }
+      case 4:
+        if (depth > 0) {
+          ctx.restore();
+          depth--;
+        }
+        break;
+      default:
+        texts.push([r.str(), r.str(), r.num(), r.num(), r.next(), r.next(), r.next()]);
+    }
+  }
+  while (depth-- > 0) ctx.restore();
+  for (const [text, font, x, y, color, anchor, baseline] of texts) {
+    ctx.font = font;
+    ctx.fillStyle = rgba(color);
+    ctx.textAlign = ["left", "center", "right"][anchor];
+    ctx.textBaseline = ["top", "middle", "bottom"][baseline];
+    ctx.fillText(text, x, y);
+  }
 }
