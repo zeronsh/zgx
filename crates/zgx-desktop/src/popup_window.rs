@@ -875,6 +875,9 @@ mod macos {
             );
             window.setAcceptsMouseMovedEvents(true);
             window.setBecomesKeyOnlyIfNeeded(true);
+            if *crate::window_chrome::OFFSCREEN {
+                crate::window_chrome::hide_ns_window(&window);
+            }
             let host = CALayer::new();
             host.setHidden(true);
             let content = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
@@ -1055,10 +1058,12 @@ mod macos {
                 let number = self.window.windowNumber();
                 PREVIEWS.with(|previews| previews.borrow_mut().retain(|other| *other != number));
             }
-            self.window.setAlphaValue(1.);
-            self.window.setIgnoresMouseEvents(false);
+            self.window
+                .setAlphaValue(crate::window_chrome::shown_alpha());
+            self.window
+                .setIgnoresMouseEvents(*crate::window_chrome::OFFSCREEN);
             // A menu's or a popover's rim, should a preview have had it off.
-            self.window.setHasShadow(true);
+            self.window.setHasShadow(!*crate::window_chrome::OFFSCREEN);
             if let Some(renderer) = &mut self.renderer {
                 renderer.trim();
             }
@@ -1400,7 +1405,9 @@ mod macos {
             .setFrameOrigin(NSPoint::new(-10_000., -10_000.));
         panel.window.orderFront(None);
         panel.window.orderOut(None);
-        panel.window.setAlphaValue(1.);
+        panel
+            .window
+            .setAlphaValue(crate::window_chrome::shown_alpha());
         POOL_PANELS.with(|pool| pool.borrow_mut().push(panel));
     }
 
@@ -1745,7 +1752,9 @@ mod macos {
                 if panel.preview.is_none() {
                     let shadow = system_shadow(scene, root);
                     if panel.window.hasShadow() != shadow {
-                        panel.window.setHasShadow(shadow);
+                        panel
+                            .window
+                            .setHasShadow(shadow && !*crate::window_chrome::OFFSCREEN);
                     }
                 }
                 if new {

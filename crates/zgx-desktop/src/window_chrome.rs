@@ -2150,6 +2150,43 @@ pub(crate) fn occluded(window: &winit::window::Window) -> Option<bool> {
     }
 }
 
+/// `ZGX_OFFSCREEN=1`: test and probe sessions keep their windows from anyone's
+/// screen: invisible and click-through, out of Mission Control and window
+/// cycling, never activating, with no Dock icon or Cmd-Tab place, while they
+/// go on drawing (it implies `ZGX_RENDER_WHEN_COVERED`) and answering
+/// `zgx inspect` (its snapshots are zgx's own frames).
+pub(crate) static OFFSCREEN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    zgx::env::var_os("ZGX_OFFSCREEN").is_some_and(|v| !v.is_empty() && v != "0")
+});
+
+/// Hides `window` from the screen as `OFFSCREEN` says (macOS).
+pub(crate) fn send_offscreen(window: &winit::window::Window) {
+    #[cfg(target_os = "macos")]
+    if let Some(window) = mac::ns_window(window) {
+        hide_ns_window(&window);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
+/// A shown window's alpha: none while `OFFSCREEN`.
+pub(crate) fn shown_alpha() -> f64 {
+    if *OFFSCREEN { 0. } else { 1. }
+}
+
+/// `send_offscreen` for a window zgx made itself (a popup's).
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_ns_window(window: &objc2_app_kit::NSWindow) {
+    use objc2_app_kit::NSWindowCollectionBehavior;
+    // AppKit keeps a titled window on a screen as it shows, so it is made unseen instead of moved
+    window.setAlphaValue(0.);
+    window.setIgnoresMouseEvents(true);
+    window.setHasShadow(false);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::Transient | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+}
+
 pub(crate) fn double_click(window: &winit::window::Window) {
     #[cfg(target_os = "macos")]
     mac::double_click(window);

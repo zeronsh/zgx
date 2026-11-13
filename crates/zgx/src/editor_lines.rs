@@ -841,15 +841,20 @@ impl LinesLayout {
             cache,
             joined: RefCell::default(),
         };
-        if let Some(width) = wrap {
+        // every line's own height, unwrapped too: a heading's taller pitch and a line's room push the lines below
+        {
+            let width = wrap.unwrap_or(f32::INFINITY);
             let known = layout.cache.heights.borrow();
             let each = (0..layout.line_count())
                 .map(|i| {
                     let line = layout.line_text(i);
+                    let inset = layout.inset(i);
                     known
                         .get(&*line)
                         .copied()
                         .unwrap_or_else(|| layout.estimate(&line, width))
+                        + inset.above
+                        + inset.below
                 })
                 .collect();
             drop(known);
@@ -883,18 +888,22 @@ impl LinesLayout {
         for i in kept - 1..first_moved.min(layout.line_count()) {
             layout.longest = layout.longest.max(layout.line_range(i).len());
         }
-        if let (Some(width), Some(heights)) = (old.wrap, &old.heights) {
+        if let Some(heights) = &old.heights {
+            let width = old.wrap.unwrap_or(f32::INFINITY);
             let old_each = &heights.borrow().each;
             let known = layout.cache.heights.borrow();
             let mut each = Vec::with_capacity(layout.line_count());
             each.extend_from_slice(&old_each[..kept - 1]);
             for i in kept - 1..first_moved {
                 let line = layout.line_text(i);
+                let inset = layout.inset(i);
                 each.push(
                     known
                         .get(&*line)
                         .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width)),
+                        .unwrap_or_else(|| layout.estimate(&line, width))
+                        + inset.above
+                        + inset.below,
                 );
             }
             each.extend_from_slice(&old_each[moved..]);
@@ -1006,13 +1015,12 @@ impl LinesLayout {
             self.widest.set(width);
         }
         if let Some(heights) = &self.heights {
-            let height = height.max(self.row) + inset.above + inset.below;
+            // cached without its room: the same text elsewhere (or once its block changes) has its own
+            let bare = height.max(self.row);
+            let height = bare + inset.above + inset.below;
             if heights.borrow().each[i] != height {
                 heights.borrow_mut().set(i, height);
-                self.cache
-                    .heights
-                    .borrow_mut()
-                    .insert((*text).into(), height);
+                self.cache.heights.borrow_mut().insert((*text).into(), bare);
             }
         }
         layout
@@ -1259,6 +1267,90 @@ mod tests {
         let third = text.find("third").unwrap();
         assert!(inset.caret(third).y > plain.caret(third).y + 11.);
         assert_eq!(inset.caret(0), plain.caret(0));
+    }
+
+    /// A note's heading, then a paragraph and a list item: each line starts where the one above ends (its taller
+    /// pitch and its room included), wrapped or not, and a heading's line is as tall as its pitch (nothing clipped).
+    #[test]
+    fn a_heading_pushes_the_lines_below_it() {
+        for wrap in [None, Some(400.)] {
+            let cache = Rc::new(LineCache::default());
+            cache.set_highlighter(Some(Rc::new(|line: &str, state: u32| {
+                let spans: LineSpans = if state == 1 {
+                    vec![(
+                        0..line.len(),
+                        SpanStyle::default().size(24.).line_height(32.).weight(600),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                (spans, state + 1)
+            })));
+            cache.set_insets(Some(Rc::new(|i| match i {
+                1 => LineInset {
+                    above: 24.,
+                    ..LineInset::default()
+                },
+                2 => LineInset {
+                    above: 12.,
+                    ..LineInset::default()
+                },
+                3 => LineInset {
+                    left: 32.,
+                    above: 8.,
+                    ..LineInset::default()
+                },
+                _ => LineInset::default(),
+            })));
+            let text = "Title\nA heading\nbody text\nList item";
+            let lay = || {
+                cache.layout(
+                    || Text::new(text),
+                    None,
+                    14.,
+                    wrap,
+                    &FontStyle::default(),
+                    0,
+                    shaper,
+                )
+            };
+            // as the editor does: painting asks for the spans, a span that shapes lays the text out again
+            let first = lay();
+            for i in 0..4 {
+                cache.spans(&first, i);
+            }
+            assert!(cache.take_restyled());
+            cache.forget_last();
+            let layout = lay();
+            layout.lines_between(0., 1000.);
+            assert!(
+                layout.height(1) >= 32. + 24.,
+                "{wrap:?}: the heading's pitch and room: {}",
+                layout.height(1)
+            );
+            for i in 1..4 {
+                assert_eq!(
+                    layout.top(i),
+                    layout.top(i - 1) + layout.height(i - 1),
+                    "{wrap:?}: line {i} starts below line {}",
+                    i - 1
+                );
+            }
+            let heading = layout.caret(text.find("A heading").unwrap());
+            let body = layout.caret(text.find("body").unwrap());
+            let item = layout.caret(text.find("List item").unwrap());
+            assert_eq!(heading.y, layout.top(1) + 24.);
+            assert!(
+                body.y >= heading.y + 32. + 12.,
+                "{wrap:?}: the paragraph sits below the heading: {} vs {}",
+                body.y,
+                heading.y
+            );
+            assert!(
+                item.y >= body.y + 8. && item.x >= 32.,
+                "{wrap:?}: the list item, indented, below the paragraph"
+            );
+        }
     }
 
     /// Laid out by its lines, a text has the carets, hits and selections it
