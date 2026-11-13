@@ -54,6 +54,13 @@ pub(crate) const ON_INPUT: u32 = 1;
 pub(crate) const ON_SCROLL: u32 = 2;
 pub(crate) const SCROLL_X: u32 = 3;
 pub(crate) const ON_RESIZE: u32 = 4;
+/// An element's listeners: `HANDLER id ON_EVENT handler`.
+pub(crate) const ON_EVENT: u32 = 5;
+/// A keymap at the element: `HANDLER id KEYMAP node`.
+pub(crate) const KEYMAP: u32 = 6;
+/// A focus group: `HANDLER id GROUP axis` (1 vertical, 2 horizontal,
+/// 3 both; 4 set: moving chooses).
+pub(crate) const GROUP: u32 = 7;
 
 /// `NUMBER`'s properties.
 pub(crate) const NUM_VALUE: u32 = 0;

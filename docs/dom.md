@@ -60,6 +60,9 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 | roles, labels, levels, live regions, checked, selected, expanded, values, descriptions, hidden, modal | ARIA: `role`, `aria-label`, `aria-level`, `aria-live`, `aria-checked`… |
 | `focusable` | `tabindex` |
 | `selectable` | `user-select` |
+| `on_event`, `on_action` | the browser's events at the element, each phase a call (capture, at it, bubbling): pointer down, up, move, enter, leave and cancel, the wheel (lines and pages as points), keys (`key` and `code`), focus and blur (`focusin`, `focusout`) and activation (`click`). A listener's `prevent_default`, `stop_propagation`, `stop_immediate_propagation`, `focus` and pointer capture apply to the event at once. An event for something inside the element has a `target` of its own, not the element's |
+| `keymap` | zgx's keymap resolution (bindings by context, sequences of up to four keys, `NoAction`): a key goes to the keymaps from the focused element out before anything hears it; a sequence's first keys are taken, and a match's actions go out in turn from the focused element until a listener handles one (`prevent_default`) |
+| `focus_group`, and list boxes, tab lists, toolbars and radio groups | one Tab stop (roving `tabindex`, on the checked or selected member first); the arrows of its axis, Home and End move among its own members (right to left, Left and Right swap); a radio group's wrap and choose |
 | `on_mount` handles | `observe_size`, `observe_bounds` (ResizeObserver), `observe_visibility`, `observe_visibility_within` (IntersectionObserver with that `rootMargin`), `is_mounted`, `retain` |
 
 ## What doesn't map
@@ -68,7 +71,7 @@ Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau** (`zgx-script`): its VM is C++ built with `cc`, and it depends on zgx-gpu; running it in the browser needs Luau built for wasm and that dependency split off.
-- **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, menus, popovers, modals and tooltips (the Popover API and `<dialog>` fit), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
+- **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, menus, popovers, modals and tooltips (the Popover API and `<dialog>` fit), `variable_virtual_list` and `measured_virtual_list`, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 
 ## Performance

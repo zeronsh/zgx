@@ -28,7 +28,7 @@ web-sys = { version = "0.3.104", features = ["Document", "Element", "HtmlElement
 zgx = { path = "../zgx", default-features = false, features = ["dom", "trace"] }
 wasm-bindgen-test = "=0.3.77"
 wasm-bindgen-futures = "0.4.77"
-web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlElement", "HtmlInputElement", "HtmlCollection", "MouseEvent", "MouseEventInit", "Node", "NodeList", "Window", "CssStyleDeclaration"] }
+web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlElement", "HtmlInputElement", "HtmlCollection", "FocusEvent", "KeyboardEvent", "KeyboardEventInit", "MouseEvent", "MouseEventInit", "Node", "NodeList", "PointerEvent", "PointerEventInit", "Window", "CssStyleDeclaration"] }
 
 # The table benchmark (`bench/`): a page's module, built for wasm32.
 [[example]]
