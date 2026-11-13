@@ -331,7 +331,7 @@ fn shape_fallback(
             descent,
             font_monospace_em_width: font.monospace_em_width(),
             font_id: font.id(),
-            font_weight: attrs.weight,
+            font_weight: font.weight(),
             font_optical: if font.has_optical() { attrs.optical } else { 0 },
             glyph_id: info.glyph_id.try_into().expect("failed to cast glyph ID"),
             //TODO: color should not be related to shaping
@@ -802,10 +802,11 @@ fn shape_run(
     */
 
     // zgx patch: the line keeps its text's own font (its default family's
-    // face) as its strut, as a browser's does: glyphs of a fallback face add
-    // to the line's ascent and descent, never replace what the font the text
-    // asked for gives (a line of fallback glyphs alone would otherwise stand
-    // on the fallback face's baseline). Only a run that fell back looks.
+    // face) as its strut, as a browser's does: under a set line height the
+    // line's ascent and descent are the font the text asked for's, whatever
+    // face a glyph falls back to (a line of fallback glyphs alone would
+    // otherwise stand on the fallback face's baseline). Only a run that fell
+    // back looks.
     if !font_is_default || glyphs[glyph_start..].iter().any(|g| g.font_id != font.id()) {
         let default_name = font_system.db().family_name(&attrs.family).to_string();
         let in_family = |id: fontdb::ID| {
@@ -843,8 +844,8 @@ fn shape_run(
                 let upem = f32::from(metrics.units_per_em);
                 let (ascent, descent) = (metrics.ascent / upem, metrics.descent / upem);
                 for glyph in glyphs[glyph_start..].iter_mut().filter(|g| g.font_id != strut) {
-                    glyph.ascent = glyph.ascent.max(ascent);
-                    glyph.descent = glyph.descent.max(descent);
+                    glyph.ascent = ascent;
+                    glyph.descent = descent;
                 }
             }
         }
@@ -1208,7 +1209,7 @@ fn shape_skip_glyphs_as(
                     descent,
                     font_monospace_em_width,
                     font_id,
-                    font_weight: attrs.weight,
+                    font_weight: font.weight(),
                     font_optical: if font.has_optical() { attrs.optical } else { 0 },
                     glyph_id,
                     color_opt: attrs.color_opt,

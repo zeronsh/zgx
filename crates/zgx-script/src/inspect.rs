@@ -573,8 +573,11 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   contributions                                  each plugin's targets: where, live matches, error
   elements                                       named elements by the context they read (provide)
   lint                                           zgx lint over the app's scripts, file:line
-  frames  [n=10] [runs=5] [all] [since] [keep]   the last frames that did anything: their phases, GPU
-                                                 time, notes, what ran and why (since: a mark or frame)
+  frames  [n=10] [runs=5] [all] [since] [until] [summary] [keep]
+                                                 the last frames that did anything: their phases, GPU
+                                                 time, notes, what ran and why (since, until: a mark or
+                                                 frame; summary: what they cost together)
+  reloads                                        each hot reload: files, partial or full, and why
   mark    [name=mark]                            mark now: `frames since=name` reads what follows
   clock   [freeze|thaw|advance <ms>]             freeze every animation, timer and caret at one time (also ZGX_FREEZE_TIME=1 at launch), move it by hand, or let it run
   gc      [--top N]                              a full Luau collection in each VM: heap before and after, what is left by type, userdata and code chunk

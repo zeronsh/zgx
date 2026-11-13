@@ -578,7 +578,7 @@ impl<'a> FontFallbackIter<'a> {
                 self.script_i.1 += 1;
                 for m_key in font_match_keys_iter(false) {
                     if self.face_contains_family(m_key.id, script_family) {
-                        if let Some(font) = self.font_system.get_font_at(m_key.id, self.ideal_weight, self.optical) {
+                        if let Some(font) = self.font_system.get_fallback_font_at(m_key.id, self.ideal_weight, self.optical) {
                             return Some(font);
                         }
                     }
@@ -601,7 +601,7 @@ impl<'a> FontFallbackIter<'a> {
             self.common_i += 1;
             for m_key in font_match_keys_iter(false) {
                 if self.face_contains_family(m_key.id, common_family) {
-                    if let Some(font) = self.font_system.get_font_at(m_key.id, self.ideal_weight, self.optical) {
+                    if let Some(font) = self.font_system.get_fallback_font_at(m_key.id, self.ideal_weight, self.optical) {
                         return Some(font);
                     }
                 }
@@ -627,7 +627,7 @@ impl<'a> FontFallbackIter<'a> {
         if self.last >= 2 {
             while let Some(id) = self.known_face((self.last - 2) as usize) {
                 self.last += 1;
-                if let Some(font) = self.font_system.get_font_at(id, self.ideal_weight, self.optical) {
+                if let Some(font) = self.font_system.get_fallback_font_at(id, self.ideal_weight, self.optical) {
                     return Some(font);
                 }
             }
@@ -641,7 +641,7 @@ impl<'a> FontFallbackIter<'a> {
                 .iter()
                 .all(|family_name| !self.face_contains_family(id, family_name))
             {
-                if let Some(font) = self.font_system.get_font_at(id, self.ideal_weight, self.optical) {
+                if let Some(font) = self.font_system.get_fallback_font_at(id, self.ideal_weight, self.optical) {
                     // zgx: the characters it holds are found, for next time.
                     for c in self.word.chars().filter(|c| !c.is_whitespace()) {
                         let mut one = [0; 4];

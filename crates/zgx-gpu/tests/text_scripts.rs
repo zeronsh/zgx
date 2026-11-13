@@ -1203,8 +1203,9 @@ fn a_pure_japanese_line_stands_on_the_text_fonts_baseline_with_the_real_faces() 
 
 /// Hebrew and Arabic fall back to the system's own SF Hebrew and SF Arabic
 /// (hidden, variable faces), as Core Text's cascade and Chrome have it, and
-/// weights between the named ones draw at their own axis value: 450 is
-/// wider than 400 and narrower than 500.
+/// a weight between their named ones draws in the instance CSS matching
+/// picks, as Chrome does (450 as Medium, 350 as Light), while the text's own
+/// face follows the axis.
 #[cfg(target_os = "macos")]
 #[test]
 fn hebrew_and_arabic_fall_back_to_the_variable_sf_faces_at_their_own_weights() {
@@ -1241,8 +1242,8 @@ fn hebrew_and_arabic_fall_back_to_the_variable_sf_faces_at_their_own_weights() {
         (run.line_w, family)
     };
     for (text, family) in [
-        ("שלום עולם טוב", ".SF Hebrew"),
-        ("مرحبا بالعالم الجميل", ".SF Arabic"),
+        ("שלוםעולםטוב", ".SF Hebrew"),
+        ("مرحبابالعالمالجميل", ".SF Arabic"),
     ] {
         let (w400, got) = width_and_family(&mut fonts, text, 400);
         if got != family {
@@ -1252,6 +1253,56 @@ fn hebrew_and_arabic_fall_back_to_the_variable_sf_faces_at_their_own_weights() {
         let (w450, _) = width_and_family(&mut fonts, text, 450);
         let (w500, f500) = width_and_family(&mut fonts, text, 500);
         assert_eq!(f500, family, "medium stays in the same face");
-        assert!(w400 < w450 && w450 < w500, "{family}: {w400} {w450} {w500}");
+        assert!(w400 < w450, "{family}: {w400} {w450}");
+        assert_eq!(w450, w500, "{family}: 450 draws as Medium");
+        let (w350, _) = width_and_family(&mut fonts, text, 350);
+        let (w300, _) = width_and_family(&mut fonts, text, 300);
+        assert_eq!(w350, w300, "{family}: 350 draws as Light");
+    }
+    let (latin400, _) = width_and_family(&mut fonts, "Hello world", 400);
+    let (latin450, _) = width_and_family(&mut fonts, "Hello world", 450);
+    let (latin500, _) = width_and_family(&mut fonts, "Hello world", 500);
+    assert!(latin400 < latin450 && latin450 < latin500, "the text's own face interpolates");
+}
+
+/// A set line height takes its baseline from the text's font whatever face a
+/// glyph falls back to: Latin, Hebrew and mixed lines at 16/24 stand on one
+/// row (SF Hebrew's metrics differ from SF Pro's).
+#[cfg(target_os = "macos")]
+#[test]
+fn hebrew_and_mixed_lines_stand_on_the_text_fonts_baseline() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_system_fonts();
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "en-US".into(),
+        db,
+        cosmic_text::PlatformFallback,
+    );
+    let system = fonts
+        .db()
+        .faces()
+        .find(|f| f.post_script_name.starts_with(".SFNS-"))
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let Some(system) = system else {
+        eprintln!("SF Pro isn't here: nothing checked");
+        return;
+    };
+    // Twice: the second shaping takes the kept fallback.
+    for _ in 0..2 {
+        let mut baselines = vec![];
+        for text in ["Hxxx", "הההה", "Hxxx הההה", "مرحبا", "Hxxx مرحبا"] {
+            let mut buffer =
+                cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(16., 24.));
+            let attrs = cosmic_text::Attrs::new()
+                .family(cosmic_text::Family::Name(&system))
+                .weight(cosmic_text::Weight(500));
+            buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+            buffer.shape_until_scroll(&mut fonts, false);
+            baselines.push((text, buffer.layout_runs().next().expect("a line").line_y));
+        }
+        assert!(
+            baselines.iter().all(|(_, y)| *y == baselines[0].1),
+            "{baselines:?}"
+        );
     }
 }

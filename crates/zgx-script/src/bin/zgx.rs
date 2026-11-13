@@ -476,6 +476,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
   clock [freeze|thaw|advance <ms>]   text <target>
+  gc [--top N]         a full Luau collection: heap before and after, what is left
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
   record               record stop [--out gesture.tape]
