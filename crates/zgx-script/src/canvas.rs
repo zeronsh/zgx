@@ -455,5 +455,27 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 .map_err(mlua::Error::runtime)
         })?,
     )?;
+    // `ui.radial(cx, cy, radius, stops)`: a radial gradient brush, its first
+    // colour at the centre and its last at the radius and beyond.
+    ui.set(
+        "radial",
+        lua.create_function(|_, (cx, cy, radius, stops): (f32, f32, f32, Table)| {
+            let colors: Vec<mlua::Value> = stops.sequence_values().collect::<mlua::Result<_>>()?;
+            let n = colors.len().max(2) - 1;
+            let stops: Vec<GradientStop> = colors
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    Ok(GradientStop {
+                        offset: i as f32 / n as f32,
+                        color: color(c)?,
+                    })
+                })
+                .collect::<mlua::Result<_>>()?;
+            Brush::radial(Point::new(cx, cy), radius, stops)
+                .map(BrushUd)
+                .map_err(mlua::Error::runtime)
+        })?,
+    )?;
     Ok(())
 }

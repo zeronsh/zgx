@@ -2954,6 +2954,20 @@ impl ScriptHost {
     pub fn collect_garbage(&self) {
         collect_garbage(&self.0);
     }
+    /// A full collection in each VM (`collect_garbage`'s, the conversion cache
+    /// let go of too), and what each held before and after, with what is left
+    /// by object type, userdata type and the chunk each function's code came
+    /// from: to tell garbage a collection frees from what scripts keep.
+    pub fn gc_report(&self) -> Vec<GcVm> {
+        let loaded = self.0.current.borrow().clone();
+        let vms: Vec<Rc<Vm>> = loaded.iter().flat_map(|l| l._vms.iter().cloned()).collect();
+        let before: Vec<usize> = vms.iter().map(|vm| vm.lua.used_memory()).collect();
+        collect_garbage(&self.0);
+        vms.iter()
+            .zip(before)
+            .map(|(vm, before)| gc_vm(vm, before))
+            .collect()
+    }
     /// A full collection in each VM and nothing else: one the scripts'
     /// allocations bring on as they run, with none of what the host does as
     /// it goes idle (`collect_garbage`). For tests: what scripts are given
@@ -4348,7 +4362,7 @@ impl ScriptHost {
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
-        lazy.ui(&["path", "linear"], canvas::install);
+        lazy.ui(&["path", "linear", "radial"], canvas::install);
         lazy.ui(&["glass"], node::install_glass);
         lazy.ui(&["map"], node::install_map);
         #[cfg(feature = "scene3d")]
@@ -4906,4 +4920,67 @@ mod budget_tests {
         // A runaway is stopped once it reads a tick beyond.
         assert!(past_budget(60 * MS, 3 * tick, 30 * MS, tick));
     }
+}
+
+/// What one script VM held around a full collection (`ScriptHost::gc_report`).
+#[derive(Debug, Clone, Default)]
+pub struct GcVm {
+    /// The VM's name (the app's, or a plugin's).
+    pub name: String,
+    /// Bytes it held before the collection, garbage included.
+    pub before: usize,
+    /// Bytes it holds after: what live objects need.
+    pub after: usize,
+    /// What is left by object type: its name, objects and bytes (largest first).
+    pub by_type: Vec<(String, usize, u64)>,
+    /// Userdata by type: its name, objects and bytes.
+    pub userdata: Vec<(String, usize, u64)>,
+    /// Compiled code by the chunk it came from: its name, functions and the
+    /// bytes of their code (the largest first).
+    pub chunks: Vec<(String, usize, u64)>,
+}
+
+fn gc_vm(vm: &Vm, before: usize) -> GcVm {
+    let mut report = GcVm {
+        name: vm.name.clone(),
+        before,
+        after: vm.lua.used_memory(),
+        ..Default::default()
+    };
+    let Ok(dump) = vm.lua.heap_dump() else {
+        return report;
+    };
+    let mut by_type: Vec<(String, usize, u64)> = dump
+        .size_by_type(None)
+        .into_iter()
+        .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
+        .collect();
+    by_type.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.by_type = by_type;
+    let mut userdata: Vec<(String, usize, u64)> = dump
+        .size_by_userdata(None)
+        .into_iter()
+        .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
+        .collect();
+    userdata.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.userdata = userdata;
+    // Code by chunk: each function's proto names its source.
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(dump.to_json())
+        && let Some(objects) = json["objects"].as_object()
+    {
+        let mut chunks: std::collections::HashMap<String, (usize, u64)> = Default::default();
+        for object in objects.values() {
+            if object["type"] == "proto" {
+                let source = object["source"].as_str().unwrap_or("?");
+                let entry = chunks.entry(source.to_string()).or_default();
+                entry.0 += 1;
+                entry.1 += object["size"].as_u64().unwrap_or(0);
+            }
+        }
+        let mut chunks: Vec<(String, usize, u64)> =
+            chunks.into_iter().map(|(n, (c, b))| (n, c, b)).collect();
+        chunks.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+        report.chunks = chunks;
+    }
+    report
 }

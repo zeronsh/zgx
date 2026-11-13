@@ -577,6 +577,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
                                                  time, notes, what ran and why (since: a mark or frame)
   mark    [name=mark]                            mark now: `frames since=name` reads what follows
   clock   [freeze|thaw|advance <ms>]             freeze every animation, timer and caret at one time (also ZGX_FREEZE_TIME=1 at launch), move it by hand, or let it run
+  gc      [--top N]                              a full Luau collection in each VM: heap before and after, what is left by type, userdata and code chunk
   text    <target>                               how a text node was shaped: the family it asks for and what that resolves to, each line's baseline, ascent and descent, and the face each run used
   switch  [name] [on]                            list fast paths, or switch one on or off, to compare
   search  [query] [next] [prev] [all] [n=5] [close]  find in page: the count, the current match, the first n
@@ -735,6 +736,68 @@ impl Session {
                         .into(),
                 );
                 Ok((driver::tree_lines_text(&shown, hidden), data))
+            })(),
+            "gc" => (|| {
+                let top = number("top").map_or(10, |n| n.max(1.) as usize);
+                let report = self.0.host.gc_report();
+                let mb = |bytes: usize| format!("{:.2} MB", bytes as f64 / 1_048_576.);
+                let kb = |bytes: u64| format!("{:.1} KB", bytes as f64 / 1024.);
+                let mut lines = Vec::new();
+                let mut vms = Vec::new();
+                for vm in &report {
+                    lines.push(format!(
+                        "{}: {} before, {} after a full collection ({} of garbage)",
+                        vm.name,
+                        mb(vm.before),
+                        mb(vm.after),
+                        mb(vm.before.saturating_sub(vm.after))
+                    ));
+                    lines.push("  by type:".to_string());
+                    for (name, count, bytes) in vm.by_type.iter().take(top) {
+                        lines.push(format!("    {name}: {count} objects, {}", kb(*bytes)));
+                    }
+                    if !vm.userdata.is_empty() {
+                        lines.push("  userdata:".to_string());
+                        for (name, count, bytes) in vm.userdata.iter().take(top) {
+                            lines.push(format!("    {name}: {count}, {}", kb(*bytes)));
+                        }
+                    }
+                    lines.push("  code by chunk:".to_string());
+                    for (name, count, bytes) in vm.chunks.iter().take(top) {
+                        lines.push(format!("    {name}: {count} functions, {}", kb(*bytes)));
+                    }
+                    let list = |items: &[(String, usize, u64)]| {
+                        Value::List(
+                            items
+                                .iter()
+                                .take(top)
+                                .map(|(name, count, bytes)| {
+                                    Value::record([
+                                        ("name", Value::from(name.as_str())),
+                                        ("count", Value::Num(*count as f64)),
+                                        ("bytes", Value::Num(*bytes as f64)),
+                                    ])
+                                })
+                                .collect::<Vec<_>>()
+                                .into(),
+                        )
+                    };
+                    vms.push(Value::record([
+                        ("name", Value::from(vm.name.as_str())),
+                        ("before", Value::Num(vm.before as f64)),
+                        ("after", Value::Num(vm.after as f64)),
+                        ("by_type", list(&vm.by_type)),
+                        ("userdata", list(&vm.userdata)),
+                        ("chunks", list(&vm.chunks)),
+                    ]));
+                }
+                if report.is_empty() {
+                    lines.push("no script is loaded".to_string());
+                }
+                Ok((
+                    lines.join("\n"),
+                    Value::record([("vms", Value::List(vms.into()))]),
+                ))
             })(),
             "text" => target(&ui).and_then(|node| {
                 // The text node under a target (a `ui.text`'s node holds it, or

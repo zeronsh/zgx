@@ -273,6 +273,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "ref",
     "path",
     "linear",
+    "radial",
     "sort",
     "number",
     "direction_of",

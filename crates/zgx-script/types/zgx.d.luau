@@ -23074,6 +23074,9 @@ declare ui: {
 	direction_of: (text: string) -> ("ltr" | "rtl")?,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
+	-- A radial gradient centred on (cx, cy): the first colour at the centre, the
+	-- last at `radius` and beyond, the colours evenly between.
+	radial: (cx: number, cy: number, radius: number, colors: { read [number]: Color }) -> Brush,
 }
 
 ---------------------------------------------------------------------------

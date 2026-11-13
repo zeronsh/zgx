@@ -648,6 +648,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
             put("on", arg(2));
         }
         "text" => put("target", arg(1)),
+        "gc" => {}
         "clock" => {
             put("action", arg(1));
             put("ms", arg(2));
@@ -957,6 +958,12 @@ const TOOLS: &[Tool] = &[
         "mark",
         &[("name", "string", false)],
         "Mark now, so zgx_frames with since=name reads only the frames after.",
+    ),
+    (
+        "zgx_gc",
+        "gc",
+        &[("top", "number", false)],
+        "Run a full Luau collection in each script VM and report the heap before and after (garbage freed), and what is left by object type, userdata type and the chunk its code came from: tell garbage from a leak by running it again after the same actions.",
     ),
     (
         "zgx_text",

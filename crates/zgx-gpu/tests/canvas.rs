@@ -616,3 +616,36 @@ fn filled_areas_draw_as_quads_and_look_as_their_raster_does() {
         assert!(worst <= 80, "scale {scale}: worst {worst}");
     }
 }
+
+/// A radial brush: its first colour at the centre, its last at the radius
+/// and beyond, the colours between; and a bad one is refused.
+#[test]
+fn a_radial_brush_fades_from_its_centre_out_to_its_radius() {
+    let brush = Brush::radial(
+        Point::new(50., 50.),
+        40.,
+        vec![
+            GradientStop {
+                offset: 0.,
+                color: Color(255, 0, 0, 255),
+            },
+            GradientStop {
+                offset: 1.,
+                color: Color(255, 0, 0, 0),
+            },
+        ],
+    )
+    .unwrap();
+    let mut canvas = Canvas::new();
+    canvas.fill(Path::rectangle(Rect::new(0., 0., 100., 100.)), brush);
+    let image = zgx_gpu::canvas::rasterize(&canvas, 100., 100., 1.).unwrap();
+    let alpha = |x: usize, y: usize| image.pixels()[(y * 100 + x) * 4 + 3];
+    let centre = alpha(50, 50);
+    let half = alpha(70, 50);
+    let beyond = alpha(95, 50);
+    assert!(centre >= 250, "{centre}");
+    assert!((100..=160).contains(&half), "{half}");
+    assert_eq!(beyond, 0, "past the radius the last colour: clear");
+    assert!(Brush::radial(Point::new(0., 0.), 0., vec![]).is_err());
+    assert!(Brush::radial(Point::new(f32::NAN, 0.), 5., vec![]).is_err());
+}

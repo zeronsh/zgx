@@ -187,6 +187,7 @@ fn rich_text_svg_and_canvas_render() {
                 c:rect(0, 0, w, h, "#222", 6)
                 c:stroke(ui.path():move(0, 0):line(w, h), "#fff", 2)
                 c:circle(w / 2, h / 2, 5, ui.linear(0, 0, w, 0, { "#f00", "#00f" }))
+                c:circle(w / 2, h / 2, 12, ui.radial(w / 2, h / 2, 12, { "#ff0000", "#ff000000" }))
             end },
         }"##,
     );
@@ -194,7 +195,10 @@ fn rich_text_svg_and_canvas_render() {
     assert!(h.kind("svg").starts_with("Svg"), "{}", h.kind("svg"));
     let canvas = h.kind("canvas");
     assert!(
-        canvas.starts_with("Canvas") && canvas.contains("Stroke") && canvas.contains("Linear"),
+        canvas.starts_with("Canvas")
+            && canvas.contains("Stroke")
+            && canvas.contains("Linear")
+            && canvas.contains("Radial"),
         "{canvas}"
     );
     assert_eq!(h.host.error().get(), None);

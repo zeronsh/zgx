@@ -375,3 +375,45 @@ fn a_scroll_view_capped_by_max_h_is_not_flagged_as_overflowing() {
     let warnings = inspector.warnings();
     assert!(warnings.is_empty(), "{warnings:#?}");
 }
+
+/// `zgx inspect gc`: a full collection per VM with the heap before and after,
+/// and what is left by type and code chunk.
+#[test]
+fn gc_report_separates_garbage_from_what_scripts_keep() {
+    let code = r#"
+local kept = {}
+for i = 1, 3000 do kept[i] = { i, tostring(i) } end
+for i = 1, 30000 do local garbage = { i, i + 1, i + 2 } end
+return ui.button { id = "b", on_click = function() local _ = #kept end, "keeps a table" }
+"#;
+    let h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    let report = h.host.gc_report();
+    assert!(!report.is_empty());
+    let vm = &report[0];
+    assert!(
+        vm.before > vm.after,
+        "{} before, {} after",
+        vm.before,
+        vm.after
+    );
+    let tables = vm
+        .by_type
+        .iter()
+        .find(|(name, ..)| name == "table")
+        .expect("tables");
+    assert!(tables.1 >= 3000, "{tables:?}");
+    assert!(
+        vm.chunks.iter().any(|(name, ..)| name.contains("app")),
+        "{:?}",
+        vm.chunks
+    );
+    // A second collection frees nothing more: what is left is kept.
+    let again = &h.host.gc_report()[0];
+    assert!(
+        again.before <= vm.after + 4096,
+        "{} vs {}",
+        again.before,
+        vm.after
+    );
+}
