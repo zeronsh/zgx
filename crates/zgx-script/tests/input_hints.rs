@@ -1,5 +1,5 @@
 //! Scripts' input placeholders, selection API, select-on-focus, window drag
-//! regions, and hover's enter/leave semantics.
+//! regions, find scopes, and hover's enter/leave semantics.
 mod common;
 
 use common::Harness;
@@ -159,6 +159,30 @@ fn window_drag_regions_ask_the_host_to_move_the_window() {
     let at = h.ui.scene.borrow().bounds(close);
     h.press(at.x + 10., 20.);
     assert_eq!(h.ui.take_window_gesture(), None);
+}
+
+#[test]
+fn find_opened_after_a_press_in_a_find_scope_looks_only_there() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.text { "harbor, outside" },
+            ui.row {
+                ui.column { id = "a", w = 200, h = 100, find_scope = true, ui.text { "harbor in a" } },
+                ui.column { id = "b", w = 200, h = 100, find_scope = true, ui.text { "harbor in b" } },
+            },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    let b = h.find("b").unwrap();
+    let at = h.ui.scene.borrow().bounds(b);
+    h.press(at.x + 100., at.y + 50.);
+    h.ui.find_text("harbor");
+    let found = h.ui.find_results(10);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let zgx::find::FoundAt::Text(node) = found[0].at else {
+        panic!("{found:?}");
+    };
+    assert!(h.ui.scene.borrow().ancestors(node).any(|id| id == b));
 }
 
 #[test]

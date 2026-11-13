@@ -2533,6 +2533,10 @@ export type NodeProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: ("target" | "shown")?,
 	window_drag: boolean?,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: boolean?,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -2992,6 +2996,10 @@ export type Props = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -3357,6 +3365,7 @@ export type Props_focus_group = ("vertical" | "horizontal" | "both")?
 export type Props_pointer_events = (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?
 export type Props_hit = ("target" | "shown")?
 export type Props_window_drag = boolean?
+export type Props_find_scope = boolean?
 export type Props_hook = (string | boolean)?
 export type Props_private = boolean?
 export type Props_selectable = boolean?
@@ -3710,6 +3719,10 @@ export type ContainerProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -4183,6 +4196,10 @@ export type GlassProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -4665,6 +4682,10 @@ export type ScrollProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -5164,6 +5185,10 @@ export type TextProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -5622,6 +5647,10 @@ export type MarkdownViewProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -6238,6 +6267,10 @@ export type RichProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -6690,6 +6723,10 @@ export type ImageProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -7159,6 +7196,10 @@ export type SvgProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -7739,6 +7780,10 @@ export type Scene3DProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -8214,6 +8259,10 @@ export type CanvasProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -8698,6 +8747,10 @@ export type CheckboxProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -9160,6 +9213,10 @@ export type InputProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -9757,6 +9814,10 @@ export type ProgressProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -10207,6 +10268,10 @@ export type SliderProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -10678,6 +10743,10 @@ export type SegmentedProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -11142,6 +11211,10 @@ export type StepperProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -11607,6 +11680,10 @@ export type DisclosureProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -12083,6 +12160,10 @@ export type AccordionProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -12533,6 +12614,10 @@ export type SectionProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -13008,6 +13093,10 @@ export type SeparatorProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -13466,6 +13555,10 @@ export type TabsProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -13946,6 +14039,10 @@ export type TreeProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -14422,6 +14519,10 @@ export type DataGridProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -14894,6 +14995,10 @@ export type CalendarProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -15359,6 +15464,10 @@ export type DatePickerProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -15822,6 +15931,10 @@ export type TimeFieldProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -16284,6 +16397,10 @@ export type ComboboxProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -16754,6 +16871,10 @@ export type CommandPaletteProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -17212,6 +17333,10 @@ export type SelectProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -17677,6 +17802,10 @@ export type SplitProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -18198,6 +18327,10 @@ export type ListProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -18753,6 +18886,10 @@ export type LayerProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -19225,6 +19362,10 @@ export type ModalProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -19746,6 +19887,10 @@ export type PopoverProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -20255,6 +20400,10 @@ export type MenuItemProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -20716,6 +20865,10 @@ export type SubmenuProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -21197,6 +21350,10 @@ export type WebViewProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -21675,6 +21832,10 @@ export type TerminalProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -22128,6 +22289,10 @@ export type HostViewProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -22581,6 +22746,10 @@ export type SlotProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -23085,6 +23254,10 @@ export type EachOptions = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -23553,6 +23726,10 @@ export type PresenceOptions = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.

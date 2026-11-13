@@ -4085,8 +4085,8 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
     styled(view, node, vm, low, cx, element)
 }
 
-/// `window_drag` and `focus_on_press`, rare: apart from the node's common
-/// path.
+/// `window_drag`, `focus_on_press` and `find_scope`, rare: apart from the
+/// node's common path.
 #[cold]
 #[inline(never)]
 fn press_flagged(mut view: View, flags: u8) -> View {
@@ -4095,6 +4095,9 @@ fn press_flagged(mut view: View, flags: u8) -> View {
     }
     if flags & crate::node::WINDOW_DRAG != 0 {
         view = view.window_drag();
+    }
+    if flags & crate::node::FIND_SCOPE != 0 {
+        view = view.find_scope(true);
     }
     view
 }
