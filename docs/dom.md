@@ -60,6 +60,10 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 | roles, labels, levels, live regions, checked, selected, expanded, values, descriptions, hidden, modal | ARIA: `role`, `aria-label`, `aria-level`, `aria-live`, `aria-checked`… |
 | `focusable` | `tabindex` |
 | `selectable` | `user-select` |
+| `modal` | a `<dialog>` shown with `showModal()`: the browser traps focus, makes the page behind inert, closes it on Escape and gives focus back; a click on its backdrop closes it unless `dismiss_backdrop(false)`; its backdrop is the theme's |
+| `popover`, `menu`, `submenu` | an auto popover in the browser's top layer, placed against its anchor on its `placement` side (the other side when it doesn't fit there), kept in the viewport and placed again as the page scrolls or resizes. Escape and a click outside close it as the browser closes popovers; a press on its anchor closes it without reopening it. A menu (`role=menu`) opens from a bare button, focuses its first item and moves among its items with the arrows, Home and End; Right opens a submenu and Left closes it, the pointer opens a submenu's trigger's submenu, and Tab leaves a menu, closing it |
+| `menu_item` | a `<button role=menuitem>` (`menuitemcheckbox`, `menuitemradio` when checkable) that closes its menu and the menus it opened from, then runs its click; focus goes back to the menu's button |
+| `View::tooltip` | a manual popover (`role=tooltip`) shown as the pointer rests on the view for its delay (at once within a second of another) or keyboard focus reaches it, gone as the pointer leaves or presses or a key is pressed; a text tip is the view's `aria-description` |
 | `on_mount` handles | `observe_size`, `observe_bounds` (ResizeObserver), `observe_visibility`, `observe_visibility_within` (IntersectionObserver with that `rootMargin`), `is_mounted`, `retain` |
 
 ## What doesn't map
@@ -68,7 +72,7 @@ Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau** (`zgx-script`): its VM is C++ built with `cc`, and it depends on zgx-gpu; running it in the browser needs Luau built for wasm and that dependency split off.
-- **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, menus, popovers, modals and tooltips (the Popover API and `<dialog>` fit), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
+- **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 
 ## Performance

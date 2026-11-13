@@ -202,6 +202,10 @@ fn after(
 }
 
 fn wrap(anchor: View, tip: Tooltip) -> View {
+    #[cfg(feature = "dom")]
+    if crate::compose::__dom::DOM_ONLY {
+        return dom_wrap(anchor, tip);
+    }
     crate::compose::component(move |cx| {
         let runtime = cx.runtime();
         let runner = cx.try_service::<TaskRunner>();
@@ -476,6 +480,65 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             .pointer_events(interactive)
             .child(content);
         // A plain tip is the view's description, not a dialog of its own.
+        if interactive {
+            panel
+        } else {
+            panel.panel_hidden()
+        }
+    })
+}
+
+/// `wrap` in the browser: a manual popover the DOM host shows as the pointer
+/// rests on the view or keyboard focus reaches it (`__dom::hover`), and
+/// hides as it leaves, presses or a key is pressed.
+#[cfg(feature = "dom")]
+fn dom_wrap(anchor: View, tip: Tooltip) -> View {
+    crate::compose::component(move |cx| {
+        let Tooltip {
+            content,
+            placement,
+            interactive,
+            delay,
+        } = tip;
+        let delay = delay.unwrap_or(TIMING.with(Cell::get).delay);
+        let (anchor, content) = match content {
+            Content::View(view) => (anchor, *view),
+            Content::Text(text) => {
+                let look = &crate::compose::OVERLAY;
+                let (x, above, below) = look.tooltip_padding;
+                let panel = crate::compose::column().px(x);
+                let panel = match above == below {
+                    true => panel.py(above),
+                    false => panel.pt(above).pb(below),
+                };
+                let panel = panel
+                    .max_w(320.)
+                    .bg(look.tooltip_bg)
+                    .border(look.tooltip_border.0)
+                    .border_color(look.tooltip_border.1)
+                    .rounded(look.tooltip_radius)
+                    .text_size(look.tooltip_font_size);
+                let panel = match look.tooltip_text {
+                    Some(color) => panel.text_color(color),
+                    None => panel,
+                };
+                (
+                    anchor.accessible_description(text.clone()),
+                    panel.text_wrap(true).child(crate::compose::text(text)),
+                )
+            }
+        };
+        let placement = placement.unwrap_or(Placement {
+            side: PlacementSide::Top,
+            align: PlacementEdge::Center,
+            offset: 6.,
+        });
+        let open = cx.runtime().signal(false);
+        let panel = crate::compose::popover("Tooltip", open, anchor)
+            .layer()
+            .placement(placement)
+            .child(content);
+        let panel = crate::compose::__dom::hover(panel, delay, interactive);
         if interactive {
             panel
         } else {
