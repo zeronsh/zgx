@@ -407,6 +407,16 @@ pub(crate) fn keep() -> *const () {
     &CHILD_MAIN as *const _ as *const ()
 }
 
+/// Whether `code` is a whole DXBC container: its magic, and the size its
+/// header gives (bytes 24 to 28) its length. A part of one would reach the
+/// driver as bytecode, which reads past its end.
+pub(crate) fn whole_dxbc(code: &[u8]) -> bool {
+    code.starts_with(b"DXBC")
+        && code
+            .get(24..28)
+            .is_some_and(|size| u32::from_le_bytes(size.try_into().unwrap()) as usize == code.len())
+}
+
 /// Compiled shaders kept between launches: `%LOCALAPPDATA%\zgx\fxc`, a file
 /// a shader, named by a hash of everything FXC was given and FXC's own
 /// version (its DLL's size and time), the key kept in full and compared
@@ -445,35 +455,50 @@ mod cache {
             job.source
         )
     }
-    fn file(key: &str) -> Option<PathBuf> {
+    fn file_name(key: &str) -> String {
         // FNV-1a: stable across runs and builds, unlike `DefaultHasher`.
         let hash = key.bytes().fold(0xcbf29ce484222325u64, |h, b| {
             (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
         });
-        Some(dir()?.join(format!("{hash:016x}.dxbc")))
+        format!("{hash:016x}.dxbc")
     }
     pub(super) fn read(key: &str) -> Option<Vec<u8>> {
-        let bytes = std::fs::read(file(key)?).ok()?;
-        let length = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
-        let kept = bytes.get(4..4 + length)?;
-        (kept == key.as_bytes()).then(|| bytes[4 + length..].to_vec())
+        read_in(&dir()?, key)
     }
     pub(super) fn write(key: &str, code: &[u8]) {
-        let (Some(path), Some(dir)) = (file(key), dir()) else {
-            return;
-        };
-        if std::fs::create_dir_all(&dir).is_err() {
+        if let Some(dir) = dir() {
+            write_in(&dir, key, code);
+        }
+    }
+    /// `read` from `dir`: the bytecode only where it is a whole DXBC
+    /// container (`whole_dxbc`), never a part of one.
+    pub(super) fn read_in(dir: &std::path::Path, key: &str) -> Option<Vec<u8>> {
+        let bytes = std::fs::read(dir.join(file_name(key))).ok()?;
+        let length = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+        let kept = bytes.get(4..4 + length)?;
+        let code = &bytes[4 + length..];
+        (kept == key.as_bytes() && super::whole_dxbc(code)).then(|| code.to_vec())
+    }
+    /// `write` into `dir`.
+    pub(super) fn write_in(dir: &std::path::Path, key: &str, code: &[u8]) {
+        if std::fs::create_dir_all(dir).is_err() {
             return;
         }
+        let path = dir.join(file_name(key));
         let mut bytes = (key.len() as u32).to_le_bytes().to_vec();
         bytes.extend_from_slice(key.as_bytes());
         bytes.extend_from_slice(code);
-        // Whole, then renamed into place: another process never reads half.
-        let partial = path.with_extension(format!("{}.part", std::process::id()));
+        // Whole, then renamed into place, from a file of this writer's own:
+        // not the process's alone, since threads compiling the same shader
+        // at once (tests do) would write one file, and rename it while
+        // another still writes it.
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let partial = path.with_extension(format!("{}-{n}.part", std::process::id()));
         if std::fs::write(&partial, bytes).is_ok() && std::fs::rename(&partial, &path).is_err() {
             let _ = std::fs::remove_file(&partial);
         }
-        trim(&dir);
+        trim(dir);
     }
     /// The oldest files go past `KEEP`.
     fn trim(dir: &std::path::Path) {
@@ -527,5 +552,55 @@ mod tests {
         assert_ne!(a, cache::key(&job("b", 2048)));
         assert_ne!(a, cache::key(&job("a", 2049)));
         assert!(a.ends_with("\n2048\nps_5_1\nzgx_fill\na"), "{a}");
+    }
+
+    /// A DXBC container of `size` bytes: its magic, and its size at 24.
+    fn dxbc(size: usize, fill: u8) -> Vec<u8> {
+        let mut code = vec![fill; size];
+        code[..4].copy_from_slice(b"DXBC");
+        code[24..28].copy_from_slice(&(size as u32).to_le_bytes());
+        code
+    }
+
+    /// A container is whole only at the size its header gives.
+    #[test]
+    fn a_part_of_a_container_is_not_bytecode() {
+        let code = dxbc(4096, 7);
+        assert!(whole_dxbc(&code));
+        assert!(!whole_dxbc(&code[..4095]));
+        assert!(!whole_dxbc(&code[..20]));
+        assert!(!whole_dxbc(b"not a container at all, but long enough"));
+    }
+
+    /// Threads compiling the same shader at once (concurrent tests do) each
+    /// write it, while others read it: every read is the whole bytecode or
+    /// nothing, never part of it, which the driver would read past.
+    #[test]
+    fn threads_writing_one_shader_never_leave_part_of_it_to_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "zgx-fxc-cache-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let code = dxbc(1 << 20, 3);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..20 {
+                        cache::write_in(&dir, "the key", &code);
+                    }
+                });
+                scope.spawn(|| {
+                    for _ in 0..200 {
+                        if let Some(read) = cache::read_in(&dir, "the key") {
+                            assert!(read == code, "read {} of {} bytes", read.len(), code.len());
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(cache::read_in(&dir, "the key").as_deref(), Some(&code[..]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

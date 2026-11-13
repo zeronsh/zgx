@@ -9,10 +9,17 @@
 use zgx::{
     compose::prelude::{rgba, *},
     reactive::Signal,
-    scene::Rect,
+    scene::{BoxShadow, Color, Rect, Transform},
     widgets::Ui,
 };
 use zgx_gpu::GpuRenderer;
+
+/// Whether `gpu` has presentation routes to count: not on wgpu's no-op
+/// backend, as under Direct3D 11 (`ZGX_D3D11`), which draws into what it
+/// presents by one route (its pixels are still compared).
+fn routes(gpu: &GpuRenderer) -> bool {
+    gpu.adapter_info().backend != zgx_gpu::wgpu::Backend::Noop
+}
 
 fn gpu_fixture() -> std::sync::MutexGuard<'static, ()> {
     static DEVICE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1066,8 +1073,10 @@ fn a_view_that_cant_copy_stays_direct() {
         gpu.debug_present_offscreen().unwrap();
     }
     assert_eq!(gpu.debug_scroll_copies(), 0);
-    let direct = gpu.debug_direct_frames();
-    assert!(direct as usize >= steps - 3, "{direct} of {steps} direct");
+    if routes(&gpu) {
+        let direct = gpu.debug_direct_frames();
+        assert!(direct as usize >= steps - 3, "{direct} of {steps} direct");
+    }
 }
 
 /// A layer shader over a pass keeping state from frame to frame: it runs each
@@ -1168,7 +1177,7 @@ fn a_scroll_ending_leaves_whole_frames_direct() {
         frame(&mut ui, &mut gpu);
     }
     let before = gpu.debug_direct_frames();
-    assert!(before > 0, "no frame went direct");
+    assert!(!routes(&gpu) || before > 0, "no frame went direct");
     offset.set(8.);
     frame(&mut ui, &mut gpu);
     let before = gpu.debug_direct_frames().max(before);
@@ -1178,7 +1187,10 @@ fn a_scroll_ending_leaves_whole_frames_direct() {
         frame(&mut ui, &mut gpu);
     }
     let direct = gpu.debug_direct_frames() - before;
-    assert!(direct >= u64::from(steps) - 2, "{direct} of {steps} direct");
+    assert!(
+        !routes(&gpu) || direct >= u64::from(steps) - 2,
+        "{direct} of {steps} direct"
+    );
 }
 
 /// A dithered picture among a fading table's rows: its dots lie on the screen's
@@ -1487,4 +1499,378 @@ fn text_getting_narrower_leaves_nothing_where_it_was() {
             }
         }
     }
+}
+
+/// A frosted panel (a composer floating on a transcript): see-through, its
+/// backdrop blurred by `blur`, rounded, at `top`, `height` tall.
+fn glass(top: f32, height: f32, blur: f32) -> View {
+    div()
+        .absolute()
+        .left(30.)
+        .top(top)
+        .size(170., height)
+        .rounded(10.)
+        .bg(rgba(0xf0f0f528))
+        .backdrop_blur(blur)
+}
+
+/// A list scrolled under `panel`, which stays put: what the copy moved of
+/// the panel and what its blur read repaints (the panel's ink, where it is
+/// and where the copy put it), and the blur reads the moved content afresh.
+fn under_glass(name: &str, panel: impl Fn() -> View, fade: Option<f32>) {
+    for scale in SCALES {
+        let mut ui = Ui::new(W, H);
+        let offset = ui.signal(0_f32);
+        let view = scroll(offset.clone()).w(W).h(H).bg(rgb(0x101820));
+        let view = match fade {
+            Some(band) => view.fade_edges(0., band),
+            None => view,
+        };
+        ui.mount(
+            overlay()
+                .w(W)
+                .h(H)
+                .bg(rgb(0x000000))
+                .child(view.child(list(ui.signal(0_f32), Some(0x101820)).w(W)))
+                .child(panel()),
+        );
+        run(name, scale, &mut ui, &offset, 12, 8., |_| {});
+    }
+}
+
+/// A blurred panel over a scrolling list, away from any fade: the list's
+/// moves copy, the panel repaints and blurs what moved under it.
+#[test]
+fn a_blurred_panel_over_a_scrolling_list() {
+    let _gpu = gpu_fixture();
+    under_glass("blurred panel", || glass(100., 40., 6.), None);
+}
+
+/// With a shadow reaching past its box.
+#[test]
+fn a_shadowed_blurred_panel_over_a_scrolling_list() {
+    let _gpu = gpu_fixture();
+    under_glass(
+        "shadowed blurred panel",
+        || {
+            glass(96., 40., 6.).shadow(BoxShadow {
+                color: Color(0, 0, 0, 90),
+                offset: Transform { x: 0., y: 6. },
+                blur_radius: 12.,
+                spread: 0.,
+            })
+        },
+        None,
+    );
+}
+
+/// Under a fade at the view's foot: the panel inside the fade's band (which
+/// repaints each frame) and outside it.
+#[test]
+fn a_blurred_panel_in_and_out_of_a_fade_band() {
+    let _gpu = gpu_fixture();
+    under_glass(
+        "blurred panel in a fade band",
+        || glass(140., 30., 6.),
+        Some(40.),
+    );
+    under_glass(
+        "blurred panel above a fade band",
+        || glass(40., 30., 6.),
+        Some(40.),
+    );
+}
+
+/// A blur wide enough to average its area down by eight before blurring
+/// (the halves pass, then the reduce reading them), across the view's foot
+/// as a composer is (in the middle it would leave no band worth a copy).
+#[test]
+fn a_wide_blur_over_a_scrolling_list() {
+    let _gpu = gpu_fixture();
+    under_glass("wide blur", || glass(110., 60., 14.), None);
+}
+
+/// Partly outside the view: the view the window's upper part, the panel
+/// across its foot.
+#[test]
+fn a_blurred_panel_across_the_views_edge() {
+    let _gpu = gpu_fixture();
+    for scale in SCALES {
+        let mut ui = Ui::new(W, H);
+        let offset = ui.signal(0_f32);
+        ui.mount(
+            overlay()
+                .w(W)
+                .h(H)
+                .bg(rgb(0x203040))
+                .child(
+                    scroll(offset.clone())
+                        .w(W)
+                        .h(120.)
+                        .bg(rgb(0x101820))
+                        .child(list(ui.signal(0_f32), Some(0x101820)).w(W)),
+                )
+                .child(glass(100., 40., 6.)),
+        );
+        run(
+            "blurred panel across the edge",
+            scale,
+            &mut ui,
+            &offset,
+            12,
+            8.,
+            |_| {},
+        );
+    }
+}
+
+/// The panel itself moving as the list scrolls (sliding in, as a composer
+/// grows): it repaints anyway, and what the copy moved of it with it.
+#[test]
+fn a_blurred_panel_moving_over_a_scrolling_list() {
+    let _gpu = gpu_fixture();
+    for scale in SCALES {
+        let mut ui = Ui::new(W, H);
+        let offset = ui.signal(0_f32);
+        let at = ui.signal(0_f32);
+        let read = at.clone();
+        ui.mount(
+            overlay()
+                .w(W)
+                .h(H)
+                .bg(rgb(0x000000))
+                .child(
+                    scroll(offset.clone())
+                        .w(W)
+                        .h(H)
+                        .bg(rgb(0x101820))
+                        .child(list(ui.signal(0_f32), Some(0x101820)).w(W)),
+                )
+                .child(
+                    glass(100., 40., 6.).reactive_style(move || {
+                        Styles::new().translate(read.get(), -read.get() / 2.)
+                    }),
+                ),
+        );
+        run(
+            "moving blurred panel",
+            scale,
+            &mut ui,
+            &offset,
+            12,
+            8.,
+            |step| {
+                at.set(step as f32 * 4.);
+            },
+        );
+    }
+}
+
+/// Scrolls within a scroll, both moving under a blurred panel.
+#[test]
+fn nested_scrolls_under_a_blurred_panel() {
+    let _gpu = gpu_fixture();
+    for scale in SCALES {
+        let mut ui = Ui::new(W, H);
+        let offset = ui.signal(0_f32);
+        let inner = ui.signal(0_f32);
+        let content = column()
+            .w(W)
+            .bg(rgb(0x101820))
+            .child(list(ui.signal(0_f32), Some(0x182030)).w(W).h(60.))
+            .child(
+                scroll(inner.clone())
+                    .w(W)
+                    .h(80.)
+                    .bg(rgb(0x101820))
+                    .child(list(ui.signal(0_f32), Some(0x101820)).w(W)),
+            )
+            .child(list(ui.signal(0_f32), Some(0x182030)).w(W).h(2000.));
+        ui.mount(
+            overlay()
+                .w(W)
+                .h(H)
+                .bg(rgb(0x000000))
+                .child(
+                    scroll(offset.clone())
+                        .w(W)
+                        .h(H)
+                        .bg(rgb(0x101820))
+                        .child(content),
+                )
+                .child(glass(70., 40., 6.)),
+        );
+        run("nested scrolls", scale, &mut ui, &offset, 12, 4., |step| {
+            inner.set(step as f32 * 8.);
+        });
+    }
+}
+
+/// A layer shader painting past its box (`set_layer_extent`'s bleed), not
+/// reading what is under it: carried by its ink, extent and all.
+#[test]
+fn a_shaded_overlay_with_an_extent_over_a_scrolling_list() {
+    let _gpu = gpu_fixture();
+    let shader = zgx::decoration::FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+            return vec4(input.color.rgb, input.color.a * 0.6);
+        }",
+        None,
+    );
+    for scale in SCALES {
+        let mut ui = Ui::new(W, H);
+        let offset = ui.signal(0_f32);
+        let node = std::rc::Rc::new(std::cell::Cell::new(None));
+        let set = node.clone();
+        ui.mount(
+            overlay()
+                .w(W)
+                .h(H)
+                .bg(rgb(0x000000))
+                .child(
+                    scroll(offset.clone())
+                        .w(W)
+                        .h(H)
+                        .bg(rgb(0x101820))
+                        .child(list(ui.signal(0_f32), Some(0x101820)).w(W)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(40.)
+                        .top(80.)
+                        .size(120., 30.)
+                        .bg(rgba(0xf0c040ff))
+                        .layer_shader(shader.clone())
+                        .on_mount(move |handle| set.set(Some(handle.node()))),
+                ),
+        );
+        let id = node.get().expect("mounted");
+        ui.scene.borrow_mut().set_layer_extent(id, 6., 0.);
+        run(
+            "shaded overlay with an extent",
+            scale,
+            &mut ui,
+            &offset,
+            12,
+            8.,
+            |_| {},
+        );
+    }
+}
+
+/// A popup's glass over a window whose list scrolls by copies: the popup
+/// blurs what its window last drew (`set_backdrop`), so the moved pixels a
+/// copy left must be what the window would paint whole.
+#[test]
+fn a_popup_blurs_what_a_copying_window_moved() {
+    let _gpu = gpu_fixture();
+    for scale in SCALES {
+        let (w, h) = ((W * scale) as u32, (H * scale) as u32);
+        let mut ui = Ui::new(W, H);
+        let offset = ui.signal(0_f32);
+        let root = std::rc::Rc::new(std::cell::Cell::new(None));
+        let set = root.clone();
+        ui.mount(
+            overlay()
+                .w(W)
+                .h(H)
+                .bg(rgb(0x000000))
+                .child(
+                    scroll(offset.clone())
+                        .w(W)
+                        .h(H)
+                        .bg(rgb(0x101820))
+                        .child(list(ui.signal(0_f32), Some(0x101820)).w(W)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(40.)
+                        .top(50.)
+                        .size(120., 60.)
+                        .on_mount(move |handle| set.set(Some(handle.node())))
+                        .child(glass(0., 60., 8.).left(0.)),
+                ),
+        );
+        let root = root.get().expect("mounted");
+        ui.scene.borrow_mut().set_popup(root, true);
+        let window = |copies: bool| {
+            let mut gpu = GpuRenderer::new(w, h).unwrap();
+            gpu.set_scale_factor(scale);
+            gpu.debug_enable_single_pass();
+            if copies {
+                gpu.debug_allow_scroll_copies();
+            }
+            // On the window's device, as a popup's renderer is.
+            let mut popup = GpuRenderer::new_with_context(1, 1, &gpu.context()).unwrap();
+            popup.set_scale_factor(scale);
+            (gpu, popup)
+        };
+        let (mut copying, mut over_copying) = window(true);
+        let (mut whole, mut over_whole) = window(false);
+        let full = Rect::new(0., 0., W, H);
+        for step in 0..12 {
+            if step > 1 {
+                offset.update(|o| *o += 8.);
+            }
+            ui.prepare_frame();
+            let damage = ui.scene.borrow_mut().flush().damage;
+            let scene = ui.scene.borrow();
+            let bounds = scene.popup_bounds(root).expect("a popup");
+            let popup_of = |gpu: &mut GpuRenderer, popup: &mut GpuRenderer, damage: &[Rect]| {
+                gpu.render(&scene, damage).unwrap();
+                gpu.present().unwrap();
+                popup.set_popup(root, bounds);
+                popup.set_backdrop(Some(gpu));
+                popup.repaint_all();
+                popup.render(&scene, &[]).unwrap();
+                popup.readback().unwrap()
+            };
+            let copied = popup_of(&mut copying, &mut over_copying, &damage);
+            let painted = popup_of(&mut whole, &mut over_whole, &[full]);
+            assert!(
+                copied == painted,
+                "a popup over a copying window at {scale}x, step {step}: its glass differs"
+            );
+        }
+        assert!(
+            copying.debug_scroll_copies() > 0,
+            "a popup over a copying window at {scale}x: no scroll was copied"
+        );
+    }
+}
+
+/// Layers that stay put over the view and read nothing under them: turned,
+/// and a group fading as a whole. Carried by their ink, as a box is.
+#[test]
+fn layers_staying_put_over_a_scrolling_list() {
+    let _gpu = gpu_fixture();
+    under_glass(
+        "turned layer",
+        || {
+            div()
+                .absolute()
+                .left(60.)
+                .top(70.)
+                .size(40., 30.)
+                .bg(rgba(0xffffffc0))
+                .rotate(0.3)
+        },
+        None,
+    );
+    under_glass(
+        "fading group",
+        || {
+            div()
+                .absolute()
+                .left(40.)
+                .top(70.)
+                .size(120., 40.)
+                .layer()
+                .opacity(0.6)
+                .child(div().size(120., 40.).rounded(8.).bg(rgb(0xd0d0e0)))
+        },
+        None,
+    );
 }

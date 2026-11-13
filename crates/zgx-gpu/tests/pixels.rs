@@ -7254,3 +7254,60 @@ fn a_frame_copied_into_a_pixel_buffer_holds_the_targets_pixels() {
     let uploaded = staging.upload(32, 16, &rgba).unwrap();
     assert!(uploaded.to_rgba() == rgba, "uploaded bytes differ");
 }
+
+/// Stripes a pixel wide, white and black, under a frosted panel: a blur wide
+/// enough to average down by 8 (in two halves of four taps, blur.wgsl's
+/// `fs_reduce4`) draws their mean, as a narrower one averaging by 4 does,
+/// through Metal directly and through wgpu alike.
+#[test]
+fn a_wide_backdrop_blur_averages_down_by_eight_in_two_halves() {
+    let _gpu_fixture = gpu_fixture();
+    let frame = |radius: f32, direct: bool| {
+        let mut gpu = GpuRenderer::new(256, 128).unwrap();
+        gpu.set_direct_metal(direct);
+        gpu.set_scale_factor(2.);
+        let mut s = Scene::new(128., 64.);
+        s.set_kind(s.root(), NodeKind::Container(Layout::Overlay));
+        let row = s.append(s.root(), NodeKind::Container(Layout::Row), fixed(128., 64.));
+        for x in 0..256 {
+            let shade = if x % 2 == 0 { 255 } else { 0 };
+            s.append(
+                row,
+                NodeKind::Rect(Color(shade, shade, shade, 255)),
+                fixed(0.5, 64.),
+            );
+        }
+        let glass = s.append(
+            s.root(),
+            NodeKind::Rect(Color(0, 0, 0, 0)),
+            fixed(128., 64.),
+        );
+        s.set_effects(
+            glass,
+            Effects {
+                blur_radius: radius,
+                ..Default::default()
+            },
+        );
+        let d = s.flush().damage;
+        let stats = gpu.render(&s, &d).unwrap();
+        (stats, gpu.readback().unwrap())
+    };
+    let (narrow, _) = frame(2., true);
+    let (wide, pixels) = frame(12., true);
+    assert_eq!(wide.blur_passes, 3);
+    // The reduce by 8 in two halves: one render pass more than by 4.
+    assert_eq!(wide.render_passes, narrow.render_passes + 1);
+    // Away from the edges, every pixel the stripes' mean.
+    for y in 32..96 {
+        for x in 64..192 {
+            let at = (y * 256 + x) * 4;
+            for c in 0..3 {
+                let v = pixels[at + c];
+                assert!((127..=128).contains(&v), "({x}, {y}): {v}");
+            }
+        }
+    }
+    let (_, through_wgpu) = frame(12., false);
+    assert!(through_wgpu == pixels, "wgpu draws what Metal does");
+}

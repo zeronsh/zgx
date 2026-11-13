@@ -253,8 +253,72 @@ jobs:
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script --all-targets --features zgx-script/scene3d --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
+      # Real programs on a real pty, driven by the keys the view sends
+      # (zgx-terminal's ignored `real_programs` tests): vim, less and git
+      # from the image, htop, tmux and fzf from linux-packages.txt, nvim and
+      # lazygit from their releases (24.04's nvim, 0.9, doesn't ask the
+      # terminal what it can do; lazygit isn't packaged), pinned by version
+      # and checksum and kept between runs. A missing program fails its test.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/nvim-0.11.4
+            ~/.local/lazygit-0.44.1
+          key: terminal-programs-nvim-0.11.4-lazygit-0.44.1-linux-x86_64
+      - name: Terminal programs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # fetch DIR REPO TAG ASSET SHA256: the asset checked, then unpacked.
+          fetch() {
+            if [ ! -d "$1" ]; then
+              mkdir -p "$(dirname "$1")"
+              scripts/fetch_release.sh "$2" "$3" "$4" "$1.tar.gz"
+              echo "$5  $1.tar.gz" | sha256sum --check --strict -
+              mkdir -p "$1.part"
+              tar xzf "$1.tar.gz" -C "$1.part"
+              mv "$1.part" "$1"
+              rm "$1.tar.gz"
+            fi
+          }
+          nvim="$HOME/.local/nvim-0.11.4"
+          lazygit="$HOME/.local/lazygit-0.44.1"
+          fetch "$nvim" neovim/neovim v0.11.4 nvim-linux-x86_64.tar.gz \
+            a74740047e73b2b380d63a474282814063d10650cd6cc95efa16d1713c7e616c
+          fetch "$lazygit" jesseduffield/lazygit v0.44.1 lazygit_0.44.1_Linux_x86_64.tar.gz \
+            84682f4ad5a449d0a3ffbc8332200fe8651aee9dd91dcd8d87197ba6c2450dbc
+          ZGX_TUI_PATH="$nvim/nvim-linux-x86_64/bin:$lazygit" \
+            cargo test -p zgx-terminal --lib --locked real_programs -- --ignored
       # The optional effects package: every effect drawn, on each job's backend.
       - run: cargo test -p zgx-fx --locked
+      # zgx-dom: views as browser DOM, on wasm32. Its lints (zgx's `dom`
+      # plumbing with them), the table benchmark built, and its tests in
+      # headless Chrome: the image's Chrome and chromedriver, and the
+      # wasm-bindgen-test-runner of the wasm-bindgen Cargo.lock pins, kept
+      # between runs.
+      - id: wasm-bindgen
+        run: |
+          version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/wasm-bindgen-${{ steps.wasm-bindgen.outputs.version }}
+          key: wasm-bindgen-cli-${{ steps.wasm-bindgen.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+      - name: zgx-dom on wasm32
+        env:
+          WASM_BINDGEN: ${{ steps.wasm-bindgen.outputs.version }}
+        run: |
+          rustup target add wasm32-unknown-unknown
+          root="$HOME/.local/wasm-bindgen-$WASM_BINDGEN"
+          if [ ! -x "$root/bin/wasm-bindgen-test-runner" ]; then
+            cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --root "$root"
+          fi
+          cargo clippy -p zgx-dom --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+          cargo build -p zgx-dom --example bench --target wasm32-unknown-unknown --release --locked
+          CHROMEDRIVER="$(command -v chromedriver || echo "$CHROMEWEBDRIVER/chromedriver")" \
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
+            cargo test -p zgx-dom --target wasm32-unknown-unknown --locked
       # zgx-script's tests with all its features, as an app built by zgx-run
       # has them (scene3d, i18n, gltf, inspect): ICU's plural rules change
       # what the i18n lint finds, and each feature may add lazy `ui`
@@ -723,6 +787,18 @@ jobs:
       - run: "cargo test -p zgx-script --test state --test tooling --locked -- upload:: test_cli:: reference_docs::"
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
+      # Real programs through ConPTY, from the image (zgx-terminal's ignored
+      # `real_programs` tests, built by the step above): PowerShell 7 with
+      # PSReadLine, cmd and Git Bash with less. A missing program fails its
+      # test; the count proves all three ran.
+      - name: Programs through ConPTY
+        shell: bash
+        run: |
+          t=session::real_programs_tests
+          cargo test -p zgx-terminal --lib --locked -- --ignored --exact \
+            $t::powershell_runs_completes_and_recalls $t::cmd_runs_commands $t::git_bash_runs_and_pages \
+            2>&1 | tee programs.txt
+          grep -q "test result: ok. 3 passed" programs.txt
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)
       # and the event loop's wake by an event handle (#478): Windows only.
       - run: cargo test -p zgx-desktop --test opaque_swap_chain --test proxy_wake --test early_context --locked
@@ -779,13 +855,19 @@ jobs:
       # fill and layer shader, each compiled cold by FXC in its child
       # (`d3d11_parity`), optimized as apps ship them; and its ahead-compiled
       # shaders are what naga writes now.
-      - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --test d3d11_atlas --release --locked
+      - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --test d3d11_atlas --test d3d11_present --release --locked
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
       # Tests of the renderer's own, drawn with Direct3D 11 throughout
       # (`ZGX_D3D11` is read once a process): a popup's glass blurring what
       # its window drew under it.
       - run: cargo test -p zgx-gpu --features d3d11 --test popup_backdrop --release --locked
+        env:
+          ZGX_D3D11: "1"
+      # Layer shaders' passes and tagged boxes read on Direct3D 11 as on
+      # Direct3D 12 (`shader_passes`, but its pictures and GPU views, which
+      # Direct3D 11 leaves out: `d3d11_left_out`).
+      - run: cargo test -p zgx-gpu --features d3d11 --test shader_passes --release --locked -- a_feedback_pass_keeps_state_from_frame_to_frame steps_run_a_pass_that_many_times_a_frame a_once_pass_draws_once a_later_pass_reads_an_earlier_ones_result_from_this_frame a_pass_past_one_keeps_float_values a_shader_declared_as_a_script_declares_it_draws_through_its_passes tagged_boxes_are_read_where_they_are_this_frame
         env:
           ZGX_D3D11: "1"
       # Its ahead-compiled shaders (dxbc/) are FXC's bytecode of naga's HLSL

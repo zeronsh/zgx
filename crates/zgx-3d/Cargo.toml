@@ -26,6 +26,9 @@ zgx-desktop = { path = "../zgx-desktop", default-features = false }
 # `world_bench` draws by the no-op backend. The gate builds this crate alone
 # (Cargo would turn it on for every bench built beside it).
 wgpu = { version = "29.0.4", default-features = false, features = ["noop"] }
+# The bundled font `scroll_glass_bench` shapes its text in, as the other
+# gate scenes do (`zgx_workload::FONT_BYTES`).
+zgx-workload = { path = "../../comparisons/workload" }
 
 [[example]]
 name = "model"

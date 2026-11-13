@@ -1,4 +1,5 @@
 //! Shared retained overlay controls for ordinary and virtual viewports.
+use crate::time::Instant;
 use crate::{
     input::{EventPhase, InputEvent, Key, PointerButton},
     reactive::Signal,
@@ -10,7 +11,7 @@ use crate::{
 use std::{
     cell::Cell,
     rc::{Rc, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// How a scrollbar is drawn and timed: zgx's own, or Windows 11's, and a

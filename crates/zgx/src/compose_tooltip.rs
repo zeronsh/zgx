@@ -5,6 +5,7 @@
 //! fades in over 140 ms and out over 100, takes no focus and lets the pointer
 //! through. An interactive one (a hover card) keeps open while the pointer is
 //! on the view or on it, takes clicks and typing, and closes on Escape.
+use crate::time::Instant;
 use crate::{
     compose::{Placement, PlacementEdge, PlacementSide, TaskRunner, TaskToken, View},
     input::{EventPhase, InputEvent, Key},
@@ -15,7 +16,7 @@ use std::{
     any::Any,
     cell::{Cell, OnceCell, RefCell},
     rc::Rc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// What a tooltip shows and how (`View::tooltip`): text in the theme's look

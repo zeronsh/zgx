@@ -60,18 +60,32 @@ fn tap(start:vec2<i32>, x:i32, y:i32, size:vec2<f32>)->vec4<f32>{
  if f>1&&all(end-start==vec2(f)){
   let size=vec2<f32>(textureDimensions(source));
   // Each factor's taps written out (a loop of a count known only at run
-  // time kept each waiting on the last): the same samples, summed in the
-  // same order.
+  // time kept each waiting on the last).
   switch f {
    case 2 { sum+=tap(start,0,0,size); }
    case 4 { sum+=tap(start,0,0,size);sum+=tap(start,2,0,size);sum+=tap(start,0,2,size);sum+=tap(start,2,2,size); }
-   case 8 { sum+=tap(start,0,0,size);sum+=tap(start,2,0,size);sum+=tap(start,4,0,size);sum+=tap(start,6,0,size);sum+=tap(start,0,2,size);sum+=tap(start,2,2,size);sum+=tap(start,4,2,size);sum+=tap(start,6,2,size);sum+=tap(start,0,4,size);sum+=tap(start,2,4,size);sum+=tap(start,4,4,size);sum+=tap(start,6,4,size);sum+=tap(start,0,6,size);sum+=tap(start,2,6,size);sum+=tap(start,4,6,size);sum+=tap(start,6,6,size); }
+   // Its four 4x4 squares' sums, from `fs_reduce4` (in `original`).
+   case 8 { let m=2*vec2<i32>(v.p.xy);sum+=textureLoad(original,m,0);sum+=textureLoad(original,m+vec2(1,0),0);sum+=textureLoad(original,m+vec2(0,1),0);sum+=textureLoad(original,m+vec2(1,1),0); }
    default { for(var y=0;y<f;y+=2){for(var x=0;x<f;x+=2){sum+=tap(start,x,y,size);}} }
   }
   return sum*4./f32(f*f);
  }
  for(var y=start.y;y<end.y;y++){for(var x=start.x;x<end.x;x++){sum+=textureLoad(source,vec2(x,y),0);}}
  return sum/f32(max((end.x-start.x)*(end.y-start.y),1));
+}
+// A factor-8 reduce's first half, into the halves texture (rgba16f, as the
+// atlas) at twice the slot's place: each texel the sum of a 4x4 square's four
+// taps, for `fs_reduce` to add four of. Sixteen taps in flight in one shader
+// held so many registers that Metal's driver kept 32 MB of scratch while it
+// drew, and half as many threads waited on twice as many samples each. (An
+// rgba32f target, exact sums, opens an 8 MB block of its own on Metal.)
+@fragment fn fs_reduce4(v:Vertex)->@location(0) vec4<f32>{
+ let s=slots[v.index];
+ let start=vec2<i32>(s.region.xy)+(vec2<i32>(v.p.xy)-2*vec2<i32>(s.atlas.xy))*4;
+ let size=vec2<f32>(textureDimensions(source));
+ var sum=vec4(0.);
+ sum+=tap(start,0,0,size);sum+=tap(start,2,0,size);sum+=tap(start,0,2,size);sum+=tap(start,2,2,size);
+ return sum;
 }
 // Texel `x` of `n`, mirrored at the edges (then held there, if the taps
 // reach past a whole mirror image of a tiny slot).

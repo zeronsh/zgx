@@ -10,14 +10,9 @@
 //! to hand it over late in the refresh, and what follows has no time left,
 //! where what comes before it spends only that wait. A host that doesn't (a headless one) has none of this: its
 //! lists build the rows in view and their overscan, and drop the rest.
+use crate::time::Instant;
 use crate::{reactive::Signal, scene::NodeId};
-use std::{
-    cell::Cell,
-    hash::Hash,
-    ops::Range,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::{cell::Cell, hash::Hash, ops::Range, rc::Rc, time::Duration};
 
 /// Viewports of rows built beyond each edge of the view, unless a list says.
 pub(crate) const AHEAD_VIEWPORTS: f32 = 1.;

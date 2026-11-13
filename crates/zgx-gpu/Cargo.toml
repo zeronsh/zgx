@@ -88,7 +88,9 @@ wgpu-hal = { version = "29.0.4", default-features = false }
 objc2 = "0.6"
 objc2-core-foundation = "0.3.2"
 objc2-core-video = "0.3.2"
-objc2-metal = { version = "0.3.2", features = ["objc2-io-surface", "block2"] }
+objc2-metal = { version = "0.3.2", features = ["objc2-io-surface", "block2", "dispatch2"] }
+# The shader libraries built ahead, loaded as data (metal_frame.rs, build.rs).
+dispatch2 = "0.3.1"
 # Drawables' presented handlers (layer_present.rs).
 block2 = "0.6"
 # Shader sources and function names for frames encoded directly (metal_frame.rs).
@@ -170,5 +172,10 @@ required-features = ["d3d11"]
 
 [[test]]
 name = "d3d11_atlas"
+harness = false
+required-features = ["d3d11"]
+
+[[test]]
+name = "d3d11_present"
 harness = false
 required-features = ["d3d11"]
