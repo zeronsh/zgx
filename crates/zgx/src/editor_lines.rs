@@ -182,8 +182,21 @@ pub struct LineInset {
     pub below: f32,
     /// Not shown and no room taken (a closed toggle's lines): the app keeps the caret out of it.
     pub hidden: bool,
+    /// The width the line wraps in, from its `left` (a table's cell); none: what the editor's width leaves.
+    pub width: Option<f32>,
+    /// This line and the next share a row (a table's cells, side by side): both start at the row's top, each at its
+    /// own `left`, and the lines after the row start below its tallest line.
+    pub joins_next: bool,
 }
 impl LineInset {
+    /// The width the line wraps in when the text wraps at `wrap`: its own, or what its indent leaves.
+    fn wrap(&self, wrap: Option<f32>) -> Option<f32> {
+        match self.width {
+            Some(width) => Some(width.max(1.)),
+            None if self.left > 0. => wrap.map(|w| (w - self.left).max(1.)),
+            None => wrap,
+        }
+    }
     /// A line's height with its room: its text's `bare` height, or nothing when hidden.
     fn height(&self, bare: f32) -> f32 {
         if self.hidden { 0. } else { bare + self.above + self.below }
@@ -199,9 +212,10 @@ pub struct LineMark {
     pub x: f32,
     /// Its top, in points from the top of the line's text (below the line's room above).
     pub y: f32,
-    /// Its width; infinite: to the area's right edge.
+    /// Its width; infinite: to the area's right edge (to its line's, where the line has a width: a cell's).
     pub width: f32,
-    /// Its height; infinite: to the bottom of the line, its wrapped rows and its room below too.
+    /// Its height; infinite: to the bottom of the line, its wrapped rows and its room below too (of its row, where
+    /// the line shares one: a cell's border is as tall as the row).
     pub height: f32,
     /// With an infinite height: how far above the line's bottom it ends.
     pub bottom: f32,
@@ -213,7 +227,8 @@ pub struct LineMark {
     pub border_color: crate::scene::Color,
     /// The border's width.
     pub border_width: f32,
-    /// Its `x` is how far its right edge sits from the area's right edge (a code block's language).
+    /// Its `x` is how far its right edge sits from the area's right edge (a code block's language); from its line's,
+    /// where the line has a width.
     pub from_right: bool,
     /// Its label in the monospaced font (a code block's line numbers).
     pub mono: bool,
@@ -793,9 +808,35 @@ fn evict<K: Eq + std::hash::Hash>(shaped: &mut HashMap<K, Shaped>) {
 /// `O(log n)` (a Fenwick tree).
 struct Heights {
     tree: Vec<f64>,
+    /// What each line adds to the tops of those below it: its height, but in a row (`LineInset::joins_next`)
+    /// nothing for every line but the last, which adds the row's.
     each: Vec<f32>,
+    /// Each line's own height, where any share a row (empty where none does: `each` is it).
+    own: Vec<f32>,
 }
 impl Heights {
+    /// Of lines `own` high, those at `joins` (in order) sharing a row with the next.
+    fn with_rows(own: Vec<f32>, joins: &[usize]) -> Self {
+        if joins.is_empty() {
+            return Self::new(own);
+        }
+        let mut each = own.clone();
+        let mut k = 0;
+        while k < joins.len() {
+            let start = joins[k];
+            while k + 1 < joins.len() && joins[k + 1] == joins[k] + 1 {
+                k += 1;
+            }
+            let last = (joins[k] + 1).min(own.len() - 1);
+            k += 1;
+            let tallest = own[start..=last].iter().copied().fold(0., f32::max);
+            each[start..last].fill(0.);
+            each[last] = tallest;
+        }
+        let mut heights = Self::new(each);
+        heights.own = own;
+        heights
+    }
     fn new(each: Vec<f32>) -> Self {
         let mut tree: Vec<f64> = each.iter().map(|h| *h as f64).collect();
         for i in 0..tree.len() {
@@ -804,7 +845,15 @@ impl Heights {
                 tree[parent] += tree[i];
             }
         }
-        Self { tree, each }
+        Self {
+            tree,
+            each,
+            own: Vec::new(),
+        }
+    }
+    /// Line `i`'s own height.
+    fn own(&self, i: usize) -> f32 {
+        if self.own.is_empty() { self.each[i] } else { self.own[i] }
     }
     /// The heights of the lines above line `i`.
     fn above(&self, i: usize) -> f64 {
@@ -919,20 +968,18 @@ impl LinesLayout {
         {
             let width = wrap.unwrap_or(f32::INFINITY);
             let known = layout.cache.heights.borrow();
+            let mut joins = Vec::new();
             let each = (0..layout.line_count())
                 .map(|i| {
-                    let line = layout.line_text(i);
                     let inset = layout.inset(i);
-                    inset.height(
-                        known
-                            .get(&*line)
-                            .copied()
-                            .unwrap_or_else(|| layout.estimate(&line, width)),
-                    )
+                    if inset.joins_next {
+                        joins.push(i);
+                    }
+                    layout.measured(i, &inset, &known, width)
                 })
                 .collect();
             drop(known);
-            layout.heights = Some(RefCell::new(Heights::new(each)));
+            layout.heights = Some(RefCell::new(Heights::with_rows(each, &joins)));
         }
         layout
     }
@@ -964,25 +1011,80 @@ impl LinesLayout {
         }
         if let Some(heights) = &old.heights {
             let width = old.wrap.unwrap_or(f32::INFINITY);
-            let old_each = &heights.borrow().each;
+            let old = heights.borrow();
             let known = layout.cache.heights.borrow();
-            let mut each = Vec::with_capacity(layout.line_count());
-            each.extend_from_slice(&old_each[..kept - 1]);
+            let count = layout.line_count();
+            let mut joined = !old.own.is_empty();
+            let mut measured = Vec::with_capacity(first_moved + 1 - kept);
             for i in kept - 1..first_moved {
-                let line = layout.line_text(i);
                 let inset = layout.inset(i);
-                each.push(inset.height(
-                    known
-                        .get(&*line)
-                        .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width)),
-                ));
+                joined |= inset.joins_next;
+                measured.push(layout.measured(i, &inset, &known, width));
             }
-            each.extend_from_slice(&old_each[moved..]);
             drop(known);
-            layout.heights = Some(RefCell::new(Heights::new(each)));
+            let spliced = |from: &[f32]| {
+                let mut all = Vec::with_capacity(count);
+                all.extend_from_slice(&from[..kept - 1]);
+                all.extend_from_slice(&measured);
+                all.extend_from_slice(&from[moved..]);
+                all
+            };
+            let mut each = spliced(&old.each);
+            let new = if joined {
+                // The rows the edit touches take their heights again; the rest keep theirs.
+                let own = if old.own.is_empty() { each.clone() } else { spliced(&old.own) };
+                let joins = |i: usize| i + 1 < count && layout.inset(i).joins_next;
+                let mut start = kept - 1;
+                while start > 0 && joins(start - 1) {
+                    start -= 1;
+                }
+                let mut end = first_moved.max(kept).min(count);
+                while end < count && joins(end - 1) {
+                    end += 1;
+                }
+                let mut row = start;
+                while row < end {
+                    let mut last = row;
+                    while joins(last) {
+                        last += 1;
+                    }
+                    let tallest = own[row..=last].iter().copied().fold(0., f32::max);
+                    each[row..last].fill(0.);
+                    each[last] = tallest;
+                    row = last + 1;
+                }
+                let mut new = Heights::new(each);
+                new.own = own;
+                new
+            } else {
+                Heights::new(each)
+            };
+            drop(old);
+            layout.heights = Some(RefCell::new(new));
         }
         layout
+    }
+    /// Line `i`'s height with its room before it is shaped: the height its text had (`known`), else an estimate.
+    fn measured(
+        &self,
+        i: usize,
+        inset: &LineInset,
+        known: &HashMap<Box<str>, f32>,
+        width: f32,
+    ) -> f32 {
+        if inset.hidden {
+            return 0.;
+        }
+        let line = self.line_text(i);
+        // a cell wraps in its own width: its text's height elsewhere is not its
+        let bare = match inset.width {
+            Some(own) => self.estimate(&line, own),
+            None => known
+                .get(&*line)
+                .copied()
+                .unwrap_or_else(|| self.estimate(&line, width)),
+        };
+        inset.height(bare)
     }
     /// A wrapped line's height before it is shaped: its rows at the
     /// estimated advance.
@@ -1029,20 +1131,76 @@ impl LinesLayout {
             None => i as f32 * self.row,
         }
     }
-    /// Line `i`'s height (as shaped, or estimated if it is not yet).
+    /// Line `i`'s height (as shaped, or estimated if it is not yet): its own, in a row too.
     pub(crate) fn height(&self, i: usize) -> f32 {
         match &self.heights {
-            Some(heights) => heights.borrow().each[i],
+            Some(heights) => heights.borrow().own(i),
             None => self.row,
         }
     }
-    /// The line at `y` down the layout.
-    pub(crate) fn line_at(&self, y: f32) -> usize {
+    /// Whether any lines share a row (`LineInset::joins_next`): only then is a line asked which row it is in.
+    fn has_rows(&self) -> bool {
+        self.heights
+            .as_ref()
+            .is_some_and(|heights| !heights.borrow().own.is_empty())
+    }
+    /// The lines of line `i`'s row: itself, or the run of lines joined to it.
+    pub(crate) fn row_of(&self, i: usize) -> Range<usize> {
+        let (mut start, mut end) = (i, i + 1);
+        if self.has_rows() {
+            let count = self.line_count();
+            while start > 0 && self.inset(start - 1).joins_next {
+                start -= 1;
+            }
+            while end < count && self.inset(end - 1).joins_next {
+                end += 1;
+            }
+        }
+        start..end
+    }
+    /// The height of line `i`'s row: its tallest line's (the line's own, alone).
+    pub(crate) fn row_height(&self, i: usize) -> f32 {
+        if !self.has_rows() {
+            return self.height(i);
+        }
+        let last = self.row_of(i).end - 1;
+        self.heights.as_ref().map_or(self.row, |h| h.borrow().each[last])
+    }
+    /// The line at `y` down the layout: of a row, the last.
+    fn last_line_at(&self, y: f32) -> usize {
         let y = y.max(0.);
         match &self.heights {
             Some(heights) => heights.borrow().line_at(y as f64),
             None => ((y / self.row) as usize).min(self.line_count() - 1),
         }
+    }
+    /// The line at `y` down the layout (of a row, the first).
+    pub(crate) fn line_at(&self, y: f32) -> usize {
+        let i = self.last_line_at(y);
+        if self.has_rows() { self.row_of(i).start } else { i }
+    }
+    /// The line at `x`, `y`: in a row, the one whose room holds `x` (the first before them all, the last after).
+    /// Whether it is a cell of a row.
+    fn line_at_point(&self, x: f32, y: f32) -> (usize, bool) {
+        let i = self.last_line_at(y);
+        if !self.has_rows() {
+            return (i, false);
+        }
+        let row = self.row_of(i);
+        if row.len() == 1 {
+            return (i, false);
+        }
+        let mut found = None;
+        for j in row {
+            let inset = self.inset(j);
+            if inset.hidden {
+                continue;
+            }
+            if found.is_none() || inset.left <= x {
+                found = Some(j);
+            }
+        }
+        (found.unwrap_or(i), true)
     }
     /// The lines that show between `top` and `bottom`, shaped: their
     /// numbers, the first and the last but one.
@@ -1060,7 +1218,8 @@ impl LinesLayout {
     /// Line `i`, shaped.
     /// The width line `i` is drawn in when the text wraps at `wrap`: what its indent leaves, as it was wrapped.
     pub(crate) fn draw_width(&self, i: usize, wrap: Option<f32>) -> Option<f32> {
-        wrap.map(|w| (w - self.inset(i).left).max(1.))
+        let inset = self.inset(i);
+        inset.width.map(|w| w.max(1.)).or(wrap.map(|w| (w - inset.left).max(1.)))
     }
     /// Line `i`'s room (`LineCache::set_insets`).
     pub(crate) fn inset(&self, i: usize) -> LineInset {
@@ -1074,13 +1233,13 @@ impl LinesLayout {
         let text = self.line_text(i);
         let inset = self.inset(i);
         // an indented line wraps narrower: kept apart from the same text unindented
-        let (wrap, key) = if inset.left > 0. {
-            (
-                self.wrap.map(|w| (w - inset.left).max(1.)),
-                std::borrow::Cow::Owned(format!("{}\u{0}{}", inset.left.to_bits(), &*text)),
-            )
+        let wrap = inset.wrap(self.wrap);
+        let key = if let Some(width) = inset.width {
+            std::borrow::Cow::Owned(format!("{}\u{1}{}", width.to_bits(), &*text))
+        } else if inset.left > 0. {
+            std::borrow::Cow::Owned(format!("{}\u{0}{}", inset.left.to_bits(), &*text))
         } else {
-            (self.wrap, std::borrow::Cow::Borrowed(&*text))
+            std::borrow::Cow::Borrowed(&*text)
         };
         let layout = match self.cache.styled(self, i, &text, wrap, &key) {
             Some(layout) => layout,
@@ -1094,9 +1253,21 @@ impl LinesLayout {
             // cached without its room: the same text elsewhere (or once its block changes) has its own
             let bare = height.max(self.row);
             let height = inset.height(bare);
-            if heights.borrow().each[i] != height {
-                heights.borrow_mut().set(i, height);
-                self.cache.heights.borrow_mut().insert((*text).into(), bare);
+            if heights.borrow().own.is_empty() {
+                if heights.borrow().each[i] != height {
+                    heights.borrow_mut().set(i, height);
+                    self.cache.heights.borrow_mut().insert((*text).into(), bare);
+                }
+            } else if heights.borrow().own[i] != height {
+                // its row is as tall as its tallest line now
+                let row = self.row_of(i);
+                let mut heights = heights.borrow_mut();
+                heights.own[i] = height;
+                let tallest = heights.own[row.clone()].iter().copied().fold(0., f32::max);
+                heights.set(row.end - 1, tallest);
+                if inset.width.is_none() {
+                    self.cache.heights.borrow_mut().insert((*text).into(), bare);
+                }
             }
         }
         layout
@@ -1178,10 +1349,15 @@ impl TextLayout for LinesLayout {
         self.hit_position(x, y).byte_offset
     }
     fn hit_position(&self, x: f32, y: f32) -> TextPosition {
-        let i = self.line_at(y);
+        let (i, cell) = self.line_at_point(x, y);
         let layout = self.line(i);
         let inset = self.inset(i);
-        let local = layout.hit_position(x - inset.left, y.max(0.) - self.top(i) - inset.above);
+        let mut down = y.max(0.) - self.top(i) - inset.above;
+        if cell {
+            // under a cell shorter than its row: its last row at x, as beside it
+            down = down.min(layout.size().1 - 0.5);
+        }
+        let local = layout.hit_position(x - inset.left, down);
         let range = self.line_range(i);
         TextPosition {
             byte_offset: range.start + local.byte_offset.min(range.len()),
@@ -1215,6 +1391,30 @@ impl TextLayout for LinesLayout {
     }
     fn selection_within(&self, range: Range<usize>, top: f32, bottom: f32) -> Vec<Rect> {
         self.selection_between(range, top, bottom)
+    }
+    fn vertical_step(&self, from: TextPosition, x: f32, down: bool) -> Option<TextPosition> {
+        if !self.has_rows() {
+            return None;
+        }
+        let i = self.line_of(from.byte_offset.min(self.text.len()));
+        let row = self.row_of(i);
+        if row.len() == 1 {
+            return None;
+        }
+        let layout = self.line(i);
+        let caret = layout.caret_position(self.local(i, from));
+        let to = caret.y + if down { caret.height * 1.5 } else { -caret.height * 0.5 };
+        // Another of its own wrapped rows: found as in any line.
+        if to >= 0. && to < layout.size().1 {
+            return None;
+        }
+        let top = self.top(i);
+        if down {
+            let below = top + self.row_height(i);
+            (row.end < self.line_count()).then(|| self.hit_position(x, below + 0.5))
+        } else {
+            (row.start > 0 && top > 0.).then(|| self.hit_position(x, top - 0.5))
+        }
     }
 }
 
@@ -1312,7 +1512,7 @@ mod tests {
                     left: 36.,
                     above: 8.,
                     below: 4.,
-                    hidden: false,
+                    ..LineInset::default()
                 }
             } else {
                 LineInset::default()
@@ -1461,6 +1661,302 @@ mod tests {
                 "{wrap:?}: the list item, indented, below the paragraph"
             );
         }
+    }
+
+    /// A table of two rows of two cells between ordinary lines: `first` is its first cell's line. Each cell is 100
+    /// wide, the second column 110 in; the second column's cells have room above and below.
+    const TABLE: &str = "before\nA1 with text long enough to wrap in its cell\nB1\nA2\nB2\nafter";
+    fn table_insets(first: Rc<Cell<usize>>) -> LineInsets {
+        Rc::new(move |i| match i.checked_sub(first.get()) {
+            Some(0 | 2) => LineInset {
+                width: Some(100.),
+                joins_next: true,
+                ..LineInset::default()
+            },
+            Some(1 | 3) => LineInset {
+                left: 110.,
+                above: 2.,
+                below: 3.,
+                width: Some(100.),
+                ..LineInset::default()
+            },
+            _ => LineInset::default(),
+        })
+    }
+    fn table(text: &str, first: usize) -> (Rc<LineCache>, Rc<LinesLayout>, Rc<Cell<usize>>) {
+        let first = Rc::new(Cell::new(first));
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(table_insets(first.clone())));
+        let layout = relaid(&cache, text);
+        (cache, layout, first)
+    }
+    fn relaid(cache: &Rc<LineCache>, text: &str) -> Rc<LinesLayout> {
+        cache.layout(
+            || Text::new(text),
+            None,
+            14.,
+            Some(400.),
+            &FontStyle::default(),
+            0,
+            shaper,
+        )
+    }
+    /// Every line's top, own height and row height, and the whole height, all shaped.
+    fn geometry(layout: &LinesLayout) -> Vec<(f32, f32, f32)> {
+        layout.lines_between(0., 10_000.);
+        let mut all: Vec<_> = (0..layout.line_count())
+            .map(|i| (layout.top(i), layout.height(i), layout.row_height(i)))
+            .collect();
+        all.push((layout.size().1, 0., 0.));
+        all
+    }
+
+    /// The cells of a row start at the row's top, each at its own left; the row is as tall as its tallest cell, and
+    /// the lines after it start below it.
+    #[test]
+    fn a_row_of_lines_shares_a_top_and_is_as_tall_as_its_tallest() {
+        let (_, layout, _) = table(TABLE, 1);
+        assert_eq!(layout.lines_between(0., 10_000.), 0..6);
+        let row = layout.row;
+        assert_eq!(layout.top(1), layout.height(0));
+        assert_eq!(layout.top(2), layout.top(1));
+        assert!(layout.height(1) >= 2. * row, "the first cell wraps: {}", layout.height(1));
+        assert_eq!(layout.height(2), row + 5., "a cell's own height, its room included");
+        assert_eq!(layout.row_height(1), layout.height(1));
+        assert_eq!(layout.row_height(2), layout.height(1));
+        assert_eq!(layout.top(3), layout.top(1) + layout.row_height(1));
+        assert_eq!(layout.top(4), layout.top(3));
+        assert_eq!(layout.row_height(3), row + 5., "the second row: its cell with room is the tallest");
+        assert_eq!(layout.top(5), layout.top(3) + row + 5.);
+        assert_eq!(layout.size().1, layout.top(5) + layout.height(5));
+        assert_eq!(layout.row_of(1), 1..3);
+        assert_eq!(layout.row_of(4), 3..5);
+        assert_eq!(layout.row_of(5), 5..6);
+        assert_eq!(layout.draw_width(1, Some(400.)), Some(100.));
+        assert_eq!(layout.draw_width(2, Some(400.)), Some(100.));
+        assert!(layout.line(1).size().0 <= 100.);
+    }
+
+    /// A hit in a row finds the cell whose room holds its x (the first before them all, the last after), and carets
+    /// sit in their cells.
+    #[test]
+    fn hits_and_carets_in_a_row_follow_its_cells() {
+        let (_, layout, _) = table(TABLE, 1);
+        layout.lines_between(0., 10_000.);
+        let at = |needle: &str| TABLE.find(needle).unwrap();
+        let (a1, b1, a2, b2) = (at("A1"), at("B1"), at("A2"), at("B2"));
+        let (top, row) = (layout.top(1), layout.row);
+        assert_eq!(layout.caret(a1), Rect::new(0., top, layout.caret(a1).width, row));
+        assert_eq!((layout.caret(b1).x, layout.caret(b1).y), (110., top + 2.));
+        assert_eq!((layout.caret(b2).x, layout.caret(b2).y), (110., layout.top(3) + 2.));
+        assert_eq!(layout.caret(a2).y, layout.top(3));
+        assert_eq!(layout.hit_test(1., top + 1.), a1);
+        assert_eq!(layout.hit_test(-20., top + 1.), a1);
+        assert_eq!(layout.hit_test(111., top + 3.), b1);
+        assert_eq!(layout.hit_test(900., top + 3.), b1 + 2, "past the last cell: its end");
+        // between the cells: the cell before the gap
+        let gap = layout.hit_test(105., top + 1.);
+        assert!((a1..b1).contains(&gap), "{gap}");
+        // lower in the row than the short cell's text: still that cell
+        let low = layout.hit_position(111., top + layout.row_height(1) - 1.);
+        assert_eq!(low.byte_offset, b1, "its row at that x, not its end");
+        let wrapped = layout.hit_test(1., top + row * 1.5);
+        assert!(wrapped > a1 && wrapped < b1, "the first cell's second row: {wrapped}");
+        assert_eq!(layout.hit_test(1., layout.top(3) + 1.), a2);
+        assert_eq!(layout.hit_test(111., layout.top(3) + 3.), b2);
+        assert_eq!(layout.hit_test(1., layout.top(5) + 1.), at("after"));
+        assert_eq!(layout.hit_test(1., 1.), 0);
+        for offset in 0..=TABLE.len() {
+            let caret = layout.caret(offset);
+            assert_eq!(
+                layout.hit_test(caret.x + 0.5, caret.y + 1.),
+                offset,
+                "a hit at caret {offset} finds it"
+            );
+        }
+    }
+
+    /// A selection over two cells paints each cell's lines inside the cell, never a band across the row.
+    #[test]
+    fn a_selection_across_cells_stays_inside_each_cell() {
+        let (_, layout, _) = table(TABLE, 1);
+        let (a1, b1) = (TABLE.find("A1").unwrap(), TABLE.find("B1").unwrap());
+        let rects = layout.selection(a1 + 3..b1 + 2);
+        assert!(rects.len() >= 3, "{rects:?}");
+        let (top, bottom) = (layout.top(1), layout.top(1) + layout.row_height(1));
+        let (mut left, mut right) = (0, 0);
+        for r in &rects {
+            assert!(r.y >= top && r.y + r.height <= bottom, "in the row: {r:?}");
+            if r.x < 110. {
+                assert!(r.x + r.width <= 100.5, "in the first cell: {r:?}");
+                left += 1;
+            } else {
+                assert!(r.x + r.width <= 210.5, "in the second cell: {r:?}");
+                assert_eq!(r.y, top + 2.);
+                right += 1;
+            }
+        }
+        assert!(left >= 2 && right == 1, "{rects:?}");
+        assert_eq!(layout.selection_between(a1 + 3..b1 + 2, top + 1., top + 2.), rects);
+        // into the next row: its first cell only
+        let a2 = TABLE.find("A2").unwrap();
+        let more = layout.selection(b1..a2 + 1);
+        assert!(more.iter().any(|r| r.y == layout.top(3) && r.x == 0.), "{more:?}");
+        assert!(more.iter().all(|r| r.x + r.width <= 210.5), "{more:?}");
+    }
+
+    /// A row in view shows all its lines, and the line at a y in it is its first.
+    #[test]
+    fn lines_between_gives_the_whole_row() {
+        let (_, layout, _) = table(TABLE, 1);
+        layout.lines_between(0., 10_000.);
+        let top = layout.top(1);
+        assert_eq!(layout.lines_between(top + 1., top + 2.), 1..3);
+        assert_eq!(layout.line_at(top + 1.), 1);
+        let second = layout.top(3);
+        assert_eq!(layout.lines_between(second + 1., second + 2.), 3..5);
+        assert_eq!(layout.lines_between(top + 1., second + 1.), 1..5);
+        assert_eq!(layout.line_at(layout.top(5) + 1.), 5);
+        assert_eq!(layout.line_at(0.), 0);
+    }
+
+    /// An edit that grows a cell makes its row taller and moves the lines below; edits around the table (which
+    /// move its lines) keep its rows: all as a layout of the text made has them.
+    #[test]
+    fn an_edit_in_a_row_lays_it_out_again() {
+        let (cache, layout, first) = table(TABLE, 1);
+        let before = geometry(&layout);
+        let mut text = String::from(TABLE);
+        let b1 = text.find("B1").unwrap();
+        text.insert_str(b1 + 2, " grows until it is the tallest cell of its row by far, three rows or more");
+        let grown = relaid(&cache, &text);
+        let after = geometry(&grown);
+        assert_eq!(after, geometry(&table(&text, 1).1));
+        assert!(after[2].1 > before[1].1, "the second cell is the tallest now");
+        assert_eq!(after[1].2, after[2].1);
+        assert_eq!(after[3].0, after[1].0 + after[2].1, "the next row starts below it");
+        assert!(after[5].0 > before[5].0);
+        assert_eq!(after[1].1, before[1].1, "the first cell's own height is its own");
+        // a line break above the table: its lines move down one, their rows with them
+        text.insert_str(0, "new\n");
+        first.set(2);
+        let moved = relaid(&cache, &text);
+        assert_eq!(moved.row_of(2), 2..4);
+        assert_eq!(geometry(&moved), geometry(&table(&text, 2).1));
+        // the last cell of the table edited, then the line after it
+        let b2 = text.find("B2").unwrap();
+        text.insert_str(b2, "taller than the first cell beside it, wrapping onto a few rows ");
+        assert_eq!(geometry(&relaid(&cache, &text)), geometry(&table(&text, 2).1));
+        let end = text.len();
+        text.insert_str(end, "\nlast");
+        assert_eq!(geometry(&relaid(&cache, &text)), geometry(&table(&text, 2).1));
+        // and before any of it is shaped again, the heights the edit keeps are a fresh layout's
+        text.replace_range(0..4, "");
+        first.set(1);
+        let kept = relaid(&cache, &text);
+        assert_eq!(kept.row_of(1), 1..3);
+        assert_eq!(geometry(&kept), geometry(&table(&text, 1).1));
+    }
+
+    /// A hidden line takes no room in a text with rows, alone or as a cell.
+    #[test]
+    fn a_hidden_line_among_rows_takes_no_room() {
+        let text = "before\nA1\nB1 hidden cell with text long enough to wrap\nC1\nhidden\nafter";
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| match i {
+            1 => LineInset {
+                width: Some(100.),
+                joins_next: true,
+                ..LineInset::default()
+            },
+            2 => LineInset {
+                left: 110.,
+                width: Some(60.),
+                joins_next: true,
+                hidden: true,
+                ..LineInset::default()
+            },
+            3 => LineInset {
+                left: 110.,
+                width: Some(100.),
+                ..LineInset::default()
+            },
+            4 => LineInset {
+                hidden: true,
+                ..LineInset::default()
+            },
+            _ => LineInset::default(),
+        })));
+        let layout = relaid(&cache, text);
+        assert_eq!(layout.lines_between(0., 10_000.), 0..6);
+        let row = layout.row;
+        assert_eq!(layout.row_of(2), 1..4);
+        assert_eq!((layout.top(1), layout.top(2), layout.top(3)), (row, row, row));
+        assert_eq!(layout.height(2), 0.);
+        assert_eq!(layout.row_height(1), row, "the hidden cell's wrapped text adds nothing");
+        assert_eq!(layout.top(4), 2. * row);
+        assert_eq!(layout.top(5), 2. * row);
+        assert_eq!(layout.size().1, 3. * row);
+        assert_eq!(layout.hit_test(111., row + 1.), text.find("C1").unwrap());
+        assert_eq!(layout.hit_test(1., 2. * row + 1.), text.find("after").unwrap());
+    }
+
+    /// Up and down leave a row for the line above or below it at the caret's x (the cell under it, if that is a
+    /// row), once the cell's own wrapped rows are done; a text with no rows steps as it did.
+    #[test]
+    fn vertical_steps_leave_a_row() {
+        let (_, layout, _) = table(TABLE, 1);
+        layout.lines_between(0., 10_000.);
+        let at = |needle: &str| TABLE.find(needle).unwrap();
+        let step = |from: usize, x: f32, down: bool| {
+            let from = TextPosition {
+                byte_offset: from,
+                affinity: TextAffinity::After,
+            };
+            layout.vertical_step(from, x, down).map(|to| to.byte_offset)
+        };
+        assert_eq!(step(at("B1"), 110., true), Some(at("B2")), "the cell below, not B1's end");
+        assert_eq!(step(at("B2"), 110., true), Some(TABLE.len()), "the line below, at its x");
+        assert_eq!(step(at("B2"), 110., false), Some(at("B1")));
+        assert_eq!(step(at("A1"), 0., false), Some(0));
+        assert_eq!(step(at("A1"), 0., true), None, "its own second row first");
+        assert_eq!(step(at("B1") - 1, 0., true), Some(at("A2")), "from the cell's last row");
+        assert_eq!(step(at("A2"), 0., false).map(|to| layout.line_of(to)), Some(1));
+        assert_eq!(step(at("after"), 0., false), None, "an ordinary line steps by a hit");
+        let above = layout.hit_test(110., layout.top(5) - layout.row * 0.5);
+        assert_eq!(layout.line_of(above), 4, "which finds the cell above at its x");
+        let plain = lines(TABLE, Some(400.));
+        assert!(!plain.has_rows());
+        let from = TextPosition {
+            byte_offset: at("B1"),
+            affinity: TextAffinity::After,
+        };
+        assert_eq!(plain.vertical_step(from, 0., true), None);
+    }
+
+    /// A text with no rows asks each line's room no more than it did: once a line as it is laid out, and for a
+    /// hit or a caret only its own line's.
+    #[test]
+    fn a_text_without_rows_asks_no_more_of_its_insets() {
+        let asked = Rc::new(Cell::new(0usize));
+        let count = asked.clone();
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(move |_| {
+            count.set(count.get() + 1);
+            LineInset::default()
+        })));
+        let text: String = (0..1_000).map(|i| format!("line {i}\n")).collect();
+        let layout = relaid(&cache, &text);
+        assert_eq!(asked.get(), layout.line_count(), "once a line");
+        asked.set(0);
+        layout.hit_test(5., 500. * layout.row);
+        assert_eq!(asked.get(), 2, "the line shaped, and its room for the hit");
+        asked.set(0);
+        layout.line_at(300. * layout.row);
+        layout.top(700);
+        layout.height(700);
+        layout.row_height(700);
+        assert_eq!(asked.get(), 0);
     }
 
     /// Laid out by its lines, a text has the carets, hits and selections it

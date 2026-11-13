@@ -6105,11 +6105,12 @@ impl Ui {
                         // or moving it, shapes it no more. A node just made is
                         // asked for its ink in the empty box it had (where it
                         // painted nothing; a line's box is never empty).
-                        s.know_text_size(*id, wrap_width, shaped);
+                        let inset = lines.inset(*i);
+                        // A cell's node is as wide as the cell: its size is known at that width.
+                        s.know_text_size(*id, if inset.width.is_some() { Some(width) } else { wrap_width }, shaped);
                         if s.bounds(*id).width == 0. {
                             s.know_text_size(*id, Some(0.), shaped);
                         }
-                        let inset = lines.inset(*i);
                         s.set_transform(
                             *id,
                             Transform {
@@ -6133,12 +6134,18 @@ impl Ui {
                             continue;
                         }
                         let top = lines.top(i) + inset.above - scroll.1;
-                        let tall = (lines.height(i) - inset.above).max(0.);
+                        // To the bottom of its row: a cell's border is as tall as the tallest cell beside it.
+                        let tall = (lines.row_height(i) - inset.above).max(0.);
+                        // A cell's marks end at the cell's right edge, not the area's.
+                        let (right, scrolled) = match inset.width {
+                            Some(width) => (inset.left + width, scroll.0),
+                            None => (inner_width, 0.),
+                        };
                         for mark in marks_of(i) {
                             let width = if mark.width.is_finite() {
                                 mark.width
                             } else {
-                                (inner_width - mark.x).max(0.)
+                                (right - mark.x).max(0.)
                             };
                             let height = if mark.height.is_finite() {
                                 mark.height
@@ -6146,7 +6153,7 @@ impl Ui {
                                 (tall - mark.y - mark.bottom).max(0.)
                             };
                             let x = if mark.from_right {
-                                inner_width - mark.x - width
+                                right - mark.x - width - scrolled
                             } else {
                                 mark.x - scroll.0
                             };
@@ -7872,6 +7879,8 @@ impl Ui {
                                         layout.hit_position(desired_x,
                                             (target + pitch * 0.5).clamp(0., f64::from(f32::MAX)) as f32)
                                     }
+                                } else if let Some(next) = layout.vertical_step(current, desired_x, direction > 0.) {
+                                    next
                                 } else {
                                     layout.hit_position(
                                         desired_x,

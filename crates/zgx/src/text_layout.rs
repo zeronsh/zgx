@@ -652,6 +652,12 @@ pub trait TextLayout {
             .filter(|r| r.y + r.height > top && r.y < bottom)
             .collect()
     }
+    /// Where a caret at `from` goes a row up or down at `x`, if not where a hit a row away says (the default):
+    /// out of a row of lines laid side by side (an editor's table cells), to the line above or below the row.
+    fn vertical_step(&self, from: TextPosition, x: f32, down: bool) -> Option<TextPosition> {
+        let _ = (from, x, down);
+        None
+    }
     /// Affinity-aware geometry; defaults preserve compatibility with custom shapers.
     fn hit_position(&self, x: f32, y: f32) -> TextPosition {
         TextPosition {
