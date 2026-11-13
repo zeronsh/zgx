@@ -4384,6 +4384,24 @@ fn mount_portal(
         }
     }
     let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
+    // Opened as the pointer rests on its trigger (a submenu's own is
+    // mounted with its menu, `compose_menu::mount`): wired before a lazy
+    // panel is built, which is what the first hover opens.
+    let panel_cell: Rc<Cell<Option<NodeId>>> = Rc::default();
+    if let (Some(hover), Some(anchor)) = (options.and_then(|p| p.hover), anchor)
+        && !is_submenu
+    {
+        crate::compose_hover::mount(
+            ui,
+            owner,
+            anchor,
+            panel_cell.clone(),
+            open.clone(),
+            hover,
+            environment.services.get::<TaskRunner>(),
+        );
+    }
+    let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
     if !options.is_some_and(|p| p.lazy) {
         built.set(true);
         mount_portal_panel(
@@ -4396,6 +4414,7 @@ fn mount_portal(
             environment,
             is_menu,
             is_submenu,
+            panel_cell,
         );
         return owner;
     }
@@ -4424,6 +4443,7 @@ fn mount_portal(
                 environment,
                 is_menu,
                 is_submenu,
+                panel_cell.clone(),
             )
         });
     });
@@ -4441,6 +4461,7 @@ fn mount_portal_panel(
     mut environment: Environment,
     is_menu: bool,
     is_submenu: bool,
+    hover_panel: Rc<Cell<Option<NodeId>>>,
 ) {
     let anchored = anchor.is_some();
     let panel_hidden = view.rare.as_ref().is_some_and(|r| r.panel_hidden);
@@ -4723,6 +4744,7 @@ fn mount_portal_panel(
         view,
         environment.clone(),
     );
+    hover_panel.set(Some(panel));
     if let Some(menu) = menu_context.clone() {
         menu.panel.set(Some(panel));
         let viewport = ui.container(
@@ -4917,21 +4939,6 @@ fn mount_portal_panel(
         environment.services.get::<TaskRunner>(),
         focus_hooks,
     );
-    // Opened as the pointer rests on its trigger (a submenu's own is mounted
-    // with its menu, `compose_menu::mount`).
-    if let (Some(hover), Some(anchor)) = (hover, anchor)
-        && !is_submenu
-    {
-        crate::compose_hover::mount(
-            ui,
-            owner,
-            anchor,
-            panel,
-            open_signal.clone(),
-            hover,
-            environment.services.get::<TaskRunner>(),
-        );
-    }
     // An unnamed popover or menu is named by its trigger, as a browser's
     // popover target is (`aria-labelledby`).
     if let Some(anchor) = anchor.filter(|_| unnamed && !is_submenu) {
@@ -7957,29 +7964,38 @@ fn mount_scroll(
         // it holds (its measured height would be its content's, circularly:
         // 0), or as a parent stretching it makes it: the viewport and the
         // content take all of a definite height, none of an indefinite one.
-        let fitted = horizontal && {
+        let (unsized_w, unsized_h) = {
             let style = scene.style(root);
-            style.height.is_none() && style.height_percent.is_none()
+            (
+                style.width.is_none() && style.width_percent.is_none(),
+                style.height.is_none() && style.height_percent.is_none(),
+            )
         };
+        let fitted = horizontal && unsized_h;
+        // Along an axis it has no size of its own on (given only a cap,
+        // `max_h`, `max_w`), it is as large as what it holds up to the cap:
+        // the viewport and its content are in flow there, taking their
+        // own size, and the cap cuts the root.
+        let (grows_w, grows_h) = (unsized_w, unsized_h && !horizontal);
         // (Fitted, it's as tall as what it holds: in its flow. As wide as a
         // scroll view that knows its width, with no word from here as that
         // changes; else what it holds is what sizes that.)
         let follows = fitted && scene.knows_its_size(root, (true, false), &sized_by_content);
         let style = Style {
-            width: (!follows).then_some(width),
+            width: (!follows && !grows_w).then_some(width),
             width_percent: follows.then_some(1.),
-            height: (!fitted).then_some(height),
+            height: (!fitted && !grows_h).then_some(height),
             height_percent: fitted.then_some(1.),
             clip: true,
-            absolute: !fitted,
+            absolute: !(fitted || grows_w || grows_h),
             ..Default::default()
         };
-        match fitted {
+        match fitted || grows_w || grows_h {
             true => scene.set_style(viewport, style),
             false => scene.set_style_within(viewport, style, root),
         }
         let mut content_style = scene.style(content);
-        content_style.width = (!horizontal).then_some(width);
+        content_style.width = (!horizontal && !grows_w).then_some(width);
         content_style.height = (horizontal && !fitted).then_some(height);
         content_style.height_percent = fitted.then_some(1.);
         content_style.flex_shrink = 0.;

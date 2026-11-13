@@ -58,6 +58,8 @@ mod resize_regions;
 mod rtl_layout;
 #[path = "../rtl_scroll.rs"]
 mod rtl_scroll;
+#[path = "../scroll_max_size.rs"]
+mod scroll_max_size;
 #[path = "../size_calc.rs"]
 mod size_calc;
 #[path = "../sticky.rs"]

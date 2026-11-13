@@ -173,7 +173,8 @@ pub(crate) fn mount(
     ui: &mut Ui,
     owner: NodeId,
     anchor: NodeId,
-    panel: NodeId,
+    // The popup's panel, once it is built (a lazy one is not before it opens).
+    panel: Rc<Cell<Option<NodeId>>>,
     open: Signal<bool>,
     delay: HoverDelay,
     runner: Option<Rc<TaskRunner>>,
@@ -209,7 +210,10 @@ pub(crate) fn mount(
             }
             (
                 scene.world_bounds(anchor),
-                scene.contains(panel).then(|| scene.world_bounds(panel)),
+                panel
+                    .get()
+                    .filter(|panel| scene.contains(*panel))
+                    .map(|panel| scene.world_bounds(panel)),
             )
         };
         let p = (x, y);

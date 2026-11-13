@@ -185,3 +185,71 @@ fn controls_carry_checked_where_they_can_be_checked() {
         assert!(listing.contains(want), "{want} in {listing}");
     }
 }
+
+/// With the app at the back (another Space, behind other apps) a menu wanted open is held, not shown
+/// nor hit: its items are no controls on screen, and pressing one lands nowhere.
+#[test]
+fn a_held_popups_items_are_not_listed_and_press_nothing() {
+    let mut h = Harness::inline(APP);
+    h.ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 800.)]);
+    h.frames(3);
+    h.click("opener");
+    h.frames(3);
+    run(&mut h, "scan");
+    assert!(
+        h.text("listing").contains("menuitem:Copy"),
+        "{}",
+        h.text("listing")
+    );
+    // To the back: held.
+    h.ui.set_app_active(false);
+    h.frames(2);
+    run(&mut h, "scan");
+    let listing = h.text("listing");
+    assert!(!listing.contains("menuitem:Copy"), "{listing}");
+    assert!(!listing.contains("menu:"), "{listing}");
+    // A handle taken while it showed is none to press now.
+    h.ui.set_app_active(true);
+    h.frames(2);
+    run(&mut h, "scan");
+    assert!(h.text("listing").contains("menuitem:Copy"));
+    // Shown again, it takes the press (its item then flashes, as a menu in a window does).
+    run(&mut h, "press_menu");
+    assert_eq!(h.text("result"), "true");
+}
+
+#[test]
+fn pressing_a_held_popups_item_returns_false_and_runs_nothing() {
+    let mut h = Harness::inline(APP);
+    h.ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 800.)]);
+    h.frames(3);
+    h.click("opener");
+    h.frames(3);
+    run(&mut h, "scan");
+    h.ui.set_app_active(false);
+    h.frames(2);
+    run(&mut h, "press_menu");
+    assert_eq!(h.text("result"), "false");
+    assert_eq!(h.text("log"), "none", "nothing ran");
+}
+
+/// Where menus are windows of their own (`Ui::set_popup_screens`), an item pressed through
+/// `ui.press` flashes, closes its menu, then runs: the press lands on the item in the popup (it is
+/// part of the window's scene), not outside it.
+#[test]
+fn a_press_on_an_item_of_a_menu_in_its_own_window_runs_it() {
+    let mut h = Harness::inline(APP);
+    h.ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 800.)]);
+    h.frames(3);
+    h.click("opener");
+    h.frames(3);
+    run(&mut h, "scan");
+    run(&mut h, "press_menu");
+    assert_eq!(h.text("result"), "true");
+    // (The item flashes, then its menu closes, then it runs: as time passes.)
+    assert!(
+        h.wait_until(|h| h.text("log") == "copied"),
+        "the item's handler ran: {}",
+        h.text("log")
+    );
+}

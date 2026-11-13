@@ -3,6 +3,8 @@
 // Each file loads its own `common` (a Harness of its own, which files
 // add methods to), as it did as a binary of its own.
 #![allow(clippy::duplicate_mod)]
+#[path = "../base_ui_props.rs"]
+mod base_ui_props;
 #[path = "../components.rs"]
 mod components;
 #[path = "../container_queries.rs"]

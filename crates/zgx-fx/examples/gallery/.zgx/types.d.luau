@@ -2454,6 +2454,13 @@ export type NodeProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: number?,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: number?,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: TooltipGroup?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -2882,6 +2889,13 @@ export type Props = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -3214,6 +3228,8 @@ export type Props_tooltip = (string | Node)?
 export type Props_tooltip_placement = Placement?
 export type Props_tooltip_interactive = boolean?
 export type Props_tooltip_delay = number?
+export type Props_tooltip_close_delay = number?
+export type Props_tooltip_group = TooltipGroup?
 export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | Styles)?
 export type Props_hover = Styles?
 export type Props_active = Styles?
@@ -3559,6 +3575,13 @@ export type ContainerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -4001,6 +4024,13 @@ export type GlassProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -4452,6 +4482,13 @@ export type ScrollProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -4920,6 +4957,13 @@ export type TextProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -5347,6 +5391,13 @@ export type MarkdownViewProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -5555,6 +5606,11 @@ export type SpanProps = {
 		bg: Color?,
 		radius: number?,
 		pad: number?,
+		-- "center" (the default): centred on the line, which it does not
+		-- make taller. "baseline": its bottom edge on the text's baseline,
+		-- as an inline image's is in CSS, the line growing to hold it (no
+		-- well).
+		align: ("center" | "baseline")?,
 	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
 	-- a link: told the keys held. Returning `true` handled it: its `href`
@@ -5876,6 +5932,13 @@ export type RichProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -6297,6 +6360,13 @@ export type ImageProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -6735,6 +6805,13 @@ export type SvgProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -7284,6 +7361,13 @@ export type Scene3DProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -7728,6 +7812,13 @@ export type CanvasProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -8181,6 +8272,13 @@ export type CheckboxProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -8612,6 +8710,13 @@ export type InputProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -9144,6 +9249,13 @@ export type ProgressProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -9563,6 +9675,13 @@ export type SliderProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -10003,6 +10122,13 @@ export type SegmentedProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -10436,6 +10562,13 @@ export type StepperProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -10870,6 +11003,13 @@ export type DisclosureProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -11315,6 +11455,13 @@ export type AccordionProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -11734,6 +11881,13 @@ export type SectionProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -12178,6 +12332,13 @@ export type SeparatorProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -12605,6 +12766,13 @@ export type TabsProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -13054,6 +13222,13 @@ export type TreeProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -13499,6 +13674,13 @@ export type DataGridProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -13940,6 +14122,13 @@ export type CalendarProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -14374,6 +14563,13 @@ export type DatePickerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -14806,6 +15002,13 @@ export type TimeFieldProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -15237,6 +15440,13 @@ export type ComboboxProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -15676,6 +15886,13 @@ export type CommandPaletteProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -16103,6 +16320,13 @@ export type SelectProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -16537,6 +16761,13 @@ export type SplitProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -17027,6 +17258,13 @@ export type ListProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -17548,6 +17786,13 @@ export type LayerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -17989,6 +18234,13 @@ export type ModalProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -18158,6 +18410,12 @@ export type ModalProps = {
 	-- What lies behind the backdrop blurs by this sigma, the panel sharp
 	-- (CSS `backdrop-filter: blur()` on a dialog's backdrop).
 	scrim_blur: number?,
+	-- Where focus goes as it opens: the `id` of a node in it, or false for
+	-- none (the panel itself); left out, its first control.
+	initial_focus: (string | false)?,
+	-- Where focus goes as it closes: the `id` of any node, or false for
+	-- nothing; left out, what had it before.
+	final_focus: (string | false)?,
 }
 -- Where an anchored popover or menu opens: on `side` of its trigger
 -- (flipping when that side lacks room), lined up with its start, centre
@@ -18178,6 +18436,8 @@ export type Placement = {
 	-- preferred side).
 	more_room: boolean?,
 }
+-- The tooltips under a node (`tooltip_group`), in milliseconds.
+export type TooltipGroup = { delay: number?, close_delay: number?, reshow_within: number?, reshow_delay: number? }
 -- How long the pointer rests on a trigger before its popup opens, and how
 -- long after it leaves the trigger and the popup before it closes, in
 -- milliseconds (Base UI's `delay` and `closeDelay`); left out, a popover's
@@ -18471,6 +18731,13 @@ export type PopoverProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -18649,6 +18916,13 @@ export type PopoverProps = {
 	dismiss_on_backdrop: boolean?,
 	-- Opens as the pointer rests on `anchor` (see `HoverDelay`).
 	hover_delay: HoverDelay?,
+	-- Where focus goes as it opens: the `id` of a node in it, or false for
+	-- none (the panel itself); left out, its first control.
+	initial_focus: (string | false)?,
+	-- Where focus goes as it closes: the `id` of any node, or false for
+	-- nothing; left out, what had it before (else the trigger, if it was
+	-- opened from the keyboard).
+	final_focus: (string | false)?,
 	-- A popover only: at the caret of the input in its `anchor`, following
 	-- it (typing, a new line, scrolling, an input method's composition),
 	-- and taking no focus: keys go on to the input, which drives it (a
@@ -18938,6 +19212,13 @@ export type MenuItemProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -19368,6 +19649,13 @@ export type SubmenuProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -19818,6 +20106,13 @@ export type WebViewProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -20265,6 +20560,13 @@ export type TerminalProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -20687,6 +20989,13 @@ export type HostViewProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -21109,6 +21418,13 @@ export type SlotProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -21582,6 +21898,13 @@ export type EachOptions = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -22019,6 +22342,13 @@ export type PresenceOptions = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,

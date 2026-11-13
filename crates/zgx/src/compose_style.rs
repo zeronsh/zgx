@@ -1731,6 +1731,18 @@ fn apply_resolved(
     if resolved.height.is_some() || resolved.height_percent.is_some() {
         style.intrinsic_height = false;
     }
+    // A scroll view given only a cap (`max_h`, `max_w`) is as large as its
+    // content up to it, as CSS's overflow box is: its default size (320 by
+    // 240) is no size it holds to there, which would make a short list as
+    // tall as the default, and a tall one as tall as the cap.
+    if style.intrinsic_height && style.max_height.is_some() {
+        style.height = None;
+        style.intrinsic_height = false;
+    }
+    if style.intrinsic_width && style.max_width.is_some() {
+        style.width = None;
+        style.intrinsic_width = false;
+    }
     if let Some(value) = rare.fade_edges {
         style.fade_edges = value;
     }

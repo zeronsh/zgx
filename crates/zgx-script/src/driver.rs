@@ -1274,7 +1274,7 @@ pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
                 | Role::Row
                 | Role::Cell
         );
-        if s.hidden || structural || !shows(&scene, node) {
+        if s.hidden || structural || !shows(&scene, node) || scene.in_held_popup(node) {
             continue;
         }
         let role = semantic_role_name(s);
@@ -1312,7 +1312,8 @@ pub fn press_control(ui: &mut Ui, handle: u64) -> bool {
     let node = NodeId::from_bits(handle);
     let shown = {
         let scene = ui.scene.borrow();
-        if !scene.contains(node) || !shows(&scene, node) {
+        // (A popup held back, the app being at the back, is none to press.)
+        if !scene.contains(node) || !shows(&scene, node) || scene.in_held_popup(node) {
             return false;
         }
         let Some(shown) = scene.visible_bounds(node) else {

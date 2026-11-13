@@ -3913,6 +3913,14 @@ impl Scene {
             .map(|ink| ink.translated(offset))
             .filter(|ink| ink.width > 0. && ink.height > 0.)
     }
+    /// Whether `id` is in a popup that is wanted but held back, not shown
+    /// nor hit while the app is at the back (`set_popups_held`).
+    pub fn in_held_popup(&self, id: NodeId) -> bool {
+        self.popups_held
+            && self
+                .popup_holding(id)
+                .is_some_and(|root| self.popup_held(root))
+    }
     /// Whether `id` is in a topmost layer shown in a popup window
     /// (`PopupRole::Topmost`).
     pub fn is_in_topmost(&self, id: NodeId) -> bool {
