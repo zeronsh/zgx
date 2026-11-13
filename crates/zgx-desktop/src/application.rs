@@ -66,6 +66,10 @@ pub struct WindowOptions {
     /// example to save power. Input-driven redraws are not limited. `None`
     /// follows the display.
     pub max_frame_rate: Option<f64>,
+    /// Whether a contained failure shows zgx's own banner over the content
+    /// (the default). An app that says failures its own way turns it off:
+    /// they are still logged and still reach `zgx::issues` listeners.
+    pub error_banner: bool,
     /// The title bar's style (macOS and Windows; other platforms keep theirs).
     pub titlebar: crate::Titlebar,
     /// A frosted desktop behind the window (macOS; Windows 11 as Acrylic or
@@ -150,6 +154,7 @@ impl Default for WindowOptions {
             bounds: None,
             display: None,
             max_frame_rate: None,
+            error_banner: true,
             titlebar: crate::Titlebar::Standard,
             glass: None,
             under_pointer: None,
@@ -3971,7 +3976,11 @@ impl Host {
     /// what the renderer went on without (`IssueKind::Degraded`) there in
     /// debug builds alone; release builds have logged them, once.
     fn show_issues(&mut self) {
-        for message in crate::contain::banner(&self.issues, cfg!(debug_assertions)) {
+        for message in crate::contain::banner(
+            &self.issues,
+            cfg!(debug_assertions),
+            self.options.error_banner,
+        ) {
             self.show_error(&message);
         }
     }

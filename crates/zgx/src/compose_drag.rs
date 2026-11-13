@@ -261,7 +261,6 @@ pub(crate) fn mount(
     source: NodeId,
     mut builder: PreviewBuilder,
     services: crate::reactive::ServiceScope,
-    theme: std::rc::Rc<crate::theme::ThemeScope>,
 ) {
     let weak = ui.downgrade();
     let mut preview = Preview(None);
@@ -281,7 +280,7 @@ pub(crate) fn mount(
                     old.unmount();
                 }
                 if let Some(view) = (builder.build)(&event.payload) {
-                    let view = ui.mount_in(view, services.clone(), Some(theme.clone()));
+                    let view = ui.mount_scoped(view, services.clone());
                     let node = view.node();
                     let mut style = ui.scene.borrow().style(node);
                     style.absolute = true;
