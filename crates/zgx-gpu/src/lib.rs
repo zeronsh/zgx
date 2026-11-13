@@ -262,6 +262,57 @@ const VERTEX_BUDGET: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 16_384;
 /// The bytes images' own textures may hold (`upload_image`).
 const IMAGE_TEXTURES: usize = 64 * 1024 * 1024;
+/// The canvas tile atlas's entry in `GpuRenderer::images` (`TileAtlas`).
+const TILE_ATLAS: u64 = u64::MAX - 1;
+/// The tile atlas's slots a side.
+const ATLAS_SLOTS: u32 = 14;
+/// A slot's side: a tile and a texel of its edge about it, so a tile
+/// sampled at its edge takes nothing of its neighbour's.
+const ATLAS_SLOT: u32 = canvas::TILE_SIZE.0 + 2;
+/// Canvas tiles' textures as slots of one texture: a frame's new tiles are
+/// one upload (a pass, on unified memory) and its tiles one bind group, where
+/// a texture a tile costs an upload pass and a bind group each.
+struct TileAtlas {
+    texture: wgpu::Texture,
+    /// Each tile's slot, by image.
+    slots: FxHashMap<u64, u16>,
+    /// Slots free, each with the frame it was let go: written again once no
+    /// frame in flight may still sample it.
+    free: std::collections::VecDeque<(u64, u16)>,
+}
+/// `image`'s pixels in an atlas slot: its edge texels repeated about it,
+/// premultiplied.
+fn atlas_texels(image: &zgx::image::ImageData) -> Vec<u8> {
+    let (tile, slot) = (canvas::TILE_SIZE.0 as usize, ATLAS_SLOT as usize);
+    let pixels = image.pixels();
+    let mut out = vec![0u8; slot * slot * 4];
+    for (y, line) in out.chunks_exact_mut(slot * 4).enumerate() {
+        let from = y.saturating_sub(1).min(tile - 1);
+        let row = &pixels[from * tile * 4..(from + 1) * tile * 4];
+        line[4..4 + tile * 4].copy_from_slice(row);
+        line[..4].copy_from_slice(&row[..4]);
+        line[(slot - 1) * 4..].copy_from_slice(&row[(tile - 1) * 4..]);
+    }
+    if !image.is_premultiplied() {
+        premultiply(&mut out);
+    }
+    out
+}
+/// Where `uv` (of a tile, 0 to 1) lies in the tile atlas, in `slot`.
+fn atlas_uv(slot: u16, uv: [f32; 4]) -> [f32; 4] {
+    let side = (ATLAS_SLOT * ATLAS_SLOTS) as f32;
+    let tile = canvas::TILE_SIZE.0 as f32;
+    let (x, y) = (
+        (slot as u32 % ATLAS_SLOTS * ATLAS_SLOT + 1) as f32,
+        (slot as u32 / ATLAS_SLOTS * ATLAS_SLOT + 1) as f32,
+    );
+    [
+        (x + uv[0] * tile) / side,
+        (y + uv[1] * tile) / side,
+        uv[2] * tile / side,
+        uv[3] * tile / side,
+    ]
+}
 /// What textures of images no node shows may hold until the window goes idle:
 /// a few windows' worth of pictures to scroll back to.
 const IMAGES_GONE_BYTES: usize = 32 * 1024 * 1024;
@@ -5060,6 +5111,8 @@ pub struct GpuRenderer {
     /// Image textures: each bound for the quads, its size in bytes, and,
     /// where the CPU wrote its texels, the texture (see `render_direct`).
     images: FxHashMap<u64, ImageTexture>,
+    /// Canvas tiles' textures, made at the first (`atlas_tile`).
+    tile_atlas: Option<TileAtlas>,
     /// The tiles of the canvas being drawn: each's image, and where its
     /// quads end (`canvas_tiles`).
     tile_runs: Vec<(u64, u32)>,
@@ -5871,6 +5924,7 @@ impl GpuRenderer {
             blurred: None,
             background: Color(0, 0, 0, 0),
             images: FxHashMap::default(),
+            tile_atlas: None,
             tile_runs: Vec::new(),
             images_awaited: false,
             layer_incomplete: false,
@@ -7315,6 +7369,7 @@ impl GpuRenderer {
         );
         others.extend(self.svgs.image_ids());
         others.insert(effects::EFFECT_ATLAS);
+        others.insert(TILE_ATLAS);
         others.extend(
             self.layers
                 .keys()
@@ -14632,7 +14687,11 @@ impl GpuRenderer {
     ) {
         let runs = std::mem::take(&mut self.tile_runs);
         let mut at = draw.start;
-        for &(image, end) in &runs {
+        for (i, &(image, end)) in runs.iter().enumerate() {
+            // Tiles in the atlas, one after another: one draw.
+            if runs.get(i + 1).is_some_and(|next| next.0 == image) {
+                continue;
+            }
             let source = self.image_source(scene, node, image);
             let tile = Draw {
                 start: at,
@@ -14682,6 +14741,7 @@ impl GpuRenderer {
             bounds.height,
             self.scale,
             wait,
+            self.image_frame,
             &mut shown,
         )?;
         stats.canvas_rasterizations += (self.canvases.rasterizations() - before) as usize;
@@ -14690,17 +14750,34 @@ impl GpuRenderer {
         self.retire_canvas_images();
         let mut runs = std::mem::take(&mut self.tile_runs);
         runs.clear();
+        // The atlas, if anything else let it go: its tiles upload again.
+        if self.tile_atlas.is_some() && !self.images.contains_key(&TILE_ATLAS) {
+            self.tile_atlas = None;
+        }
         for (raster, placement) in shown {
-            if !self.images.contains_key(&raster.id) {
+            let mut slot =
+                (self.tile_atlas.as_ref()).and_then(|a| a.slots.get(&raster.id).copied());
+            if slot.is_none() && !self.images.contains_key(&raster.id) {
                 // A stand-in whose texture went (past the images' budget).
                 let Some(pixels) = raster.pixels else {
                     self.canvases.stand_in_lost(item.id);
                     continue;
                 };
-                self.upload_image(&pixels)?;
+                let began = std::time::Instant::now();
+                slot = self.atlas_tile(&pixels);
+                // (The atlas full: a texture of its own.)
+                if slot.is_none() {
+                    self.upload_image(&pixels)?;
+                }
+                self.canvases
+                    .tile_uploaded(self.image_frame, began.elapsed());
                 stats.image_uploads += 1;
             }
             let canvas::Placement { rect, uv, .. } = placement;
+            let (image, uv) = match slot {
+                Some(slot) => (TILE_ATLAS, atlas_uv(slot, uv)),
+                None => (raster.id, uv),
+            };
             quads.push(Quad {
                 rect: [bounds.x + rect[0], bounds.y + rect[1], rect[2], rect[3]],
                 uv,
@@ -14711,18 +14788,74 @@ impl GpuRenderer {
                 border: [0.; 4],
                 mask: NO_MASK,
             });
-            runs.push((raster.id, quads.len() as u32));
+            runs.push((image, quads.len() as u32));
         }
         self.tile_runs = runs;
         Ok(())
     }
-    /// The textures of images the canvas cache no longer draws go.
+    /// `image`, a tile, written into a free slot of the tile atlas (made at
+    /// the first): its slot, or `None` if none is free now.
+    fn atlas_tile(&mut self, image: &zgx::image::ImageData) -> Option<u16> {
+        if (image.width(), image.height()) != canvas::TILE_SIZE
+            || image.gpu_frame().is_some()
+            || image.keeps_file()
+        {
+            return None;
+        }
+        let frame = self.image_frame;
+        if self.tile_atlas.is_none() {
+            let side = ATLAS_SLOT * ATLAS_SLOTS;
+            if side > self.device.limits().max_texture_dimension_2d {
+                return None;
+            }
+            let texture = sampled_texture(&self.device, self.unified, side, side, "canvas tiles");
+            let bind = self.texture_bind(&texture.create_view(&Default::default()), "canvas tiles");
+            self.images
+                .insert(TILE_ATLAS, (bind, 0, Some(texture.clone()), (0, 0)));
+            self.tile_atlas = Some(TileAtlas {
+                texture,
+                slots: FxHashMap::default(),
+                free: (0..ATLAS_SLOTS * ATLAS_SLOTS)
+                    .map(|slot| (0, slot as u16))
+                    .collect(),
+            });
+        }
+        let atlas = self.tile_atlas.as_mut().expect("made");
+        let &(at, slot) = atlas.free.front()?;
+        if at > 0 && frame < at + 3 {
+            return None;
+        }
+        atlas.free.pop_front();
+        atlas.slots.insert(image.id(), slot);
+        let texture = atlas.texture.clone();
+        let mut texels = atlas_texels(image);
+        let (x, y) = (
+            slot as u32 % ATLAS_SLOTS * ATLAS_SLOT,
+            slot as u32 / ATLAS_SLOTS * ATLAS_SLOT,
+        );
+        self.write_texels(&texture, (x, y, ATLAS_SLOT, ATLAS_SLOT), &mut texels);
+        Some(slot)
+    }
+    /// The textures of images the canvas cache no longer draws go: a tile's
+    /// slot of the atlas is free again.
     fn retire_canvas_images(&mut self) {
         for id in self.canvases.take_retired() {
+            if let Some(atlas) = &mut self.tile_atlas
+                && let Some(slot) = atlas.slots.remove(&id)
+            {
+                atlas.free.push_back((self.image_frame, slot));
+                continue;
+            }
             if self.images.remove(&id).is_some() {
                 self.image_drawn.remove(&id);
                 self.image_holders.remove(&id);
             }
+        }
+        // (Kept while tiles are in it, the window at rest too: a texture of
+        // tiles shown again, not uploaded again past the frame's budget.)
+        if self.tile_atlas.as_ref().is_some_and(|a| a.slots.is_empty()) {
+            self.tile_atlas = None;
+            self.images.remove(&TILE_ATLAS);
         }
     }
     /// The texture of `node`'s canvas raster, uploaded if it is new; the
@@ -15019,6 +15152,7 @@ impl GpuRenderer {
                 .map(|ramp| ramp.id()),
         );
         showing.insert(effects::EFFECT_ATLAS);
+        showing.insert(TILE_ATLAS);
         showing.extend(
             self.layers
                 .keys()
@@ -21157,6 +21291,55 @@ mod raster_step_tests {
     }
 }
 
+#[cfg(test)]
+mod tile_atlas_tests {
+    use super::{ATLAS_SLOT, ATLAS_SLOTS, atlas_texels, atlas_uv, canvas};
+    #[test]
+    fn a_tile_in_its_slot_has_its_edge_texels_about_it() {
+        let side = canvas::TILE_SIZE.0 as usize;
+        let mut pixels = vec![0u8; side * side * 4];
+        for y in 0..side {
+            for x in 0..side {
+                let i = (y * side + x) * 4;
+                pixels[i..i + 4].copy_from_slice(&[x as u8, y as u8, 7, 255]);
+            }
+        }
+        let image = zgx::image::ImageData::new(side as u32, side as u32, pixels).unwrap();
+        let texels = atlas_texels(&image);
+        let slot = ATLAS_SLOT as usize;
+        assert_eq!(texels.len(), slot * slot * 4);
+        let at = |x: usize, y: usize| &texels[(y * slot + x) * 4..(y * slot + x) * 4 + 4];
+        // Inside: the tile, a texel in.
+        assert_eq!(at(1, 1), &[0, 0, 7, 255]);
+        assert_eq!(at(slot - 2, slot - 2), &[255, 255, 7, 255]);
+        assert_eq!(at(100, 50), &[99, 49, 7, 255]);
+        // About it: its edge again (sampled at its edge, nothing of another's).
+        assert_eq!(at(0, 0), &[0, 0, 7, 255]);
+        assert_eq!(at(slot - 1, 30), &[255, 29, 7, 255]);
+        assert_eq!(at(40, slot - 1), &[39, 255, 7, 255]);
+    }
+    #[test]
+    fn a_tiles_uv_is_its_slots_part_of_the_atlas() {
+        let side = (ATLAS_SLOT * ATLAS_SLOTS) as f32;
+        let tile = canvas::TILE_SIZE.0 as f32;
+        // The first slot, whole: a texel in from the corner.
+        let uv = atlas_uv(0, [0., 0., 1., 1.]);
+        assert_eq!(uv, [1. / side, 1. / side, tile / side, tile / side]);
+        // The next row's second, its right half.
+        let slot = ATLAS_SLOTS as u16 + 1;
+        let uv = atlas_uv(slot, [0.5, 0., 0.5, 1.]);
+        let (x, y) = ((ATLAS_SLOT + 1) as f32, (ATLAS_SLOT + 1) as f32);
+        assert_eq!(
+            uv,
+            [
+                (x + tile / 2.) / side,
+                y / side,
+                tile / 2. / side,
+                tile / side
+            ]
+        );
+    }
+}
 #[cfg(test)]
 mod dx12_fill_pin {
     /// A wgpu update fails this until `dx12_fill::options`' register map is
