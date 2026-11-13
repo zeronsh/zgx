@@ -13,8 +13,10 @@ let root = null;
 // Scroll reads wait for the next frame, apart from the writes.
 const scrolled = new Set();
 let scrollFrame = 0;
+// Set by a click's handler (`PREVENT`): the click's default is prevented.
+let prevented = false;
 
-const TAGS = ["div", "span", "button", "input", "textarea", "progress", "label", "img", "canvas", "dialog"];
+const TAGS = ["div", "span", "button", "input", "textarea", "progress", "label", "img", "canvas", "dialog", "a"];
 
 export function zgx_init(baseCss, onDispatch, onFlush) {
   root = document;
@@ -37,6 +39,16 @@ export function zgx_init(baseCss, onDispatch, onFlush) {
   document.addEventListener("keydown", onKeyDown);
   addEventListener("resize", placeAll);
   document.addEventListener("scroll", placeAll, true);
+  document.addEventListener("keydown", onLinkKey);
+}
+
+// A link with no href (`role=link`): Enter presses it, as it does a link.
+function onLinkKey(event) {
+  const node = event.target;
+  if (event.key === "Enter" && node.$$c !== undefined && node.getAttribute && node.getAttribute("role") === "link") {
+    event.preventDefault();
+    node.click();
+  }
 }
 
 // A node made outside: the element a view mounts into.
@@ -61,6 +73,11 @@ function onClick(event) {
       const modifiers =
         (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);
       dispatch(handler, 0, modifiers, undefined);
+      // A link's click that handled it: its href doesn't open.
+      if (prevented) {
+        prevented = false;
+        event.preventDefault();
+      }
       return;
     }
     node = node.parentNode;
@@ -366,6 +383,9 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         show(panel, ops[i++] === 1);
         break;
       }
+      case 31: // PREVENT: the click being handled doesn't do its default
+        prevented = true;
+        break;
       default:
         throw new Error("zgx-dom: unknown op " + ops[i - 1]);
     }

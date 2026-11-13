@@ -16,8 +16,8 @@ use wasm_bindgen::prelude::*;
 use zgx::{
     compose::{
         __dom::{
-            self, Element, ElementKind, KeyedRegion, Overlay, OverlayKind, Region, Scope,
-            SwitchRegion, VirtualRegion,
+            self, Element, ElementKind, Inline, Inlines, KeyedRegion, Overlay, OverlayKind,
+            Region, Scope, SwitchRegion, VirtualRegion,
         },
         View,
     },
@@ -63,6 +63,8 @@ enum Slot {
     Empty,
     /// Running: put back unless removed meanwhile.
     Taken,
+    /// Running, and replaced meanwhile (`replace_handler`).
+    Replaced(Handler),
     Full(Handler),
 }
 
@@ -102,6 +104,20 @@ fn register(handler: Handler) -> u32 {
             }
         }
     })
+}
+
+/// Give handler `id` a new closure (a kept span's click, built again).
+fn replace_handler(id: u32, f: impl FnMut(Event) + 'static) {
+    let old = HANDLERS.with(|handlers| {
+        let mut handlers = handlers.borrow_mut();
+        let slot = &mut handlers.slots[id as usize];
+        let new = Handler::Event(Box::new(f));
+        match slot {
+            Slot::Taken | Slot::Replaced(_) => std::mem::replace(slot, Slot::Replaced(new)),
+            _ => std::mem::replace(slot, Slot::Full(new)),
+        }
+    });
+    drop(old);
 }
 
 fn release_handlers(ids: &[u32]) {
@@ -178,6 +194,13 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
             Slot::Taken => {
                 *slot = Slot::Full(handler);
                 None
+            }
+            Slot::Replaced(_) => {
+                let Slot::Replaced(new) = std::mem::replace(slot, Slot::Empty) else {
+                    unreachable!()
+                };
+                *slot = Slot::Full(new);
+                Some(handler)
             }
             // Removed while it ran.
             _ => Some(handler),
@@ -413,7 +436,9 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         }
     }
     let (tag, base) = match &el.kind {
-        ElementKind::Text(_) | ElementKind::BoundText(_) => (Tag::Span, "zt"),
+        ElementKind::Text(_) | ElementKind::BoundText(_) | ElementKind::Rich(_) => {
+            (Tag::Span, "zt")
+        }
         ElementKind::Button => (Tag::Button, "z zb"),
         ElementKind::Editor {
             multiline: true, ..
@@ -839,6 +864,7 @@ fn mount_kind(
         }
         ElementKind::Region(region) => mount_region(region, id, scope, block),
         ElementKind::Overlay(overlay) => return Some(mount_overlay(*overlay, id, runtime, block)),
+        ElementKind::Rich(inlines) => mount_rich(inlines, id, runtime, block),
         ElementKind::Unsupported(name) => ops::with(|ops| {
             let text = block.node(ops);
             ops.op_str(ops::TEXT, text, &format!("{name}: not shown in the DOM"));
@@ -919,6 +945,155 @@ fn mount_overlay(overlay: Overlay, panel: u32, runtime: &Runtime, block: &mut Bl
         ops::with(|ops| ops.op(&[ops::SHOW, panel, on as u32]));
     });
     wrapper
+}
+
+/// A span shown: its node (its text alone, or an element), every node it
+/// made, its click's handler, and what it showed.
+struct RichSpan {
+    node: u32,
+    ids: Vec<u32>,
+    handler: Option<u32>,
+    shown: Inline,
+}
+
+/// A paragraph's spans, let go with its block.
+#[derive(Default)]
+struct RichSpans(Vec<RichSpan>);
+impl Drop for RichSpans {
+    fn drop(&mut self) {
+        for span in self.0.drain(..).rev() {
+            free_span(span);
+        }
+    }
+}
+
+fn free_span(mut span: RichSpan) {
+    if let Some(handler) = span.handler {
+        release_handlers(&[handler]);
+    }
+    span.ids.reverse();
+    ops::with(|ops| ops.free(&span.ids));
+}
+
+/// A rich paragraph (`rich_text`): its spans as text nodes, or `<span>`s
+/// and `<a>`s with classes for their looks. As the spans change, those
+/// that still show as they did stay (streamed text appends), their clicks
+/// replaced; from the first that differs on, they are made again.
+fn mount_rich(mut inlines: Inlines, paragraph: u32, runtime: &Runtime, block: &mut Block) {
+    let state: Rc<RefCell<RichSpans>> = Rc::default();
+    let spans = state.clone();
+    let clicks = runtime.clone();
+    block.effect(runtime, move || {
+        let mut next = inlines();
+        let mut spans = spans.borrow_mut();
+        let spans = &mut spans.0;
+        let same = spans
+            .iter()
+            .zip(&next)
+            .take_while(|(span, inline)| span.shown.looks_as(inline))
+            .count();
+        for gone in spans.drain(same..).rev() {
+            ops::with(|ops| ops.op(&[ops::REMOVE, gone.node]));
+            free_span(gone);
+        }
+        for (span, inline) in spans.iter_mut().zip(next.iter_mut()) {
+            if let (Some(handler), Some(action)) = (span.handler, inline.action.take()) {
+                let opens = inline.href.is_some();
+                replace_handler(handler, link_click(clicks.clone(), action, opens));
+            }
+        }
+        for mut inline in next.drain(same..) {
+            let mut ids = Vec::new();
+            let action = inline.action.take();
+            let node = ops::with(|ops| {
+                let node = make_inline(ops, &inline, &mut ids);
+                ops.op(&[ops::APPEND, paragraph, node]);
+                node
+            });
+            let handler = action.map(|action| {
+                let opens = inline.href.is_some();
+                let id = handler(link_click(clicks.clone(), action, opens));
+                ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::ON_CLICK, id]));
+                id
+            });
+            spans.push(RichSpan {
+                node,
+                ids,
+                handler,
+                shown: inline,
+            });
+        }
+    });
+    block.regions.push(state);
+}
+
+/// A link's click: its action run (batched), and its `href` kept from
+/// opening if the action handled it.
+fn link_click(
+    runtime: Runtime,
+    mut action: Box<dyn FnMut(Modifiers) -> bool>,
+    opens: bool,
+) -> impl FnMut(Event) + 'static {
+    move |event| {
+        if let Event::Click(held) = event {
+            let handled = runtime.batch(|| action(held));
+            if handled && opens {
+                ops::with(|ops| ops.op(&[ops::PREVENT]));
+            }
+        }
+    }
+}
+
+/// A span's nodes: its text, alone or in an element with its class, link
+/// attributes, fade and icon.
+fn make_inline(ops: &mut Ops, inline: &Inline, ids: &mut Vec<u32>) -> u32 {
+    let text = ops.id();
+    ids.push(text);
+    if inline.bare() {
+        ops.op_str(ops::TEXT, text, &inline.text);
+        return text;
+    }
+    let element = ops.id();
+    ids.push(element);
+    let tag = if inline.link { Tag::A } else { Tag::Span };
+    ops.op(&[ops::CREATE, element, tag as u32]);
+    if !inline.css.is_empty() || !inline.hover.is_empty() {
+        let class = sheet::rules(ops, &inline.css, &inline.hover);
+        ops.op(&[ops::CLASS, element, class]);
+    }
+    if inline.link {
+        let attrs: &[(&str, &str)] = match &inline.href {
+            Some(href) => &[
+                ("href", href),
+                ("target", "_blank"),
+                ("rel", "noopener noreferrer"),
+            ],
+            // Focusable and pressed from the keyboard as a link is.
+            None => &[("tabindex", "0"), ("role", "link")],
+        };
+        for (name, value) in attrs {
+            ops.op_str(ops::ATTR, element, name);
+            ops.str(value);
+        }
+    }
+    if let Some((ms, elapsed)) = inline.fade {
+        ops.op_str(
+            ops::STYLE,
+            element,
+            &format!("animation:zf {ms}ms cubic-bezier(.33,1,.68,1) -{elapsed}ms both;"),
+        );
+    }
+    if let Some(css) = &inline.icon {
+        let icon = ops.id();
+        ids.push(icon);
+        ops.op(&[ops::CREATE, icon, Tag::Span as u32]);
+        let class = sheet::rules(ops, css, "");
+        ops.op(&[ops::CLASS, icon, class]);
+        ops.op(&[ops::APPEND, element, icon]);
+    }
+    ops.op_str(ops::TEXT, text, &inline.text);
+    ops.op(&[ops::APPEND, element, text]);
+    element
 }
 
 fn mount_region(region: Region, holder: u32, scope: &Scope, block: &mut Block) {

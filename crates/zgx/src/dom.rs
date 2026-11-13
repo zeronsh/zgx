@@ -249,6 +249,9 @@ pub enum ElementKind {
     Region(Region),
     /// A modal, popover, menu, submenu or tooltip: the element is its panel.
     Overlay(Box<Overlay>),
+    /// A paragraph of spans (`rich_text`), read again as what it reads
+    /// changes.
+    Rich(Inlines),
     /// What only a GPU or native host draws: a labelled box.
     Unsupported(&'static str),
 }
@@ -299,6 +302,48 @@ pub struct Overlay {
     pub interactive: bool,
     /// A modal's backdrop, as CSS.
     pub backdrop: Option<String>,
+}
+
+/// A rich paragraph's spans as the DOM shows them (tracked: theme tokens
+/// and what the spans read).
+pub type Inlines = Box<dyn FnMut() -> Vec<Inline>>;
+
+/// A span (`TextSpan`) as the DOM shows it: its text, alone when it has no
+/// CSS, link or icon, else in an element of its own.
+pub struct Inline {
+    pub text: std::sync::Arc<str>,
+    /// Its typography, decorations, background and padding, as CSS.
+    pub css: String,
+    /// Its look under the pointer (`TextSpan::hover`), as CSS.
+    pub hover: String,
+    /// A link (`on_click`, `href`): an `<a>`, focusable.
+    pub link: bool,
+    /// Where it goes, if it is a web or mail link the browser may open.
+    pub href: Option<std::sync::Arc<str>>,
+    /// Its click, told the keys held: `true` back keeps `href` from
+    /// opening.
+    pub action: Option<Box<dyn FnMut(crate::input::Modifiers) -> bool>>,
+    /// Its icon, as the CSS of an element of its own before the text.
+    pub icon: Option<String>,
+    /// Its text fading in (`TextSpan::fade_in`): how long, in milliseconds,
+    /// and how far in it is already.
+    pub fade: Option<(f32, f32)>,
+}
+impl Inline {
+    /// Whether it shows as `other` does (its click aside).
+    pub fn looks_as(&self, other: &Inline) -> bool {
+        self.text == other.text
+            && self.css == other.css
+            && self.hover == other.hover
+            && self.link == other.link
+            && self.href == other.href
+            && self.icon == other.icon
+            && self.action.is_some() == other.action.is_some()
+    }
+    /// Whether it needs no element: a bare text node.
+    pub fn bare(&self) -> bool {
+        self.css.is_empty() && !self.link && self.icon.is_none() && self.fade.is_none()
+    }
 }
 
 /// A part of the tree that changes shape: one view at a time, keyed rows or
@@ -669,6 +714,12 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
                         };
                         let anchor = anchor.map(|anchor| *anchor);
                         return overlay(view, kind, label, open, anchor, parent, scope, resources);
+                    Kind::RichText(compute) => {
+                        let theme = scope.as_ref().unwrap_or(parent).environment.theme.clone();
+                        ElementKind::Rich(inlines(compute, theme))
+                    }
+                    Kind::MenuItem(_) | Kind::Submenu { .. } | Kind::Menu { .. } => {
+                        ElementKind::Unsupported("menu")
                     }
                     Kind::Canvas(_) => ElementKind::Unsupported("canvas"),
                     Kind::Svg { .. } => ElementKind::Unsupported("svg"),
@@ -1010,6 +1061,191 @@ fn overlay(
         el.attrs.push(("aria-hidden", "true".into()));
     }
     el
+/// A paragraph's spans lowered for the DOM, as the desktop lowers them
+/// into runs (`paragraph_effect`): a link underlined unless it has a hover
+/// style or `no_underline`, tokens resolved from `theme`.
+fn inlines(
+    mut compute: Box<dyn FnMut() -> Vec<crate::compose_rich::TextSpan>>,
+    theme: Rc<crate::theme::ThemeScope>,
+) -> Inlines {
+    Box::new(move || {
+        let spans = compute();
+        let now = crate::compose_rich::fade_now();
+        spans
+            .into_iter()
+            .filter(|span| !span.text.is_empty())
+            .map(|span| inline(span, &theme, now))
+            .collect()
+    })
+}
+
+fn inline(
+    mut span: crate::compose_rich::TextSpan,
+    theme: &crate::theme::ThemeScope,
+    now: f64,
+) -> Inline {
+    use crate::rich_text::{Decoration, LineStyle};
+    let link = span.action.is_some() || span.href.is_some();
+    let extras = span.extras.take().map(|extras| *extras).unwrap_or_default();
+    let styled_hover = extras.hover.is_some();
+    if link && !styled_hover && !extras.plain {
+        span.underline.get_or_insert_with(Default::default);
+    }
+    if span.styles.has_tokens() {
+        crate::theme::resolve(&mut span.styles, theme);
+        span.background = span.background.or(span.styles.background);
+    }
+    let mut css = String::new();
+    styles_css(&span.styles, true, &mut css);
+    if let Some(spacing) = span.styles.rare().letter_spacing
+        && spacing.cell().is_none()
+        && spacing.pixels() != 0.
+    {
+        let _ = write!(css, "letter-spacing:{}px;", num(spacing.pixels()));
+    }
+    if let Some(background) = span.background.filter(|_| span.styles.background.is_none()) {
+        color_decl(&mut css, "background-color", background);
+    }
+    let decorate = |css: &mut String,
+                    underline: Option<Decoration>,
+                    strike: Option<Decoration>,
+                    color: Option<Color>| {
+        let lines = match (underline.is_some(), strike.is_some()) {
+            (true, true) => "underline line-through",
+            (true, false) => "underline",
+            (false, true) => "line-through",
+            (false, false) => return,
+        };
+        let line = underline.or(strike).expect("one of them");
+        let style = match line.line_style() {
+            LineStyle::Solid => "solid",
+            LineStyle::Double => "double",
+            LineStyle::Dotted => "dotted",
+            LineStyle::Dashed => "dashed",
+            LineStyle::Wavy => "wavy",
+        };
+        let _ = write!(
+            css,
+            "text-decoration:{lines} {style};text-decoration-thickness:{}px;",
+            num(line.thickness())
+        );
+        if let Some(color) = color.or(line.color) {
+            color_decl(css, "text-decoration-color", color);
+        }
+        if let Some(offset) = underline.and_then(|u| u.offset_px()) {
+            let _ = write!(css, "text-underline-offset:{}px;", num(offset));
+        }
+    };
+    let themed = |color| crate::compose_style::resolve_color_in(color, Some(theme));
+    let underline_color = span.underline_color.map(themed);
+    decorate(
+        &mut css,
+        span.underline,
+        span.strikethrough,
+        underline_color,
+    );
+    let [x, y] = span.padding;
+    let end = extras.padding_end.unwrap_or(x);
+    if x > 0. || y > 0. || end > 0. {
+        let _ = write!(
+            css,
+            "padding:{}px {}px {}px {}px;box-decoration-break:clone;-webkit-box-decoration-break:clone;",
+            num(y),
+            num(end),
+            num(y),
+            num(x)
+        );
+    }
+    if span.radius > 0. {
+        let _ = write!(css, "border-radius:{}px;", num(span.radius));
+    }
+    if link {
+        css.push_str("cursor:pointer;");
+    }
+    let mut hover = String::new();
+    if let Some(on) = extras.hover.as_ref().filter(|_| link) {
+        decorate(&mut hover, on.underline, None, underline_color);
+        if let Some(color) = on.text_color {
+            color_decl(&mut hover, "color", themed(color));
+        }
+    }
+    let icon = extras.icon.map(|icon| {
+        let mut css = format!(
+            "display:inline-block;vertical-align:middle;box-sizing:content-box;width:{0}px;height:{0}px;margin-right:{1}px;",
+            num(icon.size),
+            num(icon.gap)
+        );
+        let tint = match icon.tint {
+            Some(tint) => Some(color_value(themed(tint))),
+            None if icon.svg.follows_text_color() => Some("currentColor".into()),
+            None => None,
+        };
+        let url = svg_url(icon.svg.bytes());
+        match tint {
+            Some(tint) => {
+                let _ = write!(
+                    css,
+                    "background-color:{tint};-webkit-mask:{url} center/contain no-repeat;mask:{url} center/contain no-repeat;"
+                );
+            }
+            None => {
+                let _ = write!(css, "background:{url} center/contain no-repeat;");
+            }
+        }
+        if let Some(well) = icon.bg {
+            let well = themed(well);
+            // The well is the icon's box, padded, the icon drawn over it:
+            // a background under the mask would be masked too, so a shadow
+            // spreads the well instead.
+            let _ = write!(
+                css,
+                "border-radius:{}px;box-shadow:0 0 0 {}px {};margin:0 {}px 0 {}px;",
+                num(icon.radius),
+                num(icon.pad),
+                color_value(well),
+                num(icon.gap + icon.pad),
+                num(icon.pad)
+            );
+        }
+        css
+    });
+    let fade = extras
+        .fade
+        .filter(|fade| fade.fading(now))
+        .map(|fade| (fade.ms, (now - fade.start).max(0.) as f32));
+    let href = span.href.filter(|href| crate::compose_rich::opens(href));
+    let action = span.action.map(|action| {
+        Box::new(move |held| action.call(held)) as Box<dyn FnMut(crate::input::Modifiers) -> bool>
+    });
+    Inline {
+        text: span.text,
+        css,
+        hover,
+        link,
+        href,
+        action,
+        icon,
+        fade,
+    }
+}
+
+/// An SVG's bytes as a CSS `url()` of a data URL.
+fn svg_url(bytes: &[u8]) -> String {
+    let mut url = String::with_capacity(bytes.len() + 32);
+    url.push_str("url(\"data:image/svg+xml,");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || b" -_.!~*()/:=;,?@&+$<>'".contains(&byte) {
+            if byte == b' ' {
+                url.push_str("%20");
+            } else {
+                url.push(byte as char);
+            }
+        } else {
+            let _ = write!(url, "%{byte:02X}");
+        }
+    }
+    url.push_str("\")");
+    url
 }
 
 fn primitive(

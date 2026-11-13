@@ -33,6 +33,8 @@ pub(crate) const BASE_CSS: &str = "\
 .zp[data-layer]>*{pointer-events:auto;}\
 .zp[role=tooltip]{transition:opacity .14s ease-out;}\
 @starting-style{.zp[role=tooltip]:popover-open{opacity:0;}}\
+.zt a{color:inherit;}\
+@keyframes zf{from{opacity:0;}}\
 ";
 
 /// `base`'s own declarations, folded into a look's rule so its elements
@@ -93,6 +95,30 @@ pub(crate) fn plain(ops: &mut Ops, base: &'static str) -> u32 {
         }
         let index = sheet.name(ops, base);
         sheet.plain.insert(base, index);
+        index
+    })
+}
+
+/// The index of a class for a span's CSS and its look under the pointer
+/// (`hover`, may be empty), its rules written the first time.
+pub(crate) fn rules(ops: &mut Ops, css: &str, hover: &str) -> u32 {
+    SHEET.with(|sheet| {
+        let mut sheet = sheet.borrow_mut();
+        let hover = (!hover.is_empty()).then(|| hover.to_owned());
+        let key = ("zi", [Some(css.to_owned()), hover, None, None, None]);
+        if let Some(index) = sheet.by_css.get(&key) {
+            return *index;
+        }
+        let class = sheet.rules;
+        sheet.rules += 1;
+        if !css.is_empty() {
+            ops.define(&[ops::RULE], &format!(".c{class}{{{css}}}"));
+        }
+        if let Some(hover) = &key.1[1] {
+            ops.define(&[ops::RULE], &format!(".c{class}:hover{{{hover}}}"));
+        }
+        let index = sheet.name(ops, &format!("c{class}"));
+        sheet.by_css.insert(key, index);
         index
     })
 }
