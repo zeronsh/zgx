@@ -856,10 +856,12 @@ enum Rendered {
     Given(String),
     /// Written over `file`.
     Written,
+    /// Added at the end of `file` (`append`): its bytes and pixels.
+    Appended(u64, u32, u32),
 }
 
-/// `ui.render_canvas(draw, { width, height, scale, x, y, background, format, quality, file })`: a
-/// promise of `draw(c, width, height)`'s drawing as a PNG (or a JPEG or
+/// `ui.render_canvas(draw, { width, height, scale, x, y, background, format, quality, file, append })`:
+/// a promise of `draw(c, width, height)`'s drawing as a PNG (or a JPEG or
 /// WebP, `format`), in base64. The
 /// drawing is what a `ui.canvas` given that `draw` shows: its shapes and
 /// text in the same layers, clips and transforms, `x`, `y` at the
@@ -886,12 +888,32 @@ fn render_canvas(
             Some(path)
         }
     };
+    // `append = true`: the picture's file added at the end of `file`
+    // instead of over it (a PDF's page, written in parts: await each, as
+    // `ui.write_file`'s appends); the promise gives `{ bytes, width,
+    // height }`, what was added and its pixels.
+    let append = options.get::<Option<bool>>("append")?.unwrap_or(false);
+    if append && target.is_none() {
+        return Err(mlua::Error::runtime(
+            "ui.render_canvas: `append` adds the picture to a `file`; give one",
+        ));
+    }
     let render = Render::record(lua, &draw, &options, "ui.render_canvas")?;
     let (tell, mut heard) = zgx::task::latest::<Result<Rendered, String>>();
     let promise = crate::calls::pending(lua, "ui.render_canvas".into())?;
     let work = move || {
         let made = render.make(target.is_some());
         tell.send(made.and_then(|made| match &target {
+            Some(path) if append => {
+                use std::io::Write as _;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut f| f.write_all(&made.bytes))
+                    .map(|()| Rendered::Appended(made.bytes.len() as u64, made.width, made.height))
+                    .map_err(|e| format!("{}: {e}", path.display()))
+            }
             // Beside it, then over it: never half a file.
             Some(path) => {
                 let temp = path.with_extension("zgx-write");
@@ -913,6 +935,14 @@ fn render_canvas(
         match heard.recv().await {
             Some(Ok(Rendered::Given(file))) => Ok(crate::Value::Str(file.into())),
             Some(Ok(Rendered::Written)) => Ok(crate::Value::Nil),
+            Some(Ok(Rendered::Appended(bytes, width, height))) => Ok(crate::Value::Map(
+                vec![
+                    (Rc::from("bytes"), crate::Value::Num(bytes as f64)),
+                    (Rc::from("width"), crate::Value::Num(f64::from(width))),
+                    (Rc::from("height"), crate::Value::Num(f64::from(height))),
+                ]
+                .into(),
+            )),
             Some(Err(error)) => Err(format!("ui.render_canvas: {error}")),
             None => Err("ui.render_canvas: the drawing thread stopped".into()),
         }

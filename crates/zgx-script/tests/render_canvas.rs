@@ -666,3 +666,41 @@ return ui.div {}
     assert_eq!(at(30, 15)[3], 0, "transparent past the square");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_big_drawing_is_appended_to_a_picked_file() {
+    let dir = std::env::temp_dir().join(format!("zgx-render-append-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let saves = dir.join("pages.pdf");
+    let done = saved_and_done(
+        r##"
+local function board(c, w, h)
+    c:rect(0, 0, w, h, "#ffffff")
+    c:rect(100, 100, 400, 200, "#ff0000", 16)
+end
+ui.task(function()
+    local file = ui.save_file({ name = "pages.pdf" }):await()
+    local alone = pcall(ui.render_canvas, board, { width = 8, height = 8, append = true })
+    ui.write_file(file, "head|"):await()
+    -- 46 MiB of pixels at 3x: a page a PDF writer adds in parts.
+    local got = ui.render_canvas(board, { width = 1440, height = 900, scale = 3, format = "jpeg", file = file, append = true }):await()
+    ui.write_file(file, "|tail", { append = true }):await()
+    ui.invoke("done", `{alone} {got.width}x{got.height} {got.bytes}`)
+end)
+return ui.div {}
+"##,
+        saves.clone(),
+    );
+    let Value::Str(done) = done else {
+        panic!("not text: {done:?}")
+    };
+    let file = std::fs::read(&saves).unwrap();
+    let jpeg = &file[5..file.len() - 5];
+    assert_eq!(
+        (&file[..5], &file[file.len() - 5..]),
+        (&b"head|"[..], &b"|tail"[..])
+    );
+    assert_eq!(jpeg_size(jpeg), (4320, 2700));
+    assert_eq!(&*done, format!("false 4320x2700 {}", jpeg.len()));
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -1457,6 +1457,9 @@ export type RenderCanvasOptions = {
 	-- with no pixels through the script and up to 256 MiB of them (not 32),
 	-- and the promise gives nil.
 	file: (File | string)?,
+	-- With `file`: the picture added at the file's end instead of over it
+	-- (a PDF's page; await each), and the promise gives a `RenderedFile`.
+	append: boolean?,
 }
 -- A picture file zgx made and wrote itself: its size in bytes, and its
 -- pixels.
@@ -4194,7 +4197,8 @@ declare ui: {
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
 	-- `draw` as a canvas would show it, as a PNG in base64, with no window:
 	-- `width * scale` by `height * scale` pixels, `x`, `y` at its top left.
-	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string?>,
+	-- (nil with `file`; a `RenderedFile` with `file` and `append`.)
+	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<any>,
 	-- Out from (`cx`, `cy`) to radius `r` (`ry` down, for an ellipse), the
 	-- last colour past it; `transform` ({ a, b, c, d, e, f }) maps it after.
 	radial: (cx: number, cy: number, r: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush,
