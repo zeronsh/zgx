@@ -261,6 +261,8 @@ enum DcsRequest {
     None,
     /// XTGETTCAP (`DCS + q`): terminfo capabilities' names, hex, split by `;`.
     Termcap(Vec<u8>),
+    /// DECRQSS (`DCS $ q`): the setting's final bytes, `m` for SGR, say.
+    Setting(Vec<u8>),
 }
 
 /// zgx: the longest request kept; one longer is left unanswered. Room for
@@ -725,10 +727,22 @@ pub trait Handler {
     /// Report text area size in characters.
     fn text_area_size_chars(&mut self) {}
 
+    /// zgx: report a cell's size in pixels (CSI 16 t).
+    fn cell_size_pixels(&mut self) {}
+
+    /// zgx: XTVERSION, the terminal's name and version (should write back to
+    /// the pty stream).
+    fn report_version(&mut self) {}
+
     /// zgx: XTGETTCAP, the terminfo capabilities a program asks for: their
     /// names, each hex encoded, split by `;` (should write back to the pty
     /// stream).
     fn request_termcap(&mut self, _names: &[u8]) {}
+
+    /// zgx: DECRQSS, a setting a program asks for by its final bytes (`m`
+    /// for SGR, ` q` for the cursor's style, `r` for the scrolling region;
+    /// should write back to the pty stream).
+    fn report_setting(&mut self, _setting: &[u8]) {}
 
     /// Set hyperlink.
     fn set_hyperlink(&mut self, _: Option<Hyperlink>) {}
@@ -1348,11 +1362,13 @@ where
         }
     }
 
-    // zgx: XTGETTCAP's names are gathered, and asked for as the string ends.
+    // zgx: XTGETTCAP's names and DECRQSS's setting are gathered, and asked
+    // for as the string ends.
     #[inline]
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.state.dcs_request = match (intermediates, action) {
             (b"+", 'q') if !ignore => DcsRequest::Termcap(Vec::new()),
+            (b"$", 'q') if !ignore => DcsRequest::Setting(Vec::new()),
             _ => {
                 debug!(
                     "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
@@ -1366,8 +1382,14 @@ where
     #[inline]
     fn put(&mut self, byte: u8) {
         match &mut self.state.dcs_request {
-            DcsRequest::Termcap(bytes) if bytes.len() < DCS_REQUEST_LIMIT => bytes.push(byte),
-            DcsRequest::Termcap(_) => self.state.dcs_request = DcsRequest::None,
+            DcsRequest::Termcap(bytes) | DcsRequest::Setting(bytes)
+                if bytes.len() < DCS_REQUEST_LIMIT =>
+            {
+                bytes.push(byte)
+            },
+            DcsRequest::Termcap(_) | DcsRequest::Setting(_) => {
+                self.state.dcs_request = DcsRequest::None
+            },
             DcsRequest::None => debug!("[unhandled put] byte={:?}", byte),
         }
     }
@@ -1376,6 +1398,7 @@ where
     fn unhook(&mut self) {
         match mem::take(&mut self.state.dcs_request) {
             DcsRequest::Termcap(names) => self.handler.request_termcap(&names),
+            DcsRequest::Setting(setting) => self.handler.report_setting(&setting),
             DcsRequest::None => debug!("[unhandled unhook]"),
         }
     }
@@ -1763,6 +1786,8 @@ where
                 let mode = next_param_or(0);
                 handler.report_private_mode(PrivateMode::new(mode));
             },
+            // zgx: XTVERSION (CSI > q, CSI > 0 q), the terminal's name and version.
+            ('q', [b'>']) if next_param_or(0) == 0 => handler.report_version(),
             ('q', [b' ']) => {
                 // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
                 let cursor_style_id = next_param_or(0);
@@ -1793,6 +1818,8 @@ where
             ('T', []) => handler.scroll_down(next_param_or(1) as usize),
             ('t', []) => match next_param_or(1) as usize {
                 14 => handler.text_area_size_pixels(),
+                // zgx: a cell's size in pixels.
+                16 => handler.cell_size_pixels(),
                 18 => handler.text_area_size_chars(),
                 22 => handler.push_title(),
                 23 => handler.pop_title(),
@@ -2182,6 +2209,70 @@ mod tests {
         parser.advance(&mut handler, &long);
         parser.advance(&mut handler, b"\x1b\\");
         assert_eq!(handler.0, [&b"544e;5463"[..], b"524742", b""]);
+    }
+
+    /// zgx: DECRQSS's setting reaches the handler as the string ends, and
+    /// XTGETTCAP's doesn't reach it.
+    #[test]
+    fn setting_requests_reach_the_handler_whole() {
+        #[derive(Default)]
+        struct Requests(Vec<Vec<u8>>);
+        impl Handler for Requests {
+            fn report_setting(&mut self, setting: &[u8]) {
+                self.0.push(setting.to_vec());
+            }
+        }
+
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = Requests::default();
+        parser.advance(&mut handler, b"\x1bP$qm\x1b\\\x1bP$q q\x1b\\\x1bP+q544e\x1b\\");
+        parser.advance(&mut handler, b"\x1bP$q");
+        parser.advance(&mut handler, b"r\x1b\\");
+        assert_eq!(handler.0, [&b"m"[..], b" q", b"r"]);
+    }
+
+    /// zgx: a cell's size in pixels asked for (CSI 16 t).
+    #[test]
+    fn cell_size_requests_reach_the_handler() {
+        #[derive(Default)]
+        struct Requests(usize);
+        impl Handler for Requests {
+            fn cell_size_pixels(&mut self) {
+                self.0 += 1;
+            }
+        }
+
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = Requests::default();
+        parser.advance(&mut handler, b"\x1b[16t\x1b[14t\x1b[18t");
+        assert_eq!(handler.0, 1);
+    }
+
+    /// zgx: XTVERSION asked with no parameter or 0, not with another, and
+    /// DECSCUSR (`q` after a space) left as it was.
+    #[test]
+    fn version_requests_reach_the_handler() {
+        #[derive(Default)]
+        struct Requests(usize, Option<Option<CursorStyle>>);
+        impl Handler for Requests {
+            fn report_version(&mut self) {
+                self.0 += 1;
+            }
+
+            fn set_cursor_style(&mut self, style: Option<CursorStyle>) {
+                self.1 = Some(style);
+            }
+        }
+
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = Requests::default();
+        parser.advance(&mut handler, b"\x1b[>q\x1b[>0q\x1b[>1q");
+        assert_eq!(handler.0, 2);
+        parser.advance(&mut handler, b"\x1b[6 q");
+        assert_eq!(
+            handler.1,
+            Some(Some(CursorStyle { shape: CursorShape::Beam, blinking: false }))
+        );
     }
 
     #[test]

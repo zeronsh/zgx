@@ -133,9 +133,18 @@ pub(crate) struct EffectDraw {
     pub(crate) instance: u32,
 }
 
+/// A batch's halves texture and each slot's place there (none but at
+/// factor 8), for a factor-8 reduce's first half.
+pub(crate) type Halves<'a> = (
+    &'a ProtocolObject<dyn MTLTexture>,
+    &'a [Option<(u32, u32, u32, u32)>],
+);
+
 /// The backdrop blur pipelines (blur.wgsl), as `BlurPipelines`' mixed ones.
 struct Blur {
     reduce: Pipeline,
+    /// A factor-8 reduce's first half (`fs_reduce4`), into the rgba16f halves.
+    halves: Pipeline,
     across: Pipeline,
     down: Pipeline,
     mix: Pipeline,
@@ -173,8 +182,15 @@ impl MetalFrame {
         let raw = hal.raw_device().clone();
         drop(hal);
         let queue = queue.clone();
-        let draw = Library::translated(&raw, DRAW_MSL, Kind::Quads)?;
-        let copy = Library::translated(&raw, COPY_MSL, Kind::Copies)?;
+        #[cfg(zgx_metallib)]
+        let (draw, copy) = (
+            BUILT_FRESH[0].then_some(built::DRAW),
+            BUILT_FRESH[1].then_some(built::COPY),
+        );
+        #[cfg(not(zgx_metallib))]
+        let (draw, copy) = (None, None);
+        let draw = Library::ahead(&raw, DRAW_MSL, Kind::Quads, draw)?;
+        let copy = Library::ahead(&raw, COPY_MSL, Kind::Copies, copy)?;
         let pipeline = |library: &Library, vertex: &str, fragment: &str, blend: Blend| {
             library.pipeline(&raw, vertex, fragment, MTLPixelFormat::BGRA8Unorm, blend)
         };
@@ -372,6 +388,7 @@ impl MetalFrame {
                 let half = MTLPixelFormat::RGBA16Float;
                 Some(Blur {
                     reduce: pipeline("fs_reduce", half, Blend::Replace)?,
+                    halves: pipeline("fs_reduce4", half, Blend::Replace)?,
                     across: pipeline("fs_across", half, Blend::Replace)?,
                     down: pipeline("fs_down", half, Blend::Replace)?,
                     mix: pipeline("fs_mix", MTLPixelFormat::BGRA8Unorm, Blend::Mix)?,
@@ -694,27 +711,53 @@ impl Frame {
     /// A batch of backdrop filters' blur passes (`GpuRenderer::plan_blur`):
     /// `target` averaged down into `atlas[0]`, blurred across into
     /// `atlas[1]` and down into `atlas[0]`, each slot (atlas x, y, width,
-    /// height) drawn in each. The pass into the target ends; `resume` opens
-    /// the next.
+    /// height) drawn in each. Factor-8 slots reduce through `halves` first
+    /// (their places there, `fs_reduce4`). The pass into the target ends;
+    /// `resume` opens the next.
     pub(crate) fn blur(
         &mut self,
         frame: &MetalFrame,
         target: &ProtocolObject<dyn MTLTexture>,
         atlas: [&ProtocolObject<dyn MTLTexture>; 2],
+        halves: Option<Halves<'_>>,
         records: &BlurRecords<'_>,
         slots: &[(u32, u32, u32, u32)],
     ) {
         let blur = frame.blur().expect("checked by `blurs`");
+        let timing = TIME_PASSES.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some((texture, places)) = halves {
+            self.encoder.endEncoding();
+            if timing {
+                self.split(frame, "frame before the blur");
+            }
+            self.encoder = pass(&self.buffer, texture, MTLLoadAction::Clear);
+            self.scissor = None;
+            self.encoder.setRenderPipelineState(&blur.halves);
+            // SAFETY: Live textures for the blur's source slot.
+            unsafe {
+                self.encoder
+                    .setFragmentTexture_atIndex(Some(target), BLUR_SOURCE);
+            }
+            self.records(frame, records);
+            for (index, place) in places.iter().enumerate() {
+                if let Some(place) = *place {
+                    self.scissor(place);
+                    self.triangle(index as u32);
+                }
+            }
+            self.scissor = None;
+        }
         let passes = [
             (&blur.reduce, target, atlas[0]),
             (&blur.across, atlas[0], atlas[1]),
             (&blur.down, atlas[1], atlas[0]),
         ];
-        let timing = TIME_PASSES.load(std::sync::atomic::Ordering::Relaxed);
         let ran = ["frame before the blur", "blur reduce", "blur across"];
         for (step, (pipeline, source, into)) in passes.into_iter().enumerate() {
             self.encoder.endEncoding();
-            if timing {
+            // With halves, the frame before split off above; the reduce's
+            // time is both halves'.
+            if timing && (step > 0 || halves.is_none()) {
                 self.split(frame, ran[step]);
             }
             self.encoder = pass(&self.buffer, into, MTLLoadAction::Clear);
@@ -723,6 +766,12 @@ impl Frame {
             unsafe {
                 self.encoder
                     .setFragmentTexture_atIndex(Some(source), BLUR_SOURCE);
+                if step == 0
+                    && let Some((texture, _)) = halves
+                {
+                    self.encoder
+                        .setFragmentTexture_atIndex(Some(texture), BLUR_SOURCE + 1);
+                }
             }
             self.records(frame, records);
             for (index, &(x, y, width, height)) in slots.iter().enumerate() {
@@ -976,22 +1025,41 @@ impl Library {
         Self::compile(device, &msl, names, kind)
     }
 
+    /// The library of a module translated ahead, from `built` (its
+    /// library compiled when zgx was, `built`) if given and Metal loads it,
+    /// else compiled now (`translated`).
+    fn ahead(
+        device: &ProtocolObject<dyn MTLDevice>,
+        translated: &str,
+        kind: Kind,
+        built: Option<&'static [u8]>,
+    ) -> Result<Self, GpuError> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let loaded = built
+            .filter(|_| !COMPILE_AT_START.load(Relaxed))
+            .and_then(|bytes| {
+                let data = dispatch2::DispatchData::from_static_bytes(bytes);
+                device.newLibraryWithData_error(&data).ok()
+            });
+        if let Some(library) = loaded {
+            LOADED.fetch_add(1, Relaxed);
+            return Ok(Self {
+                library,
+                names: entry_points(translated),
+                kind,
+            });
+        }
+        COMPILED.fetch_add(1, Relaxed);
+        Self::translated(device, translated, kind)
+    }
+
     /// The library of a module translated ahead (`translated`).
     fn translated(
         device: &ProtocolObject<dyn MTLDevice>,
         translated: &str,
         kind: Kind,
     ) -> Result<Self, GpuError> {
-        let names = translated
-            .lines()
-            .next()
-            .and_then(|line| line.strip_prefix(ENTRY_POINTS))
-            .unwrap_or_default()
-            .split_whitespace()
-            .filter_map(|pair| pair.split_once('='))
-            .map(|(entry, name)| (entry.to_owned(), name.to_owned()))
-            .collect();
-        Self::compile(device, translated, names, kind)
+        Self::compile(device, translated, entry_points(translated), kind)
     }
 
     fn compile(
@@ -1018,6 +1086,19 @@ impl Library {
 /// MSL (`entry=name`, separated by spaces).
 const ENTRY_POINTS: &str = "// zgx entry points:";
 
+/// The entry points' names a module translated ahead lists (`ENTRY_POINTS`).
+fn entry_points(translated: &str) -> std::collections::HashMap<String, String> {
+    translated
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix(ENTRY_POINTS))
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(entry, name)| (entry.to_owned(), name.to_owned()))
+        .collect()
+}
+
 /// `draw.wgsl` and `copy_offset.wgsl` as `translate` writes them, behind
 /// their entry points' names (`ENTRY_POINTS`): every window's first frame
 /// needs both, and naga's translation was about 10 M of its instructions.
@@ -1025,6 +1106,55 @@ const ENTRY_POINTS: &str = "// zgx entry points:";
 /// (`ZGX_BLESS=1 cargo test -p zgx-gpu --lib translated_shaders`).
 const DRAW_MSL: &str = include_str!("draw.metal");
 const COPY_MSL: &str = include_str!("copy_offset.metal");
+
+/// `DRAW_MSL` and `COPY_MSL` compiled when zgx was built (build.rs, with
+/// Xcode's Metal toolchain), and the hashes of the sources they were built
+/// from: a launch whose shader cache misses loads them instead of compiling
+/// them, about 150 ms before its first frame on an M5.
+#[cfg(zgx_metallib)]
+mod built {
+    pub(crate) const DRAW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/draw.metallib"));
+    pub(crate) const COPY: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/copy_offset.metallib"));
+    include!(concat!(env!("OUT_DIR"), "/metallib_sources.rs"));
+}
+
+/// Whether the libraries built ahead are of the sources compiled in, read
+/// when zgx is compiled: one edited since is compiled at start instead.
+#[cfg(zgx_metallib)]
+const BUILT_FRESH: [bool; 2] = [
+    fnv1a(DRAW_MSL.as_bytes()) == built::DRAW_SOURCE,
+    fnv1a(COPY_MSL.as_bytes()) == built::COPY_OFFSET_SOURCE,
+];
+
+/// FNV-1a over `bytes`, as build.rs hashes the sources it compiles.
+#[cfg(zgx_metallib)]
+const fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut at = 0;
+    while at < bytes.len() {
+        hash = (hash ^ bytes[at] as u64).wrapping_mul(0x0100_0000_01b3);
+        at += 1;
+    }
+    hash
+}
+
+/// The libraries built ahead and in use (whether each source still hashes
+/// as built), or none built: for tests.
+pub(crate) fn built_libraries() -> Option<[bool; 2]> {
+    #[cfg(zgx_metallib)]
+    return Some(BUILT_FRESH);
+    #[cfg(not(zgx_metallib))]
+    None
+}
+
+/// The first frame's libraries loaded from those built ahead, and compiled
+/// at start: for tests.
+pub(crate) static LOADED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static COMPILED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Compile them at start even when built ahead: for tests.
+pub(crate) static COMPILE_AT_START: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// A WGSL module in MSL with zgx's fixed slots (`Kind`) and any sampler
 /// inline, and its entry points' names there.

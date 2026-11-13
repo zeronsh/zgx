@@ -170,5 +170,60 @@ class ReadsTests(unittest.TestCase):
         self.assertTrue(gate.runs_scene(gate.ROOT, env, package, example))
 
 
+class AllocationsTests(unittest.TestCase):
+    """The allocations table: per a scene's tick, frame or op, a scene whose
+    allocator bypasses glibc said to be uncounted, and the counter preloaded
+    after `same_run.so` in a native run of its own."""
+
+    def counts(self, allocations, reallocations=0, bytes_=0, peak=0):
+        return {'allocations': allocations, 'reallocations': reallocations, 'frees': allocations,
+                'bytes': bytes_, 'peak': peak}
+
+    def test_a_scene_with_ticks_is_reported_per_tick(self):
+        env = {'ZGX_MODE': 'scroll', 'TICKS': '300'}
+        self.assertEqual(gate.unit_of(env), ('TICKS', 300))
+        self.assertIsNone(gate.unit_of({'APP': 'mail'}))
+        # 33 more a tick over 300 ticks: +33.0 a tick.
+        rows = [('heavy-scroll', env, self.counts(30_000, 300, 900_000, 5_000),
+                 self.counts(39_900, 600, 1_200_000, 5_064))]
+        line = gate.allocation_lines(rows)[-1]
+        self.assertIn('| heavy-scroll | tick | 100.0 | 133.0 | +33.0 (+33.00%) | +1.0 | +1,000 | +64 |', line)
+
+    def test_a_scene_without_a_length_is_reported_per_run(self):
+        rows = [('app-mail', {'APP': 'mail'}, self.counts(50_000), self.counts(50_010))]
+        self.assertIn('| app-mail | run | 50,000.0 | 50,010.0 | +10.0 (+0.02%) |', gate.allocation_lines(rows)[-1])
+
+    def test_an_allocator_bypassing_glibc_is_not_read_as_zero(self):
+        rows = [('heavy-both', {'TICKS': '300'}, self.counts(12), self.counts(12))]
+        self.assertIn('not counted: its allocator bypasses glibc', gate.allocation_lines(rows)[-1])
+
+    def test_a_failed_run_and_a_new_scene_say_so(self):
+        failed = [('mount', {}, {'failed': True}, self.counts(5_000))]
+        self.assertIn('the run failed', gate.allocation_lines(failed)[-1])
+        new = [('mount', {}, None, self.counts(5_000))]
+        self.assertIn('| mount | run | (new) | 5,000.0 |', gate.allocation_lines(new)[-1])
+
+    def test_the_counter_runs_natively_after_same_run(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = pathlib.Path(root)
+            seen = {}
+
+            def run(command, env=None, **_):
+                seen['command'], seen['env'] = command, env
+                pathlib.Path(env['ZGX_ALLOC_COUNT_OUT']).write_text('100 2 98 4096 2048\n')
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+            with patch.object(gate, 'WORK', work), \
+                    patch.object(gate, 'same_run', return_value=work / 'same_run.so'), \
+                    patch.object(gate, 'count_allocs', return_value=work / 'count_allocs.so'), \
+                    patch.object(gate, 'WARM', {work / 'bench'}), \
+                    patch.object(gate.subprocess, 'run', side_effect=run):
+                counts = gate.allocations(work / 'bench', {'TICKS': '3'}, None)
+        self.assertEqual(seen['command'], [str(work / 'bench')])
+        self.assertEqual(seen['env']['LD_PRELOAD'], f'{work / "same_run.so"} {work / "count_allocs.so"}')
+        self.assertEqual(counts, {'allocations': 100, 'reallocations': 2, 'frees': 98, 'bytes': 4096,
+                                  'peak': 2048})
+
+
 if __name__ == '__main__':
     unittest.main()

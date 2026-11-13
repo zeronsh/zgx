@@ -600,6 +600,12 @@ pub(crate) struct Rare {
     grid_fill: Option<Box<dyn FnMut() -> Option<crate::scene::GridFill>>>,
     /// Conditional children (`child_when`), mounted after the others.
     conditional: Vec<RegionBuilder>,
+    /// What a region is to the DOM (`__dom::Region`), beside its builder.
+    #[cfg(feature = "dom")]
+    pub(crate) dom: Option<Box<__dom::Region>>,
+    /// `conditional`'s, to the DOM.
+    #[cfg(feature = "dom")]
+    pub(crate) dom_conditional: Vec<__dom::Region>,
 }
 /// `Rare::merge_into`'s part for assistive technology (a control a row already
 /// stands for, hidden from outside it): each part the outer view set wins.
@@ -1200,11 +1206,20 @@ impl View {
     /// subscription to what `select` reads). A changed value rebuilds the
     /// child; an equal one keeps it. For overlays such as an error banner
     /// (an `absolute` child paints over its siblings and takes no room).
+    #[cfg_attr(feature = "dom", allow(unused_mut))]
     pub fn child_when<K: PartialEq + Clone + 'static>(
         mut self,
         mut select: impl FnMut() -> Option<K> + 'static,
         mut build: impl FnMut(K, &mut Context) -> View + 'static,
     ) -> Self {
+        #[cfg(feature = "dom")]
+        if __dom::DOM_ONLY {
+            let (_, _, region) = __dom::share_when(select, build);
+            self.rare_mut().dom_conditional.push(region);
+            return self;
+        }
+        #[cfg(feature = "dom")]
+        let (mut select, mut build, dom) = __dom::share_when(select, build);
         self.rare_mut()
             .conditional
             .push(Box::new(move |ui: &mut Ui, parent, environment| {
@@ -1243,6 +1258,8 @@ impl View {
                     selected = key;
                 });
             }));
+        #[cfg(feature = "dom")]
+        self.rare_mut().dom_conditional.push(dom);
         self
     }
     /// Name the view, so tests and `ViewHandle::find` can reach its node.
@@ -3097,11 +3114,21 @@ impl Hold for FocusHold {
         self.0.taken.borrow_mut().take()
     }
 }
+#[cfg_attr(feature = "dom", allow(unused_mut))]
 fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool, H: Hold>(
     hold: H,
     mut select: impl FnMut() -> K + 'static,
     mut build: impl FnMut(K, &mut Context) -> Option<View> + 'static,
 ) -> View {
+    #[cfg(feature = "dom")]
+    if __dom::DOM_ONLY {
+        let (_, _, region) = __dom::share_switch(select, build);
+        let mut view = __dom::region_only(region);
+        view.contents = Contents::ChildIfUnstyled;
+        return view;
+    }
+    #[cfg(feature = "dom")]
+    let (mut select, mut build, dom) = __dom::share_switch(select, build);
     let mut region = View::new(Kind::Region(Box::new(move |ui, root, environment| {
         let weak = ui.downgrade();
         let runtime = ui.runtime.clone();
@@ -3156,6 +3183,8 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool, H: Hold>(
         });
     })));
     region.contents = Contents::ChildIfUnstyled;
+    #[cfg(feature = "dom")]
+    let region = __dom::attach(region, dom);
     region
 }
 /// Keyed children retain their local state and subscriptions across reorder.
@@ -3185,11 +3214,19 @@ pub enum Keys<K> {
 /// [`keyed`] whose keys say how many are the last pass's: a list growing at
 /// its end (a streamed reply's rows) is passed in what it adds, its keys
 /// neither compared, copied nor dropped whole.
+#[cfg_attr(feature = "dom", allow(unused_mut))]
 pub fn keyed_grown<K: Eq + std::hash::Hash + Clone + 'static>(
     mut keys: impl FnMut() -> Keys<K> + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
-    View::new(Kind::Region(Box::new(move |ui, root, environment| {
+    #[cfg(feature = "dom")]
+    if __dom::DOM_ONLY {
+        let (_, _, region) = __dom::share_keyed(keys, build);
+        return __dom::region_only(region);
+    }
+    #[cfg(feature = "dom")]
+    let (mut keys, mut build, dom) = __dom::share_keyed(keys, build);
+    let view = View::new(Kind::Region(Box::new(move |ui, root, environment| {
         let weak = ui.downgrade();
         let runtime = ui.runtime.clone();
         // Each key's child, where the last pass that saw the key placed it,
@@ -3378,7 +3415,10 @@ pub fn keyed_grown<K: Eq + std::hash::Hash + Clone + 'static>(
             });
             finished = true;
         });
-    })))
+    })));
+    #[cfg(feature = "dom")]
+    let view = __dom::attach(view, dom);
+    view
 }
 /// A `keyed` child: its node, the last pass that showed its key, and where.
 struct Keyed {
@@ -3626,6 +3666,15 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
 ) -> View {
     assert!(row_height.is_finite() && row_height > 0.0);
+    #[cfg(feature = "dom")]
+    if __dom::DOM_ONLY {
+        let (_, _, _, region) =
+            __dom::share_virtual(offset, row_height, overscan, count, key, build);
+        return __dom::region_only(region);
+    }
+    #[cfg(feature = "dom")]
+    let (count, key, build, dom) =
+        __dom::share_virtual(offset.clone(), row_height, overscan, count, key, build);
     let count = Rc::new(RefCell::new(count));
     let rows = RowSource::new(key, build);
     let source = rows.rows({
@@ -3634,7 +3683,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     });
     let (mut key, mut build, mounted_in) = (rows.key(), rows.build(), rows.mounted_in.clone());
     let count = move || (count.borrow_mut())();
-    View::new(Kind::VirtualList(Box::new(
+    let view = View::new(Kind::VirtualList(Box::new(
         move |ui, root, environment, options: ListOptions| {
             // With spare time its overscan is spare time's too: the frame
             // builds what shows alone.
@@ -3988,7 +4037,10 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             });
         },
     )))
-    .list_rows(source)
+    .list_rows(source);
+    #[cfg(feature = "dom")]
+    let view = __dom::attach(view, dom);
+    view
 }
 // Roll back newly appended roots if a component constructor or initial binding
 // panics. Existing siblings are never removed by this guard. This is ownership
@@ -6933,6 +6985,8 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
         mounted(NodeHandle {
             ui: ui.downgrade(),
             node: root,
+            #[cfg(feature = "dom")]
+            dom: None,
         });
     }
     root
@@ -7191,6 +7245,9 @@ pub(crate) fn focus_movement(
 pub(crate) struct AncestorWindow {
     viewport: NodeId,
     list: Signal<crate::scene::Rect>,
+    /// The innermost scroll view around it, if any: a list it has scrolled
+    /// wholly past shows nothing, told without the list's clips.
+    view: Option<NodeId>,
     /// The innermost scroll view around it (else the window) first, then
     /// the others, the window and the boxes between it and that view.
     around: Vec<Signal<crate::scene::Rect>>,
@@ -7214,11 +7271,13 @@ impl AncestorWindow {
                 .collect();
             (views, clips)
         };
+        let view = views.first().copied();
         views.push(ui.root());
         views.extend(clips);
         Self {
             viewport,
             list: ui.observe_bounds(viewport),
+            view,
             around: views
                 .into_iter()
                 .map(|view| ui.observe_bounds(view))
@@ -7245,7 +7304,17 @@ impl AncestorWindow {
             return (0., 0.);
         }
         let list = scene.world_bounds(self.viewport);
-        match scene.visible_bounds(self.viewport) {
+        // Wholly above or below the view: as `visible_bounds` would tell,
+        // without it (most of a long transcript's lists, every frame).
+        let shown = match self.view {
+            Some(view) if scene.misses_view(self.viewport, list, view) => None,
+            _ => {
+                #[cfg(test)]
+                WINDOW_CLIP_WALKS.with(|walks| walks.set(walks.get() + 1));
+                scene.visible_bounds(self.viewport)
+            }
+        };
+        match shown {
             Some(shown) if shown.height > 0. => {
                 let top = (shown.y - list.y).clamp(0., total);
                 (top, shown.height.min(total - top))
@@ -8703,6 +8772,9 @@ fn name_content(ui: &Ui, scene: &crate::scene::Scene, id: NodeId) {
 pub struct NodeHandle {
     ui: WeakUi,
     node: NodeId,
+    /// A DOM node's measurements, when `zgx-dom` mounted it.
+    #[cfg(feature = "dom")]
+    dom: Option<Rc<dyn __dom::Hooks>>,
 }
 impl NodeHandle {
     /// The mounted node.
@@ -8811,6 +8883,10 @@ impl NodeHandle {
     }
     /// Whether the node is still in the scene.
     pub fn is_mounted(&self) -> bool {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            return dom.is_mounted();
+        }
         self.ui
             .upgrade()
             .is_some_and(|ui| ui.scene.borrow().contains(self.node))
@@ -8818,6 +8894,10 @@ impl NodeHandle {
     /// The node's world bounds, republished after each frame's layout: for
     /// animating a container to the size of what it holds.
     pub fn observe_bounds(&self) -> Option<Signal<crate::scene::Rect>> {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            return dom.observe_bounds();
+        }
         let ui = self.ui.upgrade()?;
         ui.scene
             .borrow()
@@ -8828,6 +8908,10 @@ impl NodeHandle {
     /// layout that changes it: for what depends on a size alone (a
     /// ResizeObserver), at no cost when only something above it moves.
     pub fn observe_size(&self) -> Option<Signal<(f32, f32)>> {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            return dom.observe_size();
+        }
         let ui = self.ui.upgrade()?;
         ui.scene
             .borrow()
@@ -8840,10 +8924,19 @@ impl NodeHandle {
     pub fn observe_text_geometry(&self) -> Option<Signal<u64>> {
         Some(self.ui.upgrade()?.observe_text_geometry_revision())
     }
+    /// Whether assistive technology reads the UI (`Ui::assistive_technology`),
+    /// as it changes: for what keeps an order only readers meet.
+    pub fn observe_assistive_technology(&self) -> Option<Signal<bool>> {
+        Some(self.ui.upgrade()?.assistive())
+    }
     /// Whether any of the node shows (inside every clip and viewport above
     /// it), republished after each frame's layout: for building what only
     /// matters on screen.
     pub fn observe_visibility(&self) -> Option<Signal<bool>> {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            return dom.observe_visibility(0.);
+        }
         let ui = self.ui.upgrade()?;
         ui.scene
             .borrow()
@@ -8857,6 +8950,10 @@ impl NodeHandle {
     /// scroll into view before it does. A node observed both ways takes the
     /// margin.
     pub fn observe_visibility_within(&self, margin: f32) -> Option<Signal<bool>> {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            return dom.observe_visibility(margin);
+        }
         let ui = self.ui.upgrade()?;
         ui.scene
             .borrow()
@@ -8959,6 +9056,11 @@ impl NodeHandle {
     }
     /// Keep `resource` until the node is removed, then drop it.
     pub fn retain(&self, resource: impl Any) {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            dom.retain(Box::new(resource));
+            return;
+        }
         if let Some(mut ui) = self.ui.upgrade()
             && ui.scene.borrow().contains(self.node)
         {
@@ -9239,6 +9341,72 @@ pub mod prelude {
     pub use crate::web_view::{native_view, web_view, web_view_src};
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Lists whose shown part `AncestorWindow::window` worked out from
+    /// their clips (not told past without them).
+    static WINDOW_CLIP_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+mod ancestor_window_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    /// A scroll view 200 points high over five lists of 50 rows of 20: as
+    /// it scrolls, only the lists it shows (at most two) work out their
+    /// clips, the rest told past without, and a list coming into view
+    /// builds its rows on the frame it does.
+    #[test]
+    fn lists_scrolled_wholly_past_skip_their_clips() {
+        let mut ui = Ui::new(400., 300.);
+        let offset = ui.signal(0.);
+        let built = Rc::new(RefCell::new(vec![0_usize; 5]));
+        let mut lists = column().w_full();
+        for list in 0..5 {
+            let built = built.clone();
+            lists = lists.child(
+                virtual_list(
+                    ui.signal(0.),
+                    20.,
+                    0,
+                    || 50,
+                    |n| n,
+                    move |_, _, _| {
+                        built.borrow_mut()[list] += 1;
+                        div().w_full().h(20.)
+                    },
+                )
+                .virtualize_in_ancestor()
+                .w_full(),
+            );
+        }
+        ui.mount(scroll(offset.clone()).w(300.).h(200.).child(lists));
+        ui.prepare_frame();
+        for (at, shown) in [(100., 1), (900., 2), (2500., 1), (3900., 2)] {
+            built.borrow_mut().fill(0);
+            WINDOW_CLIP_WALKS.with(|walks| walks.set(0));
+            offset.set(at);
+            ui.prepare_frame();
+            let walks = WINDOW_CLIP_WALKS.with(|walks| walks.get());
+            // Every list's window runs (each moved); only those shown walk.
+            assert!(
+                walks <= shown * 2,
+                "at {at}: {walks} walks for {shown} lists shown"
+            );
+            assert!(
+                walks >= shown,
+                "at {at}: {walks} walks for {shown} lists shown"
+            );
+        }
+        // Back over the seam of the second and third (both away a frame
+        // before): each builds its rows on the frame it comes into view.
+        built.borrow_mut().fill(0);
+        offset.set(1900.);
+        ui.prepare_frame();
+        let counts = built.borrow().clone();
+        assert!(counts[1] > 0 && counts[2] > 0, "{counts:?}");
+    }
+}
 #[cfg(test)]
 thread_local! {
     /// Ancestors `update_button_labels` has looked at.
@@ -9708,3 +9876,8 @@ mod keyed_removal_tests {
         parent.set(None);
     }
 }
+/// Views read out for `zgx-dom` (hidden plumbing, not API).
+#[cfg(feature = "dom")]
+#[doc(hidden)]
+#[path = "dom.rs"]
+pub mod __dom;

@@ -61,6 +61,9 @@ i18n-dates = ["i18n", "dep:icu_datetime", "dep:icu_calendar"]
 # `ZGX_PROFILE=1` also times styles and text within their phases: a check
 # in every style and text run, so only in builds that ask for it.
 profile-nested = []
+# Views read out for `zgx-dom`, which mounts them as browser DOM: hidden
+# plumbing (`compose::__dom`), off unless zgx-dom builds for wasm32.
+dom = []
 # Why things ran (`zgx::trace`), for devtools: which writes queued which
 # effects, per frame. Off at run time until asked; built only for them.
 trace = []
@@ -75,6 +78,10 @@ psm = "0.1.32"
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 psm = "0.1.32"
+
+# The browser's clock (`performance.now()`), where std's panics.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3.2"

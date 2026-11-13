@@ -2,45 +2,45 @@
 # from the gate's top functions in each crate: crate, scopes, lines, function.
 # `python3 scripts/perf/inline_scopes.py record` writes the counts again.
 # Only functions CI's x86_64 Linux compiles (not `#[cfg(own_surfaces)]`'s).
-# rustc 1.99.1 (58cf8f9c3 2026-10-13)
-zgx	40	463	scene::<impl in crates/zgx/src/scene.rs>::measured
-zgx	48	1187	scene::<impl in crates/zgx/src/scene.rs>::arrange
-zgx	43	591	scene::<impl in crates/zgx/src/scene.rs>::store_measurement
-zgx	47	845	scene::<impl in crates/zgx/src/scene.rs>::invalidate_layout_with
-zgx	177	3027	scene::<impl in crates/zgx/src/scene.rs>::column_end
-zgx	526	5656	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
-zgx	296	2319	scene::<impl in crates/zgx/src/scene.rs>::flush
-zgx	121	1225	scene::<impl in crates/zgx/src/scene.rs>::ink
+# rustc 1.100.0 (0ef1bc386 2026-11-09)
+zgx	36	455	scene::<impl in crates/zgx/src/scene.rs>::measured
+zgx	45	1177	scene::<impl in crates/zgx/src/scene.rs>::arrange
+zgx	41	587	scene::<impl in crates/zgx/src/scene.rs>::store_measurement
+zgx	45	841	scene::<impl in crates/zgx/src/scene.rs>::invalidate_layout_with
+zgx	168	3009	scene::<impl in crates/zgx/src/scene.rs>::column_end
+zgx	520	5724	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
+zgx	273	2269	scene::<impl in crates/zgx/src/scene.rs>::flush
+zgx	117	1213	scene::<impl in crates/zgx/src/scene.rs>::ink
 zgx	90	1502	scene::<impl in crates/zgx/src/scene.rs>::set_kind
-zgx	131	1231	scene::<impl in crates/zgx/src/scene.rs>::append_as
-zgx	22	386	advanced_layout::<impl in crates/zgx/src/scene_layout.rs>::resolved_leaf_style
-zgx	187	1277	reactive::<impl in crates/zgx/src/reactive.rs>::flush
-zgx	203	1446	reactive::<impl in crates/zgx/src/reactive.rs>::flush_watched
-zgx	676	5218	selection::<impl in crates/zgx/src/selection.rs>::refresh_selection
-zgx	195	2422	mount_style_with_intrinsic
-zgx	377	9728	mount_style_with_intrinsic::{closure#10}
-zgx	107	1743	mount_element
+zgx	114	1189	scene::<impl in crates/zgx/src/scene.rs>::append_as
+zgx	20	378	advanced_layout::<impl in crates/zgx/src/scene_layout.rs>::resolved_leaf_style
+zgx	180	1263	reactive::<impl in crates/zgx/src/reactive.rs>::flush
+zgx	196	1432	reactive::<impl in crates/zgx/src/reactive.rs>::flush_watched
+zgx	643	5152	selection::<impl in crates/zgx/src/selection.rs>::refresh_selection
+zgx	193	2414	mount_style_with_intrinsic
+zgx	371	9710	mount_style_with_intrinsic::{closure#10}
+zgx	97	1723	mount_element
 zgx	61	768	compose::<impl in crates/zgx/src/compose.rs>::mount
-zgx-gpu	313	3431	<impl in crates/zgx-gpu/src/lib.rs>::prepare
+zgx-gpu	294	3369	<impl in crates/zgx-gpu/src/lib.rs>::prepare
 zgx-gpu	23	727	<impl in crates/zgx-gpu/src/lib.rs>::prepare_layer
-zgx-gpu	340	6337	<impl in crates/zgx-gpu/src/lib.rs>::prepare_layer_planned
-zgx-gpu	206	1542	<impl in crates/zgx-gpu/src/lib.rs>::encode_damage
+zgx-gpu	322	6301	<impl in crates/zgx-gpu/src/lib.rs>::prepare_layer_planned
+zgx-gpu	182	1494	<impl in crates/zgx-gpu/src/lib.rs>::encode_damage
 zgx-gpu	0	40	<impl in crates/zgx-gpu/src/lib.rs>::encode_draws
 zgx-gpu	0	47	<impl in crates/zgx-gpu/src/lib.rs>::batches
-zgx-gpu	54	1463	<impl in crates/zgx-gpu/src/lib.rs>::batches_of
+zgx-gpu	57	1469	<impl in crates/zgx-gpu/src/lib.rs>::batches_of
 zgx-gpu	108	1006	<impl in crates/zgx-gpu/src/lib.rs>::flush_pending
-zgx-gpu	479	4791	effects::<impl in crates/zgx-gpu/src/effects.rs>::prepare_effects
+zgx-gpu	447	4730	effects::<impl in crates/zgx-gpu/src/effects.rs>::prepare_effects
 zgx-gpu	159	1785	effects::<impl in crates/zgx-gpu/src/effects.rs>::encode_effects
-zgx-gpu	177	1271	upload::<impl in crates/zgx-gpu/src/upload.rs>::encode
-zgx-gpu	151	1165	passes::<impl in crates/zgx-gpu/src/passes.rs>::prepare_inputs
-zgx-script	1567	13150	kind_view
-zgx-script	325	2333	kind_view::{closure#27}::{closure#0}
+zgx-gpu	166	1237	upload::<impl in crates/zgx-gpu/src/upload.rs>::encode
+zgx-gpu	132	1133	passes::<impl in crates/zgx-gpu/src/passes.rs>::prepare_inputs
+zgx-script	1533	13054	kind_view
+zgx-script	310	2303	kind_view::{closure#27}::{closure#0}
 zgx-script	553	8910	lower::apply
-zgx-script	361	3264	lower_list
-zgx-script	475	4029	lower_item_list
-zgx-script	351	3771	lower_rich::{closure#1}::{closure#0}
+zgx-script	352	3238	lower_list
+zgx-script	467	4011	lower_item_list
+zgx-script	339	3739	lower_rich::{closure#1}::{closure#0}
 zgx-script	261	3001	to_lua
 zgx-script	171	1428	value::<impl in crates/zgx-script/src/value.rs>::reconcile
-zgx-script	174	1227	<impl in crates/zgx-script/src/lib.rs>::set_state
-zgx-script	107	1234	element::<impl in crates/zgx-script/src/element.rs>::flush
-zgx-script	361	2213	engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush
+zgx-script	166	1211	<impl in crates/zgx-script/src/lib.rs>::set_state
+zgx-script	105	1230	element::<impl in crates/zgx-script/src/element.rs>::flush
+zgx-script	325	2141	engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush

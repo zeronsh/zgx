@@ -1243,6 +1243,32 @@ const FRAME_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(5
 /// Frames presented this close together are a steady run.
 #[cfg(target_os = "macos")]
 const STEADY_GAP: std::time::Duration = std::time::Duration::from_millis(50);
+/// Whether a frame hands over as a live one's (`Latch::decide`: at once if
+/// ready past its refresh's point), `live` being a scroll's or input's
+/// (`Host::input_live`). A whole notch's frame
+/// (`ScrollResampler::notch_applied`) doesn't: notches come near a refresh's
+/// start, and one ready just before a refresh handed over beside the frame
+/// already waiting for it, leaving the next refresh nothing new.
+#[cfg(target_os = "macos")]
+fn hands_over_live(live: bool, notched: bool) -> bool {
+    live && !notched
+}
+/// Frames this soon after input that acts (`Ui::acted_at`) answer it, and
+/// show as soon as each is ready (`Host::input_live`).
+#[cfg(target_os = "macos")]
+const INPUT_LIVE: std::time::Duration = std::time::Duration::from_millis(50);
+/// Whether a frame made at `now` answers input that acted at `acted_at`
+/// (`Host::input_live`).
+#[cfg(target_os = "macos")]
+fn answers_input(acted_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    acted_at.is_some_and(|at| now.saturating_duration_since(at) < INPUT_LIVE)
+}
+/// Whether input acted after the frame last shown (`shown`): the next draws
+/// at once, not at the refresh's tick (`Host::process`).
+#[cfg(target_os = "macos")]
+fn acted_since(acted_at: Option<std::time::Instant>, shown: Option<std::time::Instant>) -> bool {
+    acted_at.is_some_and(|at| shown.is_none_or(|shown| at > shown))
+}
 /// Sleep until `at`: a long sleep ends up to a millisecond or two late (the
 /// kernel coalesces timers in proportion to their length), so the last
 /// stretch is a short one of its own.
@@ -1468,8 +1494,9 @@ impl Latch {
     /// Frames rendered at once after a held one missed its refresh.
     const REST: u8 = 120;
     /// When a frame complete at `now` presents, on the refresh grid through
-    /// `origin` with `period`. `live`: a scroll is live (`Host::scroll_live`),
-    /// and the frame never waits past its point: it keeps no later cadence,
+    /// `origin` with `period`. `live`: a scroll is live, or input the frame
+    /// answers came just now (`Host::input_live`), and the frame never waits
+    /// past its point: it keeps no later cadence,
     /// and one ready after its point hands over at once. Waiting for the next
     /// point instead held the main thread a refresh, and the next frame,
     /// starting after, missed its own start: at 120 Hz, frames ready near
@@ -1559,7 +1586,7 @@ impl Latch {
     /// The point a frame ready at `ready` presents at, the count of frames
     /// comfortably early on a later cadence that it leaves, and whether that
     /// cadence put it a refresh later than it could have shown. `live` (a
-    /// scroll): no later cadence holds it.
+    /// scroll, or input just now): no later cadence holds it.
     fn choose(
         &self,
         ready: std::time::Instant,
@@ -2975,15 +3002,16 @@ impl Host {
                 // Steady frames render at a time of their own within their
                 // wait for the refresh point (`Latch::hold`); a scroll's at a
                 // slow refresh started late already (`LateSample`), and every
-                // live scroll's renders at once: held, one the GPU then takes
-                // longer over misses its refresh.
+                // live frame (a scroll's, or one answering input) renders at
+                // once: held, one the GPU then takes longer over misses its
+                // refresh.
                 #[cfg(target_os = "macos")]
                 let started_late = starts_late(
                     self.frame_interval,
                     self.scroll.active(std::time::Instant::now()),
                 );
                 #[cfg(target_os = "macos")]
-                let live = self.scroll_live(std::time::Instant::now());
+                let live = self.input_live(std::time::Instant::now());
                 #[cfg(target_os = "macos")]
                 if let Some((origin, period)) =
                     self.refresh_grid().filter(|_| !started_late && !live)
@@ -3109,7 +3137,10 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 let grid = self.refresh_grid();
                 #[cfg(target_os = "macos")]
-                let live = self.scroll_live(std::time::Instant::now());
+                let live = hands_over_live(
+                    self.input_live(std::time::Instant::now()),
+                    self.scroll.notched(),
+                );
                 // A frame that presents itself (a live scroll's drawable,
                 // `GpuRenderer::set_scrolling`) shows once the GPU is done
                 // with it: waiting here would only hold the main thread, and
@@ -3226,6 +3257,7 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
+                    zgx_gpu::present_log::log(|| format!("handed over live={live}"));
                     self.late_sample
                         .handed_over(ready_at.get().unwrap_or_else(std::time::Instant::now));
                     // What it shows now, for `Ui::snapshot` (the last frame's
@@ -5385,6 +5417,35 @@ impl Host {
                     if !zgx::zoom::wheel_notched(step.1, || self.dispatch_prevented(event))? {
                         self.context.ui.zoom_wheel(-dy / step.1);
                     }
+                } else if crate::scroll_resample::enabled()
+                    && matches!(delta, MouseScrollDelta::LineDelta(x, y) if !continuous_lines(x, y))
+                    && self.scroll.notches_whole()
+                {
+                    // A notch that moves whole goes in as it comes and draws at
+                    // once, as an `NSScrollView` takes it. The system hands a
+                    // wheel's notches over about once a refresh, near its
+                    // start: applied at the next refresh's tick instead, one
+                    // coming just after a tick waited a refresh, and that
+                    // refresh showed nothing new (notches at 144 Hz: 104-113
+                    // refreshes a second at 120 Hz showed a new frame, as they
+                    // come 118-120).
+                    self.scroll.position = self.cursor;
+                    self.scroll.notch_applied(std::time::Instant::now());
+                    zgx_gpu::present_log::log(|| {
+                        format!("scroll-applied source=notch dx={dx:.3} dy={dy:.3}")
+                    });
+                    let event = InputEvent::Scroll {
+                        x: self.cursor.0,
+                        y: self.cursor.1,
+                        delta_x: dx,
+                        delta_y: dy,
+                    };
+                    self.dispatch_wheel(event, true)?;
+                    self.after_scroll();
+                    #[cfg(any(target_os = "macos", windows))]
+                    {
+                        self.input_arrived = true;
+                    }
                 } else if crate::scroll_resample::enabled() {
                     // Applied on display refreshes; see `update`.
                     let now = std::time::Instant::now();
@@ -6409,11 +6470,16 @@ impl Host {
         if let Some(caption) = &mut self.caption {
             caption.sync(&mut self.context.ui);
         }
-        // A key typed while frames follow the refresh draws at once: waiting
-        // for the next refresh's frame cost it a refresh (8 ms at 120 Hz)
-        // more than at rest. The newest frame is the one shown.
+        // A key typed, or a press, while frames follow the refresh draws at
+        // once: waiting for the next refresh's frame cost it a refresh (8 ms
+        // at 120 Hz) more than at rest. The newest frame is the one shown.
+        // Input acting since the last frame (`Ui::acted_at`) draws so too,
+        // whoever dispatched it (a click lands as its press lifts).
+        #[cfg(target_os = "macos")]
+        let acted = acted_since(self.context.ui.acted_at(), self.presented_at);
         #[cfg(target_os = "macos")]
         let paced = !std::mem::take(&mut self.input_arrived)
+            && !acted
             && (self.vsync_paced
                 || self
                     .display_link
@@ -6609,6 +6675,18 @@ impl Host {
             return true;
         }
         self.scroll.active(now) || self.touch.flinging()
+    }
+    /// Whether the frame being made answers someone: a scroll is live, or
+    /// input that acts (a key, text, a press) came within `INPUT_LIVE`. Its
+    /// frames keep no cadence of the frames before (`Latch::decide`), and
+    /// render at once (`Latch::hold`). Typing or clicking fast, frames ready
+    /// near their refresh point otherwise each waited for the next, the main
+    /// thread with them, and the window showed every other refresh. Frames
+    /// the app's own timers make keep the cadence, which keeps a stream from
+    /// alternating between one refresh and the next.
+    #[cfg(target_os = "macos")]
+    fn input_live(&self, now: std::time::Instant) -> bool {
+        self.scroll_live(now) || answers_input(self.context.ui.acted_at(), now)
     }
     /// The idle trim arms as a frame presents. With no frame coming, what asks
     /// for it arms it here: `zgx::idle::request`, and a large removal's nodes,
@@ -9207,6 +9285,38 @@ impl WindowCursor {
 mod tests {
     use zgx::scene::Rect;
 
+    /// A frame answers input that acted within `INPUT_LIVE` of it, and not
+    /// after; no input, none.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn frames_just_after_acting_input_answer_it() {
+        use super::{INPUT_LIVE, answers_input};
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let ms = std::time::Duration::from_millis;
+        assert!(!answers_input(None, now));
+        assert!(answers_input(Some(now), now));
+        assert!(answers_input(Some(now - INPUT_LIVE + ms(1)), now));
+        assert!(!answers_input(Some(now - INPUT_LIVE - ms(1)), now));
+        // A frame made before the input (the clock read first) still does.
+        assert!(answers_input(Some(now + ms(1)), now));
+    }
+
+    /// Input acting after the frame last shown draws the next at once;
+    /// input the shown frame already answered doesn't.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn input_since_the_frame_shown_draws_at_once() {
+        use super::acted_since;
+        let at = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let ms = std::time::Duration::from_millis;
+        assert!(!acted_since(None, None));
+        assert!(!acted_since(None, Some(at)));
+        assert!(acted_since(Some(at), None));
+        assert!(acted_since(Some(at), Some(at - ms(1))));
+        assert!(!acted_since(Some(at), Some(at + ms(1))));
+        assert!(!acted_since(Some(at), Some(at)));
+    }
+
     /// A window at rest gives back Metal's queue, then its glyph atlas, each
     /// at its own delay past the trim, and nothing once both have gone.
     #[test]
@@ -9533,6 +9643,68 @@ mod tests {
         for left in [1.9, 2.5, 3.2, 8.0, 15.0] {
             assert_eq!(align_wait(ms(left), slow), None, "{left} ms at 60 Hz");
         }
+    }
+    /// A notch coming just after a refresh's tick shows on the next refresh:
+    /// applied as it comes (nothing waits for a tick) and drawn at once, its
+    /// frame hands over at the coming point. Applied at the next tick, as
+    /// notches were, it showed a refresh later.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_notch_just_after_a_tick_shows_on_the_next_refresh() {
+        use crate::scroll_resample::ScrollResampler;
+        use std::time::{Duration, Instant};
+        let period = Duration::from_nanos(8_333_333);
+        let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
+        let origin = Instant::now();
+        let tick = origin + period * 10 + ms(0.2);
+        let arrived = tick + ms(0.5);
+        let work = ms(1.5);
+        let next_refresh = origin + period * 11;
+        // As it comes.
+        let mut scroll = ScrollResampler::default();
+        scroll.set_wheel_eases(false);
+        scroll.notch_applied(arrived);
+        assert!(!scroll.pending(), "nothing left for a tick");
+        let mut latch = Latch::default();
+        let live = hands_over_live(scroll.active(arrived), scroll.notched());
+        let at = latch.decide(arrived + work, origin, period, live);
+        assert!(
+            at < next_refresh && next_refresh - at <= Latch::LEAD,
+            "on the next refresh"
+        );
+        // At the next tick: a refresh later.
+        let mut held = ScrollResampler::default();
+        held.set_wheel_eases(false);
+        held.push_wheel(arrived, (0., 30.));
+        assert_eq!(held.sample(tick + period, period), Some((0., 30.)));
+        let at = Latch::default().decide(tick + period + work, origin, period, true);
+        assert!(at > next_refresh, "a refresh later");
+    }
+    /// A notch's frame ready just past its refresh's point, before the
+    /// refresh, waits for the next point: the frame handed over at this
+    /// point shows on this refresh and it on the next, one each. Handed over
+    /// at once, as a live scroll's is, both landed on this refresh and the
+    /// next showed nothing new.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_notch_frame_ready_just_before_a_refresh_keeps_to_the_next() {
+        use std::time::{Duration, Instant};
+        let period = Duration::from_nanos(8_333_333);
+        let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
+        let origin = Instant::now();
+        let point = origin + period * 11 - Latch::LEAD;
+        let mut latch = Latch::default();
+        let first = latch.decide(point - ms(3.), origin, period, false);
+        assert_eq!(first, point);
+        let ready = point + ms(1.);
+        assert!(!hands_over_live(true, true));
+        let second = latch.decide(ready, origin, period, hands_over_live(true, true));
+        assert_eq!(second, point + period, "the next refresh's point");
+        // A trackpad's frame keeps handing over at once.
+        assert!(hands_over_live(true, false));
+        let mut latch = Latch::default();
+        latch.decide(point - ms(3.), origin, period, true);
+        assert_eq!(latch.decide(ready, origin, period, true), ready);
     }
     #[cfg(target_os = "macos")]
     #[test]
@@ -10744,7 +10916,25 @@ mod tests {
             held_after_user_event: true,
             held_after_wait: true,
         };
+        // Bounded: a loop that never wakes fails the run (winit used to
+        // wait for a message after `resumed` asked it to exit, and on an
+        // idle desktop none came).
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !flag.load(std::sync::atomic::Ordering::Acquire) {
+                if start.elapsed() >= std::time::Duration::from_secs(20) {
+                    eprintln!(
+                        "a_turns_pointer_moves_come_as_its_last_on_windows: the loop didn't return in 20 s"
+                    );
+                    std::process::exit(101);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
         event_loop.run_app(&mut probe).unwrap();
+        done.store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(probe.held, Some(999.));
         assert!(!probe.held_after_press, "a press hands the move on first");
         assert!(!probe.held_after_user_event, "so does the app's own event");

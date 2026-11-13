@@ -241,11 +241,23 @@ struct TermDamageState {
 
     /// Old terminal cursor point.
     last_cursor: Point,
+
+    /// zgx: lines the whole screen scrolled up since the damage was reset,
+    /// with the lines' damage moved up with them (`Term::scrolled`): line
+    /// `i`'s damage is at `lines[i + scrolled]`, a window sliding down
+    /// `lines` (`ordered` puts it back at the start), so a scroll is a count
+    /// and marking a line one addition.
+    scrolled: usize,
+
+    /// zgx: the screen's lines; `lines` holds a third of them more (`slack`),
+    /// room for the window to slide before the damage is whole.
+    screen: usize,
+    slack: usize,
 }
 
 impl TermDamageState {
     fn new(num_cols: usize, num_lines: usize) -> Self {
-        let lines = (0..num_lines)
+        let lines = (0..window(num_lines))
             .map(|line| LineDamageBounds::undamaged(line, num_cols))
             .collect();
 
@@ -253,6 +265,9 @@ impl TermDamageState {
             full: true,
             lines,
             last_cursor: Default::default(),
+            scrolled: 0,
+            screen: num_lines,
+            slack: window(num_lines) - num_lines,
         }
     }
 
@@ -261,10 +276,13 @@ impl TermDamageState {
         // Reset point, so old cursor won't end up outside of the viewport.
         self.last_cursor = Default::default();
         self.full = true;
+        self.scrolled = 0;
+        self.screen = num_lines;
+        self.slack = window(num_lines) - num_lines;
 
         self.lines.clear();
-        self.lines.reserve(num_lines);
-        for line in 0..num_lines {
+        self.lines.reserve(window(num_lines));
+        for line in 0..window(num_lines) {
             self.lines.push(LineDamageBounds::undamaged(line, num_cols));
         }
     }
@@ -278,14 +296,61 @@ impl TermDamageState {
     /// Expand `line`'s damage to span at least `left` to `right` column.
     #[inline]
     fn damage_line(&mut self, line: usize, left: usize, right: usize) {
-        self.lines[line].expand(left, right);
+        self.lines[line + self.scrolled].expand(left, right);
+    }
+
+    /// zgx: the screen's lines' damage at the start of `lines` again, after
+    /// scrolling slid it down: the lines new at the bottom (where nothing
+    /// was marked before they came) damaged whole.
+    fn ordered(&mut self, num_cols: usize) {
+        let scrolled = self.scrolled;
+        if scrolled == 0 {
+            return;
+        }
+        let screen = self.screen;
+        self.lines.copy_within(scrolled..scrolled + screen, 0);
+        for (row, line) in self.lines[..screen].iter_mut().enumerate() {
+            *line = if row + scrolled >= screen {
+                LineDamageBounds::new(row, 0, num_cols.saturating_sub(1))
+            } else {
+                LineDamageBounds::new(row, line.left, line.right)
+            };
+        }
     }
 
     /// Reset information about terminal damage.
     fn reset(&mut self, num_cols: usize) {
+        // Every line is reset, the window's slack too: put back in order is
+        // only for damage read. (A scroll changes no line's number, so they
+        // stay where they are.)
         self.full = false;
+        self.scrolled = 0;
         self.lines.iter_mut().for_each(|line| line.reset(num_cols));
     }
+
+    /// zgx: the whole screen scrolled up `lines`: each line's damage moves up
+    /// with its line (the window slides: `scrolled`), the lines new at the
+    /// bottom are damaged whole and the old cursor moves up (as the damage
+    /// is read: `ordered`, `Term::damage`). A count: no line is read.
+    fn scroll_up(&mut self, lines: usize) {
+        // Past a third of the screen's lines since the last reset, the rest
+        // go too: a frame bringing that many builds most rows anyway, and
+        // one refilling the screen (output pouring in) then turns its
+        // damage for a third of its scrolls, not all of them.
+        // The window has that third's room to slide in.
+        let scrolled = self.scrolled + lines;
+        if scrolled > self.slack {
+            self.full = true;
+            return;
+        }
+        self.scrolled = scrolled;
+    }
+}
+
+/// zgx: the damage lines kept for a screen of `lines`: a third more, the
+/// room a scroll slides the screen's damage down before it is whole.
+fn window(lines: usize) -> usize {
+    lines + lines / 3
 }
 
 pub struct Term<T> {
@@ -312,6 +377,14 @@ pub struct Term<T> {
     /// Pictures placed on the active grid, and on the inactive one.
     placements: Placements,
     inactive_placements: Placements,
+
+    /// zgx: whether a scroll from the top line scrolls the whole screen at
+    /// its newest lines, so its damage can turn (`TermDamageState::scroll_up`)
+    /// rather than all go: the scroll region is the screen, and the view is
+    /// at the bottom. Worked out again only as those change (`update_ring`),
+    /// so a scroll asks nothing of them. (A caller moving the view through
+    /// `grid_mut` leaves it as it was, which can only turn less.)
+    ring_ok: bool,
 
     /// Index into `charsets`, pointing to what ASCII is currently being mapped to.
     active_charset: CharsetIndex,
@@ -382,6 +455,10 @@ pub struct Config {
     /// zgx: whether device attributes announce sixel graphics (4). Off where
     /// the embedder can't show them, so programs don't send them.
     pub sixel: bool,
+
+    /// zgx: the name and version XTVERSION answers, `name(version)` as kitty,
+    /// foot and xterm give them; empty answers nothing.
+    pub version: String,
 }
 
 impl Default for Config {
@@ -394,6 +471,7 @@ impl Default for Config {
             kitty_keyboard: Default::default(),
             osc52: Default::default(),
             sixel: true,
+            version: String::new(),
         }
     }
 }
@@ -428,6 +506,7 @@ impl<T> Term<T> {
     {
         let old_display_offset = self.grid.display_offset();
         self.grid.scroll_display(scroll);
+        self.update_ring();
         self.event_proxy.send_event(Event::MouseCursorDirty);
 
         // Clamp vi mode cursor to the viewport.
@@ -462,6 +541,7 @@ impl<T> Term<T> {
             inactive_grid,
             placements: Placements::default(),
             inactive_placements: Placements::default(),
+            ring_ok: true,
             scroll_region,
             event_proxy,
             damage,
@@ -506,6 +586,12 @@ impl<T> Term<T> {
             return TermDamage::Full;
         }
 
+        // zgx: the old cursor moved up with its line as the screen scrolled
+        // (off the top, it damages the first row: a needless redraw at most).
+        let mut previous_cursor = previous_cursor;
+        let scrolled = self.damage.scrolled as i32;
+        previous_cursor.line = cmp::max(previous_cursor.line - scrolled, Line(0));
+
         // Add information about old cursor position and new one if they are not the same, so we
         // cover everything that was produced by `Term::input`.
         if self.damage.last_cursor != previous_cursor {
@@ -519,8 +605,29 @@ impl<T> Term<T> {
 
         // NOTE: damage which changes all the content when the display offset is non-zero (e.g.
         // scrolling) is handled via full damage.
+        let columns = self.columns();
+        self.damage.ordered(columns);
         let display_offset = self.grid().display_offset();
-        TermDamage::Partial(TermDamageIterator::new(&self.damage.lines, display_offset))
+        let screen = self.damage.screen;
+        TermDamage::Partial(TermDamageIterator::new(
+            &self.damage.lines[..screen],
+            display_offset,
+        ))
+    }
+
+    /// zgx: whether a scroll from the top turns the damage (`ring_ok`), after
+    /// the scroll region, the view or the screen's size changed.
+    fn update_ring(&mut self) {
+        let screen = Line(0)..Line(self.screen_lines() as i32);
+        self.ring_ok = self.scroll_region == screen && self.grid.display_offset() == 0;
+    }
+
+    /// zgx: lines the whole screen scrolled up since the damage was reset,
+    /// when the damage is partial: what was drawn of each line still shown
+    /// is that many rows lower, and its damage is where the line is now.
+    #[inline]
+    pub fn scrolled(&self) -> usize {
+        self.damage.scrolled
     }
 
     /// Resets the terminal damage information.
@@ -559,6 +666,7 @@ impl<T> Term<T> {
         if !placements.is_empty() {
             placements.shift(0, grid.history_size(), grid.screen_lines());
         }
+        self.update_ring();
 
         if self.config.kitty_keyboard != old_config.kitty_keyboard {
             self.keyboard_mode_stack = Vec::new();
@@ -804,6 +912,7 @@ impl<T> Term<T> {
 
         // Reset scrolling region.
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.update_ring();
 
         // Resize damage information.
         self.damage.resize(num_cols, num_lines);
@@ -845,6 +954,7 @@ impl<T> Term<T> {
         mem::swap(&mut self.placements, &mut self.inactive_placements);
         self.mode ^= TermMode::ALT_SCREEN;
         self.selection = None;
+        self.update_ring();
         self.mark_fully_damaged();
     }
 
@@ -922,7 +1032,18 @@ impl<T> Term<T> {
         if (top <= *line) && region.end > *line {
             *line = cmp::max(*line - lines, top);
         }
-        self.mark_fully_damaged();
+        // zgx: the whole screen, its newest lines shown, moves its lines'
+        // damage up with them: an embedder moves what it drew of them, and
+        // draws only the lines new at the bottom (`scrolled`): a count and a
+        // compare. Once the damage is whole (a third of the screen into a
+        // frame), a line feed pays one test, as it paid one store before.
+        if !self.damage.full {
+            if self.ring_ok && origin == Line(0) {
+                self.damage.scroll_up(lines);
+            } else {
+                self.mark_fully_damaged();
+            }
+        }
     }
 
     fn deccolm(&mut self)
@@ -2288,6 +2409,7 @@ impl<T: EventListener> Handler for Term<T> {
             }
             ansi::ClearMode::Saved if self.history_size() > 0 => {
                 self.grid.clear_history();
+                self.update_ring();
                 if !self.placements.is_empty() {
                     self.placements
                         .retain(|placement| placement.point.line >= 0);
@@ -2337,6 +2459,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.placements.clear();
         self.inactive_placements.clear();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.update_ring();
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();
         self.title = None;
@@ -2689,6 +2812,7 @@ impl<T: EventListener> Handler for Term<T> {
         let screen_lines = Line(self.screen_lines() as i32);
         self.scroll_region.start = cmp::min(start, screen_lines);
         self.scroll_region.end = cmp::min(end, screen_lines);
+        self.update_ring();
         self.goto(0, 0);
     }
 
@@ -2783,9 +2907,66 @@ impl<T: EventListener> Handler for Term<T> {
             })));
     }
 
+    // zgx: as `CSI 6 ; height ; width t`, from the embedder's cell size as
+    // the text area's in pixels is.
+    #[inline]
+    fn cell_size_pixels(&mut self) {
+        self.event_proxy
+            .send_event(Event::TextAreaSizeRequest(Arc::new(move |window_size| {
+                format!(
+                    "\x1b[6;{};{}t",
+                    window_size.cell_height, window_size.cell_width
+                )
+            })));
+    }
+
     #[inline]
     fn text_area_size_chars(&mut self) {
         let text = format!("\x1b[8;{};{}t", self.screen_lines(), self.columns());
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+
+    // zgx: XTVERSION, as `DCS > | name(version) ST`.
+    fn report_version(&mut self) {
+        if self.config.version.is_empty() {
+            return;
+        }
+        let text = format!("\x1bP>|{}\x1b\\", self.config.version);
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+
+    // zgx: DECRQSS, as xterm answers it: `DCS 1 $ r`, the setting as a
+    // program would set it, and its final bytes; `DCS 0 $ r` for one not
+    // kept. The text's attributes (SGR, with underline styles as `4:3`, as
+    // nvim looks for curly underlines), the cursor's style (DECSCUSR) and
+    // the scrolling region (DECSTBM).
+    fn report_setting(&mut self, setting: &[u8]) {
+        let value = match setting {
+            b"m" => Some(sgr_setting(&self.grid.cursor.template)),
+            b" q" => {
+                let style = self
+                    .cursor_style
+                    .unwrap_or(self.config.default_cursor_style);
+                let steady = match style.shape {
+                    CursorShape::Underline => 4,
+                    CursorShape::Beam => 6,
+                    CursorShape::Block | CursorShape::HollowBlock | CursorShape::Hidden => 2,
+                };
+                Some(format!("{}", steady - u8::from(style.blinking)))
+            }
+            b"r" => {
+                let region = &self.scroll_region;
+                Some(format!("{};{}", region.start.0 + 1, region.end.0))
+            }
+            _ => None,
+        };
+        let text = match value {
+            Some(value) => {
+                let setting = str::from_utf8(setting).unwrap_or_default();
+                format!("\x1bP1$r{value}{setting}\x1b\\")
+            }
+            None => String::from("\x1bP0$r\x1b\\"),
+        };
         self.event_proxy.send_event(Event::PtyWrite(text));
     }
 
@@ -2843,6 +3024,53 @@ const TERMCAPS: &[(&str, Option<&str>)] = &[
     ),
     ("Su", None),
 ];
+
+/// zgx: the text attributes `template` holds as SGR would set them, after a
+/// reset (`0`): underline styles as `4:2` to `4:5`, colours by name, or by
+/// index or value in their colon forms (`38:5:n`, `48:2:r:g:b`; nvim reads
+/// direct colour only so), the underline's as `58`.
+fn sgr_setting(template: &Cell) -> String {
+    let mut text = String::from("0");
+    let flags = template.flags;
+    let codes = [
+        (Flags::BOLD, "1"),
+        (Flags::DIM, "2"),
+        (Flags::ITALIC, "3"),
+        (Flags::UNDERLINE, "4"),
+        (Flags::DOUBLE_UNDERLINE, "4:2"),
+        (Flags::UNDERCURL, "4:3"),
+        (Flags::DOTTED_UNDERLINE, "4:4"),
+        (Flags::DASHED_UNDERLINE, "4:5"),
+        (Flags::INVERSE, "7"),
+        (Flags::HIDDEN, "8"),
+        (Flags::STRIKEOUT, "9"),
+    ];
+    for (flag, code) in codes {
+        if flags.contains(flag) {
+            text.push(';');
+            text.push_str(code);
+        }
+    }
+    let mut color = |color: Color, base: u8, extended: u8| match color {
+        Color::Named(name) if (name as usize) < 8 => {
+            text.push_str(&format!(";{}", base + name as u8));
+        }
+        Color::Named(name) if (name as usize) < 16 => {
+            text.push_str(&format!(";{}", base + 60 + name as u8 - 8));
+        }
+        Color::Named(_) => {}
+        Color::Indexed(index) => text.push_str(&format!(";{extended}:5:{index}")),
+        Color::Spec(Rgb { r, g, b }) => text.push_str(&format!(";{extended}:2:{r}:{g}:{b}")),
+    };
+    color(template.fg, 30, 38);
+    color(template.bg, 40, 48);
+    match template.underline_color() {
+        Some(Color::Indexed(index)) => text.push_str(&format!(";58:5:{index}")),
+        Some(Color::Spec(Rgb { r, g, b })) => text.push_str(&format!(";58:2:{r}:{g}:{b}")),
+        _ => {}
+    }
+    text
+}
 
 /// zgx: hex text (either case) as the bytes it encodes, or none if it isn't.
 fn decode_hex(hex: &[u8]) -> Option<Vec<u8>> {
@@ -3760,6 +3988,94 @@ mod tests {
         assert_eq!(term.grid.cursor.point, Point::new(Line(4), Column(0)));
     }
 
+    /// zgx: a scroll from the top turns the damage (a line scrolled, not all
+    /// damaged) only while the scroll region is the screen and the view at
+    /// its newest lines: worked out again whenever the region, the view or
+    /// the screen's size changes, whichever way it goes.
+    #[test]
+    fn turning_damage_follows_the_region_view_and_size() {
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 5), VoidListener);
+        // A line at the scroll region's bottom: does the scroll it makes turn
+        // the damage?
+        let turns = |term: &mut Term<VoidListener>| {
+            term.reset_damage();
+            let bottom = term.scroll_region.end.0 - 1;
+            term.goto(bottom, 0);
+            term.linefeed();
+            let turned = term.scrolled() == 1;
+            term.reset_damage();
+            turned
+        };
+        for _ in 0..10 {
+            term.linefeed();
+        }
+        assert!(turns(&mut term), "at first");
+        // The scroll region.
+        term.set_scrolling_region(2, None);
+        assert!(!turns(&mut term), "in a region below the top");
+        term.set_scrolling_region(1, Some(3));
+        assert!(!turns(&mut term), "in a region from the top");
+        term.set_scrolling_region(1, None);
+        assert!(turns(&mut term), "the region the screen again");
+        // The view.
+        term.scroll_display(Scroll::Delta(2));
+        assert!(!turns(&mut term), "scrolled back");
+        term.scroll_display(Scroll::Bottom);
+        assert!(turns(&mut term), "at the bottom again");
+        // The screen's size, which resets the region.
+        term.set_scrolling_region(2, None);
+        term.resize(TermSize::new(10, 6));
+        assert!(turns(&mut term), "resized");
+        // The other screen, whose view is its own.
+        term.scroll_display(Scroll::Delta(2));
+        term.swap_alt();
+        assert!(turns(&mut term), "on the other screen");
+        term.swap_alt();
+        assert!(!turns(&mut term), "back, still scrolled back");
+        term.scroll_display(Scroll::Bottom);
+        // A full reset, which resets the region and the view.
+        term.set_scrolling_region(2, None);
+        term.reset_state();
+        assert!(turns(&mut term), "reset");
+        // The scrollback cleared, which brings the view down.
+        for _ in 0..10 {
+            term.linefeed();
+        }
+        term.scroll_display(Scroll::Delta(2));
+        term.clear_screen(ansi::ClearMode::Saved);
+        assert!(turns(&mut term), "the scrollback cleared");
+        // A scrollback set shorter, which brings it down too.
+        for _ in 0..10 {
+            term.linefeed();
+        }
+        term.scroll_display(Scroll::Delta(2));
+        term.set_options(Config {
+            scrolling_history: 0,
+            ..Config::default()
+        });
+        assert!(turns(&mut term), "the scrollback shortened");
+    }
+
+    /// zgx: past a third of the screen's lines scrolled since the damage
+    /// was reset, all of it is damaged: the rows a frame brings are most of
+    /// what it would build anyway.
+    #[test]
+    fn turning_damage_stops_past_a_third_of_the_screen() {
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 9), VoidListener);
+        term.goto(8, 0);
+        term.reset_damage();
+        for scrolled in 1..=3 {
+            term.linefeed();
+            assert_eq!(term.scrolled(), scrolled);
+            assert!(
+                matches!(term.damage(), TermDamage::Partial(_)),
+                "{scrolled} lines"
+            );
+        }
+        term.linefeed();
+        assert!(matches!(term.damage(), TermDamage::Full), "a fourth line");
+    }
+
     #[test]
     fn damage_public_usage() {
         let size = TermSize::new(10, 10);
@@ -4439,9 +4755,9 @@ mod grapheme_tests {
     }
 }
 
-/// zgx: XTGETTCAP's answers.
+/// zgx: XTGETTCAP's and XTVERSION's answers.
 #[cfg(test)]
-mod termcap_tests {
+mod report_tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -4483,6 +4799,47 @@ mod termcap_tests {
             answer(b"4D73"),
             "\x1bP1+r4D73=5C455D35323B25703125733B25703225735C303037\x1b\\"
         );
+    }
+
+    /// DECRQSS: SGR after a reset, the cursor's style, the scrolling region,
+    /// and not valid for a setting not kept.
+    #[test]
+    fn settings_are_reported_as_set() {
+        let answers = Answers::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 5), answers.clone());
+        term.terminal_attribute(Attr::Undercurl);
+        term.terminal_attribute(Attr::Foreground(Color::Named(NamedColor::BrightBlue)));
+        term.terminal_attribute(Attr::UnderlineColor(Some(Color::Indexed(9))));
+        term.report_setting(b"m");
+        term.set_cursor_style(Some(CursorStyle {
+            shape: CursorShape::Underline,
+            blinking: true,
+        }));
+        term.report_setting(b" q");
+        term.set_scrolling_region(2, Some(4));
+        term.report_setting(b"r");
+        term.report_setting(b"\"p");
+        assert_eq!(
+            *answers.0.lock().unwrap(),
+            "\x1bP1$r0;4:3;94;58:5:9m\x1b\\\x1bP1$r3 q\x1b\\\x1bP1$r2;4r\x1b\\\x1bP0$r\x1b\\"
+        );
+    }
+
+    /// XTVERSION answers with the name and version set, and nothing
+    /// without one.
+    #[test]
+    fn the_version_is_answered_once_set() {
+        let answers = Answers::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 3), answers.clone());
+        term.report_version();
+        assert_eq!(*answers.0.lock().unwrap(), "");
+        let config = Config {
+            version: "zgx(1.0)".into(),
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &TermSize::new(10, 3), answers.clone());
+        term.report_version();
+        assert_eq!(*answers.0.lock().unwrap(), "\x1bP>|zgx(1.0)\x1b\\");
     }
 
     /// Every capability reported is found by its name, hex encoded.

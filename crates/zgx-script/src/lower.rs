@@ -2764,7 +2764,10 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
 fn drive_of(
     shaders: &crate::node::Shaders,
     vm: &Rc<Vm>,
-) -> Option<Box<dyn FnMut() -> zgx::shader_drive::ShaderDrive>> {
+) -> Option<(
+    zgx::shader_drive::ShaderTokens,
+    Box<dyn FnMut() -> zgx::shader_drive::ShaderDrive>,
+)> {
     let vm = vm.clone();
     let props = shaders.drive.as_ref()?;
     let fill = shaders.layer.is_none();
@@ -2774,9 +2777,9 @@ fn drive_of(
     } else {
         props.layer_clock
     };
-    let literal = match fill {
-        true => shaders.params,
-        false => shaders.layer_params,
+    let (literal, tokens) = match fill {
+        true => (shaders.params, shaders.tokens),
+        false => (shaders.layer_params, shaders.layer_tokens),
     };
     let params_of = props.layer_params_of.clone();
     let on = props.layer_on.as_ref().map(resolve_owned);
@@ -2785,7 +2788,7 @@ fn drive_of(
         shaders.layer_reach.unwrap_or(0.),
     );
     let mut last = literal.unwrap_or_default();
-    Some(Box::new(move || {
+    let make: Box<dyn FnMut() -> zgx::shader_drive::ShaderDrive> = Box::new(move || {
         if let Some(f) = &params_of {
             let read = vm.call::<mlua::Value>(f, ()).and_then(|value| {
                 crate::node::shader_params(&vm.lua, &value, "layer_params", None)
@@ -2808,7 +2811,8 @@ fn drive_of(
             frost: 0.,
             running: clock,
         }
-    }))
+    });
+    Some((tokens, make))
 }
 fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     use zgx::web_view::{WebViewEvent, web_view, web_view_src};
@@ -4152,10 +4156,14 @@ fn styled(
                         params: *params,
                     });
                     // Theme colours bind to their slots: resolved where the
-                    // node is styled, and again when the theme changes.
+                    // node is styled, and again when the theme changes. A
+                    // driven fill's are the drive's (`shader_drive::attach_themed`):
+                    // in the style they'd put its time back.
                     let mut styles = styles;
                     for (slot, token) in tokens.iter().enumerate() {
-                        if let Some(token) = token {
+                        if let Some(token) = token
+                            && !driven
+                        {
                             styles =
                                 styles.token(zgx::theme::Field::ShaderParam(slot as u8), *token);
                         }
@@ -4213,9 +4221,9 @@ fn styled(
     }
     // Its shader kept up by the engine, once it has its style.
     if let Some(s) = shaders.filter(|s| s.drive.is_some())
-        && let Some(make) = drive_of(s, vm)
+        && let Some((tokens, make)) = drive_of(s, vm)
     {
-        view = zgx::shader_drive::attach(need(&mut cx), view, make);
+        view = zgx::shader_drive::attach_themed(need(&mut cx), view, tokens, make);
     }
     if let Some(disabled) = &node.disabled {
         let (disabled, vm) = (resolve_owned(disabled), vm.clone());

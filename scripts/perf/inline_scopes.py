@@ -58,7 +58,12 @@ def mir(root, crate, target):
                     "--", "--emit=mir"], cwd=root, env=env, check=True)
     name = crate.replace("-", "_")
     out = target / TRIPLE if TRIPLE else target
-    dumps = sorted((out / "release" / "deps").glob(f"{name}-*.mir"), key=lambda p: p.stat().st_mtime)
+    # Cargo 1.99 leaves the dump in release/deps; 1.100's build directory puts
+    # each package's intermediates in release/build/<package>/<hash>/out.
+    release = out / "release"
+    found = [*(release / "deps").glob(f"{name}-*.mir"),
+             *(release / "build" / crate).glob(f"*/out/{name}-*.mir")]
+    dumps = sorted(found, key=lambda p: p.stat().st_mtime)
     if not dumps:
         raise SystemExit(f"no MIR for {crate} under {target}")
     return dumps[-1].read_text(errors="replace")

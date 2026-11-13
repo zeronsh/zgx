@@ -6,6 +6,7 @@
 //! expired prefixes replay their original native key/text events; handled actions
 //! consume them. Focus, ownership and input-method changes cancel pending input.
 pub use crate::action_context::{ContextParseError, ContextPredicate, KeyContext};
+use crate::time::Instant;
 use crate::{
     input::{InputEvent, Key, Modifiers},
     scene::NodeId,
@@ -15,7 +16,7 @@ use std::{
     cell::RefCell,
     fmt,
     rc::{Rc, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// A typed command value: key bindings dispatch it and `View::on_action`
