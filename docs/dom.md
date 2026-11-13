@@ -69,6 +69,7 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 | `checkbox`, `slider`, `progress` | `<input type=checkbox>` in a `<label>`, `<input type=range>`, `<progress>` (NaN: indeterminate) |
 | `scroll`, `scroll_x` | `overflow: auto`, its offset signal both ways |
 | `virtual_list` | a scroller holding only the rows that show, positioned in a spacer as tall as all of them |
+| `canvas` | a `<canvas>` filling the element, drawn with Canvas 2D at the element's size (ResizeObserver) and the screen's pixel ratio: fills and strokes (caps, joins, miter limit, dashes) of rectangles, rounded rectangles, ellipses, lines and paths, solid, linear-gradient and striped brushes, nonzero and even-odd rules, clips, and text over the shapes. It draws again as the size or what the drawing reads changes, and only when the commands differ |
 | `image` | a `<canvas>` with the image's pixels, `role=img` and its label |
 | `switch`, `keyed`, `child_when` | a region (`display: contents` unless styled) |
 | roles, labels, levels, live regions, checked, selected, expanded, values, descriptions, hidden, modal | ARIA: `role`, `aria-label`, `aria-level`, `aria-live`, `aria-checked`… |
@@ -86,7 +87,7 @@ Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau apps' host services**: `ui.fetch`, sockets, files, plugins from the disk, hot reload and `zgx check` need hosts zgx-dom doesn't have yet; images in Luau apps show their labels (zgx-script decodes them with zgx-gpu, which isn't linked in the browser).
-- **Not yet mapped**: a span's own context menu, canvas drawing (its display list maps to Canvas 2D), SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
+- **Not yet mapped**: a span's own context menu, SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 
 ## Performance
