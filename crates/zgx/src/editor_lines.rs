@@ -69,6 +69,10 @@ pub struct SpanStyle {
     pub underline: bool,
     /// In the monospaced font (inline code): shaped so.
     pub mono: bool,
+    /// Room round its text inside its background, across and down (a chip): across, it takes room in the line.
+    pub padding: Option<[f32; 2]>,
+    /// Its background's corner radius.
+    pub radius: Option<f32>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -119,6 +123,12 @@ impl SpanStyle {
         self.underline = true;
         self
     }
+    /// Its background as a chip: `padding` across and down round its text, corners of `radius`.
+    pub const fn chip(mut self, padding: [f32; 2], radius: f32) -> Self {
+        self.padding = Some(padding);
+        self.radius = Some(radius);
+        self
+    }
     /// Its text in the monospaced font.
     pub const fn mono(mut self) -> Self {
         self.mono = true;
@@ -134,6 +144,8 @@ impl SpanStyle {
         self.line_height = self.line_height.or(style.line_height);
         self.underline |= style.underline;
         self.mono |= style.mono;
+        self.padding = self.padding.or(style.padding);
+        self.radius = self.radius.or(style.radius);
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
@@ -145,6 +157,8 @@ impl SpanStyle {
             && self.line_height.is_none()
             && !self.underline
             && !self.mono
+            && self.padding.is_none()
+            && self.radius.is_none()
     }
     /// Whether it changes how its text is shaped (and so its width or height).
     fn shapes(&self) -> bool {
@@ -153,6 +167,7 @@ impl SpanStyle {
             || self.size.is_some()
             || self.line_height.is_some()
             || self.mono
+            || self.padding.is_some()
     }
 }
 /// Room around one line of a text area (`EditorHandle::set_line_insets`): a list item's indent, a heading's space
@@ -345,6 +360,8 @@ pub(crate) fn styled_line(
                 font_size: style.size.unwrap_or(size),
                 color: style.color.unwrap_or(color),
                 background: style.background,
+                padding: style.padding.unwrap_or_default(),
+                radius: style.radius.unwrap_or_default(),
                 underline: style
                     .underline
                     .then(|| crate::rich_text::Decoration::new(1.)),
