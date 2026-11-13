@@ -244,3 +244,90 @@ async fn a_radio_groups_arrows_wrap_and_choose() {
     mounted.unmount();
     host.remove();
 }
+
+#[derive(Debug)]
+struct Card(u32);
+
+fn pointer_at(target: &web_sys::Element, kind: &str, x: f64, y: f64) {
+    let init = web_sys::PointerEventInit::new();
+    init.set_bubbles(true);
+    init.set_cancelable(true);
+    init.set_client_x(x as i32);
+    init.set_client_y(y as i32);
+    init.set_is_primary(true);
+    let event = web_sys::PointerEvent::new_with_event_init_dict(kind, &init).unwrap();
+    target.dispatch_event(&event).unwrap();
+}
+
+#[wasm_bindgen_test]
+fn a_drag_from_a_listener_drops_on_what_takes_it() {
+    let runtime = Runtime::new();
+    let log: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (dropped, ended) = (log.clone(), log.clone());
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column()
+            .gap(20.)
+            .child(
+                column()
+                    .id("card")
+                    .w(80.)
+                    .h(30.)
+                    .on_drag(|| Card(7))
+                    .on_drag_end::<Card>(move |card, accepted| {
+                        ended
+                            .borrow_mut()
+                            .push(format!("end {} {accepted}", card.0));
+                    })
+                    .child(text("Card")),
+            )
+            .child(
+                column()
+                    .id("bin")
+                    .w(120.)
+                    .h(60.)
+                    .on_drop::<Card>(move |card, _| {
+                        dropped.borrow_mut().push(format!("dropped {}", card.0));
+                    })
+                    .child(text("Bin")),
+            ),
+    );
+    let (card, bin) = (find(&host, "[data-id=card]"), find(&host, "[data-id=bin]"));
+    let (c, b) = (
+        card.get_bounding_client_rect(),
+        bin.get_bounding_client_rect(),
+    );
+    let (cx, cy) = (c.left() + 10., c.top() + 10.);
+    pointer_at(&card, "pointerdown", cx, cy);
+    // Past the threshold: the drag starts, a copy following the pointer.
+    pointer_at(&card, "pointermove", cx + 12., cy + 12.);
+    let ghosts = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .body()
+        .unwrap()
+        .last_element_child()
+        .unwrap();
+    assert_eq!(ghosts.text_content().unwrap(), "Card");
+    let (bx, by) = (b.left() + 30., b.top() + 30.);
+    pointer_at(&bin, "pointermove", bx, by);
+    pointer_at(&bin, "pointerup", bx, by);
+    assert_eq!(*log.borrow(), ["dropped 7", "end 7 true"]);
+    // Dropped where nothing takes it: not accepted.
+    log.borrow_mut().clear();
+    pointer_at(&card, "pointerdown", cx, cy);
+    pointer_at(&card, "pointermove", cx + 12., cy + 12.);
+    let body = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .body()
+        .unwrap();
+    pointer_at(&body, "pointerup", c.right() + 300., cy);
+    assert_eq!(*log.borrow(), ["end 7 false"]);
+    mounted.unmount();
+    host.remove();
+}
