@@ -43,6 +43,7 @@ mod element;
 mod elements_report;
 mod estimate;
 mod fetch_policy;
+mod journal;
 mod json;
 pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
 mod atoms;
@@ -102,7 +103,7 @@ mod value;
 mod variants;
 mod windows;
 
-pub use bundle::{Bundle, BundleFile, build};
+pub use bundle::{Bundle, BundleFile, MemoryFiles, build};
 pub use calls::{Body, Request, Response};
 pub use command::{Command, DroppedShortcut};
 pub use design::DesignLint;
@@ -174,7 +175,7 @@ pub(crate) type Functions = Rc<RefCell<HashMap<String, Rc<dyn Fn(Value) -> Value
 
 /// One script's VM.
 /// `.luaurc`'s `aliases` in `dir`, resolved against it.
-fn read_aliases(dir: &std::path::Path, files: Files) -> HashMap<String, PathBuf> {
+fn read_aliases(dir: &std::path::Path, files: &Files) -> HashMap<String, PathBuf> {
     let Ok(text) = files.read_to_string(&dir.join(".luaurc")) else {
         return HashMap::new();
     };
@@ -1081,10 +1082,57 @@ pub struct Registry {
 }
 /// Where a host's files come from: the disk, or a bundle compiled into the
 /// app (which reads nothing from the disk), with what its scripts may be.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum Files {
     Disk,
     Bundle(&'static Bundle, Code),
+    /// Files held in memory (`ScriptHost::from_files`).
+    Memory(std::sync::Arc<MemoryFiles>, Code),
+}
+/// Why a reload in place (`ScriptHost::retarget`) or a trial load
+/// (`ScriptHost::validate`) failed.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReloadError {
+    /// What went wrong, as a reload reports it.
+    pub message: String,
+    /// Whether the load was stopped for running past its time budget
+    /// (`Limits::load`), rather than failing.
+    pub timed_out: bool,
+}
+impl std::fmt::Display for ReloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for ReloadError {}
+impl ReloadError {
+    /// `message` from a load that began with the last budget stop at
+    /// `mark` (`interrupt::stop_mark`): timed out if one came since.
+    fn of(message: String, mark: Option<u64>) -> Self {
+        Self {
+            timed_out: interrupt::stop_mark() != mark,
+            message,
+        }
+    }
+}
+/// Where an app's scripts come from, other than the disk
+/// (`ScriptHost::from_files`).
+#[doc(hidden)]
+#[derive(Clone)]
+pub enum ScriptFiles {
+    /// A bundle the app's build compiled into it (`include_bundle!`).
+    Bundle(&'static Bundle),
+    /// Files held in memory: an update downloaded, say.
+    Memory(std::sync::Arc<MemoryFiles>),
+}
+impl ScriptFiles {
+    fn with(self, code: Code) -> Files {
+        match self {
+            ScriptFiles::Bundle(bundle) => Files::Bundle(bundle, code),
+            ScriptFiles::Memory(memory) => Files::Memory(memory, code),
+        }
+    }
 }
 /// What a bundle's scripts may be (`ScriptHost::code`). Luau checks no
 /// bytecode it loads: bytecode crafted to corrupt the VM steps out of the
@@ -1108,33 +1156,55 @@ impl Files {
     /// loads, so a file of crafted bytecode (a plugin's, or a module one
     /// requires) would corrupt the VM and step out of the sandbox: read as
     /// source, it just fails to parse.
-    fn chunk(self, chunk: mlua::chunk::Chunk<'_>) -> mlua::chunk::Chunk<'_> {
+    fn chunk<'a>(&self, chunk: mlua::chunk::Chunk<'a>) -> mlua::chunk::Chunk<'a> {
         match self {
-            Files::Bundle(_, Code::VerifiedBytecode) => chunk,
-            Files::Bundle(_, Code::Source) | Files::Disk => {
+            Files::Bundle(_, Code::VerifiedBytecode) | Files::Memory(_, Code::VerifiedBytecode) => {
+                chunk
+            }
+            Files::Bundle(_, Code::Source) | Files::Memory(_, Code::Source) | Files::Disk => {
                 chunk.set_mode(mlua::chunk::ChunkMode::Text)
             }
         }
     }
-    pub(crate) fn read(self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    pub(crate) fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         match self {
             Files::Disk => std::fs::read(path),
+            Files::Memory(files, _) => files.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's files")
+            }),
             Files::Bundle(bundle, _) => bundle.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's bundle")
             }),
         }
     }
-    fn read_to_string(self, path: &std::path::Path) -> std::io::Result<String> {
+    /// The root its files seem to be under, unless they're the disk's.
+    fn root(&self) -> Option<PathBuf> {
+        match self {
+            Files::Disk => None,
+            Files::Bundle(bundle, _) => Some(PathBuf::from(bundle.root)),
+            Files::Memory(memory, _) => Some(PathBuf::from(memory.root_path())),
+        }
+    }
+    /// The packages it holds (none on the disk: `ScriptHost::package`).
+    fn packages(&self) -> Vec<String> {
+        match self {
+            Files::Disk => Vec::new(),
+            Files::Bundle(bundle, _) => bundle.packages(),
+            Files::Memory(memory, _) => memory.packages(),
+        }
+    }
+    fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String> {
         String::from_utf8(self.read(path)?).map_err(std::io::Error::other)
     }
-    fn is_dir(self, path: &std::path::Path) -> bool {
+    fn is_dir(&self, path: &std::path::Path) -> bool {
         match self {
             Files::Disk => path.is_dir(),
             Files::Bundle(bundle, _) => bundle.is_dir(path),
+            Files::Memory(files, _) => files.is_dir(path),
         }
     }
     /// The files in directory `dir`.
-    fn list(self, dir: &std::path::Path) -> Vec<PathBuf> {
+    fn list(&self, dir: &std::path::Path) -> Vec<PathBuf> {
         match self {
             Files::Disk => std::fs::read_dir(dir)
                 .into_iter()
@@ -1142,6 +1212,7 @@ impl Files {
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .collect(),
             Files::Bundle(bundle, _) => bundle.list(dir),
+            Files::Memory(files, _) => files.list(dir),
         }
     }
 }
@@ -1173,7 +1244,7 @@ impl Script {
         }
     }
     /// Its source, or (from a bundle) its bytecode.
-    fn code(&self, files: Files) -> Result<Vec<u8>, String> {
+    fn code(&self, files: &Files) -> Result<Vec<u8>, String> {
         match self {
             Script::File(path) | Script::Plugin { path, .. } => files
                 .read(path)
@@ -1214,7 +1285,7 @@ fn require_module<const LENDING: bool>(
         plugin_name,
         all_packages,
     } = state;
-    let files = *files;
+    let files = files.clone();
     let plugin = LENDING;
     let plugin_name: &Option<String> = if LENDING { plugin_name } else { &None };
     let Some(root) = &root else {
@@ -1440,7 +1511,7 @@ fn require_module<const LENDING: bool>(
             .and_then(|h| h.sources.compiled(&path, &code))
             // Compiled ahead while the app's window was made (`compile_ahead`).
             .or_else(|| sources::prefetched(&code)),
-        Files::Bundle(..) => None,
+        Files::Bundle(..) | Files::Memory(..) => None,
     };
     let bytecode = match package.as_deref() {
         Some(package) => package.bytecode(),
@@ -1657,8 +1728,11 @@ impl IssueLog {
 type ErrorHooks = Rc<RefCell<Vec<Rc<dyn Fn(&str)>>>>;
 struct Inner {
     runtime: Runtime,
-    app: Script,
-    files: Files,
+    /// The app's script, and where its files come from: what `retarget`
+    /// moves to another app's. Shared, so reading it copies no inline
+    /// script's code.
+    app: RefCell<Rc<Script>>,
+    files: RefCell<Files>,
     /// `async_action`s, which `ui.call` runs.
     async_actions: calls::AsyncActions,
     /// The transport `ui.fetch` and remote images use (`fetcher`).
@@ -1743,6 +1817,8 @@ struct Inner {
     stamps: RefCell<Vec<(PathBuf, Option<SystemTime>)>>,
     /// Files scripts `require`d in the last load: watched with the scripts.
     required: RefCell<Vec<PathBuf>>,
+    /// What a load writes to state that outlives it, undone if it fails.
+    journal: Rc<journal::Journal>,
     /// The packages lent to each plugin, and how many of their modules it
     /// required: the load under way's, and the last successful one's
     /// (`contributions`).
@@ -1877,8 +1953,8 @@ impl ScriptHost {
         let persist = persist::Persist::new(runtime, warnings.clone());
         let host = Self(Rc::new(Inner {
             runtime: runtime.clone(),
-            app,
-            files: Files::Disk,
+            app: RefCell::new(Rc::new(app)),
+            files: RefCell::new(Files::Disk),
             async_actions: Rc::default(),
             fetcher: Rc::default(),
             connector: Rc::default(),
@@ -1945,6 +2021,7 @@ impl ScriptHost {
             error: runtime.signal(None),
             stamps: RefCell::default(),
             required: RefCell::default(),
+            journal: Rc::default(),
             lent: RefCell::default(),
             lent_compiled: RefCell::default(),
             lent_compiles: Cell::new(0),
@@ -1988,35 +2065,130 @@ impl ScriptHost {
     /// `require`, `.luaurc` aliases, packages, theme files, images and
     /// plugins included, and `watch` watches nothing.
     pub fn bundled(runtime: &Runtime, bundle: &'static Bundle, entry: &str) -> Self {
-        let root = PathBuf::from(bundle.root);
-        let mut host = Self::with(runtime, Script::File(root.join(entry)))
-            .configure(|inner| inner.files = Files::Bundle(bundle, Code::VerifiedBytecode));
+        Self::from_files(
+            runtime,
+            ScriptFiles::Bundle(bundle),
+            entry,
+            Code::VerifiedBytecode,
+        )
+    }
+    /// The scripts in `files` (a bundle, or files held in memory, as an
+    /// update brought them), starting at `entry`, loading as `code` allows:
+    /// as `bundled`, nothing read from the disk and nothing watched. Files
+    /// in memory go with the last host holding them.
+    #[doc(hidden)]
+    pub fn from_files(runtime: &Runtime, files: ScriptFiles, entry: &str, code: Code) -> Self {
+        let files = files.with(code);
+        let root = files.root().expect("a bundle or files in memory");
+        let mut host = Self::with(runtime, Script::File(root.join(entry)));
         // Its packages, as `build::bundle` stored them.
-        let mut names: Vec<&str> = bundle
-            .files
-            .iter()
-            .filter_map(|file| {
-                let rest = file.path.strip_prefix(bundle::build::PACKAGES)?;
-                Some(rest.strip_prefix('/')?.split_once('/')?.0)
-            })
-            .collect();
-        names.dedup();
-        for name in names {
-            let dir = root.join(bundle::build::PACKAGES).join(name);
+        for name in files.packages() {
+            let dir = root.join(bundle::build::PACKAGES).join(&name);
             host = host.package(name, dir);
         }
-        host.0
-            .assets
-            .set_files(Files::Bundle(bundle, Code::VerifiedBytecode));
-        // Theme files from the bundle; other hosts' still from the disk.
-        zgx::theme::Themes::of(runtime).set_reader(Some(Rc::new(move |path: &std::path::Path| {
-            if path.starts_with(&root) {
-                Files::Bundle(bundle, Code::VerifiedBytecode).read_to_string(path)
-            } else {
-                std::fs::read_to_string(path)
-            }
-        })));
+        let host = host.configure(|inner| *inner.files.get_mut() = files);
+        host.read_through_files();
         host
+    }
+    /// The scripts in `files`, starting at `entry`, loaded in place of the
+    /// app's: as a reload, the interface built again with its state kept
+    /// (`ui.state`, `ui.persist`, `ui.shared`, web views), images and theme
+    /// files read from `files` from now on, and what was compiled of the
+    /// old scripts let go. Loads as the host's scripts do (`Code`). If the
+    /// load fails, nothing changes: the app keeps its scripts, files,
+    /// interface and state (writes the failed scripts made undone).
+    #[doc(hidden)]
+    pub fn retarget(&self, files: ScriptFiles, entry: &str) -> Result<(), ReloadError> {
+        let files = files.with(self.code_mode());
+        let root = files.root().expect("a bundle or files in memory");
+        let before = (self.app(), self.files());
+        let app = Script::File(root.join(entry));
+        // Its state, kept by the app's script: the new one's.
+        let keys = (before.0.key(), app.key());
+        self.move_store(&keys.0, &keys.1);
+        // The catalog read anew from the new files, its directory moved to
+        // their root: memory files have no times to tell an edit by, and a
+        // script's `ui.i18n` naming the same directory keeps the one loaded.
+        // Both the app script's directory, which `ui.i18n`'s `dir` is from.
+        let roots = (before.0.dir(), app.dir().unwrap_or_else(|| root.clone()));
+        *self.0.app.borrow_mut() = Rc::new(app);
+        *self.0.files.borrow_mut() = files;
+        self.read_through_files();
+        let catalog = self.0.locales.take();
+        if let (Some(kept), (Some(from), to)) = (&catalog, &roots) {
+            kept.load_in(&self.0.locales, &self.0.runtime, &self.files(), (from, to));
+        }
+        let mark = interrupt::stop_mark();
+        match self.reload_with(None) {
+            Ok(()) => {
+                // The old scripts' bytecode, kept to reload them faster.
+                self.0.sources.keep_only(std::iter::empty());
+                self.0.lent_compiled.borrow_mut().clear();
+                Ok(())
+            }
+            Err(message) => {
+                self.0.locales.put_back(catalog);
+                self.move_store(&keys.1, &keys.0);
+                *self.0.app.borrow_mut() = before.0;
+                *self.0.files.borrow_mut() = before.1;
+                self.read_through_files();
+                *self.0.stamps.borrow_mut() = self.stamps();
+                Err(ReloadError::of(message, mark))
+            }
+        }
+    }
+    /// Whether the scripts in `files`, starting at `entry`, load: run in a
+    /// host of their own, on a runtime of their own, and dropped. Nothing
+    /// of this host is touched (its state, shared and persisted values,
+    /// themes, web views). That host reaches nothing outside: no transport
+    /// for `ui.fetch` or `ui.socket` is given it, no folder, no saved
+    /// state, so a script that asks for them as it loads meets the same
+    /// refusal it would in any host without them (the load goes on, or
+    /// fails, as the script handles it). Same limits and `Code` as this
+    /// host's.
+    #[doc(hidden)]
+    pub fn validate(&self, files: ScriptFiles, entry: &str) -> Result<(), ReloadError> {
+        let runtime = Runtime::new();
+        let limits = self.0.limits;
+        let trial = Self::from_files(&runtime, files, entry, self.code_mode())
+            .limits(limits)
+            .error_banner(false);
+        let mark = interrupt::stop_mark();
+        let loaded = trial.load().map(drop);
+        loaded.map_err(|message| ReloadError::of(message, mark))
+    }
+    /// The state script `from` holds (`ui.state`), held by script `to`.
+    fn move_store(&self, from: &str, to: &str) {
+        let mut stores = self.0.stores.borrow_mut();
+        if let Some(store) = stores.remove(from) {
+            stores.insert(to.to_owned(), store);
+        }
+    }
+    /// How its scripts may load (`Code`): its files', or `Code::Source`
+    /// for the disk's (always read as source).
+    fn code_mode(&self) -> Code {
+        match &*self.0.files.borrow() {
+            Files::Bundle(_, code) | Files::Memory(_, code) => *code,
+            Files::Disk => Code::Source,
+        }
+    }
+    /// Its images and theme files read from its files: a bundle's or those
+    /// in memory (other hosts' still from the disk).
+    fn read_through_files(&self) {
+        let files = self.files();
+        self.0.assets.set_files(files.clone());
+        let Some(root) = files.root() else {
+            return;
+        };
+        zgx::theme::Themes::of(&self.0.runtime).set_reader(Some(Rc::new(
+            move |path: &std::path::Path| {
+                if path.starts_with(&root) {
+                    files.read_to_string(path)
+                } else {
+                    std::fs::read_to_string(path)
+                }
+            },
+        )));
     }
     /// What the scripts of its bundle may be (`Code`): `bundled`'s are the
     /// app's own build's, bytecode included (`Code::VerifiedBytecode`);
@@ -2025,8 +2197,11 @@ impl ScriptHost {
     #[doc(hidden)]
     pub fn code(self, code: Code) -> Self {
         self.configure(|inner| {
-            if let Files::Bundle(bundle, _) = inner.files {
-                inner.files = Files::Bundle(bundle, code);
+            let files = inner.files.get_mut();
+            match files {
+                Files::Bundle(bundle, _) => *files = Files::Bundle(bundle, code),
+                Files::Memory(memory, _) => *files = Files::Memory(memory.clone(), code),
+                Files::Disk => {}
             }
         })
     }
@@ -2085,7 +2260,7 @@ impl ScriptHost {
                 },
             };
         };
-        let sources: Vec<(PathBuf, String)> = match &self.0.app {
+        let sources: Vec<(PathBuf, String)> = match &*self.app() {
             Script::Inline { name, code } => vec![(PathBuf::from(name), code.clone())],
             script => script
                 .dir()
@@ -2233,6 +2408,14 @@ impl ScriptHost {
         });
         *self.0.error_watch.borrow_mut() = Some(Box::new(watch));
     }
+    /// The app's script (`app`), as it is now.
+    fn app(&self) -> Rc<Script> {
+        self.0.app.borrow().clone()
+    }
+    /// Where its files come from (`files`), as it is now.
+    fn files(&self) -> Files {
+        self.0.files.borrow().clone()
+    }
     fn configure(self, f: impl FnOnce(&mut Inner)) -> Self {
         let rules = rules::of(&self.0);
         let mut inner = Rc::try_unwrap(self.0)
@@ -2285,7 +2468,7 @@ impl ScriptHost {
         if let Err(dir) = i18n::load_dir(
             &inner.locales,
             &inner.runtime,
-            inner.files,
+            &inner.files.borrow(),
             dir,
             source,
             &inner.warnings,
@@ -3218,7 +3401,7 @@ impl ScriptHost {
     }
     /// The application script's file, if it was loaded from one.
     pub fn script_path(&self) -> Option<PathBuf> {
-        match &self.0.app {
+        match &*self.app() {
             Script::File(path) => Some(path.clone()),
             _ => None,
         }
@@ -3317,7 +3500,10 @@ impl ScriptHost {
     /// `ZGX_LINT=0`, skip it.
     fn lint_loaded(&self) {
         if !cfg!(debug_assertions)
-            || matches!(self.0.files, Files::Bundle(..))
+            || matches!(
+                *self.0.files.borrow(),
+                Files::Bundle(..) | Files::Memory(..)
+            )
             || zgx::env::var_os("ZGX_LINT").is_some_and(|v| v == "0")
         {
             return;
@@ -3340,7 +3526,7 @@ impl ScriptHost {
         // An app written inline is no file, but its plugins target what it
         // declares (`unknown-target`): read with them, its own findings left
         // as an inline app's always were.
-        let inline = match &self.0.app {
+        let inline = match &*self.app() {
             Script::Inline { name, code } if !files.is_empty() => {
                 let path = PathBuf::from(format!("<inline {name}>"));
                 sources.push((path.clone(), code.clone()));
@@ -3352,7 +3538,7 @@ impl ScriptHost {
         // or `zgx check` wrote them), as the names change: from every script
         // in its directory, as `zgx types` writes them, not only those this
         // run has loaded (a module not yet required declares tokens too).
-        if let Some(dir) = self.0.app.dir()
+        if let Some(dir) = self.app().dir()
             && app_types::types_file(&dir).is_file()
         {
             let _ = app_types::write_types(&dir);
@@ -3386,7 +3572,8 @@ impl ScriptHost {
         if self.0.check.get() != Some(true) {
             return;
         }
-        let Script::File(app) = &self.0.app else {
+        let script = self.app();
+        let Script::File(app) = &*script else {
             return;
         };
         let mut paths = vec![app.clone()];
@@ -3521,7 +3708,7 @@ impl ScriptHost {
     /// values change restyles in place.
     pub fn reload_if_changed(&self) -> bool {
         // Locale files, as theme files: what changed shows in place.
-        let themes = self.0.locales.reload_if_changed(self.0.files) | self.reload_themes();
+        let themes = self.0.locales.reload_if_changed(&self.files()) | self.reload_themes();
         // `changed` forgets edited images, so the reload reads them again.
         let assets = self.0.assets.changed();
         // From the first call on, loads keep their files' bytecode.
@@ -3584,7 +3771,7 @@ impl ScriptHost {
     }
     /// The app script's path as `require` keys modules (`module_key`).
     fn app_key(&self) -> Option<PathBuf> {
-        match &self.0.app {
+        match &*self.app() {
             Script::File(path) => Some(module_key(path)),
             _ => None,
         }
@@ -3729,7 +3916,11 @@ impl ScriptHost {
                     host.poll_check();
                 }
             }
-            if matches!(host.0.files, Files::Bundle(..)) && host.0.managed.borrow().is_empty() {
+            if matches!(
+                *host.0.files.borrow(),
+                Files::Bundle(..) | Files::Memory(..)
+            ) && host.0.managed.borrow().is_empty()
+            {
                 return;
             }
             loop {
@@ -3922,7 +4113,7 @@ impl ScriptHost {
             .0
             .plugin_dir
             .as_ref()
-            .map(|dir| self.0.files.list(dir))
+            .map(|dir| self.files().list(dir))
             .into_iter()
             .flatten()
             .filter(|path| path.extension().is_some_and(|ext| ext == "luau"))
@@ -3979,7 +4170,7 @@ impl ScriptHost {
                 Script::Inline { .. } => None,
             })
             .collect();
-        if let Script::File(path) = &self.0.app {
+        if let Script::File(path) = &*self.app() {
             paths.push(path.clone());
         }
         for script in self.0.managed.borrow().iter() {
@@ -3997,14 +4188,40 @@ impl ScriptHost {
             .collect()
     }
 
+    /// Loads every script anew. One that fails after one that succeeded
+    /// leaves the state its scripts wrote as they ran (`ui.state`,
+    /// `ui.persist`, `ui.shared`) as it was, keys they made gone (a first
+    /// load has nothing to go back to: `journal`), the overrides the last load found as
+    /// they were, and its required files still watched (with those the
+    /// failed load reached: fixing one reloads).
     fn load(&self) -> Result<Loaded, String> {
+        let required = std::mem::take(&mut *self.0.required.borrow_mut());
+        let overrides = std::mem::take(&mut *self.0.overrides.borrow_mut());
+        self.0.journal.begin();
+        let loaded = self.load_anew();
+        match loaded {
+            Ok(_) => self.0.journal.keep(),
+            // What its scripts wrote as they ran undone.
+            Err(_) => self.0.journal.undo(),
+        }
+        if loaded.is_err() {
+            let mut now = self.0.required.borrow_mut();
+            let reached = std::mem::replace(&mut *now, required);
+            for path in reached {
+                if !now.contains(&path) {
+                    now.push(path);
+                }
+            }
+            *self.0.overrides.borrow_mut() = overrides;
+        }
+        loaded
+    }
+    fn load_anew(&self) -> Result<Loaded, String> {
         // What `compile_ahead` compiled goes as this load ends.
         let _ahead = sources::ReleaseAhead;
         if let Some(tracker) = tracking(&self.0) {
             tracker.begin(self.app_key());
         }
-        self.0.required.borrow_mut().clear();
-        self.0.overrides.borrow_mut().clear();
         let mut vms = Vec::new();
         let mut slots = node::Slots::new();
         let mut hooks = lower::Hooks::default();
@@ -4046,7 +4263,7 @@ impl ScriptHost {
             hooks.extend(added);
             vms.push(vm);
         }
-        let (vm, root, contributions, added) = self.run(&self.0.app, false)?;
+        let (vm, root, contributions, added) = self.run(&self.app(), false)?;
         vms.push(vm);
         let plugins = !self.0.plugins.is_empty() || !managed.is_empty();
         self.finish_load(
@@ -4088,7 +4305,7 @@ impl ScriptHost {
         let root = root.ok_or_else(|| {
             format!(
                 "{}: the application script must return a ui node",
-                self.0.app.name()
+                self.app().name()
             )
         })?;
         let mounted = vms
@@ -4178,9 +4395,9 @@ impl ScriptHost {
             .retain(|path| !ran.contains(path));
         self.0.overrides.borrow_mut().clear();
         tracker.begin_kept(self.app_key(), &last, ran);
-        let loaded = self.0.app.code(self.0.files).and_then(|code| {
-            let (root, contributions, added) =
-                self.evaluate(&vm, &self.0.app, self.0.files, &code)?;
+        let (app, files) = (self.app(), self.files());
+        let loaded = app.code(&files).and_then(|code| {
+            let (root, contributions, added) = self.evaluate(&vm, &app, files.clone(), &code)?;
             let empty = (node::Slots::new(), lower::Hooks::default());
             self.finish_load(
                 vec![vm.clone()],
@@ -4267,7 +4484,7 @@ impl ScriptHost {
         let root = dir.map(|d| d.canonicalize().unwrap_or(d));
         let aliases = root
             .as_deref()
-            .map(|root| read_aliases(root, files))
+            .map(|root| read_aliases(root, &files))
             .unwrap_or_default();
         // `@app` and `@app-original` are zgx's own aliases.
         for reserved in ["app", "app-original"] {
@@ -4335,9 +4552,14 @@ impl ScriptHost {
         let name = script.name();
         let fail = |error: mlua::Error| describe(&name, &error);
         // A plugin outside the app's bundle reads from the disk.
-        let files = match (self.0.files, script) {
+        let files = match (self.files(), script) {
             (Files::Bundle(bundle, _), Script::File(path) | Script::Plugin { path, .. })
                 if plugin && !path.starts_with(bundle.root) =>
+            {
+                Files::Disk
+            }
+            (Files::Memory(memory, _), Script::File(path) | Script::Plugin { path, .. })
+                if plugin && !path.starts_with(memory.root_path()) =>
             {
                 Files::Disk
             }
@@ -4356,7 +4578,7 @@ impl ScriptHost {
         } else {
             Grants::All
         });
-        let code = script.code(files)?;
+        let code = script.code(&files)?;
         // The handle `Lua::new` returns collects all garbage when it drops,
         // a full pass over everything the script just built; a clone does
         // not, and the VM frees all it holds when the last one goes.
@@ -4405,6 +4627,7 @@ impl ScriptHost {
         value::install_cache(&lua);
         markdown::install(&lua);
         lua.set_app_data(node::Env {
+            journal: self.0.journal.clone(),
             vm: Rc::downgrade(&vm),
             store,
             shared: self.0.shared.clone(),
@@ -4481,7 +4704,7 @@ impl ScriptHost {
         lazy.ui(&["shortcut_owner"], move |lua, ui| {
             command::install_owner(lua, ui, commands)
         });
-        i18n::install(&lazy, self.0.locales.clone(), self.0.files);
+        i18n::install(&lazy, self.0.locales.clone(), self.files());
         let (windows, shared) = (self.0.windows.clone(), self.0.shared.clone());
         lazy.ui(&["window", "window_rect", "windows"], move |lua, ui| {
             windows::install(lua, ui, windows, &shared)
@@ -4558,7 +4781,7 @@ impl ScriptHost {
         self.install_require(
             &lua,
             script.dir(),
-            files,
+            files.clone(),
             plugin.then_some((&*name, &*grants)),
         )
         .map_err(fail)?;
@@ -4594,7 +4817,7 @@ impl ScriptHost {
         let (lua, limits) = (&vm.lua, self.0.limits);
         // Building runs untracked: reading state while describing the tree
         // must not subscribe whatever is currently mounting.
-        let compiled = match (files, script) {
+        let compiled = match (&files, script) {
             (Files::Disk, Script::File(path) | Script::Plugin { path, .. }) => self
                 .0
                 .sources

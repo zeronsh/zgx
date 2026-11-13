@@ -30,7 +30,49 @@ struct Set {
     warnings: crate::SharedWarnings,
 }
 
+/// A catalog taken out of the host's (`Locales::take`): loaded again from
+/// another set of files (`load_in`), or put back.
+pub(crate) struct Kept(Set);
+
+impl Kept {
+    /// The catalog read again into `locales` from `files`, its directory
+    /// moved from under `from` to under `to` (`ScriptHost::retarget`): a
+    /// live bundle's new strings. Nothing if it wasn't under `from`, or the
+    /// new files hold no locale file there.
+    pub(crate) fn load_in(
+        &self,
+        locales: &Locales,
+        runtime: &zgx::reactive::Runtime,
+        files: &Files,
+        (from, to): (&std::path::Path, &std::path::Path),
+    ) {
+        let Ok(within) = self.0.dir.strip_prefix(from) else {
+            return;
+        };
+        let dir = crate::normalize(&to.join(within));
+        let _ = load_dir(
+            locales,
+            runtime,
+            files,
+            dir,
+            &self.0.source,
+            &self.0.warnings,
+        );
+    }
+}
+
 impl Locales {
+    /// The catalog let go of, if there was one, so the next load reads one
+    /// anew (`ScriptHost::retarget`): `put_back` if that load fails.
+    pub(crate) fn take(&self) -> Option<Kept> {
+        self.set.borrow_mut().take().map(Kept)
+    }
+    /// `kept` the catalog again, over any loaded since it was taken.
+    pub(crate) fn put_back(&self, kept: Option<Kept>) {
+        if let Some(Kept(set)) = kept {
+            *self.set.borrow_mut() = Some(set);
+        }
+    }
     /// The catalog, if `ui.i18n` made one.
     pub(crate) fn handle(&self) -> Option<I18n> {
         self.set.borrow().as_ref().map(|set| set.i18n.clone())
@@ -46,7 +88,7 @@ impl Locales {
     /// Reads again the locale files edited since they were read; whether
     /// any were. What their new text changes shows in place, as theme
     /// files' does, without reloading the scripts.
-    pub(crate) fn reload_if_changed(&self, files: Files) -> bool {
+    pub(crate) fn reload_if_changed(&self, files: &Files) -> bool {
         // Note what changed, then read it with the set let go: reading sets
         // the messages, and what shows them runs again at once, calling
         // `ui.t` (`handle`) as it does.
@@ -122,7 +164,7 @@ fn modified(path: &std::path::Path) -> Option<SystemTime> {
 /// Loads (or loads again) the locale file at `path`, named by its stem
 /// (`pt-BR.json` is `pt-BR`), warning of what fails to parse: its keys
 /// fall back to another locale's.
-fn read(i18n: &I18n, files: Files, path: &std::path::Path, warnings: &crate::SharedWarnings) {
+fn read(i18n: &I18n, files: &Files, path: &std::path::Path, warnings: &crate::SharedWarnings) {
     let Some(locale) = path.file_stem().and_then(|s| s.to_str()) else {
         return;
     };
@@ -478,7 +520,7 @@ pub(crate) fn install(lazy: &Lazy, locales: Rc<Locales>, files: Files) {
                     )));
                 }
             };
-            load(lua, &set, files, options)
+            load(lua, &set, &files, options)
         })?;
         ui.raw_set("i18n", entry)
     });
@@ -487,7 +529,7 @@ pub(crate) fn install(lazy: &Lazy, locales: Rc<Locales>, files: Files) {
 
 /// `ui.i18n { dir, source }`: loads the catalog (or keeps the one loaded
 /// for them), and makes `ui.t` and `ui.locale`.
-fn load(lua: &Lua, set: &Rc<Locales>, files: Files, options: Option<Table>) -> mlua::Result<()> {
+fn load(lua: &Lua, set: &Rc<Locales>, files: &Files, options: Option<Table>) -> mlua::Result<()> {
     let text = |name: &str, default: &str| -> mlua::Result<String> {
         Ok(options
             .as_ref()
@@ -527,7 +569,7 @@ fn load(lua: &Lua, set: &Rc<Locales>, files: Files, options: Option<Table>) -> m
 pub(crate) fn load_dir(
     set: &Locales,
     runtime: &zgx::reactive::Runtime,
-    files: Files,
+    files: &Files,
     dir: PathBuf,
     source: &str,
     warnings: &crate::SharedWarnings,
