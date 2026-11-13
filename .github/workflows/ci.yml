@@ -72,6 +72,10 @@ concurrency:
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  # Runners have no GPU, where windows draw on the software raster by
+  # default (`ZGX_RENDERER=auto`): tests and probes test the GPU renderer
+  # (lavapipe, WARP); raster-window and the *-raster probes the raster.
+  ZGX_RENDERER: gpu
 jobs:
   # Named `plan`: admission (admit.py) leaves a job of that name out of reservations.
   plan:

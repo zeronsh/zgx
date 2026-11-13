@@ -274,7 +274,17 @@ software. `WGPU_FORCE_FALLBACK_ADAPTER=1` takes WARP even beside a GPU, for
 Direct3D 12 and 11 alike, as CI's runners draw: to run the software lines
 or bless a `warp` family of goldens on a machine with a GPU. It is for
 Windows (WARP) and Linux (a software Vulkan driver); macOS has no software
-Metal adapter, so there the renderer fails to start with it. GPUs that old (Intel before Skylake, AMD before GCN, NVIDIA before
+Metal adapter, so there the renderer fails to start with it.
+
+Where WARP is the only adapter (no GPU, or none with a driver), an opaque
+window at 100% scale draws on zgx's software raster instead and shows its
+frames through GDI (softbuffer). DXGI's adapter list tells, without
+opening a device (`zgx_gpu::software_only`). A frame then costs 0.2 to 0.5
+ms of CPU where WARP took 7.6 to 9.6, at half the memory. A window that
+comes to show a GPU view or a layer shader moves to WARP. `ZGX_RENDERER`
+chooses: `gpu`, `raster`, or `auto` (the default).
+
+GPUs that old (Intel before Skylake, AMD before GCN, NVIDIA before
 Kepler) have no Windows Vulkan driver either, so Vulkan is a feature
 (`vulkan`, on zgx-desktop, zgx-script or zgx-gpu), off by default, for a
 driver whose Direct3D 12 fails: with it, Vulkan stands in where Direct3D 12

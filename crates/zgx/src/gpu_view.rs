@@ -88,6 +88,18 @@ pub fn painter(view: u64) -> Option<Rc<dyn Any>> {
     })
 }
 
+/// Whether any view is shown by a box: a renderer that draws none (the
+/// software raster) hands such a window to the GPU's.
+pub fn any_mounted() -> bool {
+    VIEWS.with(|views| {
+        views
+            .borrow()
+            .values()
+            .filter_map(Weak::upgrade)
+            .any(|view| !view.mounted.borrow().is_empty())
+    })
+}
+
 /// A box's wish for frames: how many it asked for, and whether it animates.
 struct Mounted {
     key: u64,

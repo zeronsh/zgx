@@ -15,9 +15,14 @@ In the window it can't pass the window's edge: with the window made too
 short for it below its trigger or above, the raster's menu shifts to lie
 whole inside the window (`compose_popover::placement`), not cut off.
 
+Then the viewport example with `--late`, its GPU view shown a second after
+the window opens: the raster's run draws on the raster first, then moves
+to the GPU (`raster to gpu`), and its last frame is the GPU run's.
+
     cargo build --release -p zgx-desktop --example scroll
     python3 scripts/raster_window_smoke.py target/release/examples/scroll \
-        --menus target/release/examples/menus --output /tmp/zgx-raster-window
+        --viewport target/release/examples/viewport --menus target/release/examples/menus \
+        --output /tmp/zgx-raster-window
 """
 import argparse
 import os
@@ -61,6 +66,34 @@ def desktop(processes, output):
 def capture(env, window, path):
     subprocess.run(["import", "-window", window, str(path)], env=env, check=True)
     return Image.open(path).convert("RGB")
+
+
+def find_window(env, app, title, renderer, log_path):
+    for _ in range(200):
+        found = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", f"^{title}$"],
+                               env=env, text=True, capture_output=True)
+        if found.returncode == 0:
+            return found.stdout.split()[-1]
+        if app.poll() is not None:
+            raise RuntimeError(f"{renderer}: the example exited ({app.returncode}); see {log_path}")
+        time.sleep(.05)
+    raise RuntimeError(f"{renderer}: no window")
+
+
+def run_late_view(binary, env, output, renderer):
+    """The viewport example with its view shown late: its window captured
+    once the view has shown and settled, and its present log."""
+    log_path = output / f"late-{renderer}.log"
+    with log_path.open("w") as log:
+        app = subprocess.Popen([str(binary), "--late"], env=dict(env, ZGX_RENDERER=renderer, ZGX_PRESENT_LOG="1"),
+                               stdout=log, stderr=log)
+        try:
+            window = find_window(env, app, "zgx GPU view", renderer, log_path)
+            time.sleep(3)
+            shown = capture(env, window, output / f"late-{renderer}.png")
+        finally:
+            stop(app)
+    return shown, log_path.read_text(errors="replace").splitlines()
 
 
 def run_menu(binary, env, output, renderer):
@@ -184,21 +217,22 @@ def run(binary, env, output, renderer):
     return opened, scrolled, log_path.read_text(errors="replace").splitlines()
 
 
-def compare(gpu, raster, what, output):
+def compare(gpu, raster, what, output, tolerance=TOLERANCE, share=SHARE):
     if gpu.size != raster.size:
         raise RuntimeError(f"{what}: the windows differ in size, {gpu.size} and {raster.size}")
     difference = ImageChops.difference(gpu, raster)
     worst = [max(pixel) for pixel in difference.getdata()]
-    off = sum(d > TOLERANCE for d in worst) / len(worst)
-    print(f"{what}: worst channel {max(worst)}, {off * 100:.3f}% of pixels more than {TOLERANCE} off")
-    if off > SHARE:
-        difference.point(lambda v: 255 if v > TOLERANCE else 0).save(output / f"{what}-difference.png")
-        raise RuntimeError(f"{what}: {off * 100:.3f}% of pixels differ by more than {TOLERANCE}")
+    off = sum(d > tolerance for d in worst) / len(worst)
+    print(f"{what}: worst channel {max(worst)}, {off * 100:.3f}% of pixels more than {tolerance} off")
+    if off > share:
+        difference.point(lambda v: 255 if v > tolerance else 0).save(output / f"{what}-difference.png")
+        raise RuntimeError(f"{what}: {off * 100:.3f}% of pixels differ by more than {tolerance}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=pathlib.Path)
+    parser.add_argument("--viewport", type=pathlib.Path, required=True)
     parser.add_argument("--menus", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
@@ -241,7 +275,21 @@ def main():
             raise RuntimeError(f"the GPU's menu showed {whole} rows of {MENU_HEIGHT}: not the menu sought")
         if shown < whole - 2:
             raise RuntimeError(f"the raster's menu at the window's edge was cut off: {shown} of {whole} rows")
-        print("PASS: the raster window shows what the GPU's does: opened, scrolled, a menu open")
+        # The mid-life switch: drawn on the raster, then on the GPU from
+        # the view's showing, its frame then the GPU's own.
+        late_gpu, late_gpu_log = run_late_view(args.viewport.resolve(), env, args.output, "gpu")
+        late_raster, late_raster_log = run_late_view(args.viewport.resolve(), env, args.output, "raster")
+        switched = [i for i, line in enumerate(late_raster_log) if "raster to gpu" in line]
+        before = sum(bool(presented.search(line)) for line in late_raster_log[:switched[0]]) if switched else 0
+        after = sum(bool(rendered.search(line)) for line in late_raster_log[switched[0]:]) if switched else 0
+        print(f"late view: {before} raster frames, then {'the GPU' if switched else 'no switch'} ({after} frames)")
+        if not switched or before == 0 or after == 0:
+            raise RuntimeError("the raster window didn't draw on the raster and then move to the GPU")
+        if any(presented.search(line) for line in late_raster_log[switched[0]:]):
+            raise RuntimeError("the raster presented after the window moved to the GPU")
+        compare(late_gpu, late_raster, "switched", args.output, tolerance=2, share=0)
+        print("PASS: the raster window shows what the GPU's does (opened, scrolled, a menu open, at the "
+              "window's edge), and moves to the GPU for a GPU view")
     finally:
         for process in reversed(processes):
             stop(process)
