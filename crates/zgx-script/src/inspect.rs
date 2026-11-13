@@ -1433,16 +1433,40 @@ impl Session {
         })
     }
 
-    /// This window's size, and its popups open (`windows`).
-    fn about(&self) -> Option<(zgx::scene::Rect, Vec<String>)> {
+    /// This window's size, and its popups wanted open (`windows`), each as
+    /// text and as a record: what it is, its role, whether it shows or is
+    /// held back (the app at the back), and its box.
+    fn about(&self) -> Option<(zgx::scene::Rect, Vec<Panel>)> {
         let ui = self.0.ui.upgrade()?;
         let scene = ui.scene.borrow();
         let size = scene.bounds(scene.root());
-        let popups = scene.popups().to_vec();
+        let roots = scene.wanted_popups().to_vec();
+        let panels: Vec<_> = roots
+            .iter()
+            .map(|root| {
+                let role = scene.popup_role(*root).map_or("popup", |role| match role {
+                    zgx::scene::PopupRole::Menu => "menu",
+                    zgx::scene::PopupRole::Popover => "popover",
+                    zgx::scene::PopupRole::Tooltip => "tooltip",
+                    zgx::scene::PopupRole::Topmost => "topmost",
+                });
+                (
+                    *root,
+                    role,
+                    scene.in_held_popup(*root),
+                    scene.popup_bounds(*root),
+                )
+            })
+            .collect();
         drop(scene);
-        let popups = popups
+        let popups = panels
             .into_iter()
-            .map(|popup| driver::describe(&ui, popup))
+            .map(|(root, role, held, bounds)| Panel {
+                what: driver::describe(&ui, root),
+                role,
+                held,
+                bounds,
+            })
             .collect();
         Some((size, popups))
     }
@@ -2019,6 +2043,15 @@ fn window_session(name: &str) -> Result<Session, String> {
         }
     })
 }
+/// A popup panel as `windows` lists it: its window shows it in a panel of its
+/// own where the host has them (macOS, Windows, X11), or in the window.
+struct Panel {
+    what: String,
+    role: &'static str,
+    /// Held back: wanted open, not shown nor hit, the app being at the back.
+    held: bool,
+    bounds: Option<zgx::scene::Rect>,
+}
 /// `windows`: the main window and the app's others, each with its size and
 /// its popups open (menus, popovers past the window: targets inside reach
 /// them, as the window's own nodes).
@@ -2036,9 +2069,32 @@ fn windows(main: &Session) -> (String, Value) {
             line.push_str(&format!("  \"{title}\""));
         }
         for popup in &popups {
-            line.push_str(&format!("\n  popup {popup}"));
+            line.push_str(&format!(
+                "\n  popup {}  {}  {}  owner {id}",
+                popup.what,
+                popup.role,
+                if popup.held { "held" } else { "shown" },
+            ));
         }
         lines.push(line);
+        let panels = popups.iter().map(|popup| {
+            let mut fields = vec![
+                ("what", Value::from(popup.what.as_str())),
+                ("role", Value::from(popup.role)),
+                ("owner", Value::from(id.as_str())),
+                ("shown", Value::Bool(!popup.held)),
+                ("held", Value::Bool(popup.held)),
+            ];
+            if let Some(b) = popup.bounds {
+                fields.extend([
+                    ("x", Value::Num(b.x.round() as f64)),
+                    ("y", Value::Num(b.y.round() as f64)),
+                    ("width", Value::Num(b.width.round() as f64)),
+                    ("height", Value::Num(b.height.round() as f64)),
+                ]);
+            }
+            Value::record(fields)
+        });
         data.push(Value::record([
             ("id", Value::from(id.as_str())),
             ("title", Value::from(title.as_str())),
@@ -2046,8 +2102,14 @@ fn windows(main: &Session) -> (String, Value) {
             ("height", Value::Num(size.height.round() as f64)),
             (
                 "popups",
-                Value::List(popups.iter().map(|p| Value::from(p.as_str())).collect()),
+                Value::List(
+                    popups
+                        .iter()
+                        .map(|p| Value::from(p.what.as_str()))
+                        .collect(),
+                ),
             ),
+            ("panels", Value::List(panels.collect::<Vec<_>>().into())),
         ]));
     }
     (lines.join("\n"), Value::List(data.into()))

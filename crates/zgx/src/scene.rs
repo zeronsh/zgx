@@ -3820,6 +3820,12 @@ impl Scene {
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
         self.invalidate(id, COMPOSITE);
     }
+    /// Every popup root wanted (`set_popup`), those held back while the app
+    /// is at the back (`set_popups_held`) too: what `popups` lists is what a
+    /// host shows.
+    pub fn wanted_popups(&self) -> &[NodeId] {
+        &self.popups
+    }
     /// Roots shown in popup windows (`set_popup`), in the order set; those
     /// held while the app is at the back (`set_popups_held`) aren't listed.
     pub fn popups(&self) -> &[NodeId] {

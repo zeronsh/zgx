@@ -629,15 +629,7 @@ The `ui.tween(state, opts)`, `ui.spring(state, opts)` and `ui.loop(opts)` bindin
 
 ### Cost
 
-**Release builds need `LUAU_CXXFLAGS=-DNDEBUG`.** Luau checks its asserts unless `NDEBUG` is defined, and the crate that compiles it for mlua never defines it: with them, every script loop, call and table access runs about a fifth slower (`list_state_bench`: 6.3 M instructions a tick against 5.0 M). This workspace sets it in `.cargo/config.toml`; an app built elsewhere sets it in its own:
-
-```toml
-# .cargo/config.toml
-[env]
-LUAU_CXXFLAGS = "-DNDEBUG"
-```
-
-A release build without it says so once on stderr and in `ScriptHost::warnings()`. Debug builds keep the asserts either way.
+**Release builds run Luau without its asserts.** Luau checks its asserts unless `NDEBUG` is defined, and the crate that compiles it for mlua never defined it: with them, every script loop, call and table access ran about a fifth slower (`list_state_bench`: 6.3 M instructions a tick against 5.0 M). zgx builds Luau from its own copy of that crate (`zgx-luau0-src`), which defines `NDEBUG` in release builds, so `cargo install` and an app's release build need nothing set. Debug builds keep the asserts. A build that wants them in release adds `-UNDEBUG` to `LUAU_CXXFLAGS`.
 
 `anime_bench` animates 1,000 elements' `y` and `opacity` every frame, headless, and times one frame (Apple M5 Max, release):
 
