@@ -1315,6 +1315,13 @@ export type Control = {
 	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
 	haspopup: string?,
 	focused: boolean,
+	-- A menu's or list box's scroll view, when it has one: how far it is
+	-- scrolled and how far it can go, and whether it can still scroll up or
+	-- down (`at_start`, `at_end`).
+	scroll_offset: number?,
+	scroll_range: number?,
+	at_start: boolean?,
+	at_end: boolean?,
 	-- Names it for `ui.press` while it is there.
 	handle: number,
 }
@@ -1785,7 +1792,7 @@ declare extern type WindowApi with
 	shown: State<boolean>
 	-- The open menus, popovers and tooltips: `{ x, y, w, h, kind }` each, in
 	-- window points, kind "menu", "popover", "tooltip" or "topmost"; read-only.
-	popups: State<{ { x: number, y: number, w: number, h: number, kind: string } }>
+	popups: State<{ { x: number, y: number, w: number, h: number, kind: string, offset: number?, range: number?, at_start: boolean?, at_end: boolean? } }>
 	-- Whether the window is in full screen, read-only and followed, however
 	-- it went in or out (the green button, Ctrl+Cmd+F, the menu, Mission
 	-- Control, a script), turning as it begins to go; and while it goes

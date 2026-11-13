@@ -4643,13 +4643,22 @@ fn popup_value(popups: &[zgx::widgets::PopupInfo]) -> Value {
                 Some(zgx::scene::PopupRole::Topmost) => "topmost",
                 None => "popup",
             };
-            Value::Map(Rc::from([
-                (Rc::from("h"), n(popup.rect.height)),
-                (Rc::from("kind"), Value::from(kind)),
-                (Rc::from("w"), n(popup.rect.width)),
-                (Rc::from("x"), n(popup.rect.x)),
-                (Rc::from("y"), n(popup.rect.y)),
-            ]))
+            // Sorted by key, as a map's fields are.
+            let mut fields: Vec<(Rc<str>, Value)> = Vec::new();
+            if let Some((offset, range)) = popup.scroll {
+                fields.push((Rc::from("at_end"), Value::Bool(offset >= range - 0.5)));
+                fields.push((Rc::from("at_start"), Value::Bool(offset <= 0.5)));
+            }
+            fields.push((Rc::from("h"), n(popup.rect.height)));
+            fields.push((Rc::from("kind"), Value::from(kind)));
+            if let Some((offset, range)) = popup.scroll {
+                fields.push((Rc::from("offset"), n(offset)));
+                fields.push((Rc::from("range"), n(range)));
+            }
+            fields.push((Rc::from("w"), n(popup.rect.width)));
+            fields.push((Rc::from("x"), n(popup.rect.x)));
+            fields.push((Rc::from("y"), n(popup.rect.y)));
+            Value::Map(Rc::from(fields))
         })
         .collect();
     Value::List(list.into())

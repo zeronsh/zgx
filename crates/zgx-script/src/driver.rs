@@ -1274,6 +1274,8 @@ pub struct Control {
     pub expanded: Option<bool>,
     /// What it opens (`aria-haspopup`): "dialog", "menu", "listbox", "tree" or "grid".
     pub has_popup: Option<&'static str>,
+    /// A menu's or list box's scroll view: `(offset, range)`, if it has one.
+    pub scroll: Option<(f32, f32)>,
     /// It has the keyboard focus.
     pub focused: bool,
     /// Names it for `press`, as long as it is there.
@@ -1337,6 +1339,9 @@ pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
             checked: s.checked,
             expanded: s.expanded,
             has_popup: s.has_popup.map(popup_name),
+            scroll: matches!(s.role, Role::Menu | Role::ListBox)
+                .then(|| ui.scroll_within(&scene, node))
+                .flatten(),
             focused: focused == Some(node),
             handle: node.to_bits(),
         });

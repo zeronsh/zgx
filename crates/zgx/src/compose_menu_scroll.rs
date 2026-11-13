@@ -19,6 +19,7 @@ pub(crate) fn mount(ui: &mut Ui, panel: NodeId, viewport: NodeId, content: NodeI
     let size = ui.observe_content_size(viewport);
     let extent = ui.observe_content_size(content);
     let offset = ui.signal(0_f32);
+    ui.register_menu_scroll(viewport, content, offset.clone(), size.clone(), extent.clone());
     let read_size = size.clone();
     let read_extent = extent.clone();
     let read_offset = offset.clone();

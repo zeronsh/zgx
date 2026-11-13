@@ -1305,6 +1305,15 @@ impl Drop for FramePreparationGuard<'_> {
     }
 }
 
+/// A menu's own scroller (`compose_menu_scroll`), for `Ui::scroll_report`.
+pub(crate) struct MenuScroll {
+    viewport: NodeId,
+    content: NodeId,
+    offset: Signal<f32>,
+    size: Signal<(f32, f32)>,
+    extent: Signal<(f32, f32)>,
+}
+
 /// An open popup: where its window is, in window coordinates, and what it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PopupInfo {
@@ -1312,6 +1321,9 @@ pub struct PopupInfo {
     pub rect: Rect,
     /// A menu, a popover or a tooltip, if it says.
     pub role: Option<crate::scene::PopupRole>,
+    /// How far the first scroll view inside it is scrolled and how far it can
+    /// go, if it has one (a menu cut to a height): `(offset, range)`.
+    pub scroll: Option<(f32, f32)>,
 }
 
 /// One retained document. Application code keeps returned node IDs as stable widget handles.
@@ -1687,6 +1699,9 @@ pub(crate) struct UiStorage {
     scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
     /// Run once after the next frame preparation's layout.
     after_layout: RefCell<Vec<Box<dyn FnOnce()>>>,
+    /// A menu's scroll state (`compose_menu_scroll`): its viewport and
+    /// content, and the signals of its offset and the sizes of both.
+    menu_scrolls: RefCell<Vec<MenuScroll>>,
     /// The open popups' windows, once something observes them
     /// (`Ui::observe_popups`).
     popups_observed: RefCell<Option<Signal<Vec<PopupInfo>>>>,
@@ -2073,6 +2088,7 @@ impl Ui {
             scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
             popups_observed: RefCell::default(),
+            menu_scrolls: RefCell::new(Vec::new()),
             layout_listeners: RefCell::default(),
             containers: RefCell::default(),
             mount_initialization: RefCell::new(None),
@@ -2952,6 +2968,31 @@ impl Ui {
             .or_default()
             .push(Rc::new(RefCell::new(f)));
     }
+    /// `(offset, range)` of the first scroll view in `root`'s subtree (itself
+    /// included), depth first, if any.
+    pub fn scroll_within(&self, scene: &Scene, root: NodeId) -> Option<(f32, f32)> {
+        // The root itself may be inside one (its content), which the report
+        // finds from there.
+        if let Some((offset, range, _)) = self.scroll_report(root) {
+            return Some((offset, range));
+        }
+        let mut stack = vec![(root, 0_usize)];
+        while let Some((node, depth)) = stack.pop() {
+            if let Some((offset, range, _)) = self.scroll_report(node) {
+                return Some((offset, range));
+            }
+            if depth < 4 {
+                stack.extend(
+                    scene
+                        .children(node)
+                        .iter()
+                        .rev()
+                        .map(|child| (*child, depth + 1)),
+                );
+            }
+        }
+        None
+    }
     fn popup_infos(&self) -> Vec<PopupInfo> {
         let scene = self.scene.borrow();
         let kinds = self.storage.popup_kinds.borrow();
@@ -2961,6 +3002,7 @@ impl Ui {
             .iter()
             .filter(|(root, open)| scene.contains(*root) && open.with_untracked(|open| *open))
             .map(|(root, _)| PopupInfo {
+                scroll: self.scroll_within(&scene, *root),
                 rect: scene.transformed_bounds(*root),
                 role: kinds
                     .iter()
@@ -3257,7 +3299,42 @@ impl Ui {
     /// or content inside). An offset past its range and a stretch left
     /// behind look alike on screen; these tell them apart.
     pub fn scroll_report(&self, id: NodeId) -> Option<(f32, f32, f32)> {
-        crate::elastic::report(self, id)
+        if let Some(report) = crate::elastic::report(self, id) {
+            return Some(report);
+        }
+        let scene = self.scene.borrow();
+        let menus = self.storage.menu_scrolls.borrow();
+        std::iter::once(id)
+            .chain(scene.ancestors(id).take(2))
+            .find_map(|node| {
+                menus.iter().find(|m| m.viewport == node || m.content == node)
+            })
+            .map(|menu| {
+                let range = (menu.extent.with_untracked(|e| e.1)
+                    - menu.size.with_untracked(|s| s.1))
+                .max(0.);
+                (menu.offset.with_untracked(|o| *o), range, 0.)
+            })
+    }
+    /// A menu's scroller registers (`compose_menu_scroll`).
+    pub(crate) fn register_menu_scroll(
+        &self,
+        viewport: NodeId,
+        content: NodeId,
+        offset: Signal<f32>,
+        size: Signal<(f32, f32)>,
+        extent: Signal<(f32, f32)>,
+    ) {
+        let scene = self.scene.borrow();
+        let mut menus = self.storage.menu_scrolls.borrow_mut();
+        menus.retain(|m| scene.contains(m.viewport));
+        menus.push(MenuScroll {
+            viewport,
+            content,
+            offset,
+            size,
+            extent,
+        });
     }
     /// Take a trackpad's swipe between pages as navigation, as Safari does:
     /// a gesture that starts across where nothing under it scrolls that way

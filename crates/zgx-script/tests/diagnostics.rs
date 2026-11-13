@@ -987,3 +987,36 @@ return ui.column { w = 200, h = 100,
     h.frames(3);
     assert_eq!(state(&h), Some((zgx::semantics::Role::Region, false)));
 }
+
+#[test]
+fn a_cut_menu_says_whether_it_can_scroll() {
+    let mut h = Harness::inline(
+        r##"
+local open = ui.state("open", true)
+local items = {}
+for i = 1, 20 do table.insert(items, ui.menu_item { "Item " .. i }) end
+local out = ui.state("out", "")
+ui.command { id = "read", run = function()
+    for _, c in ui.controls() do
+        if c.role == "menu" then out:set(`{tostring(c.at_start)}/{tostring(c.at_end)}/{tostring(c.scroll_range ~= nil)}`) end
+    end
+end }
+return ui.column { w = 300, h = 300,
+    ui.menu { open = open, anchor = ui.button { "Open" }, max_h = 60, table.unpack(items) },
+    ui.text { id = "out", function() return out:get() end },
+    ui.text { id = "pop", function()
+        local p = ui.window.popups:get()[1]
+        return p and `{p.kind}/{tostring(p.at_start)}/{tostring(p.at_end)}` or "none"
+    end },
+}"##,
+    );
+    h.settle();
+    h.frames(4);
+    h.host.window_state(&h.ui);
+    h.frames(3);
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("out"), "true/false/true");
+    assert_eq!(h.text("pop"), "menu/true/false");
+}

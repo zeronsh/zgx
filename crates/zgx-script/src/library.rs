@@ -1630,6 +1630,12 @@ fn controls(lua: &Lua, options: Option<Table>) -> mlua::Result<Table> {
         item.set("checked", control.checked)?;
         item.set("expanded", control.expanded)?;
         item.set("haspopup", control.has_popup)?;
+        if let Some((offset, range)) = control.scroll {
+            item.set("scroll_offset", offset)?;
+            item.set("scroll_range", range)?;
+            item.set("at_start", offset <= 0.5)?;
+            item.set("at_end", offset >= range - 0.5)?;
+        }
         item.set("focused", control.focused)?;
         // A number a script can hold exactly (2^53): a slot reused two million times wraps.
         item.set("handle", (control.handle & ((1 << 53) - 1)) as f64)?;
