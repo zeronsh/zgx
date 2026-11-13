@@ -41,6 +41,14 @@ on each side writing what it counted by function, and its difference
 change did, apart from where the heap or the linker put things. The
 counts are the first runs' still.
 
+Beside the instruction table, an allocations table, report only: each
+side's binary runs once more per scene, natively, with `count_allocs.c`
+preloaded after `same_run.c` (`allocations`), and the table gives
+allocations, reallocations, bytes and peak bytes held, base and head, per
+tick, frame or op where the scene names its length. The counted runs never
+load the counter, so their instructions are as they were. A scene whose
+allocator bypasses glibc says so. `ZGX_GATE_ALLOCS=0` leaves the table out.
+
 With ZGX_GATE_BIN_CACHE set, a side's binaries found there, stamped with
 its commit and compiler, are taken rather than built, and the head's are
 left there after: CI keeps main's by commit, so a pull request builds its
@@ -208,7 +216,7 @@ SCENES = [
     # them, under a frosted composer and an edge fade, rows watching their
     # size, bounds and visibility: the world geometry those observers and the
     # lists read, and the paint walk of the strip and band each frame draws.
-    ('scroll-glass', 'zgx-3d', 'scroll_glass_bench', {'ZGX_GPU_NOOP': '1'}),
+    ('scroll-glass', 'zgx-3d', 'scroll_glass_bench', {'ZGX_GPU_NOOP': '1', 'FRAMES': '120'}),
     # A video's frames (zgx-video's `examples/bench`): its script, animations,
     # timers and shader clock stepped on a virtual clock (`zgx::clock`), each
     # frame drawn whole by wgpu's no-op backend. What making video costs;
@@ -604,6 +612,91 @@ def same_run():
     return built
 
 
+def count_allocs():
+    """`count_allocs.c` built for preloading, once a run (`allocations`)."""
+    built = WORK / 'count_allocs.so'
+    if built not in COPIED:
+        WORK.mkdir(parents=True, exist_ok=True)
+        source = pathlib.Path(__file__).with_name('count_allocs.c')
+        subprocess.run(['cc', '-O2', '-shared', '-fPIC', '-o', str(built), str(source)], check=True)
+        COPIED.add(built)
+    return built
+
+
+# Allocations a scene makes, counted in a run of their own (`allocations`):
+# reported beside the instruction rows, gating nothing yet. `ZGX_GATE_ALLOCS=0`
+# leaves them out.
+ALLOCS = os.environ.get('ZGX_GATE_ALLOCS', '1') != '0'
+# Fewer allocations than this in a whole run: the scene's allocator is not
+# glibc's (mimalloc), and what passed through glibc is no measure of it.
+ALLOCS_FLOOR = 1000
+# A scene's length, where its environment says it: allocations per one.
+UNITS = ('TICKS', 'FRAMES', 'OPS')
+
+
+def allocations(binary, env, checkout):
+    """What `binary` allocates in the scene `env` describes, counted by
+    `count_allocs.so`: a native run (no valgrind) in the environment the
+    counted runs have (`environment`), the counter preloaded after
+    `same_run.so`. The instruction counts are other runs, which never load
+    it. A dict of allocations, reallocations, frees, bytes (asked for) and
+    peak (bytes held at once), or None when the run failed: these numbers
+    gate nothing, so a failure here is reported, not raised."""
+    # Warm, as a count is (`warm`): a cache written at a first launch (the
+    # font cache's, 8,973 allocations) is not the scene's.
+    warm(binary, env, checkout)
+    out = WORK / 'allocs.txt'
+    out.unlink(missing_ok=True)
+    environ = environment(binary, env, checkout)
+    environ['LD_PRELOAD'] = f'{environ["LD_PRELOAD"]} {count_allocs()}'
+    environ['ZGX_ALLOC_COUNT_OUT'] = str(out)
+    result = subprocess.run([str(binary)], env=environ, capture_output=True, text=True)
+    if result.returncode or not out.exists():
+        return None
+    fields = ('allocations', 'reallocations', 'frees', 'bytes', 'peak')
+    return dict(zip(fields, map(int, out.read_text().split())))
+
+
+def unit_of(env):
+    """The scene's length, per which allocations are reported: its first of
+    `UNITS` (`TICKS`, say, and 300), else None (per run)."""
+    for unit in UNITS:
+        if unit in env and env[unit].isdigit():
+            return unit, int(env[unit])
+    return None
+
+
+def allocation_lines(rows):
+    """The allocations table, one row a scene: base and head, the change in
+    allocations, reallocations, bytes and peak bytes, per unit where the
+    scene has one (`unit_of`). A scene whose allocator bypasses glibc says
+    so rather than reading 0."""
+    lines = ['**Allocations** (a native run of each side, glibc\'s allocator counted; report only, '
+             'gating nothing)', '',
+             '| scene | per | base allocs | head allocs | change | reallocs | bytes | peak bytes |',
+             '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |']
+    for name, env, before, after in rows:
+        if after is None or (before is not None and before.get('failed')):
+            lines.append(f'| {name} | | | | the run failed | | | |')
+            continue
+        if after['allocations'] < ALLOCS_FLOOR:
+            lines.append(f'| {name} | | | | not counted: its allocator bypasses glibc | | | |')
+            continue
+        unit = unit_of(env)
+        per, n = (unit[0].lower().rstrip('s'), unit[1]) if unit else ('run', 1)
+        if before is None:
+            lines.append(f'| {name} | {per} | (new) | {after["allocations"] / n:,.1f} | | | | |')
+            continue
+        change = (after['allocations'] - before['allocations']) / n
+        percent = 100 * (after['allocations'] - before['allocations']) / max(before['allocations'], 1)
+        reallocs = (after['reallocations'] - before['reallocations']) / n
+        added = (after['bytes'] - before['bytes']) / n
+        peak = after['peak'] - before['peak']
+        lines.append(f'| {name} | {per} | {before["allocations"] / n:,.1f} | {after["allocations"] / n:,.1f} | '
+                     f'{change:+,.1f} ({percent:+.2f}%) | {reallocs:+,.1f} | {added:+,.0f} | {peak:+,} |')
+    return lines
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('base')
@@ -644,6 +737,7 @@ def main():
     if not cached:
         build(base, target, WORK / 'gate-bin-base')
     rows, failed = [], []
+    allocated, allocs_time = [], 0.0
     for name, package, example, env in SCENES:
         base_binary = WORK / 'gate-bin-base' / example
         head_binary = WORK / 'gate-bin-head' / example
@@ -659,6 +753,11 @@ def main():
         if delta is not None and delta > args.threshold:
             failed.append(name)
         rows.append((name, before, after, delta, deltas))
+        if ALLOCS:
+            started = time.monotonic()
+            allocated_before = (allocations(base_binary, env, base) or {'failed': True}) if runs else None
+            allocated.append((name, env, allocated_before, allocations(head_binary, env, ROOT)))
+            allocs_time += time.monotonic() - started
         shown = f'{before / 1e6:10.1f} M {after / 1e6:10.1f} M {delta:+7.2f}%' if before else f'{"new":>12} {after / 1e6:10.1f} M'
         if len(deltas) > 1:
             shown += f'  median of {", ".join(f"{d:+.3f}%" for d in deltas)}{layout_of(deltas)}'
@@ -683,6 +782,13 @@ def main():
     print(verdict, flush=True)
     if args.markdown:
         args.markdown.write_text('\n'.join(table) + '\n')
+    if allocated:
+        lines = allocation_lines(allocated)
+        lines.append(f'\n(the native runs took {allocs_time:.0f} s)')
+        print('\n'.join(lines), flush=True)
+        if args.markdown:
+            with args.markdown.open('a') as out:
+                out.write('\n' + '\n'.join(lines) + '\n')
     if FUNCTIONS:
         explained = by_function(rows, {scene[0]: scene for scene in SCENES}, base)
         if args.markdown and explained:
