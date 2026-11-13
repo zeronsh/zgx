@@ -2138,9 +2138,9 @@ impl Linter<'_> {
         let close = self.closing(open);
         let mut depth = 0;
         let mut end = close;
-        for j in open + 1..close {
-            match self.tokens[j].text.as_str() {
-                _ if self.tokens[j].kind != Kind::Punct => {}
+        for (j, token) in self.tokens.iter().enumerate().take(close).skip(open + 1) {
+            match token.text.as_str() {
+                _ if token.kind != Kind::Punct => {}
                 "(" | "{" | "[" => depth += 1,
                 ")" | "}" | "]" => depth -= 1,
                 "," if depth == 0 => {
