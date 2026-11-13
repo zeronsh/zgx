@@ -315,6 +315,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "read_file",
     "write_file",
     "load_font",
+    "zip",
     "i18n",
     "t",
     "selector",
