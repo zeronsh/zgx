@@ -33,6 +33,10 @@ fn hot_reload_runs_with_its_plugins() {
     runs("hot_reload/app.luau", Some("hot_reload/plugins"));
 }
 #[test]
+fn topmost_runs() {
+    runs("topmost/app.luau", None);
+}
+#[test]
 fn notes_runs() {
     runs("notes/app.luau", None);
 }

@@ -1542,6 +1542,7 @@ pub(crate) struct UiStorage {
     window_active: RefCell<Option<Signal<bool>>>,
     /// Where popups may show (`Ui::set_popup_screens`).
     popup_screens: Signal<Vec<Rect>>,
+    topmost_windows: Signal<bool>,
     /// The sizes the platform cut popups to, by their roots
     /// (`Ui::set_popup_limit`).
     popup_limits: Signal<Vec<(NodeId, (f32, f32))>>,
@@ -1970,6 +1971,7 @@ impl Ui {
             pending_prune: Cell::new(1024),
             listening: Cell::new(listening),
             popup_screens: runtime.signal(Vec::new()),
+            topmost_windows: runtime.signal(false),
             popup_limits: runtime.signal(Vec::new()),
             popup_flips: runtime.signal(Vec::new()),
             popups: RefCell::new(Vec::new()),
@@ -3268,6 +3270,21 @@ impl Ui {
     }
     pub(crate) fn popup_screens(&self) -> Signal<Vec<Rect>> {
         self.storage.popup_screens.clone()
+    }
+    /// Whether the host shows a topmost layer (`View::topmost`) in a window
+    /// above the app's other popups (the desktop host sets it where it can).
+    /// Off, it is the window's own top layer.
+    pub fn set_topmost_windows(&self, on: bool) {
+        if self
+            .storage
+            .topmost_windows
+            .with_untracked(|was| *was != on)
+        {
+            self.storage.topmost_windows.set(on);
+        }
+    }
+    pub(crate) fn topmost_windows(&self) -> Signal<bool> {
+        self.storage.topmost_windows.clone()
     }
     /// The size (width, height, in points) the platform cut popup `root` to
     /// where the screen has no room for it, or `None` once it has closed: a

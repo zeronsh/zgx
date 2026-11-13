@@ -1870,6 +1870,11 @@ pub enum PopupRole {
     Popover,
     /// A tooltip or a hover card.
     Tooltip,
+    /// A layer over the whole window that no other window covers
+    /// (`View::topmost`): above menus, popovers, tooltips and a drag's
+    /// preview, filling its window's content, the pointer passing through
+    /// where it holds nothing.
+    Topmost,
 }
 const POPUPS_BIT: usize = 1usize << (usize::BITS - 2);
 const _: () = assert!(std::mem::size_of::<Slot>() > 2);
@@ -3893,6 +3898,12 @@ impl Scene {
         self.ink_alone(id)
             .map(|ink| ink.translated(offset))
             .filter(|ink| ink.width > 0. && ink.height > 0.)
+    }
+    /// Whether `id` is in a topmost layer shown in a popup window
+    /// (`PopupRole::Topmost`).
+    pub fn is_in_topmost(&self, id: NodeId) -> bool {
+        self.popup_holding(id)
+            .is_some_and(|root| self.popup_role(root) == Some(PopupRole::Topmost))
     }
     /// Whether `id` shows in a popup window of its own (`set_popup`).
     pub fn is_popup(&self, id: NodeId) -> bool {

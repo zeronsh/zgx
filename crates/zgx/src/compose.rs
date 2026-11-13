@@ -455,6 +455,8 @@ struct PortalOptions {
     layer: bool,
     /// `top_layer`: a layer above every other, under the document root.
     top: bool,
+    /// `topmost`: that layer shown in a popup window above every other.
+    topmost: bool,
     /// `hoist`: in that layer, over its parent.
     hoist: Option<Box<crate::compose_modal::Hoist>>,
     /// `View::autofocus`.
@@ -1110,6 +1112,23 @@ impl View {
         let portal = self.rare_mut().portal.get_or_insert_default();
         portal.layer = true;
         portal.top = true;
+        self.w_full().h_full()
+    }
+    /// A layer over the whole window that nothing covers, as the web's top
+    /// layer: where the host shows popups in windows of their own (a
+    /// desktop window), it is drawn in one above the app's menus, popovers,
+    /// tooltips and a drag's preview, covering its window's content (its
+    /// root at 0, 0 there), following it as it moves, resizes and zooms.
+    /// Of two, the later is above. A `layer` (no focus taken, no backdrop,
+    /// the pointer passing through but for the controls in it), so a press
+    /// on one of them closes no menu. Where the host has no such windows it
+    /// is `top_layer`'s: the window's own topmost layer. Shown while its
+    /// window is, and drawn only while it paints something.
+    pub fn topmost(mut self) -> Self {
+        let portal = self.rare_mut().portal.get_or_insert_default();
+        portal.layer = true;
+        portal.top = true;
+        portal.topmost = true;
         self.w_full().h_full()
     }
     /// Open a menu with its item `id` over the trigger, as a pop-up button's
@@ -4477,6 +4496,7 @@ fn mount_portal_panel(
 
     let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
     let is_layer = options.is_some_and(|p| p.layer);
+    let view_topmost = options.is_some_and(|p| p.topmost);
     // At an editor's caret: placed there, and focus left in the editor, as
     // a layer leaves it.
     let at_caret = options.is_some_and(|p| p.at_caret);
@@ -4835,16 +4855,21 @@ fn mount_portal_panel(
     // (`Ui::set_popup_screens`), an anchored popup is a popup root: drawn in
     // a window of its own (`Scene::set_popup`). Closed, it is none, so a
     // list's hundred row menus cost the host nothing.
-    if anchored {
+    let topmost = view_topmost;
+    if anchored || topmost {
         let (screens, visible, position) = (screens, portal.visible.clone(), portal.position);
+        let topmost_windows = ui.topmost_windows();
         let weak = ui.downgrade();
         let role = match (is_menu || is_submenu, is_layer) {
+            _ if topmost => crate::scene::PopupRole::Topmost,
             (true, _) => crate::scene::PopupRole::Menu,
             (_, true) => crate::scene::PopupRole::Tooltip,
             _ => crate::scene::PopupRole::Popover,
         };
         ui.bind(owner, move || {
-            let popup = visible.get() && screens.with(|screens| !screens.is_empty());
+            let popup = visible.get()
+                && screens.with(|screens| !screens.is_empty())
+                && (!topmost || topmost_windows.get());
             if let Some(ui) = weak.upgrade() {
                 let mut scene = ui.scene.borrow_mut();
                 if popup {
@@ -4857,7 +4882,9 @@ fn mount_portal_panel(
                 }
             }
         });
-        ui.register_popup(portal.position, open_signal);
+        if !topmost {
+            ui.register_popup(portal.position, open_signal);
+        }
     }
     // A submenu's layer lets the pointer through to its parent menu.
     if is_submenu {
