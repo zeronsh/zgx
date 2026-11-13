@@ -216,7 +216,12 @@ struct TextRaster {
     loaded: Option<(CanvasFonts, u64)>,
     raster: Option<crate::text::CpuTextRaster>,
     boxes: HashMap<usize, (Weak<Canvas>, Boxes)>,
+    /// Each drawing's parts' bounds (`part_bounds`), found once.
+    parts: HashMap<usize, (Weak<Canvas>, PartBounds)>,
 }
+/// What each of a drawing's parts (`Canvas::parts`) paints within, its
+/// text's reach too (x0, y0, x1, y1, in its points): `None` for nothing.
+type PartBounds = Arc<[Option<[f32; 4]>]>;
 type SharedText = Arc<Mutex<TextRaster>>;
 impl TextRaster {
     fn raster(&mut self) -> &mut crate::text::CpuTextRaster {
@@ -239,6 +244,7 @@ impl TextRaster {
             self.raster = Some(text);
             self.loaded = Some((self.fonts.clone(), serial));
             self.boxes.clear();
+            self.parts.clear();
         }
         self.raster.as_mut().expect("made just now")
     }
@@ -263,6 +269,48 @@ impl TextRaster {
             .insert(key, (Arc::downgrade(canvas), boxes.clone()));
         boxes
     }
+    /// What each of `canvas`'s parts paints within, its text too if drawn
+    /// into its raster: found the first time it is asked.
+    fn part_bounds(&mut self, canvas: &Arc<Canvas>) -> PartBounds {
+        if canvas.parts().is_empty() {
+            return Arc::new([]);
+        }
+        self.raster();
+        let key = Arc::as_ptr(canvas) as usize;
+        if let Some((drawing, bounds)) = self.parts.get(&key)
+            && drawing.upgrade().is_some_and(|d| Arc::ptr_eq(&d, canvas))
+        {
+            return bounds.clone();
+        }
+        self.parts
+            .retain(|_, (drawing, _)| drawing.strong_count() > 0);
+        let boxes = match canvas.rasters_text() && !canvas.texts().is_empty() {
+            true => Some(self.boxes(canvas)),
+            false => None,
+        };
+        let bounds: PartBounds = canvas
+            .parts()
+            .iter()
+            .map(|part| {
+                let shapes = commands_bounds(&canvas.commands()[part.commands.clone()]);
+                let words = boxes
+                    .as_ref()
+                    .and_then(|boxes| texts_bounds(canvas, boxes, part.texts.clone()));
+                match (shapes, words) {
+                    (Some(a), Some(b)) => Some([
+                        a[0].min(b[0]),
+                        a[1].min(b[1]),
+                        a[2].max(b[2]),
+                        a[3].max(b[3]),
+                    ]),
+                    (a, b) => a.or(b),
+                }
+            })
+            .collect();
+        self.parts
+            .insert(key, (Arc::downgrade(canvas), bounds.clone()));
+        bounds
+    }
 }
 /// What `canvas`'s text covers (x0, y0, x1, y1, in its points), a line's
 /// size around its box for what its glyphs reach past it: `None` for none,
@@ -272,8 +320,19 @@ fn text_bounds(canvas: &Arc<Canvas>, text: &SharedText) -> Option<[f32; 4]> {
         return None;
     }
     let boxes = text.lock().unwrap_or_else(|p| p.into_inner()).boxes(canvas);
+    texts_bounds(canvas, &boxes, 0..boxes.len())
+}
+/// What `canvas`'s texts at `indices` cover, as `text_bounds`.
+fn texts_bounds(
+    canvas: &Canvas,
+    boxes: &[(f32, f32, (f32, f32))],
+    indices: std::ops::Range<usize>,
+) -> Option<[f32; 4]> {
     let mut out: Option<[f32; 4]> = None;
-    for (index, (x, y, (w, h))) in boxes.iter().enumerate() {
+    for index in indices {
+        let Some((x, y, (w, h))) = boxes.get(index) else {
+            break;
+        };
         let reach = canvas.texts()[index].size;
         let t = canvas.text_transform(index);
         for (px, py) in [(*x, *y), (x + w, *y), (*x, y + h), (x + w, y + h)] {
@@ -301,6 +360,10 @@ fn intersect(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
 /// What `canvas` paints within (x0, y0, x1, y1, in its points): its fills
 /// and strokes' reach, a curve's by its control points. `None` for nothing.
 fn painted_bounds(canvas: &Canvas) -> Option<[f32; 4]> {
+    commands_bounds(canvas.commands())
+}
+/// What `commands` paint within, as `painted_bounds`.
+fn commands_bounds(commands: &[Draw]) -> Option<[f32; 4]> {
     let mut out: Option<[f32; 4]> = None;
     // A path's points, painted `reach` around and moved by `(dx, dy)`.
     let mut within = |path: &Path, reach: f32, (dx, dy): (f32, f32)| {
@@ -325,7 +388,7 @@ fn painted_bounds(canvas: &Canvas) -> Option<[f32; 4]> {
             }
         }
     };
-    for command in canvas.commands() {
+    for command in commands {
         match command {
             Draw::Fill { path, .. } => within(path, 0., (0., 0.)),
             // A miter juts out at most its limit times half the width; a
@@ -455,6 +518,11 @@ fn rasterize_region(
     }
     let [x0, y0, x1, y1] = region;
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    // Its parts' bounds: each strip leaves out those it can't reach.
+    let parts = text
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .part_bounds(canvas);
     // Its text in its raster: drawn with its shapes, in their layers.
     let mut labels = (canvas.rasters_text() && !canvas.texts().is_empty()).then(|| {
         let mut held = text.lock().unwrap_or_else(|p| p.into_inner());
@@ -473,18 +541,29 @@ fn rasterize_region(
             ),
         );
         let (w, h) = ((bx - ax) as u32, (by - ay) as u32);
+        let pixmap =
+            sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
         match &mut labels {
-            None => rasterize_at(canvas, w, h, transform),
+            None => {
+                let (skip, _) = culled(canvas, &parts, &pixmap, transform);
+                let all = 0..canvas.commands().len();
+                straight(paint_range(canvas, all, &skip, pixmap, transform)?)
+            }
             Some((held, boxes)) => {
-                let pixmap = sk::Pixmap::new(w, h)
-                    .ok_or_else(|| GpuError("canvas allocation failed".into()))?;
                 let at = Placed {
                     view,
                     scale,
                     origin: (ax, ay),
                     transform,
                 };
-                straight(paint_with_text(canvas, pixmap, &at, boxes, held.raster())?)
+                straight(paint_with_text(
+                    canvas,
+                    pixmap,
+                    &at,
+                    boxes,
+                    held.raster(),
+                    &parts,
+                )?)
             }
         }
     };
@@ -1550,14 +1629,16 @@ struct Placed {
 }
 /// `canvas`'s shapes and text in their layers (`Canvas::layers`), as
 /// `picture` draws them, into `pixmap` placed `at`: each text cut by its
-/// clip's box and mapped by its transform. A text that can't reach the
-/// pixmap is left out (a strip a pan uncovers draws what falls in it).
+/// clip's box and mapped by its transform. A text or part (`parts`, its
+/// parts' bounds) that can't reach the pixmap is left out (a strip a pan
+/// uncovers draws what falls in it).
 fn paint_with_text(
     canvas: &Canvas,
     mut pixmap: sk::Pixmap,
     at: &Placed,
     boxes: &[(f32, f32, (f32, f32))],
     text: &mut crate::text::CpuTextRaster,
+    parts: &[Option<[f32; 4]>],
 ) -> Result<sk::Pixmap, GpuError> {
     let mut sizes = boxes.iter().map(|(_, _, size)| *size);
     let layers = canvas.layers(|_| sizes.next().unwrap_or_default());
@@ -1565,12 +1646,13 @@ fn paint_with_text(
     let (view, scale) = (at.view, at.scale);
     let zoom = scale * view.scale;
     let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
+    let (skip, skip_texts) = culled(canvas, parts, &pixmap, at.transform);
     for layer in &layers {
-        pixmap = match layers.len() {
-            1 => paint_into(canvas, pixmap, at.transform)?,
-            _ => paint_into(&canvas.layer(layer), pixmap, at.transform)?,
-        };
+        pixmap = paint_range(canvas, layer.commands.clone(), &skip, pixmap, at.transform)?;
         for index in layer.texts.clone() {
+            if within(&skip_texts, index) {
+                continue;
+            }
             let label = Label {
                 text: &canvas.texts()[index],
                 at: boxes[index],
@@ -1622,6 +1704,50 @@ fn draw_label(
         &label.text.font,
         zoom,
     );
+    // An upright text wholly within its clip's box (inside its corners)
+    // needs no mask; one wholly past it, no drawing.
+    let mut clip = clip;
+    if let Some(c) = clip
+        && label.transform == zgx::affine::Affine::IDENTITY
+        && !transform.has_skew()
+    {
+        let reach = 2. * label.text.size * zoom + 2.;
+        let left = (view.x + x * view.scale) * scale - origin.0 as f32;
+        let top = (view.y + y * view.scale) * scale - origin.1 as f32;
+        let area = [
+            left - reach,
+            top - reach,
+            left + size.0 * zoom + reach,
+            top + size.1 * zoom + reach,
+        ];
+        let device = |x: f32, y: f32, w: f32, h: f32| {
+            sk::Rect::from_xywh(x, y, w, h).and_then(|r| r.transform(transform))
+        };
+        let r = c.rect;
+        let outer = device(r.x, r.y, r.width, r.height);
+        if outer.is_none_or(|o| {
+            o.right() <= area[0]
+                || o.bottom() <= area[1]
+                || o.left() >= area[2]
+                || o.top() >= area[3]
+        }) {
+            return;
+        }
+        let inner = device(
+            r.x + c.radius,
+            r.y + c.radius,
+            r.width - 2. * c.radius,
+            r.height - 2. * c.radius,
+        );
+        if inner.is_some_and(|i| {
+            i.left() <= area[0]
+                && i.top() <= area[1]
+                && i.right() >= area[2]
+                && i.bottom() >= area[3]
+        }) {
+            clip = None;
+        }
+    }
     let mask = clip.and_then(|clip| {
         let mut mask = sk::Mask::new(pixmap.width(), pixmap.height())?;
         let r = clip.rect;
@@ -1901,21 +2027,115 @@ fn device(
         view.scale, 0., 0., view.scale, view.x, view.y,
     ))
 }
-/// `canvas` drawn by `transform` (its points to pixels) into a `w` by `h`
-/// pixel image.
-fn rasterize_at(
-    canvas: &Canvas,
-    w: u32,
-    h: u32,
-    transform: sk::Transform,
-) -> Result<ImageData, GpuError> {
-    let pixmap =
-        sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
-    straight(paint_into(canvas, pixmap, transform)?)
-}
 /// `canvas`'s shapes drawn by `transform` into `pixmap`.
 fn paint_into(
     canvas: &Canvas,
+    pixmap: sk::Pixmap,
+    transform: sk::Transform,
+) -> Result<sk::Pixmap, GpuError> {
+    paint_range(canvas, 0..canvas.commands().len(), &[], pixmap, transform)
+}
+/// The parts of `canvas` (`Canvas::parts`) that can't reach `pixmap` under
+/// `transform`, by their bounds (`part_bounds`): their commands' and their
+/// texts' index ranges, in order.
+fn culled(
+    canvas: &Canvas,
+    bounds: &[Option<[f32; 4]>],
+    pixmap: &sk::Pixmap,
+    transform: sk::Transform,
+) -> (Vec<std::ops::Range<usize>>, Vec<std::ops::Range<usize>>) {
+    let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
+    let (mut commands, mut texts) = (Vec::new(), Vec::new());
+    for (part, bounds) in canvas.parts().iter().zip(bounds) {
+        let reaches = bounds.is_some_and(|[x0, y0, x1, y1]| {
+            sk::Rect::from_ltrb(x0, y0, x1.max(x0 + 1e-3), y1.max(y0 + 1e-3))
+                .and_then(|r| r.transform(transform))
+                // A pixel more each way, for antialiasing.
+                .is_none_or(|r| {
+                    r.right() > -1. && r.bottom() > -1. && r.left() < w + 1. && r.top() < h + 1.
+                })
+        });
+        if !reaches {
+            commands.push(part.commands.clone());
+            texts.push(part.texts.clone());
+        }
+    }
+    (commands, texts)
+}
+/// Whether `index` is in one of `ranges` (in order, apart).
+fn within(ranges: &[std::ops::Range<usize>], index: usize) -> bool {
+    let at = ranges.partition_point(|r| r.end <= index);
+    ranges.get(at).is_some_and(|r| r.contains(&index))
+}
+/// `canvas`'s commands in `range` drawn by `transform` into `pixmap`, but
+/// those in `skip` (whole parts, whose clips balance; in order, apart): the
+/// clips open where `range` starts opened first, those open where it ends
+/// closed (only the whole canvas must balance).
+fn paint_range(
+    canvas: &Canvas,
+    range: std::ops::Range<usize>,
+    skip: &[std::ops::Range<usize>],
+    pixmap: sk::Pixmap,
+    transform: sk::Transform,
+) -> Result<sk::Pixmap, GpuError> {
+    let commands = canvas.commands();
+    // `range`'s indices but those skipped.
+    let shown = |range: std::ops::Range<usize>| {
+        let mut gaps = Vec::with_capacity(skip.len() + 1);
+        let mut start = range.start;
+        for s in skip {
+            if s.end <= start {
+                continue;
+            }
+            if s.start >= range.end {
+                break;
+            }
+            gaps.push(start..s.start.max(start));
+            start = s.end;
+        }
+        gaps.push(start..range.end.max(start));
+        gaps.into_iter().flatten()
+    };
+    let mut open = Vec::new();
+    if range.start > 0 {
+        for at in shown(0..range.start) {
+            match commands[at] {
+                Draw::Clip { .. } => open.push(at),
+                Draw::Restore => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    let whole = range == (0..commands.len());
+    let drawn = open.into_iter().chain(shown(range)).map(|at| &commands[at]);
+    paint_commands(drawn, whole, pixmap, transform)
+}
+/// A clip open while drawing: one leaving nothing to draw, one leaving all
+/// the outer one did (covering the pixmap), or a mask.
+enum Clipped {
+    Nothing,
+    Same,
+    Mask(sk::Mask),
+}
+/// What the clips open leave: `None` for nothing, else their mask (none
+/// for all of the pixmap).
+fn clipped(open: &[Clipped]) -> Option<Option<&sk::Mask>> {
+    for clip in open.iter().rev() {
+        match clip {
+            Clipped::Nothing => return None,
+            Clipped::Same => {}
+            Clipped::Mask(mask) => return Some(Some(mask)),
+        }
+    }
+    Some(None)
+}
+/// `commands` drawn by `transform` into `pixmap`; their clips must balance
+/// if `balanced`, else those left open are closed.
+fn paint_commands<'a>(
+    commands: impl Iterator<Item = &'a Draw>,
+    balanced: bool,
     mut pixmap: sk::Pixmap,
     transform: sk::Transform,
 ) -> Result<sk::Pixmap, GpuError> {
@@ -1928,36 +2148,81 @@ fn paint_into(
     } else {
         BUDGET as u64
     };
-    let mut masks: Vec<sk::Mask> = Vec::new();
-    for command in canvas.commands() {
+    let mut masks: Vec<Clipped> = Vec::new();
+    for command in commands {
         match command {
             Draw::Clip { path: source, rule } => {
-                if masks.len() >= 16
+                let Some(outer) = clipped(&masks) else {
+                    masks.push(Clipped::Nothing);
+                    continue;
+                };
+                let Some(path) = path(source) else {
+                    masks.push(Clipped::Nothing);
+                    continue;
+                };
+                // Where it lies in the pixmap: past it, nothing shows; over
+                // all of it (a square rectangle's), all the outer clip did.
+                let device = path.bounds().transform(transform);
+                if device.is_some_and(|r| {
+                    r.right() <= 0.
+                        || r.bottom() <= 0.
+                        || r.left() >= w as f32
+                        || r.top() >= h as f32
+                }) {
+                    masks.push(Clipped::Nothing);
+                    continue;
+                }
+                let covers = match source.shape() {
+                    Some(Shape::Rect { rect, radius }) if !transform.has_skew() => {
+                        sk::Rect::from_xywh(
+                            rect.x + radius,
+                            rect.y + radius,
+                            rect.width - 2. * radius,
+                            rect.height - 2. * radius,
+                        )
+                        .and_then(|inner| inner.transform(transform))
+                        .is_some_and(|r| {
+                            r.left() <= 0.
+                                && r.top() <= 0.
+                                && r.right() >= w as f32
+                                && r.bottom() >= h as f32
+                        })
+                    }
+                    _ => false,
+                };
+                if covers {
+                    masks.push(Clipped::Same);
+                    continue;
+                }
+                let held = masks
+                    .iter()
+                    .filter(|m| matches!(m, Clipped::Mask(_)))
+                    .count();
+                if held >= 16
                     || (u64::from(w) * u64::from(h))
-                        .checked_mul((masks.len() + 1) as u64)
+                        .checked_mul((held + 1) as u64)
                         .is_none_or(|bytes| bytes > mask_budget)
                 {
                     return Err(GpuError("canvas clip stack exceeds budget".into()));
                 }
-                let mut mask = masks.last().cloned().unwrap_or_else(|| {
-                    let mut mask = sk::Mask::new(w, h).unwrap();
-                    mask.data_mut().fill(255);
-                    mask
-                });
-                if let Some(path) = path(source) {
-                    mask.intersect_path(
-                        &path,
-                        match rule {
-                            FillRule::Winding => sk::FillRule::Winding,
-                            FillRule::EvenOdd => sk::FillRule::EvenOdd,
-                        },
-                        true,
-                        transform,
-                    );
-                } else {
-                    mask.clear();
-                }
-                masks.push(mask);
+                let rule = match rule {
+                    FillRule::Winding => sk::FillRule::Winding,
+                    FillRule::EvenOdd => sk::FillRule::EvenOdd,
+                };
+                let mask = match outer {
+                    // Its coverage alone: what intersecting all of it gives.
+                    None => {
+                        let mut mask = sk::Mask::new(w, h).unwrap();
+                        mask.fill_path(&path, rule, true, transform);
+                        mask
+                    }
+                    Some(outer) => {
+                        let mut mask = outer.clone();
+                        mask.intersect_path(&path, rule, true, transform);
+                        mask
+                    }
+                };
+                masks.push(Clipped::Mask(mask));
                 continue;
             }
             Draw::Restore => {
@@ -1966,6 +2231,12 @@ fn paint_into(
                 }
                 continue;
             }
+            _ => {}
+        }
+        let Some(mask) = clipped(&masks) else {
+            continue;
+        };
+        match command {
             Draw::Image {
                 image,
                 rect,
@@ -1978,7 +2249,7 @@ fn paint_into(
                     image,
                     (*rect, *fit, *radius, *opacity),
                     transform,
-                    masks.last(),
+                    mask,
                 )?;
                 continue;
             }
@@ -1994,7 +2265,7 @@ fn paint_into(
                     path,
                     (*color, *offset, *blur, *spread),
                     transform,
-                    masks.last(),
+                    mask,
                 )?;
                 continue;
             }
@@ -2111,7 +2382,7 @@ fn paint_into(
                     FillRule::EvenOdd => sk::FillRule::EvenOdd,
                 },
                 transform,
-                masks.last(),
+                mask,
             ),
             Draw::Stroke { style, .. } => {
                 if !style.width.is_finite()
@@ -2150,12 +2421,12 @@ fn paint_into(
                     },
                     dash,
                 };
-                pixmap.stroke_path(&path, &paint, &stroke, transform, masks.last());
+                pixmap.stroke_path(&path, &paint, &stroke, transform, mask);
             }
             _ => unreachable!(),
         }
     }
-    if !masks.is_empty() {
+    if balanced && !masks.is_empty() {
         return Err(GpuError("unbalanced canvas clip".into()));
     }
     Ok(pixmap)

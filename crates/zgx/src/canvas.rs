@@ -740,8 +740,9 @@ pub struct CanvasLayer {
 const MAX_LAYERS: usize = 8;
 
 /// Where a canvas's texts fall among its commands, whether it clips, and
-/// the texts transformed: kept only once a command follows a text, a clip
-/// opens or a text is transformed.
+/// the texts transformed, and the parts it was joined from: kept only once
+/// a command follows a text, a clip opens, a text is transformed or a part
+/// is joined.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct TextOrder {
     /// How many commands came before the first text, and each later text
@@ -753,6 +754,8 @@ struct TextOrder {
     /// The texts drawn transformed (`Canvas::text_transformed`): their
     /// indices, in order, and transforms.
     transformed: Vec<(usize, Affine)>,
+    /// The parts `extend` added whose clips balance ([`Canvas::parts`]).
+    parts: Vec<CanvasPart>,
 }
 impl TextOrder {
     /// How many commands came before the last text.
@@ -777,6 +780,16 @@ pub struct Canvas {
     /// Whether its text is drawn into its raster with its shapes
     /// (`Canvas::raster_text`), rather than as text nodes over it.
     raster_text: bool,
+}
+/// A part of a canvas added by [`Canvas::extend`] (an `each` item's
+/// drawing): its commands' and texts' indices. Its clips balance, so a
+/// raster of a region it can't reach may leave it out whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanvasPart {
+    /// Its commands' indices.
+    pub commands: std::ops::Range<usize>,
+    /// Its texts' indices.
+    pub texts: std::ops::Range<usize>,
 }
 impl Canvas {
     /// An empty canvas.
@@ -954,7 +967,8 @@ impl Canvas {
     }
     /// Whether every text comes after every command, nothing clips and no
     /// text is transformed: the drawing, then its words over it, as a
-    /// chart's labels and a terminal's rows are.
+    /// chart's labels and a terminal's rows are. (False for a canvas joined
+    /// from parts, `extend`, which the general way draws the same.)
     pub fn texts_last(&self) -> bool {
         self.order.is_none()
     }
@@ -1016,7 +1030,32 @@ impl Canvas {
             );
         }
         self.text.extend_from_slice(&other.text);
+        // Kept as a part if its clips balance: none closed that it didn't
+        // open, none left open.
+        let mut depth = 0usize;
+        let balanced = other.commands.iter().all(|command| {
+            match command {
+                Draw::Clip { .. } => depth += 1,
+                Draw::Restore if depth == 0 => return false,
+                Draw::Restore => depth -= 1,
+                _ => {}
+            }
+            true
+        }) && depth == 0;
+        if balanced && (!other.commands.is_empty() || !other.text.is_empty()) {
+            let part = CanvasPart {
+                commands: before..self.commands.len(),
+                texts: texts_before..self.text.len(),
+            };
+            self.order().parts.push(part);
+        }
         self
+    }
+    /// The parts [`Canvas::extend`] added whose clips balance, in order:
+    /// each `each` item's drawing, which a raster of a region it can't
+    /// reach leaves out.
+    pub fn parts(&self) -> &[CanvasPart] {
+        self.order.as_ref().map_or(&[], |order| &order.parts[..])
     }
     /// Each text's clip, in order: the box its open clips leave (their
     /// bounds', intersected), rounded where that is a rounded rectangle's
@@ -1428,6 +1467,34 @@ mod tests {
         assert_eq!((joined.text_after(0), joined.text_after(1)), (2, 4));
         assert_eq!(joined.texts_after().collect::<Vec<_>>(), [2, 4]);
         assert_eq!(joined.layers(size)[0].commands, 0..3);
+        // Each part it was joined from, its commands' and texts' indices,
+        // while its clips balance.
+        assert_eq!(
+            joined.parts(),
+            [CanvasPart {
+                commands: 1..4,
+                texts: 0..2
+            }]
+        );
+        let mut opens = Canvas::new();
+        opens.clip(square(0., 0.), FillRule::Winding);
+        let mut closes = Canvas::new();
+        closes.restore();
+        joined.extend(&opens).extend(&closes).extend(&canvas);
+        assert_eq!(joined.parts().len(), 2, "the unbalanced ones are not parts");
+        assert_eq!(joined.parts()[1].commands, 6..9);
+        assert!(canvas.parts().is_empty());
+        // Parts kept, a chart's labels over its drawing are still that.
+        let mut chart = Canvas::new();
+        let mut bar = Canvas::new();
+        bar.fill(square(0., 0.), red);
+        chart.extend(&bar).extend(&bar);
+        assert_eq!(chart.parts().len(), 2);
+        chart.text(label("a", 0., 0.));
+        assert_eq!(chart.text_after(0), 2);
+        assert_eq!(chart.layers(size).len(), 1);
+        chart.fill(square(0., 0.), red);
+        assert_eq!(chart.text_after(0), 2, "a command over a text");
         // However many times a text is covered, at most 8 layers: the
         // cheapest neighbours joined, every text still in one of them.
         let mut many = Canvas::new();

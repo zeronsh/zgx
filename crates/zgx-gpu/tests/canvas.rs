@@ -697,6 +697,182 @@ fn a_panned_canvas_moves_its_raster_and_looks_as_drawn_under_the_view() {
     assert_eq!(differ(&gpu.readback().unwrap(), &drawn(zoomed)), (0, 0));
 }
 
+/// A board of screens, each an `each` item's part (clipped to its rounded
+/// box, a shadow, an ellipse and a curve in it), joined (`parts`) or drawn
+/// as one list of commands.
+fn screens(parts: bool) -> Arc<Canvas> {
+    let mut board = Canvas::new();
+    board.fill(
+        Path::rectangle(Rect::new(-20., -20., 900., 700.)),
+        Color(30, 30, 40, 255),
+    );
+    for i in 0..24 {
+        let (x, y) = ((i % 6) as f32 * 140., (i / 6) as f32 * 160.);
+        let mut screen = Canvas::new();
+        let at = Rect::new(x, y, 120., 140.);
+        screen.shadow(
+            Path::rounded_rect(at, 12.).unwrap(),
+            Color(0, 0, 0, 120),
+            Point::new(0., 4.),
+            6.,
+            0.,
+        );
+        screen.clip(Path::rounded_rect(at, 12.).unwrap(), FillRule::Winding);
+        screen.fill(Path::rectangle(at), Color(240, 240, 250, 255));
+        screen.fill(
+            Path::ellipse(Rect::new(x + 60., y + 70., 90., 60.)).unwrap(),
+            Color(200, (i * 10) as u8, 40, 255),
+        );
+        let mut curve = Path::builder();
+        curve.move_to(x, y + 120.).cubic_to(
+            Point::new(x + 40., y + 20.),
+            Point::new(x + 80., y + 160.),
+            Point::new(x + 130., y + 30.),
+        );
+        screen.stroke(
+            curve.build().unwrap(),
+            Color(20, 20, 20, 255),
+            Stroke {
+                width: 3.,
+                ..Stroke::default()
+            },
+        );
+        screen.restore();
+        match parts {
+            true => {
+                board.extend(&screen);
+            }
+            false => {
+                for command in screen.commands() {
+                    match command {
+                        Draw::Clip { path, rule } => board.clip(path.clone(), *rule),
+                        Draw::Restore => board.restore(),
+                        Draw::Fill { path, brush, rule } => {
+                            board.fill_rule(path.clone(), brush.clone(), *rule)
+                        }
+                        Draw::Stroke { path, brush, style } => {
+                            board.stroke(path.clone(), brush.clone(), style.clone())
+                        }
+                        Draw::Shadow {
+                            path,
+                            color,
+                            offset,
+                            blur,
+                            spread,
+                        } => board.shadow(path.clone(), *color, *offset, *blur, *spread),
+                        Draw::Image { .. } => unreachable!(),
+                    };
+                }
+            }
+        }
+    }
+    assert_eq!(board.parts().len(), if parts { 24 } else { 0 });
+    Arc::new(board)
+}
+/// A board of `each` items' parts, panned and zoomed, shows what the same
+/// drawing as one list of commands does: the strips a pan draws leave out
+/// the parts they can't reach, and nothing else.
+#[test]
+fn a_board_of_parts_looks_as_drawn_whole_however_panned_and_zoomed() {
+    use zgx::scene::CanvasView;
+    let at = |x: f32, y: f32, scale: f32| CanvasView { x, y, scale };
+    let views = [
+        at(-10., -6., 1.),
+        at(-90., -50., 1.),
+        at(-200., -40., 1.),
+        at(-230., -190., 1.),
+        at(-400., -300., 1.),
+        at(-100., -100., 2.5),
+        at(-130., -120., 2.5),
+        at(5., 5., 0.3),
+    ];
+    let shown = |board: Arc<Canvas>| {
+        let mut scene = Scene::new(200., 120.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let node = scene.append(
+            scene.root(),
+            NodeKind::Canvas(board),
+            Style {
+                width: Some(200.),
+                height: Some(120.),
+                ..Default::default()
+            },
+        );
+        // An offscreen renderer draws a zoom at once, as a window's does
+        // once the zoom's raster lands.
+        let mut gpu = GpuRenderer::new(300, 180).unwrap();
+        gpu.set_scale_factor(1.5);
+        views
+            .iter()
+            .map(|view| {
+                scene.set_canvas_view(node, Some(*view));
+                let report = scene.flush();
+                gpu.render(&scene, &report.damage).unwrap();
+                gpu.readback().unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let (parts, whole) = (shown(screens(true)), shown(screens(false)));
+    for ((a, b), view) in parts.iter().zip(&whole).zip(views) {
+        assert!(a == b, "{view:?}");
+    }
+    // And as a picture of it under each view.
+    let board = screens(true);
+    for (shown, view) in parts.iter().zip(views) {
+        let drawn = zgx_gpu::canvas::rasterize_viewed(&board, view, 200., 120., 1.5).unwrap();
+        let off = (0..300 * 180)
+            .filter(|i| (0..3).any(|c| shown[i * 4 + c].abs_diff(drawn.pixels()[i * 4 + c]) > 2))
+            .count();
+        assert!(off < 300 * 180 / 100, "{view:?}: {off} pixels");
+    }
+}
+/// A clip over all the raster draws as no clip; one past it, as nothing;
+/// one over part of it, its shape.
+#[test]
+fn clips_over_all_or_none_of_the_raster_draw_as_their_masks_do() {
+    use zgx::scene::CanvasView;
+    let view = CanvasView::default();
+    let ellipse = || Path::ellipse(Rect::new(-10., 10., 120., 70.)).unwrap();
+    let drawn = |clip: Option<Path>| {
+        let mut canvas = Canvas::new();
+        if let Some(clip) = &clip {
+            canvas.clip(clip.clone(), FillRule::Winding);
+        }
+        canvas.fill(ellipse(), Color(200, 30, 40, 255));
+        if clip.is_some() {
+            canvas.restore();
+        }
+        zgx_gpu::canvas::rasterize_viewed(&canvas, view, 100., 60., 1.5)
+            .unwrap()
+            .pixels()
+            .to_vec()
+    };
+    let none = drawn(None);
+    assert_eq!(
+        drawn(Some(Path::rectangle(Rect::new(-1., -1., 102., 62.)))),
+        none
+    );
+    assert_eq!(
+        drawn(Some(
+            Path::rounded_rect(Rect::new(-20., -20., 140., 100.), 10.).unwrap()
+        )),
+        none
+    );
+    let past = drawn(Some(Path::rectangle(Rect::new(200., 0., 50., 50.))));
+    assert!(past.iter().all(|v| *v == 0));
+    // Half of it: the left half as drawn, the right empty.
+    let half = drawn(Some(Path::rectangle(Rect::new(0., 0., 50., 60.))));
+    for y in 0..90 {
+        for x in 0..150 {
+            let i = (y * 150 + x) * 4;
+            match x < 75 {
+                true => assert_eq!(half[i..i + 4], none[i..i + 4], "{x}, {y}"),
+                false => assert_eq!(half[i + 3], 0, "{x}, {y}"),
+            }
+        }
+    }
+}
+
 /// Zoomed, a window's canvas shows the raster of the zoom before, scaled,
 /// rasterizing nothing on the frame; the new zoom's raster is made off it,
 /// the window woken, and the next frame shows it, as drawn under the view.
