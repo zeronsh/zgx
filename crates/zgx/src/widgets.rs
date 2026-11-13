@@ -1956,6 +1956,9 @@ pub(crate) struct UiStorage {
     pub(crate) find: RefCell<Option<crate::find::Session>>,
     /// The app turned find in page off.
     pub(crate) find_off: Cell<bool>,
+    /// Views find looks within when it opens in them (`View::find_scope`),
+    /// some perhaps gone: they go as the list grows.
+    pub(crate) find_scopes: RefCell<Vec<NodeId>>,
     /// Virtual lists' rows' indices from their places, by list.
     pub(crate) list_rows: RefCell<std::collections::HashMap<NodeId, crate::find::RowIndex>>,
     /// How far a wheel's line scrolls each list, by its root: a row's height.
@@ -1963,6 +1966,9 @@ pub(crate) struct UiStorage {
     /// What the last primary press went to: the keyboard scrolls the scroll
     /// view around it (`scroll_keys`).
     last_pressed: Cell<Option<NodeId>>,
+    /// Where it was, in window points: what find scopes look at for a press
+    /// on what takes no input (`find::press_target`).
+    pub(crate) last_press_at: Cell<Option<(f32, f32)>>,
     /// Elastic scrolling (`Ui::set_elastic_scrolling`): off, never read.
     elastic: RefCell<crate::elastic::State>,
     /// Scroll views that page (`View::paging`): none, never more than a look.
@@ -2329,9 +2335,11 @@ impl Ui {
             list_reveals: Default::default(),
             find: RefCell::new(None),
             find_off: Cell::new(false),
+            find_scopes: RefCell::new(Vec::new()),
             list_rows: Default::default(),
             wheel_lines: Default::default(),
             last_pressed: Cell::new(None),
+            last_press_at: Cell::new(None),
             elastic: Default::default(),
             paging: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
@@ -2440,6 +2448,7 @@ impl Ui {
         let (selection, scroll, press) = event;
         if press {
             self.storage.last_pressed.set(result.target);
+            self.storage.last_press_at.set(self.input.pointer());
         }
         self.selection_after_dispatch(selection, result);
         self.scroll_after_dispatch(scroll, result);

@@ -2470,6 +2470,10 @@ export type NodeProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: ("target" | "shown")?,
 	window_drag: boolean?,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: boolean?,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.

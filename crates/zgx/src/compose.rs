@@ -2072,6 +2072,22 @@ impl View {
         self.rare_mut().selectable = Some(selectable);
         self
     }
+    /// Make this view a scope of its own for find in page, as a
+    /// document's pane or a chat's thread: find opened with focus in it
+    /// (else last pressed in it) looks only within the nearest such view,
+    /// its text, fields' values and lists' rows, mounted or not, its bar at
+    /// that view's top right. Without one, find looks in the whole window.
+    #[doc(hidden)]
+    pub fn find_scope(self, on: bool) -> Self {
+        if !on {
+            return self;
+        }
+        self.on_mount(|handle| {
+            if let Some(ui) = handle.ui.upgrade() {
+                crate::find::add_scope(&ui, handle.node);
+            }
+        })
+    }
     /// The highlight behind this selectable region's selected text, in place
     /// of the theme's `selection` (and `selection.inactive`), as CSS's
     /// `::selection { background }` does. For a selectable view.

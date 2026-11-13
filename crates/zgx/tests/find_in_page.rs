@@ -394,3 +394,126 @@ fn matches_are_shapes_rounded_by_the_mark_radius() {
         );
     }
 }
+
+#[test]
+fn find_opened_in_a_scope_looks_only_there_its_bar_at_the_scope() {
+    let mut ui = Ui::new(800., 400.);
+    let (left, right) = (
+        ui.signal(String::from("harbor left")),
+        ui.signal(String::from("harbor right")),
+    );
+    let name = |n: usize| match n {
+        700 => "a harbor row".to_string(),
+        n => format!("Row {n}"),
+    };
+    let view = ui.mount(
+        column()
+            .child(button().id("outside").child(text("harbor outside")))
+            .child(
+                row()
+                    .child(
+                        column()
+                            .id("a")
+                            .find_scope(true)
+                            .w(300.)
+                            .h(300.)
+                            .child(text("harbor in a"))
+                            .child(text_input("Left", left).id("left").w(200.)),
+                    )
+                    .child(
+                        column()
+                            .id("b")
+                            .find_scope(true)
+                            .w(460.)
+                            .h(300.)
+                            .child(text("harbor in b"))
+                            .child(text_input("Right", right).id("right").w(200.))
+                            .child(
+                                virtual_list(
+                                    ui.signal(0.),
+                                    20.,
+                                    1,
+                                    || 1000,
+                                    |n| n,
+                                    move |_, n, _| text(name(n)),
+                                )
+                                .h(200.),
+                            ),
+                    ),
+            ),
+    );
+    ui.prepare_frame();
+    let (a, b) = (view.find("a").unwrap(), view.find("b").unwrap());
+    let within = |ui: &Ui, scope| {
+        let scene = ui.scene.borrow();
+        ui.find_results(100).iter().all(|found| {
+            let node = match found.at {
+                FoundAt::Text(node) | FoundAt::Editor(node) => node,
+                FoundAt::Row { list, .. } => list,
+            };
+            scene.ancestors(node).any(|id| id == scope)
+        })
+    };
+
+    // Focus in b: its text, its field's value and its list's unmounted row.
+    ui.input.focus(&ui.scene, view.find("right"));
+    key(&mut ui, Key::Character("f".into()), command());
+    ui.find_text("harbor");
+    settle(&mut ui);
+    let status = ui.find_status();
+    assert_eq!((status.count, status.done), (3, true), "{status:?}");
+    assert!(within(&ui, b), "{:?}", ui.find_results(10));
+    assert!(
+        marked(&ui)
+            .iter()
+            .all(|(text, _)| !text.contains("in a") && !text.contains("outside")),
+        "{:?}",
+        marked(&ui)
+    );
+    // The bar at b's top right.
+    let field = ui.focused_editor().expect("the bar's field focused").node;
+    let (bar, scope) = {
+        let scene = ui.scene.borrow();
+        (scene.bounds(field), scene.bounds(b))
+    };
+    assert!(
+        bar.x > scope.x
+            && bar.x + bar.width < scope.x + scope.width
+            && (bar.y - scope.y).abs() < 30.,
+        "bar {bar:?} in b {scope:?}"
+    );
+
+    // Opened again from a: a's matches, the bar there.
+    ui.input.focus(&ui.scene, view.find("left"));
+    key(&mut ui, Key::Character("f".into()), command());
+    let status = ui.find_status();
+    assert_eq!(
+        (status.query.as_str(), status.count),
+        ("harbor", 2),
+        "{status:?}"
+    );
+    assert!(within(&ui, a), "{:?}", ui.find_results(10));
+    assert!(
+        marked(&ui).iter().all(|(text, _)| !text.contains("in b")),
+        "{:?}",
+        marked(&ui)
+    );
+    let field = ui.focused_editor().expect("the bar's field focused").node;
+    let (bar, scope) = {
+        let scene = ui.scene.borrow();
+        (scene.bounds(field), scene.bounds(a))
+    };
+    // Narrower than the bar, a's own: the bar at its right, in the window.
+    assert!(
+        bar.x >= 0. && bar.x + bar.width < scope.x + scope.width,
+        "bar {bar:?} in a {scope:?}"
+    );
+    key(&mut ui, Key::Escape, Modifiers::default());
+
+    // Outside every scope: the whole window, as without scopes.
+    ui.input.focus(&ui.scene, view.find("outside"));
+    key(&mut ui, Key::Character("f".into()), command());
+    ui.find_text("harbor");
+    settle(&mut ui);
+    assert_eq!(ui.find_status().count, 6, "{:?}", ui.find_status());
+}

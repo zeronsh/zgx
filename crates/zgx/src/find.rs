@@ -13,6 +13,11 @@
 //! rows would show), a slice each frame until all are counted, so a list of
 //! a million rows never stalls one; nothing runs once the count is done, or
 //! while no find is open.
+//!
+//! A view can be a scope of its own (`View::find_scope`), as a document's
+//! pane or a chat's thread: find opened with focus (else the last press) in
+//! one looks only within the nearest, its bar at that view's top right.
+//! Opened again from another, it looks there.
 use crate::{
     compose::{View, ViewHandle},
     input::{EventPhase, InputEvent, Key},
@@ -112,6 +117,11 @@ pub(crate) struct Session {
     bar: Option<ViewHandle>,
     /// What had focus before the bar.
     previous_focus: Option<NodeId>,
+    /// The view find looks within (`View::find_scope`), else the window.
+    scope: Option<NodeId>,
+    /// Where the bar is: its top and right insets in the window, at its
+    /// scope's top right (`None`, the window's).
+    place: Signal<Option<(f32, f32)>>,
     /// The bar asked for this, to do once its event is done.
     asked: Option<Ask>,
     /// The scene's content when the query was last looked for, and when:
@@ -165,13 +175,18 @@ impl Ui {
         if self.storage.find_off.get() {
             return false;
         }
-        if self.storage.find.borrow().is_none() {
+        let open = self.storage.find.borrow().is_some();
+        if open {
+            self.rescope();
+        } else {
             let status = self.signal(FindStatus {
                 open: true,
                 ..Default::default()
             });
             let typed = self.signal(String::new());
             let previous_focus = self.input.focused();
+            let scope = self.scope_around(previous_focus.or_else(|| self.press_target()));
+            let place = self.signal(self.place_of(scope));
             *self.storage.find.borrow_mut() = Some(Session {
                 query: String::new(),
                 folded: String::new(),
@@ -184,10 +199,12 @@ impl Ui {
                 typed: typed.clone(),
                 bar: None,
                 previous_focus,
+                scope,
+                place: place.clone(),
                 asked: None,
                 searched: None,
             });
-            let bar = self.mount(bar(self, status, typed));
+            let bar = self.mount(bar(self, status, typed, place));
             if let Some(session) = self.storage.find.borrow_mut().as_mut() {
                 session.bar = Some(bar);
             }
@@ -195,6 +212,113 @@ impl Ui {
         }
         self.focus_find_field();
         true
+    }
+    /// Find opened again: within the scope around what has focus (else
+    /// what was last pressed), outside the bar, if that is another, the
+    /// query found there.
+    fn rescope(&mut self) {
+        let Some((bar, scope)) = self
+            .storage
+            .find
+            .borrow()
+            .as_ref()
+            .map(|s| (s.bar.as_ref().map(ViewHandle::node), s.scope))
+        else {
+            return;
+        };
+        let outside = |id: &NodeId| {
+            let scene = self.scene.borrow();
+            bar.is_none_or(|bar| *id != bar && !scene.ancestors(*id).any(|a| a == bar))
+        };
+        let Some(from) =
+            (self.input.focused().filter(outside)).or_else(|| self.press_target().filter(outside))
+        else {
+            return;
+        };
+        let now = self.scope_around(Some(from));
+        if now == scope {
+            return;
+        }
+        let query = match self.storage.find.borrow_mut().as_mut() {
+            Some(session) => {
+                session.scope = now;
+                session.query.clone()
+            }
+            None => return,
+        };
+        self.place_bar();
+        if !query.is_empty() {
+            self.find_text(&query);
+        }
+    }
+    /// What the last press landed on: its target, else (a press on what
+    /// takes no input, plain text) the node where it was.
+    fn press_target(&self) -> Option<NodeId> {
+        let pressed = self.last_pressed();
+        if self.storage.find_scopes.borrow().is_empty() || self.scope_around(pressed).is_some() {
+            return pressed;
+        }
+        let Some((x, y)) = self.storage.last_press_at.get() else {
+            return pressed;
+        };
+        self.scene.borrow().hit_test(x, y).or(pressed)
+    }
+    /// The nearest find scope holding `node` (or it), if any.
+    fn scope_around(&self, node: Option<NodeId>) -> Option<NodeId> {
+        let scopes = self.storage.find_scopes.borrow();
+        if scopes.is_empty() {
+            return None;
+        }
+        let node = node?;
+        let scene = self.scene.borrow();
+        if !scene.contains(node) {
+            return None;
+        }
+        std::iter::once(node)
+            .chain(scene.ancestors(node))
+            .find(|id| scopes.contains(id))
+    }
+    /// The bar's place at `scope`'s top right, as much of it as shows,
+    /// and in the window however narrow the scope.
+    fn place_of(&self, scope: Option<NodeId>) -> Option<(f32, f32)> {
+        const INSET: f32 = 8.;
+        let bar = self
+            .storage
+            .find
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.bar.as_ref().map(ViewHandle::node));
+        let scene = self.scene.borrow();
+        let scope = scope.filter(|id| scene.contains(*id))?;
+        let shown = scene.visible_bounds(scope)?;
+        let window = scene.bounds(scene.root());
+        let width = bar
+            .filter(|id| scene.contains(*id))
+            .map_or(0., |id| scene.bounds(id).width);
+        let right = window.x + window.width - (shown.x + shown.width) + INSET;
+        Some((
+            shown.y - window.y + INSET,
+            right.min(window.width - width - INSET).max(INSET),
+        ))
+    }
+    /// The bar moved to where its scope now is.
+    fn place_bar(&self) {
+        let Some((scope, place)) =
+            (self.storage.find.borrow().as_ref()).map(|s| (s.scope, s.place.clone()))
+        else {
+            return;
+        };
+        let now = self.place_of(scope);
+        if place.with_untracked(|p| *p != now) {
+            place.set(now);
+        }
+    }
+    /// Where find looks: its scope while that is mounted, else the window.
+    fn find_root(&self, scene: &crate::scene::Scene) -> NodeId {
+        let scope = self.storage.find.borrow().as_ref().and_then(|s| s.scope);
+        scope
+            .filter(|id| scene.contains(*id))
+            .unwrap_or_else(|| scene.root())
     }
     fn focus_find_field(&mut self) {
         let field = self
@@ -453,7 +577,7 @@ impl Ui {
             .and_then(|s| s.bar.as_ref().map(ViewHandle::node));
         let mut segments = Vec::new();
         let mut found = Vec::new();
-        let mut pending = vec![scene.root()];
+        let mut pending = vec![self.find_root(&scene)];
         while let Some(id) = pending.pop() {
             if Some(id) == bar || !scene.contains(id) || !scene.shown_in_layout(id) {
                 continue;
@@ -798,7 +922,7 @@ impl Ui {
             let leaves: Vec<NodeId> = {
                 let scene = self.scene.borrow();
                 let mut leaves = Vec::new();
-                let mut pending = vec![scene.root()];
+                let mut pending = vec![self.find_root(&scene)];
                 while let Some(id) = pending.pop() {
                     if Some(id) == bar || !scene.shown_in_layout(id) {
                         continue;
@@ -965,8 +1089,21 @@ pub(crate) fn sync(ui: &Ui) {
         (scene.content_revision(), scene.layout_revision())
     };
     if marked_at != Some(now) {
+        ui.place_bar();
         ui.refresh_marks();
     }
+}
+
+/// Make `node` a find scope (`View::find_scope`). Those gone are let go as
+/// the list fills, so it never holds more than twice those mounted.
+pub(crate) fn add_scope(ui: &Ui, node: NodeId) {
+    let mut scopes = ui.storage.find_scopes.borrow_mut();
+    if scopes.len() == scopes.capacity()
+        && let Ok(scene) = ui.scene.try_borrow()
+    {
+        scopes.retain(|id| scene.contains(*id));
+    }
+    scopes.push(node);
 }
 
 /// While rows are left to count, now: the next slice is due. Once counted,
@@ -1127,7 +1264,12 @@ fn count_text(s: &FindStatus, short: bool) -> String {
 
 /// Find's bar: a field, how many matches, the one before and the next, and
 /// close.
-fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
+fn bar(
+    ui: &Ui,
+    status: Signal<FindStatus>,
+    typed: Signal<String>,
+    place: Signal<Option<(f32, f32)>>,
+) -> View {
     use crate::compose::{button, row, svg, text, text_input, text_signal};
     let look = find_look();
     let ask = |ui: &Ui, what: Ask| {
@@ -1270,7 +1412,10 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
         .accessible_label(crate::i18n::label("Find"))
         .reactive_style(move || {
             typing();
-            Styles::new()
+            match place.get() {
+                Some((top, right)) => Styles::new().top(top).right(right),
+                None => Styles::new(),
+            }
         })
         .on_event(keys)
         .child(group.child(field).child(navigator))

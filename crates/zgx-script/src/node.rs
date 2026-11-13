@@ -68,8 +68,9 @@ pub(crate) struct Node {
     /// `bg_shader`, `shader_params`, `layer_shader` and `layer_params`
     /// (boxed: few nodes have any).
     pub shaders: Option<Box<Shaders>>,
-    /// `window_drag = true` (`WINDOW_DRAG`) and `focus_on_press = false`
-    /// (`KEEPS_FOCUS`): rare, tested together where the node is styled.
+    /// `window_drag = true` (`WINDOW_DRAG`), `focus_on_press = false`
+    /// (`KEEPS_FOCUS`) and `find_scope = true` (`FIND_SCOPE`): rare, tested
+    /// together where the node is styled.
     pub press_flags: u8,
     /// `hook = false` or `private = true`: no plugin may target it
     /// (`ui.contribute { target }`), whatever matches it.
@@ -1655,6 +1656,8 @@ pub(crate) struct SpanIcon {
 pub(crate) const WINDOW_DRAG: u8 = 1;
 /// `Node::press_flags`: a press on it leaves focus where it is.
 pub(crate) const KEEPS_FOCUS: u8 = 2;
+/// `Node::press_flags`: find in page opened in it looks only there.
+pub(crate) const FIND_SCOPE: u8 = 4;
 
 /// A node's tooltip (`tooltip`, `tooltip_placement`).
 #[derive(Default, Clone)]
@@ -4363,6 +4366,7 @@ fn fill_from(
             "focusable" => node.focusable = Some(lua.unpack(value)?),
             "window_drag" => node.set_press_flag(WINDOW_DRAG, lua.unpack(value)?),
             "focus_on_press" => node.set_press_flag(KEEPS_FOCUS, !lua.unpack::<bool>(value)?),
+            "find_scope" => node.set_press_flag(FIND_SCOPE, lua.unpack(value)?),
             "selectable" => node.selectable = lua.unpack(value)?,
             "selection_color" | "selected_text_color" => {
                 let at = usize::from(key == "selected_text_color");
