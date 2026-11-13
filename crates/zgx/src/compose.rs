@@ -6488,10 +6488,14 @@ fn open_element(
             let mut defaults = widget_style(|w| &w.menu_item);
             // A height the app gives the item is its height: the platform's
             // least (GNOME's 32) is for items sized by their content.
-            if OVERLAY.menu_item_min_height.is_some()
-                && (view.styles.height.is_some() || view.styles.height_percent.is_some())
-            {
+            let sized = view.styles.height.is_some() || view.styles.height_percent.is_some();
+            if OVERLAY.menu_item_min_height.is_some() && sized {
                 defaults = defaults.min_h(0.);
+            }
+            // Its height is the whole slot: the platform's gap between
+            // items (Windows' 2 above and below) is not added to it.
+            if sized && OVERLAY.menu_item_inset.1 > 0. {
+                defaults = defaults.my(0.);
             }
             let look = menu_look();
             defaults.merge(&look.item);

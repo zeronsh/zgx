@@ -9419,7 +9419,16 @@ impl GpuRenderer {
                     && matches!(item.kind, NodeKind::Text { .. } | NodeKind::RichText { .. })
                 {
                     let clip = item.clip.unwrap_or(viewport);
-                    let own = clip.intersection(item.bounds).unwrap_or_default();
+                    // Ink may pass the line box above and below (a descender of
+                    // a font taller than its line height), as CSS lets it.
+                    let overshoot = (item.bounds.height * 0.5).clamp(2., 12.);
+                    let tall = Rect::new(
+                        item.bounds.x,
+                        item.bounds.y - overshoot,
+                        item.bounds.width,
+                        item.bounds.height + 2. * overshoot,
+                    );
+                    let own = clip.intersection(tall).unwrap_or_default();
                     match scene.has_text_shadows() {
                         true => shadowed(scene, item.id, item.bounds, clip, own, &mut own_clip),
                         false => own,
