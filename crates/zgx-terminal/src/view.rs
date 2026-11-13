@@ -16,7 +16,6 @@ use crate::{
     GridSize, Session, SessionEvent, SessionOptions, keys,
     paint::{self, CursorAt, Look, Metrics, RowPaint},
     search::{Highlight, Search},
-    session::Term,
 };
 use alacritty_terminal::{
     grid::{Dimensions, Scroll},
@@ -144,13 +143,14 @@ struct Engine {
     last_offset: Cell<usize>,
     last_focus: Cell<bool>,
     /// The search open (`TerminalState::search`), if one is; `searching`
-    /// says so for a paint to test once. The matches it last highlighted,
-    /// and the counts it last reported.
+    /// says so for a paint to test once. Its matches in view, drawn over
+    /// the rows while `found_open` (`found_view`), and the counts it last
+    /// reported.
     search: RefCell<Option<Search>>,
     searching: Cell<bool>,
-    last_highlights: RefCell<Vec<Highlight>>,
+    found: Signal<Rc<[Highlight]>>,
+    found_open: Signal<bool>,
     last_counts: Cell<Option<(usize, Option<usize>)>>,
-    counts_due: Cell<bool>,
     /// The content box last laid out, in points.
     size: Cell<(f32, f32)>,
     /// A press being dragged: selecting, or reported to the program.
@@ -255,9 +255,9 @@ impl EngineTerminal {
             last_focus: Cell::new(false),
             search: RefCell::new(None),
             searching: Cell::new(false),
-            last_highlights: RefCell::new(Vec::new()),
+            found: runtime.signal(Rc::from([])),
+            found_open: runtime.signal(false),
             last_counts: Cell::new(None),
-            counts_due: Cell::new(false),
             size: Cell::new((0., 0.)),
             pressed: Cell::new(None),
             scroll_rest: Cell::new(0.),
@@ -475,8 +475,19 @@ impl Engine {
     }
 
     /// Work out the rows that changed and hand the canvases those that
-    /// differ.
+    /// differ; and while a search is open, its matches in view.
     fn paint(&self) {
+        self.paint_rows();
+        if self.searching.get() {
+            self.search_step();
+        }
+    }
+
+    /// `paint`'s rows: built as before searching. (With a search's steps
+    /// in its body, its hot loops took other registers on x86: the terminal
+    /// cells +0.05% to +0.40%.)
+    #[inline(never)]
+    fn paint_rows(&self) {
         let session = self.session.borrow();
         let Some(session) = session.as_ref() else {
             return;
@@ -515,12 +526,6 @@ impl Engine {
             // focus, a selection) are no news to a reader.
             output = !all;
             *self.last_selection.borrow_mut() = selection;
-            // The search's matches in view, worked out again: other ones
-            // draw every row again. One test while none is open.
-            let highlights = match self.searching.get() {
-                true => self.search_in_view(&term, &mut all),
-                false => None,
-            };
             let mut damaged = vec![false; rows];
             // Lines the screen scrolled up, their damage moved with them:
             // what the slots drew moves up as many rows, and only the rows
@@ -563,17 +568,11 @@ impl Engine {
                         paint::row(&term, row, look, metrics, cursor, selection.as_ref()),
                     ));
                 }
-                if let Some(highlights) = &highlights {
-                    paint::highlight(&mut changed, highlights, look, metrics);
-                }
             });
             if !term.placements().is_empty() || self.any_pictures.get() {
                 self.work_out_pictures(&term, session, metrics);
             }
             term.reset_damage();
-        }
-        if self.searching.get() {
-            self.report_search();
         }
         self.fit_slots(screen_rows);
         // Worked out only while a screen reader listens.
@@ -1467,11 +1466,12 @@ impl Engine {
     /// Search for `needle` from now on (none, empty), every row drawn again.
     fn set_search(&self, needle: &str) {
         let search = (!needle.is_empty()).then(|| Search::new(needle));
-        self.searching.set(search.is_some());
+        let open = search.is_some();
+        self.searching.set(open);
         *self.search.borrow_mut() = search;
-        self.last_highlights.borrow_mut().clear();
         self.last_counts.set(None);
-        self.full.set(true);
+        self.found.set(Rc::from([]));
+        self.found_open.set(open);
         self.paint();
     }
 
@@ -1502,47 +1502,36 @@ impl Engine {
         self.paint();
     }
 
-    /// The search brought up to date with what `term` holds, and its
-    /// matches in view; `all` when they differ from the last drawn. Its
-    /// counts go to the state. Out of `paint`'s line: only while a search
-    /// is open.
+    /// The search brought up to date with what the screen holds: its
+    /// matches in view to `found` (drawn over the rows) and its counts to
+    /// the state, where they changed. Out of `paint`'s line: only while a
+    /// search is open.
     #[cold]
     #[inline(never)]
-    fn search_in_view(&self, term: &Term, all: &mut bool) -> Option<Vec<Highlight>> {
-        let mut search = self.search.borrow_mut();
-        let search = search.as_mut()?;
-        search.update(term);
-        let highlights = search.in_view(term);
-        let mut last = self.last_highlights.borrow_mut();
-        if *last != highlights {
-            *all = true;
-            last.clone_from(&highlights);
-        }
-        let counts = (search.total(), search.selected());
-        if self.last_counts.replace(Some(counts)) != Some(counts) {
-            self.counts_due.set(true);
-        }
-        Some(highlights)
-    }
-
-    /// The search's counts, changed, to the state (`report_search` after
-    /// the screen is unlocked: what the state change runs may paint).
-    #[cold]
-    #[inline(never)]
-    fn report_search(&self) {
-        if !self.counts_due.replace(false) {
-            return;
-        }
-        let (Some((total, selected)), Some(term)) = (self.last_counts.get(), self.controller())
-        else {
+    fn search_step(&self) {
+        let step = self.with_session(|session| {
+            let term = session.term();
+            let mut search = self.search.borrow_mut();
+            let search = search.as_mut()?;
+            search.update(&term);
+            Some((search.in_view(&term), (search.total(), search.selected())))
+        });
+        let Some(Some((highlights, counts))) = step else {
             return;
         };
-        term.update_state(|state| {
-            if let Some(search) = &mut state.search {
-                search.total = Some(total);
-                search.selected = selected;
-            }
-        });
+        if self.found.with_untracked(|found| **found != highlights[..]) {
+            self.found.set(Rc::from(highlights));
+        }
+        if self.last_counts.replace(Some(counts)) != Some(counts)
+            && let Some(term) = self.controller()
+        {
+            term.update_state(|state| {
+                if let Some(search) = &mut state.search {
+                    search.total = Some(counts.0);
+                    search.selected = counts.1;
+                }
+            });
+        }
     }
 
     /// Ask again what is in front once the output settles: `PROCESS_CHECK`
@@ -1935,9 +1924,15 @@ fn view(engine: Rc<Engine>) -> View {
                 let order = engine.order.clone();
                 let pictured = engine.pictured.clone();
                 let listening = engine.listening.clone();
+                let found = engine.found_open.clone();
                 move || {
                     let (_, generation) = layout.get();
                     let pictured = pictured.get();
+                    // A search's matches over the rows, only while one is
+                    // open: one more node then, none otherwise.
+                    if found.get() {
+                        return found_layers(pictured, &order, &listening, generation);
+                    }
                     // Each slot is drawn at its line whatever its place among
                     // the nodes: only a reader meets them in that order. With
                     // none, they keep theirs, and a scroll moves no node.
@@ -1959,6 +1954,7 @@ fn view(engine: Rc<Engine>) -> View {
             move |(slot, _), _cx| match slot {
                 UNDER => pictures_view(&engine, true),
                 OVER => pictures_view(&engine, false),
+                FOUND => found_view(&engine),
                 slot => row_view(&engine, slot),
             },
         )
@@ -2169,6 +2165,7 @@ fn view(engine: Rc<Engine>) -> View {
 /// again at each scroll.
 const UNDER: usize = usize::MAX;
 const OVER: usize = usize::MAX - 1;
+const FOUND: usize = usize::MAX - 2;
 
 /// A picture as the view draws it, in points.
 #[derive(Clone, Debug, PartialEq)]
@@ -2254,6 +2251,63 @@ fn shown_pictures(term: &crate::Term, session: &Session, metrics: Metrics) -> Ve
 }
 
 /// The pictures under the text (negative z), or over it.
+/// The rows' layers while a search is open: the pictures' under them (if
+/// any), the rows, its matches over them (translucent, as a selection is:
+/// every match shows, on cells of any background), the pictures' over
+/// them. Out of the rows' list's line: only while a search is open.
+#[cold]
+#[inline(never)]
+fn found_layers(
+    pictured: bool,
+    order: &Signal<Rc<[usize]>>,
+    listening: &Signal<bool>,
+    generation: u32,
+) -> Vec<(usize, u32)> {
+    let slots: Vec<usize> = if listening.get() {
+        order.with(|order| order.to_vec())
+    } else {
+        (0..order.with_untracked(|order| order.len())).collect()
+    };
+    let rows = slots.into_iter().map(|slot| (slot, generation));
+    let under = pictured.then_some((UNDER, 0));
+    let over = pictured.then_some((OVER, 0));
+    under
+        .into_iter()
+        .chain(rows)
+        .chain(std::iter::once((FOUND, generation)))
+        .chain(over)
+        .collect()
+}
+
+/// A search's matches in view (`Engine::found`), over the rows, on the
+/// screen's rows as they show: in the rows' container, moved down as far
+/// as it moves up.
+fn found_view(engine: &Rc<Engine>) -> View {
+    let found = engine.found.clone();
+    let look = engine.look.clone();
+    let cells = engine.clone();
+    let placed = engine.clone();
+    canvas(move |_| {
+        // In the cells' size, drawn again with a new font.
+        let _ = cells.layout.get();
+        let metrics = cells.metrics.get();
+        look.with(|look| found.with(|found| paint::draw_found(found, look, metrics)))
+    })
+    .absolute()
+    .left(PAD_X)
+    .top(PAD_Y)
+    .w_full()
+    .reactive_style(move || {
+        // The rows' height (the container's own comes from its rows,
+        // placed absolutely), at the screen's top.
+        let (rows, _) = placed.layout.get();
+        let height = placed.metrics.get().cell_height;
+        let top = placed.scrolled.get() as f32 * height;
+        Styles::new().h(f32::from(rows) * height).translate(0., top)
+    })
+    .accessible_hidden()
+}
+
 fn pictures_view(engine: &Rc<Engine>, below: bool) -> View {
     let pictures = engine.pictures.clone();
     let shown = engine.pictures.clone();
