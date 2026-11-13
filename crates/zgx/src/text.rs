@@ -252,8 +252,14 @@ impl Text {
     /// Every edit that made this text from the one `id` names, earliest first: (the byte it began at then, how many
     /// bytes it removed, what it inserted), if its log reaches back to that one. A document mirrored elsewhere (a
     /// note's CRDT) follows an editor by these. `None`: read it whole.
-    pub fn deltas_since(&self, id: u64) -> Option<impl Iterator<Item = (usize, usize, &str)> + Clone> {
-        Some(self.edits_since(id)?.map(|edit| (edit.start, edit.old_len, &*edit.inserted)))
+    pub fn deltas_since(
+        &self,
+        id: u64,
+    ) -> Option<impl Iterator<Item = (usize, usize, &str)> + Clone> {
+        Some(
+            self.edits_since(id)?
+                .map(|edit| (edit.start, edit.old_len, &*edit.inserted)),
+        )
     }
     /// Drops the edits it keeps for its readers ([`Text::inserts_since`])
     /// once a stream into it has stopped, staying the same text (its
@@ -959,8 +965,19 @@ mod tests {
         text.replace_range(5..11, "");
         text.replace_range(0..1, "J");
         text.append("!");
-        let deltas: Vec<_> = text.deltas_since(start).unwrap().map(|(s, n, t)| (s, n, t.to_string())).collect();
-        assert_eq!(deltas, [(5, 6, String::new()), (0, 1, "J".into()), (5, 0, "!".into())]);
+        let deltas: Vec<_> = text
+            .deltas_since(start)
+            .unwrap()
+            .map(|(s, n, t)| (s, n, t.to_string()))
+            .collect();
+        assert_eq!(
+            deltas,
+            [
+                (5, 6, String::new()),
+                (0, 1, "J".into()),
+                (5, 0, "!".into())
+            ]
+        );
         assert_eq!(text.to_string(), "Jello!");
         assert!(text.deltas_since(text.id()).unwrap().next().is_none());
     }

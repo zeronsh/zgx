@@ -148,7 +148,11 @@ impl SpanStyle {
     }
     /// Whether it changes how its text is shaped (and so its width or height).
     fn shapes(&self) -> bool {
-        self.weight.is_some() || self.italic || self.size.is_some() || self.line_height.is_some() || self.mono
+        self.weight.is_some()
+            || self.italic
+            || self.size.is_some()
+            || self.line_height.is_some()
+            || self.mono
     }
 }
 /// Room around one line of a text area (`EditorHandle::set_line_insets`): a list item's indent, a heading's space
@@ -292,7 +296,9 @@ pub(crate) fn styled_line(
                 font_size: style.size.unwrap_or(size),
                 color: style.color.unwrap_or(color),
                 background: style.background,
-                underline: style.underline.then(|| crate::rich_text::Decoration::new(1.)),
+                underline: style
+                    .underline
+                    .then(|| crate::rich_text::Decoration::new(1.)),
                 strikethrough: style.strike.then(|| crate::rich_text::Decoration::new(1.)),
                 ..Default::default()
             }
@@ -646,7 +652,14 @@ impl LineCache {
     }
     /// Line `i` shaped with the runs its spans give it, if they shape it
     /// (a weight, italics): `None` for a line shaped as its plain text.
-    fn styled(&self, layout: &LinesLayout, i: usize, text: &str, wrap: Option<f32>, key_text: &str) -> Option<Rc<dyn TextLayout>> {
+    fn styled(
+        &self,
+        layout: &LinesLayout,
+        i: usize,
+        text: &str,
+        wrap: Option<f32>,
+        key_text: &str,
+    ) -> Option<Rc<dyn TextLayout>> {
         if !self.shapes.get() {
             return None;
         }
@@ -671,7 +684,13 @@ impl LineCache {
         Some(shaped)
     }
     /// Line `text`, shaped (from the cache if it is there).
-    fn line(&self, text: &str, shape: &LineShaper, wrap: Option<f32>, key: &str) -> Rc<dyn TextLayout> {
+    fn line(
+        &self,
+        text: &str,
+        shape: &LineShaper,
+        wrap: Option<f32>,
+        key: &str,
+    ) -> Rc<dyn TextLayout> {
         let tick = self.clock.get() + 1;
         self.clock.set(tick);
         if let Some((layout, used)) = self.shaped.borrow_mut().get_mut(key) {
@@ -960,14 +979,21 @@ impl LinesLayout {
     /// Line `i`, shaped.
     /// Line `i`'s room (`LineCache::set_insets`).
     pub(crate) fn inset(&self, i: usize) -> LineInset {
-        self.cache.insets.borrow().as_ref().map_or_else(LineInset::default, |insets| insets(i))
+        self.cache
+            .insets
+            .borrow()
+            .as_ref()
+            .map_or_else(LineInset::default, |insets| insets(i))
     }
     pub(crate) fn line(&self, i: usize) -> Rc<dyn TextLayout> {
         let text = self.line_text(i);
         let inset = self.inset(i);
         // an indented line wraps narrower: kept apart from the same text unindented
         let (wrap, key) = if inset.left > 0. {
-            (self.wrap.map(|w| (w - inset.left).max(1.)), std::borrow::Cow::Owned(format!("{}\u{0}{}", inset.left.to_bits(), &*text)))
+            (
+                self.wrap.map(|w| (w - inset.left).max(1.)),
+                std::borrow::Cow::Owned(format!("{}\u{0}{}", inset.left.to_bits(), &*text)),
+            )
         } else {
             (self.wrap, std::borrow::Cow::Borrowed(&*text))
         };
@@ -1001,7 +1027,12 @@ impl LinesLayout {
     }
     fn shift(&self, i: usize, rect: Rect) -> Rect {
         let inset = self.inset(i);
-        Rect::new(rect.x + inset.left, rect.y + self.top(i) + inset.above, rect.width, rect.height)
+        Rect::new(
+            rect.x + inset.left,
+            rect.y + self.top(i) + inset.above,
+            rect.width,
+            rect.height,
+        )
     }
     /// The selection of `range`, only on the lines between `top` and
     /// `bottom`: what an editor draws of a selection of the whole file.
@@ -1134,7 +1165,10 @@ mod tests {
         use crate::scene::Color;
         let ink = Color(0, 0, 0, 255);
         let spans: LineSpans = vec![
-            (0..5, SpanStyle::default().size(24.).line_height(32.).weight(600)),
+            (
+                0..5,
+                SpanStyle::default().size(24.).line_height(32.).weight(600),
+            ),
             (6..10, SpanStyle::default().mono()),
             (11..15, SpanStyle::default().underline()),
         ];
@@ -1148,8 +1182,17 @@ mod tests {
         let code = runs.iter().find(|r| r.range == (6..10)).unwrap();
         assert_eq!(code.font.family, crate::text_layout::FontFamily::Monospace);
         assert_eq!(code.font_size, 16.);
-        assert!(runs.iter().find(|r| r.range == (11..15)).unwrap().underline.is_some());
-        assert!(shape_key(&spans).is_some(), "size and font reshape the line");
+        assert!(
+            runs.iter()
+                .find(|r| r.range == (11..15))
+                .unwrap()
+                .underline
+                .is_some()
+        );
+        assert!(
+            shape_key(&spans).is_some(),
+            "size and font reshape the line"
+        );
         assert!(shape_key(&vec![(11..15, SpanStyle::default().underline())]).is_none());
     }
     use crate::text_layout::{FallbackTextLayout, FontStyle};
@@ -1179,9 +1222,29 @@ mod tests {
     #[test]
     fn insets_move_carets_hits_and_wrapping() {
         let cache = Rc::new(LineCache::default());
-        cache.set_insets(Some(Rc::new(|i| if i == 1 { LineInset { left: 36., above: 8., below: 4. } } else { LineInset::default() })));
+        cache.set_insets(Some(Rc::new(|i| {
+            if i == 1 {
+                LineInset {
+                    left: 36.,
+                    above: 8.,
+                    below: 4.,
+                }
+            } else {
+                LineInset::default()
+            }
+        })));
         let text = "first\nsecond line that is long enough to wrap in a narrow box\nthird";
-        let layout = |cache: &Rc<LineCache>| cache.layout(|| Text::new(text), None, 14., Some(200.), &FontStyle::default(), 0, shaper);
+        let layout = |cache: &Rc<LineCache>| {
+            cache.layout(
+                || Text::new(text),
+                None,
+                14.,
+                Some(200.),
+                &FontStyle::default(),
+                0,
+                shaper,
+            )
+        };
         let inset = layout(&cache);
         let plain = layout(&Rc::new(LineCache::default()));
         let second = text.find("second").unwrap();
@@ -1189,7 +1252,10 @@ mod tests {
         assert_eq!(a.x, b.x + 36.);
         assert_eq!(a.y, b.y + 8.);
         assert_eq!(inset.hit_test(a.x + 1., a.y + 1.), second);
-        assert!(inset.height(1) > plain.height(1) + 11., "above, below and a narrower wrap add height");
+        assert!(
+            inset.height(1) > plain.height(1) + 11.,
+            "above, below and a narrower wrap add height"
+        );
         let third = text.find("third").unwrap();
         assert!(inset.caret(third).y > plain.caret(third).y + 11.);
         assert_eq!(inset.caret(0), plain.caret(0));
