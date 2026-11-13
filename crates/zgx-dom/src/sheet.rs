@@ -25,6 +25,14 @@ pub(crate) const BASE_CSS: &str = "\
 .zt{display:block;box-sizing:border-box;}\
 .zs0{user-select:none;}.zs1{user-select:text;}\
 .zu{align-items:center;justify-content:center;border:1px dashed currentColor;opacity:.6;min-height:24px;}\
+.zd,.zp{color:inherit;background:none;border:0 solid transparent;padding:0;max-width:calc(100vw - 8px);max-height:calc(100vh - 8px);}\
+.zd:not([open]),.zp:not(:popover-open){display:none;}\
+.zd::backdrop{background:var(--zbd,rgba(0,0,0,.5));}\
+.zp{position:fixed;inset:auto;margin:0;overflow:visible;}\
+.zp[data-layer]{inset:0;width:auto;height:auto;max-width:none;max-height:none;pointer-events:none;}\
+.zp[data-layer]>*{pointer-events:auto;}\
+.zp[role=tooltip]{transition:opacity .14s ease-out;}\
+@starting-style{.zp[role=tooltip]:popover-open{opacity:0;}}\
 ";
 
 /// `base`'s own declarations, folded into a look's rule so its elements
@@ -37,6 +45,8 @@ fn folded(base: &'static str) -> (&'static str, &'static str) {
         "z ze" => (Z, "ze "),
         "z zu" => (Z, "zu "),
         "z zc" => (Z, "zc "),
+        "z zd" => (Z, "zd "),
+        "z zp" => (Z, "zp "),
         _ => ("", ""),
     }
 }

@@ -470,6 +470,10 @@ struct PortalOptions {
     /// `View::at_caret`: placed at the caret of the editor in its trigger,
     /// focus left there.
     at_caret: bool,
+    /// A tooltip in the DOM (`__dom::hover`): shown as the pointer rests on
+    /// its anchor for this long, and whether the pointer may enter it.
+    #[cfg(feature = "dom")]
+    dom_hover: Option<(std::time::Duration, bool)>,
 }
 /// A declarative view: a node to mount, its styles, children, handlers and
 /// semantics. Built with the functions here ([`column()`], [`text()`],

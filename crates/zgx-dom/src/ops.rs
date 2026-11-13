@@ -31,6 +31,8 @@ pub(crate) const CLASS_ADD: u32 = 25;
 pub(crate) const VISIBLE: u32 = 26;
 pub(crate) const TRUNCATE: u32 = 27;
 pub(crate) const WALK: u32 = 28;
+pub(crate) const OVERLAY: u32 = 29;
+pub(crate) const SHOW: u32 = 30;
 
 /// Words a frame holds before it applies what it has (`Ops::op`).
 pub(crate) const EARLY: usize = 1 << 12;
@@ -47,6 +49,7 @@ pub(crate) enum Tag {
     Progress = 5,
     Label = 6,
     Canvas = 8,
+    Dialog = 9,
 }
 
 /// Handler kinds (`HANDLER`'s second word).
