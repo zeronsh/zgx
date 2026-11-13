@@ -18185,7 +18185,27 @@ export type Placement = {
 	side: ("bottom" | "top" | "left" | "right")?,
 	align: ("start" | "center" | "end")?,
 	offset: number?,
+	-- Points kept between it and the screen's edges (0).
+	padding: number?,
+	-- Slide along the edge to stay on screen (true); false keeps its
+	-- aligned place and lets it reach past.
+	shift: boolean?,
+	-- Where its alignment would reach past the screen, line up with the
+	-- trigger's other edge when that fits (false).
+	flip_align: boolean?,
+	-- Where neither side has room, take the one with more (false: keep the
+	-- preferred side).
+	more_room: boolean?,
 }
+-- How long the pointer rests on a trigger before its popup opens, and how
+-- long after it leaves the trigger and the popup before it closes, in
+-- milliseconds (Base UI's `delay` and `closeDelay`); left out, a popover's
+-- or menu's opens at 300 and a submenu's at 100, and each closes at 0.
+-- Heading for the popup across the space between, the pointer is held in
+-- the triangle to it (a safe polygon), so a diagonal crossing keeps it open;
+-- out of it, or at rest in it for 300 ms, it closes. One opened by a click
+-- stays open.
+export type HoverDelay = { open: number?, close: number? }
 export type PopoverProps = {
 	-- Size and position.
 	w: Props_w,
@@ -18646,6 +18666,8 @@ export type PopoverProps = {
 	match_anchor_width: boolean?,
 	-- A popover only: false keeps it open on a click outside.
 	dismiss_on_backdrop: boolean?,
+	-- Opens as the pointer rests on `anchor` (see `HoverDelay`).
+	hover_delay: HoverDelay?,
 	-- A popover only: at the caret of the input in its `anchor`, following
 	-- it (typing, a new line, scrolling, an input method's composition),
 	-- and taking no focus: keys go on to the input, which drives it (a
@@ -19527,6 +19549,9 @@ export type SubmenuProps = {
 	-- label, a value, a chevron); the label and a "›" otherwise. It opens
 	-- when the pointer moves onto it.
 	trigger: Node?,
+	-- How long it waits under the pointer before it opens (100) and, off
+	-- its trigger and itself, before it closes (0); see `HoverDelay`.
+	hover_delay: HoverDelay?,
 }
 export type WebViewProps = {
 	-- Size and position.

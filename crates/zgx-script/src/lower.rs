@@ -1663,7 +1663,10 @@ fn themed(spec: &crate::node::ThemeSpec, vm: &Rc<Vm>, view: View) -> View {
 fn with_hover(view: View, hover: Option<&crate::node::HoverProps>, open: f32) -> View {
     let ms = |ms: f32| std::time::Duration::from_secs_f32(ms.max(0.) / 1000.);
     match hover {
-        Some(hover) => view.hover_delay(ms(hover.open.unwrap_or(open)), ms(hover.close.unwrap_or(0.))),
+        Some(hover) => view.hover_delay(
+            ms(hover.open.unwrap_or(open)),
+            ms(hover.close.unwrap_or(0.)),
+        ),
         None => view,
     }
 }

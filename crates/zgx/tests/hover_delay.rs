@@ -29,7 +29,10 @@ impl App {
         let mut ui = Ui::new(600., 500.);
         let executor = Rc::new(RefCell::new(LocalExecutor::new()));
         let content = view(&mut ui);
-        let view = ui.mount(provide(TaskRunner::from_executor(executor.clone()), content));
+        let view = ui.mount(provide(
+            TaskRunner::from_executor(executor.clone()),
+            content,
+        ));
         ui.prepare_frame();
         Self {
             ui,
@@ -144,7 +147,7 @@ fn resting_in_the_polygon_closes_the_submenu_after_the_timeout() {
     let beta = app.bounds("beta");
     let (panel, _) = (app.bounds("child1"), ());
     // Into the polygon over Beta, then no further.
-    let rest = (beta.x + beta.width - 6., beta.y + beta.height / 2.);
+    let rest = (beta.x + beta.width - 1., beta.y + beta.height / 2.);
     assert!(rest.0 < panel.x, "short of the submenu: {rest:?} {panel:?}");
     app.travel(from, rest, 6);
     assert!(child.get(), "held while it may be heading there");
@@ -167,6 +170,8 @@ fn a_submenu_opens_and_closes_after_its_own_delays() {
     assert!(!child.get(), "waits its open delay");
     app.wait(MS + STEP);
     assert!(child.get(), "opens after it");
+    // A little more motion on the trigger, as a hand has.
+    app.at((from.0 + 1., from.1));
     // Onto Beta, away from the polygon: it closes after its own delay.
     let beta = app.bounds("beta");
     app.at((beta.x + 20., beta.y + beta.height / 2.));
@@ -186,7 +191,11 @@ fn hover_popover(open: Duration, close: Duration) -> (App, Signal<bool>) {
             popover(
                 "Card",
                 shown,
-                button().id("trigger").size(100., 30.).p(0.).child(text("Hover")),
+                button()
+                    .id("trigger")
+                    .size(100., 30.)
+                    .p(0.)
+                    .child(text("Hover")),
             )
             .hover_delay(open, close)
             .w(160.)
@@ -236,7 +245,10 @@ fn heading_for_the_popover_keeps_it_open() {
     let card = app.bounds("card");
     // Down and across over the gap between them, onto the panel.
     app.travel(
-        (trigger.x + trigger.width - 10., trigger.y + trigger.height - 2.),
+        (
+            trigger.x + trigger.width - 10.,
+            trigger.y + trigger.height - 2.,
+        ),
         centre(card),
         12,
     );

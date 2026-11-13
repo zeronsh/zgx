@@ -2523,9 +2523,9 @@ pub fn text_message(message: crate::i18n::Message) -> View {
     text_signal(move || message.get())
 }
 pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
+pub use crate::compose_hover::HoverDelay;
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
-pub use crate::compose_hover::HoverDelay;
 pub use crate::compose_popover::{
     Collision, Edge as PlacementEdge, Placement, Side as PlacementSide,
 };

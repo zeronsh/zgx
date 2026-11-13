@@ -27,6 +27,9 @@ pub(crate) struct MenuContext {
     /// The pointer is heading for an open submenu (in its safe polygon, on a
     /// sibling item): moving over the items between stays that menu open.
     hold: Cell<bool>,
+    /// A close of its submenu waits on the pointer's close delay: entering
+    /// another item closes nothing meanwhile.
+    closing: Cell<bool>,
 }
 impl MenuContext {
     pub(crate) fn new(
@@ -45,6 +48,7 @@ impl MenuContext {
             children: RefCell::new(Vec::new()),
             hover: Cell::new(SUBMENU_HOVER),
             hold: Cell::new(false),
+            closing: Cell::new(false),
         });
         if let Some(parent) = &context.parent {
             let mut children = parent.children.borrow_mut();
@@ -72,7 +76,7 @@ impl MenuContext {
     /// Whether the pointer is heading for an open submenu of this menu, over
     /// the items between (see `hold`).
     pub(crate) fn holding(&self) -> bool {
-        self.hold.get()
+        self.hold.get() || self.closing.get()
     }
     /// The hover delay of this menu's submenu `open`.
     pub(crate) fn child_hover(&self, open: &Signal<bool>) -> HoverDelay {
@@ -555,6 +559,7 @@ fn mount_safe_polygon(
             menu.hold.set(false);
             {
                 waiting.set(0);
+                menu.closing.set(false);
                 task.borrow_mut().take();
             }
             return;
@@ -582,6 +587,7 @@ fn mount_safe_polygon(
             menu.hold.set(false);
             {
                 waiting.set(0);
+                menu.closing.set(false);
                 task.borrow_mut().take();
             }
             return;
@@ -598,6 +604,7 @@ fn mount_safe_polygon(
             menu.hold.set(false);
             {
                 waiting.set(0);
+                menu.closing.set(false);
                 task.borrow_mut().take();
             }
             return;
@@ -620,10 +627,12 @@ fn mount_safe_polygon(
             return;
         }
         waiting.set(kind);
+        menu.closing.set(kind == 2 && !delay.is_zero());
         let closing: Vec<Signal<bool>> = open.iter().map(|child| child.open.clone()).collect();
         let (menu_hold, waited) = (menu.clone(), waiting.clone());
         let after = move || {
             menu_hold.hold.set(false);
+            menu_hold.closing.set(false);
             waited.set(0);
             for open in &closing {
                 open.set(false);

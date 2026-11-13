@@ -527,7 +527,11 @@ fn placement(
         } else if more_room {
             // Room before the trigger, and after it.
             let (room_first, room_second) = (start - gap - low, high - end - gap);
-            if room_first > room_second { first } else { second }
+            if room_first > room_second {
+                first
+            } else {
+                second
+            }
         } else {
             preferred
         }

@@ -39,12 +39,13 @@ pub(crate) const SUBMENU_HOVER: HoverDelay = HoverDelay {
 /// popup, before the popup closes (it has stopped heading there).
 pub(crate) const SAFE_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// Whether `point` is on `rect` (its edges included).
+/// Whether `point` is in `rect`, its top and left edges included, as hit
+/// testing has it: a pointer on the edge two boxes share is on the lower one.
 pub(crate) fn contains(rect: Rect, point: (f32, f32)) -> bool {
     point.0 >= rect.x
-        && point.0 <= rect.x + rect.width
+        && point.0 < rect.x + rect.width
         && point.1 >= rect.y
-        && point.1 <= rect.y + rect.height
+        && point.1 < rect.y + rect.height
 }
 
 /// Whether `p` is in the triangle `a`, `b`, `c` (edges included).
