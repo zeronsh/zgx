@@ -45,6 +45,11 @@ fn per_publish(blocks: usize, publishes: usize) -> Vec<(Phase, u64)> {
     host.reload().expect("the script loads");
     let _view = ui.mount(host.view());
     let mut text: String = (0..blocks).map(block).collect();
+    let long: usize = std::env::var("LASTLEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    text.push_str(&"The last block with **bold** and `code` words, growing. ".repeat(long));
     text.push_str("The last block, growing");
     host.set_state(&state, Value::from(text.as_str())).unwrap();
     ui.prepare_frame();
@@ -76,6 +81,9 @@ fn a_publish_costs_the_changed_block_not_the_answer() {
     let small = per_publish(3, 20);
     let large = per_publish(30, 20);
     for ((phase, a), (_, b)) in small.iter().zip(&large) {
+        if std::env::var_os("STREAM_PRINT").is_some() {
+            eprintln!("{phase:?}: 3 blocks {a}, 30 blocks {b}");
+        }
         if matches!(
             phase,
             Phase::Script | Phase::Update | Phase::Layout | Phase::Damage
