@@ -178,7 +178,52 @@ struct Inner {
     _follow: RefCell<Option<Effect>>,
 }
 
+thread_local! {
+    /// The app's catalog, which zgx's own words read from ([`label`]); the host that loads it installs it.
+    static APP: RefCell<Option<std::rc::Weak<Inner>>> = const { RefCell::new(None) };
+}
+
+/// zgx's own words (a code block's Copy, a date picker's month buttons, a toast's Dismiss) in the app's locale:
+/// `english` is the key, read from the app's catalog ([`I18n::install_as_app`]) when it has it, else `english`
+/// as it is. Read in a view, it follows the locale.
+pub fn label(english: &str) -> String {
+    label_args(english, &[])
+}
+
+/// [`label`] with `{name}` arguments ("Page {page} of {total}"); without the key, each `{name}` takes its value.
+pub fn label_args(english: &str, args: &[(&str, ArgValue)]) -> String {
+    let app = APP.with(|a| a.borrow().as_ref().and_then(std::rc::Weak::upgrade)).map(I18n);
+    if let Some(i18n) = app.filter(|i18n| i18n.has(english)) {
+        let mut message = i18n.t(english);
+        for (name, value) in args {
+            message = message.arg(name, value.clone());
+        }
+        return message.get();
+    }
+    let mut text = english.to_string();
+    for (name, value) in args {
+        let shown = match value {
+            ArgValue::Number(n) if n.fract() == 0.0 => format!("{}", *n as i64),
+            ArgValue::Number(n) => n.to_string(),
+            ArgValue::Text(t) => t.to_string(),
+            ArgValue::Date(ms) => ms.to_string(),
+        };
+        text = text.replace(&format!("{{{name}}}"), &shown);
+    }
+    text
+}
+
 impl I18n {
+    /// Make this the app's catalog: zgx's own words read from it ([`label`]), the English its key.
+    pub fn install_as_app(&self) {
+        APP.with(|a| *a.borrow_mut() = Some(Rc::downgrade(&self.0)));
+    }
+
+    /// Whether any locale file has `key`, telling no issue when none does.
+    pub fn has(&self, key: &str) -> bool {
+        self.0.catalogs.borrow().iter().any(|(_, catalog)| catalog.get(key).is_some())
+    }
+
     /// A catalog with no locales yet, its keys defined by `source`'s file.
     pub fn new(runtime: &Runtime, source: &str) -> I18n {
         let source: Rc<str> = source.into();

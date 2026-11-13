@@ -375,7 +375,7 @@ fn month_view(
     let arrow = |on: bool| {
         let (go, glyph) = (month.clone(), month.clone());
         button()
-            .accessible_label(if on { "Next month" } else { "Previous month" })
+            .accessible_label(zgx::i18n::label(if on { "Next month" } else { "Previous month" }))
             .focusable(false)
             .w(28.)
             .h(28.)

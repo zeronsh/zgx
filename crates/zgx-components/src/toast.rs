@@ -367,7 +367,7 @@ fn toast_view(id: u64, toast: Toast, toaster: Rc<Toaster>, cx: &mut zgx::compose
     }
     card.child(
         button()
-            .accessible_label("Dismiss")
+            .accessible_label(zgx::i18n::label("Dismiss"))
             .shrink_0()
             .w(22.)
             .h(22.)
