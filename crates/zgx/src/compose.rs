@@ -5038,6 +5038,9 @@ fn mount_portal_panel(
             (_, true) => crate::scene::PopupRole::Tooltip,
             _ => crate::scene::PopupRole::Popover,
         };
+        if !topmost {
+            ui.register_popup(portal.position, open_signal.clone(), role);
+        }
         ui.bind(owner, move || {
             let popup = visible.get()
                 && screens.with(|screens| !screens.is_empty())
@@ -5054,9 +5057,6 @@ fn mount_portal_panel(
                 }
             }
         });
-        if !topmost {
-            ui.register_popup(portal.position, open_signal);
-        }
     }
     // A submenu's layer lets the pointer through to its parent menu.
     if is_submenu {

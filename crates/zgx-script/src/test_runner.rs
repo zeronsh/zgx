@@ -743,6 +743,22 @@ impl UserData for Mounted {
                 }
             },
         );
+        methods.add_method("states", |_, m, ()| {
+            Ok(m.app()?
+                .host
+                .states()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>())
+        });
+        methods.add_method("retained_states", |_, m, ()| {
+            let query = crate::GcQuery {
+                retained: Some("State".into()),
+                ..Default::default()
+            };
+            let reports = m.app()?.host.gc_report(&query);
+            Ok(reports.iter().map(|vm| vm.found.matched).sum::<usize>())
+        });
         methods.add_method("state", |_, m, name: String| {
             let states = m.app()?.host.states();
             let suffix = format!("::{name}");

@@ -324,3 +324,29 @@ fn controls_say_what_they_open() {
         assert!(out.contains(want), "{want} in {out}");
     }
 }
+
+#[test]
+fn window_popups_lists_the_open_menus_and_popovers() {
+    let mut h = Harness::inline(
+        r##"
+local open = ui.state("open", false)
+local seen = ui.state("seen", 0)
+return ui.column { w_full = true, h_full = true,
+    ui.text { id = "n", function() return tostring(#ui.window.popups:get()) end },
+    ui.popover { open = open, anchor = ui.button { id = "a", "Anchor" }, ui.text { id = "body", "inside" } },
+}"##,
+    );
+    h.host.window_state(&h.ui);
+    h.frames(3);
+    assert_eq!(h.text("n"), "0");
+    h.host
+        .set_state("open", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frames(4);
+    assert_eq!(h.text("n"), "1");
+    h.host
+        .set_state("open", zgx_script::Value::Bool(false))
+        .unwrap();
+    h.frames(4);
+    assert_eq!(h.text("n"), "0");
+}

@@ -67,6 +67,10 @@ declare extern type TestApp with
 	-- Deliver frames until the target shows (its text holding `text`, if
 	-- given), or is gone; whether it did before `timeout_ms` (5000).
 	function wait(self, target: string, options: { text: string?, gone: boolean?, timeout_ms: number? }?): boolean
+	-- Every named state's name (`ui.state`, `ui.persist`, `ui.shared`), in name order.
+	function states(self): { string }
+	-- How many States the scripts hold after a full collection, as `zgx inspect gc --retained State` counts them.
+	function retained_states(self): number
 	-- A named state's value (`ui.state`, `ui.persist`, `ui.shared`).
 	function state(self, name: string): any
 	-- Set a named state, as the script's `set` would.

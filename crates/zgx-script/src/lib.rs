@@ -2677,6 +2677,18 @@ impl ScriptHost {
             });
             self.0.window_state.borrow_mut().push((false, effect));
         }
+        let popups = ui.observe_popups();
+        let state = self.0.shared.state(
+            windows::POPUPS,
+            popup_value(&popups.with_untracked(Clone::clone)),
+        );
+        let effect = self.0.runtime.effect(move || {
+            let now = popup_value(&popups.get());
+            if state.with_untracked(|was| *was != now) {
+                state.set(now);
+            }
+        });
+        self.0.window_state.borrow_mut().push((false, effect));
     }
     /// Keep `ui.window.full_screen` as whether the window is in full
     /// screen (pass its `WindowInfo::fullscreen`), and
@@ -4618,6 +4630,30 @@ async fn wake(
 /// Everything `inner`'s loaded VMs can free, freed: two full collections in
 /// each, as one leaves what a userdata's finalizer held (a node's or an
 /// element's, and the closures and values only they reached) for the next.
+/// `ui.window.popups`: each open popup's window as `{ x, y, w, h, kind }`.
+fn popup_value(popups: &[zgx::widgets::PopupInfo]) -> Value {
+    let n = |v: f32| Value::Num(f64::from(v));
+    let list: Vec<Value> = popups
+        .iter()
+        .map(|popup| {
+            let kind = match popup.role {
+                Some(zgx::scene::PopupRole::Menu) => "menu",
+                Some(zgx::scene::PopupRole::Popover) => "popover",
+                Some(zgx::scene::PopupRole::Tooltip) => "tooltip",
+                Some(zgx::scene::PopupRole::Topmost) => "topmost",
+                None => "popup",
+            };
+            Value::Map(Rc::from([
+                (Rc::from("h"), n(popup.rect.height)),
+                (Rc::from("kind"), Value::from(kind)),
+                (Rc::from("w"), n(popup.rect.width)),
+                (Rc::from("x"), n(popup.rect.x)),
+                (Rc::from("y"), n(popup.rect.y)),
+            ]))
+        })
+        .collect();
+    Value::List(list.into())
+}
 fn collect_garbage(inner: &Inner) {
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
