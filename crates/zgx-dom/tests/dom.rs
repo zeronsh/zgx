@@ -364,6 +364,9 @@ async fn observers_report_sizes_and_visibility() {
     let width = runtime.signal(120_f32);
     let read = width.clone();
     let host = host();
+    // In view whatever earlier tests left on the page: it observes its
+    // visibility.
+    host.scroll_into_view();
     let mounted = zgx_dom::mount(
         &runtime,
         &host,
@@ -454,7 +457,7 @@ fn virtual_list_rows_lie_inside_the_list() {
     let runtime = Runtime::new();
     let offset = runtime.signal(0_f32);
     let host = host();
-    let _mounted = zgx_dom::mount(
+    let mounted = zgx_dom::mount(
         &runtime,
         &host,
         column().p(40.).child(
@@ -488,4 +491,7 @@ fn virtual_list_rows_lie_inside_the_list() {
     }
     let first_row = rows.item(0).unwrap().get_bounding_client_rect();
     assert_eq!(first_row.top(), rect.top());
+    // Gone, so it pushes no later test's host out of view.
+    mounted.unmount();
+    host.remove();
 }
