@@ -1057,14 +1057,14 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
     let runtime = scope.runtime().clone();
     let viewport = runtime.signal(0_f32);
     let space = ops::with(|ops| {
-        ops.op_str(
-            ops::STYLE,
-            holder,
-            "overflow:hidden auto;display:block;height:240px;",
-        );
+        // A scroller, 240 tall unless the view sizes it (its own class,
+        // made later, wins over the base class).
+        let class = sheet::plain(ops, "zl");
+        ops.op(&[ops::CLASS_ADD, holder, class]);
+        // The rows' containing block: they lie at their offsets in it.
         let space = block.node(ops);
         ops.op(&[ops::CREATE, space, Tag::Div as u32]);
-        let class = sheet::plain(ops, "z");
+        let class = sheet::plain(ops, "z zr");
         ops.op(&[ops::CLASS, space, class]);
         ops.op(&[ops::APPEND, holder, space]);
         space

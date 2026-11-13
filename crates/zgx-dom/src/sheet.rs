@@ -17,6 +17,7 @@ pub(crate) const BASE_CSS: &str = "\
 .z{display:flex;flex-direction:column;box-sizing:border-box;}\
 .zr{position:relative;}\
 .zv{position:absolute;left:0;right:0;}\
+.zl{display:block;overflow:hidden auto;height:240px;}\
 .zb{font:inherit;color:inherit;background:none;text-align:inherit;cursor:default;margin:0;padding:0;border:0 solid transparent;}\
 .zb:focus-visible,.ze:focus-visible{outline:2px solid Highlight;outline-offset:-2px;}\
 .ze{font:inherit;color:inherit;background:transparent;outline:none;white-space:pre-wrap;margin:0;padding:0;border:0 solid transparent;}\

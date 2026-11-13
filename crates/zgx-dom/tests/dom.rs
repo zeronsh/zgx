@@ -446,3 +446,46 @@ fn a_long_frame_keeps_each_rows_strings() {
         "row 700"
     );
 }
+
+#[wasm_bindgen_test]
+fn virtual_list_rows_lie_inside_the_list() {
+    // Its rows are positioned in its scrolled content, at their offsets,
+    // and the list is as tall as the view says.
+    let runtime = Runtime::new();
+    let offset = runtime.signal(0_f32);
+    let host = host();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().p(40.).child(
+            virtual_list(
+                offset.clone(),
+                20.,
+                0,
+                || 1_000,
+                |i| i,
+                |_, key: usize, _| text(format!("row {key}")),
+            )
+            .h(100.),
+        ),
+    );
+    let list = first(&host).first_element_child().unwrap();
+    let rect = list.get_bounding_client_rect();
+    assert_eq!(rect.height(), 100.);
+    let space = list.first_element_child().unwrap();
+    let rows = space.children();
+    assert!(rows.length() > 0);
+    for i in 0..rows.length() {
+        let row = rows.item(i).unwrap().get_bounding_client_rect();
+        assert!(
+            row.top() >= rect.top() - 0.5 && row.left() >= rect.left() - 0.5,
+            "row {i} at ({}, {}) lies outside the list at ({}, {})",
+            row.left(),
+            row.top(),
+            rect.left(),
+            rect.top()
+        );
+    }
+    let first_row = rows.item(0).unwrap().get_bounding_client_rect();
+    assert_eq!(first_row.top(), rect.top());
+}
