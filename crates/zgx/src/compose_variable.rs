@@ -1012,10 +1012,11 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 // key repeated, and those left unstamped go below.
                 run += 1;
                 let mut fresh = 0;
+                let mut repeated = false;
                 for (key, ..) in &keys {
                     match entries.get_mut(key) {
                         Some(entry) => {
-                            assert!(entry.run != run, "duplicate virtual list child key");
+                            repeated |= entry.run == run;
                             entry.run = run;
                         }
                         None => fresh += 1,
@@ -1026,9 +1027,12 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         Default::default();
                     for (key, ..) in &keys {
                         if !entries.contains_key(key) {
-                            assert!(new.insert(key), "duplicate virtual list child key");
+                            repeated |= !new.insert(key);
                         }
                     }
+                }
+                if repeated {
+                    drop_repeated_keys(&mut keys, |(key, ..)| key);
                 }
                 // Measured, anchor on the first row in view measured at this
                 // width: rows coming into view above it, estimates until
@@ -1254,4 +1258,33 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
         },
     )))
     .list_rows(source)
+}
+
+/// A key given to two rows of a list (bad data): the first keeps it and the
+/// rest are left out, the same each pass, and the list says so once. A panic
+/// here was contained once and then took the app down.
+pub(crate) fn drop_repeated_keys<K: std::hash::Hash + Eq, T>(
+    rows: &mut Vec<T>,
+    key_of: impl Fn(&T) -> &K,
+) {
+    let mut keep = Vec::with_capacity(rows.len());
+    let mut first: std::collections::HashMap<&K, (), rustc_hash::FxBuildHasher> =
+        Default::default();
+    for row in rows.iter() {
+        keep.push(first.insert(key_of(row), ()).is_none());
+    }
+    drop(first);
+    let mut index = 0;
+    rows.retain(|_| {
+        index += 1;
+        keep[index - 1]
+    });
+    thread_local! {
+        static TOLD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if !TOLD.replace(true) {
+        eprintln!(
+            "zgx: a virtual list has the same child key twice (bad data): the first row keeps it, the others are left out"
+        );
+    }
 }

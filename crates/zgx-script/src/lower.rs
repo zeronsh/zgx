@@ -4675,7 +4675,27 @@ fn styled(
             view = view.role(role);
         }
         if let Some(level) = a11y.level {
-            view = view.heading(usize::from(level));
+            view = if a11y.role == Some(zgx::semantics::Role::Heading) {
+                view.heading(usize::from(level))
+            } else {
+                view.level(usize::from(level))
+            };
+        }
+        if let Some(current) = &a11y.current {
+            use zgx::semantics::Current;
+            let (current, vm) = (resolve_owned(current), vm.clone());
+            view = view.current_when(move || match resolve(&current, Ty::Str, None, &vm) {
+                Some(Lit::Str(kind)) => match &*kind {
+                    "true" => Some(Current::True),
+                    "page" => Some(Current::Page),
+                    "step" => Some(Current::Step),
+                    "location" => Some(Current::Location),
+                    "date" => Some(Current::Date),
+                    "time" => Some(Current::Time),
+                    _ => None,
+                },
+                _ => None,
+            });
         }
         if let Some(selected) = &a11y.selected {
             let (selected, vm) = (resolve_owned(selected), vm.clone());
@@ -6864,6 +6884,83 @@ fn code_editor(
     if let Some(tab) = &code.tab {
         view = view.tab_indent(tab.clone());
     }
+    if let Some(style) = &code.atom_style {
+        let (style, vm, theme) = (resolve_owned(style), vm.clone(), theme.clone());
+        let wash = match resolve(&style, Ty::Color, None, &vm) {
+            Some(Lit::Color(color)) => Some(color),
+            Some(Lit::Token(t)) => theme.get(t).color(),
+            _ => None,
+        };
+        if let Some(color) = wash {
+            view = view.atom_wash(color);
+        }
+    }
+    if let Some(state) = &code.atoms {
+        let (state, color_of) = (state.clone(), color_of.clone());
+        view = view.atoms_when(move |handle| {
+            let list = state.with(Clone::clone);
+            crate::atoms::from_list(&list, handle, &*color_of)
+        });
+    }
+    if code.atoms.is_some() || code.on_atoms.is_some() {
+        let (state, told, vm) = (code.atoms.clone(), code.on_atoms.clone(), vm.clone());
+        view = view.on_atoms(move |event| {
+            let chars = |byte: usize| event.chars(byte);
+            if let Some(state) = &state {
+                let next = crate::atoms::list(event.atoms, chars);
+                if state.with(|now| *now != next) {
+                    state.set(next);
+                }
+            }
+            if let Some(told) = &told {
+                let result = (|| -> mlua::Result<()> {
+                    let change = vm.lua.create_table()?;
+                    change.set("reason", event.reason)?;
+                    let list = |lua: &mlua::Lua, items: Vec<Value>| -> mlua::Result<mlua::Table> {
+                        let table = lua.create_table()?;
+                        for value in items {
+                            table.push(crate::value::to_lua(&value, lua, false)?)?;
+                        }
+                        Ok(table)
+                    };
+                    change.set(
+                        "atoms",
+                        list(
+                            &vm.lua,
+                            match crate::atoms::list(event.atoms, chars) {
+                                Value::List(items) => items.to_vec(),
+                                _ => Vec::new(),
+                            },
+                        )?,
+                    )?;
+                    let mut added = Vec::new();
+                    let mut removed = Vec::new();
+                    for step in event.changes {
+                        match step {
+                            zgx::text_edit::AtomChange::Added(atom) => {
+                                added.push(crate::atoms::item(
+                                    atom,
+                                    (chars(atom.range.start), chars(atom.range.end)),
+                                ))
+                            }
+                            zgx::text_edit::AtomChange::Removed(atom, range, label) => {
+                                removed.push(crate::atoms::with_label(
+                                    crate::atoms::item(atom, (range.start, range.end)),
+                                    label,
+                                ));
+                            }
+                        }
+                    }
+                    change.set("added", list(&vm.lua, added)?)?;
+                    change.set("removed", list(&vm.lua, removed)?)?;
+                    vm.call::<()>(told, change)
+                })();
+                if let Err(error) = result {
+                    vm.report(error);
+                }
+            }
+        });
+    }
     if let Some(told) = &code.on_caret {
         let (told, vm) = (told.clone(), vm.clone());
         view = view.on_caret(move |caret| {
@@ -9008,6 +9105,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 }
                 if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
                     out = out.icon(span_icon(&vm, &low, icon));
+                }
+                if let Some(icon) = rare.and_then(|rare| rare.trailing_icon.as_ref()) {
+                    out = out.trailing_icon(span_icon(&vm, &low, icon));
                 }
                 out
             })

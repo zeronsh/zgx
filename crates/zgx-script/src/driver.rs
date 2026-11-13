@@ -909,6 +909,12 @@ pub struct Line {
     pub disabled: bool,
     /// Checked or not, if it can be.
     pub checked: Option<bool>,
+    /// It is the chosen one of its set (a tab, an option).
+    pub selected: Option<bool>,
+    /// It is the current one (`aria-current`).
+    pub current: bool,
+    /// Its heading level or tree depth (`aria-level`).
+    pub level: Option<usize>,
 }
 
 /// One node as [`tree_lines`] shows it: a [`Line`], and more that may grow
@@ -980,6 +986,9 @@ pub fn tree_lines(
                         focused: focused == Some(node),
                         disabled: s.is_some_and(|s| s.disabled),
                         checked: s.and_then(|s| s.checked),
+                        selected: s.and_then(|s| s.selected),
+                        current: s.is_some_and(|s| s.current.is_some()),
+                        level: s.and_then(|s| s.level),
                     },
                     hidden: !shows(&scene, node),
                 });
@@ -1095,6 +1104,15 @@ fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
             Some(false) => out.push_str(" unchecked"),
             None => {}
         }
+        if line.selected == Some(true) {
+            out.push_str(" selected");
+        }
+        if line.current {
+            out.push_str(" current");
+        }
+        if let Some(level) = line.level {
+            let _ = write!(out, " level={level}");
+        }
         out.push('\n');
     }
     if hidden > 0 {
@@ -1144,6 +1162,12 @@ pub fn node(
         if s.read_only {
             flags.push("read-only");
         }
+        if s.selected == Some(true) {
+            flags.push("selected");
+        }
+        if s.current.is_some() {
+            flags.push("current");
+        }
         match s.checked {
             Some(true) => flags.push("checked"),
             Some(false) => flags.push("unchecked"),
@@ -1154,6 +1178,9 @@ pub fn node(
         }
         if !flags.is_empty() {
             out.push(("state".into(), flags.join(" ")));
+        }
+        if let Some(level) = s.level {
+            out.push(("level".into(), level.to_string()));
         }
         if let Some(popup) = s.has_popup {
             out.push(("haspopup".into(), popup_name(popup).into()));
@@ -1274,6 +1301,8 @@ pub struct Control {
     pub expanded: Option<bool>,
     /// What it opens (`aria-haspopup`): "dialog", "menu", "listbox", "tree" or "grid".
     pub has_popup: Option<&'static str>,
+    /// A menu's or list box's scroll view: `(offset, range)`, if it has one.
+    pub scroll: Option<(f32, f32)>,
     /// It has the keyboard focus.
     pub focused: bool,
     /// Names it for `press`, as long as it is there.
@@ -1337,6 +1366,9 @@ pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
             checked: s.checked,
             expanded: s.expanded,
             has_popup: s.has_popup.map(popup_name),
+            scroll: matches!(s.role, Role::Menu | Role::ListBox)
+                .then(|| ui.scroll_within(&scene, node))
+                .flatten(),
             focused: focused == Some(node),
             handle: node.to_bits(),
         });

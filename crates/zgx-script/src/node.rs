@@ -1598,6 +1598,8 @@ pub(crate) type HoverFill = (
 pub(crate) struct SpanRare {
     /// An icon before the text, in the line.
     pub icon: Option<SpanIcon>,
+    /// An icon after the text, in the line.
+    pub trailing_icon: Option<SpanIcon>,
     /// The icon in its place while the pointer is on a link span
     /// (`hover = { icon = … }`).
     pub hover_icon: Option<SpanIcon>,
@@ -1707,6 +1709,13 @@ pub(crate) struct CodeProps {
     /// `on_top_line = function(line)`: the first line in view, whenever it
     /// changes.
     pub on_top_line: Option<Function>,
+    /// `atoms = state`: its atoms, `{ id, from, to, data?, style? }` each,
+    /// followed and kept (`atoms.rs`).
+    pub atoms: Option<zgx::reactive::Signal<Value>>,
+    /// `on_atoms = function(change)`: told as atoms are made, lost or moved.
+    pub on_atoms: Option<Function>,
+    /// `atom_style = { bg }`: the wash behind atoms with none of their own.
+    pub atom_style: Option<Source>,
     /// `find = { query, case, current, limit, color, current_color }`: a
     /// search's matches marked behind the text, found where the text is
     /// held (no list of them made in the script).
@@ -3450,6 +3459,8 @@ pub(crate) struct A11y {
     pub hidden_of: Option<Source>,
     /// `busy`: still being filled in (`aria-busy`), followed.
     pub busy: Option<Source>,
+    /// `current`: `aria-current`, a kind as a string, followed.
+    pub current: Option<Source>,
     /// `inert`: out of focus order, reach and the accessibility tree, followed.
     pub inert: Option<Source>,
     /// `aria_modal = true`: while it shows, nothing else is read.
@@ -3761,6 +3772,9 @@ const WIDGET_FIELDS: &[&str] = &[
     "tab",
     "on_caret",
     "on_top_line",
+    "atoms",
+    "on_atoms",
+    "atom_style",
     "animate",
     "size",
     "vertical",
@@ -4671,6 +4685,15 @@ fn fill_from(
                 lits.sort_by_key(|(prop, _)| specificity(*prop));
                 node.pseudo.push((pseudo, lits.into()));
             }
+            // `dim = false`: stays as it is while disabled (the read-only
+            // look is the app's), still disabled for assistive technology.
+            "dim" => match value {
+                mlua::Value::Boolean(false) => node
+                    .pseudo
+                    .push((Pseudo::Disabled, vec![(Prop::Opacity, Lit::Num(1.))].into())),
+                mlua::Value::Boolean(true) => {}
+                _ => return Err(mlua::Error::runtime("`dim` is a boolean")),
+            },
             "variants" => match value {
                 mlua::Value::UserData(ud) if ud.is::<crate::variants::SelectionUd>() => {
                     variants = Some(ud.borrow::<crate::variants::SelectionUd>()?.0.clone());
@@ -4728,7 +4751,10 @@ fn fill_from(
                     ))
                 })?;
                 // ARIA requires their state; there is no saying "unknown".
-                if checkable_menu_role(&name) && !table.contains_key("checked")? {
+                // (`ui.menu_item` has already taken its `checked` into its options.)
+                let item_checked =
+                    matches!(&node.kind, Kind::MenuItem(_, options) if options.checked.is_some());
+                if checkable_menu_role(&name) && !item_checked && !table.contains_key("checked")? {
                     return Err(mlua::Error::runtime(format!(
                         "role `{name}` says whether it is checked: give it `checked`"
                     )));
@@ -4800,6 +4826,19 @@ fn fill_from(
                         node.props.push((prop, source(lua, prop.ty(), name, value)?));
                     }
                 }
+            }
+            "level" => {
+                let level: f64 = lua.unpack(value)?;
+                if !(1. ..=255.).contains(&level) || level.fract() != 0. {
+                    return Err(mlua::Error::runtime(format!(
+                        "`level` is a depth from 1 to 255, not {level}"
+                    )));
+                }
+                node.a11y.get_or_insert_default().level = Some(level as u8);
+            }
+            "current" => {
+                node.a11y.get_or_insert_default().current =
+                    Some(source(lua, Ty::Str, "current", value)?);
             }
             "busy" => {
                 node.a11y.get_or_insert_default().busy =
@@ -5249,6 +5288,10 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"icon" => {
                     let icon: Table = lua.unpack(given)?;
                     rare_mut(&mut span).icon = Some(span_icon(&icon)?);
+                }
+                b"trailing_icon" => {
+                    let icon: Table = lua.unpack(given)?;
+                    rare_mut(&mut span).trailing_icon = Some(span_icon(&icon)?);
                 }
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
                 b"on_click" => span.click = Some(handler(given)?),
@@ -5917,6 +5960,20 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         let tab = table.raw_get::<Option<String>>("tab")?;
                         let on_caret = table.raw_get::<Option<Function>>("on_caret")?;
                         let on_top_line = table.raw_get::<Option<Function>>("on_top_line")?;
+                        let atoms = match table.raw_get::<mlua::Value>("atoms")? {
+                            mlua::Value::Nil => None,
+                            v => Some(state_of(&v).ok_or_else(|| {
+                                mlua::Error::runtime("a textarea's `atoms` must be a ui.state")
+                            })?),
+                        };
+                        let on_atoms = table.raw_get::<Option<Function>>("on_atoms")?;
+                        let atom_style = match table.raw_get::<Option<Table>>("atom_style")? {
+                            None => None,
+                            Some(style) => match style.raw_get::<mlua::Value>("bg")? {
+                                mlua::Value::Nil => None,
+                                value => Some(source(lua, Ty::Color, "bg", value)?),
+                            },
+                        };
                         let find = match table.raw_get::<Option<Table>>("find")? {
                             None => None,
                             Some(find) => {
@@ -5947,6 +6004,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             || tab.is_some()
                             || on_caret.is_some()
                             || on_top_line.is_some()
+                            || atoms.is_some()
+                            || on_atoms.is_some()
+                            || atom_style.is_some()
                             || find.is_some())
                         .then(|| {
                             Rc::new(CodeProps {
@@ -5957,6 +6017,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                                 tab,
                                 on_caret,
                                 on_top_line,
+                                atoms,
+                                on_atoms,
+                                atom_style,
                                 find,
                             })
                         })

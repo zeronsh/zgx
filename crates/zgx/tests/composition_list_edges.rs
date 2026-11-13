@@ -135,3 +135,53 @@ fn rows_added_above_leave_the_rows_in_view_where_they_are() {
     assert_eq!(offset.get(), 405.);
     assert_eq!(shown(&ui), before);
 }
+
+#[test]
+fn a_key_given_to_two_rows_is_a_logged_error_and_the_first_row_keeps_it() {
+    let mut ui = Ui::new(400., 400.);
+    let offset = ui.signal(0_f32);
+    let view = ui.mount(
+        virtual_list(
+            offset.clone(),
+            20.,
+            1,
+            || 4,
+            // Rows 1 and 2 share a key (bad data).
+            |index| if index == 2 { 1 } else { index },
+            |_, key, _| div().id(format!("row-{key}")).h(20.),
+        )
+        .size(200., 200.),
+    );
+    // Twice over: the second pass once took the app down.
+    ui.prepare_frame();
+    offset.set(1.);
+    ui.prepare_frame();
+    offset.set(0.);
+    ui.prepare_frame();
+    assert!(view.find("row-1").is_some(), "the first keeps the key");
+    assert!(view.find("row-3").is_some(), "the rows after it are built");
+}
+
+#[test]
+fn a_measured_list_with_a_repeated_key_goes_on_too() {
+    let mut ui = Ui::new(400., 400.);
+    let offset = ui.signal(0_f32);
+    let heights = VariableHeights::new(&ui.runtime, 4, 20.);
+    let view = ui.mount(
+        measured_rows(
+            offset.clone(),
+            heights.clone(),
+            1,
+            || vec![0_u32, 1, 1, 3],
+            |_: &[u32], _| 20.,
+            |_, key, _| div().id(format!("row-{key}")).h(20.),
+        )
+        .size(200., 200.),
+    );
+    ui.prepare_frame();
+    offset.set(1.);
+    ui.prepare_frame();
+    offset.set(0.);
+    ui.prepare_frame();
+    assert!(view.find("row-1").is_some() && view.find("row-3").is_some());
+}

@@ -245,3 +245,53 @@ fn an_inset_shadow_blurs_into_the_box() {
     let sharp = render(shadow(0., 0., 8.));
     assert!(grey(&sharp, 70, 24) < 10 && grey(&sharp, 70, 32) > 245);
 }
+
+/// CSS draws an inset shadow inside the border, from the padding edge: a
+/// 1 point ring under a 1 point border shows its whole width just inside it.
+#[test]
+fn an_inset_shadow_starts_at_the_padding_edge_inside_the_border() {
+    use std::sync::Arc;
+    use zgx::decoration::Decoration;
+    let mut scene = Scene::new(140., 140.);
+    scene.append(
+        scene.root(),
+        NodeKind::Quad(QuadStyle {
+            fill: Color(255, 255, 255, 255),
+            border_color: Color(0, 0, 255, 255),
+            border_width: 1.,
+            decoration: Some(Arc::new(Decoration {
+                inset_shadows: Some(Arc::from([BoxShadow {
+                    color: Color(255, 0, 0, 255),
+                    offset: Transform { x: 0., y: 0. },
+                    blur_radius: 0.,
+                    spread: 1.,
+                }])),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }),
+        Style {
+            width: Some(100.),
+            height: Some(100.),
+            margin: Insets {
+                left: 20.,
+                top: 20.,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let mut gpu = GpuRenderer::new(140, 140).unwrap();
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    let pixels = gpu.readback().unwrap();
+    let at = |x: usize, y: usize| {
+        let i = (y * 140 + x) * 4;
+        (pixels[i], pixels[i + 1], pixels[i + 2])
+    };
+    // The border's pixel is the border's; the shadow's ring is the next one in.
+    assert_eq!(at(70, 20).2, 255, "the border row: {:?}", at(70, 20));
+    assert!(at(70, 20).0 < 50, "the border is not red: {:?}", at(70, 20));
+    assert!(at(70, 21).0 > 200 && at(70, 21).1 < 60, "the ring row: {:?}", at(70, 21));
+    assert_eq!(at(70, 22), (255, 255, 255), "clear inside the ring");
+}

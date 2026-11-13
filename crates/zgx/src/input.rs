@@ -862,9 +862,9 @@ struct State {
     /// The modifier keys last known held (from the platform's pointer and
     /// key events): what an activation (a click) was made with.
     modifiers: Modifiers,
-    /// The last interaction was the pointer (a press), not the keyboard:
-    /// what it focuses shows no focus ring (`focus_visible_now`).
-    pointer_modality: bool,
+    /// A key that moves or types was the last interaction (not a press, and
+    /// not yet at launch): what takes focus shows its ring (`focus_visible_now`).
+    keyboard_modality: bool,
     /// The node the pointer is locked to (`lock_pointer`): every pointer
     /// event goes to it, the mouse's own motion as `PointerMotion`.
     pointer_lock: Option<NodeId>,
@@ -1268,11 +1268,11 @@ impl InputDispatcher {
     pub fn next_key_deadline(&self) -> Option<Instant> {
         self.actions.borrow().deadline()
     }
-    /// Whether what takes focus now shows it (CSS's `:focus-visible`): not
-    /// when the last interaction was a pointer press (a clicked button),
-    /// yes after the keyboard, and at first.
+    /// Whether what takes focus now shows it (CSS's `:focus-visible`): only
+    /// after the keyboard, not for a pointer press (a clicked button), nor
+    /// for the focus a window takes at launch.
     pub fn focus_visible_now(&self) -> bool {
-        !self.state.borrow().pointer_modality
+        self.state.borrow().keyboard_modality
     }
     /// The physical key (a DOM `KeyboardEvent.code`) of the key events
     /// dispatched until it's set again: a platform sets it around each.
@@ -3086,7 +3086,7 @@ impl InputDispatcher {
         }
         match &event {
             InputEvent::PointerDown { .. } => {
-                self.state.borrow_mut().pointer_modality = true;
+                self.state.borrow_mut().keyboard_modality = false;
                 KEYBOARD_IN_USE.with(|k| k.set(false));
             }
             // As `:focus-visible`: a key that moves or types does; Escape
@@ -3096,8 +3096,8 @@ impl InputDispatcher {
                 if !modifiers.meta && !modifiers.control && !modifiers.alt =>
             {
                 let mut state = self.state.borrow_mut();
-                if state.pointer_modality && !matches!(key, Key::Escape) {
-                    state.pointer_modality = false;
+                if !matches!(key, Key::Escape) {
+                    state.keyboard_modality = true;
                 }
                 if !matches!(key, Key::Escape) {
                     KEYBOARD_IN_USE.with(|k| k.set(true));

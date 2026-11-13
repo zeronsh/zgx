@@ -18,7 +18,8 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{
-    Highlighter, LineColors, LineInset, LineInsets, LineSpans, SpanHighlighter, SpanStyle,
+    Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans,
+    SpanHighlighter, SpanStyle,
 };
 
 #[derive(Default)]
@@ -453,6 +454,36 @@ fn show_decorations(
     s.set_style(id, style);
     s.set_text_mark_shapes(id, shaped, ends, radius);
 }
+/// What is told of an editor's atoms: what happened to them, then all of
+/// them as they are.
+pub type AtomListener = Box<dyn FnMut(&AtomEvent<'_>)>;
+/// What an editor tells of its atoms (`EditorHandle::on_atoms`).
+pub struct AtomEvent<'a> {
+    /// What happened to them, in order.
+    pub changes: &'a [crate::text_edit::AtomChange],
+    /// All of them as they are, by start.
+    pub atoms: &'a [crate::text_edit::Atom],
+    /// Why they changed: "edit", "undo", "redo" or "set".
+    pub reason: &'a str,
+    text: &'a str,
+}
+impl AtomEvent<'_> {
+    /// Byte offset `byte` of the text as it is now, in characters.
+    pub fn chars(&self, byte: usize) -> usize {
+        let mut at = byte.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        self.text[..at].chars().count()
+    }
+    /// The character offset `chars` as a byte of the text as it is now.
+    pub fn byte(&self, chars: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(chars)
+            .map_or(self.text.len(), |(at, _)| at)
+    }
+}
 #[derive(Default)]
 struct CodeHint {
     /// Ranges of the text marked with a colour behind them (a search's
@@ -472,6 +503,10 @@ struct CodeHint {
     lines: RefCell<Option<Rc<crate::editor_lines::LineCache>>>,
     line_layer: Cell<Option<NodeId>>,
     line_nodes: RefCell<Vec<(usize, NodeId)>>,
+    /// Shapes beside the lines in view (`EditorHandle::set_line_marks`), on a layer under the text.
+    line_marks: RefCell<Option<LineMarks>>,
+    mark_layer: Cell<Option<NodeId>>,
+    mark_nodes: RefCell<Vec<NodeId>>,
     /// The lines last given assistive technology (`Semantics::set_text_lines`).
     told_lines: RefCell<Vec<(usize, NodeId)>>,
     /// Marks behind the selection (the current line, decorations), made
@@ -488,6 +523,13 @@ struct CodeHint {
     /// Where it was last drawn, and last told.
     caret_drawn: Cell<Option<Caret>>,
     caret_told: Cell<Option<Caret>>,
+    /// The wash behind atoms (`EditorHandle::set_atom_wash`) that have none of
+    /// their own.
+    atom_wash: Cell<Option<Color>>,
+    /// Told when its atoms are made, lost or moved (`EditorHandle::on_atoms`),
+    /// as `on_caret`, and the revision of them it last told.
+    on_atoms: RefCell<Option<AtomListener>>,
+    atoms_told: Cell<u64>,
     /// Told the first line in view when it changes
     /// (`EditorHandle::on_top_line`), as `on_caret`.
     on_top_line: RefCell<Option<TopLineListener>>,
@@ -958,6 +1000,15 @@ impl EditorHandle {
         self.hint.line_cache().set_insets(insets);
         self.refresh();
     }
+    /// Shapes drawn beside each line of a text area (a list's bullet, a quote's rule), by line index: they scroll
+    /// with their lines, under the text. `None`: none.
+    pub fn set_line_marks(&self, marks: Option<LineMarks>) {
+        if !self.multiline {
+            return;
+        }
+        *self.hint.code_made().line_marks.borrow_mut() = marks;
+        self.refresh();
+    }
     /// The caret's colour (`None`: the text's, as by default) and width in
     /// points (`None`: the app's, `Ui::set_caret_width`).
     pub fn set_caret_style(&self, color: Option<Color>, width: Option<f32>) {
@@ -1004,6 +1055,61 @@ impl EditorHandle {
         *code.on_caret.borrow_mut() = Some(Box::new(told));
         code.caret_listened.set(true);
         code.caret_told.set(None);
+        self.refresh();
+    }
+    /// Its atoms (`TextEditor::atoms`), by start.
+    pub fn atoms(&self) -> Vec<crate::text_edit::Atom> {
+        self.editor.borrow().atoms().to_vec()
+    }
+    /// Make `label` an atom at the caret (over the selection), or over
+    /// `range` where given (the trigger text typed for it): one undo step,
+    /// the caret after it. Its id. None for a read-only editor or a range
+    /// that isn't text.
+    pub fn insert_atom(
+        &self,
+        label: &str,
+        range: Option<std::ops::Range<usize>>,
+        wash: Option<Color>,
+        payload: Option<std::sync::Arc<dyn crate::text_edit::AtomPayload>>,
+    ) -> Option<u64> {
+        if self.is_read_only() {
+            return None;
+        }
+        self.preferred_x.set(None);
+        let id = self
+            .editor
+            .borrow_mut()
+            .insert_atom(label, range, wash, payload)?;
+        self.hint.code_made();
+        self.hint.value.write(&self.editor);
+        self.refresh();
+        Some(id)
+    }
+    /// Set its atoms (a draft's): see `TextEditor::set_atoms`.
+    pub fn set_atoms(&self, atoms: Vec<crate::text_edit::Atom>) {
+        self.hint.code_made();
+        // Unchanged, nothing draws: a binding that follows a list calls this
+        // from an effect, and drawing there would follow what it reads.
+        if self.editor.borrow_mut().set_atoms(atoms) {
+            self.refresh();
+        }
+    }
+    /// The wash behind atoms that have none of their own (`Atom::wash`).
+    pub fn set_atom_wash(&self, color: Option<Color>) {
+        self.hint.code_made().atom_wash.set(color);
+        self.refresh();
+    }
+    /// A new atom's id, for one made by `set_atoms`.
+    pub fn new_atom_id(&self) -> u64 {
+        self.editor.borrow_mut().new_atom_id()
+    }
+    /// Call `told` with what happened to its atoms, and all of them as they
+    /// are, whenever they are made, lost or moved (an edit, an undo): after
+    /// the editor is drawn, so it may change what it likes.
+    pub fn on_atoms(&self, told: impl FnMut(&AtomEvent<'_>) + 'static) {
+        let code = self.hint.code_made();
+        *code.on_atoms.borrow_mut() = Some(Box::new(told));
+        code.atoms_told.set(self.editor.borrow().atoms_revision());
         self.refresh();
     }
     /// Call `told` with the first line in view, from 1, whenever it changes
@@ -1305,6 +1411,15 @@ impl Drop for FramePreparationGuard<'_> {
     }
 }
 
+/// A menu's own scroller (`compose_menu_scroll`), for `Ui::scroll_report`.
+pub(crate) struct MenuScroll {
+    viewport: NodeId,
+    content: NodeId,
+    offset: Signal<f32>,
+    size: Signal<(f32, f32)>,
+    extent: Signal<(f32, f32)>,
+}
+
 /// An open popup: where its window is, in window coordinates, and what it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PopupInfo {
@@ -1312,6 +1427,9 @@ pub struct PopupInfo {
     pub rect: Rect,
     /// A menu, a popover or a tooltip, if it says.
     pub role: Option<crate::scene::PopupRole>,
+    /// How far the first scroll view inside it is scrolled and how far it can
+    /// go, if it has one (a menu cut to a height): `(offset, range)`.
+    pub scroll: Option<(f32, f32)>,
 }
 
 /// One retained document. Application code keeps returned node IDs as stable widget handles.
@@ -1687,6 +1805,9 @@ pub(crate) struct UiStorage {
     scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
     /// Run once after the next frame preparation's layout.
     after_layout: RefCell<Vec<Box<dyn FnOnce()>>>,
+    /// A menu's scroll state (`compose_menu_scroll`): its viewport and
+    /// content, and the signals of its offset and the sizes of both.
+    menu_scrolls: RefCell<Vec<MenuScroll>>,
     /// The open popups' windows, once something observes them
     /// (`Ui::observe_popups`).
     popups_observed: RefCell<Option<Signal<Vec<PopupInfo>>>>,
@@ -2073,6 +2194,7 @@ impl Ui {
             scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
             popups_observed: RefCell::default(),
+            menu_scrolls: RefCell::new(Vec::new()),
             layout_listeners: RefCell::default(),
             containers: RefCell::default(),
             mount_initialization: RefCell::new(None),
@@ -2952,6 +3074,31 @@ impl Ui {
             .or_default()
             .push(Rc::new(RefCell::new(f)));
     }
+    /// `(offset, range)` of the first scroll view in `root`'s subtree (itself
+    /// included), depth first, if any.
+    pub fn scroll_within(&self, scene: &Scene, root: NodeId) -> Option<(f32, f32)> {
+        // The root itself may be inside one (its content), which the report
+        // finds from there.
+        if let Some((offset, range, _)) = self.scroll_report(root) {
+            return Some((offset, range));
+        }
+        let mut stack = vec![(root, 0_usize)];
+        while let Some((node, depth)) = stack.pop() {
+            if let Some((offset, range, _)) = self.scroll_report(node) {
+                return Some((offset, range));
+            }
+            if depth < 4 {
+                stack.extend(
+                    scene
+                        .children(node)
+                        .iter()
+                        .rev()
+                        .map(|child| (*child, depth + 1)),
+                );
+            }
+        }
+        None
+    }
     fn popup_infos(&self) -> Vec<PopupInfo> {
         let scene = self.scene.borrow();
         let kinds = self.storage.popup_kinds.borrow();
@@ -2961,6 +3108,7 @@ impl Ui {
             .iter()
             .filter(|(root, open)| scene.contains(*root) && open.with_untracked(|open| *open))
             .map(|(root, _)| PopupInfo {
+                scroll: self.scroll_within(&scene, *root),
                 rect: scene.transformed_bounds(*root),
                 role: kinds
                     .iter()
@@ -3257,7 +3405,44 @@ impl Ui {
     /// or content inside). An offset past its range and a stretch left
     /// behind look alike on screen; these tell them apart.
     pub fn scroll_report(&self, id: NodeId) -> Option<(f32, f32, f32)> {
-        crate::elastic::report(self, id)
+        if let Some(report) = crate::elastic::report(self, id) {
+            return Some(report);
+        }
+        let scene = self.scene.borrow();
+        let menus = self.storage.menu_scrolls.borrow();
+        std::iter::once(id)
+            .chain(scene.ancestors(id).take(2))
+            .find_map(|node| {
+                menus
+                    .iter()
+                    .find(|m| m.viewport == node || m.content == node)
+            })
+            .map(|menu| {
+                let range = (menu.extent.with_untracked(|e| e.1)
+                    - menu.size.with_untracked(|s| s.1))
+                .max(0.);
+                (menu.offset.with_untracked(|o| *o), range, 0.)
+            })
+    }
+    /// A menu's scroller registers (`compose_menu_scroll`).
+    pub(crate) fn register_menu_scroll(
+        &self,
+        viewport: NodeId,
+        content: NodeId,
+        offset: Signal<f32>,
+        size: Signal<(f32, f32)>,
+        extent: Signal<(f32, f32)>,
+    ) {
+        let scene = self.scene.borrow();
+        let mut menus = self.storage.menu_scrolls.borrow_mut();
+        menus.retain(|m| scene.contains(m.viewport));
+        menus.push(MenuScroll {
+            viewport,
+            content,
+            offset,
+            size,
+            extent,
+        });
     }
     /// Take a trackpad's swipe between pages as navigation, as Safari does:
     /// a gesture that starts across where nothing under it scrolls that way
@@ -5855,8 +6040,16 @@ impl Ui {
                 let mut free: Vec<NodeId> = free.into_iter().map(|(_, id)| id).collect();
                 pool.extend(kept);
                 if let (Some(lines), Some(layer)) = (&long_lines, code.line_layer.get()) {
+                    // A hidden line has no node.
+                    pool.retain(|(line, id)| {
+                        let hidden = lines.inset(*line).hidden;
+                        if hidden {
+                            free.push(*id);
+                        }
+                        !hidden
+                    });
                     for i in shown_lines.clone() {
-                        if pool.iter().any(|(line, _)| *line == i) {
+                        if lines.inset(i).hidden || pool.iter().any(|(line, _)| *line == i) {
                             continue;
                         }
                         let id = free.pop().unwrap_or_else(|| {
@@ -5930,6 +6123,130 @@ impl Ui {
                     s.remove(id);
                 }
                 drop(pool);
+                // Each shown line's marks, under the text.
+                let marks_of = code.line_marks.borrow().clone();
+                let mut wanted: Vec<(Rect, LineMark)> = Vec::new();
+                if let (Some(lines), Some(marks_of)) = (&long_lines, marks_of) {
+                    for i in shown_lines.clone() {
+                        let inset = lines.inset(i);
+                        if inset.hidden {
+                            continue;
+                        }
+                        let top = lines.top(i) + inset.above - scroll.1;
+                        let tall = (lines.height(i) - inset.above).max(0.);
+                        for mark in marks_of(i) {
+                            let width = if mark.width.is_finite() {
+                                mark.width
+                            } else {
+                                (inner_width - mark.x).max(0.)
+                            };
+                            let height = if mark.height.is_finite() {
+                                mark.height
+                            } else {
+                                (tall - mark.y - mark.bottom).max(0.)
+                            };
+                            let x = if mark.from_right {
+                                inner_width - mark.x - width
+                            } else {
+                                mark.x - scroll.0
+                            };
+                            wanted.push((Rect::new(x, top + mark.y, width, height), mark));
+                        }
+                    }
+                }
+                if !wanted.is_empty()
+                    && code.mark_layer.get().is_none_or(|layer| !s.contains(layer))
+                {
+                    let layer = s.append(
+                        viewport,
+                        NodeKind::Container(Layout::Overlay),
+                        Style::default(),
+                    );
+                    let mut order = s.children(viewport).to_vec();
+                    order.retain(|id| *id != layer);
+                    let at = order.iter().position(|id| *id == text).unwrap_or(0);
+                    order.insert(at, layer);
+                    s.reorder_children(viewport, &order);
+                    code.mark_layer.set(Some(layer));
+                    code.mark_nodes.borrow_mut().clear();
+                }
+                let mut mark_nodes = code.mark_nodes.borrow_mut();
+                let count: usize = wanted
+                    .iter()
+                    .map(|(_, m)| 1 + usize::from(m.label.is_some()))
+                    .sum();
+                while mark_nodes.len() > count {
+                    s.remove(mark_nodes.pop().unwrap());
+                }
+                if let Some(layer) = code.mark_layer.get() {
+                    while mark_nodes.len() < count {
+                        mark_nodes.push(s.append(
+                            layer,
+                            NodeKind::Rect(Color(0, 0, 0, 0)),
+                            Style::default(),
+                        ));
+                    }
+                    let mut ids = mark_nodes.iter().copied();
+                    for (rect, mark) in wanted {
+                        let Some(id) = ids.next() else { break };
+                        let quad = crate::scene::QuadStyle {
+                            fill: mark.fill,
+                            radius: mark.radius,
+                            border_color: mark.border_color,
+                            border_width: mark.border_width,
+                            shadow: None,
+                            decoration: None,
+                            border_over: false,
+                            outline: None,
+                        };
+                        if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
+                            s.set_kind(id, NodeKind::Quad(quad));
+                        }
+                        s.set_style(id, fixed(rect.width, rect.height));
+                        s.set_transform(
+                            id,
+                            Transform {
+                                x: rect.x,
+                                y: rect.y,
+                            },
+                        );
+                        if let Some((label, label_color, label_size)) = mark.label {
+                            let Some(id) = ids.next() else { break };
+                            let unchanged = matches!(
+                                s.kind(id),
+                                NodeKind::Text { text, color: c, font_size }
+                                    if **text == *label && *c == label_color && *font_size == label_size
+                            );
+                            if !unchanged {
+                                s.set_kind(
+                                    id,
+                                    NodeKind::Text {
+                                        text: label,
+                                        color: label_color,
+                                        font_size: label_size,
+                                    },
+                                );
+                            }
+                            let mut label_font = font.clone();
+                            if mark.mono {
+                                label_font.family = crate::text_layout::FontFamily::Monospace;
+                            }
+                            if mark.height.is_finite() && mark.height > 0. {
+                                label_font.line_height = crate::text_layout::LineHeight::px(mark.height);
+                            }
+                            s.set_font(id, label_font);
+                            s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
+                            s.set_transform(
+                                id,
+                                Transform {
+                                    x: rect.x,
+                                    y: rect.y,
+                                },
+                            );
+                        }
+                    }
+                }
+                drop(mark_nodes);
             }
             s.set_transform(
                 caret,
@@ -6004,7 +6321,24 @@ impl Ui {
                 let mut shaped: Vec<crate::scene::TextMark> = Vec::new();
                 let mut ends = Vec::new();
                 {
-                    let decorations = code.decorations.borrow();
+                    let plain = code.decorations.borrow();
+                    // Atoms wash their label, among the decorations by start.
+                    let wash = code.atom_wash.get();
+                    let mut marked: Vec<(std::ops::Range<usize>, Color)> = e
+                        .atoms()
+                        .iter()
+                        .filter_map(|atom| {
+                            atom.wash.or(wash).map(|color| (atom.range.clone(), color))
+                        })
+                        .collect();
+                    let decorations: std::borrow::Cow<'_, [(std::ops::Range<usize>, Color)]> =
+                        if marked.is_empty() {
+                            std::borrow::Cow::Borrowed(&plain[..])
+                        } else {
+                            marked.extend(plain.iter().cloned());
+                            marked.sort_by_key(|(range, _)| range.start);
+                            std::borrow::Cow::Owned(marked)
+                        };
                     // Those in the text in view: from where the first line
                     // shown starts (all of them, if it is short).
                     let shown_from = match &long_lines {
@@ -6486,6 +6820,7 @@ impl Ui {
         let refresh: Rc<dyn Fn()> = {
             let hook = interaction_refresh.clone();
             let told = hint.clone();
+            let told_editor = editor.clone();
             let storage = Rc::downgrade(&self.storage);
             Rc::new(move || {
                 if told.held.get() != 0 {
@@ -6523,6 +6858,42 @@ impl Ui {
                         code.caret_told.set(Some(caret));
                         callback(caret);
                         let mut slot = code.on_caret.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some(callback);
+                        }
+                    }
+                    for _ in 0..4 {
+                        let revision = told_editor.borrow().atoms_revision();
+                        let listening = code.on_atoms.borrow().is_some();
+                        if !listening {
+                            // Nothing to tell: what happened is not kept.
+                            told_editor.borrow_mut().take_atom_changes();
+                            break;
+                        }
+                        let idle = !told_editor.borrow().atom_changes_pending();
+                        if revision == code.atoms_told.get() && idle {
+                            break;
+                        }
+                        let Some(mut callback) = code.on_atoms.borrow_mut().take() else {
+                            break;
+                        };
+                        let (changes, atoms, reason, text) = {
+                            let mut e = told_editor.borrow_mut();
+                            (
+                                e.take_atom_changes(),
+                                e.atoms().to_vec(),
+                                e.atom_reason(),
+                                e.text().into_owned(),
+                            )
+                        };
+                        code.atoms_told.set(revision);
+                        callback(&AtomEvent {
+                            changes: &changes,
+                            atoms: &atoms,
+                            reason,
+                            text: &text,
+                        });
+                        let mut slot = code.on_atoms.borrow_mut();
                         if slot.is_none() {
                             *slot = Some(callback);
                         }

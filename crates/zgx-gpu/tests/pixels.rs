@@ -2112,6 +2112,11 @@ fn declarative_menu_focus_and_dismissal_match_full_repaint() {
         (partial, report.layout_nodes)
     };
     ui.prepare_frame();
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::ArrowDown,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
     ui.input.focus(&ui.scene, view.find("anchor"));
     let closed = render(&ui).0;
     open.set(true);

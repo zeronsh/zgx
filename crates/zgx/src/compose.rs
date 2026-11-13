@@ -519,6 +519,8 @@ enum Contents {
 type Decorations = Vec<(std::ops::Range<usize>, crate::scene::Color)>;
 /// Ranges of a text underlined (`View::underlines`).
 type Underlines = Vec<crate::widgets::EditorUnderline>;
+/// What gives a text area's atoms as the values it reads change.
+type AtomsFollow = Box<dyn FnMut(&crate::widgets::EditorHandle) -> Vec<crate::text_edit::Atom>>;
 /// What a code editor adds to a text area: its lines' colours, ranges
 /// marked behind its text, its current line and what Tab inserts.
 #[derive(Default)]
@@ -530,6 +532,9 @@ pub(crate) struct CodeOptions {
     indent: Option<String>,
     on_caret: Option<Box<dyn FnMut(crate::widgets::Caret)>>,
     on_top_line: Option<Box<dyn FnMut(usize)>>,
+    atom_wash: Option<crate::scene::Color>,
+    on_atoms: Option<crate::widgets::AtomListener>,
+    atoms_when: Option<AtomsFollow>,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -1520,6 +1525,21 @@ impl View {
         accessibility.level = Some(level.max(1));
         self
     }
+    /// A tree item's depth, 1 for the top (`aria-level`): virtualised rows
+    /// are flat siblings, so it can't be inferred.
+    pub fn level(mut self, level: usize) -> Self {
+        self.accessibility_mut().level = Some(level.max(1));
+        self
+    }
+    /// What this is the current one of, followed (`aria-current`): none
+    /// while `current` says so.
+    pub fn current_when(
+        mut self,
+        current: impl FnMut() -> Option<crate::semantics::Current> + 'static,
+    ) -> Self {
+        self.accessibility_mut().current_when = Some(Box::new(current));
+        self
+    }
     /// Whether this option, tab or item is the chosen one, followed
     /// (`aria-selected`).
     pub fn selected_when(mut self, selected: impl FnMut() -> bool + 'static) -> Self {
@@ -1992,6 +2012,27 @@ impl View {
     /// status bar's line and column); see `EditorHandle::on_caret`.
     pub fn on_caret(mut self, told: impl FnMut(crate::widgets::Caret) + 'static) -> Self {
         self.code_mut().on_caret = Some(Box::new(told));
+        self
+    }
+    /// The wash behind a text area's atoms that have none of their own.
+    pub fn atom_wash(mut self, color: crate::scene::Color) -> Self {
+        self.code_mut().atom_wash = Some(color);
+        self
+    }
+    /// Call `told` with what happened to a text area's atoms and all of them
+    /// as they are, whenever they are made, lost or moved; see
+    /// `EditorHandle::on_atoms`.
+    pub fn on_atoms(mut self, told: impl FnMut(&crate::widgets::AtomEvent<'_>) + 'static) -> Self {
+        self.code_mut().on_atoms = Some(Box::new(told));
+        self
+    }
+    /// A text area's atoms follow what `atoms` gives, as the reactive values
+    /// it reads change (a draft restored).
+    pub fn atoms_when(
+        mut self,
+        atoms: impl FnMut(&crate::widgets::EditorHandle) -> Vec<crate::text_edit::Atom> + 'static,
+    ) -> Self {
+        self.code_mut().atoms_when = Some(Box::new(atoms));
         self
     }
     /// Call `told` with a text area's first line in view, from 1, whenever
@@ -3956,10 +3997,11 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 // key repeated, and those left unstamped go below.
                 run += 1;
                 let mut fresh = 0;
+                let mut repeated = false;
                 for (key, _) in &keys {
                     match entries.get_mut(key) {
                         Some((.., placed)) => {
-                            assert!(placed.run != run, "duplicate virtual list child key");
+                            repeated |= placed.run == run;
                             placed.run = run;
                         }
                         None => fresh += 1,
@@ -3970,9 +4012,12 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         Default::default();
                     for (key, _) in &keys {
                         if !entries.contains_key(key) {
-                            assert!(new.insert(key), "duplicate virtual list child key");
+                            repeated |= !new.insert(key);
                         }
                     }
+                }
+                if repeated {
+                    variable::drop_repeated_keys(&mut keys, |(key, _)| key);
                 }
                 let Some(mut ui) = weak.upgrade() else {
                     return;
@@ -5338,32 +5383,50 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, mut icon, menu, plain, room_after, outset, on_hover, border, min_width) =
-                match span.extras.take() {
-                    None => (None, None, None, false, -1., 0., None, None, 0.),
-                    Some(extras) => {
-                        let extras = *extras;
-                        let end = extras.padding_end.unwrap_or(span.padding[0]);
-                        let apart = extras.icon.is_some() || end != span.padding[0];
-                        // Its text's run comes next, after the room before it
-                        // when that's apart. Noted here, where only spans with
-                        // extras come, so a plain span pays nothing for fades.
-                        if let Some(fade) = extras.fade {
-                            fading.note(runs.len() + usize::from(apart), fade);
-                        }
-                        (
-                            extras.hover,
-                            extras.icon,
-                            extras.menu,
-                            extras.plain,
-                            if apart { end } else { -1. },
-                            extras.outset,
-                            extras.on_hover,
-                            extras.border,
-                            extras.min_width,
-                        )
+            let (
+                hover,
+                mut icon,
+                menu,
+                plain,
+                room_after,
+                outset,
+                on_hover,
+                border,
+                min_width,
+                trailing,
+            ) = match span.extras.take() {
+                None => (None, None, None, false, -1., 0., None, None, 0., None),
+                Some(extras) => {
+                    let extras = *extras;
+                    let end = extras.padding_end.unwrap_or(span.padding[0]);
+                    let apart = extras.icon.is_some()
+                        || extras.trailing_icon.is_some()
+                        || end != span.padding[0];
+                    let end = end
+                        + extras
+                            .trailing_icon
+                            .as_ref()
+                            .map_or(0., |t| t.size + t.gap + 2. * t.margin);
+                    // Its text's run comes next, after the room before it
+                    // when that's apart. Noted here, where only spans with
+                    // extras come, so a plain span pays nothing for fades.
+                    if let Some(fade) = extras.fade {
+                        fading.note(runs.len() + usize::from(apart), fade);
                     }
-                };
+                    (
+                        extras.hover,
+                        extras.icon,
+                        extras.menu,
+                        extras.plain,
+                        if apart { end } else { -1. },
+                        extras.outset,
+                        extras.on_hover,
+                        extras.border,
+                        extras.min_width,
+                        extras.trailing_icon,
+                    )
+                }
+            };
             let mut hover = hover;
             let styled_hover = hover.is_some();
             if link && !styled_hover && !plain {
@@ -5429,6 +5492,7 @@ fn paragraph_effect<const LOCATING: bool>(
                 links.push(crate::compose_rich::Link {
                     range: start..content.len(),
                     hit_start: icon_at.as_ref().map_or(start, |icon| icon.start),
+                    hit_end: content.len(),
                     action: span.action,
                     href: span.href,
                     label: span.label,
@@ -5656,6 +5720,37 @@ fn paragraph_effect<const LOCATING: bool>(
             // The room after the text: a placeholder of its own.
             if room_after > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                if let Some(link) = links.last_mut().filter(|l| l.range.end == text_end) {
+                    link.hit_end = content.len();
+                }
+                if let Some(icon) = trailing {
+                    let tint = match icon.tint {
+                        Some(crate::theme::Themed::Value(tint)) => {
+                            std::sync::Arc::new(icon.svg.tinted(tint))
+                        }
+                        Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                            icon.svg.tinted(
+                                theme
+                                    .get(token)
+                                    .color()
+                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                            ),
+                        ),
+                        None if icon.svg.follows_text_color() => {
+                            std::sync::Arc::new(icon.svg.tinted(color))
+                        }
+                        None => icon.svg,
+                    };
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range: text_end..content.len(),
+                        svg: tint,
+                        size: icon.size,
+                        inset: icon.gap + icon.margin,
+                        dy: icon.dy,
+                        well: None,
+                        boxed: None,
+                    });
+                }
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
@@ -6443,10 +6538,14 @@ fn open_element(
             let mut defaults = widget_style(|w| &w.menu_item);
             // A height the app gives the item is its height: the platform's
             // least (GNOME's 32) is for items sized by their content.
-            if OVERLAY.menu_item_min_height.is_some()
-                && (view.styles.height.is_some() || view.styles.height_percent.is_some())
-            {
+            let sized = view.styles.height.is_some() || view.styles.height_percent.is_some();
+            if OVERLAY.menu_item_min_height.is_some() && sized {
                 defaults = defaults.min_h(0.);
+            }
+            // Its height is the whole slot: the platform's gap between
+            // items (Windows' 2 above and below) is not added to it.
+            if sized && OVERLAY.menu_item_inset.1 > 0. {
+                defaults = defaults.my(0.);
             }
             let look = menu_look();
             defaults.merge(&look.item);
@@ -7134,6 +7233,9 @@ fn open_element(
                 indent,
                 on_caret,
                 on_top_line,
+                atom_wash,
+                on_atoms,
+                atoms_when,
             } = *code;
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
@@ -7154,6 +7256,19 @@ fn open_element(
             }
             if let Some(told) = on_top_line {
                 editor.on_top_line(told);
+            }
+            if let Some(color) = atom_wash {
+                editor.set_atom_wash(Some(color));
+            }
+            if let Some(told) = on_atoms {
+                editor.on_atoms(told);
+            }
+            if let Some(mut atoms) = atoms_when {
+                let editor = editor.clone();
+                ui.bind(root, move || {
+                    let next = atoms(&editor);
+                    editor.set_atoms(next)
+                });
             }
             editor.set_indent(indent.as_deref());
             if let Some(mut ranges) = decorations {
@@ -8853,6 +8968,8 @@ pub(crate) struct Accessibility {
     hidden_when: Option<Box<dyn FnMut() -> bool>>,
     /// `View::busy_when`.
     busy_when: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::current_when`.
+    current_when: Option<Box<dyn FnMut() -> Option<crate::semantics::Current>>>,
     /// `View::accessible_modal`: while it shows, nothing else is read.
     modal: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -8903,6 +9020,9 @@ impl Accessibility {
         }
         if outer.hidden_when.is_some() {
             inner.hidden_when = outer.hidden_when;
+        }
+        if outer.current_when.is_some() {
+            inner.current_when = outer.current_when;
         }
         if outer.busy_when.is_some() {
             inner.busy_when = outer.busy_when;
@@ -8972,6 +9092,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         hidden,
         hidden_when,
         busy_when,
+        current_when,
         modal,
         focus_group,
         label,
@@ -9047,6 +9168,14 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut current) = current_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let current = current();
+            tree.borrow_mut()
+                .update(root, |node| node.current = current);
         });
     }
     if let Some(mut busy) = busy_when {

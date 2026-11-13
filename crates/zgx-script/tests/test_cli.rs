@@ -1126,3 +1126,34 @@ end)
     let (code, text) = run(&dir, &[]);
     assert_eq!(code, Some(0), "{text}");
 }
+
+#[test]
+fn a_run_removes_the_storage_of_runs_that_were_killed() {
+    let dir = app(
+        "stale-storage",
+        &[("a.test.luau", "test(\"mounts\", function() mount() end)\n")],
+    );
+    let tmp = common::temp_dir("stale-storage-tmp");
+    // A process that is gone (a pid beyond any the system hands out), and one
+    // that is alive (this test's).
+    let gone = tmp.join("zgx-test-storage-4194999-0");
+    let alive = tmp.join(format!("zgx-test-storage-{}-0", std::process::id()));
+    for path in [&gone, &alive] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let out = zgx()
+        .arg("test")
+        .arg(&dir)
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(!gone.exists(), "a dead run's storage goes");
+    assert!(alive.exists(), "a live process's stays");
+}

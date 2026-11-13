@@ -796,7 +796,10 @@ impl Session {
                         lines.push(format!("  marked {count} objects"));
                     }
                     if found.no_mark {
-                        lines.push("  no mark: run `gc --mark` first".to_string());
+                        lines.push(
+                            "  no mark on this VM (none made, or the script reloaded since: a reload drops it): run `gc --mark` first; the counts below are all of them"
+                                .to_string(),
+                        );
                     }
                     if !found.since.is_empty() {
                         lines.push("  survived since the mark:".to_string());
@@ -806,8 +809,14 @@ impl Session {
                     }
                     if query.retained.is_some() {
                         lines.push(format!(
-                            "  {} objects match, {} reachable without Rust's handles; held by:",
-                            found.matched, found.lua_reachable
+                            "  {} objects match{}, {} reachable without Rust's handles; held by:",
+                            found.matched,
+                            if query.since_mark && !found.no_mark {
+                                " (made since the mark)"
+                            } else {
+                                ""
+                            },
+                            found.lua_reachable
                         ));
                         for holder in &found.holders {
                             lines.push(format!("    {} ×", holder.count));

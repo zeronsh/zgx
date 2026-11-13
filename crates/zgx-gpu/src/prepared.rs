@@ -1974,7 +1974,7 @@ impl TextCache {
             Source::Plain { .. } => unreachable!("plain text keeps its caret row"),
         };
         if caret_row
-            && text.ends_with(['\r', '\n'])
+            && text.ends_with(['\r', '\n', '\u{1e}'])
             && crate::text::ends_open(&buffer)
             && let Some((font, font_size)) = last
         {

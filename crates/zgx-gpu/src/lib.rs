@@ -9469,7 +9469,20 @@ impl GpuRenderer {
                     && matches!(item.kind, NodeKind::Text { .. } | NodeKind::RichText { .. })
                 {
                     let clip = item.clip.unwrap_or(viewport);
-                    let own = clip.intersection(item.bounds).unwrap_or_default();
+                    // Ink may pass the line box above and below (a descender of
+                    // a font taller than its line height), as CSS lets it.
+                    // (Never more than the damage a text counts, `ink_bounds`.)
+                    let overshoot = match &item.kind {
+                        NodeKind::Text { font_size, .. } if *font_size <= 48. => (font_size * 0.3).max(2.),
+                        _ => 0.,
+                    };
+                    let tall = Rect::new(
+                        item.bounds.x,
+                        item.bounds.y - overshoot,
+                        item.bounds.width,
+                        item.bounds.height + 2. * overshoot,
+                    );
+                    let own = clip.intersection(tall).unwrap_or_default();
                     match scene.has_text_shadows() {
                         true => shadowed(scene, item.id, item.bounds, clip, own, &mut own_clip),
                         false => own,
@@ -19187,10 +19200,38 @@ fn push_insets(
         .and_then(|d| d.inset_shadows.as_deref())
         .unwrap_or(&[]);
     let mut blurred = false;
+    // CSS draws an inset shadow from the padding edge, inside the border.
+    let sides = style.border_sides();
+    let side = |value: f32| if value.is_finite() { value.max(0.) } else { 0. };
+    let (top, right, bottom, left) = (
+        side(sides.top),
+        side(sides.right),
+        side(sides.bottom),
+        side(sides.left),
+    );
+    let bounds = Rect::new(
+        bounds.x + left,
+        bounds.y + top,
+        (bounds.width - left - right).max(0.),
+        (bounds.height - top - bottom).max(0.),
+    );
+    let mut corners = decoration::shadow_corners(
+        style,
+        bounds.width + left + right,
+        bounds.height + top + bottom,
+        0.,
+    );
+    for (corner, inset) in corners.iter_mut().zip([
+        left.max(top),
+        top.max(right),
+        right.max(bottom),
+        bottom.max(left),
+    ]) {
+        *corner = (*corner - inset).max(0.);
+    }
     for s in shadows.iter().filter(|s| s.color.3 > 0) {
         let spread = s.spread.max(0.);
         let fade = [bounds.x, bounds.y, bounds.width, bounds.height];
-        let corners = decoration::shadow_corners(style, bounds.width, bounds.height, 0.);
         if s.blur_radius > 0. && s.blur_radius.is_finite() {
             let first = points.len();
             points.push([s.offset.x, s.offset.y]);

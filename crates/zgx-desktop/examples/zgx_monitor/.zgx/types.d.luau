@@ -1242,6 +1242,12 @@ declare extern type Element with
 	-- How far a scroll view or list is scrolled along its axis and how far it
 	-- can go, in points: `at_start` and `at_end` say whether it can still
 	-- scroll up or down (left or right). Nil for anything else.
+	-- An editor's atoms (see a textarea's `atoms`): `label` made an atom at
+	-- the caret, over the selection, or over `replace`'s characters; one step
+	-- of undo, the caret after it. Its id, or nil for elements that are not
+	-- editors.
+	function insert_atom(self, label: string, options: InsertAtomOptions?): string?
+	function atoms(self): { AtomItem }?
 	function scroll_info(self): { offset: number, range: number, at_start: boolean, at_end: boolean }?
 	function has_class(self, class: string): boolean
 	-- An input's selection, in characters (Unicode code points from 0, as
@@ -1315,6 +1321,13 @@ export type Control = {
 	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
 	haspopup: string?,
 	focused: boolean,
+	-- A menu's or list box's scroll view, when it has one: how far it is
+	-- scrolled and how far it can go, and whether it can still scroll up or
+	-- down (`at_start`, `at_end`).
+	scroll_offset: number?,
+	scroll_range: number?,
+	at_start: boolean?,
+	at_end: boolean?,
 	-- Names it for `ui.press` while it is there.
 	handle: number,
 }
@@ -1785,7 +1798,7 @@ declare extern type WindowApi with
 	shown: State<boolean>
 	-- The open menus, popovers and tooltips: `{ x, y, w, h, kind }` each, in
 	-- window points, kind "menu", "popover", "tooltip" or "topmost"; read-only.
-	popups: State<{ { x: number, y: number, w: number, h: number, kind: string } }>
+	popups: State<{ { x: number, y: number, w: number, h: number, kind: string, offset: number?, range: number?, at_start: boolean?, at_end: boolean? } }>
 	-- Whether the window is in full screen, read-only and followed, however
 	-- it went in or out (the green button, Ctrl+Cmd+F, the menu, Mission
 	-- Control, a script), turning as it begins to go; and while it goes
@@ -2475,6 +2488,12 @@ export type NodeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Reactive<boolean>?,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: number?,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Reactive<string>?,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Reactive<boolean>?,
@@ -2545,6 +2564,9 @@ export type NodeProps = {
 	tooltip_group: TooltipGroup?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: boolean?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
@@ -2925,6 +2947,12 @@ export type Props = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -2995,6 +3023,9 @@ export type Props = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -3310,6 +3341,8 @@ export type Props_description = (string | ReadOnlyState<string> | (() -> string)
 export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = Reactive<boolean>?
+export type Props_level = number?
+export type Props_current = Reactive<string>?
 export type Props_busy = Reactive<boolean>?
 export type Props_inert = Reactive<boolean>?
 export type Props_sr_only = boolean?
@@ -3333,6 +3366,7 @@ export type Props_tooltip_delay = number?
 export type Props_tooltip_close_delay = number?
 export type Props_tooltip_group = TooltipGroup?
 export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | Styles)?
+export type Props_dim = boolean?
 export type Props_hover = Styles?
 export type Props_active = Styles?
 export type Props_focus = Styles?
@@ -3631,6 +3665,12 @@ export type ContainerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -3701,6 +3741,9 @@ export type ContainerProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -4095,6 +4138,12 @@ export type GlassProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -4165,6 +4214,9 @@ export type GlassProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -4568,6 +4620,12 @@ export type ScrollProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -4638,6 +4696,9 @@ export type ScrollProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5058,6 +5119,12 @@ export type TextProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -5128,6 +5195,9 @@ export type TextProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5507,6 +5577,12 @@ export type MarkdownViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -5577,6 +5653,9 @@ export type MarkdownViewProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5825,6 +5904,17 @@ export type SpanProps = {
 		-- as an inline image's is in CSS, the line growing to hold it (no
 		-- well).
 		align: ("center" | "baseline")?,
+	}?,
+	-- An icon after the text, in the line (a chip's arrow): `size` square,
+	-- centred on the line, `gap` from the text (the link's box includes it).
+	trailing_icon: {
+		src: string?,
+		code: string?,
+		size: number?,
+		gap: number?,
+		margin: number?,
+		dy: number?,
+		tint: Color?,
 	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
 	-- a link: told the keys held. Returning `true` handled it: its `href`
@@ -6103,6 +6193,12 @@ export type RichProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -6173,6 +6269,9 @@ export type RichProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -6546,6 +6645,12 @@ export type ImageProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -6616,6 +6721,9 @@ export type ImageProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -7006,6 +7114,12 @@ export type SvgProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -7076,6 +7190,9 @@ export type SvgProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -7577,6 +7694,12 @@ export type Scene3DProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -7647,6 +7770,9 @@ export type Scene3DProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8043,6 +8169,12 @@ export type CanvasProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -8113,6 +8245,9 @@ export type CanvasProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8518,6 +8653,12 @@ export type CheckboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -8588,6 +8729,9 @@ export type CheckboxProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8971,6 +9115,12 @@ export type InputProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -9041,6 +9191,9 @@ export type InputProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -9284,6 +9437,40 @@ export type InputProps = {
 	-- The first line in view, from 1, whenever it changes: an outline following
 	-- the text.
 	on_top_line: ((line: number) -> ())?,
+	-- Its atoms (chips): ranges of the text that edit as one unit, `{ id,
+	-- from, to, data?, style? }` each, `from` and `to` in characters from 0
+	-- (half-open), by `from`. Two-way, as `value` is: the editor writes it as
+	-- they are made, lost or moved, and setting it restores them (a draft's;
+	-- set the text first). The label stays in the text.
+	atoms: State<{ AtomItem }>?,
+	-- Told after atoms are made, lost or moved (an edit, an undo): what was
+	-- added and removed (a removed one with its `label` and the range it had),
+	-- all of them, and why: "edit", "undo", "redo" or "set".
+	on_atoms: ((change: AtomChange) -> ())?,
+	-- The wash behind atoms that have none of their own (`style.bg`).
+	atom_style: { bg: Color? }?,
+}
+export type AtomItem = {
+	id: string?,
+	from: number,
+	to: number,
+	data: any?,
+	style: { bg: string? }?,
+	-- Only on a removed atom: the text it had.
+	label: string?,
+}
+export type AtomChange = {
+	reason: "edit" | "undo" | "redo" | "set",
+	atoms: { AtomItem },
+	added: { AtomItem },
+	removed: { AtomItem },
+}
+export type InsertAtomOptions = {
+	id: string?,
+	data: any?,
+	style: { bg: string? }?,
+	-- The characters it takes the place of (the `@que` typed to ask for it).
+	replace: { from: number, to: number }?,
 }
 -- `value` from 0 to 1, or nil: indeterminate (work of unknown size), a
 -- stretch of the bar sweeping across.
@@ -9525,6 +9712,12 @@ export type ProgressProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -9595,6 +9788,9 @@ export type ProgressProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -9966,6 +10162,12 @@ export type SliderProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -10036,6 +10238,9 @@ export type SliderProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -10428,6 +10633,12 @@ export type SegmentedProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -10498,6 +10709,9 @@ export type SegmentedProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -10883,6 +11097,12 @@ export type StepperProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -10953,6 +11173,9 @@ export type StepperProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11339,6 +11562,12 @@ export type DisclosureProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -11409,6 +11638,9 @@ export type DisclosureProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11806,6 +12038,12 @@ export type AccordionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -11876,6 +12114,9 @@ export type AccordionProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12247,6 +12488,12 @@ export type SectionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -12317,6 +12564,9 @@ export type SectionProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12713,6 +12963,12 @@ export type SeparatorProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -12783,6 +13039,9 @@ export type SeparatorProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -13162,6 +13421,12 @@ export type TabsProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -13232,6 +13497,9 @@ export type TabsProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -13633,6 +13901,12 @@ export type TreeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -13703,6 +13977,9 @@ export type TreeProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14100,6 +14377,12 @@ export type DataGridProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -14170,6 +14453,9 @@ export type DataGridProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14563,6 +14849,12 @@ export type CalendarProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -14633,6 +14925,9 @@ export type CalendarProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15019,6 +15314,12 @@ export type DatePickerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -15089,6 +15390,9 @@ export type DatePickerProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15473,6 +15777,12 @@ export type TimeFieldProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -15543,6 +15853,9 @@ export type TimeFieldProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15926,6 +16239,12 @@ export type ComboboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -15996,6 +16315,9 @@ export type ComboboxProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -16387,6 +16709,12 @@ export type CommandPaletteProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -16457,6 +16785,9 @@ export type CommandPaletteProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -16836,6 +17167,12 @@ export type SelectProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -16906,6 +17243,9 @@ export type SelectProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -17292,6 +17632,12 @@ export type SplitProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -17362,6 +17708,9 @@ export type SplitProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -17804,6 +18153,12 @@ export type ListProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -17874,6 +18229,9 @@ export type ListProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -18350,6 +18708,12 @@ export type LayerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -18420,6 +18784,9 @@ export type LayerProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -18813,6 +19180,12 @@ export type ModalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -18883,6 +19256,9 @@ export type ModalProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -19325,6 +19701,12 @@ export type PopoverProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -19395,6 +19777,9 @@ export type PopoverProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -19825,6 +20210,12 @@ export type MenuItemProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -19895,6 +20286,9 @@ export type MenuItemProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20277,6 +20671,12 @@ export type SubmenuProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -20347,6 +20747,9 @@ export type SubmenuProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20749,6 +21152,12 @@ export type WebViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -20819,6 +21228,9 @@ export type WebViewProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -21218,6 +21630,12 @@ export type TerminalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -21288,6 +21706,9 @@ export type TerminalProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -21662,6 +22083,12 @@ export type HostViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -21732,6 +22159,9 @@ export type HostViewProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22106,6 +22536,12 @@ export type SlotProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -22176,6 +22612,9 @@ export type SlotProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22601,6 +23040,12 @@ export type EachOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -22671,6 +23116,9 @@ export type EachOptions = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -23060,6 +23508,12 @@ export type PresenceOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -23130,6 +23584,9 @@ export type PresenceOptions = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,

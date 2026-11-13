@@ -987,3 +987,284 @@ return ui.column { w = 200, h = 100,
     h.frames(3);
     assert_eq!(state(&h), Some((zgx::semantics::Role::Region, false)));
 }
+
+#[test]
+fn a_cut_menu_says_whether_it_can_scroll() {
+    let mut h = Harness::inline(
+        r##"
+local open = ui.state("open", true)
+local items = {}
+for i = 1, 20 do table.insert(items, ui.menu_item { "Item " .. i }) end
+local out = ui.state("out", "")
+ui.command { id = "read", run = function()
+    for _, c in ui.controls() do
+        if c.role == "menu" then out:set(`{tostring(c.at_start)}/{tostring(c.at_end)}/{tostring(c.scroll_range ~= nil)}`) end
+    end
+end }
+return ui.column { w = 300, h = 300,
+    ui.menu { open = open, anchor = ui.button { "Open" }, max_h = 60, table.unpack(items) },
+    ui.text { id = "out", function() return out:get() end },
+    ui.text { id = "pop", function()
+        local p = ui.window.popups:get()[1]
+        return p and `{p.kind}/{tostring(p.at_start)}/{tostring(p.at_end)}` or "none"
+    end },
+}"##,
+    );
+    h.settle();
+    h.frames(4);
+    h.host.window_state(&h.ui);
+    h.frames(3);
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("out"), "true/false/true");
+    assert_eq!(h.text("pop"), "menu/true/false");
+}
+
+#[test]
+fn a_menu_item_with_a_checkable_role_takes_its_checked() {
+    let mut h = Harness::inline(
+        r##"
+local on = ui.state("on", true)
+return ui.column { w = 300, h = 200,
+    ui.menu { id = "m", open = ui.state("m", true), anchor = ui.button { "Open" },
+        ui.menu_item { id = "sw", role = "menuitemcheckbox", checked = on, "Notifications" } },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    let item = h.find("sw").unwrap();
+    let semantic = h.ui.semantics.borrow().get(item).cloned().unwrap();
+    assert_eq!(semantic.role, zgx::semantics::Role::MenuItem);
+    assert_eq!(semantic.checked, Some(true));
+}
+
+#[test]
+fn a_textarea_atom_is_one_unit_and_the_script_hears_it_go() {
+    let mut h = Harness::inline(
+        r##"
+local draft = ui.state("draft", "see  now")
+local atoms = ui.state("atoms", {})
+local heard = ui.state("heard", "")
+local box = ui.ref()
+ui.command { id = "add", run = function()
+    box:get():set_selection(4, 4)
+    box:get():insert_atom("@file.pdf", { id = "file-1", data = { path = "a/b.pdf" } })
+end }
+return ui.column { w = 400, h = 200,
+    ui.textarea { ref = box, id = "ta", value = draft, atoms = atoms, w = 300, h = 80,
+        atom_style = { bg = "#3366ff40" },
+        on_atoms = function(change)
+            local gone = {}
+            for _, a in change.removed do table.insert(gone, `{a.id}:{a.from}-{a.to}:{a.label}`) end
+            heard:set(change.reason .. "|" .. table.concat(gone, ","))
+        end },
+    ui.text { id = "n", function() return tostring(#atoms:get()) end },
+    ui.text { id = "info", function()
+        local a = atoms:get()[1]
+        return a and `{a.id}:{a.from}-{a.to}:{a.data.path}` or "none"
+    end },
+    ui.text { id = "heard", function() return heard:get() end },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    h.host.run_command("add");
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("n"), "1");
+    assert_eq!(h.text("info"), "file-1:4-13:a/b.pdf");
+    assert_eq!(h.text("ta"), "see @file.pdf now");
+    let ta = h.find("ta").unwrap();
+    h.ui.input.focus(&h.ui.scene, Some(ta));
+    h.ui.dispatch(zgx::input::InputEvent::KeyDown {
+        key: zgx::input::Key::Backspace,
+        modifiers: Default::default(),
+        repeat: false,
+    });
+    h.frames(3);
+    assert_eq!(h.text("n"), "0");
+    assert_eq!(h.text("heard"), "edit|file-1:4-13:@file.pdf");
+}
+
+#[test]
+fn a_textarea_restores_atoms_from_a_draft_and_undo_brings_one_back() {
+    use zgx_script::Value as V;
+    let mut h = Harness::inline(
+        r##"
+local draft = ui.state("draft", "ask @a.pdf and /skill now")
+local atoms = ui.state("atoms", {})
+local heard = ui.state("heard", "")
+local box = ui.ref()
+ui.command { id = "read", run = function()
+    local list = box:get():atoms()
+    heard:set(`{#list}:{list[1].id}:{list[1].from}-{list[1].to}:{list[2].id}:{list[2].from}-{list[2].to}`)
+end }
+return ui.column { w = 400, h = 200,
+    ui.textarea { ref = box, id = "ta", value = draft, atoms = atoms, w = 300, h = 80 },
+    ui.text { id = "heard", function() return heard:get() end },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    let atom = |id: &str, from: f64, to: f64| {
+        V::record([
+            ("id", V::from(id)),
+            ("from", V::Num(from)),
+            ("to", V::Num(to)),
+        ])
+    };
+    h.host
+        .set_state(
+            "atoms",
+            V::List(vec![atom("file", 4., 10.), atom("skill", 15., 21.)].into()),
+        )
+        .unwrap();
+    h.frames(3);
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.text("heard"), "2:file:4-10:skill:15-21");
+    // One Backspace takes the skill whole (the caret at its end), undo gives it back.
+    let ta = h.find("ta").unwrap();
+    h.ui.input.focus(&h.ui.scene, Some(ta));
+    let editor = h.ui.editor(ta).unwrap();
+    editor.set_selection(25, 25);
+    assert_eq!(editor.atoms().len(), 2);
+    editor.set_selection(21, 21);
+    h.ui.dispatch(zgx::input::InputEvent::KeyDown {
+        key: zgx::input::Key::Backspace,
+        modifiers: Default::default(),
+        repeat: false,
+    });
+    h.frames(3);
+    assert_eq!(editor.atoms().len(), 1);
+    assert!(editor.undo());
+    h.frames(3);
+    assert_eq!(editor.atoms().len(), 2);
+}
+
+#[test]
+fn level_and_current_reach_the_tree_and_selected_prints() {
+    use zgx_script::Value as V;
+    let mut h = Harness::inline(
+        r##"local page = ui.state("page", "page")
+return ui.column { w = 300, h = 200,
+    ui.column { id = "row", role = "treeitem", label = "Deep", level = 3, selected = true, current = page, ui.text { "Deep" } },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    let row = h.find("row").unwrap();
+    let read = |h: &Harness| {
+        h.ui.semantics
+            .borrow()
+            .get(row)
+            .map(|s| (s.role, s.level, s.current, s.selected))
+    };
+    assert_eq!(
+        read(&h),
+        Some((
+            zgx::semantics::Role::TreeItem,
+            Some(3),
+            Some(zgx::semantics::Current::Page),
+            Some(true)
+        ))
+    );
+    let tree = h.tree();
+    assert!(tree.contains("selected"), "{tree}");
+    assert!(tree.contains("current"), "{tree}");
+    assert!(tree.contains("level=3"), "{tree}");
+    h.host.set_state("page", V::Str("".into())).unwrap();
+    h.frames(3);
+    assert_eq!(read(&h).unwrap().2, None);
+}
+
+#[test]
+fn dim_false_keeps_a_disabled_button_undimmed_but_disabled() {
+    let mut h = Harness::inline(
+        r##"return ui.column { w = 300, h = 200,
+    ui.button { id = "plain", disabled = true, "Plain" },
+    ui.button { id = "kept", disabled = true, dim = false, "Kept" },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    assert!(h.opacity("plain") < 0.9, "{}", h.opacity("plain"));
+    assert_eq!(h.opacity("kept"), 1.);
+    let kept = h.find("kept").unwrap();
+    assert!(h.ui.semantics.borrow().get(kept).unwrap().disabled);
+}
+
+#[test]
+fn a_blur_tweened_to_zero_rests_unblurred() {
+    let mut h = Harness::inline(
+        r##"local shown = ui.state("shown", false)
+ui.on_mount(function() shown:set(true) end)
+return ui.column { w = 200, h = 100,
+    ui.text { id = "t", "Hello", blur = ui.tween(shown, { from = 3, to = 0, duration = 200 }) },
+}"##,
+    );
+    h.settle();
+    h.frames(30);
+    let t = h.find("t").unwrap();
+    let effects = h.ui.scene.borrow().effects(t);
+    assert_eq!(effects.filter_blur, 0., "{effects:?}");
+    assert_eq!(effects.blur_radius, 0., "{effects:?}");
+}
+
+#[test]
+fn a_span_takes_a_leading_and_a_trailing_icon() {
+    let widths: Vec<f32> = ["", "trailing_icon = { code = '<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><rect width=\"16\" height=\"16\"/></svg>', size = 12, gap = 4 },"]
+        .iter()
+        .map(|extra| {
+            let mut h = Harness::inline(&format!(
+                r##"return ui.row {{ w = 400, h = 100,
+    ui.rich {{ id = "r", ui.span {{ "Notion", on_click = function() end, {extra} }} }},
+}}"##
+            ));
+            h.settle();
+            h.frames(3);
+            let r = h.find("r").unwrap();
+            h.ui.scene.borrow().bounds(r).width
+        })
+        .collect();
+    assert!(widths[1] >= widths[0] + 15.9, "{widths:?}");
+}
+
+#[test]
+fn a_republished_list_reuses_the_tables_of_the_rows_it_kept() {
+    use zgx_script::{Value, tables_converted, values_converted};
+    let rows = |changed: usize| {
+        let items: Vec<String> = (0..1200)
+            .map(|i| {
+                let text = if i == changed { "edited" } else { "same" };
+                format!(
+                    r#"{{"id":{i},"kind":"m","text":"{text} {i}","refs":[{{"n":1}},{{"n":2}}]}}"#
+                )
+            })
+            .collect();
+        Value::from_json(&format!("[{}]", items.join(","))).unwrap()
+    };
+    let mut h = Harness::inline(
+        r##"local rows = ui.shared("rows", {})
+local out = ui.state("out", 0)
+ui.command { id = "read", run = function() out:set(#rows:get()) end }
+return ui.column { w = 100, h = 100, ui.text { id = "out", function() return tostring(out:get()) end } }"##,
+    );
+    let shared = h.host.shared("rows", Value::Nil);
+    shared.set(rows(usize::MAX));
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.text("out"), "1200");
+    shared.set(rows(600));
+    let before = (tables_converted(), values_converted());
+    h.host.run_command("read");
+    h.frames(2);
+    let (tables, values) = (tables_converted() - before.0, values_converted() - before.1);
+    assert_eq!(h.text("out"), "1200");
+    assert!(
+        tables < 20 && values < 100,
+        "only the changed row converts again: {tables} tables, {values} values"
+    );
+}

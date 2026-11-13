@@ -56,6 +56,8 @@ pub(crate) struct Link {
     pub range: Range<usize>,
     /// Where its box starts: its icon's placeholder when it has one, so a press on the icon is a press on the link.
     pub hit_start: usize,
+    /// Where its box ends: its trailing icon's placeholder when it has one.
+    pub hit_end: usize,
     pub action: Option<InlineAction>,
     /// Where it goes (`TextSpan::href`): a click opens it, its context menu
     /// opens or copies it.
@@ -184,6 +186,7 @@ pub struct TextSpan {
 pub(crate) struct SpanExtras {
     pub hover: Option<SpanHover>,
     pub icon: Option<SpanIcon>,
+    pub trailing_icon: Option<SpanIcon>,
     pub menu: Option<SpanMenu>,
     /// Not underlined, though a link (`TextSpan::no_underline`).
     pub plain: bool,
@@ -303,6 +306,12 @@ impl TextSpan {
     /// that follows the text colour takes the span's.
     pub fn icon(mut self, icon: SpanIcon) -> Self {
         self.extras.get_or_insert_default().icon = Some(icon);
+        self
+    }
+    /// An icon after the text, in the line (a connector chip's arrow):
+    /// `size` square, centred on the line, `gap` from the text.
+    pub fn trailing_icon(mut self, icon: SpanIcon) -> Self {
+        self.extras.get_or_insert_default().trailing_icon = Some(icon);
         self
     }
     /// Its text fading in, from clear to its colour (`TextFade`): a
@@ -911,7 +920,7 @@ pub(crate) fn mount_links(
             engine,
             data.links
                 .iter()
-                .map(|l| l.hit_start..l.range.end)
+                .map(|l| l.hit_start..l.hit_end)
                 .collect::<Vec<_>>(),
         );
         if geometry_key.as_ref() != Some(&key) {
@@ -930,7 +939,7 @@ pub(crate) fn mount_links(
                     .iter()
                     .map(|link| {
                         layout
-                            .selection(link.hit_start..link.range.end)
+                            .selection(link.hit_start..link.hit_end)
                             .into_iter()
                             .filter_map(|rect| {
                                 rect.intersection(Rect::new(0., 0., bounds.width, bounds.height))
