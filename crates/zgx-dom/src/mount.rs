@@ -115,7 +115,12 @@ fn element_event(
             _ => None,
         }
     });
+    // A drag's end lets it go, its source's listeners there or not.
+    let ends = bits & 0xff == 17;
     let Some(mut handler) = taken else {
+        if ends {
+            __dom::end_drag();
+        }
         return 0;
     };
     let (key, code) = keys
@@ -155,6 +160,9 @@ fn element_event(
         }
     });
     drop(dropped);
+    if ends {
+        __dom::end_drag();
+    }
     flush();
     outcome
 }

@@ -403,9 +403,89 @@ function run(node, event, phase) {
   if (outcome & 4) event.stopImmediatePropagation();
   else if (outcome & 2) event.stopPropagation();
   if (outcome & 8) node.focus({ preventScroll: true });
-  if (outcome & 16 && event.pointerId !== undefined) node.setPointerCapture(event.pointerId);
-  if (outcome & 32 && event.pointerId !== undefined && node.hasPointerCapture(event.pointerId))
+  try {
+    if (outcome & 16 && event.pointerId !== undefined) node.setPointerCapture(event.pointerId);
+    if (outcome & 32 && event.pointerId !== undefined && node.hasPointerCapture(event.pointerId))
+      node.releasePointerCapture(event.pointerId);
+  } catch (_) {
+    // No such pointer (it went, or the event was made by a script).
+  }
+  if (outcome & 64 && !drag) startDrag(node, handler, event);
+}
+
+// A drag a listener started (`start_drag`): its source hears Start, Move
+// and End; what's under the pointer, from the innermost element with
+// listeners out, hears Over until one takes it (`accept_drag`), then
+// Leave as the pointer leaves it, and Drop as the button comes up over it.
+// A copy of the source follows the pointer.
+let drag = null;
+
+function startDrag(node, handler, event) {
+  const r = node.getBoundingClientRect();
+  if (node.hasPointerCapture && event.pointerId !== undefined && node.hasPointerCapture(event.pointerId))
     node.releasePointerCapture(event.pointerId);
+  const ghost = node.cloneNode(true);
+  ghost.style.cssText +=
+    ";position:fixed;margin:0;left:" + r.left + "px;top:" + r.top + "px;width:" + r.width + "px;height:" + r.height +
+    "px;opacity:.8;pointer-events:none;z-index:2147483647;";
+  document.body.appendChild(ghost);
+  drag = { source: node, handler, over: null, ghost, dx: event.clientX - r.left, dy: event.clientY - r.top };
+  elementEvent(handler, 18 | (1 << 8), 1, r.left, r.top, 0, 0, undefined);
+  document.addEventListener("pointermove", dragMove, true);
+  document.addEventListener("pointerup", dragUp, true);
+  document.addEventListener("pointercancel", dragUp, true);
+  dragOver(event.clientX, event.clientY);
+}
+
+function dragOver(x, y) {
+  let taken = null;
+  const hit = document.elementFromPoint(x, y);
+  for (let n = hit; n && n !== document; n = n.parentNode) {
+    if (n.$$e === undefined) continue;
+    const outcome = elementEvent(n.$$e, 13 | ((n === hit ? 1 : 2) << 8), n === hit ? 1 : 0, x, y, 0, 0, undefined);
+    if (outcome & 128) {
+      taken = n;
+      break;
+    }
+    if (outcome & 2) break;
+  }
+  if (drag.over && drag.over !== taken && drag.over.$$e !== undefined)
+    elementEvent(drag.over.$$e, 14 | (1 << 8), 1, x, y, 0, 0, undefined);
+  drag.over = taken;
+}
+
+function dragMove(event) {
+  if (!drag) return;
+  const x = event.clientX, y = event.clientY;
+  drag.ghost.style.left = x - drag.dx + "px";
+  drag.ghost.style.top = y - drag.dy + "px";
+  elementEvent(drag.handler, 15 | (1 << 8), 1, x, y, 0, 0, undefined);
+  dragOver(x, y);
+  event.stopPropagation();
+}
+
+function dragUp(event) {
+  if (!drag) return;
+  const { handler, over, ghost } = drag;
+  const x = event.clientX, y = event.clientY;
+  let accepted = 0;
+  if (over && over.$$e !== undefined && event.type === "pointerup") {
+    accepted = elementEvent(over.$$e, 16 | (1 << 8), 1, x, y, 0, 0, undefined) & 1;
+    elementEvent(over.$$e, 14 | (1 << 8), 1, x, y, accepted, 0, undefined);
+  }
+  drag = null;
+  ghost.remove();
+  document.removeEventListener("pointermove", dragMove, true);
+  document.removeEventListener("pointerup", dragUp, true);
+  document.removeEventListener("pointercancel", dragUp, true);
+  elementEvent(handler, 17 | (1 << 8), 1, x, y, accepted, 0, undefined);
+  // The press ended in a drag, not a click.
+  const eat = (click) => {
+    click.stopPropagation();
+    click.preventDefault();
+  };
+  document.addEventListener("click", eat, { capture: true, once: true });
+  setTimeout(() => document.removeEventListener("click", eat, { capture: true }), 0);
 }
 
 // Keymaps (`View::keymap`): a key down goes to the keymaps from the focused

@@ -243,6 +243,12 @@ impl Listeners {
                 None => return 0,
             },
             12 => InputEvent::PointerCancel,
+            // A drag's phases (`DRAG`): over, leave, drop at a
+            // destination; start, move, end at its source.
+            13..=18 => match drag_event(event) {
+                Some(drag) => InputEvent::Drag(drag),
+                None => return 0,
+            },
             _ => return 0,
         };
         let node = crate::scene::NodeId::outside(event.node);
@@ -271,7 +277,20 @@ impl Listeners {
                 break;
             }
         }
-        cx.dom_outcome()
+        let outcome = cx.dom_outcome();
+        // A drag started here: kept until it ends.
+        if let Some((payload, pressed)) = cx.take_dom_drag() {
+            let pressed = pressed.unwrap_or((event.x, event.y));
+            DRAG.with(|drag| {
+                *drag.borrow_mut() = Some(Drag {
+                    payload,
+                    source: event.node,
+                    pressed,
+                    grab: (0., 0.),
+                })
+            });
+        }
+        outcome
     }
 }
 
@@ -314,7 +333,61 @@ pub fn dom_key(key: &str) -> Option<crate::input::Key> {
     })
 }
 
+/// A drag in the document (`start_drag`): what it carries, its source,
+/// where it was pressed, and that press's distance from the source's edges.
+struct Drag {
+    payload: crate::actions::Action,
+    source: u32,
+    pressed: (f32, f32),
+    grab: (f32, f32),
+}
+
+/// The drag event for a DOM event of kind 13 (over), 14 (leave), 16
+/// (drop) at a destination, or 18 (start: `x`, `y` the source's top left),
+/// 15 (move) and 17 (end: `dx` 1 if accepted) at its source.
+fn drag_event(event: &DomEvent) -> Option<crate::input::DragEvent> {
+    use crate::input::{DragEvent, DragPhase};
+    DRAG.with(|drag| {
+        let mut drag = drag.borrow_mut();
+        let drag = drag.as_mut()?;
+        let phase = match event.kind {
+            13 => DragPhase::Over,
+            14 => DragPhase::Leave,
+            15 => DragPhase::Move,
+            16 => DragPhase::Drop,
+            17 => DragPhase::End,
+            _ => {
+                drag.grab = (drag.pressed.0 - event.x, drag.pressed.1 - event.y);
+                DragPhase::Start
+            }
+        };
+        let (x, y) = match phase {
+            DragPhase::Start => drag.pressed,
+            _ => (event.x, event.y),
+        };
+        Some(DragEvent {
+            phase,
+            payload: drag.payload.clone(),
+            source: crate::scene::NodeId::outside(drag.source),
+            x,
+            y,
+            grab_x: drag.grab.0,
+            grab_y: drag.grab.1,
+            accepted: event.dx == 1.,
+            outside: false,
+            visiting: false,
+        })
+    })
+}
+
+/// The drag in the document ends (after its source heard `End`).
+pub fn end_drag() {
+    DRAG.with(|drag| drag.borrow_mut().take());
+}
+
 thread_local! {
+    /// The drag in progress, if any.
+    static DRAG: RefCell<Option<Drag>> = const { RefCell::new(None) };
     /// Every keymap mounted in the document, by its node.
     static KEYMAPS: Rc<RefCell<crate::actions::Registry>> = Rc::default();
     /// The actions a key just matched, for the elements it routes them to.
