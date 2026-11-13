@@ -6378,3 +6378,46 @@ fn a_popover_anchor_fills_its_row_with_anchor_fill() {
     assert!(fill > 400., "filled: {fill}");
     assert!(hug < fill - 100., "hugging: {hug}");
 }
+
+/// `ui.list { heights = ui.computed(...) }`: the computed's list gives the
+/// rows, as a state's or a function's does.
+#[test]
+fn a_list_takes_its_heights_from_a_computed() {
+    let rows = |heights: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"local n = ui.state("n", 3)
+            local computed = ui.computed(function() local t = {{}} for i = 1, n:get() do t[i] = 20 end return t end)
+            local fn = function() local t = {{}} for i = 1, n:get() do t[i] = 20 end return t end
+            return ui.list {{ id = "l", w = 100, h = 200, heights = {heights},
+                row = function(i) return ui.div {{ id = "r" .. i, h = 20 }} end }}"##
+        ));
+        h.frames(3);
+        (1..=5)
+            .filter(|i| h.find(&format!("r{i}")).is_some())
+            .count()
+    };
+    assert_eq!(rows("fn"), 3, "a function");
+    assert_eq!(rows("computed"), 3, "a computed");
+}
+
+/// `heights` that don't give a list of numbers say so, rather than showing
+/// no rows.
+#[test]
+fn a_list_whose_heights_are_no_list_of_numbers_says_so() {
+    for heights in [
+        "function() return nil end",
+        "function() return { \"a\" } end",
+        "function() return 20 end",
+    ] {
+        let h = Harness::inline(&format!(
+            r##"return ui.list {{ id = "l", w = 100, h = 200, heights = {heights},
+                row = function(i) return ui.div {{ h = 20 }} end }}"##
+        ));
+        h.frames(2);
+        let error = h.error();
+        assert!(
+            error.as_deref().is_some_and(|e| e.contains("`heights`")),
+            "{heights}: {error:?}"
+        );
+    }
+}

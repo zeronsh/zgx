@@ -7872,6 +7872,15 @@ fn list_heights(
                 .map_err(|e| heights_vm.report(e))
                 .unwrap_or_default(),
         };
+        if !matches!(value, Value::List(_)) {
+            heights_vm.report(mlua::Error::runtime(format!(
+                "ui.list: `heights` is a list of row heights (numbers), not {value:?}"
+            )));
+        } else if value.list().iter().any(|v| !matches!(v, Value::Num(_))) {
+            heights_vm.report(mlua::Error::runtime(
+                "ui.list: `heights` holds numbers only (a row's height in points)",
+            ));
+        }
         let values = value.list().iter().map(|v| match v {
             Value::Num(n) if n.is_finite() && *n > 0. => *n as f32,
             // No room, and not built (`heights` takes positive numbers).

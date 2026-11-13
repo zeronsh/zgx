@@ -3493,14 +3493,16 @@ export type ListProps = Merge<Props, {
 	-- as a state; built again when the item changes, or, taking a third
 	-- parameter, its item as a state kept current (it updates in place).
 	data: Readable<{ any }>?,
-	-- Builds row `index` (from 1); with `key`, the row of item `key`, given
-	-- its index as a state that follows where the row is. With `data`,
-	-- the row of an item.
+	-- Builds row `index` (from 1). With `key`, `row` is called with the key
+	-- (the value `key(index)` gave), not the index: `row(key, index)`, the
+	-- index a state that follows where the row is. With `data`, the row of
+	-- an item.
 	row: ((index: number) -> Node)
 		| ((key: any, index: State<number>) -> Node)
 		| ((item: any, index: State<number>, row: State<any>) -> Node),
 	-- Each row's item's key (a number, string or boolean), as a function of
-	-- its index (with `data`, of its item): a row follows its item as the
+	-- its index (with `data`, of its item); `row` then receives the key,
+	-- not the index (see `row`). A row follows its item as the
 	-- list changes, moved rather than written again (rows a removal or an
 	-- insertion shifts keep their nodes, text and layout). With `data`, a
 	-- field's name (`key = "id"`) is read without making any item a table.
@@ -3534,8 +3536,9 @@ export type ListProps = Merge<Props, {
 	-- a state or a function saying it is followed (a composer growing).
 	scroll_padding: (ScrollPadding | State<ScrollPadding> | (() -> ScrollPadding))?,
 	-- Each row's own height instead, in order: a list, a state holding one
-	-- (a host's shared value costs the script nothing), or a function
-	-- returning one (tracked). The row count is its length.
+	-- (a `ui.state` or `ui.computed`; a host's shared value costs the script
+	-- nothing), or a function returning one (tracked). The row count is its
+	-- length. Anything but a list of numbers is an error, not no rows.
 	heights: ({ number } | Readable<{ number }> | (() -> { number }))?,
 	-- Rows (from 1, in order) that stick to the top while their section
 	-- scrolls past, each pushed up by the next: section headers. With
