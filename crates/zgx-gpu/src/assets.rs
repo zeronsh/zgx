@@ -35,6 +35,11 @@ pub fn decode_image_kept(bytes: Arc<[u8]>) -> Result<Arc<ImageData>, GpuError> {
     if width > 8192 || height > 8192 || width as usize * height as usize * 4 > MAX_BYTES {
         return Err(GpuError("decoded image exceeds 64 MiB".into()));
     }
+    // An animated WebP plays as a GIF does: it keeps no file to decode as drawn.
+    #[cfg(feature = "webp")]
+    if format == Some(image::ImageFormat::WebP) && webp_is_animated(&bytes) {
+        return decode_image(&bytes);
+    }
     #[cfg(feature = "png")]
     if format == Some(image::ImageFormat::Png) {
         return ImageData::kept_scaled(width, height, bytes, redecode, png_scaled)
@@ -42,6 +47,47 @@ pub fn decode_image_kept(bytes: Arc<[u8]>) -> Result<Arc<ImageData>, GpuError> {
             .map_err(|e| GpuError(e.into()));
     }
     ImageData::kept(width, height, bytes, redecode)
+        .map(Arc::new)
+        .map_err(|e| GpuError(e.into()))
+}
+/// Whether a WebP file holds an animation.
+#[cfg(feature = "webp")]
+fn webp_is_animated(bytes: &[u8]) -> bool {
+    image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).is_ok_and(|d| d.has_animation())
+}
+/// An animated WebP's frames, composited, and how long each shows; it loops
+/// for ever (the container's loop count isn't read).
+#[cfg(feature = "webp")]
+pub fn decode_webp_animation(bytes: &[u8]) -> Result<Arc<zgx::animation::Animation>, GpuError> {
+    use image::AnimationDecoder;
+    use zgx::animation::{Animation, Frame, LoopCount};
+    if bytes.len() > MAX_BYTES {
+        return Err(GpuError("encoded WebP exceeds 64 MiB".into()));
+    }
+    let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes))
+        .map_err(|e| GpuError(e.to_string()))?;
+    let mut frames = Vec::new();
+    let mut total = 0usize;
+    for frame in decoder.into_frames() {
+        let frame = frame.map_err(|e| GpuError(e.to_string()))?;
+        if frames.len() >= 4096 {
+            return Err(GpuError("WebP exceeds 4096 frames".into()));
+        }
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        let duration =
+            std::time::Duration::from_secs_f64(f64::from(numer) / f64::from(denom.max(1)) / 1000.);
+        let buffer = frame.into_buffer();
+        let (width, height) = buffer.dimensions();
+        total += buffer.as_raw().len();
+        if total > 4 * MAX_BYTES {
+            return Err(GpuError("decoded WebP frames exceed 256 MiB".into()));
+        }
+        let image = ImageData::new(width, height, buffer.into_raw())
+            .map(Arc::new)
+            .map_err(|e| GpuError(e.into()))?;
+        frames.push(Frame { image, duration });
+    }
+    Animation::new(frames, LoopCount::Infinite)
         .map(Arc::new)
         .map_err(|e| GpuError(e.into()))
 }
@@ -223,6 +269,11 @@ pub fn decode_image(bytes: &[u8]) -> Result<Arc<ImageData>, GpuError> {
         }
         Some(image::ImageFormat::WebP) if !cfg!(feature = "webp") => {
             return Err(GpuError("WebP images need zgx-gpu's `webp` feature".into()));
+        }
+        #[cfg(feature = "webp")]
+        Some(image::ImageFormat::WebP) if webp_is_animated(bytes) => {
+            return decode_webp_animation(bytes)
+                .map(|animation| Arc::new(ImageData::animated(animation)));
         }
         #[cfg(feature = "jpeg")]
         Some(image::ImageFormat::Jpeg) => {
