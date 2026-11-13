@@ -324,7 +324,11 @@ pub(crate) fn unknown_tokens(files: &[File]) -> Vec<Diagnostic> {
                     ),
                 ),
                 Some(_) => {
-                    let wanted = field_of(t, i).and_then(|field| field_kinds().get(field));
+                    // A table of data (variants keyed by name) has keys that
+                    // are no style fields, whatever they are called.
+                    let wanted = field_of(t, i)
+                        .filter(|_| !in_data_table(t, i))
+                        .and_then(|field| field_kinds().get(field));
                     if let (Some(wanted), Some(kind)) = (wanted, kind_of(name))
                         && *wanted != kind
                     {
@@ -597,6 +601,58 @@ fn in_value_position(t: &[Token], at: usize) -> bool {
     )
 }
 
+/// The fields typed as a style table (`hover: Styles?`), whose tables hold
+/// style fields; the definitions luau-lsp checks.
+fn style_table_keys() -> &'static HashSet<String> {
+    static KEYS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        include_str!("../types/zgx.d.luau")
+            .lines()
+            .filter_map(|line| {
+                let (field, ty) = line.trim().split_once(": ")?;
+                let ty = ty.trim_end_matches(',');
+                matches!(ty, "Styles?" | "Styles" | "Reactive<Styles>?")
+                    .then(|| field.to_owned())
+                    .filter(|field| field.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            })
+            .collect()
+    })
+}
+
+/// Whether the value at `at` is in a table that is data rather than a style
+/// or node props: one given to a name that is no style table (`local
+/// SELECTED = { primary = …, outline = "$x" }`, keyed by variant). A table
+/// passed to a call (`ui.button { … }`, `Button({ … })`), returned, or
+/// given to a style field (`hover = { … }`) is not.
+fn in_data_table(t: &[Token], at: usize) -> bool {
+    let mut depth = 0usize;
+    let mut j = at;
+    let open = loop {
+        if j == 0 {
+            return false;
+        }
+        j -= 1;
+        let token = &t[j];
+        if token.kind != Kind::Punct {
+            continue;
+        }
+        match token.text.as_str() {
+            ")" | "]" | "}" => depth += 1,
+            "(" | "[" | "{" if depth == 0 => break j,
+            "(" | "[" | "{" => depth -= 1,
+            _ => {}
+        }
+    };
+    if t[open].text != "{" || open < 2 || t[open - 1].text != "=" || t[open - 1].kind != Kind::Punct
+    {
+        return false;
+    }
+    match &t[open - 2] {
+        key if key.kind == Kind::Name => !style_table_keys().contains(key.text.as_str()),
+        key => key.text == "]",
+    }
+}
+
 /// The field the value at `at` is given to (`bg` in `bg = "$…"`), also
 /// through an `if`/`and`/`or` expression on the field's line.
 fn field_of(t: &[Token], at: usize) -> Option<&str> {
@@ -673,6 +729,28 @@ return ui.column { bg = "$app.crad", gap = "$app.gap" }"##,
             ),
         ]);
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_table_of_data_keyed_by_variant_is_no_style() {
+        // `outline` here is a variant's name, not the outline width.
+        let found = lint(&[(
+            "button.luau",
+            r##"local SELECTED = {
+	primary = { bg = "$accent" },
+	outline = "$surface.raised",
+	ghost = "$surface.raised",
+}
+local variants = { outline = "$surface.raised" }
+return ui.button { bg = SELECTED.outline, hover = { outline = "$surface.raised" } }"##,
+        )]);
+        // Only the style table's `outline` (a width) is a finding.
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("colour token, and `outline` takes a number")
+                && found[0].contains(":7:"),
+            "{found:?}"
+        );
     }
 
     #[test]

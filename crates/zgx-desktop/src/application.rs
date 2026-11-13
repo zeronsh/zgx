@@ -9364,6 +9364,18 @@ impl WindowCursor {
     }
 }
 
+/// Whether the event AppKit is handling is a held key's auto-repeat (a menu's key equivalent runs on each).
+#[cfg(target_os = "macos")]
+fn key_repeat_now() -> bool {
+    use objc2_app_kit::{NSApplication, NSEventType};
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    NSApplication::sharedApplication(mtm)
+        .currentEvent()
+        .is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat())
+}
+
 #[cfg(test)]
 mod tests {
     use zgx::scene::Rect;
@@ -10917,16 +10929,4 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<WindowHandle>();
     }
-}
-
-/// Whether the event AppKit is handling is a held key's auto-repeat (a menu's key equivalent runs on each).
-#[cfg(target_os = "macos")]
-fn key_repeat_now() -> bool {
-    use objc2_app_kit::{NSApplication, NSEventType};
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        return false;
-    };
-    NSApplication::sharedApplication(mtm)
-        .currentEvent()
-        .is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat())
 }
