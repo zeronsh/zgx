@@ -68,8 +68,12 @@ Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau** (`zgx-script`): its VM is C++ built with `cc`, and it depends on zgx-gpu; running it in the browser needs Luau built for wasm and that dependency split off.
-- **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, menus, popovers, modals and tooltips (the Popover API and `<dialog>` fit), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
-- **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
+- **Overlays**: a popover's arrow, `at_caret`, `hoist` and `modal_placement` placement; `lazy` panels are built as they mount; menus have no typeahead.
+- **Rich text**: a span's own context menu, and a link's middle click.
+- **Input**: drags started from listeners (`start_drag`), file drops and pinch; text and IME stay the browser's own in `<input>` and `<textarea>`. `reactive_interaction` isn't applied.
+- **Lists**: the `_watched` variants' watchers aren't called.
+- **Canvas**: `canvas::measure_text` gives none while a canvas draws, and a canvas view's pan and zoom (`canvas_view`) isn't applied.
+- **Also not yet mapped**: SVG, a `NodeHandle`'s layout, editor and scene methods, and sizes worked out (`w_calc` and the like).
 
 ## Performance
 
