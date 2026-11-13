@@ -58,6 +58,25 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(lost, "a, b")
 
 
+class DumpTests(unittest.TestCase):
+    def dump_found(self, rel):
+        # The build is stubbed: the dump is placed where that cargo writes it.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            path = target / rel
+            path.parent.mkdir(parents=True)
+            path.write_text("fn found() -> () {}\n")
+            with mock.patch.object(inline_scopes.subprocess, "run"):
+                return inline_scopes.mir(target, "zgx-gpu", target)
+
+    def test_cargo_1_99_deps_dump(self):
+        self.assertIn("found", self.dump_found("release/deps/zgx_gpu-0123abcd.mir"))
+
+    def test_cargo_1_100_build_dir_dump(self):
+        # 1.100 names the folder by package (hyphens) and the dump by crate (underscores).
+        self.assertIn("found", self.dump_found("release/build/zgx-gpu/0123abcd/out/zgx_gpu-0123abcd.mir"))
+
+
 class VerdictTests(unittest.TestCase):
     def test_1740_lost_scopes_fail(self):
         self.assertIn("inlines 411 scopes, 520 recorded", inline_scopes.verdict(520, 5495, 411, 5583))
