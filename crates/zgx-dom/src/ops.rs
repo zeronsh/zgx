@@ -30,6 +30,7 @@ pub(crate) const CLASS_NAME: u32 = 24;
 pub(crate) const CLASS_ADD: u32 = 25;
 pub(crate) const VISIBLE: u32 = 26;
 pub(crate) const TRUNCATE: u32 = 27;
+pub(crate) const WALK: u32 = 28;
 
 /// Words a frame holds before it applies what it has (`Ops::op`).
 pub(crate) const EARLY: usize = 1 << 12;
@@ -78,6 +79,10 @@ pub(crate) struct Ops {
     /// Pixels the JS side copies out this frame.
     pub(crate) keep: Vec<std::sync::Arc<zgx::image::ImageData>>,
     scheduled: bool,
+    /// While a block is captured, the nodes something writes after it is
+    /// made (an effect, a handler, a region, an observer): what a template's
+    /// clone must reach (`template::stamp`).
+    pub(crate) used: Vec<u32>,
     /// While a block's structure is captured (`capture`), the frame's own
     /// words, text and text length, set aside.
     main: Option<(Vec<u32>, String, u32)>,
@@ -160,6 +165,27 @@ impl Ops {
     pub(crate) fn op_str(&mut self, code: u32, id: u32, s: &str) {
         self.op(&[code, id]);
         self.str(s);
+    }
+    /// `node` is written after its block is made (see `used`).
+    #[inline]
+    pub(crate) fn mark(&mut self, node: u32) {
+        if self.main.is_some() {
+            self.used.push(node);
+        }
+    }
+    /// Ids that were never written to the JS side's table, free again.
+    pub(crate) fn release(&mut self, ids: &[u32]) {
+        for &id in ids {
+            if id + 1 == self.next {
+                self.next = id;
+                while self.free.last() == Some(&(self.next - 1)) {
+                    self.free.pop();
+                    self.next -= 1;
+                }
+            } else {
+                self.free.push(id);
+            }
+        }
     }
     pub(crate) fn capturing(&self) -> bool {
         self.main.is_some()

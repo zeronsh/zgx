@@ -260,15 +260,20 @@ impl Block {
         self.ids.push(id);
         id
     }
-    fn effect(&mut self, runtime: &Runtime, f: impl FnMut() + 'static) {
+    /// An effect writing `node`: marked as one a template's clone must reach
+    /// (`template::stamp`).
+    fn effect(&mut self, node: u32, runtime: &Runtime, f: impl FnMut() + 'static) {
+        ops::with(|ops| ops.mark(node));
         self.effects.push(runtime.effect(f));
     }
     fn on(&mut self, node: u32, kind: u32, f: impl FnMut(Event) + 'static) {
+        ops::with(|ops| ops.mark(node));
         let id = handler(f);
         self.handlers.push(id);
         ops::with(|ops| ops.op(&[ops::HANDLER, node, kind, id]));
     }
     fn on_click(&mut self, node: u32, runtime: Runtime, click: Box<dyn FnMut(Modifiers)>) {
+        ops::with(|ops| ops.mark(node));
         let id = register(Handler::Click(runtime, click));
         self.handlers.push(id);
         ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::ON_CLICK, id]));
@@ -320,7 +325,7 @@ pub fn mount(runtime: &Runtime, parent: &web_sys::Element, view: View) -> Mounte
             });
             block.root = root;
             let css_scope = scope.clone();
-            block.effect(runtime, move || {
+            block.effect(root, runtime, move || {
                 let css = css_scope.root_css();
                 ops::with(|ops| ops.op_str(ops::STYLE, root, &css));
             });
@@ -394,7 +399,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
                     ops.op_str(ops::TEXT, id, "");
                     id
                 });
-                block.effect(&runtime, move || {
+                block.effect(id, &runtime, move || {
                     let value = text();
                     ops::with(|ops| ops.op_str(ops::SET_TEXT, id, &value));
                 });
@@ -444,7 +449,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         // Inline, over the class; written only when it changes (an empty
         // patch, the commonest, is never written).
         let mut last = String::new();
-        block.effect(&runtime, move || {
+        block.effect(id, &runtime, move || {
             let css = css();
             if css != last {
                 ops::with(|ops| ops.op_str(ops::STYLE, id, &css));
@@ -453,7 +458,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         });
     }
     for (name, mut value) in std::mem::take(&mut el.bound_attrs) {
-        block.effect(&runtime, move || {
+        block.effect(id, &runtime, move || {
             let value = value();
             ops::with(|ops| match value {
                 Some(value) => {
@@ -466,7 +471,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
     }
     if let Some(mut disabled) = el.disabled.take() {
         let native = matches!(tag, Tag::Button | Tag::Input | Tag::TextArea);
-        block.effect(&runtime, move || {
+        block.effect(id, &runtime, move || {
             let on = disabled();
             ops::with(|ops| {
                 if native {
@@ -521,6 +526,8 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
                 ..HookState::default()
             }),
         });
+        // Its observers write it, now or later.
+        ops::with(|ops| ops.mark(id));
         block.regions.push(Rc::new(HooksOwner(hooks.clone())));
         for f in on_mount {
             f(__dom::node_handle(id, hooks.clone()));
@@ -648,7 +655,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                 ops.op(&[ops::APPEND, id, node]);
                 node
             });
-            block.effect(runtime, move || {
+            block.effect(node, runtime, move || {
                 let value = text();
                 ops::with(|ops| ops.op_str(ops::SET_TEXT, node, &value));
             });
@@ -666,7 +673,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                     write.set(value as f32);
                 }
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let value = offset.get();
                 ops::with(|ops| ops.op(&[ops::NUMBER, id, prop, value.to_bits()]));
             });
@@ -687,7 +694,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                 }
             });
             if let Some(mut placeholder) = placeholder {
-                block.effect(runtime, move || {
+                block.effect(id, runtime, move || {
                     let text = placeholder();
                     ops::with(|ops| {
                         ops.op_str(ops::ATTR, id, "placeholder");
@@ -701,7 +708,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                     write.set(text);
                 }
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let text = value.get();
                 ops::with(|ops| ops.op_str(ops::VALUE, id, &text));
             });
@@ -733,12 +740,12 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                     write.set(on);
                 }
             });
-            block.effect(runtime, move || {
+            block.effect(input, runtime, move || {
                 let on = value.get();
                 ops::with(|ops| ops.op(&[ops::CHECKED, input, on as u32]));
             });
             if let Some(mixed) = mixed {
-                block.effect(runtime, move || {
+                block.effect(input, runtime, move || {
                     let on = mixed.get();
                     ops::with(|ops| {
                         ops.op_str(ops::PROP, input, "indeterminate");
@@ -775,7 +782,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                     write.set(v as f32);
                 }
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let v = value.get();
                 ops::with(|ops| ops.op(&[ops::NUMBER, id, ops::NUM_VALUE, v.to_bits()]));
             });
@@ -787,7 +794,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                 ops.op_str(ops::ATTR, id, "aria-label");
                 ops.str(&label);
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let v = value.get();
                 let v = if v.is_nan() { v } else { v.clamp(0., 1.) };
                 ops::with(|ops| ops.op(&[ops::NUMBER, id, ops::NUM_PROGRESS, v.to_bits()]));
@@ -800,7 +807,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                 ops.op_str(ops::ATTR, id, "aria-label");
                 ops.str(&label);
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let image = source();
                 let (w, h) = (image.width(), image.height());
                 let pixels = image.pixels();
@@ -847,10 +854,21 @@ fn child_block(view: View, scope: &Scope, resources: __dom::Resources) -> Block 
     });
     block.root = mount_view(view, scope, &mut block);
     if capturing {
-        ops::with(|ops| {
+        let unused = ops::with(|ops| {
             let captured = ops.captured();
-            template::stamp(ops, captured, &block.ids);
+            let used = std::mem::take(&mut ops.used);
+            let mut unused = Vec::new();
+            template::stamp(ops, captured, &block.ids, &used, &mut unused);
+            ops.used = used;
+            ops.used.clear();
+            // Nodes nothing writes: reached through their parents only,
+            // they take no id.
+            ops.release(&unused);
+            unused
         });
+        if !unused.is_empty() {
+            block.ids.retain(|id| !unused.contains(id));
+        }
     }
     block
 }
@@ -863,7 +881,7 @@ fn mount_switch(region: SwitchRegion, holder: u32, scope: &Scope, block: &mut Bl
     let shown: Rc<RefCell<Option<Block>>> = Rc::default();
     let runtime = scope.runtime().clone();
     let (state, scope) = (shown.clone(), scope.clone());
-    block.effect(&runtime.clone(), move || {
+    block.effect(holder, &runtime.clone(), move || {
         if !changed() {
             return;
         }
@@ -901,7 +919,7 @@ fn mount_keyed(region: KeyedRegion, holder: u32, scope: &Scope, block: &mut Bloc
     let build = Rc::new(RefCell::new(build));
     let runtime = scope.runtime().clone();
     let (keyed, scope) = (state.clone(), scope.clone());
-    block.effect(&runtime.clone(), move || {
+    block.effect(holder, &runtime.clone(), move || {
         let mut guard = keyed.borrow_mut();
         let state = &mut *guard;
         keys(&mut state.next);
@@ -1081,7 +1099,7 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
         }
     });
     let scroll = offset.clone();
-    block.effect(&runtime, move || {
+    block.effect(holder, &runtime, move || {
         let value = scroll.get();
         ops::with(|ops| ops.op(&[ops::NUMBER, holder, ops::NUM_SCROLL_TOP, value.to_bits()]));
     });
@@ -1090,7 +1108,7 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
     let (state, scope) = (rows.clone(), scope.clone());
     let mut wanted: Vec<(usize, u32)> = Vec::new();
     let mut extent = f32::NAN;
-    block.effect(&runtime.clone(), move || {
+    block.effect(space, &runtime.clone(), move || {
         let n = count();
         let total = n as f32 * row_height;
         if total != extent {

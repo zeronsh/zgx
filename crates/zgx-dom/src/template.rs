@@ -87,9 +87,9 @@ impl<'a> Strings<'a> {
 struct Template {
     /// The detached template's root.
     master: u32,
-    /// How to reach each node from the clone's root: (op, node, from), in
-    /// local indices (creation order).
-    walk: Vec<(u32, u32, u32)>,
+    /// How to reach each node from the clone's root: its child indices, by
+    /// local index (creation order; the root's is empty).
+    paths: Vec<Vec<u32>>,
     /// The template's texts, styles and attribute values, by slot.
     values: Vec<String>,
 }
@@ -102,7 +102,12 @@ struct Entry {
 
 #[derive(Default)]
 struct Templates {
+    /// Each shape's entry, by its key: the whole structure (tags, class
+    /// numbers, attribute names, where texts and values go, handler kinds),
+    /// compared exactly, so two shapes never share a template.
     shapes: HashMap<Vec<u32>, Entry>,
+    /// Whether blocks are stamped from templates at all (`set_enabled`).
+    disabled: bool,
     /// Attribute names, numbered for shapes.
     names: HashMap<String, u32>,
     /// Spare buffers for capturing and reading.
@@ -118,6 +123,12 @@ thread_local! {
 const SHAPES: usize = 512;
 /// Blocks of more nodes are replayed, not templated: a page, not a row.
 const NODES: usize = 256;
+
+/// Whether blocks are stamped from templates (on unless turned off): off,
+/// every block is written as it was captured. For tests comparing the two.
+pub(crate) fn set_enabled(on: bool) {
+    TEMPLATES.with(|t| t.borrow_mut().disabled = !on);
+}
 
 /// Buffers to capture a block into.
 pub(crate) fn spare() -> Captured {
@@ -141,12 +152,21 @@ enum Slot {
 /// Write a captured block into the frame: stamped from its shape's template
 /// when there is one, as it was captured otherwise. `ids` are its nodes in
 /// creation order (the root first).
-pub(crate) fn stamp(ops: &mut Ops, captured: Captured, ids: &[u32]) {
+pub(crate) fn stamp(
+    ops: &mut Ops,
+    captured: Captured,
+    ids: &[u32],
+    used: &[u32],
+    unused: &mut Vec<u32>,
+) {
     TEMPLATES.with(|templates| {
         let mut templates = templates.borrow_mut();
         let templates = &mut *templates;
         let mut parsed = std::mem::take(&mut templates.parsed);
-        match shape(&captured, ids, &mut templates.names, &mut parsed) {
+        let found = (!templates.disabled)
+            .then(|| shape(&captured, ids, &mut templates.names, &mut parsed))
+            .flatten();
+        match found {
             Some(()) => {
                 let entry = if templates.shapes.contains_key(&parsed.key) {
                     templates.shapes.get_mut(&parsed.key)
@@ -162,7 +182,9 @@ pub(crate) fn stamp(ops: &mut Ops, captured: Captured, ids: &[u32]) {
                             entry.template = make(ops, &captured, &parsed, ids.len());
                         }
                         match &entry.template {
-                            Some(template) => clone(ops, template, &parsed, &captured, ids),
+                            Some(template) => {
+                                clone(ops, template, &parsed, &captured, ids, used, unused)
+                            }
                             None => replay(ops, &captured),
                         }
                     }
@@ -288,23 +310,24 @@ fn make(ops: &mut Ops, captured: &Captured, parsed: &Parsed, n: usize) -> Option
         parented[c as usize] = true;
         children[p as usize].push(c);
     }
-    let mut walk = Vec::with_capacity(n - 1);
+    let mut paths: Vec<Option<Vec<u32>>> = vec![None; n];
+    paths[0] = Some(Vec::new());
     let mut stack = vec![0_u32];
+    let mut reached = 1;
     while let Some(node) = stack.pop() {
-        let kids = &children[node as usize];
-        for (j, &child) in kids.iter().enumerate() {
-            if j == 0 {
-                walk.push((ops::FIRST, child, node));
-            } else {
-                walk.push((ops::NEXT, child, kids[j - 1]));
-            }
+        let path = paths[node as usize].clone().unwrap_or_default();
+        for (j, &child) in children[node as usize].iter().enumerate() {
+            let mut own = path.clone();
+            own.push(j as u32);
+            paths[child as usize] = Some(own);
+            reached += 1;
+            stack.push(child);
         }
-        // Children in order: the first's subtree walked first.
-        stack.extend(kids.iter().rev());
     }
-    if walk.len() != n - 1 {
+    if reached != n {
         return None;
     }
+    let paths: Vec<Vec<u32>> = paths.into_iter().map(Option::unwrap_or_default).collect();
     // The template: the captured block replayed onto nodes of its own,
     // never freed, without its handlers.
     let fresh: Vec<u32> = (0..n).map(|_| ops.id()).collect();
@@ -332,7 +355,7 @@ fn make(ops: &mut Ops, captured: &Captured, parsed: &Parsed, n: usize) -> Option
     replay_mapped(ops, captured, Some(&map))?;
     Some(Template {
         master: fresh[0],
-        walk,
+        paths,
         values: parsed
             .values
             .iter()
@@ -341,13 +364,51 @@ fn make(ops: &mut Ops, captured: &Captured, parsed: &Parsed, n: usize) -> Option
     })
 }
 
-/// Stamp a block of `template`'s shape: clone, walk, then what differs.
-fn clone(ops: &mut Ops, template: &Template, parsed: &Parsed, captured: &Captured, ids: &[u32]) {
+/// Stamp a block of `template`'s shape: clone, reach the nodes something
+/// writes (`used`, and those whose value differs from the template's), then
+/// write what differs. The ids of nodes nothing reaches go in `unused`:
+/// never in the JS side's table, they are free again.
+fn clone(
+    ops: &mut Ops,
+    template: &Template,
+    parsed: &Parsed,
+    captured: &Captured,
+    ids: &[u32],
+    used: &[u32],
+    unused: &mut Vec<u32>,
+) {
     ops.op(&[ops::CLONE, ids[0], template.master]);
-    for &(code, node, from) in &template.walk {
-        ops.op(&[code, ids[node as usize], ids[from as usize]]);
-    }
     let text = captured.text.as_str();
+    let mut reached = vec![false; ids.len()];
+    reached[0] = true;
+    let mut reach = |ops: &mut Ops, id: u32| {
+        let Some(local) = ids.iter().position(|&x| x == id) else {
+            return;
+        };
+        if std::mem::replace(&mut reached[local], true) {
+            return;
+        }
+        let path = &template.paths[local];
+        ops.op(&[ops::WALK, id, ids[0], path.len() as u32]);
+        ops.words.extend_from_slice(path);
+    };
+    for &id in used {
+        reach(ops, id);
+    }
+    for (&(node, _, start, end), master) in parsed.values.iter().zip(&template.values) {
+        if &text[start as usize..end as usize] != master {
+            reach(ops, node);
+        }
+    }
+    for handler in &parsed.handlers {
+        reach(ops, handler[0]);
+    }
+    unused.extend(
+        ids.iter()
+            .zip(&reached)
+            .filter(|(_, reached)| !**reached)
+            .map(|(id, _)| *id),
+    );
     for (&(node, slot, start, end), master) in parsed.values.iter().zip(&template.values) {
         let value = &text[start as usize..end as usize];
         if value == master {

@@ -448,6 +448,246 @@ fn a_long_frame_keeps_each_rows_strings() {
         list.children().item(700).unwrap().text_content().unwrap(),
         "row 700"
     );
+    // Tall: gone, so the page's later tests start in view.
+    _mounted.unmount();
+    host.remove();
+}
+
+#[wasm_bindgen_test]
+fn alike_rows_keep_their_own_values_and_classes() {
+    // Rows of one structure, some with another class set or another
+    // attribute value: each keeps its own, stamped or not.
+    let runtime = Runtime::new();
+    let host = host();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        keyed(
+            || (0..20).collect::<Vec<u32>>(),
+            |k: u32, _| {
+                let label = text(format!("row {k}")).accessible_label(format!("label {k}"));
+                let label = if k.is_multiple_of(3) {
+                    label.font_bold()
+                } else {
+                    label
+                };
+                row().p(2.).child(label)
+            },
+        ),
+    );
+    let list = first(&host);
+    let window = web_sys::window().unwrap();
+    let mut classes = std::collections::HashSet::new();
+    for k in 0..20 {
+        let cell = list
+            .children()
+            .item(k)
+            .unwrap()
+            .first_element_child()
+            .unwrap();
+        assert_eq!(cell.text_content().unwrap(), format!("row {k}"));
+        assert_eq!(
+            cell.get_attribute("aria-label").unwrap(),
+            format!("label {k}")
+        );
+        let weight = window
+            .get_computed_style(&cell)
+            .unwrap()
+            .unwrap()
+            .get_property_value("font-weight")
+            .unwrap();
+        assert_eq!(
+            weight == "700",
+            k.is_multiple_of(3),
+            "row {k} weighs {weight}"
+        );
+        classes.insert(cell.class_name());
+    }
+    assert_eq!(classes.len(), 2, "bold and plain cells, a class each");
+}
+
+/// A row of a shape picked by `seed` (nested rows and columns, texts,
+/// buttons, a few styles and labels) holding row `nth`'s own texts and labels:
+/// rows of one seed share a template and differ in their values.
+fn random_row(seed: u32, nth: u32) -> zgx::compose::View {
+    let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    let mut next = move |n: u32| {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x % n
+    };
+    fn styled(view: zgx::compose::View, pick: u32) -> zgx::compose::View {
+        match pick {
+            0 => view,
+            1 => view.p(4.),
+            2 => view.bg(Color(200, 40, 40, 255)),
+            3 => view.w(40.),
+            _ => view.font_bold().text_color(Color(10, 120, 200, 255)),
+        }
+    }
+    let leaf = |next: &mut dyn FnMut(u32) -> u32| -> zgx::compose::View {
+        let view = match next(4) {
+            0 => text(format!("t{}-{nth}", next(5))),
+            1 => button()
+                .child(text(format!("b{}", next(3))))
+                .on_click(|| {}),
+            2 => text("label").accessible_label(format!("l{}-{}", next(4), nth % 3)),
+            _ => column()
+                .child(text("inner"))
+                .child(text(format!("i{}-{}", next(3), nth % 2))),
+        };
+        let pick = next(5);
+        styled(view, pick)
+    };
+    let mut parent = if next(2) == 0 { row() } else { column() };
+    for _ in 0..1 + next(3) {
+        parent = parent.child(leaf(&mut next));
+    }
+    let pick = next(5);
+    styled(parent, pick)
+}
+
+#[wasm_bindgen_test]
+fn stamped_rows_match_rows_written_in_full() {
+    // Many rows of a few random shapes, mounted stamped from templates and
+    // written in full: the same DOM, node for node.
+    let keys = || (0..120).collect::<Vec<u32>>();
+    let shapes = |k: u32| random_row(k % 17, k);
+    let runtime = Runtime::new();
+    let (stamped, full) = (host(), host());
+    let a = zgx_dom::mount(&runtime, &stamped, keyed(keys, move |k: u32, _| shapes(k)));
+    zgx_dom::__set_templates(false);
+    let b = zgx_dom::mount(&runtime, &full, keyed(keys, move |k: u32, _| shapes(k)));
+    zgx_dom::__set_templates(true);
+    assert_eq!(stamped.inner_html(), full.inner_html());
+    assert!(stamped.inner_html().len() > 2_000);
+    // Tall: gone, so the page's later tests start in view.
+    a.unmount();
+    b.unmount();
+    stamped.remove();
+    full.remove();
+}
+
+#[wasm_bindgen_test]
+fn a_rows_child_swapped_later_takes_its_handler_and_style() {
+    // Nodes nothing wrote when a row was stamped get no id; what a row
+    // later shows (a switch's new view) is a block of its own, with its
+    // own: its handler runs and its style shows.
+    let runtime = Runtime::new();
+    let armed = runtime.signal(false);
+    let clicks = runtime.signal(0);
+    let host = host();
+    let (read, count) = (armed.clone(), clicks.clone());
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        keyed(
+            || (0..6).collect::<Vec<u32>>(),
+            move |k: u32, _| {
+                let (read, count) = (read.clone(), count.clone());
+                row().p(1.).child(text(format!("r{k}"))).child(switch(
+                    move || read.get(),
+                    move |armed, _| {
+                        let count = count.clone();
+                        if armed {
+                            button()
+                                .bg(Color(0, 128, 0, 255))
+                                .child(text("go"))
+                                .on_click(move || {
+                                    count.set(count.get() + 1);
+                                })
+                        } else {
+                            text("idle")
+                        }
+                    },
+                ))
+            },
+        ),
+    );
+    armed.set(true);
+    zgx_dom::flush();
+    let list = first(&host);
+    let button: web_sys::HtmlElement = list
+        .children()
+        .item(4)
+        .unwrap()
+        .query_selector("button")
+        .unwrap()
+        .expect("the row's new button")
+        .dyn_into()
+        .unwrap();
+    button.click();
+    assert_eq!(clicks.get(), 1);
+    let bg = web_sys::window()
+        .unwrap()
+        .get_computed_style(&button)
+        .unwrap()
+        .unwrap()
+        .get_property_value("background-color")
+        .unwrap();
+    assert_eq!(bg, "rgb(0, 128, 0)");
+}
+
+#[wasm_bindgen_test]
+fn stamped_rows_hold_ids_only_for_what_is_written() {
+    // A row of seven nodes: its root (a reactive style), a static cell and
+    // its text (the row's own value), a label with a handler and its bound
+    // text, and a button with a handler holding a static text. Stamped from
+    // a template, the static cell and the button's text take no id: five.
+    let runtime = Runtime::new();
+    let selected = runtime.signal(false);
+    let host = host();
+    let rows = 40_u32;
+    let before = zgx_dom::live_nodes();
+    let (sel, label_sel) = (selected.clone(), selected.clone());
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        keyed(
+            move || (0..rows).collect::<Vec<u32>>(),
+            move |k: u32, _| {
+                let (sel, label_sel) = (sel.clone(), label_sel.clone());
+                row()
+                    .reactive_style(move || {
+                        if sel.get() {
+                            Styles::new().bg(Color(120, 40, 40, 255))
+                        } else {
+                            Styles::new()
+                        }
+                    })
+                    .child(text(k.to_string()).w(40.))
+                    .child(
+                        text_signal(move || format!("{k} {}", label_sel.get()))
+                            .grow()
+                            .on_click(|| {}),
+                    )
+                    .child(text("x").w(20.).on_click(|| {}))
+            },
+        ),
+    );
+    // The host, the typography root and the list; the first row written in
+    // full (no template yet: seven); the template itself (seven, kept for
+    // the page); the second row, the template's own values (four: its cell
+    // text needs no write); then five a row.
+    let ids = zgx_dom::live_nodes() - before;
+    assert_eq!(ids, 3 + 7 + 7 + 4 + (rows - 2) * 5, "{ids} ids");
+    // And what they hold still updates: every row's label, and the style.
+    selected.set(true);
+    zgx_dom::flush();
+    let list = first(&host);
+    let last = list.last_element_child().unwrap();
+    assert_eq!(
+        last.children().item(1).unwrap().text_content().unwrap(),
+        format!("{} true", rows - 1)
+    );
+    assert!(
+        last.get_attribute("style")
+            .unwrap()
+            .contains("background-color")
+    );
+    mounted.unmount();
+    host.remove();
 }
 
 #[wasm_bindgen_test]
