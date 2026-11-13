@@ -6,7 +6,10 @@
 //! 133 points), the list fading out over its last 61 points. With
 //! `OBSERVE=1` (the default) rows watch their size, bounds and visibility
 //! within a margin, as an app's `on_resize`, `ref.width` and `on_visible`
-//! do. Each frame paints the strip the scroll brings in and the band.
+//! do. Where scroll copies run, each frame paints the strip the scroll
+//! brings in and the band (the composer lies in the fade's band, which
+//! repaints each frame); a renderer with no surface of its own on macOS
+//! copies nothing and paints the whole view.
 //! The gate runs it on wgpu's no-op backend (`ZGX_GPU_NOOP`), zgx-3d's wgpu
 //! with that backend, as `fx_bench` is.
 //! Run: ZGX_GPU_NOOP=1 cargo run --release -p zgx-3d --example scroll_glass_bench
