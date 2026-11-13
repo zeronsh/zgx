@@ -310,6 +310,18 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         nodes.length = ops[i++];
         break;
       }
+      case 28: { // WALK id from n index…: a descendant, by child indices
+        const id = ops[i++];
+        let node = nodes[ops[i++]];
+        const n = ops[i++];
+        // By siblings: `childNodes` would make a live list each step.
+        for (let k = 0; k < n; k++) {
+          node = node.firstChild;
+          for (let s = ops[i++]; s > 0; s--) node = node.nextSibling;
+        }
+        nodes[id] = node;
+        break;
+      }
       case 26: { // VISIBLE id handler margin(f32 bits)
         const node = nodes[ops[i++]];
         const handler = ops[i++];

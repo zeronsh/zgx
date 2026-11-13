@@ -34,3 +34,10 @@ pub use mount::{Mounted, flush, live_nodes, mount, mount_in_body};
 /// mounts as any view does.
 #[cfg(feature = "luau")]
 pub use zgx_script as script;
+
+/// Whether repeated rows are stamped from templates (on by default). For
+/// tests that compare the stamped DOM with the DOM written in full; not API.
+#[doc(hidden)]
+pub fn __set_templates(on: bool) {
+    template::set_enabled(on);
+}
