@@ -973,6 +973,45 @@ impl Within {
         }
     }
 }
+/// For a renderer that keeps its pixels (zgx-desktop's software `Raster`):
+/// what to repaint, beside the scene's damage, after moving `scroll`'s
+/// pixels already drawn by its `dx`, `dy` at `scale` (what the copy carried
+/// of what paints above or shows beneath the content, and the rounded clips
+/// around the view, where they are and where the copy took their pixels), or
+/// none when a copy can't reproduce the frame and the view repaints whole.
+/// The same rules as this renderer's own scroll copies (`copy_blocker`); a
+/// fade around the content is left to a repaint.
+#[doc(hidden)]
+pub fn scroll_copy_repaints(
+    scene: &Scene,
+    scroll: &zgx::scene::ScrollMove,
+    damage: &[Rect],
+    scale: f32,
+) -> Option<Vec<Rect>> {
+    let (mut repaint, mut fade) = (Vec::new(), None);
+    if copy_blocker(scene, scroll, damage, scale, &mut repaint, &mut fade).is_some()
+        || fade.is_some()
+    {
+        return None;
+    }
+    for corner in scene.scroll_corners(scroll.node)? {
+        let moved = Rect::new(
+            corner.x + scroll.dx,
+            corner.y + scroll.dy,
+            corner.width,
+            corner.height,
+        );
+        repaint.extend(
+            [
+                corner.intersection(scroll.clip),
+                moved.intersection(scroll.clip),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+    }
+    Some(repaint)
+}
 /// Whether moving `scroll`'s pixels reproduces the frame (`None`), and what
 /// keeps it from it otherwise: its content is one contiguous run of paint
 /// items none of which reads what lies under it; beneath it the clip shows a

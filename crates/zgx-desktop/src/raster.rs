@@ -46,6 +46,11 @@ pub struct Raster {
     origin: (f32, f32),
     /// The selection on the text being drawn, which recolours its glyphs.
     selected: Option<zgx::scene::TextHighlight>,
+    /// `flush_serial` of the scene drawn last: a scroll's pixels move only
+    /// over the frame of the flush before its own.
+    rendered: Option<u64>,
+    /// Scroll moves applied by moving pixels already drawn (for tests).
+    scroll_copies: u64,
 }
 impl Raster {
     /// Register an additional validated font and invalidate retained glyph shapes.
@@ -79,6 +84,8 @@ impl Raster {
             background: 0x10141c,
             origin: (0., 0.),
             selected: None,
+            rendered: None,
+            scroll_copies: 0,
         }
     }
     /// Resize the store to `width` by `height`.
@@ -86,20 +93,79 @@ impl Raster {
         self.width = width;
         self.height = height;
         self.pixels.resize(width * height, 0x10141c);
+        self.rendered = None;
+    }
+    /// Scroll moves applied by moving the pixels already drawn (for tests).
+    #[doc(hidden)]
+    pub fn scroll_copies(&self) -> u64 {
+        self.scroll_copies
     }
     /// Repaint `damage` (and whatever scrolled) from `scene`.
     pub fn render(&mut self, scene: &Scene, damage: &[Rect]) {
         self.canvases.retain(scene);
         self.svgs.retain(scene);
-        // No pixel copies here: scrolled regions repaint in full.
-        let moved: Vec<Rect> = scene
+        let serial = scene.flush_serial();
+        // A scroll moves the pixels already drawn when they are the frame of
+        // the flush before and the move lies on whole pixels, as the GPU
+        // renderer's scroll copies do (`scroll_copy_repaints` says what else
+        // repaints); otherwise what it shows repaints.
+        let copyable = self
+            .rendered
+            .is_some_and(|drawn| drawn.wrapping_add(1) == serial);
+        let mut repaint = damage.to_vec();
+        for scroll in scene
             .scroll_moves()
             .iter()
-            .filter(|scroll| scroll.serial == scene.flush_serial())
-            .map(|scroll| scroll.clip)
-            .collect();
-        let damage = [damage, &moved].concat();
-        self.render_flat(scene, scene.layer_items(None), &damage);
+            .filter(|scroll| scroll.serial == serial)
+        {
+            let whole = |v: f32| (v - v.round()).abs() < 1e-3;
+            let copied = (copyable
+                && [scroll.dx, scroll.dy, scroll.clip.x, scroll.clip.y]
+                    .into_iter()
+                    .chain([scroll.clip.width, scroll.clip.height])
+                    .all(whole))
+            .then(|| zgx_gpu::scroll_copy_repaints(scene, scroll, damage, 1.))
+            .flatten();
+            match copied {
+                Some(rest) => {
+                    self.move_pixels(
+                        scroll.clip,
+                        scroll.dx.round() as i32,
+                        scroll.dy.round() as i32,
+                    );
+                    self.scroll_copies += 1;
+                    repaint.extend(rest);
+                }
+                None => repaint.push(scroll.clip),
+            }
+        }
+        self.render_flat(scene, scene.layer_items(None), &repaint);
+        self.rendered = Some(serial);
+    }
+    /// Move the pixels within `clip` by `(dx, dy)`, as content that scrolled
+    /// by that much: what comes in at the edge the move leaves is left for a
+    /// repaint (the scene's damage has it).
+    fn move_pixels(&mut self, clip: Rect, dx: i32, dy: i32) {
+        let (x0, y0, x1, y1) = self.region(clip);
+        let (x0, y0, x1, y1) = (x0 as i32, y0 as i32, x1 as i32, y1 as i32);
+        let (left, right) = (x0 + dx.max(0), x1 + dx.min(0));
+        let (top, bottom) = (y0 + dy.max(0), y1 + dy.min(0));
+        if left >= right || top >= bottom {
+            return;
+        }
+        let (width, run) = (self.width as i32, (right - left) as usize);
+        let mut row = |y: i32| {
+            let from = ((y - dy) * width + left - dx) as usize;
+            self.pixels
+                .copy_within(from..from + run, (y * width + left) as usize);
+        };
+        // Rows moving down are copied from the bottom up, so each is read
+        // before a copy writes over it.
+        if dy > 0 {
+            (top..bottom).rev().for_each(&mut row);
+        } else {
+            (top..bottom).for_each(&mut row);
+        }
     }
     fn render_flat(
         &mut self,
@@ -400,6 +466,8 @@ impl Raster {
             background,
             origin: (x, y),
             selected: None,
+            rendered: None,
+            scroll_copies: 0,
         };
         let mut black = make(0);
         let mut white = make(0xffffff);
