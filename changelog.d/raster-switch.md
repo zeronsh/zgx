@@ -1,0 +1,4 @@
+---
+section: changed
+---
+- **On a machine whose only GPU is a software one, windows now draw on the software raster** (zgx-desktop, zgx). `ZGX_RENDERER=auto` is now the default: an opaque 1x window with no hardware adapter (no render node on Linux, only WARP on Windows) draws on zgx's raster rather than through lavapipe, llvmpipe or WARP. That takes a third of the memory (an idle app: 42 MB where lavapipe held 140) and a fraction of the CPU (0.2–0.5 ms a frame where they took 1.3–9.6). A raster window that comes to show a GPU view or a layer shader moves to the GPU before its next frame, and then matches a GPU window pixel for pixel. Its menus and tooltips stay inside the window, flipped or shifted to fit. **`ZGX_RENDERER=gpu` restores the previous behaviour**, the GPU renderer everywhere. Machines with a hardware GPU are unaffected. New: `zgx::gpu_view::any_mounted`, `Scene::has_layer_shaders`.
