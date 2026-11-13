@@ -798,7 +798,9 @@ enum Format {
 fn encode(image: &zgx::image::ImageData, format: Format) -> Result<Vec<u8>, zgx_gpu::GpuError> {
     #[allow(unused_variables)]
     let without = |what: &str| -> Result<Vec<u8>, zgx_gpu::GpuError> {
-        Err(zgx_gpu::GpuError(format!("zgx-script is built without `{what}`")))
+        Err(zgx_gpu::GpuError(format!(
+            "zgx-script is built without `{what}`"
+        )))
     };
     match format {
         Format::Png => png(image),
