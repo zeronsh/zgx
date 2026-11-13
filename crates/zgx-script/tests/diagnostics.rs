@@ -1195,3 +1195,20 @@ fn dim_false_keeps_a_disabled_button_undimmed_but_disabled() {
     let kept = h.find("kept").unwrap();
     assert!(h.ui.semantics.borrow().get(kept).unwrap().disabled);
 }
+
+#[test]
+fn a_blur_tweened_to_zero_rests_unblurred() {
+    let mut h = Harness::inline(
+        r##"local shown = ui.state("shown", false)
+ui.on_mount(function() shown:set(true) end)
+return ui.column { w = 200, h = 100,
+    ui.text { id = "t", "Hello", blur = ui.tween(shown, { from = 3, to = 0, duration = 200 }) },
+}"##,
+    );
+    h.settle();
+    h.frames(30);
+    let t = h.find("t").unwrap();
+    let effects = h.ui.scene.borrow().effects(t);
+    assert_eq!(effects.filter_blur, 0., "{effects:?}");
+    assert_eq!(effects.blur_radius, 0., "{effects:?}");
+}

@@ -9421,7 +9421,11 @@ impl GpuRenderer {
                     let clip = item.clip.unwrap_or(viewport);
                     // Ink may pass the line box above and below (a descender of
                     // a font taller than its line height), as CSS lets it.
-                    let overshoot = (item.bounds.height * 0.5).clamp(2., 12.);
+                    // (Never more than the damage a text counts, `ink_bounds`.)
+                    let overshoot = match &item.kind {
+                        NodeKind::Text { font_size, .. } if *font_size <= 48. => (font_size * 0.3).max(2.),
+                        _ => 0.,
+                    };
                     let tall = Rect::new(
                         item.bounds.x,
                         item.bounds.y - overshoot,
