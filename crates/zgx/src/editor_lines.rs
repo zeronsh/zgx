@@ -168,6 +168,46 @@ pub struct LineInset {
 }
 /// Each line's room, by its index.
 pub type LineInsets = Rc<dyn Fn(usize) -> LineInset>;
+/// A shape drawn beside a line of a text area (`EditorHandle::set_line_marks`): a list item's bullet or number, a
+/// to-do's box, a quote's rule, the wash behind a code line. It scrolls with its line, under the text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineMark {
+    /// Its left edge, in points from the text area's left content edge.
+    pub x: f32,
+    /// Its top, in points from the top of the line's text (below the line's room above).
+    pub y: f32,
+    /// Its width; infinite: to the area's right edge.
+    pub width: f32,
+    /// Its height; infinite: to the bottom of the line, its wrapped rows and its room below too.
+    pub height: f32,
+    /// The fill colour.
+    pub fill: crate::scene::Color,
+    /// The corner radius.
+    pub radius: f32,
+    /// The border's colour.
+    pub border_color: crate::scene::Color,
+    /// The border's width.
+    pub border_width: f32,
+    /// Text drawn from its top left (an ordinal), its colour and size.
+    pub label: Option<(std::sync::Arc<str>, crate::scene::Color, f32)>,
+}
+impl Default for LineMark {
+    fn default() -> Self {
+        Self {
+            x: 0.,
+            y: 0.,
+            width: 0.,
+            height: 0.,
+            fill: crate::scene::Color(0, 0, 0, 0),
+            radius: 0.,
+            border_color: crate::scene::Color(0, 0, 0, 0),
+            border_width: 0.,
+            label: None,
+        }
+    }
+}
+/// Each line's marks, by its index.
+pub type LineMarks = Rc<dyn Fn(usize) -> Vec<LineMark>>;
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
 pub type LineSpans = Vec<(Range<usize>, SpanStyle)>;
 /// A `Highlighter` that styles its ranges (`SpanStyle`) beyond colouring
