@@ -688,6 +688,8 @@ fn overlay_scrollbar_exports_value_actions_orientation_and_hides_without_overflo
     assert_eq!(adapter.scene_node(id), None);
     height.set(400.);
     ui.prepare_frame();
+    // Overflowing again, it's back where it rested before its content shrank.
+    assert_eq!(offset.get(), 50.);
     let update = adapter.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Bars", 1.);
     assert!(
         update
@@ -698,7 +700,7 @@ fn overlay_scrollbar_exports_value_actions_orientation_and_hides_without_overflo
     consumer.update_and_process_changes(update, &mut Changes::default());
     ui.set_disabled(mounted.node(), true);
     assert!(!ui.set_accessible_numeric_value(target, 10.));
-    assert_eq!(offset.get(), 0.);
+    assert_eq!(offset.get(), 50.);
 }
 
 #[test]

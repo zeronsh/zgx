@@ -288,3 +288,51 @@ fn a_moved_layer_repaints_what_changed_after_the_move_where_it_was() {
         "the bar: {damage:?}"
     );
 }
+/// Content short for a while (rows built again, a section swapped) clamps
+/// the view, and as it grows back the view returns where it rested; a move
+/// made meanwhile stands instead, and a position asked for past the end is
+/// clamped and never kept.
+#[test]
+fn scroll_returns_to_its_place_as_content_grows_back() {
+    let mut ui = Ui::new(600., 400.);
+    let offset = ui.signal(0.);
+    let tall = ui.signal(1000.);
+    let read_tall = tall.clone();
+    ui.mount(
+        scroll(offset.clone())
+            .w(220.)
+            .h(200.)
+            .child(div().reactive_style(move || Styles::new().h(read_tall.get()))),
+    );
+    ui.prepare_frame();
+    wheel(&mut ui, 20., 20., 600.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 600.);
+    // Short for a moment, then whole again: back where it was.
+    tall.set(300.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 100.);
+    tall.set(500.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 300.);
+    tall.set(1000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 600.);
+    // Moved while it was short: where it was moved to stands.
+    tall.set(300.);
+    ui.prepare_frame();
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    wheel(&mut ui, 20., 20., -40.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 60.);
+    tall.set(1000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 60.);
+    // Asked for past the end: clamped, and not chased as it grows.
+    offset.set(5000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 800.);
+    tall.set(2000.);
+    ui.prepare_frame();
+    assert_eq!(offset.get(), 800.);
+}
