@@ -34,7 +34,8 @@ pub(crate) struct Look {
     pub selection_text: Option<Color>,
     /// Text under a block cursor; `None` is the background.
     pub cursor_text: Option<Color>,
-    /// Behind a search's matches, and its selected one.
+    /// Over a search's matches, and its selected one: translucent, the
+    /// text under them read through.
     pub found: Color,
     pub found_selected: Color,
 }
@@ -45,8 +46,8 @@ impl Default for Look {
             selection: Color(0x4a, 0x78, 0xc0, 0x88),
             selection_text: None,
             cursor_text: None,
-            found: Color(0xd8, 0xa8, 0x30, 0x70),
-            found_selected: Color(0xf0, 0x80, 0x18, 0xc8),
+            found: Color(0xf0, 0xc0, 0x30, 0x60),
+            found_selected: Color(0xff, 0x8c, 0x1a, 0x90),
         }
     }
 }
@@ -649,31 +650,29 @@ fn styled_underline<L>(
     });
 }
 
-/// A search's `highlights` behind the text of the `rows` built, over their
-/// cells' own fills. Out of the rows' building: only while a search is
-/// open.
-#[cold]
-#[inline(never)]
-pub(crate) fn highlight(
-    rows: &mut [(usize, RowPaint)],
+/// A search's `highlights` (the rows in view's columns), drawn over the
+/// rows, translucent.
+pub(crate) fn draw_found(
     highlights: &[crate::search::Highlight],
     look: &Look,
     metrics: Metrics,
-) {
-    for (row, paint) in rows {
-        for highlight in highlights.iter().filter(|highlight| highlight.row == *row) {
-            paint.fills.push(Fill {
+) -> Canvas {
+    let mut canvas = Canvas::new();
+    for highlight in highlights {
+        canvas.fill(
+            Path::rectangle(Rect {
                 x: highlight.first as f32 * metrics.cell_width,
-                y: 0.,
+                y: highlight.row as f32 * metrics.cell_height,
                 width: (highlight.last + 1 - highlight.first) as f32 * metrics.cell_width,
                 height: metrics.cell_height,
-                color: match highlight.selected {
-                    true => look.found_selected,
-                    false => look.found,
-                },
-            });
-        }
+            }),
+            match highlight.selected {
+                true => look.found_selected,
+                false => look.found,
+            },
+        );
     }
+    canvas
 }
 
 /// The grid's font: the platform's monospaced one, without ligatures.

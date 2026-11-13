@@ -1457,11 +1457,11 @@ fn closing_a_terminal_asks_for_the_idle_trim() {
     drop(app);
 }
 
-/// The fills a search's matches draw behind the text: `(matches, selected)`.
+/// The fills a search's matches draw over the text: `(matches, selected)`.
 fn search_fills(app: &Harness) -> (usize, usize) {
     use zgx::canvas::{Brush, Draw};
-    let found = zgx::scene::Color(0xd8, 0xa8, 0x30, 0x70);
-    let selected = zgx::scene::Color(0xf0, 0x80, 0x18, 0xc8);
+    let found = zgx::scene::Color(0xf0, 0xc0, 0x30, 0x60);
+    let selected = zgx::scene::Color(0xff, 0x8c, 0x1a, 0x90);
     let scene = app.ui.scene.borrow();
     let (mut matches, mut chosen) = (0, 0);
     for item in scene.paint_items() {
@@ -1480,6 +1480,37 @@ fn search_fills(app: &Harness) -> (usize, usize) {
         }
     }
     (matches, chosen)
+}
+
+/// Where the selected match's highlight is drawn, and where `text` is:
+/// the top of each on screen.
+fn selected_and_text_tops(app: &Harness, text: &str) -> (Option<f32>, Option<f32>) {
+    use zgx::canvas::{Brush, Draw, Shape};
+    let selected = zgx::scene::Color(0xff, 0x8c, 0x1a, 0x90);
+    let scene = app.ui.scene.borrow();
+    let (mut fill, mut shown) = (None, None);
+    for item in scene.paint_items() {
+        let top = scene.transformed_bounds(item.id).y;
+        match item.kind {
+            NodeKind::Canvas(canvas) => {
+                for draw in canvas.commands() {
+                    if let Draw::Fill {
+                        path,
+                        brush: Brush::Solid(color),
+                        ..
+                    } = draw
+                        && *color == selected
+                        && let Some(Shape::Rect { rect, .. }) = path.shape()
+                    {
+                        fill = Some(top + rect.y);
+                    }
+                }
+            }
+            NodeKind::Text { text: drawn, .. } if &**drawn == text => shown = Some(top),
+            _ => {}
+        }
+    }
+    (fill, shown)
 }
 
 /// A search through the engine-drawn terminal by Ghostty's bindings: every
@@ -1535,6 +1566,36 @@ fn a_search_counts_highlights_and_scrolls_to_its_matches() {
         app.texts()
     );
     assert_eq!(search_fills(&app).1, 1);
+    // Over the rows, so a match on a cell with a background of its own
+    // shows too: the matches' canvas paints after every row's.
+    {
+        let found = zgx::scene::Color(0xf0, 0xc0, 0x30, 0x60);
+        let scene = app.ui.scene.borrow();
+        let canvases: Vec<bool> = scene
+            .paint_items()
+            .filter_map(|item| match item.kind {
+                NodeKind::Canvas(canvas) => Some(canvas.commands().iter().any(|draw| {
+                    matches!(draw, zgx::canvas::Draw::Fill { brush: zgx::canvas::Brush::Solid(color), .. } if *color == found)
+                })),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            canvases.last(),
+            Some(&true),
+            "the matches' canvas paints last"
+        );
+    }
+    // Drawn on the row that shows it, the view scrolled back.
+    let (fill, shown) = selected_and_text_tops(&app, "0 error here");
+    let (fill, shown) = (
+        fill.expect("the selected highlight"),
+        shown.expect("the line"),
+    );
+    assert!(
+        (fill - shown).abs() < 4.,
+        "highlight at {fill}, its line at {shown}"
+    );
     // Output while it is open: counted as it arrives.
     replay.feed(b"one more error\r\n");
     app.ui.prepare_frame();
