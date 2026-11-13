@@ -42,6 +42,8 @@ mod layout_fit_content;
 mod layout_growing_boxes;
 #[path = "../layout_history.rs"]
 mod layout_history;
+#[path = "../layout_splitter_drag.rs"]
+mod layout_splitter_drag;
 #[path = "../layout_width_changes.rs"]
 mod layout_width_changes;
 #[path = "../max_content_wrapped_text.rs"]
