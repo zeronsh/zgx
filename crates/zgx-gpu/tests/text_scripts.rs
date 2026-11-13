@@ -1023,3 +1023,44 @@ fn a_line_of_fallback_glyphs_keeps_the_text_fonts_baseline() {
         );
     }
 }
+
+/// Hiragino Sans, as macOS has it (its classes W3 300, W4 400, W6 600),
+/// serves Regular from W3, Medium from W4 and Bold from W6, as Core Text's
+/// cascade gives Chrome; elsewhere nothing is asserted.
+#[cfg(target_os = "macos")]
+#[test]
+fn hiragino_sans_serves_css_weights_a_class_below() {
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "ja-JP".into(),
+        {
+            let mut db = cosmic_text::fontdb::Database::new();
+            db.load_system_fonts();
+            db
+        },
+        cosmic_text::PlatformFallback,
+    );
+    if !fonts.db().faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(name, _)| name == "Hiragino Sans")
+    }) {
+        eprintln!("no Hiragino Sans installed: nothing checked");
+        return;
+    }
+    for (css, class) in [(400, 300), (500, 400), (700, 600)] {
+        let mut buffer = cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(13., 20.));
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::SansSerif)
+            .weight(cosmic_text::Weight(css));
+        buffer.set_text("こんにちは", &attrs, cosmic_text::Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        let run = buffer.layout_runs().next().expect("a line");
+        let face = fonts.db().face(run.glyphs[0].font_id).expect("a face");
+        let named = face
+            .families
+            .iter()
+            .any(|(name, _)| name == "Hiragino Sans");
+        assert!(named, "{css}: {:?}", face.families);
+        assert_eq!(face.weight.0, class, "weight {css}");
+    }
+}

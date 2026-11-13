@@ -1971,7 +1971,10 @@ export type Styles = {
 	-- Which way lines run in it and what it holds (HTML's `dir`): "rtl"
 	-- for Arabic, Hebrew, Persian or Urdu runs rows from the right, starts
 	-- columns and text at the right, and turns `ps`, `ms`, `inset_start` round.
-	dir: ("ltr" | "rtl")?,
+	-- "auto" on text takes its first strong character's way (and one with
+	-- none, its parent's); on a container, set `dir` from
+	-- `ui.direction_of(text)` for the text it shows.
+	dir: ("ltr" | "rtl" | "auto")?,
 	grow: number?,
 	shrink: number?,
 	basis: Length?,
@@ -2214,7 +2217,7 @@ export type StyleProps = {
 	gap_y: Reactive<Length>?,
 	-- Flex and grid.
 	direction: Reactive<Direction>?,
-	dir: Reactive<"ltr" | "rtl">?,
+	dir: Reactive<"ltr" | "rtl" | "auto">?,
 	grow: Reactive<number>?,
 	shrink: Reactive<number>?,
 	basis: Reactive<Length>?,
@@ -3112,7 +3115,7 @@ export type Props_gap = Reactive<Num>?
 export type Props_gap_x = Reactive<Length>?
 export type Props_gap_y = Reactive<Length>?
 export type Props_direction = Reactive<Direction>?
-export type Props_dir = Reactive<"ltr" | "rtl">?
+export type Props_dir = Reactive<"ltr" | "rtl" | "auto">?
 export type Props_grow = Reactive<number>?
 export type Props_shrink = Reactive<number>?
 export type Props_basis = Reactive<Length>?
@@ -23065,6 +23068,10 @@ declare ui: {
 	-- "1,234.50", `{ style = "percent" }` takes a fraction (0.05 is "5%"),
 	-- `{ notation = "compact" }` gives "1.2K", `{ sign = "always" }` "+3".
 	number: (n: number, opts: NumberOptions?) -> string,
+	-- The way text runs by its first strong character: "rtl" for Arabic,
+	-- Hebrew and the like, "ltr" for another letter, nil for none (HTML's
+	-- `dir=auto`): what `dir` takes for a container showing that text.
+	direction_of: (text: string) -> ("ltr" | "rtl")?,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
 }

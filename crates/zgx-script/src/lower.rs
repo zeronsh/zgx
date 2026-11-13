@@ -9708,6 +9708,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Dir, Lit::Str(v)) => match &**v {
             "rtl" => s.rtl(),
             "ltr" => s.direction(zgx::scene::Direction::Ltr),
+            "auto" => s.dir_auto(),
             _ => s,
         },
         (TextSize, Lit::Num(v)) => s.text_size(*v),

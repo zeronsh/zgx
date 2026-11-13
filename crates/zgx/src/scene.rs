@@ -3518,6 +3518,8 @@ pub struct Scene {
     cold: Option<Box<ColdMaps>>,
     /// Directions nodes set themselves (`set_direction`); others inherit.
     directions: NodeMap<Direction>,
+    /// Text whose direction is its first strong character's (`set_direction_auto`).
+    auto_directions: NodeMap<()>,
     /// Layer shaders and their uniforms, by node (`set_layer_shader`):
     /// usually none.
     layer_shaders: NodeMap<LayerShader>,
@@ -3744,6 +3746,7 @@ impl Scene {
             given_styles: Default::default(),
             cold: None,
             directions: Default::default(),
+            auto_directions: Default::default(),
             layer_shaders: Default::default(),
             inert: Vec::new(),
             selectable: Default::default(),
@@ -5854,6 +5857,60 @@ impl Scene {
             .parent
             .is_some_and(|parent| self.node(parent).rtl);
         self.refresh_direction::<true>(id, inherited, false);
+    }
+    /// Whether any node's direction is its text's (`set_direction_auto`).
+    pub fn has_auto_directions(&self) -> bool {
+        !self.auto_directions.is_empty()
+    }
+    /// Run text `id` the way its first strong character does (`on`), or not:
+    /// right to left for Arabic, Hebrew and the like, else left to right,
+    /// and its parent's where it has none. Decided again, before layout, as
+    /// its text changes.
+    pub fn set_direction_auto(&mut self, id: NodeId, on: bool) {
+        if on == self.auto_directions.contains_key(&id) {
+            return;
+        }
+        if on {
+            self.auto_directions.insert(id, ());
+            self.resolve_auto_direction(id);
+        } else {
+            self.auto_directions.remove(&id);
+            self.set_direction(id, None);
+        }
+    }
+    /// `id`'s direction from its text, or the first of its descendants' that
+    /// has a strong character, if any does.
+    fn resolve_auto_direction(&mut self, id: NodeId) {
+        let mut found = None;
+        let mut stack = vec![id];
+        let mut visited = 0;
+        while let Some(at) = stack.pop() {
+            visited += 1;
+            let strong = match &self.node(at).kind {
+                NodeKind::Text { text, .. } => crate::text_layout::first_strong_direction(text),
+                NodeKind::RichText { text } => {
+                    crate::text_layout::first_strong_direction(text.text())
+                }
+                _ => {
+                    stack.extend(self.children(at).iter().rev().copied());
+                    None
+                }
+            };
+            if strong.is_some() || visited > 2000 {
+                found = strong;
+                break;
+            }
+        }
+        self.set_direction(id, found);
+    }
+    /// The nodes that take their direction from their text, decided again.
+    fn resolve_auto_directions(&mut self) {
+        let ids: Vec<NodeId> = self.auto_directions.keys().copied().collect();
+        for id in ids {
+            if self.contains(id) {
+                self.resolve_auto_direction(id);
+            }
+        }
     }
     /// Which way `id` and its parent run.
     fn way(&self, id: NodeId) -> Way {
@@ -7969,6 +8026,9 @@ impl Scene {
         }
         if !self.directions.is_empty() {
             self.directions.remove(&id);
+        }
+        if !self.auto_directions.is_empty() {
+            self.auto_directions.remove(&id);
         }
         if !self.layer_shaders.is_empty()
             && let Some(layer) = self.layer_shaders.remove(&id)
@@ -14293,6 +14353,9 @@ impl Scene {
     #[inline(never)]
     fn prepare_layout_active(&mut self, full: bool) {
         self.settle_children();
+        if !self.auto_directions.is_empty() {
+            self.resolve_auto_directions();
+        }
         let _span = crate::profile::span(crate::profile::Phase::Layout);
         self.layout_pass = self.layout_pass.wrapping_add(1);
         let mut report = FrameReport::default();

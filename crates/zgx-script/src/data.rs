@@ -365,6 +365,21 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
         })?;
     let sort: mlua::Function = crate::lazy::builtin(lua, "=ui.sort", SORT)?.call(sort_by_keys)?;
     ui.set("sort", sort)?;
+    // `ui.direction_of(text)`: "rtl" for text whose first strong character is
+    // right to left (Arabic, Hebrew, …), "ltr" for another letter, nil for
+    // none: what `dir` takes for a container showing that text.
+    ui.set(
+        "direction_of",
+        lua.create_function(|_, text: mlua::LuaString| {
+            Ok(
+                match zgx::text_layout::first_strong_direction(&text.to_str()?) {
+                    Some(zgx::scene::Direction::Rtl) => Some("rtl"),
+                    Some(zgx::scene::Direction::Ltr) => Some("ltr"),
+                    None => None,
+                },
+            )
+        })?,
+    )?;
     ui.set(
         "number",
         lua.create_function(|_, (n, options): (f64, Option<Table>)| {

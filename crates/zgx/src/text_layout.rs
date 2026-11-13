@@ -135,6 +135,25 @@ pub fn has_rtl(text: &str) -> bool {
         matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
     })
 }
+/// The way `text` runs by its first strong character, as the Unicode bidi
+/// algorithm's rule P2 and HTML's `dir=auto` take it (isolates skipped):
+/// Arabic and Hebrew letters right to left, others left to right; `None`
+/// where it has none (digits, punctuation, spaces).
+pub fn first_strong_direction(text: &str) -> Option<crate::scene::Direction> {
+    use unicode_bidi::BidiClass::*;
+    let mut isolates = 0_u32;
+    for c in text.chars() {
+        match unicode_bidi::bidi_class(c) {
+            LRI | RLI | FSI => isolates += 1,
+            PDI => isolates = isolates.saturating_sub(1),
+            _ if isolates > 0 => {}
+            L => return Some(crate::scene::Direction::Ltr),
+            R | AL => return Some(crate::scene::Direction::Rtl),
+            _ => {}
+        }
+    }
+    None
+}
 /// Physical paragraph alignment within an allocated text width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TextAlign {

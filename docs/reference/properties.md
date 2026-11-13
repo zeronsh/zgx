@@ -27,7 +27,7 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | `relative` | `boolean` | `false` | a containing block for absolute descendants |
 | `top`, `left`, `right`, `bottom` | `Length` | | insets of an absolute node |
 | `inset_start`, `inset_end` | `Length` | | its inset from the start or end of a line (CSS's `inset-inline-start`/`-end`): `left` and `right` left to right, `right` and `left` with `dir = "rtl"` |
-| `dir` | `"ltr" \| "rtl"` | its parent's (`"ltr"` at the root) | which way lines run in it and what it holds (HTML's `dir`): `"rtl"` runs rows from the right, starts a column's children and text at the right, and turns the `ps`/`pe`, `ms`/`me`, `inset_start`/`inset_end` edges round; `pl`, `ml` and `left` stay on the left A function or state follows: [text from people](#which-way-text-from-people-runs), which may run either way |
+| `dir` | `"ltr" \| "rtl" \| "auto"` | its parent's (`"ltr"` at the root) | which way lines run in it and what it holds (HTML's `dir`): `"rtl"` runs rows from the right, starts a column's children and text at the right, and turns the `ps`/`pe`, `ms`/`me`, `inset_start`/`inset_end` edges round; `pl`, `ml` and `left` stay on the left. `"auto"` on text takes the way of its first strong character (Arabic and Hebrew letters run right to left; text with none, and what is not text, take the parent's) and follows the text as it changes; on a container, set `dir = ui.direction_of(text)` for the text it shows, so a list item's marker and text swap sides in an Arabic answer. Bidi reordering within a line is the shaper's, by the Unicode algorithm. A function or state follows: [text from people](#which-way-text-from-people-runs), which may run either way |
 
 ## Spacing
 

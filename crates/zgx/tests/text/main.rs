@@ -19,6 +19,8 @@ mod links;
 mod selectable_text;
 #[path = "../system_preferences.rs"]
 mod system_preferences;
+#[path = "../text_direction.rs"]
+mod text_direction;
 #[path = "../text_hyphens.rs"]
 mod text_hyphens;
 #[path = "../text_lang.rs"]

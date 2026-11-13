@@ -4356,7 +4356,7 @@ impl ScriptHost {
             &["scene3d", "mesh", "light", "group", "model"],
             scene3d::install,
         );
-        lazy.ui(&["json", "number", "sort"], data::install);
+        lazy.ui(&["json", "number", "sort", "direction_of"], data::install);
         let terms = self.0.terms.clone();
         lazy.ui(&["term"], move |lua, ui| term::install(lua, ui, terms));
         let webs = self.0.webs.clone();

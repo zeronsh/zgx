@@ -2064,6 +2064,9 @@ fn apply_rare(
     if let Some(direction) = rare.direction {
         scene.set_direction(node, Some(direction));
     }
+    if rare.direction_auto || scene.has_auto_directions() {
+        scene.set_direction_auto(node, rare.direction_auto && rare.direction.is_none());
+    }
     match rare.zoom {
         Some(crate::style::ZoomStyle::By(zoom)) => {
             scene.set_zoom(node, zoom);

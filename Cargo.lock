@@ -5216,6 +5216,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "stacker",
+ "unicode-bidi",
  "unicode-linebreak",
  "unicode-normalization",
  "unicode-segmentation",

@@ -47,7 +47,11 @@ impl FontMatchKey {
     ) -> FontMatchKey {
         // TODO: smarter way of detecting emoji
         let not_emoji = !face.post_script_name.contains("Emoji");
-        let font_weight_diff = attrs.weight.0.abs_diff(face.weight.0);
+        // zgx patch: macOS's Hiragino Sans numbers its weights a step below
+        // CSS's (W3 is Regular, W4 Medium, W6 Bold), as Core Text's cascade
+        // takes them: a face counts as the weight it is used for.
+        let face_weight = matched_weight(face);
+        let font_weight_diff = attrs.weight.0.abs_diff(face_weight);
 
         // zgx patch: the face's weight axis is read from its file once, not
         // for every new family, weight and style asked for.
@@ -59,7 +63,7 @@ impl FontMatchKey {
                     let w = attrs.weight.0 as f32;
                     w >= min && w <= max
                 });
-        let font_weight = face.weight.0;
+        let font_weight = face_weight;
         let font_stretch_diff = attrs.stretch.to_number().abs_diff(face.stretch.to_number());
         let font_stretch = face.stretch.to_number();
         let font_style_diff = match (attrs.style, face.style) {
@@ -85,6 +89,23 @@ impl FontMatchKey {
             query: false,
         }
     }
+}
+
+/// zgx patch: the weight `face` is matched as: its own, except Hiragino
+/// Sans's, whose W3 is the Regular Core Text gives for 400 (its OS/2 class
+/// is 300), W4 the Medium for 500 and W6 the Bold for 700: a hundred more.
+fn matched_weight(face: &FaceInfo) -> u16 {
+    let hiragino = cfg!(target_os = "macos")
+        && face.families.iter().any(|(name, _)| name == "Hiragino Sans");
+    if hiragino {
+        shifted_hiragino_weight(face.weight.0)
+    } else {
+        face.weight.0
+    }
+}
+/// A Hiragino Sans face's OS/2 weight class as the CSS weight it serves.
+pub(crate) fn shifted_hiragino_weight(class: u16) -> u16 {
+    class.saturating_add(100).min(1000)
 }
 
 /// zgx patch: a face's `wght` axis range, from its file.

@@ -275,6 +275,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "linear",
     "sort",
     "number",
+    "direction_of",
     "toast",
     "toast_defaults",
     "dismiss_toast",

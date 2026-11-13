@@ -16,6 +16,8 @@ categories = ["gui"]
 [dependencies]
 unicode-linebreak = "0.1.5"
 unicode-segmentation = "1.12"
+# A paragraph runs the way its first strong character does (`dir = "auto"`).
+unicode-bidi = { version = "0.3", default-features = false, features = ["std", "hardcoded-data"] }
 # Words in Chinese, Japanese and Thai, which put no spaces between them
 # (`cjk-thai-words`).
 # The Thai dictionary in data/ is this minor version's (see

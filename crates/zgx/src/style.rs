@@ -865,6 +865,8 @@ pub(crate) struct RareStyles {
     pub(crate) snap: Option<bool>,
     /// `Styled::direction`: which way its lines run.
     pub(crate) direction: Option<crate::scene::Direction>,
+    /// `Styled::dir_auto`: its text sets which way it runs.
+    pub(crate) direction_auto: bool,
     pub(crate) border_style: Option<crate::decoration::BorderStyle>,
     /// `Styled::border_over`.
     pub(crate) border_over: Option<bool>,
@@ -921,6 +923,7 @@ impl RareStyles {
         fade_overflow: None,
         snap: None,
         direction: None,
+        direction_auto: false,
         border_style: None,
         border_over: None,
         outline: None,
@@ -977,6 +980,9 @@ impl RareStyles {
         }
         if other.direction.is_some() {
             self.direction = other.direction;
+        }
+        if other.direction_auto {
+            self.direction_auto = true;
         }
         if other.border_over.is_some() {
             self.border_over = other.border_over;
@@ -3391,6 +3397,15 @@ pub trait Styled: Sized {
     /// have: a toolbar that stays put, a canvas that zooms itself.
     fn zoom_fixed(mut self) -> Self {
         self.styles_mut().rare_mut().zoom = Some(ZoomStyle::Fixed);
+        self
+    }
+    /// Text that runs the way its first strong character does (HTML's
+    /// `dir=auto`): right to left for Arabic, Hebrew, Persian or Urdu
+    /// letters, so its lines start at the right and its mirrored edges follow;
+    /// text with no strong character, and what isn't text, take their
+    /// parent's. Re-decided as the text changes.
+    fn dir_auto(mut self) -> Self {
+        self.styles_mut().rare_mut().direction_auto = true;
         self
     }
     /// `direction(Direction::Rtl)`: Arabic, Hebrew, Persian, Urdu.
