@@ -38,7 +38,7 @@ const TEXTURE_FRAMES: u8 = 8;
 /// How long a frame waits, at most, for the tiles a change to the drawing
 /// shows (made on the tile threads): a small change shows at once, a large
 /// one over the next frames, its old tiles shown meanwhile.
-const CHANGE_WAIT: Duration = Duration::from_millis(8);
+pub(super) const CHANGE_WAIT: Duration = Duration::from_millis(8);
 type View = zgx::scene::CanvasView;
 /// A tile: its level's zoom (bits), column and row.
 type Key = (u32, i32, i32);
@@ -537,29 +537,32 @@ impl CanvasCache {
             tiles: HashMap::new(),
             used: self.clock,
         };
+        let shapes = painted_bounds(canvas);
+        let words = text_bounds(canvas, &self.text);
+        let bounds = match (shapes, words) {
+            (Some(a), Some(b)) => Some([
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]),
+            (a, b) => a.or(b),
+        };
         let mut stand_in = None;
         if let Some(panned) = entry.panned {
-            level.painted = panned.painted;
+            // (What the drawing paints, as its raster found it; found anew
+            // for a drawing changed since.)
+            level.painted = device_bounds(bounds, entry.view, entry.scale);
             stand_in = Some(StandIn {
                 view: entry.view,
                 region: panned.region,
                 id: entry.id,
             });
         }
-        let shapes = painted_bounds(canvas);
-        let words = text_bounds(canvas, &self.text);
         let pyramid = Pyramid {
             drawing: canvas.clone(),
             scale: entry.scale,
-            bounds: match (shapes, words) {
-                (Some(a), Some(b)) => Some([
-                    a[0].min(b[0]),
-                    a[1].min(b[1]),
-                    a[2].max(b[2]),
-                    a[3].max(b[3]),
-                ]),
-                (a, b) => a.or(b),
-            },
+            bounds,
             levels: vec![level],
             zoom: (entry.view.scale, Instant::now()),
             wake: None,

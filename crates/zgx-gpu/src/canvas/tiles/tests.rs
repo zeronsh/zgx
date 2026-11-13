@@ -383,6 +383,64 @@ fn a_large_change_shows_the_old_tiles_while_its_own_are_made_off_the_frame() {
         "the change's tiles"
     );
 }
+#[test]
+fn a_change_to_a_slow_raster_shows_the_one_before_while_its_own_is_made_off_the_frame() {
+    let node = node();
+    let mut cache = CanvasCache::default();
+    let at = view(-5., -5., 1.);
+    let (before, _) = (cache.get_panned(node, &slow(10), at, W, H, 2., false)).unwrap();
+    let changed = slow(240);
+    let begun = Instant::now();
+    let (shown, placement) = (cache.get_panned(node, &changed, at, W, H, 2., false)).unwrap();
+    let took = begun.elapsed();
+    assert!(
+        took < CHANGE_WAIT + Duration::from_millis(150),
+        "the frame waits little for a change ({took:?})"
+    );
+    assert_eq!(shown.id, before.id, "the raster before shown meanwhile");
+    assert!(placement.scaled, "drawn again once its own lands");
+    // Then its own, as one made on the frame.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let own = loop {
+        let (raster, placement) = (cache.get_panned(node, &changed, at, W, H, 2., false)).unwrap();
+        if !placement.scaled {
+            break raster;
+        }
+        assert!(Instant::now() < deadline, "its raster lands");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let mut fresh = CanvasCache::default();
+    let (theirs, _) = (fresh.get_panned(node, &changed, at, W, H, 2., false)).unwrap();
+    assert!(own.pixels.unwrap().pixels() == theirs.pixels.unwrap().pixels());
+    // A zoom before a change's raster lands: in tiles at once, the change's
+    // made off the frame (the raster before standing in).
+    let mut zooming = CanvasCache::default();
+    (zooming.get_panned(node, &slow(10), at, W, H, 2., false)).unwrap();
+    (zooming.get_panned(node, &changed, at, W, H, 2., false)).unwrap();
+    let begun = Instant::now();
+    let zoomed = view(-30., -20., 1.25);
+    (zooming.get_panned(node, &changed, zoomed, W, H, 2., false)).unwrap();
+    let took = begun.elapsed();
+    assert!(zooming.tiled(node), "zoomed: in tiles");
+    assert!(
+        took < Duration::from_millis(150),
+        "nothing made on the frame ({took:?})"
+    );
+    // A drawing quick to rasterize changes on the frame, as before.
+    let card = |shade: u8| {
+        let mut canvas = Canvas::new();
+        let rect = Rect::new(10., 10., 40., 30.);
+        canvas.fill(
+            Path::rounded_rect(rect, 4.).unwrap(),
+            Color(shade, 9, 9, 255),
+        );
+        Arc::new(canvas)
+    };
+    let mut quick = CanvasCache::default();
+    let (was, _) = (quick.get_panned(node, &card(60), at, W, H, 1., false)).unwrap();
+    let (now, placement) = (quick.get_panned(node, &card(250), at, W, H, 1., false)).unwrap();
+    assert!(now.id != was.id && !placement.scaled);
+}
 /// A gradient under a clip, ellipses and strokes: tiles as its raster.
 fn shaded_with(gradient: bool, clip: bool, ellipses: bool, strokes: bool) -> Arc<Canvas> {
     let mut board = Canvas::new();

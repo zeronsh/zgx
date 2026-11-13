@@ -32,6 +32,9 @@ struct Entry {
     used: u64,
     /// Where it lies, if drawn to be panned (`CanvasCache::get_panned`).
     panned: Option<Panned>,
+    /// How long it took to make on the frame: a change to a drawing slower
+    /// than a frame waits is made off it (`get_panned`).
+    took: std::time::Duration,
 }
 /// A raster drawn to be panned: a region of the drawing under one zoom, in
 /// the box's device pixels under the view it was first drawn under.
@@ -173,6 +176,65 @@ struct Zoom {
     /// Started at once (the zoom moved ×2 from the raster shown), not after
     /// the zoom held still: kept while the zoom stays within ×2 of it.
     immediate: bool,
+    /// Of a change to the drawing (`get_panned`): taken when it lands though
+    /// the drawing changed again since (the next made from there), so a
+    /// drawing changing every frame still shows anew as each lands.
+    change: bool,
+}
+impl Zoom {
+    /// `canvas`'s raster under `view` in a `width` by `height` box at
+    /// `scale`, made off the frame from `due` on (in its own rasterizer, in
+    /// `fonts`: a frame drawing text meanwhile never waits on it).
+    fn start(
+        canvas: &Arc<Canvas>,
+        view: zgx::scene::CanvasView,
+        (width, height, scale): (f32, f32, f32),
+        due: std::time::Instant,
+        immediate: bool,
+        fonts: CanvasFonts,
+    ) -> Self {
+        let size = [
+            (width * scale).ceil() as i32,
+            (height * scale).ceil() as i32,
+        ];
+        let done: Arc<Mutex<Option<Made>>> = Arc::default();
+        let cancel: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let (filled, drawing, stop) = (done.clone(), canvas.clone(), cancel.clone());
+        off_frame(Box::new(move || {
+            let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+            // Until due (a zoom held still), unless superseded.
+            while !stopped() && std::time::Instant::now() < due {
+                let left = due.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(left.min(std::time::Duration::from_millis(4)));
+            }
+            if stopped() {
+                return;
+            }
+            static TEXT: OnceLock<SharedText> = OnceLock::new();
+            let text = TEXT.get_or_init(Default::default);
+            text.lock().unwrap_or_else(|p| p.into_inner()).fonts = fonts;
+            SUPERSEDED_BY.with(|by| *by.borrow_mut() = Some(stop.clone()));
+            let bounds = text_bounds(&drawing, text);
+            let panned = panned_region(&drawing, view, size, scale, bounds);
+            let made = rasterize_region(&drawing, view, scale, panned.region, None, text)
+                .map(|image| (panned, image));
+            SUPERSEDED_BY.with(|by| *by.borrow_mut() = None);
+            if stopped() {
+                return;
+            }
+            *filled.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
+            zgx::image::wake_waiting();
+        }));
+        Zoom {
+            canvas: canvas.clone(),
+            view,
+            size: (width, height, scale),
+            done,
+            cancel,
+            immediate,
+            change: false,
+        }
+    }
 }
 impl Drop for Zoom {
     fn drop(&mut self) {
@@ -981,11 +1043,17 @@ impl CanvasCache {
             let zoom = self.zooms.remove(&node).expect("in flight");
             match made {
                 Ok((panned, image))
-                    if zoom.size == (width, height, scale) && same(&zoom.canvas) =>
+                    if zoom.size == (width, height, scale)
+                        && (zoom.change || same(&zoom.canvas)) =>
                 {
+                    let drawn = if same(&zoom.canvas) {
+                        canvas
+                    } else {
+                        &zoom.canvas
+                    };
                     self.store(
                         node,
-                        canvas,
+                        drawn,
                         Arc::new(image),
                         zoom.size,
                         zoom.view,
@@ -1038,7 +1106,9 @@ impl CanvasCache {
             && entry.width == width
             && entry.height == height
             && entry.scale == scale
-            && entry.canvas.upgrade().is_some_and(|old| same(&old))
+            // (In tiles, a drawing changed since its raster too: its own made
+            // off the frame, the raster standing in meanwhile.)
+            && (tiles::ENABLED || entry.canvas.upgrade().is_some_and(|old| same(&old)))
         {
             // Zoomed: drawn in tiles from now on, off the frame.
             if tiles::ENABLED {
@@ -1062,50 +1132,13 @@ impl CanvasCache {
                     } else {
                         REFINE_AFTER
                     };
-                let done: Arc<Mutex<Option<Made>>> = Arc::default();
-                let cancel: Arc<std::sync::atomic::AtomicBool> = Arc::default();
-                let (filled, drawing, stop) = (done.clone(), canvas.clone(), cancel.clone());
-                // The thread's own rasterizer, in the same fonts: a frame
-                // drawing text meanwhile never waits on it.
                 let fonts = self
                     .text
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .fonts
                     .clone();
-                off_frame(Box::new(move || {
-                    let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
-                    // Until the zoom has held still, unless superseded.
-                    while !stopped() && std::time::Instant::now() < due {
-                        let left = due.saturating_duration_since(std::time::Instant::now());
-                        std::thread::sleep(left.min(std::time::Duration::from_millis(4)));
-                    }
-                    if stopped() {
-                        return;
-                    }
-                    static TEXT: OnceLock<SharedText> = OnceLock::new();
-                    let text = TEXT.get_or_init(Default::default);
-                    text.lock().unwrap_or_else(|p| p.into_inner()).fonts = fonts;
-                    SUPERSEDED_BY.with(|by| *by.borrow_mut() = Some(stop.clone()));
-                    let bounds = text_bounds(&drawing, text);
-                    let panned = panned_region(&drawing, view, size, scale, bounds);
-                    let made = rasterize_region(&drawing, view, scale, panned.region, None, text)
-                        .map(|image| (panned, image));
-                    SUPERSEDED_BY.with(|by| *by.borrow_mut() = None);
-                    if stopped() {
-                        return;
-                    }
-                    *filled.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
-                    zgx::image::wake_waiting();
-                }));
-                let zoom = Zoom {
-                    canvas: canvas.clone(),
-                    view,
-                    size: (width, height, scale),
-                    done,
-                    cancel,
-                    immediate,
-                };
+                let zoom = Zoom::start(canvas, view, (width, height, scale), due, immediate, fonts);
                 // The one it replaces, if any, superseded as it goes.
                 self.zooms.insert(node, zoom);
             }
@@ -1132,8 +1165,72 @@ impl CanvasCache {
             }
             return Ok(shown);
         }
+        // A change to a drawing slow to rasterize (its raster took longer
+        // than a frame waits): its raster made off the frame, the frame
+        // waiting a little for it, the one before shown meanwhile (the host
+        // woken when it lands).
+        if !wait
+            && kept.is_none()
+            && let Some(entry) = self.entries.get(&node)
+            && let Some(panned) = entry.panned
+            && entry.took >= tiles::CHANGE_WAIT
+            && entry.width == width
+            && entry.height == height
+            && entry.scale == scale
+            && entry.view.scale == view.scale
+        {
+            let shift = [
+                ((view.x - entry.view.x) * scale).round() as i32,
+                ((view.y - entry.view.y) * scale).round() as i32,
+            ];
+            if let Some(placement) = panned.place(shift, size, width, height, scale) {
+                let started = self.zooms.get(&node).is_some_and(|zoom| {
+                    zoom.change
+                        && zoom.view.scale == view.scale
+                        && zoom.size == (width, height, scale)
+                });
+                if !started {
+                    let fonts = self
+                        .text
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .fonts
+                        .clone();
+                    let now = std::time::Instant::now();
+                    let mut zoom =
+                        Zoom::start(canvas, view, (width, height, scale), now, true, fonts);
+                    zoom.change = true;
+                    self.zooms.insert(node, zoom);
+                }
+                let deadline = std::time::Instant::now() + tiles::CHANGE_WAIT;
+                let landed = || {
+                    (self.zooms.get(&node)).is_some_and(|zoom| {
+                        zoom.done
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .is_some()
+                    })
+                };
+                while !landed() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_micros(250));
+                }
+                if landed() {
+                    return self.get_panned(node, canvas, view, width, height, scale, wait);
+                }
+                let entry = self.entries.get_mut(&node).expect("found above");
+                entry.used = self.clock;
+                return Ok((
+                    entry.raster(),
+                    Placement {
+                        scaled: true,
+                        ..placement
+                    },
+                ));
+            }
+        }
         // Panned past what it holds: what is new drawn beside what it
         // holds. Else (a zoom, a change) what shows, as a box's raster.
+        let began = std::time::Instant::now();
         let (drawn, panned, image, shift) = match &kept {
             Some((drawn, old, pixels, shift)) => {
                 let panned = old.extended(*shift, size);
@@ -1165,6 +1262,12 @@ impl CanvasCache {
             drawn,
             Some(panned),
         );
+        // (A strip panned onto says little of the whole's time.)
+        if kept.is_none()
+            && let Some(entry) = self.entries.get_mut(&node)
+        {
+            entry.took = began.elapsed();
+        }
         Ok((raster, placement))
     }
     /// `node`'s backdrop kept of `canvas`, once it has zoomed (`get_panned`
@@ -1312,8 +1415,11 @@ impl CanvasCache {
         view: zgx::scene::CanvasView,
         panned: Option<Panned>,
     ) -> Raster {
+        // (How long the node's raster took, until measured again.)
+        let mut took = std::time::Duration::ZERO;
         if let Some(old) = self.entries.remove(&node) {
             self.bytes -= old.bytes;
+            took = old.took;
         }
         let bytes = image.pixels().len();
         while (self.bytes + bytes > BUDGET || self.entries.len() >= MAX_ENTRIES)
@@ -1337,6 +1443,7 @@ impl CanvasCache {
                 bytes,
                 used: self.clock,
                 panned,
+                took,
             },
         );
         self.rasterizations += 1;
