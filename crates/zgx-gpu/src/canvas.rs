@@ -188,6 +188,50 @@ thread_local! {
     static SUPERSEDED_BY: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicBool>>> =
         const { std::cell::RefCell::new(None) };
 }
+thread_local! {
+    /// Texts smaller than this many device pixels are left out of the
+    /// rasters this thread makes (a backdrop's: a blur of the board).
+    static TEXT_LEFT_BELOW: std::cell::Cell<f32> = const { std::cell::Cell::new(0.) };
+}
+/// The longest side of a canvas's backdrop, in device pixels.
+const BACKDROP_SIDE: f32 = 2048.;
+/// What all backdrops' pixels take at most.
+const BACKDROP_BUDGET: usize = 32 * 1024 * 1024;
+/// How long a drawing holds still before its backdrop is made again.
+const BACKDROP_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
+/// A canvas's whole drawing at a low resolution, shown while a zoom's own
+/// raster is made, where the raster of the zoom before shows less of it
+/// (Penpot's document atlas): a zoom out shows the board, blurred, at once.
+#[derive(Default)]
+struct Backdrop {
+    /// The drawing it is of (kept when the drawing changes, until made
+    /// again: a placeholder a little out of date).
+    drawing: Weak<Canvas>,
+    /// The view it was drawn under, where it lies, and its pixels, at the
+    /// box's scale.
+    made: Option<(zgx::scene::CanvasView, Panned, Arc<ImageData>, f32)>,
+    /// One being made off the frame: of which drawing, and its result.
+    job: Option<BackdropJob>,
+    used: u64,
+}
+type MadeBackdrop = Result<(zgx::scene::CanvasView, Panned, ImageData), GpuError>;
+struct BackdropJob {
+    drawing: Weak<Canvas>,
+    scale: f32,
+    done: Arc<Mutex<Option<MadeBackdrop>>>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for BackdropJob {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+impl Backdrop {
+    fn bytes(&self) -> usize {
+        self.made.as_ref().map_or(0, |m| m.2.pixels().len())
+    }
+}
 /// Whether the raster this thread is making is superseded: checked every
 /// few commands and before each text.
 fn superseded() -> bool {
@@ -658,6 +702,8 @@ pub struct CanvasCache {
     entries: HashMap<NodeId, Entry>,
     /// Rasters for new zooms being made off the frame, by node.
     zooms: HashMap<NodeId, Zoom>,
+    /// Panned and zoomed canvases' backdrops, by node.
+    backdrops: HashMap<NodeId, Backdrop>,
     bytes: usize,
     clock: u64,
     rasterizations: u64,
@@ -678,6 +724,7 @@ impl CanvasCache {
     pub fn retain(&mut self, scene: &Scene) {
         self.entries.retain(|id, _| draws_raster(scene, *id));
         self.zooms.retain(|id, _| draws_raster(scene, *id));
+        self.backdrops.retain(|id, _| draws_raster(scene, *id));
         self.bytes = self.entries.values().map(|e| e.bytes).sum();
     }
     /// Whether it holds no raster.
@@ -698,6 +745,7 @@ impl CanvasCache {
     pub fn retain_nodes(&mut self, keep: impl Fn(NodeId) -> bool) {
         self.entries.retain(|id, _| keep(*id));
         self.zooms.retain(|id, _| keep(*id));
+        self.backdrops.retain(|id, _| keep(*id));
         self.bytes = self.entries.values().map(|e| e.bytes).sum();
     }
     /// The image ids of the rasters it holds.
@@ -717,6 +765,9 @@ impl CanvasCache {
     /// Rasterize `node` again on its next request (its texture was lost).
     pub fn forget(&mut self, node: NodeId) {
         self.zooms.remove(&node);
+        if !self.backdrops.is_empty() {
+            self.backdrops.remove(&node);
+        }
         if let Some(entry) = self.entries.remove(&node) {
             self.bytes -= entry.bytes;
         }
@@ -836,6 +887,9 @@ impl CanvasCache {
             (height * scale).ceil() as i32,
         ];
         self.clock = self.clock.wrapping_add(1);
+        if !wait {
+            self.keep_backdrop(node, canvas, scale);
+        }
         let same = |drawing: &Arc<Canvas>| Arc::ptr_eq(drawing, canvas) || **drawing == **canvas;
         // A zoom's raster made off the frame: the raster from now on, if
         // still of this drawing (else dropped). One that failed is made
@@ -969,6 +1023,27 @@ impl CanvasCache {
                 // The one it replaces, if any, superseded as it goes.
                 self.zooms.insert(node, zoom);
             }
+            // Zoomed: it keeps a backdrop from now on (one made now if new).
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.backdrops.entry(node) {
+                slot.insert(Backdrop::default());
+                self.keep_backdrop(node, canvas, scale);
+            }
+            // The backdrop instead where it shows clearly more (a zoom out).
+            if let Some(backdrop) = self.backdrops.get_mut(&node)
+                && let Some((drawn, panned, image, at)) = &backdrop.made
+                && *at == scale
+            {
+                let back = panned.scaled(*drawn, view, width, height, scale);
+                let area = |p: &Placement| p.rect[2] * p.rect[3];
+                if area(&back) > area(&shown.1) * 1.1 {
+                    backdrop.used = self.clock;
+                    let raster = Raster {
+                        id: image.id(),
+                        pixels: Some(image.clone()),
+                    };
+                    return Ok((raster, back));
+                }
+            }
             return Ok(shown);
         }
         // Panned past what it holds: what is new drawn beside what it
@@ -1005,6 +1080,131 @@ impl CanvasCache {
             Some(panned),
         );
         Ok((raster, placement))
+    }
+    /// `node`'s backdrop kept of `canvas`, once it has zoomed (`get_panned`
+    /// starts one): one that landed taken, and one made off the frame when
+    /// there is none of this drawing at this scale (at once for the first,
+    /// else once the drawing holds still).
+    fn keep_backdrop(&mut self, node: NodeId, canvas: &Arc<Canvas>, scale: f32) {
+        if self.backdrops.is_empty() || !self.backdrops.contains_key(&node) {
+            return;
+        }
+        let backdrop = self.backdrops.get_mut(&node).expect("kept");
+        let landed = backdrop
+            .job
+            .as_ref()
+            .and_then(|job| job.done.lock().unwrap_or_else(|p| p.into_inner()).take());
+        if let Some(made) = landed {
+            let job = backdrop.job.take().expect("in flight");
+            if let Ok((drawn, panned, image)) = made {
+                backdrop.made = Some((drawn, panned, Arc::new(image), job.scale));
+                backdrop.drawing = job.drawing.clone();
+                backdrop.used = self.clock;
+                // Within their budget: the least used others go.
+                let mut total: usize = self.backdrops.values().map(Backdrop::bytes).sum();
+                while total > BACKDROP_BUDGET {
+                    let Some((_, oldest)) = self
+                        .backdrops
+                        .iter_mut()
+                        .filter(|(id, b)| **id != node && b.made.is_some())
+                        .min_by_key(|(_, b)| b.used)
+                    else {
+                        break;
+                    };
+                    total -= oldest.bytes();
+                    oldest.made = None;
+                }
+            }
+        }
+        let backdrop = self.backdrops.get_mut(&node).expect("kept above");
+        // Of this drawing: the same, or one equal to it (kept from now on).
+        let of = |drawing: &mut Weak<Canvas>| match drawing.upgrade() {
+            Some(d) if Arc::ptr_eq(&d, canvas) => true,
+            Some(d) if *d == **canvas => {
+                *drawing = Arc::downgrade(canvas);
+                true
+            }
+            _ => false,
+        };
+        let current =
+            backdrop.made.as_ref().is_some_and(|m| m.3 == scale) && of(&mut backdrop.drawing);
+        let making = backdrop
+            .job
+            .as_mut()
+            .is_some_and(|job| job.scale == scale && of(&mut job.drawing));
+        if current || making {
+            return;
+        }
+        let due = std::time::Instant::now()
+            + match backdrop.made {
+                None => Default::default(),
+                Some(_) => BACKDROP_AFTER,
+            };
+        let done: Arc<Mutex<Option<MadeBackdrop>>> = Arc::default();
+        let cancel: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let (filled, drawing, stop) = (done.clone(), canvas.clone(), cancel.clone());
+        let fonts = self
+            .text
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .fonts
+            .clone();
+        off_frame(Box::new(move || {
+            let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+            while !stopped() && std::time::Instant::now() < due {
+                let left = due.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(left.min(std::time::Duration::from_millis(4)));
+            }
+            if stopped() {
+                return;
+            }
+            static TEXT: OnceLock<SharedText> = OnceLock::new();
+            let text = TEXT.get_or_init(Default::default);
+            text.lock().unwrap_or_else(|p| p.into_inner()).fonts = fonts;
+            // All of it, fitted into the longest side, at most a device
+            // pixel a point.
+            let bounds = match (painted_bounds(&drawing), text_bounds(&drawing, text)) {
+                (Some(a), Some(b)) => Some([
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ]),
+                (a, b) => a.or(b),
+            };
+            let Some([x0, y0, x1, y1]) = bounds else {
+                return;
+            };
+            let k = (BACKDROP_SIDE / (x1 - x0).max(y1 - y0).max(1.)).min(scale);
+            let drawn = zgx::scene::CanvasView {
+                x: -x0 * k / scale,
+                y: -y0 * k / scale,
+                scale: k / scale,
+            };
+            let size = [((x1 - x0) * k).ceil() as i32, ((y1 - y0) * k).ceil() as i32];
+            let panned = Panned {
+                region: [0, 0, size[0], size[1]],
+                painted: [0, 0, size[0], size[1]],
+            };
+            SUPERSEDED_BY.with(|by| *by.borrow_mut() = Some(stop.clone()));
+            TEXT_LEFT_BELOW.with(|below| below.set(4.));
+            let made = rasterize_region(&drawing, drawn, scale, panned.region, None, text)
+                .map(|image| (drawn, panned, image));
+            TEXT_LEFT_BELOW.with(|below| below.set(0.));
+            SUPERSEDED_BY.with(|by| *by.borrow_mut() = None);
+            if stopped() {
+                return;
+            }
+            *filled.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
+            zgx::image::wake_waiting();
+        }));
+        // The one it replaces, if any, superseded as it goes.
+        backdrop.job = Some(BackdropJob {
+            drawing: Arc::downgrade(canvas),
+            scale,
+            done,
+            cancel,
+        });
     }
     /// Keep `image`, `canvas` rasterized for `node`, within the budget.
     fn store(
@@ -1719,6 +1919,9 @@ fn paint_with_text(
             }
             if superseded() {
                 return Err(GpuError(SUPERSEDED.into()));
+            }
+            if canvas.texts()[index].size * zoom < TEXT_LEFT_BELOW.with(std::cell::Cell::get) {
+                continue;
             }
             let label = Label {
                 text: &canvas.texts()[index],

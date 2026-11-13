@@ -945,6 +945,13 @@ fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
     assert_eq!(show(&mut gpu, at(-46., -26., 2.)).canvas_rasterizations, 1);
     assert_eq!(show(&mut gpu, zoomed).canvas_rasterizations, 0);
     assert!(!gpu.take_images_awaited());
+    // Zoomed, it keeps a backdrop (all of the board, fitted), made off the
+    // frame after the zoom's raster.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while WOKEN.load(Ordering::SeqCst) < woken + 2 {
+        assert!(std::time::Instant::now() < deadline, "no backdrop");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     // Zoomed on before the zoom held still: the first's raster is
     // superseded, the last's alone made and shown.
     let (on, last) = (at(-60., -30., 2.4), at(-70., -36., 2.6));
@@ -972,6 +979,23 @@ fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
         woken + 1,
         "woken once: the first never landed"
     );
+    // Zoomed out far: the raster before, scaled, would show a corner of
+    // the board; its backdrop shows all of it (blurred) until the zoom's
+    // own raster lands.
+    let out = at(40., 30., 0.3);
+    let stats = show(&mut gpu, out);
+    assert_eq!(
+        (stats.canvas_rasterizations, stats.image_uploads),
+        (0, 1),
+        "the backdrop's"
+    );
+    assert!(gpu.take_images_awaited());
+    let backdrop = gpu.readback().unwrap();
+    let drawn = zgx_gpu::canvas::rasterize_viewed(&board, out, 200., 120., 1.5).unwrap();
+    let near = (0..300 * 180)
+        .filter(|i| (0..3).all(|c| backdrop[i * 4 + c].abs_diff(drawn.pixels()[i * 4 + c]) < 48))
+        .count();
+    assert!(near > 300 * 180 * 95 / 100, "{near} pixels near");
     // An offscreen renderer waits for it, as it does for shaders.
     let mut waits = GpuRenderer::new(300, 180).unwrap();
     waits.set_scale_factor(1.5);
