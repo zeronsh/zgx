@@ -6,13 +6,17 @@
 //! local z = ui.zip(file)
 //! z:add("01-home.png", { base64 = png })   -- or a string, as text
 //! z:add("index.html", html)
+//! z:add_canvas("02-board.png", draw, { width = 1440, height = 900, scale = 3 })
 //! z:close():after(function() end)          -- after every add, in order
 //! ```
 //!
 //! Entries are stored as given (no compression: pictures are compressed
 //! already), names in UTF-8, written by one thread in the order they were
-//! added. The archive is built beside the file and renamed over it on
-//! `close`, so a zip left unclosed (or failing) leaves the file as it was.
+//! added. `add_canvas` records `draw` as `ui.render_canvas` does and makes
+//! its picture on that thread, up to 256 MiB of pixels as a picked file
+//! takes, so no pixels and no base64 pass through the script. The archive
+//! is built beside the file and renamed over it on `close`, so a zip left
+//! unclosed (or failing) leaves the file as it was.
 use crate::{
     calls::{PromiseUd, pending, settle_with},
     value::Value,
@@ -25,6 +29,7 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
+    rc::Rc,
     sync::mpsc,
 };
 
@@ -32,9 +37,15 @@ use std::{
 const MAX_ENTRIES: usize = 65_534;
 const MAX_BYTES: u64 = u32::MAX as u64 - (64 << 20);
 
+/// What an entry's promise is told: done (with a picture's file size and
+/// pixels, for `add_canvas`), or why not.
+type Told = zgx::task::LatestSender<Result<Option<(u64, u32, u32)>, String>>;
+
 enum Job {
-    Add(String, Vec<u8>, zgx::task::LatestSender<Result<(), String>>),
-    Close(zgx::task::LatestSender<Result<(), String>>),
+    Add(String, Vec<u8>, Told),
+    /// A drawing, made into its picture on the zip's thread.
+    Render(String, Box<crate::canvas::Render>, Told),
+    Close(Told),
 }
 
 struct Entry {
@@ -171,7 +182,22 @@ pub(crate) fn open(path: PathBuf) -> Result<ZipUd, String> {
                 Job::Add(name, bytes, tell) => {
                     let done = match (&failed, archive.as_mut()) {
                         (Some(why), _) => Err(why.clone()),
-                        (None, Some(a)) => a.add(name, &bytes),
+                        (None, Some(a)) => a.add(name, &bytes).map(|()| None),
+                        (None, None) => Err("this zip is closed".into()),
+                    };
+                    if let Err(why) = &done {
+                        failed.get_or_insert_with(|| why.clone());
+                    }
+                    tell.send(done);
+                }
+                Job::Render(name, render, tell) => {
+                    // (One picture at a time, dropped once it's written.)
+                    let done = match (&failed, archive.as_mut()) {
+                        (Some(why), _) => Err(why.clone()),
+                        (None, Some(a)) => render.make(true).and_then(|made| {
+                            a.add(name, &made.bytes)
+                                .map(|()| Some((made.bytes.len() as u64, made.width, made.height)))
+                        }),
                         (None, None) => Err("this zip is closed".into()),
                     };
                     if let Err(why) = &done {
@@ -182,7 +208,7 @@ pub(crate) fn open(path: PathBuf) -> Result<ZipUd, String> {
                 Job::Close(tell) => {
                     let done = match (failed.take(), archive.take()) {
                         (Some(why), _) => Err(why),
-                        (None, Some(a)) => a.close(),
+                        (None, Some(a)) => a.close().map(|()| None),
                         (None, None) => Err("this zip is closed".into()),
                     };
                     tell.send(done);
@@ -204,9 +230,9 @@ impl ZipUd {
         &self,
         lua: &Lua,
         what: &str,
-        job: impl FnOnce(zgx::task::LatestSender<Result<(), String>>) -> Job,
+        job: impl FnOnce(Told) -> Job,
     ) -> mlua::Result<PromiseUd> {
-        let (tell, mut heard) = zgx::task::latest::<Result<(), String>>();
+        let (tell, mut heard) = zgx::task::latest::<Result<Option<(u64, u32, u32)>, String>>();
         let promise = pending(lua, what.into())?;
         let sent = match self.jobs.borrow().as_ref() {
             Some(jobs) => jobs.send(job(tell)).is_ok(),
@@ -218,7 +244,15 @@ impl ZipUd {
                 return Err("ui.zip: this zip is closed".into());
             }
             match heard.recv().await {
-                Some(Ok(())) => Ok(Value::Nil),
+                Some(Ok(None)) => Ok(Value::Nil),
+                Some(Ok(Some((bytes, width, height)))) => Ok(Value::Map(
+                    vec![
+                        (Rc::from("bytes"), Value::Num(bytes as f64)),
+                        (Rc::from("width"), Value::Num(f64::from(width))),
+                        (Rc::from("height"), Value::Num(f64::from(height))),
+                    ]
+                    .into(),
+                )),
                 Some(Err(error)) => Err(format!("ui.zip: {error}")),
                 None => Err("ui.zip: the zip's thread stopped".into()),
             }
@@ -227,16 +261,23 @@ impl ZipUd {
     }
 }
 
+impl ZipUd {
+    /// `name` as an entry's, if it's one not in this zip yet.
+    fn free_name(&self, name: &str, what: &str) -> mlua::Result<String> {
+        let name = entry_name(name).map_err(|e| mlua::Error::runtime(format!("{what}: {e}")))?;
+        if self.names.borrow().contains(&name) {
+            return Err(mlua::Error::runtime(format!(
+                "{what}: \"{name}\" is in this zip already"
+            )));
+        }
+        Ok(name)
+    }
+}
+
 impl UserData for ZipUd {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("add", |lua, zip, (name, data): (String, mlua::Value)| {
-            let name =
-                entry_name(&name).map_err(|e| mlua::Error::runtime(format!("zip:add: {e}")))?;
-            if !zip.names.borrow_mut().insert(name.clone()) {
-                return Err(mlua::Error::runtime(format!(
-                    "zip:add: \"{name}\" is in this zip already"
-                )));
-            }
+            let name = zip.free_name(&name, "zip:add")?;
             let bytes = match data {
                 mlua::Value::String(text) => text.as_bytes().to_vec(),
                 mlua::Value::Table(t) => {
@@ -254,8 +295,27 @@ impl UserData for ZipUd {
                     )));
                 }
             };
+            zip.names.borrow_mut().insert(name.clone());
             zip.send(lua, "zip:add", |tell| Job::Add(name, bytes, tell))
         });
+        // `z:add_canvas(name, draw, opts)`: `draw` as `ui.render_canvas`
+        // draws it (the same `opts`: `width`, `height`, `scale`, `x`, `y`,
+        // `background`, `format`, `quality`), its picture made and added on
+        // the zip's thread. A promise of `{ bytes, width, height }`.
+        methods.add_method(
+            "add_canvas",
+            |lua, zip, (name, draw, options): (String, mlua::Function, mlua::Table)| {
+                if zip.jobs.borrow().is_none() {
+                    return Err(mlua::Error::runtime("zip:add_canvas: this zip is closed"));
+                }
+                let name = zip.free_name(&name, "zip:add_canvas")?;
+                let render = crate::canvas::Render::record(lua, &draw, &options, "zip:add_canvas")?;
+                zip.names.borrow_mut().insert(name.clone());
+                zip.send(lua, "zip:add_canvas", |tell| {
+                    Job::Render(name, Box::new(render), tell)
+                })
+            },
+        );
         methods.add_method("close", |lua, zip, ()| {
             let promise = zip.send(lua, "zip:close", Job::Close);
             // Nothing after it: the thread ends once the close is done.

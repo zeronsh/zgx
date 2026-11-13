@@ -545,3 +545,124 @@ return ui.div {}
     assert!(!saves.with_extension("zgx-write").exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Runs `code` with a save dialog that answers `saves`, until it invokes
+/// `done`: what it gave.
+fn saved_and_done(code: &'static str, saves: std::path::PathBuf) -> Value {
+    let heard: Heard = Rc::default();
+    let sink = heard.clone();
+    let h = Harness::wrapped(
+        move |runtime| {
+            let host = ScriptHost::inline(runtime, "app", code);
+            let heard = sink.clone();
+            host.action("done", move |value| {
+                heard.borrow_mut().push(("done".into(), value))
+            });
+            host
+        },
+        move |view| {
+            zgx::compose::provide(
+                zgx::platform::PlatformService(Rc::new(SavesTo(saves.clone()))),
+                view,
+            )
+        },
+    );
+    // (A 4320 by 2700 picture is slow in a debug build: a wait of its own.)
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        h.settle();
+        if let Some((_, value)) = heard.borrow().iter().find(|(n, _)| n == "done") {
+            return value.clone();
+        }
+        if let Some(e) = h.host.error().with_untracked(|e| e.clone()) {
+            panic!("script error: {e}");
+        }
+        assert!(Instant::now() < deadline, "no `done`");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A JPEG's frame size, from its SOF0/SOF2 header.
+fn jpeg_size(jpeg: &[u8]) -> (u16, u16) {
+    assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF], "a JPEG");
+    let sof = jpeg
+        .windows(2)
+        .position(|w| w[0] == 0xFF && (w[1] == 0xC0 || w[1] == 0xC2))
+        .expect("a frame header");
+    let size = |i: usize| u16::from_be_bytes([jpeg[i], jpeg[i + 1]]);
+    (size(sof + 7), size(sof + 5))
+}
+
+/// A zip's entries, by its central directory (as unzip reads it): names
+/// and bytes.
+fn unzip(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]) as usize;
+    let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+    let end = bytes.len() - 22;
+    assert_eq!(u32_at(end), 0x0605_4b50, "the end of a zip");
+    let (n, mut at) = (u16_at(end + 10), u32_at(end + 16));
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let (size, name_len, offset) = (u32_at(at + 20), u16_at(at + 28), u32_at(at + 42));
+        let name = String::from_utf8(bytes[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        let data_at = offset + 30 + u16_at(offset + 26) + u16_at(offset + 28);
+        out.push((name, bytes[data_at..data_at + size].to_vec()));
+        at += 46 + name_len;
+    }
+    out
+}
+
+#[test]
+fn a_zip_adds_a_drawing_made_on_its_own_thread() {
+    let dir = std::env::temp_dir().join(format!("zgx-zip-canvas-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let saves = dir.join("export.zip");
+    let done = saved_and_done(
+        r##"
+local function board(c, w, h)
+    c:rect(0, 0, w, h, "#ffffff")
+    c:rect(100, 100, 400, 200, "#ff0000", 16)
+end
+ui.task(function()
+    local file = ui.save_file({ name = "export.zip" }):await()
+    local z = ui.zip(file)
+    z:add("notes.txt", "hi")
+    -- A 1440 by 900 board at 3x: 46 MiB of pixels, more than a picture
+    -- given back may be, added all the same. Not awaited: in order anyway.
+    local big = z:add_canvas("board.jpg", board, { width = 1440, height = 900, scale = 3, format = "jpeg" })
+    local small = z:add_canvas("icon.png", function(c)
+        c:rect(500, 300, 10, 10, "#00ff00")
+    end, { width = 20, height = 10, scale = 2, x = 500, y = 300 })
+    local twice = pcall(z.add_canvas, z, "icon.png", board, { width = 8, height = 8 })
+    local outside = pcall(z.add_canvas, z, "../up.png", board, { width = 8, height = 8 })
+    local made = big:await()
+    local tiny = small:await()
+    z:close():await()
+    local late = pcall(z.add_canvas, z, "late.png", board, { width = 8, height = 8 })
+    ui.invoke("done", `{made.width}x{made.height} {made.bytes > 0} {tiny.width}x{tiny.height} {twice} {outside} {late}`)
+end)
+return ui.div {}
+"##,
+        saves.clone(),
+    );
+    assert_eq!(
+        done,
+        Value::Str("4320x2700 true 40x20 false false false".into())
+    );
+    let entries = unzip(&std::fs::read(&saves).unwrap());
+    let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["notes.txt", "board.jpg", "icon.png"]);
+    assert_eq!(entries[0].1, b"hi");
+    assert_eq!(jpeg_size(&entries[1].1), (4320, 2700));
+    // The PNG: 40 by 20, and its drawing at its top left (x, y).
+    let mut reader = png::Decoder::new(std::io::Cursor::new(entries[2].1.clone()))
+        .read_info()
+        .unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    assert_eq!((info.width, info.height), (40, 20));
+    let at = |x: u32, y: u32| &pixels[((y * 40 + x) * 4) as usize..][..4];
+    assert_eq!(at(5, 5), &[0, 255, 0, 255]);
+    assert_eq!(at(30, 15)[3], 0, "transparent past the square");
+    std::fs::remove_dir_all(dir).unwrap();
+}

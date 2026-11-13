@@ -706,6 +706,158 @@ fn measuring(_: &Fonts) -> Rc<RefCell<zgx::scene::Scene>> {
 static TEXT: std::sync::Mutex<Option<(Fonts, zgx_gpu::text::CpuTextRaster)>> =
     std::sync::Mutex::new(None);
 
+/// A drawing recorded on the script's thread, made into a picture file off
+/// it (`ui.render_canvas`, `zip:add_canvas`): no pixels pass through the
+/// script. (In the browser, no picture: its parts go unread.)
+#[cfg_attr(target_arch = "wasm32", expect(dead_code))]
+pub(crate) struct Render {
+    canvas: Canvas,
+    view: zgx::scene::CanvasView,
+    width: f32,
+    height: f32,
+    scale: f32,
+    background: Option<Color>,
+    fonts: Fonts,
+    format: Format,
+}
+
+/// A picture file `Render::make` made: its bytes, and its size in pixels.
+pub(crate) struct Made {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+impl Render {
+    /// `draw(c, width, height)` recorded now, with `options`' `width`,
+    /// `height`, `scale`, `x`, `y`, `background`, `format` and `quality`
+    /// (`ui.render_canvas`'s); `what` names the call in its errors.
+    pub(crate) fn record(
+        lua: &Lua,
+        draw: &mlua::Function,
+        options: &Table,
+        what: &str,
+    ) -> mlua::Result<Self> {
+        let size = |key: &str| -> mlua::Result<f32> {
+            match options.get::<Option<f32>>(key)? {
+                Some(v) if v.is_finite() && v > 0. => Ok(v),
+                _ => Err(mlua::Error::runtime(format!(
+                    "{what}: `{key}` is a size in points, over 0"
+                ))),
+            }
+        };
+        let (width, height) = (size("width")?, size("height")?);
+        let scale = match options.get::<Option<f32>>("scale")? {
+            None => 1.,
+            Some(_) => size("scale")?,
+        };
+        // The file: "png" (the default), "jpeg" (`quality` 1 to 100, 90 unless
+        // said; no transparency, laid over white) or "webp" (lossless).
+        let format = match options.get::<Option<String>>("format")?.as_deref() {
+            None | Some("png") => Format::Png,
+            Some("jpeg" | "jpg") => {
+                let quality = options.get::<Option<f64>>("quality")?.unwrap_or(90.);
+                Format::Jpeg(quality.round().clamp(1., 100.) as u8)
+            }
+            Some("webp") => Format::Webp,
+            Some(other) => {
+                return Err(mlua::Error::runtime(format!(
+                    "{what}: `format` is \"png\", \"jpeg\" or \"webp\", not \"{other}\""
+                )));
+            }
+        };
+        let x = options.get::<Option<f32>>("x")?.unwrap_or(0.);
+        let y = options.get::<Option<f32>>("y")?.unwrap_or(0.);
+        let env = crate::node::env(lua)?;
+        let theme = zgx::theme::Themes::of(&env.runtime).root().clone();
+        // The app's own fonts (bundled, loaded), as its windows shape with.
+        let fonts: Fonts = (env.platform.borrow().as_ref()).map_or_else(Vec::new, |p| p.0.fonts());
+        let recorder = lua.create_userdata(Recorder(Default::default()))?;
+        let background = draw_in(theme, || {
+            let background = match options.get::<mlua::Value>("background")? {
+                mlua::Value::Nil => None,
+                v => Some(self::color(&v)?),
+            };
+            zgx::canvas::drawing_for(&measuring(&fonts), || {
+                draw.call::<()>((&recorder, width, height))
+            })?;
+            mlua::Result::Ok(background)
+        })?;
+        let canvas = recorder.take::<Recorder>()?.0.into_inner();
+        let view = zgx::scene::CanvasView {
+            scale: 1.,
+            x: -x,
+            y: -y,
+        };
+        Ok(Self {
+            canvas,
+            view,
+            width,
+            height,
+            scale,
+            background,
+            fonts,
+            format,
+        })
+    }
+
+    /// The picture made and encoded, here (a thread other than the
+    /// script's): up to `FILE_BUDGET` of pixels for a file (`for_file`),
+    /// the 32 MiB a picture given back to the script may take otherwise.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn make(self, for_file: bool) -> Result<Made, String> {
+        let image = {
+            let mut held = TEXT.lock().unwrap_or_else(|e| e.into_inner());
+            if !held
+                .as_ref()
+                .is_some_and(|(had, _)| same_fonts(had, &self.fonts))
+            {
+                let mut text = zgx_gpu::text::CpuTextRaster::default();
+                each_font(&self.fonts, |font| text.register_font(font));
+                *held = Some((self.fonts, text));
+            }
+            let text = &mut held.as_mut().expect("made just now").1;
+            let (canvas, view, background) = (&self.canvas, self.view, self.background);
+            let (width, height, scale) = (self.width, self.height, self.scale);
+            match for_file {
+                true => zgx_gpu::canvas::picture_up_to(
+                    canvas,
+                    view,
+                    width,
+                    height,
+                    scale,
+                    background,
+                    text,
+                    zgx_gpu::canvas::FILE_BUDGET,
+                ),
+                false => {
+                    zgx_gpu::canvas::picture(canvas, view, width, height, scale, background, text)
+                }
+            }
+            .map_err(|e| e.0)?
+        };
+        let bytes = encode(&image, self.format).map_err(|e| e.0)?;
+        Ok(Made {
+            bytes,
+            width: image.width(),
+            height: image.height(),
+        })
+    }
+    /// No renderer in the browser (wasm32): no picture.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn make(self, _: bool) -> Result<Made, String> {
+        Err("pictures aren't made in the browser yet".into())
+    }
+}
+
+/// What `ui.render_canvas` gives back once its picture is made.
+enum Rendered {
+    /// The file in base64 (no `file`).
+    Given(String),
+    /// Written over `file`.
+    Written,
+}
+
 /// `ui.render_canvas(draw, { width, height, scale, x, y, background, format, quality, file })`: a
 /// promise of `draw(c, width, height)`'s drawing as a PNG (or a JPEG or
 /// WebP, `format`), in base64. The
@@ -718,36 +870,6 @@ fn render_canvas(
     lua: &Lua,
     (draw, options): (mlua::Function, Table),
 ) -> mlua::Result<crate::calls::PromiseUd> {
-    let size = |key: &str| -> mlua::Result<f32> {
-        match options.get::<Option<f32>>(key)? {
-            Some(v) if v.is_finite() && v > 0. => Ok(v),
-            _ => Err(mlua::Error::runtime(format!(
-                "ui.render_canvas: `{key}` is a size in points, over 0"
-            ))),
-        }
-    };
-    let (width, height) = (size("width")?, size("height")?);
-    let scale = match options.get::<Option<f32>>("scale")? {
-        None => 1.,
-        Some(_) => size("scale")?,
-    };
-    // The file: "png" (the default), "jpeg" (`quality` 1 to 100, 90 unless
-    // said; no transparency, laid over white) or "webp" (lossless).
-    let format = match options.get::<Option<String>>("format")?.as_deref() {
-        None | Some("png") => Format::Png,
-        Some("jpeg" | "jpg") => {
-            let quality = options.get::<Option<f64>>("quality")?.unwrap_or(90.);
-            Format::Jpeg(quality.round().clamp(1., 100.) as u8)
-        }
-        Some("webp") => Format::Webp,
-        Some(other) => {
-            return Err(mlua::Error::runtime(format!(
-                "ui.render_canvas: `format` is \"png\", \"jpeg\" or \"webp\", not \"{other}\""
-            )));
-        }
-    };
-    let x = options.get::<Option<f32>>("x")?.unwrap_or(0.);
-    let y = options.get::<Option<f32>>("y")?.unwrap_or(0.);
     let env = crate::node::env(lua)?;
     // `file`: one the user picked (`ui.save_file`), written with the
     // picture, made and encoded off the main thread with no pixels through
@@ -764,72 +886,33 @@ fn render_canvas(
             Some(path)
         }
     };
-    let theme = zgx::theme::Themes::of(&env.runtime).root().clone();
-    // The app's own fonts (bundled, loaded), as its windows shape with.
-    let fonts: Fonts = (env.platform.borrow().as_ref()).map_or_else(Vec::new, |p| p.0.fonts());
-    let recorder = lua.create_userdata(Recorder(Default::default()))?;
-    let background = draw_in(theme, || {
-        let background = match options.get::<mlua::Value>("background")? {
-            mlua::Value::Nil => None,
-            v => Some(self::color(&v)?),
-        };
-        zgx::canvas::drawing_for(&measuring(&fonts), || {
-            draw.call::<()>((&recorder, width, height))
-        })?;
-        mlua::Result::Ok(background)
-    })?;
-    let canvas = recorder.take::<Recorder>()?.0.into_inner();
-    let view = zgx::scene::CanvasView {
-        scale: 1.,
-        x: -x,
-        y: -y,
-    };
-    let (tell, mut heard) = zgx::task::latest::<Result<Option<String>, String>>();
+    let render = Render::record(lua, &draw, &options, "ui.render_canvas")?;
+    let (tell, mut heard) = zgx::task::latest::<Result<Rendered, String>>();
     let promise = crate::calls::pending(lua, "ui.render_canvas".into())?;
-    std::thread::spawn(move || {
-        let mut held = TEXT.lock().unwrap_or_else(|e| e.into_inner());
-        if !held
-            .as_ref()
-            .is_some_and(|(had, _)| same_fonts(had, &fonts))
-        {
-            let mut text = zgx_gpu::text::CpuTextRaster::default();
-            each_font(&fonts, |font| text.register_font(font));
-            *held = Some((fonts, text));
-        }
-        let text = &mut held.as_mut().expect("made just now").1;
-        let made = match &target {
-            Some(_) => zgx_gpu::canvas::picture_up_to(
-                &canvas,
-                view,
-                width,
-                height,
-                scale,
-                background,
-                text,
-                zgx_gpu::canvas::FILE_BUDGET,
-            ),
-            None => zgx_gpu::canvas::picture(&canvas, view, width, height, scale, background, text),
-        };
-        tell.send(
-            made.and_then(|image| encode(&image, format))
-                .map_err(|e| e.0)
-                .and_then(|file| match &target {
-                    // Beside it, then over it: never half a file.
-                    Some(path) => {
-                        let temp = path.with_extension("zgx-write");
-                        std::fs::write(&temp, &file)
-                            .and_then(|()| std::fs::rename(&temp, path))
-                            .map(|()| None)
-                            .map_err(|e| format!("{}: {e}", path.display()))
-                    }
-                    None => Ok(Some(base64(&file))),
-                }),
-        );
-    });
+    let work = move || {
+        let made = render.make(target.is_some());
+        tell.send(made.and_then(|made| match &target {
+            // Beside it, then over it: never half a file.
+            Some(path) => {
+                let temp = path.with_extension("zgx-write");
+                std::fs::write(&temp, &made.bytes)
+                    .and_then(|()| std::fs::rename(&temp, path))
+                    .map(|()| Rendered::Written)
+                    .map_err(|e| format!("{}: {e}", path.display()))
+            }
+            None => Ok(Rendered::Given(base64(&made.bytes))),
+        }));
+    };
+    // No threads in the browser (wasm32): it runs here, and fails there as
+    // no picture is made.
+    #[cfg(target_arch = "wasm32")]
+    work();
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(work);
     crate::calls::settle_with(lua, &promise, crate::errors::Kind::Io, async move {
         match heard.recv().await {
-            Some(Ok(Some(file))) => Ok(crate::Value::Str(file.into())),
-            Some(Ok(None)) => Ok(crate::Value::Nil),
+            Some(Ok(Rendered::Given(file))) => Ok(crate::Value::Str(file.into())),
+            Some(Ok(Rendered::Written)) => Ok(crate::Value::Nil),
             Some(Err(error)) => Err(format!("ui.render_canvas: {error}")),
             None => Err("ui.render_canvas: the drawing thread stopped".into()),
         }

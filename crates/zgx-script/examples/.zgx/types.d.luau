@@ -964,8 +964,12 @@ export type File = { path: string, name: string, size: number, type: string }
 -- `ui.zip(file)`: a .zip written into a file the user picked, an entry at a
 -- time (stored as given; names are relative paths). `close` comes after
 -- every `add`, in order, and only then is the file replaced.
+-- `add_canvas` adds `draw`'s picture as `ui.render_canvas` would make it
+-- (the same options), made on the zip's thread with no pixels through the
+-- script and up to 256 MiB of them: a promise of its bytes and pixels.
 export type Zip = {
 	add: (self: Zip, name: string, data: string | { base64: string }) -> Promise<nil>,
+	add_canvas: (self: Zip, name: string, draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<RenderedFile>,
 	close: (self: Zip) -> Promise<nil>,
 }
 export type FilePickerOptions = {
@@ -1487,6 +1491,9 @@ export type RenderCanvasOptions = {
 	-- and the promise gives nil.
 	file: (File | string)?,
 }
+-- A picture file zgx made and wrote itself: its size in bytes, and its
+-- pixels.
+export type RenderedFile = { bytes: number, width: number, height: number }
 
 -- `ui.web(opts)`: a web page's controller. Its fields are tracked, so a
 -- text or computed reading `web.title` follows the page.
