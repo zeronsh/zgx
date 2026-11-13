@@ -2041,7 +2041,7 @@ thread_local! {
     /// old one's (`derive`), as after its own `set_key`, rather than every
     /// row converted again. Few and recent; one the VM has no table for
     /// converts whole.
-    static REPUBLISHED: RefCell<Vec<(usize, Value)>> = const { RefCell::new(Vec::new()) };
+    static REPUBLISHED: RefCell<Vec<(usize, std::rc::Weak<[Value]>)>> = const { RefCell::new(Vec::new()) };
 }
 const REPUBLISHED_KEPT: usize = 16;
 fn host_base(id: usize) -> Option<Value> {
@@ -2049,7 +2049,8 @@ fn host_base(id: usize) -> Option<Value> {
         kept.borrow()
             .iter()
             .find(|(at, _)| *at == id)
-            .map(|(_, old)| old.clone())
+            .and_then(|(_, old)| old.upgrade())
+            .map(Value::List)
     })
 }
 /// Notes that `new` replaced `old` (reconciled, so its unchanged rows are
@@ -2064,7 +2065,8 @@ fn note_republished(old: &Value, new: &Value, depth: u32) {
                     if kept.len() >= REPUBLISHED_KEPT {
                         kept.remove(0);
                     }
-                    kept.push((identity(new), old.clone()));
+                    // Weakly: the cache's sweeps let go of an old list nothing holds.
+                    kept.push((identity(new), Rc::downgrade(a)));
                 });
             }
         }
