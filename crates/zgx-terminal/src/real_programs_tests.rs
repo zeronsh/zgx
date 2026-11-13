@@ -521,11 +521,13 @@ fn powershell_runs_completes_and_recalls() {
         !run.screen().contains("Get-ChildItem")
     });
     run.key(Key::ArrowUp);
-    run.until("the last command recalled", |run| {
-        let line = "Write-Output ('zgx' + 6*7)";
-        run.rows().iter().filter(|row| row.contains(line)).count() >= 2
-    });
+    let line = "Write-Output ('zgx' + 6*7)";
+    let lines = |run: &Run| run.rows().iter().filter(|row| row.contains(line)).count();
+    run.until("the last command recalled", |run| lines(run) >= 2);
+    // As a person would, waiting for the line to clear before typing on:
+    // ConPTY reads Escape and a letter right behind it as Alt and the letter.
     run.key(Key::Escape);
+    run.until("the recalled line cleared", |run| lines(run) == 1);
     run.type_text("exit");
     run.key(Key::Enter);
     assert_eq!(run.exits(), 0, "{}", run.screen());
