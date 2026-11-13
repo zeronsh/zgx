@@ -853,23 +853,49 @@ jobs:
       # Direct3D 11 (the `d3d11` feature, on WARP) draws what Direct3D 12
       # does, byte for byte: the suite's scenes and every ready-made shader
       # fill and layer shader, each compiled cold by FXC in its child
-      # (`d3d11_parity`), optimized as apps ship them; and its ahead-compiled
-      # shaders are what naga writes now.
-      - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --test d3d11_atlas --test d3d11_present --release --locked
-        env:
-          LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
-      # Tests of the renderer's own, drawn with Direct3D 11 throughout
-      # (`ZGX_D3D11` is read once a process): a popup's glass blurring what
-      # its window drew under it.
-      - run: cargo test -p zgx-gpu --features d3d11 --test popup_backdrop --release --locked
-        env:
-          ZGX_D3D11: "1"
-      # Layer shaders' passes and tagged boxes read on Direct3D 11 as on
-      # Direct3D 12 (`shader_passes`, but its pictures and GPU views, which
-      # Direct3D 11 leaves out: `d3d11_left_out`).
-      - run: cargo test -p zgx-gpu --features d3d11 --test shader_passes --release --locked -- a_feedback_pass_keeps_state_from_frame_to_frame steps_run_a_pass_that_many_times_a_frame a_once_pass_draws_once a_later_pass_reads_an_earlier_ones_result_from_this_frame a_pass_past_one_keeps_float_values a_shader_declared_as_a_script_declares_it_draws_through_its_passes tagged_boxes_are_read_where_they_are_this_frame
-        env:
-          ZGX_D3D11: "1"
+      # (`d3d11_parity`, with a `LOCALAPPDATA` of its own, run first); and
+      # its ahead-compiled shaders are what naga writes now (next step).
+      # Then every other zgx-gpu test drawn with Direct3D 11 throughout
+      # (`ZGX_D3D11`, read once a process; the d3d11_* tests set it
+      # themselves), so what it can't draw shows here and not silently.
+      # Each skip has its reason beside it; drop the skip with its reason.
+      # Unoptimized, as the steps above, and one build for both: built
+      # with the release profile's LTO, the eighty test binaries took past
+      # the job's hour. (Rust neither reassociates floats nor contracts
+      # them into FMAs when optimizing, and the shaders compile the same,
+      # so parity checks an unoptimized build as strictly.)
+      - name: zgx-gpu's tests drawn with Direct3D 11
+        shell: bash
+        run: |
+          skips=(
+            a_picture_is_sampled_by_name                                 # pictures read by layer shaders: left out on D3D11
+            an_apps_view_is_drawn_with_its_device_and_sampled_by_name    # GPU views read by layer shaders: left out on D3D11
+            backdrop_readers_apart_share_one_copy_and_pass               # counts copies: D3D11 makes 2 where D3D12 shares 1
+            draws_around_a_reader_sharing_a_copy_do_not_draw_over_it     # counts copies: D3D11 makes 2 where D3D12 shares 1
+            a_child_fxc_cannot_survive_fails_that_shader_alone           # Direct3D 12's FXC child process
+            an_apps_shaders_built_through_a_child_draw_as_wgpu_builds_them  # Direct3D 12's FXC child process
+            a_declared_fill_is_compiled_before_it_draws                  # compile timing on WARP under D3D11
+            a_window_draws_on_while_a_fill_compiles                      # compile timing on WARP under D3D11
+            a_width_within_its_reach_breaks_its_lines_as_it_did          # fails without D3D11 too (#2124, #1813)
+            a_page_pushed_and_popped_again_and_again_gives_its_image_textures_back  # fails on WARP without D3D11 (#2124)
+            a_long_text_draws_only_the_lines_in_its_clip                 # fails on WARP without D3D11 (#2124)
+            naturally_measured_streaming_rows_reflow_with_damage_and_stable_anchor  # fails on WARP without D3D11 (#2124)
+            a_long_column_s_damaged_frames_are_full_frames               # fails on WARP without D3D11 (#2124)
+            a_node_mounted_and_gone_while_a_layered_list_moves_leaves_nothing  # fails on WARP without D3D11 (#2124)
+            atlas_icons_survive_the_atlas_filling_up                     # fails on WARP without D3D11 (#2124)
+          )
+          args=()
+          for skip in "${skips[@]}"; do args+=(--skip "$skip"); done
+          d3d11=() targets=(--lib)
+          for test in crates/zgx-gpu/tests/*.rs; do
+            name=$(basename "$test" .rs)
+            case $name in
+              d3d11_*) d3d11+=(--test "$name") ;;
+              *) targets+=(--test "$name") ;;
+            esac
+          done
+          LOCALAPPDATA="$RUNNER_TEMP\\zgx-cold-d3d11" cargo test -p zgx-gpu --features d3d11 --locked "${d3d11[@]}"
+          ZGX_D3D11=1 cargo test -p zgx-gpu --features d3d11 --locked "${targets[@]}" -- "${args[@]}"
       # Its ahead-compiled shaders (dxbc/) are FXC's bytecode of naga's HLSL
       # today; stale ones are kept for a machine without FXC to take (and
       # checked when the parity above failed: stale shaders fail it).

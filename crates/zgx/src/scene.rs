@@ -15676,7 +15676,7 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         match self.plain_walks() {
             true => match damage {
-                Some(_) => self.layer_items_walk::<false, false, false, false>(
+                Some(_) => self.layer_items_walk::<false, false, false, false, false>(
                     root,
                     damage,
                     &mut Vec::new(),
@@ -15685,7 +15685,7 @@ impl Scene {
                 ),
                 None => self.layer_items_whole(root),
             },
-            false => self.layer_items_walk::<true, false, false, false>(
+            false => self.layer_items_walk::<true, false, false, false, false>(
                 root,
                 damage,
                 &mut Vec::new(),
@@ -15707,7 +15707,7 @@ impl Scene {
         if !self.plain_walks() || !self.paints_plainly(node, clip) {
             return None;
         }
-        Some(self.layer_items_walk::<false, false, false, true>(
+        Some(self.layer_items_walk::<false, false, false, true, false>(
             None,
             Some(&[clip]),
             &mut Vec::new(),
@@ -15839,19 +15839,41 @@ impl Scene {
     /// its damage already, and pays nothing for it.
     #[inline(never)]
     fn layer_items_whole(&self, root: Option<NodeId>) -> Vec<PaintItem<'_>> {
-        self.layer_items_walk::<false, false, true, false>(root, None, &mut Vec::new(), None, None)
+        match self.long_lists {
+            true => self.layer_items_walk::<false, false, true, false, true>(
+                root,
+                None,
+                &mut Vec::new(),
+                None,
+                None,
+            ),
+            false => self.layer_items_walk::<false, false, true, false, false>(
+                root,
+                None,
+                &mut Vec::new(),
+                None,
+                None,
+            ),
+        }
     }
     /// The window's paint items (as [`Scene::layer_items`] with `None`), and
     /// into `inherited` what each took from its ancestors, for
     /// [`Scene::item_in`] to work it out again alone.
     pub fn layer_items_recorded(&self, inherited: &mut Vec<Inherited>) -> Vec<PaintItem<'_>> {
         inherited.clear();
-        match self.plain_walks() {
-            true => self
-                .layer_items_walk::<false, true, false, false>(None, None, inherited, None, None),
-            false => {
-                self.layer_items_walk::<true, true, false, false>(None, None, inherited, None, None)
-            }
+        match (self.plain_walks(), self.long_lists) {
+            (true, false) => self.layer_items_walk::<false, true, false, false, false>(
+                None, None, inherited, None, None,
+            ),
+            (true, true) => self.layer_items_walk::<false, true, false, false, true>(
+                None, None, inherited, None, None,
+            ),
+            (false, false) => self.layer_items_walk::<true, true, false, false, false>(
+                None, None, inherited, None, None,
+            ),
+            (false, true) => self.layer_items_walk::<true, true, false, false, true>(
+                None, None, inherited, None, None,
+            ),
         }
     }
     /// The paint items of `id`'s subtree as the window's walk makes them,
@@ -15867,22 +15889,75 @@ impl Scene {
         out: &mut Vec<Inherited>,
     ) -> Vec<PaintItem<'_>> {
         out.clear();
-        match self.plain_walks() {
-            true => self.layer_items_walk::<false, true, false, false>(
-                None,
-                None,
-                out,
-                Some((id, inherited)),
-                None,
-            ),
-            false => self.layer_items_walk::<true, true, false, false>(
-                None,
-                None,
-                out,
-                Some((id, inherited)),
-                None,
-            ),
+        let from = Some((id, inherited));
+        match (self.plain_walks(), self.long_lists) {
+            (true, false) => self
+                .layer_items_walk::<false, true, false, false, false>(None, None, out, from, None),
+            (true, true) => self
+                .layer_items_walk::<false, true, false, false, true>(None, None, out, from, None),
+            (false, false) => self
+                .layer_items_walk::<true, true, false, false, false>(None, None, out, from, None),
+            (false, true) => {
+                self.layer_items_walk::<true, true, false, false, true>(None, None, out, from, None)
+            }
         }
+    }
+    /// What a kept frame rests on: every child its walk's search of a long
+    /// list left out, `ink_may_show` says can't show (but where a clip
+    /// inset narrows the walk's clip past what `ink_may_show` applies).
+    #[cfg(debug_assertions)]
+    #[cold]
+    fn left_out_cant_show(&self, all: &[NodeId], found: &[NodeId]) {
+        if found.len() == all.len() {
+            return;
+        }
+        let inset_above = |id: NodeId| {
+            let mut at = self.node(id).parent;
+            while let Some(a) = at {
+                if self.node(a).clip_inset.is_some() {
+                    return true;
+                }
+                at = self.node(a).parent;
+            }
+            false
+        };
+        for child in all {
+            if !found.contains(child) {
+                debug_assert!(
+                    !self.ink_may_show(*child) || inset_above(*child),
+                    "left {child:?} out of a kept frame (its long list searched by its clip), \
+                     yet ink_may_show says it can show, with no ancestor's clip inset narrowing \
+                     the walk's clip past ink_may_show's (the one mismatch that is safe)"
+                );
+            }
+        }
+    }
+    /// Whether `id`'s ink can show in the window: the test a walk cut to its
+    /// clips puts to it (`layer_items_walk`'s `within`), at its parent's
+    /// world translation and the clip it paints within. A kept frame's walk
+    /// leaves out only nodes for which this is false (a long list's rows
+    /// out of view), so one changing that still can't show paints nothing
+    /// a patch must draw. Never false where the walk would keep something
+    /// that paints (its clip insets aren't applied, which only widens the
+    /// clip); false where an ancestor is hidden. Unlike `within`, false
+    /// within a clip for a node with no ink or an empty one: the walk keeps
+    /// it, but nothing in it paints, and once something does its ink is
+    /// worked out afresh.
+    /// Renderer plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn ink_may_show(&self, id: NodeId) -> bool {
+        let Some(parent) = self.node(id).parent else {
+            return true;
+        };
+        let Some((transform, clip)) = self.shown_context(parent) else {
+            return false;
+        };
+        let Some(clip) = clip else {
+            return true;
+        };
+        self.ink(id).is_some_and(|ink| {
+            ink.width > 0. && ink.height > 0. && ink.translated(transform).intersects(clip)
+        })
     }
     /// Plain node `id`'s box as [`Scene::item_in`] places it, from what it
     /// `inherited`, and what it paints: for a renderer patching a node
@@ -15948,6 +16023,9 @@ impl Scene {
     }
     /// `POPUPS`: popup roots exist, which this walk leaves out below `root`.
     /// `RECORD`: what each item inherits goes into `inherited`.
+    /// `LONG`: some list grew long (`long_lists`): without damage, a whole
+    /// repaint's or a kept frame's walk searches long lists by its clip;
+    /// without one, the walk compiles as it did.
     /// `from`: a subtree alone, from what its root inherited (`root` and
     /// `damage` are then `None`).
     /// `AROUND`: what `around` holds is left out, its own items kept.
@@ -15956,6 +16034,7 @@ impl Scene {
         const RECORD: bool,
         const CLIPS: bool,
         const AROUND: bool,
+        const LONG: bool,
     >(
         &self,
         root: Option<NodeId>,
@@ -16237,6 +16316,28 @@ impl Scene {
                         (Some(reach), all) if all.len() >= SEARCHED_CHILDREN => {
                             self.searched(id, node, all, transform, reach)
                         }
+                        // A walk cut to its clips (a whole repaint) or a kept
+                        // frame's (`RECORD`) searches long lists by their
+                        // clip, as a damaged one does by its damage: the
+                        // rows that can show, not every row. (A kept
+                        // frame's leaves its other children as they are:
+                        // testing each against its clip costs more than
+                        // the few it would leave out.)
+                        (None, all)
+                            if LONG && (CLIPS || RECORD) && all.len() >= SEARCHED_CHILDREN =>
+                        {
+                            match clip {
+                                Some(clip) => {
+                                    let found = self.searched(id, node, all, transform, clip);
+                                    #[cfg(debug_assertions)]
+                                    if RECORD {
+                                        self.left_out_cant_show(all, found);
+                                    }
+                                    found
+                                }
+                                None => all,
+                            }
+                        }
                         (_, all) => all,
                     },
                 };
@@ -16247,9 +16348,11 @@ impl Scene {
                         // What it holds is cut to `clip`: a child whose ink
                         // misses it paints nothing here (a scroll view's
                         // rows out of view), on a whole repaint (`CLIPS`; a
-                        // damaged walk prunes by its damage). A recorded
-                        // walk keeps them: a kept frame patches what comes
-                        // into view from its list.
+                        // damaged walk prunes by its damage). A kept
+                        // frame's walk leaves out only a long list's rows
+                        // out of view (above); what comes into view later
+                        // reaches it through a splice of an ancestor that
+                        // changed (`Scene::ink_may_show`).
                         .filter(|child| {
                             let ink = self.ink(**child);
                             touches(ink, transform) && (!CLIPS || within(ink, transform, clip))
@@ -23435,8 +23538,9 @@ mod local_transform_tests {
     /// A full paint walk (no damage, as a resize repaints) passes by what
     /// its clip cuts away: a scroll view's rows out of view give no items,
     /// while one partly in view, and one out of view whose shadow reaches
-    /// into it, do. A recorded walk (a kept frame's list, patched as rows
-    /// come into view) keeps every row.
+    /// into it, do. A recorded walk (a kept frame's list) keeps a short
+    /// list's rows, out of view or not: it leaves out a long list's alone,
+    /// those its search finds can't show (`kept_lists`).
     #[test]
     fn a_full_walk_passes_by_what_its_clip_cuts_away() {
         let mut scene = Scene::new(400., 300.);
@@ -23492,6 +23596,109 @@ mod local_transform_tests {
         for id in [inside, partly, below, reaching] {
             assert!(recorded.contains(&id), "recorded: {id:?}");
         }
+        assert!(scene.ink_may_show(reaching) && !scene.ink_may_show(below));
+    }
+    /// A kept frame's walk and a splice's re-walk of a long list's parent
+    /// cut the list alike: with nothing changed, the splice walks again the
+    /// very rows the keep recorded (those its clip shows), each with what
+    /// it inherited.
+    #[test]
+    fn a_splice_of_a_long_list_walks_the_rows_its_keep_recorded() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let view = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(200., 100.)
+            },
+        );
+        let list = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        for i in 0..400u32 {
+            scene.append(
+                list,
+                NodeKind::Quad(QuadStyle {
+                    fill: Color((i % 251) as u8, 9, 9, 255),
+                    ..QuadStyle::default()
+                }),
+                fixed(200., 20.),
+            );
+        }
+        scene.set_transform(list, Transform { x: 0., y: -2000. });
+        scene.flush();
+        let mut inherited = Vec::new();
+        let recorded = scene.layer_items_recorded(&mut inherited);
+        let ids: Vec<NodeId> = recorded.iter().map(|item| item.id).collect();
+        let at = ids
+            .iter()
+            .position(|id| *id == list)
+            .expect("the list recorded");
+        let rows: Vec<NodeId> = ids[at..].to_vec();
+        assert!(
+            rows.len() < 20,
+            "the rows its clip shows, not the list: {}",
+            rows.len()
+        );
+        let mut out = Vec::new();
+        let spliced: Vec<NodeId> = scene
+            .layer_items_from(list, &inherited[at], &mut out)
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(spliced, rows, "the splice walks the rows the keep did");
+        assert_eq!(out.len(), spliced.len(), "each with what it inherited");
+    }
+    #[test]
+    fn a_long_list_leaves_out_a_row_that_paints_nothing_out_of_view() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let view = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(200., 100.)
+            },
+        );
+        let list = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        let mut empty = None;
+        for i in 0..400u32 {
+            let kind = match i {
+                300 => NodeKind::Container(Layout::Overlay),
+                _ => NodeKind::Quad(QuadStyle {
+                    fill: Color((i % 251) as u8, 9, 9, 255),
+                    ..QuadStyle::default()
+                }),
+            };
+            let row = scene.append(list, kind, fixed(200., 20.));
+            if i == 300 {
+                empty = Some(row);
+            }
+        }
+        let empty = empty.unwrap();
+        scene.flush();
+        // A debug build checks each row left out can't show.
+        let mut inherited = Vec::new();
+        let ids: Vec<NodeId> = scene
+            .layer_items_recorded(&mut inherited)
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(!ids.contains(&empty));
+        assert!(!scene.ink_may_show(empty), "it paints nothing");
+        // Given something to paint, in view, it can show.
+        scene.append(
+            empty,
+            NodeKind::Quad(QuadStyle {
+                fill: Color(9, 9, 9, 255),
+                ..QuadStyle::default()
+            }),
+            fixed(200., 20.),
+        );
+        scene.set_transform(list, Transform { x: 0., y: -6000. });
+        scene.flush();
+        assert!(scene.ink_may_show(empty));
     }
     #[test]
     fn colour_filters_compose_down_the_tree_without_layers() {
