@@ -20304,6 +20304,83 @@ impl TextServices {
     }
 }
 
+/// `plain_glyph_places`: each glyph's key and pen position, the
+/// underlines' boxes, and the prepared text's key (for `trim_text`).
+#[doc(hidden)]
+pub type PlainGlyphs = (Vec<(CacheKey, f32, f32)>, Vec<Rect>, u64);
+/// Plain text's glyphs as a renderer at `scale` places them: each one's key
+/// and its pen position in device pixels from the text's origin (its box's,
+/// snapped to a device pixel), laid out by `cache` as layout measured it;
+/// then its underlines' boxes (`FontStyle::underline`), in points from
+/// there. For the software raster, to draw the glyphs the GPU draws where
+/// it does. `None` for text the prepared cache doesn't lay out
+/// (`handles_plain`).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn plain_glyph_places(
+    fonts: &mut FontSystem,
+    cache: &mut prepared::TextCache,
+    text: &Arc<str>,
+    font_size: f32,
+    font: &zgx::text_layout::FontStyle,
+    wrap: f32,
+    height: f32,
+    scale: f32,
+) -> Option<PlainGlyphs> {
+    if !prepared::TextCache::handles_plain(text, font_size) {
+        return None;
+    }
+    let laid = cache.layout_plain(fonts, text, font_size, font, Some(wrap));
+    let glyphs = styled_glyphs(Vec::new(), laid.runs(Some(height)), scale, |_, _| 0);
+    let underlines = font.underline.map_or_else(Vec::new, |line| {
+        text::plain_underlines(laid.runs(Some(height)), font_size, line)
+            .into_iter()
+            .map(|d| d.bounds)
+            .collect()
+    });
+    Some((
+        glyphs.into_iter().map(|g| (g.key, g.x, g.y)).collect(),
+        underlines,
+        laid.key(),
+    ))
+}
+/// After a frame that laid text out from `fonts` and `cache` without a
+/// renderer (the software raster), what a renderer's frame trims: words
+/// unused a few shaping frames, and prepared text past what was `drawn`
+/// and a little of the rest. Without it the words a changing value shapes
+/// pile up, frame after frame.
+#[doc(hidden)]
+pub fn trim_text(
+    fonts: &mut FontSystem,
+    cache: &mut prepared::TextCache,
+    drawn: impl IntoIterator<Item = u64>,
+) {
+    fonts.shape_run_cache.trim(SHAPE_RUN_AGES);
+    if cache.needs_trim() {
+        cache.trim(drawn);
+    }
+}
+/// A glyph's image as a renderer rasterizes it for its atlas.
+#[doc(hidden)]
+pub fn glyph_image(
+    swash: &mut SwashCache,
+    fonts: &mut FontSystem,
+    key: CacheKey,
+) -> Option<cosmic_text::SwashImage> {
+    text::glyph_image(swash, fonts, key)
+}
+/// A mask glyph's coverage `a` as `draw.wgsl` draws it in `color` at
+/// `scale`: firmed below `SHARP_TEXT_BELOW` (`firm`, `firmness`).
+#[doc(hidden)]
+pub fn glyph_coverage(a: f32, color: Color, scale: f32) -> f32 {
+    if scale >= SHARP_TEXT_BELOW {
+        return a;
+    }
+    let luma = (0.2126 * color.0 as f32 + 0.7152 * color.1 as f32 + 0.0722 * color.2 as f32) / 255.;
+    let k = (luma * 2.).clamp(0., 1.);
+    a + k * 0.67 * a * (1. - a)
+}
+
 /// `fonts` and `cache` as text services a scene whose host installed none
 /// takes (`Scene::set_default_text_services`): a renderer's, so a scene it
 /// draws without `install_text` is measured as it is drawn, not by zgx's

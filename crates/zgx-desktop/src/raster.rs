@@ -51,6 +51,21 @@ pub struct Raster {
     rendered: Option<u64>,
     /// Scroll moves applied by moving pixels already drawn (for tests).
     scroll_copies: u64,
+    /// The text services the scene is laid out with (`share_text`): plain
+    /// text drawn from their layout, as the GPU renderer draws it.
+    shared_text: Option<std::rc::Rc<std::cell::RefCell<SharedText>>>,
+}
+/// Text services a raster shares with its scene, and the glyph images it
+/// drew from them.
+struct SharedText {
+    fonts: std::rc::Rc<std::cell::RefCell<cosmic_text::FontSystem>>,
+    cache: std::rc::Rc<std::cell::RefCell<zgx_gpu::prepared::TextCache>>,
+    swash: cosmic_text::SwashCache,
+    images: HashMap<cosmic_text::CacheKey, Option<cosmic_text::SwashImage>>,
+    image_bytes: usize,
+    /// The prepared texts drawn this frame, kept when it trims the
+    /// services after it (`zgx_gpu::trim_text`).
+    drawn: Vec<u64>,
 }
 impl Raster {
     /// Register an additional validated font and invalidate retained glyph shapes.
@@ -86,7 +101,27 @@ impl Raster {
             selected: None,
             rendered: None,
             scroll_copies: 0,
+            shared_text: None,
         }
+    }
+    /// Lay out and draw plain text with `fonts` and `cache`, the ones its
+    /// scenes are measured with (`TextServices::install`, a renderer's
+    /// `install_text`): the glyphs the GPU renderer draws, where it draws
+    /// them, rather than the bundled font's.
+    #[doc(hidden)]
+    pub fn share_text(
+        &mut self,
+        fonts: std::rc::Rc<std::cell::RefCell<cosmic_text::FontSystem>>,
+        cache: std::rc::Rc<std::cell::RefCell<zgx_gpu::prepared::TextCache>>,
+    ) {
+        self.shared_text = Some(std::rc::Rc::new(std::cell::RefCell::new(SharedText {
+            fonts,
+            cache,
+            swash: cosmic_text::SwashCache::new(),
+            images: HashMap::new(),
+            image_bytes: 0,
+            drawn: Vec::new(),
+        })));
     }
     /// Resize the store to `width` by `height`.
     pub fn resize(&mut self, width: usize, height: usize) {
@@ -141,6 +176,21 @@ impl Raster {
         }
         self.render_flat(scene, scene.layer_items(None), &repaint);
         self.rendered = Some(serial);
+        // Text laid out this frame: the shared services trimmed, as a
+        // renderer's frame trims its own.
+        if let Some(shared) = &self.shared_text {
+            let mut shared = shared.borrow_mut();
+            let drawn = std::mem::take(&mut shared.drawn);
+            if !drawn.is_empty() {
+                zgx_gpu::trim_text(
+                    &mut shared.fonts.borrow_mut(),
+                    &mut shared.cache.borrow_mut(),
+                    drawn.iter().copied(),
+                );
+            }
+            shared.drawn = drawn;
+            shared.drawn.clear();
+        }
     }
     /// Move the pixels within `clip` by `(dx, dy)`, as content that scrolled
     /// by that much: what comes in at the edge the move leaves is left for a
@@ -393,7 +443,19 @@ impl Raster {
                                     rect.x -= inset;
                                 }
                             }
-                            if item.text_options != Default::default() {
+                            if item.text_options == Default::default()
+                                && self.shared_text.is_some()
+                                && self.shared_plain_text(
+                                    text,
+                                    bounds,
+                                    clip,
+                                    *color,
+                                    *font_size,
+                                    item.effects,
+                                    item.font,
+                                )
+                            {
+                            } else if item.text_options != Default::default() {
                                 let runs = if text.is_empty() {
                                     Vec::new()
                                 } else {
@@ -468,6 +530,7 @@ impl Raster {
             selected: None,
             rendered: None,
             scroll_copies: 0,
+            shared_text: self.shared_text.clone(),
         };
         let mut black = make(0);
         let mut white = make(0xffffff);
@@ -1091,6 +1154,126 @@ impl Raster {
         if oversized {
             self.rich_glyphs.pop();
         }
+    }
+    /// Plain text from the shared services' layout (`share_text`), each
+    /// glyph where and as the GPU renderer draws it at 1x: false for text
+    /// their prepared cache doesn't lay out.
+    #[allow(clippy::too_many_arguments)]
+    fn shared_plain_text(
+        &mut self,
+        text: &std::sync::Arc<str>,
+        bounds: Rect,
+        clip: Rect,
+        color: Color,
+        size: f32,
+        effects: Effects,
+        font: &zgx::text_layout::FontStyle,
+    ) -> bool {
+        const IMAGE_BUDGET: usize = 8 * 1024 * 1024;
+        let Some(shared) = self.shared_text.clone() else {
+            return false;
+        };
+        let mut shared = shared.borrow_mut();
+        let SharedText {
+            fonts,
+            cache,
+            swash,
+            images,
+            image_bytes,
+            drawn,
+        } = &mut *shared;
+        let mut fonts = fonts.borrow_mut();
+        let Some((places, underlines, key)) = zgx_gpu::plain_glyph_places(
+            &mut fonts,
+            &mut cache.borrow_mut(),
+            text,
+            size,
+            font,
+            bounds.width,
+            bounds.height,
+            1.,
+        ) else {
+            return false;
+        };
+        drawn.push(key);
+        let Some(clip) = intersect(bounds, clip) else {
+            return true;
+        };
+        let (x0, y0, x1, y1) = self.region(clip);
+        // Its origin on a whole pixel, as the GPU renderer snaps it.
+        let (ox, oy) = (bounds.x.round() as i32, bounds.y.round() as i32);
+        for (key, x, y) in places {
+            if !images.contains_key(&key) {
+                let image = zgx_gpu::glyph_image(swash, &mut fonts, key);
+                *image_bytes += image.as_ref().map_or(0, |i| i.data.capacity());
+                if *image_bytes > IMAGE_BUDGET {
+                    images.clear();
+                    *image_bytes = 0;
+                }
+                images.insert(key, image);
+            }
+            let Some(image) = &images[&key] else {
+                continue;
+            };
+            let gx = ox + x as i32 + image.placement.left;
+            let gy = oy + y as i32 - image.placement.top;
+            let color = selected_ink(&self.selected, bounds, gx, gy, image, color);
+            for by in 0..image.placement.height as usize {
+                let py = gy + by as i32;
+                if py < y0 as i32 || py >= y1 as i32 {
+                    continue;
+                }
+                for bx in 0..image.placement.width as usize {
+                    let px = gx + bx as i32;
+                    if px < x0 as i32 || px >= x1 as i32 {
+                        continue;
+                    }
+                    let i = by * image.placement.width as usize + bx;
+                    let (ink, alpha) = match image.content {
+                        cosmic_text::SwashContent::Mask => (
+                            color,
+                            zgx_gpu::glyph_coverage(image.data[i] as f32 / 255., color, 1.),
+                        ),
+                        cosmic_text::SwashContent::Color => (
+                            Color(
+                                image.data[i * 4],
+                                image.data[i * 4 + 1],
+                                image.data[i * 4 + 2],
+                                color.3,
+                            ),
+                            image.data[i * 4 + 3] as f32 / 255.,
+                        ),
+                        cosmic_text::SwashContent::SubpixelMask => (
+                            color,
+                            zgx_gpu::glyph_coverage(image.data[i * 4] as f32 / 255., color, 1.),
+                        ),
+                    };
+                    blend(
+                        &mut self.pixels[py as usize * self.width + px as usize],
+                        ink,
+                        effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade) * alpha,
+                    );
+                }
+            }
+        }
+        // Its underlines in its colour, as the GPU draws them: on whole
+        // pixels.
+        for line in underlines {
+            let (left, top) = ((line.x + ox as f32).round(), (line.y + oy as f32).round());
+            let right = (line.x + ox as f32 + line.width).round();
+            let line = Rect::new(left, top, right - left, line.height.round().max(1.));
+            let Some(shown) = intersect(line, clip) else {
+                continue;
+            };
+            let (lx0, ly0, lx1, ly1) = self.region(shown);
+            for py in ly0..ly1 {
+                let alpha = effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade);
+                for pixel in &mut self.pixels[py * self.width + lx0..py * self.width + lx1] {
+                    blend(pixel, color, alpha);
+                }
+            }
+        }
+        true
     }
     #[allow(clippy::too_many_arguments)]
     fn styled_text(
