@@ -371,12 +371,72 @@ pub struct KeyedRegion {
 
 pub struct VirtualRegion {
     pub offset: Signal<f32>,
-    pub row_height: f32,
+    pub heights: Heights,
     pub overscan: usize,
     pub count: Box<dyn FnMut() -> usize>,
     pub key: Box<dyn FnMut(usize) -> u32>,
     /// A row, given its index signal and key id.
     pub build: BuildListRow,
+}
+
+/// A virtual list's row heights: all one (`virtual_list`), or each its own
+/// (`variable_virtual_list`), measured from the rows mounted
+/// (`measured_virtual_list`, `measured_rows`).
+pub enum Heights {
+    Fixed(f32),
+    Variable {
+        heights: super::VariableHeights,
+        measured: bool,
+    },
+}
+impl Heights {
+    /// Where row `index` starts (tracked).
+    pub fn top(&self, index: usize) -> f32 {
+        match self {
+            Heights::Fixed(height) => index as f32 * height,
+            Heights::Variable { heights, .. } => heights.row_offset(index),
+        }
+    }
+    /// Row `index`'s height (tracked).
+    pub fn height(&self, index: usize) -> f32 {
+        match self {
+            Heights::Fixed(height) => *height,
+            Heights::Variable { heights, .. } => heights.row_height(index).unwrap_or(0.),
+        }
+    }
+    /// All `count` rows' height together (tracked).
+    pub fn total(&self, count: usize) -> f32 {
+        match self {
+            Heights::Fixed(height) => count as f32 * height,
+            Heights::Variable { heights, .. } => heights.content_height(),
+        }
+    }
+    /// The row at `offset` down the list, of `count` (tracked).
+    pub fn row_at(&self, offset: f32, count: usize) -> usize {
+        match self {
+            Heights::Fixed(height) => ((offset.max(0.) / height) as usize).min(count),
+            Heights::Variable { heights, .. } => heights.row_at(offset).unwrap_or(0),
+        }
+    }
+    /// Its rows are measured: each is as tall as it lays out.
+    pub fn measured(&self) -> bool {
+        matches!(self, Heights::Variable { measured: true, .. })
+    }
+    /// A measured row's height, laid out (at least a pixel, as the desktop
+    /// floors it).
+    pub fn measure(&self, index: usize, height: f32) {
+        if let Heights::Variable { heights, .. } = self {
+            let _ = heights.set_height(index, height.max(1.));
+        }
+    }
+    /// It stays at its end through changes when it rests there
+    /// (`VariableHeights::anchor_end`).
+    pub fn anchors_end(&self) -> bool {
+        match self {
+            Heights::Fixed(_) => false,
+            Heights::Variable { heights, .. } => heights.anchors_end(),
+        }
+    }
 }
 
 /// Whether regions keep only their DOM form: in the browser, where no `Ui`
@@ -568,7 +628,7 @@ pub(crate) fn share_virtual<K: Eq + std::hash::Hash + Clone + 'static>(
         (count.clone(), key.clone(), build.clone(), ids.clone());
     let region = Region::Virtual(VirtualRegion {
         offset,
-        row_height,
+        heights: Heights::Fixed(row_height),
         overscan,
         count: Box::new(move || (dom_count.borrow_mut())()),
         key: Box::new(move |index| {
@@ -589,6 +649,34 @@ pub(crate) fn share_virtual<K: Eq + std::hash::Hash + Clone + 'static>(
         Box::new(move |index, k, cx| (build.borrow_mut())(index, k, cx)),
         region,
     )
+}
+
+/// A variable or measured list's DOM form (`variable_list`, `DOM_ONLY`):
+/// its count is its heights'.
+pub(crate) fn variable_region<K: Eq + std::hash::Hash + Clone + 'static>(
+    offset: Signal<f32>,
+    heights: super::VariableHeights,
+    measured: bool,
+    overscan: usize,
+    mut key: impl FnMut(usize) -> K + 'static,
+    mut build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
+) -> Region {
+    if measured {
+        heights.floor_measured();
+    }
+    let ids = Rc::new(RefCell::new(KeyIds::<K>::new()));
+    let (key_ids, count) = (ids.clone(), heights.clone());
+    Region::Virtual(VirtualRegion {
+        offset,
+        heights: Heights::Variable { heights, measured },
+        overscan,
+        count: Box::new(move || count.len()),
+        key: Box::new(move |index| key_ids.borrow_mut().id(&key(index))),
+        build: Box::new(move |index, id, cx| {
+            let key = ids.borrow().keys[&id].clone();
+            build(index, key, cx)
+        }),
+    })
 }
 
 /// Read `view` out as an element in `scope`: components, providers and slots
