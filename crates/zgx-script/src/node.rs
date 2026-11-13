@@ -82,6 +82,10 @@ pub(crate) struct Node {
     /// `tooltip = "text" | node`, `tooltip_placement`: shown over it while
     /// the pointer rests on it. Boxed: few nodes have one.
     pub tooltip: Option<Box<Tooltip>>,
+    /// `tooltip_group = { delay, close_delay, reshow_within, reshow_delay }`:
+    /// the tooltips under it wait and reshow together
+    /// (`View::tooltip_group`).
+    pub tooltip_group: Option<zgx::compose::TooltipGroup>,
     /// Where the script created it (`app.luau:12`), recorded only while the
     /// layout inspector or layout warnings want it.
     pub source: Option<Rc<str>>,
@@ -740,6 +744,7 @@ impl Node {
             selectable: None,
             selection_colors: None,
             tooltip: None,
+            tooltip_group: None,
             source: None,
             theme: None,
             provide: None,
@@ -1314,6 +1319,8 @@ pub(crate) enum Kind {
         /// `on_close` beside a state `open`: runs as the person closes it
         /// (Escape, the backdrop); a controlled `open` has its own.
         on_close: Option<Function>,
+        /// `initial_focus` and `final_focus`.
+        focus: Option<FocusProps>,
     },
     Popover {
         label: String,
@@ -1332,6 +1339,8 @@ pub(crate) enum Kind {
         /// `hover_delay = { open, close }`: opens as the pointer rests on
         /// its trigger (`View::hover_delay`).
         hover: Option<HoverProps>,
+        /// `initial_focus` and `final_focus`.
+        focus: Option<FocusProps>,
     },
     Menu {
         label: String,
@@ -1344,6 +1353,8 @@ pub(crate) enum Kind {
         match_anchor: bool,
         /// `hover_delay = { open, close }`, as a popover's.
         hover: Option<HoverProps>,
+        /// `initial_focus` and `final_focus`.
+        focus: Option<FocusProps>,
     },
     /// Its label, and how it is chosen and shown.
     MenuItem(String, MenuItemOptions),
@@ -1562,6 +1573,9 @@ pub(crate) struct SpanIcon {
     pub bg: Option<Value>,
     pub radius: f32,
     pub pad: f32,
+    /// `align = "baseline"`: its bottom edge on the text's baseline, the
+    /// line growing to hold it.
+    pub baseline: bool,
 }
 
 /// `Node::press_flags`: a press on it moves the window.
@@ -1579,6 +1593,8 @@ pub(crate) struct Tooltip {
     pub interactive: bool,
     /// `tooltip_delay`: how long the pointer rests before it shows.
     pub delay: Option<std::time::Duration>,
+    /// `tooltip_close_delay`: how long it stays after the pointer leaves.
+    pub close_delay: Option<std::time::Duration>,
 }
 #[derive(Clone)]
 pub(crate) enum TooltipContent {
@@ -3661,6 +3677,8 @@ const WIDGET_FIELDS: &[&str] = &[
     "scrim_blur",
     "match_anchor_width",
     "hover_delay",
+    "initial_focus",
+    "final_focus",
     "step",
     "options",
     "decimals",
@@ -4268,6 +4286,28 @@ fn fill_from(
                 let ms: f64 = lua.unpack(value)?;
                 node.tooltip.get_or_insert_default().delay =
                     Some(crate::duration_ms("tooltip_delay", ms)?);
+            }
+            // Milliseconds it stays after the pointer leaves (none; a hover
+            // card 120).
+            "tooltip_close_delay" => {
+                let ms: f64 = lua.unpack(value)?;
+                node.tooltip.get_or_insert_default().close_delay =
+                    Some(crate::duration_ms("tooltip_close_delay", ms)?);
+            }
+            "tooltip_group" => {
+                let table: mlua::Table = lua.unpack(value)?;
+                let ms = |key: &str| -> mlua::Result<Option<std::time::Duration>> {
+                    table
+                        .get::<Option<f64>>(key)?
+                        .map(|ms| crate::duration_ms(key, ms))
+                        .transpose()
+                };
+                node.tooltip_group = Some(zgx::compose::TooltipGroup {
+                    delay: ms("delay")?,
+                    close_delay: ms("close_delay")?,
+                    reshow_within: ms("reshow_within")?,
+                    reshow_delay: ms("reshow_delay")?,
+                });
             }
             "pointer_events" => {
                 node.pointer_events = Some(match &value {
@@ -5055,6 +5095,15 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         bg: (!matches!(bg, Value::Nil)).then_some(bg),
                         radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
                         pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
+                        baseline: match icon.get::<Option<String>>("align")?.as_deref() {
+                            None | Some("center") => false,
+                            Some("baseline") => true,
+                            Some(other) => {
+                                return Err(mlua::Error::runtime(format!(
+                                    "an icon's `align` is center or baseline, not {other:?}"
+                                )));
+                            }
+                        },
                     });
                 }
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
@@ -5233,6 +5282,33 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
+/// `initial_focus` and `final_focus` on a modal, popover or menu: `false`
+/// (no control picked), or the `id` of a node.
+pub(crate) type FocusProps = (zgx::compose::FocusTarget, zgx::compose::FocusTarget);
+fn focus_of(table: &Table) -> mlua::Result<Option<FocusProps>> {
+    use zgx::compose::FocusTarget;
+    let target = |key: &str| -> mlua::Result<FocusTarget> {
+        Ok(match table.get::<mlua::Value>(key)? {
+            mlua::Value::Boolean(false) => FocusTarget::None,
+            mlua::Value::String(id) => {
+                let id = id.to_string_lossy();
+                FocusTarget::Id(id.strip_prefix('#').unwrap_or(&id).to_owned())
+            }
+            mlua::Value::Nil | mlua::Value::Boolean(true) => FocusTarget::Default,
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "`{key}` is false or the id of a node, not {}",
+                    other.type_name()
+                )));
+            }
+        })
+    };
+    let (initial, last) = (target("initial_focus")?, target("final_focus")?);
+    Ok(
+        (initial != FocusTarget::Default || last != FocusTarget::Default)
+            .then_some((initial, last)),
+    )
+}
 /// `hover_delay = { open = ms, close = ms }` on a popover, menu or submenu:
 /// each in milliseconds, left out for its default.
 #[derive(Clone, Copy, Debug, Default)]
@@ -6142,6 +6218,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         dismiss: table.get("dismiss_on_backdrop")?,
                         scrim_blur: table.get("scrim_blur")?,
                         on_close,
+                        focus: focus_of(&table)?,
                     },
                 ),
                 Some(&table),
@@ -6180,6 +6257,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                                 dismiss: None,
                                 scrim_blur: None,
                                 on_close: None,
+                                focus: None,
                             },
                         ),
                         Some(&table),
@@ -6210,6 +6288,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         over: table.get("open_over")?,
                         match_anchor,
                         hover: hover_of(&table)?,
+                        focus: focus_of(&table)?,
                     }
                 } else {
                     Kind::Popover {
@@ -6224,6 +6303,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         // Set as `fill` walks the table (`late_field`).
                         at_caret: false,
                         hover: hover_of(&table)?,
+                        focus: focus_of(&table)?,
                     }
                 };
                 let mut node = fill(lua, Node::new(owner(lua)?, kind), Some(&table))?;

@@ -463,6 +463,9 @@ struct PortalOptions {
     topmost: bool,
     /// `hover_delay`: opens as the pointer rests on its trigger.
     hover: Option<crate::compose_hover::HoverDelay>,
+    /// `initial_focus` and `final_focus`.
+    initial_focus: crate::compose_modal::FocusTarget,
+    final_focus: crate::compose_modal::FocusTarget,
     /// `hoist`: in that layer, over its parent.
     hoist: Option<Box<crate::compose_modal::Hoist>>,
     /// `View::autofocus`.
@@ -1161,6 +1164,22 @@ impl View {
         portal.top = true;
         portal.topmost = true;
         self.w_full().h_full()
+    }
+    /// Where focus goes as this modal, popover or menu opens, as Base UI's
+    /// `initialFocus`: `FocusTarget::Id(id)` (the node `View::id` names, in
+    /// it), `None` (the panel itself, no control), or by default its first
+    /// control.
+    pub fn initial_focus(mut self, target: FocusTarget) -> Self {
+        self.rare_mut().portal.get_or_insert_default().initial_focus = target;
+        self
+    }
+    /// Where focus goes as this modal, popover or menu closes, as Base UI's
+    /// `finalFocus`: `FocusTarget::Id(id)` (any node `View::id` names),
+    /// `None` (nothing focused), or by default what had focus before (else
+    /// its trigger, as it was opened from the keyboard).
+    pub fn final_focus(mut self, target: FocusTarget) -> Self {
+        self.rare_mut().portal.get_or_insert_default().final_focus = target;
+        self
     }
     /// Open this popover, menu or submenu as the pointer rests on its trigger
     /// for `open`, and close it once the pointer has been off the trigger and
@@ -2524,18 +2543,19 @@ pub fn text_message(message: crate::i18n::Message) -> View {
 }
 pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 pub use crate::compose_hover::HoverDelay;
+pub use crate::compose_modal::FocusTarget;
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
 pub use crate::compose_popover::{
     Collision, Edge as PlacementEdge, Placement, Side as PlacementSide,
 };
 pub use crate::compose_rich::{
-    InlineSvg, RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now, rich_text,
-    text_span,
+    IconAlign, InlineSvg, RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now,
+    rich_text, text_span,
 };
 pub use crate::compose_scrollbar::{ScrollbarEase, ScrollbarStyle};
 pub use crate::compose_tooltip::{
-    Tooltip, TooltipLook, TooltipTiming, set_tooltip_look, set_tooltip_timing,
+    Tooltip, TooltipGroup, TooltipLook, TooltipTiming, set_tooltip_look, set_tooltip_timing,
 };
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
@@ -4535,6 +4555,9 @@ fn mount_portal_panel(
     let hover = (view.rare.as_ref())
         .and_then(|r| r.portal.as_ref())
         .and_then(|p| p.hover);
+    let focus_targets = (view.rare.as_ref())
+        .and_then(|r| r.portal.as_ref())
+        .map(|p| (p.initial_focus.clone(), p.final_focus.clone()));
     let menu_context = is_menu.then(|| {
         crate::compose_menu::MenuContext::new(
             open.clone(),
@@ -4855,6 +4878,21 @@ fn mount_portal_panel(
     let open_signal = open.clone();
     let popup_open = open.clone();
     let unnamed = label.is_empty();
+    let focus_hooks = focus_targets
+        .filter(|(initial, last)| *initial != FocusTarget::Default || *last != FocusTarget::Default)
+        .map(|(initial, last)| {
+            let registry = environment.registry.clone();
+            crate::compose_modal::FocusHooks {
+                initial,
+                last,
+                find: Rc::new(move |id: &str| {
+                    registry
+                        .borrow()
+                        .get(id)
+                        .and_then(|nodes| nodes.last().copied())
+                }),
+            }
+        });
     crate::compose_modal::activate(
         ui,
         owner,
@@ -4877,6 +4915,7 @@ fn mount_portal_panel(
         keeps_focus,
         on_dismiss,
         environment.services.get::<TaskRunner>(),
+        focus_hooks,
     );
     // Opened as the pointer rests on its trigger (a submenu's own is mounted
     // with its menu, `compose_menu::mount`).
@@ -5282,9 +5321,18 @@ fn paragraph_effect<const LOCATING: bool>(
             // An icon keeps its room before the text: a padded
             // placeholder run of its own. So does the room before the text
             // where it isn't the room after it (`padding_end`).
+            let on_baseline = icon
+                .as_ref()
+                .is_some_and(|icon| icon.align == crate::compose_rich::IconAlign::Baseline);
             let icon_at = (room_after >= 0.).then(|| {
                 let at = content.len();
-                content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                // On the baseline, an inline box holds its room, and the
+                // line grows to hold it; else a padded placeholder does.
+                content.push_str(if on_baseline {
+                    crate::rich_text::INLINE_BOX_TEXT
+                } else {
+                    crate::compose_rich::ICON_PLACEHOLDER
+                });
                 at..content.len()
             });
             let start = content.len();
@@ -5370,6 +5418,52 @@ fn paragraph_effect<const LOCATING: bool>(
                     font_size,
                     color,
                 }),
+                (Some(icon), Some(range)) if on_baseline => {
+                    let lead = span.padding[0];
+                    box_labels.push("".into());
+                    boxes.push(crate::rich_text::InlineBox {
+                        width: lead + icon.size + icon.gap,
+                        height: icon.size,
+                        baseline: icon.size,
+                        ..crate::rich_text::InlineBox::new(range.start)
+                    });
+                    runs.push(crate::rich_text::TextRun {
+                        background: None,
+                        underline: None,
+                        strikethrough: None,
+                        padding: [0., 0.],
+                        radius: 0.,
+                        outset: 0.,
+                        range: range.clone(),
+                        font: font.clone(),
+                        font_size,
+                        color,
+                    });
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range,
+                        svg: match icon.tint {
+                            Some(crate::theme::Themed::Value(tint)) => {
+                                std::sync::Arc::new(icon.svg.tinted(tint))
+                            }
+                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                icon.svg.tinted(
+                                    theme
+                                        .get(token)
+                                        .color()
+                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                                ),
+                            ),
+                            None if icon.svg.follows_text_color() => {
+                                std::sync::Arc::new(icon.svg.tinted(color))
+                            }
+                            None => icon.svg,
+                        },
+                        size: icon.size,
+                        inset: lead,
+                        well: None,
+                        boxed: Some(icon.size),
+                    });
+                }
                 (Some(icon), Some(range)) => {
                     let lead = span.padding[0];
                     // (A well takes its room round the icon too.)

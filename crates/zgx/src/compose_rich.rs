@@ -112,6 +112,16 @@ pub(crate) struct IconWell {
     pub radius: f32,
     pub pad: f32,
 }
+/// How a span's icon sits in its line (`SpanIcon::align`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IconAlign {
+    /// Centred on the line, which it does not make taller.
+    #[default]
+    Center,
+    /// Its bottom edge on the text's baseline, as an inline image's is in
+    /// CSS (`vertical-align: baseline`): the line grows to hold it. No well.
+    Baseline,
+}
 /// A span's leading icon: `size` square, `gap` before the text, tinted
 /// with `tint` (a colour or token) if set, else as the SVG says (one that
 /// follows the text colour takes the span's).
@@ -133,6 +143,8 @@ pub struct SpanIcon {
     pub radius: f32,
     /// The well's room round the icon, on every side.
     pub pad: f32,
+    /// How it sits in its line.
+    pub align: IconAlign,
 }
 /// What keeps an icon's room in the line: a word joiner (zero width, and
 /// no line break either side, so the icon stays with its text), padded.

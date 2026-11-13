@@ -772,6 +772,9 @@ pub struct FallbackTextLayout {
     cells: Vec<(Range<usize>, Rect)>,
     end: Rect,
     size: (f32, f32),
+    /// Where its inline boxes are (`TextLayout::inline_boxes`): offset, left
+    /// and top. None for text without.
+    places: Vec<(usize, f32, f32)>,
 }
 impl FallbackTextLayout {
     /// Mixed-size approximate cells used when no native rich shaper is installed.
@@ -822,6 +825,7 @@ impl FallbackTextLayout {
             cells,
             end: Rect::new(x, y, 1., pitch),
             size: (max_x.max(x), y + pitch),
+            places: Vec::new(),
         };
         layout.finished(rich, width)
     }
@@ -836,8 +840,10 @@ impl FallbackTextLayout {
             cells: boxes.cells,
             end: Rect::new(x, y, 1., height),
             size: (wide, y + height),
+            places: Vec::new(),
         }
         .finished(rich, width)
+        .placed(rich, width)
     }
     /// Where each of `rich`'s inline boxes is at `width` (as
     /// `TextLayout::inline_boxes`): its character's offset, left and top.
@@ -859,6 +865,21 @@ impl FallbackTextLayout {
                 Some((range.start, rect.x, top))
             })
             .collect()
+    }
+    /// Its inline boxes' places, as `inline_places` has them.
+    fn placed(mut self, rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
+        let boxes = crate::rich_text::fallback_boxes(rich, width);
+        let mut kept = self.cells.iter();
+        self.places = boxes
+            .places
+            .iter()
+            .filter_map(|&(cell, top)| {
+                let (range, _) = boxes.cells.get(cell)?;
+                let (_, rect) = kept.find(|(kept, _)| kept == range)?;
+                Some((range.start, rect.x, top))
+            })
+            .collect();
+        self
     }
     /// `with_rich`'s cells cut as its clamp says, and aligned.
     #[inline(always)]
@@ -952,7 +973,12 @@ impl FallbackTextLayout {
         let (end, size) = Self::place(text, size, max_width, font, |range, rect| {
             cells.push((range, rect))
         });
-        let mut layout = Self { cells, end, size };
+        let mut layout = Self {
+            cells,
+            end,
+            size,
+            places: Vec::new(),
+        };
         layout.align(max_width, font.align);
         layout
     }
@@ -1095,6 +1121,7 @@ impl FallbackTextLayout {
             cells: out,
             end,
             size,
+            places: Vec::new(),
         };
         layout.align(max_width, font.align);
         layout
@@ -1273,6 +1300,9 @@ impl Iterator for AsciiClusters<'_> {
     }
 }
 impl TextLayout for FallbackTextLayout {
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        self.places.clone()
+    }
     fn cache_weight(&self) -> Option<usize> {
         Some(
             std::mem::size_of::<Self>().saturating_add(

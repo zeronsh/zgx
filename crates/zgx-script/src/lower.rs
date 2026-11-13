@@ -1462,6 +1462,10 @@ fn decorated(mut view: View, node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>) -
     {
         view = tooltip(view, tip, low);
     }
+    // The tooltips under it, with their own delays and reshow.
+    if let Some(group) = node.tooltip_group {
+        view = view.tooltip_group(group);
+    }
     if let Some(spec) = &node.theme {
         view = themed(spec, vm, view);
     }
@@ -1497,6 +1501,9 @@ fn tooltip(anchor: View, tip: &crate::node::Tooltip, low: &Rc<Lowering>) -> View
     }
     if let Some(delay) = tip.delay {
         core = core.delay(delay);
+    }
+    if let Some(delay) = tip.close_delay {
+        core = core.close_delay(delay);
     }
     anchor.tooltip(core.interactive(tip.interactive))
 }
@@ -1656,6 +1663,15 @@ fn themed(spec: &crate::node::ThemeSpec, vm: &Rc<Vm>, view: View) -> View {
                 view,
             )
         }
+    }
+}
+/// `view` with where focus goes as it opens and closes, if its props say.
+fn with_focus(view: View, focus: Option<&crate::node::FocusProps>) -> View {
+    match focus {
+        Some((initial, last)) => view
+            .initial_focus(initial.clone())
+            .final_focus(last.clone()),
+        None => view,
     }
 }
 /// `view` opening as the pointer rests on its trigger, if its props say
@@ -3779,6 +3795,7 @@ fn kind_view(
             dismiss,
             scrim_blur,
             on_close,
+            focus,
         } => {
             // Built when it first opens (`View::lazy`), as every script
             // overlay: closed, a list's menus and cards cost nothing.
@@ -3794,6 +3811,7 @@ fn kind_view(
             };
             let view = if *layer { view.layer() } else { view };
             let view = if *topmost { view.topmost() } else { view };
+            let view = with_focus(view, focus.as_ref());
             let view = match dismiss {
                 Some(d) => view.dismiss_on_backdrop(*d),
                 None => view,
@@ -3830,6 +3848,7 @@ fn kind_view(
             match_anchor,
             at_caret,
             hover,
+            focus,
         } => {
             let view = popover(
                 label.clone(),
@@ -3857,6 +3876,7 @@ fn kind_view(
             };
             let view = if *at_caret { view.at_caret() } else { view };
             let view = with_hover(view, hover.as_ref(), 300.);
+            let view = with_focus(view, focus.as_ref());
             match placement {
                 Some(at) => view.placement(*at),
                 None => view,
@@ -3871,6 +3891,7 @@ fn kind_view(
             over,
             match_anchor,
             hover,
+            focus,
         } => {
             let mut view = menu(
                 label.clone(),
@@ -3896,6 +3917,7 @@ fn kind_view(
                 view.autofocus(false)
             };
             let view = with_hover(view, hover.as_ref(), 300.);
+            let view = with_focus(view, focus.as_ref());
             match placement {
                 Some(at) => view.placement(*at),
                 None => view,
@@ -8950,6 +8972,11 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         bg: icon.bg.as_ref().and_then(crate::node::themed_color),
                         radius: icon.radius,
                         pad: icon.pad,
+                        align: if icon.baseline {
+                            zgx::compose::IconAlign::Baseline
+                        } else {
+                            zgx::compose::IconAlign::Center
+                        },
                     });
                 }
                 out

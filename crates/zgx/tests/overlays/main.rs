@@ -1,5 +1,7 @@
 //! Menus, popovers, modals and tooltips. One test binary for the area (see AGENTS.md):
 //! a test file goes in the group for its area, listed here.
+#[path = "../base_ui_hooks.rs"]
+mod base_ui_hooks;
 #[path = "../composition_caret_popover.rs"]
 mod composition_caret_popover;
 #[path = "../composition_menu.rs"]
