@@ -481,6 +481,8 @@ struct PortalOptions {
     /// `View::at_caret`: placed at the caret of the editor in its trigger,
     /// focus left there.
     at_caret: bool,
+    /// `View::anchor_fill`: the anchor's slot takes its share of its row.
+    anchor_fill: bool,
 }
 /// A declarative view: a node to mount, its styles, children, handlers and
 /// semantics. Built with the functions here ([`column()`], [`text()`],
@@ -1113,6 +1115,13 @@ impl View {
     /// one it is on. `id` is read again as what it reads changes.
     pub fn active_descendant(mut self, id: impl Fn() -> Option<String> + 'static) -> Self {
         self.rare_mut().active_descendant = Some(Box::new(id));
+        self
+    }
+    /// A popover's anchor slot is a child of its row like any other: it
+    /// grows and stretches with the row, so an anchor that grows or fills
+    /// its width has the room to, with no measuring.
+    pub fn anchor_fill(mut self) -> Self {
+        self.rare_mut().portal.get_or_insert_default().anchor_fill = true;
         self
     }
     /// A popover placed at the caret of the text editor in its trigger, not
@@ -4313,17 +4322,24 @@ fn mount_portal(
     is_submenu: bool,
 ) -> NodeId {
     let anchored = anchor.is_some();
+    let fill = anchored
+        && view
+            .rare
+            .as_ref()
+            .and_then(|r| r.portal.as_ref())
+            .is_some_and(|p| p.anchor_fill);
     let owner = ui.container(
         parent,
         Layout::Overlay,
         crate::scene::Style {
             absolute: !anchored,
-            align: if is_submenu {
+            flex_grow: if fill { 1. } else { 0. },
+            align: if is_submenu || fill {
                 crate::scene::Align::Stretch
             } else {
                 crate::scene::Align::Start
             },
-            justify: if is_submenu {
+            justify: if is_submenu || fill {
                 crate::scene::Justify::Stretch
             } else {
                 crate::scene::Justify::Start

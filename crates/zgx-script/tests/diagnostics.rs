@@ -474,3 +474,62 @@ return ui.button { id = "b", on_click = function() remember(#kept) end, "keeps" 
     assert!(path.contains("upvalue") && path.contains(".run"), "{path}");
     assert!(path.contains("@") && path.contains(":"), "{path}");
 }
+
+/// A node's callbacks (handlers and function bindings) are let go when it
+/// unmounts: after a full collection what they captured is gone, mount after
+/// mount (a busy window waits on the collector until the host asks for one).
+#[test]
+fn a_nodes_prop_callbacks_are_released_when_it_unmounts() {
+    for prop in [
+        "on_click = function() local _ = #big end",
+        "w = function() local _ = #big return 10 end",
+        "on_mount = function() local _ = #big end",
+        "on_resize = function() local _ = #big end",
+        "",
+    ] {
+        let code = format!(
+            r##"
+local on = ui.state("on", false)
+local Probe = ui.component(function()
+    local big = {{}} for i = 1, 300 do big[i] = {{ i }} end
+    return ui.div {{ id = "p", w = 10, h = 10, {prop} }}
+end)
+return ui.column {{
+    ui.button {{ id = "t", w = 40, h = 20, "t", on_click = function() on:set(not on:peek()) end }},
+    ui.show(function() return on:get() end, Probe {{}}),
+}}"##
+        );
+        let dir = common::temp_dir("prop-callbacks");
+        std::fs::write(dir.join("app.luau"), &code).unwrap();
+        let path = dir.join("app.luau");
+        let mut h = Harness::new(|runtime| ScriptHost::new(runtime, &path));
+        h.settle();
+        let mut shown = false;
+        let mut toggle = |h: &mut Harness| {
+            shown = !shown;
+            h.host
+                .set_state("on", zgx_script::Value::Bool(shown))
+                .unwrap();
+            h.settle();
+        };
+        for _ in 0..20 {
+            toggle(&mut h);
+        }
+        assert!(h.find("p").is_none(), "off after an even number of toggles");
+        toggle(&mut h);
+        assert!(h.find("p").is_some(), "mounted");
+        toggle(&mut h);
+        let before = h.host.gc_report(&Default::default())[0].after;
+        for _ in 0..400 {
+            toggle(&mut h);
+        }
+        let grown = h.host.gc_report(&Default::default())[0]
+            .after
+            .saturating_sub(before);
+        assert!(
+            grown < 256 * 1024,
+            "`{prop}`: 200 mounts held {} KB more",
+            grown / 1024
+        );
+    }
+}

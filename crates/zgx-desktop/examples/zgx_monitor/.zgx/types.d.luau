@@ -1657,8 +1657,10 @@ export type ClipboardReadRequest = {
 
 -- `ui.command(opts)`: an app command, shown as a menu item; its key
 -- reaches it wherever focus is (terminals and web pages included). `id`
--- and `run` are required unless `separator` is set (Luau checks table
--- unions poorly, so this is one table).
+-- and `run` are required unless `separator` is set, or `menu` alone names
+-- one (it declares the menu and its place in the bar, with no entry: fix
+-- the menu bar's order). Luau checks table unions poorly, so this is one
+-- table.
 export type CommandOptions = {
 	id: string?,
 	-- Defaults to the id.
@@ -18996,6 +18998,10 @@ export type PopoverProps = {
 	arrow: number?,
 	-- At least as wide as its trigger, as a select's list is.
 	match_anchor_width: boolean?,
+	-- The anchor's slot takes its share of its row like any child, so an
+	-- anchor that grows or fills its width (a composer's textarea) has the
+	-- room to, with no `on_resize` measuring. Popover only.
+	anchor_fill: boolean?,
 	-- A popover only: false keeps it open on a click outside.
 	dismiss_on_backdrop: boolean?,
 	-- Opens as the pointer rests on `anchor` (see `HoverDelay`).

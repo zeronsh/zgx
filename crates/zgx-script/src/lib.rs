@@ -4946,6 +4946,13 @@ pub struct GcVm {
     pub chunks: Vec<(String, usize, u64)>,
     /// The mark, the objects since it and the holders asked for.
     pub found: GcFound,
+    /// Resources kept for the script's whole life (made at no scope, in a
+    /// handler), and how many of them are timers that have ended.
+    pub app_resources: (usize, usize),
+    /// Nodes alive in every script (made, not yet dropped), and the node
+    /// userdata the VM holds: more of the first after full collections
+    /// than of the second are held from Rust.
+    pub live_nodes: (usize, usize),
 }
 
 fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
@@ -4955,6 +4962,18 @@ fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
         after: vm.lua.used_memory(),
         ..Default::default()
     };
+    if let Some(env) = vm.lua.app_data_ref::<node::Env>() {
+        let kept = env.retained.borrow();
+        let done = kept
+            .iter()
+            .filter(|r| {
+                r.downcast_ref::<timers::Stop>()
+                    .is_some_and(timers::Stop::done)
+            })
+            .count();
+        report.app_resources = (kept.len(), done);
+    }
+    report.live_nodes.0 = node::LIVE_NODES.load(std::sync::atomic::Ordering::Relaxed);
     let Ok(dump) = vm.lua.heap_dump() else {
         return report;
     };
@@ -4971,6 +4990,10 @@ fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
         .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
         .collect();
     userdata.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.live_nodes.1 = userdata
+        .iter()
+        .find(|(name, ..)| name == "NodeUd")
+        .map_or(0, |(_, count, _)| *count);
     report.userdata = userdata;
     if query.mark || query.since_mark || query.retained.is_some() {
         report.found = gc_paths::find(dump.to_json(), query, &mut vm.gc_mark.borrow_mut());

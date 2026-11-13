@@ -354,7 +354,7 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
             let context = Owned(context);
             CGContextSetGrayFillColor(context.0, 1., 1.);
             CGContextSetShouldAntialias(context.0, true);
-            CGContextSetShouldSmoothFonts(context.0, std::env::var("ZGX_CG_SMOOTH").is_ok());
+            CGContextSetShouldSmoothFonts(context.0, false);
             CGContextSetAllowsFontSubpixelPositioning(context.0, true);
             CGContextSetShouldSubpixelPositionFonts(context.0, true);
             CGContextSetAllowsFontSubpixelQuantization(context.0, false);

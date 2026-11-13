@@ -741,7 +741,7 @@ impl Session {
                 );
                 Ok((driver::tree_lines_text(&shown, hidden), data))
             })(),
-            "gc" => (|| {
+            "gc" => {
                 let top = number("top").map_or(10, |n| n.max(1.) as usize);
                 let flag = |key: &str| field(key).is_some_and(|v| v.truthy());
                 let query = crate::GcQuery {
@@ -778,6 +778,14 @@ impl Session {
                     for (name, count, bytes) in vm.chunks.iter().take(top) {
                         lines.push(format!("    {name}: {count} functions, {}", kb(*bytes)));
                     }
+                    lines.push(format!(
+                        "  kept for the script's life: {} ({} ended timers)",
+                        vm.app_resources.0, vm.app_resources.1
+                    ));
+                    lines.push(format!(
+                        "  nodes alive: {} (script nodes the VM holds: {})",
+                        vm.live_nodes.0, vm.live_nodes.1
+                    ));
                     let found = &vm.found;
                     if let Some(count) = found.marked {
                         lines.push(format!("  marked {count} objects"));
@@ -863,7 +871,7 @@ impl Session {
                     lines.join("\n"),
                     Value::record([("vms", Value::List(vms.into()))]),
                 ))
-            })(),
+            }
             "text" => target(&ui).and_then(|node| {
                 // The text node under a target (a `ui.text`'s node holds it, or
                 // wraps it in a box).

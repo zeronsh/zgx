@@ -387,18 +387,22 @@ impl<'a> FontFallbackIter<'a> {
 
     /// zgx patch: face `id` for a glyph that fell back: at the named
     /// weight CSS matching picks (`FontSystem::get_fallback_font_at`), but a
-    /// face of the family the text asked for (the system font reached
-    /// through the common fallbacks) follows the axis.
+    /// face of the family the text asked for, or any face when that family
+    /// has none installed, follows the axis.
     fn fallback_font(&mut self, id: fontdb::ID) -> Option<Arc<Font>> {
-        let asked = self.default_families.iter().any(|family| {
-            let name = self.font_system.db().family_name(family);
-            self.face_contains_family(id, name)
-        });
-        if asked {
-            self.font_system.get_font_at(id, self.ideal_weight, self.optical)
-        } else {
+        // With no face of the family asked for (not installed), the face
+        // found first is the text's own font, as a browser's default is.
+        let snap = self.default_i > 0
+            && self.default_font_match_key().is_some()
+            && !self.default_families.iter().any(|family| {
+                let name = self.font_system.db().family_name(family);
+                self.face_contains_family(id, name)
+            });
+        if snap {
             self.font_system
                 .get_fallback_font_at(id, self.ideal_weight, self.optical)
+        } else {
+            self.font_system.get_font_at(id, self.ideal_weight, self.optical)
         }
     }
 

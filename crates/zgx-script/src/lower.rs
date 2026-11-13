@@ -3847,6 +3847,7 @@ fn kind_view(
             dismiss,
             match_anchor,
             at_caret,
+            anchor_fill,
             hover,
             focus,
         } => {
@@ -3875,6 +3876,11 @@ fn kind_view(
                 view
             };
             let view = if *at_caret { view.at_caret() } else { view };
+            let view = if *anchor_fill {
+                view.anchor_fill()
+            } else {
+                view
+            };
             let view = with_hover(view, hover.as_ref(), 300.);
             let view = with_focus(view, focus.as_ref());
             match placement {

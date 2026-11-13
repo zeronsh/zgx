@@ -1095,3 +1095,20 @@ fn reserved_commands_publish_their_shortcuts() {
         "reserved commands are menu items too"
     );
 }
+
+/// `ui.command { menu = "Edit" }` alone declares the menu: a command with
+/// no id, title or entry, in its place among the others.
+#[test]
+fn a_command_that_names_only_a_menu_declares_it_without_an_entry() {
+    let h = Harness::inline(
+        r##"ui.command { menu = "View" }
+        ui.command { id = "bump", title = "Bump", menu = "Edit", run = function() end }
+        return ui.text { "x" }"##,
+    );
+    let commands = h.host.commands().get();
+    let shown: Vec<_> = commands
+        .iter()
+        .map(|c| (c.id.as_str(), c.menu.as_str(), c.separator))
+        .collect();
+    assert_eq!(shown, vec![("", "View", false), ("bump", "Edit", false)]);
+}

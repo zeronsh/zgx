@@ -707,6 +707,15 @@ pub(crate) struct LayoutAnim {
     /// kept here, where nodes without `layout` lower past it.
     pub hit: bool,
 }
+/// Nodes made and not yet dropped, every script's (`zgx inspect gc` shows
+/// them: nodes alive after full collections are held from Rust).
+pub(crate) static LIVE_NODES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+impl Drop for Node {
+    fn drop(&mut self) {
+        LIVE_NODES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 impl Node {
     fn set_press_flag(&mut self, flag: u8, on: bool) {
         if on {
@@ -720,6 +729,7 @@ impl Node {
         self.a11y.as_ref()?.hook.as_deref()
     }
     pub(crate) fn new(owner: Weak<Vm>, kind: Kind) -> Self {
+        LIVE_NODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
             owner,
             kind,
@@ -1336,6 +1346,9 @@ pub(crate) enum Kind {
         /// `at_caret = true`: at the caret of the editor in its anchor,
         /// focus left there (`View::at_caret`).
         at_caret: bool,
+        /// `anchor_fill = true`: the anchor's slot takes its share of its row
+        /// (`View::anchor_fill`).
+        anchor_fill: bool,
         /// `hover_delay = { open, close }`: opens as the pointer rests on
         /// its trigger (`View::hover_delay`).
         hover: Option<HoverProps>,
@@ -2326,9 +2339,24 @@ pub(crate) fn env(lua: &Lua) -> mlua::Result<mlua::AppDataRef<'_, Env>> {
     lua.app_data_ref::<Env>()
         .ok_or_else(|| mlua::Error::runtime("ui library used outside a script host"))
 }
+/// Nodes made between asking the host for a collection (`node_ud`).
+const NODES_PER_TRIM: u32 = 4096;
+thread_local! { static NODES_MADE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
 pub(crate) fn node_ud(lua: &Lua, mut node: Node) -> mlua::Result<mlua::AnyUserData> {
-    if node.owner.upgrade().is_some_and(|vm| vm.locate.get()) {
-        node.source = location(lua);
+    if let Some(vm) = node.owner.upgrade() {
+        if vm.locate.get() {
+            node.source = location(lua);
+        }
+        // A node's userdata pins far more than Luau counts, so its collector
+        // lags behind a busy window that never goes idle: ask for the
+        // idle trim every so many nodes made.
+        let made = NODES_MADE.get() + 1;
+        NODES_MADE.set(if made >= NODES_PER_TRIM {
+            zgx::idle::request(&vm.runtime);
+            0
+        } else {
+            made
+        });
     }
     // Every `ui.*` call makes one: without the memory limit's protected
     // call around each (see vendor/mlua/ZGX_PATCH.md).
@@ -3727,6 +3755,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "dismiss_on_backdrop",
     "scrim_blur",
     "match_anchor_width",
+    "anchor_fill",
     "hover_delay",
     "initial_focus",
     "final_focus",
@@ -6331,6 +6360,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         match_anchor,
                         // Set as `fill` walks the table (`late_field`).
                         at_caret: false,
+                        anchor_fill: table.get::<Option<bool>>("anchor_fill")?.unwrap_or(false),
                         hover: hover_of(&table)?,
                         focus: focus_of(&table)?,
                     }

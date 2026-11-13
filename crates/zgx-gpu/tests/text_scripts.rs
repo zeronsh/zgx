@@ -1309,3 +1309,56 @@ fn hebrew_and_mixed_lines_stand_on_the_text_fonts_baseline() {
         );
     }
 }
+
+/// With no face of the family asked for, the system font found in its place
+/// is the text's own: a weight between the named ones follows the axis there
+/// (450 is narrower than 500), as it does for the family named outright.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_family_that_is_not_installed_falls_to_the_system_font_at_the_weight_asked() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_system_fonts();
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "en-US".into(),
+        db,
+        cosmic_text::PlatformFallback,
+    );
+    let system = fonts
+        .db()
+        .faces()
+        .find(|f| f.post_script_name.starts_with(".SFNS-"))
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let Some(system) = system else {
+        eprintln!("SF Pro isn't here: nothing checked");
+        return;
+    };
+    let width = |fonts: &mut cosmic_text::FontSystem, family: &str, weight: u16| {
+        let mut buffer = cosmic_text::Buffer::new(fonts, cosmic_text::Metrics::new(14., 20.));
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::Name(family))
+            .weight(cosmic_text::Weight(weight))
+            .optical(14);
+        buffer.set_text(
+            "The quick brown fox, complex",
+            &attrs,
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(fonts, false);
+        buffer.layout_runs().next().expect("a line").line_w
+    };
+    for weight in [450, 550] {
+        let named = width(&mut fonts, &system, weight);
+        let missing = width(&mut fonts, "No Such Family 42", weight);
+        assert_eq!(
+            named, missing,
+            "{weight}: the same widths as the named family"
+        );
+    }
+    let (w400, w450, w500) = (
+        width(&mut fonts, "No Such Family 42", 400),
+        width(&mut fonts, "No Such Family 42", 450),
+        width(&mut fonts, "No Such Family 42", 500),
+    );
+    assert!(w400 < w450 && w450 < w500, "{w400} {w450} {w500}");
+}

@@ -6352,3 +6352,29 @@ fn a_pointer_event_says_where_and_the_keys_held() {
         "{said}"
     );
 }
+
+/// `anchor_fill`: a popover's anchor slot takes its share of the row, so an
+/// anchor that grows fills it (no `on_resize` measuring); without it the slot
+/// hugs its content.
+#[test]
+fn a_popover_anchor_fills_its_row_with_anchor_fill() {
+    let width = |fill: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"local open = ui.state("open", false)
+            local text = ui.state("text", "")
+            return ui.row {{ id = "row", w = 500, h = 40,
+                ui.text {{ "label" }},
+                ui.popover {{ open = open, {fill}
+                    anchor = ui.textarea {{ id = "ta", value = text, grow = 1, h = 30 }},
+                    ui.text {{ "panel" }} }},
+            }}"##
+        ));
+        h.frames(3);
+        let ta = h.find("ta").unwrap();
+        h.ui.scene.borrow().bounds(ta).width
+    };
+    let hug = width("");
+    let fill = width("anchor_fill = true,");
+    assert!(fill > 400., "filled: {fill}");
+    assert!(hug < fill - 100., "hugging: {hug}");
+}
