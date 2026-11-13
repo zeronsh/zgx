@@ -293,6 +293,66 @@ pub struct ShapedText {
     line_height: f32,
 }
 impl ShapedText {
+    /// What each line of this text came out as, for `zgx inspect text`: its
+    /// baseline, the ascent and descent that put it there, and the face each
+    /// run of its glyphs was drawn in, with the family the text asked for
+    /// and what that resolves to.
+    pub fn report(&self, fonts: &FontSystem, asked: &[(String, u16)]) -> Vec<String> {
+        let db = fonts.db();
+        let mut out = Vec::new();
+        for (family, weight) in asked {
+            let family_enum = match family.as_str() {
+                "sans-serif" => Family::SansSerif,
+                "serif" => Family::Serif,
+                "monospace" => Family::Monospace,
+                name => Family::Name(name),
+            };
+            let query = cosmic_text::fontdb::Query {
+                families: &[family_enum],
+                weight: cosmic_text::fontdb::Weight(*weight),
+                ..Default::default()
+            };
+            let face = db.query(&query).and_then(|id| db.face(id));
+            out.push(format!(
+                "asked family {family:?} weight {weight}: resolves to family {:?}, face {}",
+                db.family_name(&family_enum),
+                face.map_or("none".to_string(), |f| format!(
+                    "{:?} ps={} class={}",
+                    f.families.first().map(|(n, _)| n.as_str()).unwrap_or(""),
+                    f.post_script_name,
+                    f.weight.0
+                ))
+            ));
+        }
+        for (n, run) in self.buffer.layout_runs().enumerate() {
+            out.push(format!(
+                "line {n}: baseline {} top {} height {} ascent {} descent {} (rounded, strut included) width {:.2}",
+                run.line_y, run.line_top, run.line_height, run.ascent, run.descent, run.line_w
+            ));
+            let mut at = 0;
+            while at < run.glyphs.len() {
+                let first = &run.glyphs[at];
+                let mut end = at + 1;
+                while end < run.glyphs.len() && run.glyphs[end].font_id == first.font_id {
+                    end += 1;
+                }
+                let (start, stop) = run.glyphs[at..end]
+                    .iter()
+                    .fold((usize::MAX, 0), |(a, b), g| (a.min(g.start), b.max(g.end)));
+                let face = db.face(first.font_id);
+                out.push(format!(
+                    "  glyphs {at}..{end} bytes {start}..{stop}: face {:?} ps={} class={} asked weight {} size {}",
+                    face.and_then(|f| f.families.first().map(|(n, _)| n.as_str())).unwrap_or("?"),
+                    face.map_or("?", |f| f.post_script_name.as_str()),
+                    face.map_or(0, |f| f.weight.0),
+                    first.font_weight.0,
+                    first.font_size
+                ));
+                at = end;
+            }
+        }
+        out
+    }
     /// `text` shaped in the default font at `font_size`, wrapped at `width`
     /// if given.
     pub fn new(
@@ -425,6 +485,11 @@ impl ShapedText {
                 return Some(Rect::new(0., run.line_top, 1., run.line_height));
             }
             for glyph in run.glyphs {
+                // A mark's zero-width glyph shares its letter's cluster (SF
+                // Arabic's dots): the letter's glyph places the caret.
+                if shares_cluster_with_a_wider_glyph(run.glyphs, glyph) {
+                    continue;
+                }
                 let start = offset + glyph.start;
                 let end = offset + glyph.end;
                 if cursor.byte_index < start || cursor.byte_index > end {
@@ -663,6 +728,7 @@ impl zgx::text_layout::TextLayout for ShapedText {
             let mut clusters: Vec<(usize, usize, f32, f32, bool)> = run
                 .glyphs
                 .iter()
+                .filter(|g| !shares_cluster_with_a_wider_glyph(run.glyphs, g))
                 .map(|g| (offset + g.start, offset + g.end, g.x, g.w, g.level.is_rtl()))
                 .collect();
             #[cfg(test)]
@@ -3102,4 +3168,16 @@ mod wash_tests {
         .unwrap();
         assert_eq!(washes(&apart).len(), 2, "two spans side by side: two");
     }
+}
+
+/// Whether `glyph` has no width and another glyph of `glyphs` covers its
+/// cluster with some.
+fn shares_cluster_with_a_wider_glyph(
+    glyphs: &[cosmic_text::LayoutGlyph],
+    glyph: &cosmic_text::LayoutGlyph,
+) -> bool {
+    glyph.w == 0.
+        && glyphs
+            .iter()
+            .any(|other| other.start == glyph.start && other.end == glyph.end && other.w > 0.)
 }

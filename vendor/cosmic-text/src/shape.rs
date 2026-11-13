@@ -819,7 +819,24 @@ fn shape_run(
             .filter(|key| key.font_weight_diff == 0 || key.variable_weight_match)
             .find(|key| in_family(key.id))
             .or_else(|| fonts.first().filter(|key| key.query).filter(|key| in_family(key.id)))
-            .map(|key| key.id);
+            .map(|key| key.id)
+            // The default family isn't installed: Core Text's own, the first
+            // common fallback that is (macOS's `.SF NS`), is the text's font.
+            .or_else(|| {
+                let common = font_system.fallbacks.common_fallback().to_vec();
+                common.iter().find_map(|name| {
+                    fonts
+                        .iter()
+                        .filter(|key| key.font_weight_diff == 0 || key.variable_weight_match)
+                        .find(|key| {
+                            font_system
+                                .db()
+                                .face(key.id)
+                                .is_some_and(|face| face.families.iter().any(|(n, _)| n == name))
+                        })
+                        .map(|key| key.id)
+                })
+            });
         if let Some(strut) = strut {
             if let Some(face) = font_system.get_font(strut, attrs.weight) {
                 let metrics = face.as_swash().metrics(&[]);

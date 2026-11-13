@@ -475,7 +475,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--until MARK|FRAME] [--summary] [--keep N]
   reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
-  clock [freeze|thaw|advance <ms>]
+  clock [freeze|thaw|advance <ms>]   text <target>
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
   record               record stop [--out gesture.tape]
@@ -647,6 +647,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
             put("name", arg(1));
             put("on", arg(2));
         }
+        "text" => put("target", arg(1)),
         "clock" => {
             put("action", arg(1));
             put("ms", arg(2));
@@ -956,6 +957,12 @@ const TOOLS: &[Tool] = &[
         "mark",
         &[("name", "string", false)],
         "Mark now, so zgx_frames with since=name reads only the frames after.",
+    ),
+    (
+        "zgx_text",
+        "text",
+        &[("target", "string", true)],
+        "How a text node was shaped: the family it asks for and what that resolves to, each line's baseline, ascent and descent (the strut included), and the face each run of glyphs used.",
     ),
     (
         "zgx_clock",

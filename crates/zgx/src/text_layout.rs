@@ -135,6 +135,20 @@ pub fn has_rtl(text: &str) -> bool {
         matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
     })
 }
+/// Text to describe (`Scene::describe_text`): plain text in its font, or rich.
+pub enum TextDescription<'a> {
+    /// A text node's text at `size` in `font`.
+    Plain {
+        /// Its text.
+        text: &'a str,
+        /// Its font size.
+        size: f32,
+        /// Its font.
+        font: &'a FontStyle,
+    },
+    /// A rich text node's paragraph.
+    Rich(&'a crate::rich_text::RichText),
+}
 /// The way `text` runs by its first strong character, as the Unicode bidi
 /// algorithm's rule P2 and HTML's `dir=auto` take it (isolates skipped):
 /// Arabic and Hebrew letters right to left, others left to right; `None`

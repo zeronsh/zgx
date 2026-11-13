@@ -52,6 +52,10 @@ pub struct LayoutRun<'a> {
     pub line_height: f32,
     /// Width of line
     pub line_w: f32,
+    /// zgx: the line's ascent and descent as its baseline took them
+    /// (rounded, the strut included).
+    pub ascent: f32,
+    pub descent: f32,
 }
 
 impl LayoutRun<'_> {
@@ -307,6 +311,8 @@ impl<'b> LayoutRunIter<'b> {
                 line_top,
                 line_height,
                 line_w: layout_line.w,
+                ascent,
+                descent,
             }));
         }
         None

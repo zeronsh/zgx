@@ -577,6 +577,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
                                                  time, notes, what ran and why (since: a mark or frame)
   mark    [name=mark]                            mark now: `frames since=name` reads what follows
   clock   [freeze|thaw|advance <ms>]             freeze every animation, timer and caret at one time (also ZGX_FREEZE_TIME=1 at launch), move it by hand, or let it run
+  text    <target>                               how a text node was shaped: the family it asks for and what that resolves to, each line's baseline, ascent and descent, and the face each run used
   switch  [name] [on]                            list fast paths, or switch one on or off, to compare
   search  [query] [next] [prev] [all] [n=5] [close]  find in page: the count, the current match, the first n
   zoom    [to: in|out|reset|1.5|150%]            the window's zoom (Cmd/Ctrl +, -, 0) and its viewport in points
@@ -735,6 +736,40 @@ impl Session {
                 );
                 Ok((driver::tree_lines_text(&shown, hidden), data))
             })(),
+            "text" => target(&ui).and_then(|node| {
+                // The text node under a target (a `ui.text`'s node holds it, or
+                // wraps it in a box).
+                let scene = ui.scene.borrow();
+                let mut at = node;
+                while !matches!(
+                    scene.kind(at),
+                    zgx::scene::NodeKind::Text { .. } | zgx::scene::NodeKind::RichText { .. }
+                ) {
+                    at = *scene
+                        .children(at)
+                        .first()
+                        .ok_or("the target holds no text")?;
+                }
+                let width = scene.bounds(at).width;
+                let lines = scene
+                    .describe_text(at, width)
+                    .ok_or("no text shaper that can describe it is installed")?;
+                let data = Value::record([
+                    ("node", Value::from(format!("{at:?}").as_str())),
+                    ("width", Value::Num(f64::from(width))),
+                    (
+                        "lines",
+                        Value::List(
+                            lines
+                                .iter()
+                                .map(|l| Value::from(l.as_str()))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        ),
+                    ),
+                ]);
+                Ok((lines.join("\n"), data))
+            }),
             "node" => target(&ui).map(|node| {
                 let fields = driver::node(&ui, self.0.inspector.as_ref(), node);
                 let text = fields

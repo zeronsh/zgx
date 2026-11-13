@@ -2059,6 +2059,8 @@ struct Local {
     maps: bool,
 }
 /// What few scenes have, by node; each entry goes with its node.
+type TextDescriber =
+    std::rc::Rc<dyn Fn(&crate::text_layout::TextDescription<'_>, Option<f32>) -> Vec<String>>;
 /// A fitted text's key, and the spaces it breaks at (`Scene::fitted_breaks`).
 type FittedSpaces = (u64, Option<Arc<[usize]>>);
 #[derive(Default)]
@@ -3522,6 +3524,8 @@ pub struct Scene {
     auto_directions: NodeMap<()>,
     /// A right to left paragraph's rich text with its base level set
     /// (`fit_rich`), for the text it was made from.
+    /// What says how text was shaped (`set_text_describer`).
+    text_describer: Option<TextDescriber>,
     rtl_rich: std::cell::RefCell<
         NodeMap<(
             Arc<crate::rich_text::RichText>,
@@ -3756,6 +3760,7 @@ impl Scene {
             directions: Default::default(),
             auto_directions: Default::default(),
             rtl_rich: Default::default(),
+            text_describer: None,
             layer_shaders: Default::default(),
             inert: Vec::new(),
             selectable: Default::default(),
@@ -7045,6 +7050,45 @@ impl Scene {
         for id in ids {
             self.invalidate(id, PAINT);
             self.invalidate_layout(id);
+        }
+    }
+    /// Install what says how text was shaped (`describe_text`): for each
+    /// line, its baseline, ascent and descent, and the face each run used.
+    pub fn set_text_describer(
+        &mut self,
+        describer: impl Fn(&crate::text_layout::TextDescription<'_>, Option<f32>) -> Vec<String>
+        + 'static,
+    ) {
+        self.text_describer = Some(std::rc::Rc::new(describer));
+    }
+    /// How text `id` shapes in a box `width` wide: the family it asks for and
+    /// what that resolves to, and each line's baseline, ascent and descent and
+    /// the faces its runs use. `None` where the node isn't text or no shaper
+    /// that can say is installed.
+    pub fn describe_text(&self, id: NodeId, width: f32) -> Option<Vec<String>> {
+        let describer = self.text_describer.as_ref()?;
+        match self.kind(id) {
+            NodeKind::Text {
+                text, font_size, ..
+            } => {
+                let fitted = self.fit_str(id, width, text);
+                Some(describer(
+                    &crate::text_layout::TextDescription::Plain {
+                        text: &fitted,
+                        size: *font_size,
+                        font: self.font(id),
+                    },
+                    Some(width),
+                ))
+            }
+            NodeKind::RichText { text } => {
+                let fitted = self.fit_rich(id, width, text);
+                Some(describer(
+                    &crate::text_layout::TextDescription::Rich(&fitted),
+                    Some(width),
+                ))
+            }
+            _ => None,
         }
     }
     /// Install rich paragraph geometry for inline selection and interactive spans.
