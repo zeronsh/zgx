@@ -75,11 +75,12 @@ pub enum FocusTarget {
 }
 /// What `View::initial_focus` and `View::final_focus` say, and how to find a
 /// node by id.
+type FindById = std::rc::Rc<dyn Fn(&str) -> Option<NodeId>>;
 #[derive(Clone)]
 pub(crate) struct FocusHooks {
     pub initial: FocusTarget,
     pub last: FocusTarget,
-    pub find: std::rc::Rc<dyn Fn(&str) -> Option<NodeId>>,
+    pub find: FindById,
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn activate(

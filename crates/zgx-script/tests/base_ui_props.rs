@@ -59,7 +59,7 @@ fn a_hover_delay_that_is_no_table_is_an_error() {
 
 #[test]
 fn a_hover_delay_on_a_menu_and_a_submenu_loads() {
-    let mut h = Harness::inline(
+    let h = Harness::inline(
         r##"return ui.column {
             ui.menu { open = ui.state("m", false), hover_delay = { open = 200, close = 100 },
                 anchor = ui.button { "Menu" },
@@ -188,8 +188,7 @@ fn a_span_icon_on_the_baseline_loads_and_grows_the_line() {
         h.frames(4);
         assert_eq!(h.error(), None);
         let node = h.find("t").unwrap();
-        let height = h.ui.scene.borrow().bounds(node).height;
-        height
+        h.ui.scene.borrow().bounds(node).height
     };
     let centred = line("align = \"center\"");
     let baseline = line("align = \"baseline\"");
