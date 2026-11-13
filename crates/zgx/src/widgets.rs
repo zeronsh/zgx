@@ -1530,17 +1530,18 @@ pub enum WheelTape {
     /// Play `tape` back, its events at their times, at `at` (in points).
     Play { tape: String, at: (f32, f32) },
 }
-/// An observed node's bounds (`observe_bounds`), and what of its sum of
-/// translations holds while only scroll content moves
-/// (`Scene::world_bounds_kept`): kept from one scroll's frame to the next,
+/// An observed node's bounds (`observe_bounds`) or visibility
+/// (`observe_visibility`), and what of the work behind it holds while only
+/// scroll content moves (`Scene::world_bounds_kept`,
+/// `Scene::shows_within_kept`): kept from one scroll's frame to the next,
 /// in the entry itself (a box of its own made every observed node mounted
 /// allocate), going with the observation.
-struct ObservedBounds {
-    signal: Signal<Rect>,
-    kept: Cell<Option<crate::scene::ScrollAnchor>>,
+struct Observed<T, K> {
+    signal: Signal<T>,
+    kept: Cell<Option<K>>,
 }
-impl ObservedBounds {
-    fn new(signal: Signal<Rect>) -> Self {
+impl<T, K> Observed<T, K> {
+    fn new(signal: Signal<T>) -> Self {
         Self {
             signal,
             kept: Cell::new(None),
@@ -1641,8 +1642,8 @@ pub(crate) struct UiStorage {
     content_revision: RefCell<Option<Signal<u64>>>,
     /// Nodes' laid-out sizes (`observe_size`): read only when layout runs.
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
-    observed_bounds: RefCell<crate::scene::NodeMap<ObservedBounds>>,
-    observed_visibility: RefCell<crate::scene::NodeMap<Signal<bool>>>,
+    observed_bounds: RefCell<crate::scene::NodeMap<Observed<Rect, crate::scene::ScrollAnchor>>>,
+    observed_visibility: RefCell<crate::scene::NodeMap<Observed<bool, crate::scene::ShownAnchor>>>,
     /// Of those, the ones that count as shown within a margin of the view
     /// (`observe_visibility_within`): only nodes asked so are here.
     visibility_margins: RefCell<crate::scene::NodeMap<f32>>,
@@ -2893,7 +2894,7 @@ impl Ui {
         self.storage
             .observed_bounds
             .borrow_mut()
-            .insert(node, ObservedBounds::new(signal.clone()));
+            .insert(node, Observed::new(signal.clone()));
         self.storage.bounds_geometry_revision.set(None);
         signal
     }
@@ -3587,14 +3588,14 @@ impl Ui {
         self.storage.margins_checked.set(observed.len());
     }
     pub(crate) fn observe_visibility(&self, node: NodeId) -> Signal<bool> {
-        if let Some(signal) = self.storage.observed_visibility.borrow().get(&node) {
-            return signal.clone();
+        if let Some(observed) = self.storage.observed_visibility.borrow().get(&node) {
+            return observed.signal.clone();
         }
         let signal = self.signal(false);
         self.storage
             .observed_visibility
             .borrow_mut()
-            .insert(node, signal.clone());
+            .insert(node, Observed::new(signal.clone()));
         self.storage.bounds_geometry_revision.set(None);
         signal
     }
@@ -4305,15 +4306,17 @@ impl Ui {
                 }
                 let scene = self.scene.borrow();
                 let margins = self.storage.visibility_margins.borrow();
-                for (node, signal) in self.storage.observed_visibility.borrow().iter() {
+                let mut pass = crate::scene::ShownPass::default();
+                for (node, observed) in self.storage.observed_visibility.borrow().iter() {
                     if scene.contains(*node) {
-                        let now = match margins.is_empty() {
-                            true => scene.visible_bounds(*node).is_some(),
-                            false => match margins.get(node) {
-                                Some(margin) => scene.shows_within(*node, *margin),
-                                None => scene.visible_bounds(*node).is_some(),
-                            },
+                        let margin = match margins.is_empty() {
+                            true => None,
+                            false => margins.get(node).copied(),
                         };
+                        let mut kept = observed.kept.get();
+                        let now = scene.shows_within_kept(*node, margin, &mut kept, &mut pass);
+                        observed.kept.set(kept);
+                        let signal = &observed.signal;
                         if signal.with_untracked(|told| *told != now) {
                             visibility.push((*node, signal.clone(), now));
                         }
@@ -8498,6 +8501,18 @@ mod bounds_anchor_tests {
                 checked += 1;
             }
         }
+        let margins = ui.storage.visibility_margins.borrow();
+        for (node, observed) in ui.storage.observed_visibility.borrow().iter() {
+            if scene.contains(*node) {
+                let walked = match margins.get(node) {
+                    Some(margin) => scene.shows_within(*node, *margin),
+                    None => scene.visible_bounds(*node).is_some(),
+                };
+                let told = observed.signal.with_untracked(|told| *told);
+                assert_eq!(told, walked, "{node:?}: visibility");
+                checked += 1;
+            }
+        }
         let bits = |r: Rect| [r.x, r.y, r.width, r.height].map(f32::to_bits);
         for (node, observed) in ui.storage.observed_bounds.borrow().iter() {
             let mut kept = observed.kept.get();
@@ -8528,6 +8543,12 @@ mod bounds_anchor_tests {
         fn observed(view: View) -> View {
             view.on_mount(|handle| {
                 handle.observe_bounds();
+                // Seen, and seen within a margin, by turns.
+                match handle.node().number() % 3 {
+                    0 => handle.observe_visibility(),
+                    1 => handle.observe_visibility_within(25.5),
+                    _ => handle.observe_visibility_within(0.),
+                };
             })
         }
         // A row nested a few boxes deep, as a transcript's are.
@@ -8677,11 +8698,15 @@ mod bounds_anchor_tests {
             }
             frame(&mut ui);
         }
-        let kept = ui.storage.observed_bounds.borrow();
-        assert!(kept.values().any(|o| o.kept.get().is_some()));
-        drop(kept);
+        let bounds = ui.storage.observed_bounds.borrow();
+        assert!(bounds.values().any(|o| o.kept.get().is_some()));
+        drop(bounds);
+        let shown = ui.storage.observed_visibility.borrow();
+        assert!(shown.values().any(|o| o.kept.get().is_some()));
+        drop(shown);
         mounted.unmount();
         assert!(ui.storage.observed_bounds.borrow().is_empty());
+        assert!(ui.storage.observed_visibility.borrow().is_empty());
     }
 }
 

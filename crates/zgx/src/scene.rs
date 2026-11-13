@@ -577,6 +577,110 @@ pub(crate) struct ScrollAnchor {
     own: Transform,
     translated: u64,
 }
+/// What `Scene::shows_within_kept` keeps of an observed node: its nearest
+/// scroll content strictly above it (`anchor`), what of its box (grown by
+/// its margin) shows inside its clips up to and including that content,
+/// relative to where the content was (`inner`), and what it holds while.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShownAnchor {
+    anchor: NodeId,
+    inner: Shown,
+    own: Transform,
+    margin: u32,
+    translated: u64,
+    layout: u64,
+}
+/// What of a node shows inside the clips that move with it.
+#[derive(Clone, Copy, Debug)]
+enum Shown {
+    /// This part, relative to its scroll content.
+    Within(Rect),
+    /// None, however it scrolls: clipped away, transparent or hidden.
+    Never,
+    /// Too near an edge to say without the full walk.
+    Near,
+}
+/// What `Scene::shows_within_kept` works out once a pass for each scroll
+/// content: its offset and the clip above it.
+#[derive(Default)]
+pub(crate) struct ShownPass {
+    /// The first few scroll contents met: a window has one or two. Past
+    /// them, each is worked out for each node (nothing allocated, either).
+    met: [Option<(NodeId, Transform, Rect)>; SHOWN_PASS_KEEPS],
+}
+const SHOWN_PASS_KEEPS: usize = 4;
+impl ShownPass {
+    fn of(
+        &mut self,
+        anchor: NodeId,
+        work: impl FnOnce() -> (Transform, Rect),
+    ) -> (Transform, Rect) {
+        if let Some(&(_, offset, clip)) = self.met.iter().flatten().find(|(at, ..)| *at == anchor) {
+            return (offset, clip);
+        }
+        let (offset, clip) = work();
+        if let Some(free) = self.met.iter_mut().find(|met| met.is_none()) {
+            *free = Some((anchor, offset, clip));
+        }
+        (offset, clip)
+    }
+}
+/// How far from an edge, relative to the coordinates' size, a box must be
+/// for a range check to answer for the full walk: past the rounding of
+/// either's sums (a few dozen roundings of 2^-24 each, ~6e-8 of the size).
+const SHOWN_SLACK: f32 = 1e-4;
+/// A product of opacities below which what is kept of a node takes the
+/// full walk every time (`Shown::Near`): one so faint no pixel shows it
+/// (an 8-bit channel stops at 1/255), whose product could underflow to
+/// zero, as `world` multiplies them, without any of them reaching zero.
+/// Fades short of zero drop nothing kept, so the one case a kept answer can
+/// differ from the walk's is a product at least this, kept, later brought
+/// to exactly zero by opacities changed short of zero alone: some 2^-125
+/// of it, invisible long before.
+const FAINT: f32 = 1. / (1u32 << 24) as f32;
+/// Whether two boxes overlap, clearly apart, or too near to say.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Overlap {
+    Over,
+    Apart,
+    Near,
+}
+/// Where two boxes meet, kept even where they don't (a width or height of
+/// zero or less), for `overlap` to judge.
+fn meet(a: Rect, b: Rect) -> Rect {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    Rect::new(
+        x,
+        y,
+        (a.x + a.width).min(b.x + b.width) - x,
+        (a.y + a.height).min(b.y + b.height) - y,
+    )
+}
+fn overlap(a: Rect, b: Rect) -> Overlap {
+    let w = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+    let h = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    let size = [
+        a.x,
+        a.y,
+        a.x + a.width,
+        a.y + a.height,
+        b.x,
+        b.y,
+        b.x + b.width,
+        b.y + b.height,
+    ]
+    .into_iter()
+    .fold(1f32, |size, v| size.max(v.abs()));
+    let slack = SHOWN_SLACK * size;
+    if w > slack && h > slack {
+        Overlap::Over
+    } else if w < -slack || h < -slack {
+        Overlap::Apart
+    } else {
+        Overlap::Near
+    }
+}
 /// Whether two translations are the same to the bit (a zero's sign too:
 /// `-0. + -0.` is `-0.`, `0. + -0.` is `0.`).
 fn same_bits(a: Transform, b: Transform) -> bool {
@@ -4228,6 +4332,208 @@ impl Scene {
             own: node.transform,
             translated: self.translated(),
         }
+    }
+    /// Whether any of `id` shows, grown by `margin` on every side
+    /// (`shows_within`) or not grown (`None`: `visible_bounds`), as those
+    /// answer, keeping in `kept` what of it holds while only scroll content
+    /// moves: the node's box inside its clips from it up to and including
+    /// its nearest scroll content, all of which move with that content. A
+    /// scroll then checks that box, moved with the content, against the
+    /// clip above it (`ShownPass`, once a pass for each scroll content): a
+    /// range check, not a walk. Where the box comes within `SHOWN_SLACK` of
+    /// an edge, the sums' order could decide it, and the full walk does.
+    /// Popups, transformed layers and nodes under no scroll content take
+    /// the full walk every time. What was kept is dropped by any change to
+    /// geometry but a scroll, a leaf's move or layout (`translated`: other
+    /// translations, clips, nodes hidden or shown, opacities), by layout
+    /// (`layout_revision`), a margin changed, or the node's own move.
+    pub(crate) fn shows_within_kept(
+        &self,
+        id: NodeId,
+        margin: Option<f32>,
+        kept: &mut Option<ShownAnchor>,
+        pass: &mut ShownPass,
+    ) -> bool {
+        let walked = |scene: &Self| match margin {
+            Some(margin) => scene.shows_within(id, margin),
+            None => scene.visible_bounds(id).is_some(),
+        };
+        if !self.popups.is_empty() || self.transformed > 0 {
+            *kept = None;
+            return walked(self);
+        }
+        let own = self.node(id).transform;
+        let margin_bits = margin.map_or(u32::MAX, f32::to_bits);
+        let holds = kept.as_ref().is_some_and(|k| {
+            k.translated == self.translated()
+                && k.layout == self.layout_revision
+                && k.margin == margin_bits
+                && same_bits(k.own, own)
+        });
+        if !holds {
+            match self.shown_anchor(id, margin.unwrap_or(0.), margin_bits) {
+                Ok(anchor) => *kept = Some(anchor),
+                Err(overlap) => {
+                    *kept = None;
+                    return match overlap {
+                        Overlap::Over => true,
+                        Overlap::Apart => false,
+                        Overlap::Near => walked(self),
+                    };
+                }
+            }
+        }
+        let Some(k) = kept.as_ref() else {
+            return walked(self);
+        };
+        let inner = match k.inner {
+            Shown::Never => return false,
+            Shown::Near => return walked(self),
+            Shown::Within(inner) => inner,
+        };
+        let (offset, outer) = pass.of(k.anchor, || {
+            let outer = self
+                .node(k.anchor)
+                .parent
+                .and_then(|parent| self.world_clip(parent))
+                .unwrap_or(self.viewport);
+            (self.offset_of(k.anchor), outer)
+        });
+        let shown = inner.translated(offset);
+        match overlap(shown, outer) {
+            Overlap::Over => true,
+            Overlap::Apart => false,
+            Overlap::Near => walked(self),
+        }
+    }
+    /// `id`'s translation and its ancestors', summed from it upwards.
+    fn offset_of(&self, id: NodeId) -> Transform {
+        let mut offset = Transform::default();
+        let mut at = Some(id);
+        while let Some(id) = at {
+            let node = self.tree_node(id);
+            offset.x += node.transform.x;
+            offset.y += node.transform.y;
+            at = node.parent;
+        }
+        offset
+    }
+    /// What `shows_within_kept` keeps of `id`: `None` under no scroll
+    /// content. One walk to the root and nothing allocated: every observed
+    /// node comes here on a frame that drops what was kept (anything moving
+    /// but a scroll). Boxes and clips are placed relative to `id`'s offset
+    /// (each ancestor's less the translations below it), then to its
+    /// scroll content's; its opacity is `world`'s product, in its order.
+    #[cold]
+    #[inline(never)]
+    fn shown_anchor(
+        &self,
+        id: NodeId,
+        margin: f32,
+        margin_bits: u32,
+    ) -> Result<ShownAnchor, Overlap> {
+        let node = self.node(id);
+        let mut opacity = match own_visible(&node.style) {
+            true => node.effects.opacity,
+            false => 0.,
+        };
+        // A node hidden or at an opacity of zero, its own or above: changing
+        // it shows or hides something, which drops what is kept
+        // (`translated`). The product alone could reach zero with none of
+        // them at zero (`FAINT`).
+        let mut nil = opacity <= 0.;
+        // What clips `id` from it up to its scroll content, where `id`'s
+        // offset is the origin, and the translations from `id` up to just
+        // below the one being looked at.
+        let clip_in =
+            |clip: Option<Rect>, node: &Node, below: Transform| match clip_axes(&node.style)
+                != (false, false)
+            {
+                true => clipped_bounds(
+                    clip,
+                    node.bounds.translated(Transform {
+                        x: -below.x,
+                        y: -below.y,
+                    }),
+                    &node.style,
+                ),
+                false => clip,
+            };
+        let mut clip = clip_in(None, node, Transform::default());
+        let mut below = node.transform;
+        let mut parent = node.parent;
+        let anchor = loop {
+            let Some(at) = parent else {
+                // Under no scroll content: the walk above, done, answers
+                // (against the viewport, placed as the clips are), the
+                // full walk only near an edge. Nothing is kept.
+                if nil {
+                    return Err(Overlap::Apart);
+                }
+                if opacity < FAINT {
+                    return Err(Overlap::Near);
+                }
+                let viewport = self.viewport.translated(Transform {
+                    x: -below.x,
+                    y: -below.y,
+                });
+                let shown = match clip {
+                    Some(clip) => meet(clip, viewport),
+                    None => viewport,
+                };
+                return Err(overlap(node.bounds.expand(margin), shown));
+            };
+            let ancestor = self.tree_node(at);
+            let own = match own_visible(&ancestor.style) {
+                true => ancestor.effects.opacity,
+                false => 0.,
+            };
+            nil |= own <= 0.;
+            opacity *= own;
+            clip = clip_in(clip, ancestor, below);
+            if ancestor.scroll_copy {
+                break at;
+            }
+            below.x += ancestor.transform.x;
+            below.y += ancestor.transform.y;
+            parent = ancestor.parent;
+        };
+        // Hidden by an opacity or a style above too: hidden however it
+        // scrolls, until one of those changes (`translated`).
+        let mut parent = self.tree_node(anchor).parent;
+        while let Some(at) = parent {
+            let ancestor = self.tree_node(at);
+            let own = match own_visible(&ancestor.style) {
+                true => ancestor.effects.opacity,
+                false => 0.,
+            };
+            nil |= own <= 0.;
+            opacity *= own;
+            parent = ancestor.parent;
+        }
+        let boxed = node.bounds.expand(margin);
+        let inner = match (nil, opacity < FAINT) {
+            (true, _) => Shown::Never,
+            (false, true) => Shown::Near,
+            (false, false) => match clip {
+                None => Shown::Within(boxed.translated(below)),
+                Some(clip) => match overlap(boxed, clip) {
+                    Overlap::Over => {
+                        Shown::Within(boxed.intersection(clip).unwrap_or(boxed).translated(below))
+                    }
+                    Overlap::Apart => Shown::Never,
+                    Overlap::Near => Shown::Near,
+                },
+            },
+        };
+        Ok(ShownAnchor {
+            anchor,
+            inner,
+            own: node.transform,
+            margin: margin_bits,
+            translated: self.translated(),
+            layout: self.layout_revision,
+        })
     }
     /// Where layout put `id`, in window coordinates, before any translation
     /// (its own or its ancestors', scrolling included): what moves only when
@@ -16953,6 +17259,354 @@ mod tests {
     /// content inside a translated parent, nodes made scroll content and
     /// not, boxes laid out again, nodes mounted and removed, a row moved
     /// from one scroll view to another and a scroll view moved (both mount
+    /// Opacities none of which is zero whose product is (0.01 to the 23rd
+    /// underflows; to the 22nd it doesn't): hidden as `world` multiplies
+    /// them, and shown again once one of them changes, though none crossed
+    /// zero and nothing kept was dropped. A product that faint (`FAINT`)
+    /// takes the full walk every time.
+    #[test]
+    fn kept_visibility_multiplies_opacities_as_the_walk() {
+        let boxed = |w: f32, h: f32, clip: bool| Style {
+            width: Some(w),
+            height: Some(h),
+            clip,
+            ..Style::default()
+        };
+        let faint = Effects {
+            opacity: 0.01,
+            ..Effects::default()
+        };
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+        let view = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            boxed(300., 200., true),
+        );
+        let content = scene.append(
+            view,
+            NodeKind::Container(Layout::Column),
+            boxed(280., 2000., false),
+        );
+        scene.set_scroll_copy(content, true);
+        let mut at = content;
+        let mut levels = Vec::new();
+        for _ in 0..23 {
+            at = scene.append(
+                at,
+                NodeKind::Container(Layout::Column),
+                boxed(280., 40., false),
+            );
+            scene.set_effects(at, faint);
+            levels.push(at);
+        }
+        let row = scene.append(
+            at,
+            NodeKind::Rect(Color(9, 9, 9, 255)),
+            boxed(200., 20., false),
+        );
+        scene.prepare_layout();
+        let mut kept = None;
+        let mut check = |scene: &Scene, shown: bool| {
+            let mut pass = ShownPass::default();
+            assert_eq!(scene.visible_bounds(row).is_some(), shown, "the walk");
+            assert_eq!(
+                scene.shows_within_kept(row, None, &mut kept, &mut pass),
+                shown
+            );
+        };
+        check(&scene, false);
+        scene.set_transform(content, Transform { x: 0., y: -5. });
+        check(&scene, false);
+        // One level opaque: the product no longer underflows.
+        scene.set_effects(levels[3], Effects::default());
+        check(&scene, true);
+        scene.set_transform(content, Transform { x: 0., y: -8. });
+        check(&scene, true);
+        scene.set_effects(levels[3], faint);
+        check(&scene, false);
+    }
+    /// A row whose edge lands on its scroll view's within a rounding, as
+    /// sums in another order could put it either side: `shows_within_kept`
+    /// takes the full walk there and answers as it does, ulp by ulp.
+    #[test]
+    fn kept_visibility_near_an_edge_is_the_walks() {
+        let boxed = |w: f32, h: f32, clip: bool| Style {
+            width: Some(w),
+            height: Some(h),
+            clip,
+            ..Style::default()
+        };
+        let mut scene = Scene::new(400., 300.);
+        scene.set_pixel_scale(2.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+        let root = scene.root();
+        scene.append(
+            root,
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            boxed(10., 33.3, false),
+        );
+        let view = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            boxed(300., 200., true),
+        );
+        let content = scene.append(
+            view,
+            NodeKind::Container(Layout::Column),
+            boxed(280., 2000., false),
+        );
+        scene.set_scroll_copy(content, true);
+        scene.append(
+            content,
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            boxed(10., 412.7, false),
+        );
+        let wrapper = scene.append(
+            content,
+            NodeKind::Container(Layout::Column),
+            boxed(280., 17.9, false),
+        );
+        let row = scene.append(
+            wrapper,
+            NodeKind::Rect(Color(9, 9, 9, 255)),
+            boxed(200., 17.9, false),
+        );
+        scene.prepare_layout();
+        let row_bottom = scene.node(row).bounds.y + scene.node(row).bounds.height;
+        let view_top = scene.node(view).bounds.y;
+        let mut kept = None;
+        let (mut near, mut checked) = (0, 0);
+        for margin in [None, Some(0.), Some(0.3)] {
+            // The wrapper put so that the row's bottom meets the view's top
+            // as the content scrolls to -400, give or take a few ulps.
+            let meet = view_top - margin.unwrap_or(0.) - row_bottom + 400.;
+            let mut y = meet;
+            for _ in 0..40 {
+                y = y.next_down();
+            }
+            for _ in 0..80 {
+                scene.set_transform(wrapper, Transform { x: 0., y });
+                for scroll in [-401., -400.5, -400., -399.5, -399.] {
+                    scene.set_transform(content, Transform { x: 0., y: scroll });
+                    let mut pass = ShownPass::default();
+                    let walked = match margin {
+                        Some(margin) => scene.shows_within(row, margin),
+                        None => scene.visible_bounds(row).is_some(),
+                    };
+                    let got = scene.shows_within_kept(row, margin, &mut kept, &mut pass);
+                    assert_eq!(
+                        got, walked,
+                        "wrapper at {y}, content at {scroll}, margin {margin:?}"
+                    );
+                    checked += 1;
+                    near +=
+                        usize::from(matches!(kept.as_ref().map(|k| k.inner), Some(Shown::Near)))
+                            + usize::from(overlap_near(&scene, row, margin));
+                }
+                y = y.next_up();
+            }
+        }
+        assert_eq!(checked, 3 * 80 * 5);
+        assert!(near > 0, "some answers came within the slack of an edge");
+    }
+    /// Whether `id`'s box (grown by `margin`) is within `SHOWN_SLACK` of its
+    /// clip's edge, as the full walk places both.
+    fn overlap_near(scene: &Scene, id: NodeId, margin: Option<f32>) -> bool {
+        let (bounds, _, clip) = scene.world(id);
+        let clip = clip.unwrap_or(scene.viewport);
+        overlap(bounds.expand(margin.unwrap_or(0.)), clip) == Overlap::Near
+    }
+    /// What `shows_within_kept` keeps answers as the full walk does
+    /// (`shows_within` with a margin, `visible_bounds` without), after every
+    /// change a scene takes: scrolls by whole points and fractions, nested
+    /// scroll content and scroll content under a translated parent, nodes
+    /// and leaves moving, clips turned on and off on either axis, nodes
+    /// hidden by their style or an opacity of zero, margins changed, boxes
+    /// laid out again, the window resized, nodes mounted, removed and moved
+    /// under another (mounted again), each pass with its own `ShownPass`.
+    #[test]
+    fn kept_visibility_is_the_full_walks() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        let styled = |w: f32, h: f32, clip: u64, hidden: bool| {
+            let mut style = Style {
+                width: Some(w),
+                height: Some(h),
+                clip: clip == 1,
+                ..Style::default()
+            };
+            if clip >= 2 || hidden {
+                style.layout_options = Some(Arc::new(crate::layout::LayoutOptions {
+                    clip_x: (clip == 2).then_some(true),
+                    clip_y: (clip == 3).then_some(true),
+                    visible: hidden.then_some(false),
+                    ..Default::default()
+                }));
+            }
+            style
+        };
+        let (mut kept_answers, mut walked_answers) = (0, 0);
+        for _ in 0..16 {
+            let mut scene = Scene::new(400., 300.);
+            scene.set_pixel_scale(2.);
+            scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+            let mut nodes = vec![scene.root()];
+            let mut kept: NodeMap<Option<ShownAnchor>> = NodeMap::default();
+            let mut margins: NodeMap<Option<f32>> = NodeMap::default();
+            // A scroll view to start from: a clip holding scroll content.
+            let view = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                styled(300., 200., 1, false),
+            );
+            let content = scene.append(
+                view,
+                NodeKind::Container(Layout::Column),
+                styled(280., 900., 0, false),
+            );
+            scene.set_scroll_copy(content, true);
+            nodes.extend([view, content]);
+            let mut scrolls = vec![content];
+            for step in 0..1200 {
+                nodes.retain(|id| scene.contains(*id));
+                scrolls.retain(|id| scene.contains(*id));
+                let pick = |n: u64| nodes[n as usize % nodes.len()];
+                let at = pick(next(1 << 20));
+                let amount = |n: u64| match n % 5 {
+                    0 => 0.,
+                    1 => (n % 900) as f32 / 3. - 300.,
+                    2 => -((n % 97) as f32) * 0.37,
+                    3 => (n % 600) as f32 * 1.25 - 200.,
+                    _ => 1e-3 * (n % 7) as f32,
+                };
+                let to = Transform {
+                    x: amount(next(1 << 20)) * 0.1,
+                    y: amount(next(1 << 20)),
+                };
+                match next(16) {
+                    // Mostly scrolls.
+                    0..=5 if !scrolls.is_empty() => {
+                        let scroll = scrolls[next(scrolls.len() as u64) as usize];
+                        scene.set_transform(scroll, to);
+                    }
+                    6 if at != scene.root() => scene.set_transform(at, to),
+                    7 if at != scene.root() => {
+                        let opacity = [0., 0.5, 1.][next(3) as usize];
+                        scene.set_effects(
+                            at,
+                            Effects {
+                                opacity,
+                                ..Effects::default()
+                            },
+                        );
+                    }
+                    8 => {
+                        let scroll = next(3) == 0;
+                        scene.set_scroll_copy(at, scroll);
+                        if scroll {
+                            scrolls.push(at);
+                        }
+                    }
+                    9 if at != scene.root() => {
+                        let w = 20. + next(300) as f32;
+                        let h = 10. + next(400) as f32;
+                        scene.set_style(at, styled(w, h, next(5), next(9) == 0));
+                    }
+                    10 | 11 if nodes.len() < 140 => {
+                        let kind = match next(3) {
+                            0 => NodeKind::Rect(Color(9, 9, 9, 255)),
+                            1 => NodeKind::Container(Layout::Overlay),
+                            _ => NodeKind::Container(Layout::Column),
+                        };
+                        let w = 10. + next(260) as f32;
+                        let h = 5. + next(120) as f32;
+                        let id = scene.append(at, kind, styled(w, h, next(5), false));
+                        nodes.push(id);
+                    }
+                    12 if at != scene.root() => {
+                        let to = pick(next(1 << 20));
+                        let inside = |mut id: NodeId| loop {
+                            if id == at {
+                                break true;
+                            }
+                            match scene.parent(id) {
+                                Some(parent) => id = parent,
+                                None => break false,
+                            }
+                        };
+                        if next(2) == 0 && !inside(to) {
+                            let scroll = scene.node(at).scroll_copy;
+                            let from = scene.transform(at);
+                            let again = scene.append(
+                                to,
+                                NodeKind::Container(Layout::Column),
+                                styled(120., 300., 1, false),
+                            );
+                            scene.set_scroll_copy(again, scroll);
+                            scene.set_transform(again, from);
+                            let row = scene.append(
+                                again,
+                                NodeKind::Rect(Color(1, 1, 1, 255)),
+                                styled(60., 18., 0, false),
+                            );
+                            nodes.extend([again, row]);
+                            if scroll {
+                                scrolls.push(again);
+                            }
+                        }
+                        scene.remove(at);
+                    }
+                    13 => {
+                        margins.insert(
+                            at,
+                            [None, Some(0.), Some(40.), Some(200.5)][next(4) as usize],
+                        );
+                    }
+                    14 if next(8) == 0 => {
+                        scene.resize(300. + next(200) as f32, 200. + next(200) as f32)
+                    }
+                    15 => {
+                        scene.flush();
+                    }
+                    _ => {}
+                }
+                if step % 3 == 0 {
+                    scene.prepare_layout();
+                }
+                let mut pass = ShownPass::default();
+                for &id in &nodes {
+                    if !scene.contains(id) {
+                        kept.remove(&id);
+                        continue;
+                    }
+                    let margin = margins.get(&id).copied().flatten();
+                    let walked = match margin {
+                        Some(margin) => scene.shows_within(id, margin),
+                        None => scene.visible_bounds(id).is_some(),
+                    };
+                    let entry = kept.entry(id).or_insert(None);
+                    let got = scene.shows_within_kept(id, margin, entry, &mut pass);
+                    assert_eq!(got, walked, "node {id:?} at step {step}, margin {margin:?}");
+                    match entry.as_ref().map(|k| k.inner) {
+                        Some(Shown::Within(_)) | Some(Shown::Never) => kept_answers += 1,
+                        _ => walked_answers += 1,
+                    }
+                }
+            }
+        }
+        // Both ways are taken, each often (nodes under no scroll content
+        // and near an edge take the walk).
+        assert!(
+            kept_answers > 50_000 && walked_answers > 50_000,
+            "{kept_answers} kept, {walked_answers} walked"
+        );
+    }
     /// again, as `Ui` moves them), and frames between some of those.
     #[test]
     fn kept_world_bounds_are_the_full_walks_to_the_bit() {
