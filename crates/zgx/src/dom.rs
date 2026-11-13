@@ -143,8 +143,248 @@ pub struct Element {
     pub resources: Resources,
     /// Lays out as its child, in its place (CSS `display: contents`).
     pub contents: bool,
-    /// What of it the DOM can't show (listeners, keymaps…), for a warning.
+    /// What of it the DOM can't show, for a warning.
     pub dropped: Vec<&'static str>,
+    /// Its `on_event` listeners (and what's built on them: `on_action`).
+    pub listeners: Option<Listeners>,
+    /// Its keymap (`View::keymap`).
+    pub keymap: Option<Box<crate::actions::Keymap>>,
+    /// A focus group (`View::focus_group`, or its role's): its arrows, and
+    /// whether moving chooses (a radio group's).
+    pub focus_group: Option<(crate::input::FocusGroup, bool)>,
+}
+
+/// An element's `on_event` listeners, run as the DOM routes an event to
+/// it: each phase (capture, at it, bubbling) a call.
+pub struct Listeners(Vec<super::EventListener>);
+
+/// An event from the DOM, as an element's listeners get it.
+pub struct DomEvent<'a> {
+    /// 0 pointerdown, 1 pointerup, 2 pointermove, 3 pointerenter,
+    /// 4 pointerleave, 5 wheel, 6 keydown, 7 keyup, 8 focusin, 9 focusout,
+    /// 10 click (activation), 11 a keymap's action, 12 pointercancel.
+    pub kind: u32,
+    /// 0 capture, 1 at the element, 2 bubbling.
+    pub phase: u32,
+    /// Whether the element is what the event is for (else something in it).
+    pub at_self: bool,
+    /// The element's node.
+    pub node: u32,
+    pub x: f32,
+    pub y: f32,
+    /// A wheel's deltas, a pointer's button (`dx`), an action's index.
+    pub dx: f32,
+    pub dy: f32,
+    pub modifiers: crate::input::Modifiers,
+    pub repeat: bool,
+    pub clicks: u8,
+    pub key: &'a str,
+    pub code: &'a str,
+}
+
+/// A node outside any scene (a DOM node), for an event's target that isn't
+/// the element itself.
+const ELSEWHERE: u32 = u32::MAX - 1;
+
+impl Listeners {
+    /// Run them for `event`: what they decided (`EventContext`'s bits,
+    /// 1 prevented, 2 stopped, 4 immediately, 8 focus, 16 capture,
+    /// 32 release), or 0 for an event they don't take.
+    pub fn run(&mut self, event: &DomEvent) -> u32 {
+        use crate::input::{EventContext, EventPhase, InputEvent, PointerButton};
+        let button = || match event.dx as i32 {
+            0 => PointerButton::Primary,
+            1 => PointerButton::Middle,
+            2 => PointerButton::Secondary,
+            other => PointerButton::Other(other.max(0) as u16),
+        };
+        let (x, y) = (event.x, event.y);
+        let input = match event.kind {
+            0 => InputEvent::PointerDown {
+                x,
+                y,
+                button: button(),
+            },
+            1 => InputEvent::PointerUp {
+                x,
+                y,
+                button: button(),
+            },
+            2 => InputEvent::PointerMove { x, y },
+            3 => InputEvent::PointerEnter,
+            4 => InputEvent::PointerLeave,
+            5 => InputEvent::Scroll {
+                x,
+                y,
+                delta_x: event.dx,
+                delta_y: event.dy,
+            },
+            6 | 7 => {
+                let Some(key) = dom_key(event.key) else {
+                    return 0;
+                };
+                match event.kind {
+                    6 => InputEvent::KeyDown {
+                        key,
+                        modifiers: event.modifiers,
+                        repeat: event.repeat,
+                    },
+                    _ => InputEvent::KeyUp {
+                        key,
+                        modifiers: event.modifiers,
+                    },
+                }
+            }
+            8 => InputEvent::Focus,
+            9 => InputEvent::Blur,
+            10 => InputEvent::Activate,
+            11 => match ACTIONS.with(|actions| actions.borrow().get(event.dx as usize).cloned()) {
+                Some(action) => InputEvent::Action(action),
+                None => return 0,
+            },
+            12 => InputEvent::PointerCancel,
+            _ => return 0,
+        };
+        let node = crate::scene::NodeId::outside(event.node);
+        let target = match event.at_self {
+            true => node,
+            false => crate::scene::NodeId::outside(ELSEWHERE),
+        };
+        let phase = match event.phase {
+            0 => EventPhase::Capture,
+            1 => EventPhase::Target,
+            _ => EventPhase::Bubble,
+        };
+        let code = (!event.code.is_empty()).then(|| Rc::from(event.code));
+        let mut cx = EventContext::dom(
+            input,
+            target,
+            node,
+            phase,
+            event.modifiers,
+            event.clicks,
+            code,
+        );
+        for listener in &mut self.0 {
+            listener(&mut cx);
+            if cx.dom_outcome() & 4 != 0 {
+                break;
+            }
+        }
+        cx.dom_outcome()
+    }
+}
+
+/// A DOM `KeyboardEvent.key` as zgx's key: none for a modifier or a key
+/// zgx doesn't name.
+pub fn dom_key(key: &str) -> Option<crate::input::Key> {
+    use crate::input::Key;
+    Some(match key {
+        "Tab" => Key::Tab,
+        "Enter" => Key::Enter,
+        " " => Key::Space,
+        "Escape" => Key::Escape,
+        "Backspace" => Key::Backspace,
+        "Delete" => Key::Delete,
+        "ArrowLeft" => Key::ArrowLeft,
+        "ArrowRight" => Key::ArrowRight,
+        "ArrowUp" => Key::ArrowUp,
+        "ArrowDown" => Key::ArrowDown,
+        "Home" => Key::Home,
+        "End" => Key::End,
+        "PageUp" => Key::PageUp,
+        "PageDown" => Key::PageDown,
+        "Insert" => Key::Insert,
+        "ContextMenu" => Key::ContextMenu,
+        _ => {
+            if let Some(n) = key.strip_prefix('F').and_then(|n| n.parse::<u8>().ok())
+                && (1..=35).contains(&n)
+            {
+                return Some(Key::Function(n));
+            }
+            // A named key (Shift, CapsLock, Unidentified…) is a word; a
+            // character is one grapheme, a few code points at most.
+            if key.is_empty()
+                || (key.chars().count() > 1 && key.chars().all(|c| c.is_ascii_alphanumeric()))
+            {
+                return None;
+            }
+            Key::Character(key.into())
+        }
+    })
+}
+
+thread_local! {
+    /// Every keymap mounted in the document, by its node.
+    static KEYMAPS: Rc<RefCell<crate::actions::Registry>> = Rc::default();
+    /// The actions a key just matched, for the elements it routes them to.
+    static ACTIONS: RefCell<Vec<crate::actions::Action>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `map` bound at node `node`, until what this gives back is dropped.
+pub fn bind_keymap(node: u32, map: crate::actions::Keymap) -> Box<dyn Any> {
+    KEYMAPS.with(|registry| {
+        Box::new(crate::actions::Registry::bind(
+            registry,
+            crate::scene::NodeId::outside(node),
+            map,
+        )) as Box<dyn Any>
+    })
+}
+
+/// What a key does to the keymaps on its way (`path`, the nodes with
+/// keymaps from the focused element out): nothing (0), it's taken with no
+/// action (1: a sequence's first keys, or `NoAction`), or `2 + n` with `n`
+/// actions to route, in turn, until one is handled (`Listeners::run`'s
+/// kind 11 gets them by number).
+pub fn resolve_keys(
+    path: &[u32],
+    key: &str,
+    code: &str,
+    modifiers: crate::input::Modifiers,
+    repeat: bool,
+) -> u32 {
+    use crate::actions::{Keystroke, NoAction, Resolution};
+    let Some(key) = dom_key(key) else {
+        return 0;
+    };
+    let path: Vec<_> = path
+        .iter()
+        .map(|&n| crate::scene::NodeId::outside(n))
+        .collect();
+    let code = (!code.is_empty()).then_some(code);
+    let now = crate::time::Instant::now();
+    KEYMAPS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        // A sequence left waiting too long is dropped: its keys went by.
+        let _ = registry.expired(now);
+        loop {
+            match registry.resolve(
+                path.clone(),
+                Keystroke::new(key.clone(), modifiers),
+                code,
+                repeat,
+                now,
+            ) {
+                Resolution::None => return 0,
+                Resolution::Prefix => return 1,
+                // The keys before didn't finish a sequence: this one alone.
+                Resolution::Retry(_) => continue,
+                Resolution::Matched(replay) => {
+                    if replay
+                        .candidates
+                        .first()
+                        .is_some_and(|a| a.downcast_ref::<NoAction>().is_some())
+                    {
+                        return 1;
+                    }
+                    let n = replay.candidates.len() as u32;
+                    ACTIONS.with(|actions| *actions.borrow_mut() = replay.candidates);
+                    return 2 + n;
+                }
+            }
+        }
+    })
 }
 
 /// An element's static styles, compared as they are: a host keeps the
@@ -1261,9 +1501,9 @@ fn primitive(
 ) -> Element {
     let scope = own_scope.as_ref().unwrap_or(parent);
     let mut dropped = Vec::new();
-    if !view.events.is_empty() {
-        dropped.push("on_event");
-    }
+    let listeners = (!view.events.is_empty()).then(|| Listeners(std::mem::take(&mut view.events)));
+    let mut keymap = None;
+    let mut focus_group = None;
     let mut attrs = Vec::new();
     let mut bound_attrs: Vec<BoundAttr> = Vec::new();
     let mut conditional = Vec::new();
@@ -1281,9 +1521,13 @@ fn primitive(
             accessibility,
             dom_conditional,
             selectable,
+            keymap: map,
             ..
         } = *rare;
         conditional = dom_conditional;
+        if !map.bindings.is_empty() || !map.contexts.is_empty() {
+            keymap = Some(Box::new(map));
+        }
         if let Some(label) = accessible_label {
             attrs.push(("aria-label", label));
         }
@@ -1339,9 +1583,19 @@ fn primitive(
             if let Some(mut f) = a.description_when {
                 bound_attrs.push(("aria-description", Box::new(move || Some(f()))));
             }
-            if a.focus_group.is_some() {
-                dropped.push("focus_group");
-            }
+            // Composite widgets keep one Tab stop, as a browser's do (as
+            // `apply_accessibility`).
+            focus_group = a
+                .focus_group
+                .or(match a.role {
+                    Some(Role::ListBox) => Some(crate::input::FocusGroup::Vertical),
+                    Some(Role::TabList | Role::Toolbar) => {
+                        Some(crate::input::FocusGroup::Horizontal)
+                    }
+                    Some(Role::RadioGroup) => Some(crate::input::FocusGroup::Both),
+                    _ => None,
+                })
+                .map(|axis| (axis, a.role == Some(Role::RadioGroup)));
         }
     }
     let text_like = matches!(kind, ElementKind::Text(_) | ElementKind::BoundText(_));
@@ -1426,6 +1680,9 @@ fn primitive(
         resources,
         contents: view.contents != super::Contents::Own,
         dropped,
+        listeners,
+        keymap,
+        focus_group,
     }
 }
 

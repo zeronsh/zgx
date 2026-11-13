@@ -326,6 +326,45 @@ pub enum InputEvent {
     /// Assistive technology asks a slider to step down.
     Decrement,
 }
+#[cfg(feature = "dom")]
+impl EventContext {
+    /// `event` at `target` as a DOM host routes it: in `phase` at
+    /// `current`, with the pointer's modifiers, the press's click count and
+    /// the key's physical code.
+    pub(crate) fn dom(
+        event: InputEvent,
+        target: NodeId,
+        current: NodeId,
+        phase: EventPhase,
+        modifiers: Modifiers,
+        clicks: u8,
+        code: Option<Rc<str>>,
+    ) -> Self {
+        let mut cx = Self::new(event, target);
+        cx.current_target = current;
+        cx.phase = phase;
+        cx.pointer_modifiers = modifiers;
+        cx.click_count = clicks;
+        cx.key_code = code;
+        cx
+    }
+    /// What its listeners decided, for a DOM host: 1 the default
+    /// prevented, 2 propagation stopped, 4 immediately, 8 focus asked for
+    /// the current node, 16 the pointer captured, 32 released.
+    pub(crate) fn dom_outcome(&self) -> u32 {
+        let mut bits =
+            self.prevented as u32 | (self.stopped as u32) << 1 | (self.immediate as u32) << 2;
+        if self.focus.is_some() {
+            bits |= 8;
+        }
+        match self.capture {
+            Some(Some(_)) => bits |= 16,
+            Some(None) => bits |= 32,
+            None => {}
+        }
+        bits
+    }
+}
 /// Which part of its route an event is in, as the DOM's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventPhase {
