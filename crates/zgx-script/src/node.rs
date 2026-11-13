@@ -1329,6 +1329,9 @@ pub(crate) enum Kind {
         /// `at_caret = true`: at the caret of the editor in its anchor,
         /// focus left there (`View::at_caret`).
         at_caret: bool,
+        /// `hover_delay = { open, close }`: opens as the pointer rests on
+        /// its trigger (`View::hover_delay`).
+        hover: Option<HoverProps>,
     },
     Menu {
         label: String,
@@ -1339,6 +1342,8 @@ pub(crate) enum Kind {
         /// `open_over = fn() -> id`: opens with that item over the trigger.
         over: Option<Function>,
         match_anchor: bool,
+        /// `hover_delay = { open, close }`, as a popover's.
+        hover: Option<HoverProps>,
     },
     /// Its label, and how it is chosen and shown.
     MenuItem(String, MenuItemOptions),
@@ -1347,6 +1352,9 @@ pub(crate) enum Kind {
         open: Signal<Value>,
         /// Its own trigger row (a `ui.menu_item` with content).
         trigger: Option<Rc<Node>>,
+        /// `hover_delay = { open, close }`: how long it waits under the
+        /// pointer before it opens (100 ms), and before it closes (none).
+        hover: Option<HoverProps>,
     },
     /// `ui.component(fn)`: `fn(props)` runs as each instance mounts, with
     /// its own `ui.use_state` state, effects and mount hooks.
@@ -3652,6 +3660,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "dismiss_on_backdrop",
     "scrim_blur",
     "match_anchor_width",
+    "hover_delay",
     "step",
     "options",
     "decimals",
@@ -4785,7 +4794,7 @@ pub(crate) fn placement_of(value: mlua::Value) -> mlua::Result<Option<zgx::compo
         mlua::Value::Table(t) => t,
         other => {
             return Err(mlua::Error::runtime(format!(
-                "`placement` is a table ({{ side, align, offset }}), not {}",
+                "`placement` is a table ({{ side, align, offset, padding, shift, flip_align, more_room }}), not {}",
                 other.type_name()
             )));
         }
@@ -4820,6 +4829,21 @@ pub(crate) fn placement_of(value: mlua::Value) -> mlua::Result<Option<zgx::compo
         && offset.is_finite()
     {
         at.offset = offset;
+    }
+    // How it avoids the screen's edges (`Collision`).
+    if let Some(padding) = table.get::<Option<f32>>("padding")?
+        && padding.is_finite()
+    {
+        at.collision.padding = padding.max(0.);
+    }
+    if let Some(shift) = table.get::<Option<bool>>("shift")? {
+        at.collision.shift = shift;
+    }
+    if let Some(flip) = table.get::<Option<bool>>("flip_align")? {
+        at.collision.flip_align = flip;
+    }
+    if let Some(more) = table.get::<Option<bool>>("more_room")? {
+        at.collision.more_room = more;
     }
     Ok(Some(at))
 }
@@ -5209,6 +5233,22 @@ pub(crate) fn install_plugins(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
+/// `hover_delay = { open = ms, close = ms }` on a popover, menu or submenu:
+/// each in milliseconds, left out for its default.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct HoverProps {
+    pub(crate) open: Option<f32>,
+    pub(crate) close: Option<f32>,
+}
+fn hover_of(table: &Table) -> mlua::Result<Option<HoverProps>> {
+    let Some(delay) = table.get::<Option<Table>>("hover_delay")? else {
+        return Ok(None);
+    };
+    Ok(Some(HoverProps {
+        open: delay.get("open")?,
+        close: delay.get("close")?,
+    }))
+}
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     style_atoms(lua);
     let ui = lua.create_table()?;
@@ -6169,6 +6209,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         autofocus,
                         over: table.get("open_over")?,
                         match_anchor,
+                        hover: hover_of(&table)?,
                     }
                 } else {
                     Kind::Popover {
@@ -6182,6 +6223,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         match_anchor,
                         // Set as `fill` walks the table (`late_field`).
                         at_caret: false,
+                        hover: hover_of(&table)?,
                     }
                 };
                 let mut node = fill(lua, Node::new(owner(lua)?, kind), Some(&table))?;
@@ -6254,6 +6296,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                                 mlua::Value::Nil => None,
                                 node => Some(expect_node(node, "`trigger`")?),
                             },
+                            hover: hover_of(&table)?,
                         },
                     ),
                     Some(&table),

@@ -59,6 +59,7 @@ fn nested(popups: bool) -> Nested {
                         side: PlacementSide::Right,
                         align: PlacementEdge::Start,
                         offset: 4.,
+                        ..Default::default()
                     })
                     .lazy()
                     .w(120.)

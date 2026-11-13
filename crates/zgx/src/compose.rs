@@ -461,6 +461,8 @@ struct PortalOptions {
     top: bool,
     /// `topmost`: that layer shown in a popup window above every other.
     topmost: bool,
+    /// `hover_delay`: opens as the pointer rests on its trigger.
+    hover: Option<crate::compose_hover::HoverDelay>,
     /// `hoist`: in that layer, over its parent.
     hoist: Option<Box<crate::compose_modal::Hoist>>,
     /// `View::autofocus`.
@@ -1159,6 +1161,20 @@ impl View {
         portal.top = true;
         portal.topmost = true;
         self.w_full().h_full()
+    }
+    /// Open this popover, menu or submenu as the pointer rests on its trigger
+    /// for `open`, and close it once the pointer has been off the trigger and
+    /// it for `close`, as Base UI's `openOnHover`, `delay` and `closeDelay`
+    /// do. Heading from the trigger to the popup, the pointer is held in the
+    /// triangle between them (a safe polygon: it closes as the pointer
+    /// strays out of it or rests in it 300 ms), so a diagonal crossing keeps
+    /// it open. One opened any other way (a click) stays until closed. A
+    /// submenu opens on hover by default after 100 ms and closes at once; this
+    /// sets its own.
+    pub fn hover_delay(mut self, open: std::time::Duration, close: std::time::Duration) -> Self {
+        self.rare_mut().portal.get_or_insert_default().hover =
+            Some(crate::compose_hover::HoverDelay { open, close });
+        self
     }
     /// Open a menu with its item `id` over the trigger, as a pop-up button's
     /// menu (a select's) opens with the chosen item over the button, rather
@@ -2509,7 +2525,10 @@ pub fn text_message(message: crate::i18n::Message) -> View {
 pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
-pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
+pub use crate::compose_hover::HoverDelay;
+pub use crate::compose_popover::{
+    Collision, Edge as PlacementEdge, Placement, Side as PlacementSide,
+};
 pub use crate::compose_rich::{
     InlineSvg, RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now, rich_text,
     text_span,
@@ -4513,6 +4532,9 @@ fn mount_portal_panel(
         }
     }
     environment.portal = Some((portal.overlay, portal.visible.clone()));
+    let hover = (view.rare.as_ref())
+        .and_then(|r| r.portal.as_ref())
+        .and_then(|p| p.hover);
     let menu_context = is_menu.then(|| {
         crate::compose_menu::MenuContext::new(
             open.clone(),
@@ -4522,6 +4544,9 @@ fn mount_portal_panel(
         )
     });
     if let Some(menu) = &menu_context {
+        if let Some(hover) = hover {
+            menu.hover.set(hover);
+        }
         environment.menu = Some(menu.clone());
     }
 
@@ -4705,7 +4730,15 @@ fn mount_portal_panel(
         if !is_submenu {
             crate::compose_menu::mount_press(ui, trigger, portal.overlay, panel, open.clone());
         }
-        crate::compose_menu::mount(ui, panel, menu, trigger, portal.overlay, dismiss_backdrop);
+        crate::compose_menu::mount(
+            ui,
+            panel,
+            menu,
+            trigger,
+            portal.overlay,
+            dismiss_backdrop,
+            environment.services.get::<TaskRunner>(),
+        );
     }
     let mut over_focus = None;
     if let Some(anchor) = anchor {
@@ -4845,6 +4878,21 @@ fn mount_portal_panel(
         on_dismiss,
         environment.services.get::<TaskRunner>(),
     );
+    // Opened as the pointer rests on its trigger (a submenu's own is mounted
+    // with its menu, `compose_menu::mount`).
+    if let (Some(hover), Some(anchor)) = (hover, anchor)
+        && !is_submenu
+    {
+        crate::compose_hover::mount(
+            ui,
+            owner,
+            anchor,
+            panel,
+            open_signal.clone(),
+            hover,
+            environment.services.get::<TaskRunner>(),
+        );
+    }
     // An unnamed popover or menu is named by its trigger, as a browser's
     // popover target is (`aria-labelledby`).
     if let Some(anchor) = anchor.filter(|_| unnamed && !is_submenu) {
@@ -6563,10 +6611,11 @@ fn open_element(
             .as_ref()
             .and_then(|_| environment.services.get::<TaskRunner>());
         let weak_ui = ui.downgrade();
-        // A submenu waits this long under the pointer before it opens, as
-        // Base UI's and AppKit's do, so a pointer passing over on its way to
-        // another item doesn't open it; a press or the keyboard opens it at once.
-        const SUBMENU_HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+        // A submenu waits under the pointer before it opens (its menu's
+        // `hover_delay`: 100 ms, as Base UI's and AppKit's do), so a pointer
+        // passing over on its way to another item doesn't open it; a press or
+        // the keyboard opens it at once. Heading for an open submenu across
+        // the items between (its safe polygon) closes and opens nothing.
         let hover_open: Rc<RefCell<Option<TaskToken>>> = Rc::default();
         ui.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Capture
@@ -6589,20 +6638,30 @@ fn open_element(
                 && (cx.target == root || matches!(cx.event, InputEvent::PointerDown { .. }))
                 && let Some(menu) = &item_menu
             {
-                menu.close_children(menu_trigger.as_ref());
+                let heading = matches!(cx.event, InputEvent::PointerEnter) && menu.holding();
+                if !heading {
+                    menu.close_children(menu_trigger.as_ref());
+                }
                 // (A press opens it on activation, as a click always has.)
                 if let Some(open) = &menu_trigger
                     && matches!(cx.event, InputEvent::PointerEnter)
                 {
+                    let delay = menu.child_hover(open).open;
                     match &runner {
-                        Some(runner) => {
-                            let open = open.clone();
+                        Some(runner) if !delay.is_zero() || heading => {
+                            let (open, menu) = (open.clone(), menu.clone());
                             *hover_open.borrow_mut() = Some(runner.spawn(Box::pin(async move {
-                                crate::timer::sleep(SUBMENU_HOVER_DELAY).await;
+                                crate::timer::sleep(delay).await;
+                                // Still heading for the one open: wait for the
+                                // pointer to arrive there, or stray.
+                                while menu.holding() {
+                                    crate::timer::sleep(std::time::Duration::from_millis(30)).await;
+                                }
+                                menu.close_children(Some(&open));
                                 open.set(true);
                             })));
                         }
-                        None => {
+                        _ => {
                             open.set(true);
                         }
                     }

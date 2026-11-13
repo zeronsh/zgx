@@ -18,6 +18,8 @@ mod context_menu;
 mod dialog_keyboard;
 #[path = "../modal_closes_popups.rs"]
 mod modal_closes_popups;
+#[path = "../hover_delay.rs"]
+mod hover_delay;
 #[path = "../nested_popover_dismiss.rs"]
 mod nested_popover_dismiss;
 #[path = "../portal_scope_regressions.rs"]

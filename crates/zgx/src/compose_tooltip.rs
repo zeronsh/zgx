@@ -25,6 +25,7 @@ pub struct Tooltip {
     placement: Option<Placement>,
     interactive: bool,
     delay: Option<Duration>,
+    close_delay: Option<Duration>,
 }
 enum Content {
     Text(String),
@@ -42,6 +43,7 @@ impl From<String> for Tooltip {
             placement: None,
             interactive: false,
             delay: None,
+            close_delay: None,
         }
     }
 }
@@ -52,6 +54,7 @@ impl From<View> for Tooltip {
             placement: None,
             interactive: false,
             delay: None,
+            close_delay: None,
         }
     }
 }
@@ -74,6 +77,17 @@ impl Tooltip {
     pub fn delay(mut self, delay: Duration) -> Self {
         self.delay = Some(delay);
         self
+    }
+    /// How long it stays after the pointer leaves the view (and, for an
+    /// interactive card, the card): none by default, and for a card 120
+    /// ms to cross to it.
+    pub fn close_delay(mut self, delay: Duration) -> Self {
+        self.close_delay = Some(delay);
+        self
+    }
+    /// `delay` and `close_delay` together, as `View::hover_delay` names them.
+    pub fn hover_delay(self, open: Duration, close: Duration) -> Self {
+        self.delay(open).close_delay(close)
     }
 }
 
@@ -230,6 +244,7 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             placement,
             interactive,
             delay,
+            close_delay,
         } = tip;
         let timing = TIMING.with(Cell::get);
         let delay = delay.unwrap_or(timing.delay);
@@ -374,14 +389,15 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             let (set, runner, waiting) = (set.clone(), runner.clone(), waiting.clone());
             let (over_anchor, over_card) = (over_anchor.clone(), over_card.clone());
             move || {
-                if !interactive || runner.is_none() {
+                if (!interactive && close_delay.is_none()) || runner.is_none() {
                     waiting.borrow_mut().take();
                     set(false, false);
                     return;
                 }
                 let (set, over_anchor, over_card) =
                     (set.clone(), over_anchor.clone(), over_card.clone());
-                *waiting.borrow_mut() = after(&runner, Duration::from_millis(120), move || {
+                let grace = close_delay.unwrap_or(Duration::from_millis(120));
+                *waiting.borrow_mut() = after(&runner, grace, move || {
                     if !over_anchor.get() && !over_card.get() {
                         set(false, false);
                     }
@@ -490,6 +506,7 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             side: PlacementSide::Top,
             align: PlacementEdge::Center,
             offset: 6.,
+            ..Default::default()
         });
         let content = crate::compose::column()
             .child(content)

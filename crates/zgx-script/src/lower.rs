@@ -1658,6 +1658,15 @@ fn themed(spec: &crate::node::ThemeSpec, vm: &Rc<Vm>, view: View) -> View {
         }
     }
 }
+/// `view` opening as the pointer rests on its trigger, if its props say
+/// (`hover_delay`), `open` ms by default.
+fn with_hover(view: View, hover: Option<&crate::node::HoverProps>, open: f32) -> View {
+    let ms = |ms: f32| std::time::Duration::from_secs_f32(ms.max(0.) / 1000.);
+    match hover {
+        Some(hover) => view.hover_delay(ms(hover.open.unwrap_or(open)), ms(hover.close.unwrap_or(0.))),
+        None => view,
+    }
+}
 /// The style property a theme token in `prop` sets.
 fn token_field(prop: Prop) -> Option<zgx::theme::Field> {
     use Prop::*;
@@ -3817,6 +3826,7 @@ fn kind_view(
             dismiss,
             match_anchor,
             at_caret,
+            hover,
         } => {
             let view = popover(
                 label.clone(),
@@ -3843,6 +3853,7 @@ fn kind_view(
                 view
             };
             let view = if *at_caret { view.at_caret() } else { view };
+            let view = with_hover(view, hover.as_ref(), 300.);
             match placement {
                 Some(at) => view.placement(*at),
                 None => view,
@@ -3856,6 +3867,7 @@ fn kind_view(
             autofocus,
             over,
             match_anchor,
+            hover,
         } => {
             let mut view = menu(
                 label.clone(),
@@ -3880,6 +3892,7 @@ fn kind_view(
             } else {
                 view.autofocus(false)
             };
+            let view = with_hover(view, hover.as_ref(), 300.);
             match placement {
                 Some(at) => view.placement(*at),
                 None => view,
@@ -3908,11 +3921,13 @@ fn kind_view(
             label,
             open,
             trigger,
+            hover,
         } => {
             let view = submenu(
                 label.clone(),
                 bridge(need(&mut cx), open, Value::truthy, Value::Bool),
             );
+            let view = with_hover(view, hover.as_ref(), 100.);
             match trigger {
                 // A menu item is the row; anything else goes in one.
                 Some(node) if matches!(node.kind, Kind::MenuItem(..)) => {
