@@ -66,6 +66,7 @@ pub fn role_name(role: Role) -> &'static str {
         Role::Image => "img",
         Role::Document => "document",
         Role::Article => "article",
+        Role::Region => "region",
         Role::Heading => "heading",
         Role::List => "list",
         Role::ListBox => "listbox",
@@ -263,6 +264,39 @@ pub fn own_text(scene: &Scene, node: NodeId) -> Option<String> {
         NodeKind::RichText { text, .. } => Some(text.text().to_owned()),
         _ => None,
     }
+}
+/// The text shown inside the control `handle` names (`Control::handle`), a
+/// word apart, at most `cap` characters: what a reader sees of it, not
+/// what is hidden from assistive technology or does not show. None when
+/// the node is gone.
+pub fn subtree_text(ui: &Ui, handle: u64, cap: usize) -> Option<String> {
+    let node = NodeId::from_bits(handle);
+    let scene = ui.scene.borrow();
+    let semantics = ui.semantics.borrow();
+    if !scene.contains(node) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if semantics.get(n).is_some_and(|s| s.hidden) || !shows(&scene, n) {
+            continue;
+        }
+        if let Some(text) = own_text(&scene, n) {
+            let text = text.trim();
+            if !text.is_empty() {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(text);
+                if out.chars().count() >= cap {
+                    break;
+                }
+            }
+        }
+        stack.extend(scene.children(n).iter().rev());
+    }
+    Some(out.chars().take(cap).collect())
 }
 /// The first text inside `node` (itself included), depth first.
 pub fn first_text(scene: &Scene, node: NodeId) -> Option<String> {
@@ -1121,6 +1155,9 @@ pub fn node(
         if !flags.is_empty() {
             out.push(("state".into(), flags.join(" ")));
         }
+        if let Some(popup) = s.has_popup {
+            out.push(("haspopup".into(), popup_name(popup).into()));
+        }
     }
     if ui.input.focused() == Some(node) {
         out.push(("focused".into(), "yes".into()));
@@ -1230,8 +1267,13 @@ pub struct Control {
     pub disabled: bool,
     /// Selected, if it can be (a tab, an option).
     pub selected: Option<bool>,
+    /// Checked, if it can be (a checkbox, a radio, a switch, a checked or
+    /// radio menu item): on or off.
+    pub checked: Option<bool>,
     /// Open, if it can be (a menu's trigger, a disclosure).
     pub expanded: Option<bool>,
+    /// What it opens (`aria-haspopup`): "dialog", "menu", "listbox", "tree" or "grid".
+    pub has_popup: Option<&'static str>,
     /// It has the keyboard focus.
     pub focused: bool,
     /// Names it for `press`, as long as it is there.
@@ -1267,11 +1309,12 @@ pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
                 | Role::ScrollBar
                 | Role::Document
                 | Role::Article
+                | Role::Region
                 | Role::Grid
                 | Role::Row
                 | Role::Cell
         );
-        if s.hidden || structural || !shows(&scene, node) {
+        if s.hidden || structural || !shows(&scene, node) || scene.in_held_popup(node) {
             continue;
         }
         let role = semantic_role_name(s);
@@ -1291,7 +1334,9 @@ pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
             bounds,
             disabled: s.disabled,
             selected: s.selected,
+            checked: s.checked,
             expanded: s.expanded,
+            has_popup: s.has_popup.map(popup_name),
             focused: focused == Some(node),
             handle: node.to_bits(),
         });
@@ -1308,7 +1353,8 @@ pub fn press_control(ui: &mut Ui, handle: u64) -> bool {
     let node = NodeId::from_bits(handle);
     let shown = {
         let scene = ui.scene.borrow();
-        if !scene.contains(node) || !shows(&scene, node) {
+        // (A popup held back, the app being at the back, is none to press.)
+        if !scene.contains(node) || !shows(&scene, node) || scene.in_held_popup(node) {
             return false;
         }
         let Some(shown) = scene.visible_bounds(node) else {
@@ -1334,4 +1380,16 @@ pub fn press_control(ui: &mut Ui, handle: u64) -> bool {
     };
     click_at(ui, shown);
     true
+}
+
+/// A pop-up kind as ARIA names it (`haspopup`).
+fn popup_name(kind: zgx::semantics::PopupKind) -> &'static str {
+    use zgx::semantics::PopupKind;
+    match kind {
+        PopupKind::Menu => "menu",
+        PopupKind::Dialog => "dialog",
+        PopupKind::Listbox => "listbox",
+        PopupKind::Tree => "tree",
+        PopupKind::Grid => "grid",
+    }
 }

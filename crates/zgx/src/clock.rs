@@ -178,6 +178,44 @@ impl Drop for VirtualClock {
     }
 }
 
+thread_local! {
+    static FROZEN: RefCell<Option<VirtualClock>> = const { RefCell::new(None) };
+}
+/// Freeze this thread's time (a screenshot or test run that must not depend on
+/// when its frames were made): every animation, timer, caret and frame reads
+/// the time it stands at until [`advance_frozen`] moves it, on 1 January
+/// 2000 UTC. Does nothing where a virtual clock already runs.
+pub fn freeze() {
+    if is_virtual() {
+        return;
+    }
+    FROZEN.with_borrow_mut(|frozen| *frozen = Some(VirtualClock::new()));
+}
+/// Whether [`freeze`] holds this thread's time.
+pub fn is_frozen() -> bool {
+    FROZEN.with_borrow(Option::is_some)
+}
+/// Let this thread's time run again.
+pub fn thaw() {
+    FROZEN.with_borrow_mut(Option::take);
+}
+/// Move frozen time on by `by`, waking each timer due by then at its own
+/// time, in order, and calling `settle` after each. Whether it was frozen.
+pub fn advance_frozen(by: Duration, settle: impl FnMut()) -> bool {
+    FROZEN
+        .with_borrow(|frozen| {
+            frozen.as_ref().map(|clock| {
+                let to = clock.elapsed() + by;
+                clock.advance(to, settle);
+            })
+        })
+        .is_some()
+}
+/// How long frozen time has run, if it is frozen.
+pub fn frozen_elapsed() -> Option<Duration> {
+    FROZEN.with_borrow(|frozen| frozen.as_ref().map(VirtualClock::elapsed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +276,21 @@ mod tests {
                 ("late", Duration::from_millis(30)),
             ]
         );
+    }
+
+    #[test]
+    fn frozen_time_stands_still_until_advanced_and_thaws() {
+        assert!(!is_frozen());
+        freeze();
+        assert!(is_frozen() && is_virtual());
+        let at = now();
+        std::thread::sleep(Duration::from_millis(3));
+        assert_eq!(now(), at);
+        assert!(advance_frozen(Duration::from_millis(250), || {}));
+        assert_eq!(now() - at, Duration::from_millis(250));
+        assert_eq!(frozen_elapsed(), Some(Duration::from_millis(250)));
+        thaw();
+        assert!(!is_frozen() && !is_virtual());
+        assert!(!advance_frozen(Duration::from_secs(1), || {}));
     }
 }

@@ -59,6 +59,9 @@ pub fn menus(commands: &[Command]) -> Vec<AppMenu> {
                 menus.len() - 1
             }
         };
+        if command.id.is_empty() && !command.separator {
+            continue;
+        }
         let entry = if command.separator {
             AppMenuEntry::Separator
         } else {
@@ -869,6 +872,21 @@ mod tests {
                 "find"
             ]
         );
+    }
+    /// A menu named alone (no id, no entry) takes its place in the bar and
+    /// adds nothing to it.
+    #[test]
+    fn a_menu_named_alone_orders_the_bar_without_an_entry() {
+        let menus = menus(&[
+            command("", "Go", None),
+            command("", "File", None),
+            command("new_tab", "File", Some("cmd+t")),
+            command("back", "Go", Some("cmd+[")),
+        ]);
+        let labels: Vec<_> = menus.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Go", "Edit", "File"]);
+        assert_eq!(shape(&menus[0]), ["back"]);
+        assert_eq!(shape(&menus[2]), ["new_tab"]);
     }
     /// A command with no menu (`menu = false`) goes in the key-only menu,
     /// last, which the menu bar leaves out; the rest keep their order.

@@ -68,6 +68,11 @@ pub struct Decoration {
     /// Its colour; `None`, the run's text colour.
     pub color: Option<Color>,
     thickness: f32,
+    /// Whether the thickness is the font's (a line-through's OS/2
+    /// yStrikeoutSize): the default's, not one asked for.
+    auto: bool,
+    /// Whether it breaks around glyphs reaching it (CSS `text-decoration-skip-ink: auto`).
+    skip_ink: bool,
     line: LineStyle,
     /// How far below the baseline it sits (CSS `text-underline-offset`);
     /// None, a tenth of the font size.
@@ -84,9 +89,26 @@ impl Decoration {
             } else {
                 1.
             },
+            auto: false,
+            skip_ink: false,
             line: LineStyle::Solid,
             offset: None,
         }
+    }
+    /// Whether its thickness is left to the font (`Decoration::default`), as
+    /// a line-through's is to its OS/2 yStrikeoutSize.
+    pub fn is_auto(self) -> bool {
+        self.auto
+    }
+    /// Broken around the parts of glyphs that cross it (descenders), as CSS's
+    /// `text-decoration-skip-ink: auto`, rather than drawn through them.
+    pub fn skip_ink(mut self, skip: bool) -> Self {
+        self.skip_ink = skip;
+        self
+    }
+    /// Whether it skips ink (`skip_ink`).
+    pub fn skips_ink(self) -> bool {
+        self.skip_ink
     }
     /// Drawn as `line`.
     pub fn line(mut self, line: LineStyle) -> Self {
@@ -119,7 +141,10 @@ impl Decoration {
 }
 impl Default for Decoration {
     fn default() -> Self {
-        Self::new(1.)
+        Self {
+            auto: true,
+            ..Self::new(1.)
+        }
     }
 }
 
@@ -150,6 +175,12 @@ pub struct TextRun {
     /// How far the background reaches past the text across without taking room (CSS's negative inline
     /// margin under padding): a search match's mark.
     pub outset: f32,
+    /// An outline round the run's box (CSS's inline border): its width and
+    /// colour. Its width is already part of `padding`; this draws it.
+    pub border: Option<(f32, Color)>,
+    /// The least width of the run's box, padding and border included (CSS's
+    /// `min-width` on an inline box): its text is centred in the room.
+    pub min_width: f32,
 }
 impl TextRun {
     /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
@@ -180,6 +211,8 @@ impl Default for TextRun {
             padding: [0.; 2],
             radius: 0.,
             outset: 0.,
+            border: None,
+            min_width: 0.,
         }
     }
 }
@@ -335,6 +368,31 @@ impl RichText {
             runs,
         })
     }
+    /// The paragraph running right to left whatever its first strong
+    /// character is (`FontStyle::paragraph_rtl`, on every run).
+    pub fn with_paragraph_rtl(&self) -> Self {
+        let runs: Vec<TextRun> = self
+            .runs
+            .iter()
+            .map(|run| {
+                let mut run = run.clone();
+                run.font.paragraph_rtl = true;
+                run
+            })
+            .collect();
+        Self {
+            runs: runs.into(),
+            ..self.clone()
+        }
+    }
+    /// The text with a line feed in place of each space at `spaces` (byte
+    /// offsets): the same bytes, so offsets, runs and boxes hold.
+    pub fn with_line_feeds(&self, spaces: &[usize]) -> Self {
+        Self {
+            text: line_feeds(&self.text, spaces),
+            ..self.clone()
+        }
+    }
     /// With inline `boxes` (see [`InlineBox`]), in order of their offsets.
     /// Errs unless each is at an [`INLINE_BOX_CHAR`] that is a run of its
     /// own. Sizes that aren't finite are zero; no boxes, none.
@@ -456,6 +514,7 @@ impl RichText {
                 a.range == b.range
                     && a.font_size == b.font_size
                     && a.padding[0] == b.padding[0]
+                    && a.min_width == b.min_width
                     && a.font == b.font
             })
     }
@@ -471,6 +530,7 @@ impl RichText {
                 a.range != b.range
                     || a.font_size != b.font_size
                     || a.padding[0] != b.padding[0]
+                    || a.min_width != b.min_width
                     || a.font != b.font
             })
     }
@@ -792,6 +852,17 @@ impl RichText {
         self.remade(lines, runs).unwrap_or_else(|_| self.clone())
     }
 }
+/// `text` with a line feed in place of the space at each of `spaces`.
+pub(crate) fn line_feeds(text: &str, spaces: &[usize]) -> Arc<str> {
+    let mut bytes = text.as_bytes().to_vec();
+    for &at in spaces {
+        if bytes.get(at) == Some(&b' ') {
+            bytes[at] = b'\n';
+        }
+    }
+    String::from_utf8(bytes).map_or_else(|_| text.into(), Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     /// A grid in a rich run reads as no tracking: the estimate's 0.6 em.

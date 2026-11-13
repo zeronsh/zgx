@@ -21,7 +21,8 @@ use zgx::reactive::{Effect, Runtime, Signal};
 /// A command as the application shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Command {
-    /// Unique; empty for a separator.
+    /// Unique; empty for a separator, or for a menu declared alone (no
+    /// title either).
     pub id: String,
     /// What the menu item says.
     pub title: String,
@@ -399,6 +400,27 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                         menu,
                         key: None,
                         separator: true,
+                        repeat: false,
+                    },
+                    None,
+                    None,
+                ));
+                return Ok(());
+            }
+            // A menu named and nothing else declares it, and its place in
+            // the bar, without an entry.
+            if matches!(table.get::<mlua::Value>("menu")?, mlua::Value::String(_))
+                && ["id", "title", "run", "key"]
+                    .iter()
+                    .all(|field| matches!(table.get::<mlua::Value>(*field), Ok(mlua::Value::Nil)))
+            {
+                commands.pending.borrow_mut().push((
+                    Command {
+                        id: String::new(),
+                        title: String::new(),
+                        menu,
+                        key: None,
+                        separator: false,
                         repeat: false,
                     },
                     None,

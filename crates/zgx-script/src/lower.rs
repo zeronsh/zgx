@@ -1462,6 +1462,10 @@ fn decorated(mut view: View, node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>) -
     {
         view = tooltip(view, tip, low);
     }
+    // The tooltips under it, with their own delays and reshow.
+    if let Some(group) = node.tooltip_group {
+        view = view.tooltip_group(group);
+    }
     if let Some(spec) = &node.theme {
         view = themed(spec, vm, view);
     }
@@ -1497,6 +1501,9 @@ fn tooltip(anchor: View, tip: &crate::node::Tooltip, low: &Rc<Lowering>) -> View
     }
     if let Some(delay) = tip.delay {
         core = core.delay(delay);
+    }
+    if let Some(delay) = tip.close_delay {
+        core = core.close_delay(delay);
     }
     anchor.tooltip(core.interactive(tip.interactive))
 }
@@ -1656,6 +1663,27 @@ fn themed(spec: &crate::node::ThemeSpec, vm: &Rc<Vm>, view: View) -> View {
                 view,
             )
         }
+    }
+}
+/// `view` with where focus goes as it opens and closes, if its props say.
+fn with_focus(view: View, focus: Option<&crate::node::FocusProps>) -> View {
+    match focus {
+        Some((initial, last)) => view
+            .initial_focus(initial.clone())
+            .final_focus(last.clone()),
+        None => view,
+    }
+}
+/// `view` opening as the pointer rests on its trigger, if its props say
+/// (`hover_delay`), `open` ms by default.
+fn with_hover(view: View, hover: Option<&crate::node::HoverProps>, open: f32) -> View {
+    let ms = |ms: f32| std::time::Duration::from_secs_f32(ms.max(0.) / 1000.);
+    match hover {
+        Some(hover) => view.hover_delay(
+            ms(hover.open.unwrap_or(open)),
+            ms(hover.close.unwrap_or(0.)),
+        ),
+        None => view,
     }
 }
 /// The style property a theme token in `prop` sets.
@@ -3767,6 +3795,7 @@ fn kind_view(
             dismiss,
             scrim_blur,
             on_close,
+            focus,
         } => {
             // Built when it first opens (`View::lazy`), as every script
             // overlay: closed, a list's menus and cards cost nothing.
@@ -3782,6 +3811,7 @@ fn kind_view(
             };
             let view = if *layer { view.layer() } else { view };
             let view = if *topmost { view.topmost() } else { view };
+            let view = with_focus(view, focus.as_ref());
             let view = match dismiss {
                 Some(d) => view.dismiss_on_backdrop(*d),
                 None => view,
@@ -3817,6 +3847,9 @@ fn kind_view(
             dismiss,
             match_anchor,
             at_caret,
+            anchor_fill,
+            hover,
+            focus,
         } => {
             let view = popover(
                 label.clone(),
@@ -3843,6 +3876,13 @@ fn kind_view(
                 view
             };
             let view = if *at_caret { view.at_caret() } else { view };
+            let view = if *anchor_fill {
+                view.anchor_fill()
+            } else {
+                view
+            };
+            let view = with_hover(view, hover.as_ref(), 300.);
+            let view = with_focus(view, focus.as_ref());
             match placement {
                 Some(at) => view.placement(*at),
                 None => view,
@@ -3856,6 +3896,8 @@ fn kind_view(
             autofocus,
             over,
             match_anchor,
+            hover,
+            focus,
         } => {
             let mut view = menu(
                 label.clone(),
@@ -3880,6 +3922,8 @@ fn kind_view(
             } else {
                 view.autofocus(false)
             };
+            let view = with_hover(view, hover.as_ref(), 300.);
+            let view = with_focus(view, focus.as_ref());
             match placement {
                 Some(at) => view.placement(*at),
                 None => view,
@@ -3908,11 +3952,13 @@ fn kind_view(
             label,
             open,
             trigger,
+            hover,
         } => {
             let view = submenu(
                 label.clone(),
                 bridge(need(&mut cx), open, Value::truthy, Value::Bool),
             );
+            let view = with_hover(view, hover.as_ref(), 100.);
             match trigger {
                 // A menu item is the row; anything else goes in one.
                 Some(node) if matches!(node.kind, Kind::MenuItem(..)) => {
@@ -4668,8 +4714,27 @@ fn styled(
         if a11y.hidden {
             view = view.accessible_hidden();
         }
+        if let Some(hidden) = &a11y.hidden_of {
+            let (hidden, vm) = (resolve_owned(hidden), vm.clone());
+            view = view.accessible_hidden_when(move || {
+                resolve(&hidden, Ty::Bool, None, &vm) == Some(Lit::Bool(true))
+            });
+        }
+        if let Some(busy) = &a11y.busy {
+            let (busy, vm) = (resolve_owned(busy), vm.clone());
+            view = view
+                .busy_when(move || resolve(&busy, Ty::Bool, None, &vm) == Some(Lit::Bool(true)));
+        }
+        if let Some(inert) = &a11y.inert {
+            let (inert, vm) = (resolve_owned(inert), vm.clone());
+            view = view
+                .inert_when(move || resolve(&inert, Ty::Bool, None, &vm) == Some(Lit::Bool(true)));
+        }
         if a11y.modal {
             view = view.accessible_modal();
+        }
+        if let Some(kind) = a11y.has_popup {
+            view = view.accessible_has_popup(kind);
         }
         if let Some(axis) = a11y.focus_group {
             view = view.focus_group(axis);
@@ -7826,6 +7891,15 @@ fn list_heights(
                 .map_err(|e| heights_vm.report(e))
                 .unwrap_or_default(),
         };
+        if !matches!(value, Value::List(_)) {
+            heights_vm.report(mlua::Error::runtime(format!(
+                "ui.list: `heights` is a list of row heights (numbers), not {value:?}"
+            )));
+        } else if value.list().iter().any(|v| !matches!(v, Value::Num(_))) {
+            heights_vm.report(mlua::Error::runtime(
+                "ui.list: `heights` holds numbers only (a row's height in points)",
+            ));
+        }
         let values = value.list().iter().map(|v| match v {
             Value::Num(n) if n.is_finite() && *n > 0. => *n as f32,
             // No room, and not built (`heights` takes positive numbers).
@@ -8656,6 +8730,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         followed: Vec<(&'static str, Ty, Owned)>,
         click: Option<Handler>,
         href: Option<Arc<str>>,
+        label: Option<Arc<str>>,
         rare: Option<Rc<crate::node::SpanRare>>,
     }
     #[derive(Clone, Copy)]
@@ -8673,6 +8748,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         underline_style: Option<zgx::rich_text::LineStyle>,
         underline_color: Option<zgx::theme::Themed<Color>>,
         underline_thickness: Option<f32>,
+        underline_skip_ink: bool,
         hover: Option<crate::node::HoverFill>,
     }
     // Whether any span fades in: known as they're taken, so a paragraph
@@ -8715,6 +8791,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     underline_style: s.underline_style,
                     underline_color: s.underline_color,
                     underline_thickness: s.underline_thickness,
+                    underline_skip_ink: s.underline_skip_ink,
                     hover: s.hover,
                 },
                 font: s.font.clone(),
@@ -8724,6 +8801,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     .collect(),
                 click: s.click.clone(),
                 href: s.href.clone(),
+                label: s.label.clone(),
                 rare: s.rare.clone(),
             }
         })
@@ -8800,16 +8878,19 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     underline_style,
                     underline_color,
                     underline_thickness,
+                    underline_skip_ink,
                     hover,
                 } = *style;
                 let decoration = || {
                     let d = zgx::rich_text::Decoration::new(underline_thickness.unwrap_or(1.))
-                        .line(underline_style.unwrap_or_default());
+                        .line(underline_style.unwrap_or_default())
+                        .skip_ink(underline_skip_ink);
                     match underline_offset {
                         Some(offset) => d.offset(offset),
                         None => d,
                     }
                 };
+                let rare = span.rare.as_deref();
                 let mut out: TextSpan = text_span(render_text(&span.text, &vm));
                 if let Some(c) = color {
                     out = out.text_color(c);
@@ -8835,11 +8916,15 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if let Some(color) = underline_color {
                     out = out.underline_color(color);
                 }
-                if let Some((underlined, color, background)) = hover {
+                if let Some((underlined, color, background, underline_color)) = hover {
                     out = out.hover(zgx::compose::SpanHover {
                         underline: underlined.then(decoration),
                         text_color: color,
                         background,
+                        underline_color,
+                        icon: rare
+                            .and_then(|rare| rare.hover_icon.as_ref())
+                            .map(|icon| span_icon(&vm, &low, icon)),
                     });
                 }
                 if strike {
@@ -8868,7 +8953,6 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         out = out.no_underline();
                     }
                 }
-                let rare = span.rare.as_deref();
                 if let Some((svg, w, h, d)) = rare.and_then(|rare| rare.inline_svg.as_ref())
                     && let Some(svg) = inline_svg_data(svg)
                 {
@@ -8895,6 +8979,12 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     });
                 }
                 if let Some(rare) = rare {
+                    if let Some((width, color)) = rare.border {
+                        out = out.border(width, color);
+                    }
+                    if let Some(width) = rare.min_w {
+                        out = out.min_width(width);
+                    }
                     if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
                         out = out.padding_end(end);
                     }
@@ -8907,6 +8997,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                             .context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
                     }
                 }
+                if let Some(label) = &span.label {
+                    out = out.label(label.clone());
+                }
                 if let Some(href) = &span.href {
                     out = out.href(href.clone());
                     if underline == Some(false) {
@@ -8914,25 +9007,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                 }
                 if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
-                    // Tracked: a remote icon shows once it comes.
-                    let data = load_svg(&vm, &low, &icon.src);
-                    // `"currentColor"`: the span's text colour.
-                    let (svg, tint) = match &icon.tint {
-                        Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
-                            (Arc::new(data.current_color()), None)
-                        }
-                        Some(tint) => (data, crate::node::themed_color(tint)),
-                        None => (data, None),
-                    };
-                    out = out.icon(zgx::compose::SpanIcon {
-                        svg,
-                        size: icon.size,
-                        gap: icon.gap,
-                        tint,
-                        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
-                        radius: icon.radius,
-                        pad: icon.pad,
-                    });
+                    out = out.icon(span_icon(&vm, &low, icon));
                 }
                 out
             })
@@ -8943,6 +9018,40 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
             spans
         }
     })
+}
+
+/// A span's icon as the paragraph draws it.
+fn span_icon(
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    icon: &crate::node::SpanIcon,
+) -> zgx::compose::SpanIcon {
+    // Tracked: a remote icon shows once it comes.
+    let data = load_svg(vm, low, &icon.src);
+    // `"currentColor"`: the span's text colour.
+    let (svg, tint) = match &icon.tint {
+        Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
+            (Arc::new(data.current_color()), None)
+        }
+        Some(tint) => (data, crate::node::themed_color(tint)),
+        None => (data, None),
+    };
+    zgx::compose::SpanIcon {
+        svg,
+        size: icon.size,
+        gap: icon.gap,
+        margin: icon.margin,
+        dy: icon.dy,
+        tint,
+        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
+        radius: icon.radius,
+        pad: icon.pad,
+        align: if icon.baseline {
+            zgx::compose::IconAlign::Baseline
+        } else {
+            zgx::compose::IconAlign::Center
+        },
+    }
 }
 
 /// The translation and local transform a node's literals set, if any.
@@ -9662,6 +9771,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Dir, Lit::Str(v)) => match &**v {
             "rtl" => s.rtl(),
             "ltr" => s.direction(zgx::scene::Direction::Ltr),
+            "auto" => s.dir_auto(),
             _ => s,
         },
         (TextSize, Lit::Num(v)) => s.text_size(*v),
@@ -9677,6 +9787,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         }),
         (Font, Lit::Str(v)) => s.font_family(font_family(v)),
         (Wrap, Lit::Bool(v)) => s.text_wrap(*v),
+        (Wrap, Lit::Str(v)) if &**v == "pretty" => s.text_pretty(true),
         (Wrap, Lit::Str(_)) => s.text_balance(true),
         // The ellipsis alone: text with one and no clamp keeps one line, so
         // `lines` wins however the two are set, in whichever order.

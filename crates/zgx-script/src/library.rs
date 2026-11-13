@@ -236,6 +236,7 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     )?;
     ui.set("controls", lua.create_function(controls)?)?;
     ui.set("press", lua.create_function(press)?)?;
+    ui.set("text_of", lua.create_function(text_of)?)?;
     ui.set(
         "tabs",
         lua.create_function(|lua, table: Table| {
@@ -1603,7 +1604,7 @@ fn control_window(lua: &Lua, what: &str) -> mlua::Result<Option<zgx::widgets::Ui
 
 /// `ui.controls { limit? }`: the controls on screen as a list, in document
 /// order with popups and modals last: `{ role, name, x, y, w, h, disabled,
-/// selected, expanded, focused, handle }`, window points. `{}` where the
+/// selected, checked, expanded, focused, handle }`, window points. `{}` where the
 /// host gave no window (`ScriptHost::window_controls`).
 fn controls(lua: &Lua, options: Option<Table>) -> mlua::Result<Table> {
     let limit = match &options {
@@ -1626,7 +1627,9 @@ fn controls(lua: &Lua, options: Option<Table>) -> mlua::Result<Table> {
         item.set("h", control.bounds.height)?;
         item.set("disabled", control.disabled)?;
         item.set("selected", control.selected)?;
+        item.set("checked", control.checked)?;
         item.set("expanded", control.expanded)?;
+        item.set("haspopup", control.has_popup)?;
         item.set("focused", control.focused)?;
         // A number a script can hold exactly (2^53): a slot reused two million times wraps.
         item.set("handle", (control.handle & ((1 << 53) - 1)) as f64)?;
@@ -1652,6 +1655,21 @@ fn press(lua: &Lua, handle: f64) -> mlua::Result<bool> {
         return Ok(false);
     }
     Ok(crate::driver::press_control(&mut ui, handle as u64))
+}
+
+/// `ui.text_of(handle, cap?)`: the text a control (`ui.controls`' `handle`)
+/// shows, a word apart, at most `cap` (400) characters; "" when it is gone.
+fn text_of(lua: &Lua, (handle, cap): (f64, Option<f64>)) -> mlua::Result<String> {
+    let Some(ui) = control_window(lua, "ui.text_of")? else {
+        return Ok(String::new());
+    };
+    if !(handle.is_finite() && handle >= 0. && handle.fract() == 0.) {
+        return Ok(String::new());
+    }
+    let cap = cap
+        .filter(|c| c.is_finite() && *c >= 0.)
+        .map_or(400, |c| c as usize);
+    Ok(crate::driver::subtree_text(&ui, handle as u64, cap).unwrap_or_default())
 }
 
 /// What a disclosure's summary shows: text, or a node of the app's.

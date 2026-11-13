@@ -1,5 +1,7 @@
 //! Retained menu keyboard navigation and trigger metadata.
 use crate::{
+    compose::{TaskRunner, TaskToken},
+    compose_hover::{HoverDelay, SAFE_TIMEOUT, SUBMENU_HOVER, contains, in_safe_polygon},
     input::{EventPhase, InputEvent, Key, PointerButton},
     reactive::Signal,
     scene::NodeId,
@@ -19,6 +21,15 @@ pub(crate) struct MenuContext {
     trigger: Option<NodeId>,
     submenu: bool,
     children: RefCell<Vec<Weak<MenuContext>>>,
+    /// When this submenu opens and closes as the pointer rests on, or
+    /// leaves, its trigger (`View::hover_delay`).
+    pub hover: Cell<HoverDelay>,
+    /// The pointer is heading for an open submenu (in its safe polygon, on a
+    /// sibling item): moving over the items between stays that menu open.
+    hold: Cell<bool>,
+    /// A close of its submenu waits on the pointer's close delay: entering
+    /// another item closes nothing meanwhile.
+    closing: Cell<bool>,
 }
 impl MenuContext {
     pub(crate) fn new(
@@ -35,6 +46,9 @@ impl MenuContext {
             trigger,
             submenu,
             children: RefCell::new(Vec::new()),
+            hover: Cell::new(SUBMENU_HOVER),
+            hold: Cell::new(false),
+            closing: Cell::new(false),
         });
         if let Some(parent) = &context.parent {
             let mut children = parent.children.borrow_mut();
@@ -57,6 +71,36 @@ impl MenuContext {
             {
                 child.open.set(false);
             }
+        }
+    }
+    /// Whether the pointer is heading for an open submenu of this menu, over
+    /// the items between (see `hold`).
+    pub(crate) fn holding(&self) -> bool {
+        self.hold.get() || self.closing.get()
+    }
+    /// The hover delay of this menu's submenu `open`.
+    pub(crate) fn child_hover(&self, open: &Signal<bool>) -> HoverDelay {
+        self.children
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|child| child.open.same(open))
+            .map_or(SUBMENU_HOVER, |child| child.hover.get())
+    }
+    /// This menu's open submenus.
+    fn open_children(&self) -> Vec<Rc<MenuContext>> {
+        self.children
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|child| child.open.with_untracked(|o| *o))
+            .collect()
+    }
+    /// Every panel under this menu that is open: its open submenus' and theirs.
+    fn open_panels(&self, out: &mut Vec<NodeId>) {
+        for child in self.open_children() {
+            out.extend(child.panel.get());
+            child.open_panels(out);
         }
     }
     /// Focus the first enabled item of this menu's open submenu `open`.
@@ -110,8 +154,10 @@ pub(crate) fn mount(
     anchor: NodeId,
     overlay: NodeId,
     dismiss_backdrop: bool,
+    runner: Option<Rc<TaskRunner>>,
 ) {
     menu.overlay.set(Some(overlay));
+    mount_safe_polygon(ui, panel, menu.clone(), runner);
     if menu.submenu {
         let current = menu.clone();
         ui.bind(panel, move || {
@@ -144,7 +190,7 @@ pub(crate) fn mount(
         let expanded = open.get();
         reset.borrow_mut().reset();
         semantics.borrow_mut().update(anchor, |node| {
-            node.has_popup = Some(PopupKind::Menu);
+            node.has_popup.get_or_insert(PopupKind::Menu);
             node.expanded = Some(expanded);
         });
     });
@@ -482,4 +528,125 @@ fn item_at(ui: &Ui, panel: NodeId, x: f32, y: f32) -> Option<NodeId> {
                 && ui.input.is_enabled(&scene, *node)
         })
         .filter(|item| scene.is_within(*item, panel))
+}
+
+/// Heading from a submenu's trigger to its panel across this menu's other
+/// items keeps it open: while the pointer is in the safe polygon from where
+/// it left the trigger (`in_safe_polygon`) the items it crosses close and
+/// open nothing (`MenuContext::holding`). Out of it, over this menu, the
+/// submenu closes after its close delay; resting in it, after a moment.
+fn mount_safe_polygon(
+    ui: &mut Ui,
+    panel: NodeId,
+    menu: Rc<MenuContext>,
+    runner: Option<Rc<TaskRunner>>,
+) {
+    let weak = ui.downgrade();
+    let exit: Cell<Option<(f32, f32)>> = Cell::new(None);
+    // What waits to close the submenu: nothing (0), the safe polygon's
+    // timeout (1) or the close delay (2), and its task.
+    let waiting: Rc<Cell<u8>> = Rc::default();
+    let task: Rc<RefCell<Option<TaskToken>>> = Rc::default();
+    ui.on_document_event(panel, move |event| {
+        let InputEvent::PointerMove { x, y } = *event else {
+            return;
+        };
+        let p = (x, y);
+        let open = menu.open_children();
+        let Some(ui) = weak.upgrade() else { return };
+        let (Some(child), true) = (open.first(), ui.scene.borrow().contains(panel)) else {
+            exit.set(None);
+            menu.hold.set(false);
+            {
+                waiting.set(0);
+                menu.closing.set(false);
+                task.borrow_mut().take();
+            }
+            return;
+        };
+        let bounds = {
+            let scene = ui.scene.borrow();
+            let at = |node: Option<NodeId>| {
+                node.filter(|node| scene.contains(*node))
+                    .map(|node| scene.world_bounds(node))
+            };
+            (
+                child.trigger.and_then(|trigger| at(Some(trigger))),
+                at(child.panel.get()),
+                at(Some(panel)),
+            )
+        };
+        let (Some(trigger), Some(floating), Some(mine)) = bounds else {
+            menu.hold.set(false);
+            return;
+        };
+        // Over the trigger: where the pointer left it from, if it does. Over
+        // the submenu (or one of its own), or off this menu: nothing held.
+        if contains(trigger, p) {
+            exit.set(Some(p));
+            menu.hold.set(false);
+            {
+                waiting.set(0);
+                menu.closing.set(false);
+                task.borrow_mut().take();
+            }
+            return;
+        }
+        let mut panels = Vec::new();
+        menu.open_panels(&mut panels);
+        let over_open = {
+            let scene = ui.scene.borrow();
+            panels
+                .iter()
+                .any(|node| scene.contains(*node) && contains(scene.world_bounds(*node), p))
+        };
+        if over_open || !contains(mine, p) {
+            menu.hold.set(false);
+            {
+                waiting.set(0);
+                menu.closing.set(false);
+                task.borrow_mut().take();
+            }
+            return;
+        }
+        // A submenu the pointer never left the trigger of (opened by the
+        // keyboard) closes as an item is entered, not as it moves.
+        let Some(exit) = exit.get() else {
+            menu.hold.set(false);
+            return;
+        };
+        let held = in_safe_polygon(exit, trigger, floating, p);
+        menu.hold.set(held);
+        // Leaving it starts the close delay once; each move inside it starts
+        // the wait over (resting in it is not heading there).
+        let (delay, kind) = match held {
+            true => (SAFE_TIMEOUT, 1),
+            false => (child.hover.get().close, 2),
+        };
+        if kind == 2 && waiting.get() == 2 {
+            return;
+        }
+        waiting.set(kind);
+        menu.closing.set(kind == 2 && !delay.is_zero());
+        let closing: Vec<Signal<bool>> = open.iter().map(|child| child.open.clone()).collect();
+        let (menu_hold, waited) = (menu.clone(), waiting.clone());
+        let after = move || {
+            menu_hold.hold.set(false);
+            menu_hold.closing.set(false);
+            waited.set(0);
+            for open in &closing {
+                open.set(false);
+            }
+        };
+        *task.borrow_mut() = match &runner {
+            Some(runner) if !delay.is_zero() => Some(runner.spawn(Box::pin(async move {
+                crate::timer::sleep(delay).await;
+                after();
+            }))),
+            _ => {
+                after();
+                None
+            }
+        };
+    });
 }

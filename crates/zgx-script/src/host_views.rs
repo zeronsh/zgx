@@ -9,6 +9,10 @@ thread_local! {
     static VIEWS: RefCell<HashMap<String, Factory>> = RefCell::default();
 }
 
+/// Drops what `name` shows: the factory goes, and the key with it. A view already mounted from it stays as made.
+pub fn remove_host_view(name: &str) {
+    VIEWS.with(|views| views.borrow_mut().remove(name));
+}
 /// Registers what `ui.host_view { name = name }` shows: `make` runs each time such an element mounts.
 pub fn host_view(name: impl Into<String>, make: impl Fn() -> View + 'static) {
     VIEWS.with(|views| views.borrow_mut().insert(name.into(), Rc::new(make)));

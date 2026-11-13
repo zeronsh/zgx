@@ -974,3 +974,450 @@ fn a_kana_runs_han_takes_the_chinese_list_on_every_platform() {
     assert_eq!(found.len(), 22, "{found:?}");
     assert_eq!(fonts.full_scans(), 0, "every face searched for {found:?}");
 }
+
+/// Latin as the text's font and Chinese from a fallback face of smaller
+/// metrics (0.9 / 0.1 against Geist's 1.005 / 0.295).
+struct HansFallback;
+
+impl cosmic_text::Fallback for HansFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn script_fallback(&self, script: unicode_script::Script, _: &str) -> &[&'static str] {
+        match script {
+            unicode_script::Script::Han => &["ZgxHans"],
+            _ => &[],
+        }
+    }
+}
+
+/// A line of fallback glyphs alone stands on the baseline its Latin lines
+/// do: the text's own font is the line's strut, as in a browser, so a
+/// fallback face of other metrics doesn't move it.
+#[test]
+fn a_line_of_fallback_glyphs_keeps_the_text_fonts_baseline() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_data(include_bytes!("fonts/GeistVariable-subset.ttf").to_vec());
+    db.load_font_data(include_bytes!("fonts/ZgxHans.ttf").to_vec());
+    let mut fonts =
+        cosmic_text::FontSystem::new_with_locale_and_db_and_fallback("zh".into(), db, HansFallback);
+    let baseline = |fonts: &mut cosmic_text::FontSystem, text: &str, size: f32| {
+        let mut buffer = cosmic_text::Buffer::new(fonts, cosmic_text::Metrics::new(size, 20.));
+        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name("Geist"));
+        buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        let run = buffer.layout_runs().next().expect("a line");
+        assert!(run.glyphs.iter().all(|g| g.glyph_id != 0), "{text}: shaped");
+        run.line_y
+    };
+    for size in [12., 13., 14., 16.] {
+        assert_eq!(
+            baseline(&mut fonts, "车见", size),
+            baseline(&mut fonts, "abc", size),
+            "{size}"
+        );
+    }
+}
+
+/// Hiragino Sans, as macOS has it, is drawn in W3 up to weight 500 and in W6
+/// from 600, as Core Text's cascade gives Chrome (measured: 400 and 500 draw
+/// the same pixels, 600 and 700 likewise); elsewhere nothing is asserted.
+#[cfg(target_os = "macos")]
+#[test]
+fn hiragino_sans_is_drawn_in_w3_to_500_and_w6_from_600() {
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "ja-JP".into(),
+        {
+            let mut db = cosmic_text::fontdb::Database::new();
+            db.load_system_fonts();
+            db
+        },
+        cosmic_text::PlatformFallback,
+    );
+    if !fonts.db().faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(name, _)| name == "Hiragino Sans")
+    }) {
+        eprintln!("no Hiragino Sans installed: nothing checked");
+        return;
+    }
+    for (css, class) in [
+        (100, 300),
+        (400, 300),
+        (500, 300),
+        (600, 600),
+        (700, 600),
+        (900, 600),
+    ] {
+        let mut buffer = cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(13., 20.));
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::SansSerif)
+            .weight(cosmic_text::Weight(css));
+        buffer.set_text("こんにちは", &attrs, cosmic_text::Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        let run = buffer.layout_runs().next().expect("a line");
+        let face = fonts.db().face(run.glyphs[0].font_id).expect("a face");
+        let named = face
+            .families
+            .iter()
+            .any(|(name, _)| name == "Hiragino Sans");
+        assert!(named, "{css}: {:?}", face.families);
+        assert_eq!(face.weight.0, class, "weight {css}");
+    }
+}
+
+/// The macOS system faces themselves (SF Pro, Hiragino Sans W3), at 13 and
+/// 14 px on a 20 px line: Latin, mixed and pure Japanese lines stand on one
+/// baseline, the text font's.
+#[cfg(target_os = "macos")]
+#[test]
+fn latin_mixed_and_japanese_lines_share_a_baseline_with_the_real_system_faces() {
+    let sf = std::path::Path::new("/System/Library/Fonts/SFNS.ttf");
+    let hiragino = std::fs::read_dir("/System/Library/Fonts")
+        .ok()
+        .and_then(|dir| {
+            dir.flatten()
+                .map(|e| e.path())
+                .find(|p| p.to_string_lossy().ends_with("シック W3.ttc"))
+        });
+    let Some(hiragino) = hiragino.filter(|_| sf.exists()) else {
+        eprintln!("the system faces aren't here: nothing checked");
+        return;
+    };
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_file(sf).unwrap();
+    let family = db
+        .faces()
+        .next()
+        .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+        .expect("SF's family");
+    db.load_font_file(&hiragino).unwrap();
+    struct Ja;
+    impl cosmic_text::Fallback for Ja {
+        fn common_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn forbidden_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn script_fallback(&self, script: unicode_script::Script, _: &str) -> &[&'static str] {
+            match script {
+                unicode_script::Script::Hiragana | unicode_script::Script::Katakana => {
+                    &["Hiragino Sans"]
+                }
+                _ => &[],
+            }
+        }
+    }
+    let mut fonts =
+        cosmic_text::FontSystem::new_with_locale_and_db_and_fallback("ja-JP".into(), db, Ja);
+    for size in [13., 14.] {
+        let mut baselines = Vec::new();
+        for text in ["Hello world", "Anaraの使い方", "こんにちは。あなた"] {
+            let mut buffer =
+                cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(size, 20.));
+            let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(&family));
+            buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+            buffer.shape_until_scroll(&mut fonts, false);
+            baselines.push(buffer.layout_runs().next().expect("a line").line_y);
+        }
+        assert!(
+            baselines.windows(2).all(|w| w[0] == w[1]),
+            "{size}px: Latin, mixed, Japanese: {baselines:?}"
+        );
+    }
+}
+
+/// A run that is Japanese from end to end, in a text font that has no kana:
+/// every glyph falls back, yet the line stands on the text font's baseline
+/// (the real SF Pro and Hiragino Sans W3 at 13 px on a 20 px line: 15).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pure_japanese_line_stands_on_the_text_fonts_baseline_with_the_real_faces() {
+    let sf = std::path::Path::new("/System/Library/Fonts/SFNS.ttf");
+    let hiragino = std::fs::read_dir("/System/Library/Fonts")
+        .ok()
+        .and_then(|dir| {
+            dir.flatten()
+                .map(|e| e.path())
+                .find(|p| p.to_string_lossy().ends_with("シック W3.ttc"))
+        });
+    let Some(hiragino) = hiragino.filter(|_| sf.exists()) else {
+        eprintln!("the system faces aren't here: nothing checked");
+        return;
+    };
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_file(sf).unwrap();
+    let family = db
+        .faces()
+        .next()
+        .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+        .expect("SF's family");
+    db.load_font_file(&hiragino).unwrap();
+    struct Ja;
+    impl cosmic_text::Fallback for Ja {
+        fn common_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn forbidden_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn script_fallback(&self, script: unicode_script::Script, _: &str) -> &[&'static str] {
+            match script {
+                unicode_script::Script::Hiragana | unicode_script::Script::Katakana => {
+                    &["Hiragino Sans"]
+                }
+                _ => &[],
+            }
+        }
+    }
+    let mut fonts =
+        cosmic_text::FontSystem::new_with_locale_and_db_and_fallback("ja-JP".into(), db, Ja);
+    // The same text twice, so the second shaping takes the kept fallback.
+    for _ in 0..2 {
+        let mut buffer = cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(13., 20.));
+        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(&family));
+        buffer.set_text(
+            "こんにちは。あなたのガイドです。",
+            &attrs,
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut fonts, false);
+        let run = buffer.layout_runs().next().expect("a line");
+        assert!(run.glyphs.iter().all(|g| {
+            fonts
+                .db()
+                .face(g.font_id)
+                .is_some_and(|f| f.families.iter().any(|(n, _)| n == "Hiragino Sans"))
+        }));
+        assert_eq!(run.line_y, 15., "pure Japanese at 13/20");
+    }
+}
+
+/// Hebrew and Arabic fall back to the system's own SF Hebrew and SF Arabic
+/// (hidden, variable faces), as Core Text's cascade and Chrome have it, and
+/// a weight between their named ones draws in the instance CSS matching
+/// picks, as Chrome does (450 as Medium, 350 as Light), while the text's own
+/// face follows the axis.
+#[cfg(target_os = "macos")]
+#[test]
+fn hebrew_and_arabic_fall_back_to_the_variable_sf_faces_at_their_own_weights() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_system_fonts();
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "en-US".into(),
+        db,
+        cosmic_text::PlatformFallback,
+    );
+    // The system font (SF Pro, which has neither script).
+    let system = fonts
+        .db()
+        .faces()
+        .find(|f| f.post_script_name.starts_with(".SFNS-"))
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let Some(system) = system else {
+        eprintln!("SF Pro isn't here: nothing checked");
+        return;
+    };
+    let width_and_family = |fonts: &mut cosmic_text::FontSystem, text: &str, weight: u16| {
+        let mut buffer = cosmic_text::Buffer::new(fonts, cosmic_text::Metrics::new(16., 20.));
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::Name(&system))
+            .weight(cosmic_text::Weight(weight));
+        buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        let run = buffer.layout_runs().next().expect("a line");
+        let family = fonts
+            .db()
+            .face(run.glyphs[0].font_id)
+            .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
+            .unwrap_or_default();
+        (run.line_w, family)
+    };
+    for (text, family) in [
+        ("שלוםעולםטוב", ".SF Hebrew"),
+        ("مرحبابالعالمالجميل", ".SF Arabic"),
+    ] {
+        let (w400, got) = width_and_family(&mut fonts, text, 400);
+        if got != family {
+            eprintln!("{family} isn't installed here ({got}): nothing checked");
+            continue;
+        }
+        let (w450, _) = width_and_family(&mut fonts, text, 450);
+        let (w500, f500) = width_and_family(&mut fonts, text, 500);
+        assert_eq!(f500, family, "medium stays in the same face");
+        assert!(w400 < w450, "{family}: {w400} {w450}");
+        assert_eq!(w450, w500, "{family}: 450 draws as Medium");
+        let (w350, _) = width_and_family(&mut fonts, text, 350);
+        let (w300, _) = width_and_family(&mut fonts, text, 300);
+        assert_eq!(w350, w300, "{family}: 350 draws as Light");
+    }
+    let (latin400, _) = width_and_family(&mut fonts, "Hello world", 400);
+    let (latin450, _) = width_and_family(&mut fonts, "Hello world", 450);
+    let (latin500, _) = width_and_family(&mut fonts, "Hello world", 500);
+    assert!(
+        latin400 < latin450 && latin450 < latin500,
+        "the text's own face interpolates"
+    );
+}
+
+/// A set line height takes its baseline from the text's font whatever face a
+/// glyph falls back to: Latin, Hebrew and mixed lines at 16/24 stand on one
+/// row (SF Hebrew's metrics differ from SF Pro's).
+#[cfg(target_os = "macos")]
+#[test]
+fn hebrew_and_mixed_lines_stand_on_the_text_fonts_baseline() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_system_fonts();
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "en-US".into(),
+        db,
+        cosmic_text::PlatformFallback,
+    );
+    let system = fonts
+        .db()
+        .faces()
+        .find(|f| f.post_script_name.starts_with(".SFNS-"))
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let Some(system) = system else {
+        eprintln!("SF Pro isn't here: nothing checked");
+        return;
+    };
+    // Twice: the second shaping takes the kept fallback.
+    for _ in 0..2 {
+        let mut baselines = vec![];
+        for text in ["Hxxx", "הההה", "Hxxx הההה", "مرحبا", "Hxxx مرحبا"] {
+            let mut buffer =
+                cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(16., 24.));
+            let attrs = cosmic_text::Attrs::new()
+                .family(cosmic_text::Family::Name(&system))
+                .weight(cosmic_text::Weight(500));
+            buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+            buffer.shape_until_scroll(&mut fonts, false);
+            baselines.push((text, buffer.layout_runs().next().expect("a line").line_y));
+        }
+        assert!(
+            baselines.iter().all(|(_, y)| *y == baselines[0].1),
+            "{baselines:?}"
+        );
+    }
+}
+
+/// With no face of the family asked for, the system font found in its place
+/// is the text's own: a weight between the named ones follows the axis there
+/// (450 is narrower than 500), as it does for the family named outright.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_family_that_is_not_installed_falls_to_the_system_font_at_the_weight_asked() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_system_fonts();
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "en-US".into(),
+        db,
+        cosmic_text::PlatformFallback,
+    );
+    let system = fonts
+        .db()
+        .faces()
+        .find(|f| f.post_script_name.starts_with(".SFNS-"))
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let Some(system) = system else {
+        eprintln!("SF Pro isn't here: nothing checked");
+        return;
+    };
+    let width = |fonts: &mut cosmic_text::FontSystem, family: &str, weight: u16| {
+        let mut buffer = cosmic_text::Buffer::new(fonts, cosmic_text::Metrics::new(14., 20.));
+        let attrs = cosmic_text::Attrs::new()
+            .family(cosmic_text::Family::Name(family))
+            .weight(cosmic_text::Weight(weight))
+            .optical(14);
+        buffer.set_text(
+            "The quick brown fox, complex",
+            &attrs,
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(fonts, false);
+        buffer.layout_runs().next().expect("a line").line_w
+    };
+    for weight in [450, 550] {
+        let named = width(&mut fonts, &system, weight);
+        let missing = width(&mut fonts, "No Such Family 42", weight);
+        assert_eq!(
+            named, missing,
+            "{weight}: the same widths as the named family"
+        );
+    }
+    let (w400, w450, w500) = (
+        width(&mut fonts, "No Such Family 42", 400),
+        width(&mut fonts, "No Such Family 42", 450),
+        width(&mut fonts, "No Such Family 42", 500),
+    );
+    assert!(w400 < w450 && w450 < w500, "{w400} {w450} {w500}");
+}
+
+/// Kana that a line break opportunity separates kern as they do shaped
+/// together, as Core Text and Chrome set them (Hiragino Sans W3's `kern` makes
+/// ォ before ル 12.48 at 13 px, イ before ル 12.35; the line 154.83).
+#[cfg(target_os = "macos")]
+#[test]
+fn kana_pairs_kern_across_break_opportunities() {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+    let gpu = zgx_gpu::GpuRenderer::new(64, 64).unwrap();
+    let fonts_rc = gpu.text_system();
+    let mut fonts = fonts_rc.borrow_mut();
+    if !fonts
+        .db()
+        .faces()
+        .any(|f| f.post_script_name == "HiraginoSans-W3")
+    {
+        eprintln!("no Hiragino Sans W3: nothing checked");
+        return;
+    }
+    let mut buffer = Buffer::new(&mut fonts, Metrics::new(13., 20.));
+    let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
+    buffer.set_text("フォルダにファイルを追加", &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(&mut fonts, false);
+    let width = buffer.layout_runs().next().unwrap().line_w;
+    assert!((width - 154.83).abs() < 0.01, "{width}");
+}
+
+/// A kern pair a space or a comma and a space make crosses a word boundary
+/// as Chrome sets it (SF at 24 px/600: 401.92 over the line, where each word
+/// shaped alone gave 403.01).
+#[cfg(target_os = "macos")]
+#[test]
+fn kerning_crosses_the_space_between_words() {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+    let gpu = zgx_gpu::GpuRenderer::new(64, 64).unwrap();
+    let fonts_rc = gpu.text_system();
+    let mut fonts = fonts_rc.borrow_mut();
+    if !fonts
+        .db()
+        .faces()
+        .any(|f| f.post_script_name.starts_with(".SFNS-"))
+    {
+        eprintln!("no SF: nothing checked");
+        return;
+    }
+    let width = |fonts: &mut cosmic_text::FontSystem, text: &str, size: f32, weight: u16| {
+        let mut buffer = Buffer::new(fonts, Metrics::new(size, size * 1.5));
+        let attrs = Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight(weight))
+            .optical(size.round() as u16);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        buffer.layout_runs().next().unwrap().line_w
+    };
+    let line = "Sphinx of black quartz, judge my vow";
+    assert!((width(&mut fonts, line, 24., 600) - 401.922).abs() < 0.05);
+    assert!((width(&mut fonts, line, 20., 600) - 340.766).abs() < 0.05);
+}

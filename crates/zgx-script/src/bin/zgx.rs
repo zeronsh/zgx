@@ -480,6 +480,11 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--until MARK|FRAME] [--summary] [--keep N]
   reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
+  clock [freeze|thaw|advance <ms>]   text <target>
+  gc [--top N] [--retained KIND] [--sample N] [--mark] [--since-mark] [--lua-only]
+                       a full Luau collection: heap before and after, what is left; --retained
+                       State: the chains of holders from a root; --mark, then --since-mark: what
+                       survives after it
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
   record               record stop [--out gesture.tape]
@@ -533,7 +538,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--all" | "--full" | "--gone" | "--next" | "--prev" | "--close" | "--summary" => {
-                flags.push((arg[2..].to_string(), None))
+                flags.push((arg[2..].replace('-', "_"), None))
             }
             "--out" => match args.next() {
                 Some(path) => out = Some(path),
@@ -543,7 +548,8 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 }
             },
             "--depth" | "--budget" | "--text" | "--timeout" | "--width" | "--runs" | "--since"
-            | "--until" | "--keep" | "--repeat" | "--every" => {
+            | "--until" | "--keep" | "--repeat" | "--every" | "--top" | "--retained"
+            | "--sample" => {
                 flags.push((arg[2..].to_string(), args.next()));
             }
             _ => words.push(arg),
@@ -650,6 +656,12 @@ fn inspect(args: Vec<String>) -> ExitCode {
         "switch" => {
             put("name", arg(1));
             put("on", arg(2));
+        }
+        "text" => put("target", arg(1)),
+        "gc" => {}
+        "clock" => {
+            put("action", arg(1));
+            put("ms", arg(2));
         }
         "set" => {
             put("name", arg(1));
@@ -956,6 +968,31 @@ const TOOLS: &[Tool] = &[
         "mark",
         &[("name", "string", false)],
         "Mark now, so zgx_frames with since=name reads only the frames after.",
+    ),
+    (
+        "zgx_gc",
+        "gc",
+        &[
+            ("top", "number", false),
+            ("retained", "string", false),
+            ("sample", "number", false),
+            ("mark", "boolean", false),
+            ("since_mark", "boolean", false),
+            ("lua_only", "boolean", false),
+        ],
+        "Run a full Luau collection in each script VM and report the heap before and after (garbage freed), and what is left by object type, userdata type and the chunk its code came from: tell garbage from a leak by running it again after the same actions. `retained` names a kind (a userdata type such as State, `table`, `function`, or part of a function's name or chunk) and prints the chains of holders from a root to those objects (registry → .key → upvalue → …, each function with its chunk:line), the commonest `sample` of them with counts. `mark` remembers the objects there are now; after more actions, `since_mark` lists what survived a collection that wasn't there then, and with `retained` only holders of those. Every `retained` answer also says how many of the matches a Luau holder alone reaches (the rest are held through Rust's handles); `lua_only` shows those Luau holders' chains instead of the handle chains.",
+    ),
+    (
+        "zgx_text",
+        "text",
+        &[("target", "string", true)],
+        "How a text node was shaped: the family it asks for and what that resolves to, each line's baseline, ascent and descent (the strut included), and the face each run of glyphs used.",
+    ),
+    (
+        "zgx_clock",
+        "clock",
+        &[("action", "string", false), ("ms", "number", false)],
+        "Freeze every animation, timer, caret and frame at one time (action freeze), move it on by hand (advance with ms), or let it run again (thaw); no action says which. A screenshot run freezes it so spinners, carets and transitions are the same each time (also ZGX_FREEZE_TIME=1 at launch).",
     ),
     (
         "zgx_switch",

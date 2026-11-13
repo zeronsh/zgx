@@ -2059,6 +2059,10 @@ struct Local {
     maps: bool,
 }
 /// What few scenes have, by node; each entry goes with its node.
+type TextDescriber =
+    std::rc::Rc<dyn Fn(&crate::text_layout::TextDescription<'_>, Option<f32>) -> Vec<String>>;
+/// A fitted text's key, and the spaces it breaks at (`Scene::fitted_breaks`).
+type FittedSpaces = (u64, Option<Arc<[usize]>>);
 #[derive(Default)]
 struct ColdMaps {
     /// Absolute nodes moved by an inset alone since the last layout
@@ -2089,12 +2093,12 @@ struct ColdMaps {
     column_kept: Vec<KeptChildren>,
     /// Sizes worked out from the containing block (`set_size_calcs`).
     size_calcs: NodeMap<std::sync::Arc<crate::size_calc::SizeCalcs>>,
-    /// Nodes that balance their text's lines, or not (`set_text_balance`),
-    /// for what they hold.
-    balanced: NodeMap<bool>,
-    /// The width each balanced text wraps at, for what it was worked out
-    /// from.
-    balanced_widths: std::cell::RefCell<NodeMap<(u64, f32)>>,
+    /// Nodes that fit their text's lines (`set_text_fit`), or are said not
+    /// to, for what they hold.
+    balanced: NodeMap<Option<crate::text_wrap::TextWrap>>,
+    /// Where each fitted text breaks its lines (the spaces that become line
+    /// breaks), for what it was worked out from.
+    balanced_widths: std::cell::RefCell<NodeMap<FittedSpaces>>,
     /// The min-content and max-content widths of those of them that size
     /// themselves by what they hold, as their parent last measured them.
     content_widths: NodeMap<(f32, f32)>,
@@ -3516,6 +3520,18 @@ pub struct Scene {
     cold: Option<Box<ColdMaps>>,
     /// Directions nodes set themselves (`set_direction`); others inherit.
     directions: NodeMap<Direction>,
+    /// Text whose direction is its first strong character's (`set_direction_auto`).
+    auto_directions: NodeMap<()>,
+    /// A right to left paragraph's rich text with its base level set
+    /// (`fit_rich`), for the text it was made from.
+    /// What says how text was shaped (`set_text_describer`).
+    text_describer: Option<TextDescriber>,
+    rtl_rich: std::cell::RefCell<
+        NodeMap<(
+            Arc<crate::rich_text::RichText>,
+            Arc<crate::rich_text::RichText>,
+        )>,
+    >,
     /// Layer shaders and their uniforms, by node (`set_layer_shader`):
     /// usually none.
     layer_shaders: NodeMap<LayerShader>,
@@ -3742,6 +3758,9 @@ impl Scene {
             given_styles: Default::default(),
             cold: None,
             directions: Default::default(),
+            auto_directions: Default::default(),
+            rtl_rich: Default::default(),
+            text_describer: None,
             layer_shaders: Default::default(),
             inert: Vec::new(),
             selectable: Default::default(),
@@ -3819,6 +3838,12 @@ impl Scene {
         self.damage_subtree(id);
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
         self.invalidate(id, COMPOSITE);
+    }
+    /// Every popup root wanted (`set_popup`), those held back while the app
+    /// is at the back (`set_popups_held`) too: what `popups` lists is what a
+    /// host shows.
+    pub fn wanted_popups(&self) -> &[NodeId] {
+        &self.popups
     }
     /// Roots shown in popup windows (`set_popup`), in the order set; those
     /// held while the app is at the back (`set_popups_held`) aren't listed.
@@ -3912,6 +3937,14 @@ impl Scene {
         self.ink_alone(id)
             .map(|ink| ink.translated(offset))
             .filter(|ink| ink.width > 0. && ink.height > 0.)
+    }
+    /// Whether `id` is in a popup that is wanted but held back, not shown
+    /// nor hit while the app is at the back (`set_popups_held`).
+    pub fn in_held_popup(&self, id: NodeId) -> bool {
+        self.popups_held
+            && self
+                .popup_holding(id)
+                .is_some_and(|root| self.popup_held(root))
     }
     /// Whether `id` is in a topmost layer shown in a popup window
     /// (`PopupRole::Topmost`).
@@ -5224,6 +5257,9 @@ impl Scene {
     }
     /// Whether `id` is a scroll view or a list: its viewport, its first
     /// child, holds its scrolled content.
+    pub fn is_scroll_view(&self, id: NodeId) -> bool {
+        self.scrolls(id)
+    }
     fn scrolls(&self, id: NodeId) -> bool {
         let node = self.node(id);
         let Some(viewport) = self.children_raw(node).first() else {
@@ -5839,6 +5875,60 @@ impl Scene {
             .is_some_and(|parent| self.node(parent).rtl);
         self.refresh_direction::<true>(id, inherited, false);
     }
+    /// Whether any node's direction is its text's (`set_direction_auto`).
+    pub fn has_auto_directions(&self) -> bool {
+        !self.auto_directions.is_empty()
+    }
+    /// Run text `id` the way its first strong character does (`on`), or not:
+    /// right to left for Arabic, Hebrew and the like, else left to right,
+    /// and its parent's where it has none. Decided again, before layout, as
+    /// its text changes.
+    pub fn set_direction_auto(&mut self, id: NodeId, on: bool) {
+        if on == self.auto_directions.contains_key(&id) {
+            return;
+        }
+        if on {
+            self.auto_directions.insert(id, ());
+            self.resolve_auto_direction(id);
+        } else {
+            self.auto_directions.remove(&id);
+            self.set_direction(id, None);
+        }
+    }
+    /// `id`'s direction from its text, or the first of its descendants' that
+    /// has a strong character, if any does.
+    fn resolve_auto_direction(&mut self, id: NodeId) {
+        let mut found = None;
+        let mut stack = vec![id];
+        let mut visited = 0;
+        while let Some(at) = stack.pop() {
+            visited += 1;
+            let strong = match &self.node(at).kind {
+                NodeKind::Text { text, .. } => crate::text_layout::first_strong_direction(text),
+                NodeKind::RichText { text } => {
+                    crate::text_layout::first_strong_direction(text.text())
+                }
+                _ => {
+                    stack.extend(self.children(at).iter().rev().copied());
+                    None
+                }
+            };
+            if strong.is_some() || visited > 2000 {
+                found = strong;
+                break;
+            }
+        }
+        self.set_direction(id, found);
+    }
+    /// The nodes that take their direction from their text, decided again.
+    fn resolve_auto_directions(&mut self) {
+        let ids: Vec<NodeId> = self.auto_directions.keys().copied().collect();
+        for id in ids {
+            if self.contains(id) {
+                self.resolve_auto_direction(id);
+            }
+        }
+    }
     /// Which way `id` and its parent run.
     fn way(&self, id: NodeId) -> Way {
         let node = self.node(id);
@@ -5883,7 +5973,13 @@ impl Scene {
             let given = self.style(id);
             self.restyle(id, given, true);
         }
-        if turned && let Some(logical) = self.node(id).align_logical {
+        if turned && matches!(self.node(id).kind, NodeKind::Text { .. }) {
+            let mut font = self.node(id).font.clone();
+            if let Some(logical) = self.node(id).align_logical {
+                font.align = logical;
+            }
+            self.set_font(id, font);
+        } else if turned && let Some(logical) = self.node(id).align_logical {
             let mut font = self.node(id).font.clone();
             font.align = logical;
             self.set_font(id, font);
@@ -6889,6 +6985,7 @@ impl Scene {
         use crate::text_layout::TextAlign;
         let logical = matches!(font.align, TextAlign::Start | TextAlign::End).then_some(font.align);
         let rtl = self.node(id).rtl;
+        font.paragraph_rtl = rtl;
         font.align = match font.align {
             TextAlign::Start if rtl => TextAlign::Right,
             TextAlign::End if rtl => TextAlign::Left,
@@ -6953,6 +7050,45 @@ impl Scene {
         for id in ids {
             self.invalidate(id, PAINT);
             self.invalidate_layout(id);
+        }
+    }
+    /// Install what says how text was shaped (`describe_text`): for each
+    /// line, its baseline, ascent and descent, and the face each run used.
+    pub fn set_text_describer(
+        &mut self,
+        describer: impl Fn(&crate::text_layout::TextDescription<'_>, Option<f32>) -> Vec<String>
+        + 'static,
+    ) {
+        self.text_describer = Some(std::rc::Rc::new(describer));
+    }
+    /// How text `id` shapes in a box `width` wide: the family it asks for and
+    /// what that resolves to, and each line's baseline, ascent and descent and
+    /// the faces its runs use. `None` where the node isn't text or no shaper
+    /// that can say is installed.
+    pub fn describe_text(&self, id: NodeId, width: f32) -> Option<Vec<String>> {
+        let describer = self.text_describer.as_ref()?;
+        match self.kind(id) {
+            NodeKind::Text {
+                text, font_size, ..
+            } => {
+                let fitted = self.fit_str(id, width, text);
+                Some(describer(
+                    &crate::text_layout::TextDescription::Plain {
+                        text: &fitted,
+                        size: *font_size,
+                        font: self.font(id),
+                    },
+                    Some(width),
+                ))
+            }
+            NodeKind::RichText { text } => {
+                let fitted = self.fit_rich(id, width, text);
+                Some(describer(
+                    &crate::text_layout::TextDescription::Rich(&fitted),
+                    Some(width),
+                ))
+            }
+            _ => None,
         }
     }
     /// Install rich paragraph geometry for inline selection and interactive spans.
@@ -7954,6 +8090,9 @@ impl Scene {
         if !self.directions.is_empty() {
             self.directions.remove(&id);
         }
+        if !self.auto_directions.is_empty() {
+            self.auto_directions.remove(&id);
+        }
         if !self.layer_shaders.is_empty()
             && let Some(layer) = self.layer_shaders.remove(&id)
             && layer.shader.is_some()
@@ -8232,7 +8371,11 @@ impl Scene {
     /// asked; `None` takes its parent's. Whether it changed anything.
     #[cold]
     #[inline(never)]
-    pub fn set_text_balance(&mut self, id: NodeId, balance: Option<bool>) -> bool {
+    pub fn set_text_fit(
+        &mut self,
+        id: NodeId,
+        balance: Option<Option<crate::text_wrap::TextWrap>>,
+    ) -> bool {
         let held = (self.cold.as_ref()).and_then(|cold| cold.balanced.get(&id).copied());
         if held == balance || !self.contains(id) {
             return false;
@@ -8407,86 +8550,105 @@ impl Scene {
     pub fn language_revision(&self) -> u64 {
         self.cold.as_ref().map_or(0, |cold| cold.language_revision)
     }
-    /// The width text `id` wraps at in a box `width` wide, and how far right
-    /// of the box's left edge its lines start: `(width, 0)`, unless its lines
-    /// are balanced (`set_text_balance`), when they wrap narrower and, centred
-    /// or right-aligned, are aligned in the box, not in that narrower width.
-    /// Renderers, and the layouts selection, find and accessibility read,
-    /// lay text out at the width and draw it the inset to the right.
-    #[inline]
-    pub fn text_wrap(&self, id: NodeId, width: f32) -> (f32, f32) {
-        match &self.cold {
-            Some(cold) if !cold.balanced.is_empty() => self.balanced_wrap(cold, id, width),
-            _ => (width, 0.),
-        }
+    /// The spaces of text `id` that break its lines in a box `width` wide, if
+    /// it is fitted (`set_text_fit`) and Chrome's fit differs from greedy
+    /// breaking: their byte offsets. Layout and renderers lay the text out
+    /// with a line feed at each, the box and its line count as they were.
+    pub fn fitted_breaks(&self, id: NodeId, width: f32) -> Option<Arc<[usize]>> {
+        let cold = self
+            .cold
+            .as_ref()
+            .filter(|cold| !cold.balanced.is_empty())?;
+        self.fitted_spaces(cold, id, width)
     }
-    #[cold]
-    #[inline(never)]
-    fn balanced_wrap(&self, cold: &ColdMaps, id: NodeId, width: f32) -> (f32, f32) {
-        use crate::text_layout::TextAlign;
-        let wrap = self.balanced_width(cold, id, width);
-        if wrap >= width {
-            return (width, 0.);
-        }
-        let align = match &self.node(id).kind {
-            NodeKind::Text { .. } => self.node(id).font.align,
-            NodeKind::RichText { text } => {
-                (text.runs().first()).map_or(TextAlign::Start, |run| run.font.align)
-            }
-            _ => return (width, 0.),
+    /// Rich text `id` as it shows in a box `width` wide: `rich` with its
+    /// fitted breaks (`fitted_breaks`), if it has any.
+    pub fn fit_rich(
+        &self,
+        id: NodeId,
+        width: f32,
+        rich: &Arc<crate::rich_text::RichText>,
+    ) -> Arc<crate::rich_text::RichText> {
+        let rich = match self.fitted_breaks(id, width) {
+            Some(spaces) => Arc::new(rich.with_line_feeds(&spaces)),
+            None => rich.clone(),
         };
-        let inset = (width - wrap)
-            * match align {
-                TextAlign::Center => 0.5,
-                TextAlign::Right | TextAlign::End => 1.,
-                TextAlign::Start | TextAlign::Left => 0.,
-            };
-        (wrap, inset)
+        // Right to left, its paragraphs take that base level whatever their
+        // first strong character is (kept for as long as the paragraph is).
+        if self.node(id).rtl
+            && !rich
+                .runs()
+                .first()
+                .is_some_and(|run| run.font.paragraph_rtl)
+        {
+            let mut kept = self.rtl_rich.borrow_mut();
+            if let Some((from, directed)) = kept.get(&id)
+                && (Arc::ptr_eq(from, &rich) || **from == *rich)
+            {
+                return directed.clone();
+            }
+            let directed = Arc::new(rich.with_paragraph_rtl());
+            if kept.len() >= 256 {
+                kept.clear();
+            }
+            kept.insert(id, (rich.clone(), directed.clone()));
+            return directed;
+        }
+        rich
     }
-    /// Text `id` shaped as it shows in a box `width` wide: at its wrap
-    /// width, its lines where they are drawn (`text_wrap`).
+    /// Plain text `id` as it shows in a box `width` wide (`fit_rich`'s).
+    pub fn fit_str(&self, id: NodeId, width: f32, text: &Arc<str>) -> Arc<str> {
+        match self.fitted_breaks(id, width) {
+            Some(spaces) => crate::rich_text::line_feeds(text, &spaces),
+            None => text.clone(),
+        }
+    }
+    /// Text `id` shaped as it shows in a box `width` wide: with its fitted
+    /// breaks.
     pub(crate) fn shape_node_text(
         &self,
         id: NodeId,
         width: f32,
     ) -> Option<Box<dyn crate::text_layout::TextLayout>> {
-        let (wrap, inset) = self.text_wrap(id, width);
-        let layout = match self.kind(id) {
+        Some(match self.kind(id) {
             NodeKind::Text {
                 text, font_size, ..
-            } => self.shape_text_with_font(text, *font_size, Some(wrap), self.font(id)),
-            NodeKind::RichText { text } => self.shape_rich_text(text, Some(wrap)),
+            } => self.shape_text_with_font(
+                &self.fit_str(id, width, text),
+                *font_size,
+                Some(width),
+                self.font(id),
+            ),
+            NodeKind::RichText { text } => {
+                self.shape_rich_text(&self.fit_rich(id, width, text), Some(width))
+            }
             _ => return None,
-        };
-        Some(crate::text_layout::Inset::around(layout, inset))
+        })
     }
-    fn balanced_width(&self, cold: &ColdMaps, id: NodeId, width: f32) -> f32 {
+    #[cold]
+    #[inline(never)]
+    fn fitted_spaces(&self, cold: &ColdMaps, id: NodeId, width: f32) -> Option<Arc<[usize]>> {
         use std::hash::{Hash, Hasher};
         if !matches!(
             self.node(id).kind,
             NodeKind::Text { .. } | NodeKind::RichText { .. }
         ) {
-            return width;
+            return None;
         }
         // As the nearest of it and its ancestors that says.
-        let mut at = Some(id);
-        let balanced = loop {
-            match at {
-                Some(node) => match cold.balanced.get(&node) {
-                    Some(balanced) => break *balanced,
-                    None => at = self.node(node).parent,
-                },
-                None => break false,
+        let mut at = id;
+        let wrap = loop {
+            if let Some(wrap) = cold.balanced.get(&at) {
+                break (*wrap)?;
             }
+            at = self.node(at).parent?;
         };
-        if !balanced {
-            return width;
-        }
         // What it was worked out from: the box's width, the shaper, and the
         // text with its font.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         width.to_bits().hash(&mut hasher);
         self.text_shaper_revision.hash(&mut hasher);
+        wrap.hash(&mut hasher);
         match &self.node(id).kind {
             NodeKind::Text {
                 text, font_size, ..
@@ -8496,80 +8658,47 @@ impl Scene {
                 self.node(id).font.hash(&mut hasher);
             }
             NodeKind::RichText { text } => (Arc::as_ptr(text) as usize).hash(&mut hasher),
-            _ => return width,
+            _ => return None,
         }
         let key = hasher.finish();
-        if let Some((at, balanced)) = cold.balanced_widths.borrow().get(&id)
+        if let Some((at, spaces)) = cold.balanced_widths.borrow().get(&id)
             && *at == key
         {
-            return *balanced;
+            return spaces.clone();
         }
-        let balanced = self.balance_lines(id, width);
+        let spaces = self.fit_spaces(id, width, wrap).map(Arc::from);
         let mut widths = cold.balanced_widths.borrow_mut();
         // Those of texts long gone go too, now and then.
         if widths.len() >= 1024 {
             widths.clear();
         }
-        widths.insert(id, (key, balanced));
-        balanced
+        widths.insert(id, (key, spaces.clone()));
+        spaces
     }
-    /// The narrowest width under `width` at which text `id` takes as many
-    /// lines as at `width` (`width` itself for one line, or more than six).
-    fn balance_lines(&self, id: NodeId, width: f32) -> f32 {
-        let height = |limit: Option<f32>| self.wrapped_size(id, limit).1;
-        let (full, line) = (height(Some(width)), height(None));
-        if !(width.is_finite() && width > 0.) || line <= 0. {
-            return width;
-        }
-        let lines = (full / line).round();
-        if !(2. ..=6.).contains(&lines) {
-            return width;
-        }
-        // As narrow as the longest line, unwrapped, over the lines: no
-        // narrower keeps their count.
-        let single = self.wrapped_size(id, None).0;
-        let (mut narrow, mut wide) = ((single / lines).min(width), width);
-        while wide - narrow > 0.5 {
-            let middle = (narrow + wide) * 0.5;
-            if height(Some(middle)) <= full + 0.01 {
-                wide = middle;
-            } else {
-                narrow = middle;
-            }
-        }
-        wide
-    }
-    /// Text `id` laid out at `limit` (`None`: unwrapped), as layout measures it.
-    fn wrapped_size(&self, id: NodeId, limit: Option<f32>) -> (f32, f32) {
-        let node = self.node(id);
-        match &node.kind {
+    /// Where Chrome breaks text `id`'s lines in `width`, from its layout
+    /// unwrapped.
+    fn fit_spaces(
+        &self,
+        id: NodeId,
+        width: f32,
+        wrap: crate::text_wrap::TextWrap,
+    ) -> Option<Vec<usize>> {
+        let (text, layout, size): (&str, _, f32) = match &self.node(id).kind {
             NodeKind::Text {
                 text, font_size, ..
-            } => {
-                if node.style.text_options != Default::default() {
-                    let runs = if text.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![crate::rich_text::TextRun {
-                            range: 0..text.len(),
-                            font: node.font.clone(),
-                            font_size: *font_size,
-                            ..Default::default()
-                        }]
-                    };
-                    let rich = crate::rich_text::RichText::new(text.clone(), runs)
-                        .unwrap()
-                        .with_options(node.style.text_options);
-                    return self.rich_measurer.measure_mounted(&rich, limit);
-                }
-                match &self.font_measurer {
-                    Some(measure) => measure(text, *font_size, limit, &node.font),
-                    None => self.measure_text_with_font(text, *font_size, limit, &node.font),
-                }
-            }
-            NodeKind::RichText { text } => self.rich_measurer.measure_mounted(text, limit),
-            _ => (0., 0.),
-        }
+            } => (
+                text,
+                self.shape_text_with_font(text, *font_size, None, self.font(id)),
+                *font_size,
+            ),
+            NodeKind::RichText { text } => (
+                text.text(),
+                self.shape_rich_text(text, None),
+                text.runs().first().map_or(16., |run| run.font_size),
+            ),
+            _ => return None,
+        };
+        crate::text_wrap::fitted_spaces(text, &*layout, width, size, wrap)
     }
     /// Work what `sizes` sets of `id`'s size out from its containing block,
     /// over its style's. Such a node has layout options, which a parent lays
@@ -14309,6 +14438,9 @@ impl Scene {
     #[inline(never)]
     fn prepare_layout_active(&mut self, full: bool) {
         self.settle_children();
+        if !self.auto_directions.is_empty() {
+            self.resolve_auto_directions();
+        }
         let _span = crate::profile::span(crate::profile::Phase::Layout);
         self.layout_pass = self.layout_pass.wrapping_add(1);
         let mut report = FrameReport::default();

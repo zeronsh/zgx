@@ -33,6 +33,10 @@ pub(crate) const KEPT_NODES: usize = 8_000;
 pub const KEPT_REST: Duration = Duration::from_secs(30);
 /// Spare frames a row that doesn't fit waits before it is built anyway.
 const MOST_WAITED: u32 = 4;
+/// How long a list's width stands still before it builds rows ahead again:
+/// while it changes (a splitter dragged, a window resized) the rows in view
+/// reflow and the rest wait, as a browser's off-screen content does.
+const WIDTH_STILL: Duration = Duration::from_millis(100);
 
 /// A list's share of its window's spare time: shared by its pass and
 /// the window's queue.
@@ -48,6 +52,8 @@ pub(crate) struct ListAhead {
     /// Spare frames its next row has not fit in.
     waited: Cell<u32>,
     resting: Cell<bool>,
+    /// Its width changed lately: no rows are built ahead until this passes.
+    held_until: Cell<Option<Instant>>,
     viewports: f32,
 }
 /// A list's rows by what it does with them, around the view.
@@ -70,6 +76,7 @@ impl ListAhead {
             // Until its view first moves: a list that never scrolls builds
             // what it always built.
             resting: Cell::new(true),
+            held_until: Cell::new(None),
             viewports,
         }
     }
@@ -81,6 +88,21 @@ impl ListAhead {
     /// Whether this pass may build a row: once for each that was asked.
     pub(crate) fn take_may_build(&self) -> bool {
         self.may_build.take()
+    }
+    /// Its width changed: rows ahead wait for it to stand still.
+    pub(crate) fn hold(&self) {
+        self.held_until.set(Some(crate::clock::now() + WIDTH_STILL));
+    }
+    /// Whether rows ahead wait for its width to stand still.
+    pub(crate) fn held(&self) -> bool {
+        match self.held_until.get() {
+            Some(until) if crate::clock::now() < until => true,
+            Some(_) => {
+                self.held_until.set(None);
+                false
+            }
+            None => false,
+        }
     }
     /// The view moved: rows are kept again.
     pub(crate) fn moved(&self) {
@@ -294,7 +316,11 @@ impl<K: Eq + Hash + Clone> Kept<K> {
         // A new width measures every row again: those out of view are built
         // again as they are wanted.
         let width = view.width.to_bits();
-        let same_width = std::mem::replace(&mut self.width, width) == width;
+        let was_width = std::mem::replace(&mut self.width, width);
+        let same_width = was_width == width;
+        if !same_width && was_width != 0 {
+            self.ahead.hold();
+        }
         // Rows may have moved: asked, or a row in view isn't what it was.
         let moved = std::mem::replace(&mut self.structure, view.structure) != view.structure
             || shown.iter().any(|(row, index)| {
@@ -370,7 +396,7 @@ impl<K: Eq + Hash + Clone> Kept<K> {
         let mut built: Vec<usize> = shown.iter().chain(&kept).map(|(_, index)| *index).collect();
         built.sort_unstable();
         let mut next = rings.next(&range, !self.up, &built, can);
-        let turn = self.ahead.take_may_build();
+        let turn = self.ahead.take_may_build() && !self.ahead.held();
         // Spare time's turn: the rows out of view ask for their pictures
         // (laid out, all: a row built this turn is only after).
         if turn {
@@ -531,6 +557,11 @@ impl crate::widgets::Ui {
         deadline: Instant,
     ) -> Result<(), crate::widgets::LayoutFeedbackError> {
         for list in lists {
+            // Its width is changing: the rows in view reflow, the rest wait
+            // (it stays queued: frames come until it has stood still).
+            if list.held() {
+                continue;
+            }
             while list.wants.get() {
                 let now = Instant::now();
                 let cost = Duration::from_secs_f32(list.cost.get());

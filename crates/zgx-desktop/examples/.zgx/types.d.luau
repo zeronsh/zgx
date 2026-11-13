@@ -970,6 +970,51 @@ declare extern type Locale with
 	function get(self): string?
 	function peek(self): string?
 	function set(self, locale: string?): ()
+	-- `Intl`-style text in the locale shown, with ECMA-402's option names (and
+	-- Chrome's output for them). Times are milliseconds since 1970 (a JS
+	-- `Date`'s); `timeZone` is "UTC" or the machine's.
+	-- `{ type = "conjunction" | "disjunction" | "unit", style = "long" | "short" | "narrow" }`.
+	function format_list(self, items: { string }, options: { type: string?, style: string? }?): string
+	-- `style` "decimal", "percent" or "currency" (with `currency = "USD"`),
+	-- `minimumFractionDigits`, `maximumFractionDigits`, `useGrouping`.
+	function format_number(
+		self,
+		n: number,
+		options: {
+			style: string?,
+			currency: string?,
+			minimumFractionDigits: number?,
+			maximumFractionDigits: number?,
+			useGrouping: boolean?,
+		}?
+	): string
+	-- `dateStyle` / `timeStyle` ("full", "long", "medium", "short"), or the
+	-- components `weekday`, `year`, `month`, `day`, `hour`, `minute`,
+	-- `second` ("long", "short", "narrow", "numeric", "2-digit").
+	function format_date(
+		self,
+		t: number,
+		options: {
+			dateStyle: string?,
+			timeStyle: string?,
+			weekday: string?,
+			year: string?,
+			month: string?,
+			day: string?,
+			hour: string?,
+			minute: string?,
+			second: string?,
+			hour12: boolean?,
+			timeZone: string?,
+		}?
+	): string
+	-- `unit` "second" … "year"; `numeric` "always" or "auto" ("yesterday").
+	function format_relative(
+		self,
+		delta: number,
+		unit: string,
+		options: { numeric: string?, style: string? }?
+	): string
 end
 -- `ui.span { … }`: a run of rich text, used once.
 declare extern type Span with
@@ -1338,6 +1383,10 @@ declare extern type Element with
 	-- list of measured rows measures those around it as it lands, so it
 	-- ends where asked. False for elements that are not lists.
 	function scroll_to_row(self, i: number, options: { align: ("start" | "center" | "end" | "nearest")? }?): boolean
+	-- How far a scroll view or list is scrolled along its axis and how far it
+	-- can go, in points: `at_start` and `at_end` say whether it can still
+	-- scroll up or down (left or right). Nil for anything else.
+	function scroll_info(self): { offset: number, range: number, at_start: boolean, at_end: boolean }?
 	function has_class(self, class: string): boolean
 	-- An input's selection, in characters (Unicode code points from 0, as
 	-- `utf8.len` counts them). Each returns false (or nil) for elements
@@ -1402,9 +1451,13 @@ export type Control = {
 	w: number,
 	h: number,
 	disabled: boolean,
-	-- Nil where it cannot be selected or opened.
+	-- Nil where it cannot be selected, checked or opened. `checked`: a
+	-- checkbox, radio, switch, or a checked or radio menu item, on or off.
 	selected: boolean?,
+	checked: boolean?,
 	expanded: boolean?,
+	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
+	haspopup: string?,
 	focused: boolean,
 	-- Names it for `ui.press` while it is there.
 	handle: number,
@@ -1754,8 +1807,10 @@ export type ClipboardReadRequest = {
 
 -- `ui.command(opts)`: an app command, shown as a menu item; its key
 -- reaches it wherever focus is (terminals and web pages included). `id`
--- and `run` are required unless `separator` is set (Luau checks table
--- unions poorly, so this is one table).
+-- and `run` are required unless `separator` is set, or `menu` alone names
+-- one (it declares the menu and its place in the bar, with no entry: fix
+-- the menu bar's order). Luau checks table unions poorly, so this is one
+-- table.
 export type CommandOptions = {
 	id: string?,
 	-- Defaults to the id.
@@ -1872,6 +1927,9 @@ declare extern type WindowApi with
 	-- is false is worth a notification or a badge.
 	active: State<boolean>
 	shown: State<boolean>
+	-- The open menus, popovers and tooltips: `{ x, y, w, h, kind }` each, in
+	-- window points, kind "menu", "popover", "tooltip" or "topmost"; read-only.
+	popups: State<{ { x: number, y: number, w: number, h: number, kind: string } }>
 	-- Whether the window is in full screen, read-only and followed, however
 	-- it went in or out (the green button, Ctrl+Cmd+F, the menu, Mission
 	-- Control, a script), turning as it begins to go; and while it goes
@@ -2080,7 +2138,10 @@ export type Styles = {
 	-- Which way lines run in it and what it holds (HTML's `dir`): "rtl"
 	-- for Arabic, Hebrew, Persian or Urdu runs rows from the right, starts
 	-- columns and text at the right, and turns `ps`, `ms`, `inset_start` round.
-	dir: ("ltr" | "rtl")?,
+	-- "auto" on text takes its first strong character's way (and one with
+	-- none, its parent's); on a container, set `dir` from
+	-- `ui.direction_of(text)` for the text it shows.
+	dir: ("ltr" | "rtl" | "auto")?,
 	grow: number?,
 	shrink: number?,
 	basis: Length?,
@@ -2241,7 +2302,7 @@ export type Styles = {
 	italic: boolean?,
 	align: TextAlign?,
 	font: Font?,
-	wrap: (boolean | "balance")?,
+	wrap: (boolean | "balance" | "pretty")?,
 	truncate: boolean?,
 	lines: number?,
 	line_height: Num?,
@@ -2323,7 +2384,7 @@ export type StyleProps = {
 	gap_y: Reactive<Length>?,
 	-- Flex and grid.
 	direction: Reactive<Direction>?,
-	dir: Reactive<"ltr" | "rtl">?,
+	dir: Reactive<"ltr" | "rtl" | "auto">?,
 	grow: Reactive<number>?,
 	shrink: Reactive<number>?,
 	basis: Reactive<Length>?,
@@ -2426,7 +2487,7 @@ export type StyleProps = {
 	italic: Reactive<boolean>?,
 	align: Reactive<TextAlign>?,
 	font: Reactive<Font>?,
-	wrap: Reactive<boolean | "balance">?,
+	wrap: Reactive<boolean | "balance" | "pretty">?,
 	truncate: Reactive<boolean>?,
 	lines: Reactive<number>?,
 	line_height: Reactive<Num>?,
@@ -2483,6 +2544,7 @@ export type AriaRole =
 	| "img"
 	| "tabpanel"
 	| "article"
+	| "region"
 	| "radiogroup"
 	| "radio"
 	| "slider"
@@ -2556,10 +2618,25 @@ export type NodeProps = {
 	error: (string | Readable<string?> | (() -> string?))?,
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
-	aria_hidden: boolean?,
+	aria_hidden: Reactive<boolean>?,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Reactive<boolean>?,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Reactive<boolean>?,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: boolean?,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Reactive<boolean>?,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: boolean?,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -2603,6 +2680,13 @@ export type NodeProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: number?,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: number?,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: TooltipGroup?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	hover: Styles?,
@@ -2985,9 +3069,24 @@ export type Props = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -3031,6 +3130,13 @@ export type Props = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -3207,7 +3313,7 @@ export type Props_gap = Reactive<Num>?
 export type Props_gap_x = Reactive<Length>?
 export type Props_gap_y = Reactive<Length>?
 export type Props_direction = Reactive<Direction>?
-export type Props_dir = Reactive<"ltr" | "rtl">?
+export type Props_dir = Reactive<"ltr" | "rtl" | "auto">?
 export type Props_grow = Reactive<number>?
 export type Props_shrink = Reactive<number>?
 export type Props_basis = Reactive<Length>?
@@ -3305,7 +3411,7 @@ export type Props_bold = Reactive<boolean>?
 export type Props_italic = Reactive<boolean>?
 export type Props_align = Reactive<TextAlign>?
 export type Props_font = Reactive<Font>?
-export type Props_wrap = Reactive<boolean | "balance">?
+export type Props_wrap = Reactive<boolean | "balance" | "pretty">?
 export type Props_truncate = Reactive<boolean>?
 export type Props_lines = Reactive<number>?
 export type Props_line_height = Reactive<Num>?
@@ -3347,8 +3453,13 @@ export type Props_live = ("polite" | "assertive" | "off")?
 export type Props_description = (string | ReadOnlyState<string> | (() -> string))?
 export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
-export type Props_aria_hidden = boolean?
+export type Props_aria_hidden = Reactive<boolean>?
+export type Props_busy = Reactive<boolean>?
+export type Props_inert = Reactive<boolean>?
+export type Props_sr_only = boolean?
+export type Props_pressed = Reactive<boolean>?
 export type Props_aria_modal = boolean?
+export type Props_haspopup = ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?
 export type Props_focus_group = ("vertical" | "horizontal" | "both")?
 export type Props_pointer_events = (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?
 export type Props_hit = ("target" | "shown")?
@@ -3363,6 +3474,8 @@ export type Props_tooltip = (string | Node)?
 export type Props_tooltip_placement = Placement?
 export type Props_tooltip_interactive = boolean?
 export type Props_tooltip_delay = number?
+export type Props_tooltip_close_delay = number?
+export type Props_tooltip_group = TooltipGroup?
 export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | Styles)?
 export type Props_hover = Styles?
 export type Props_active = Styles?
@@ -3662,9 +3775,24 @@ export type ContainerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -3708,6 +3836,13 @@ export type ContainerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -4104,9 +4239,24 @@ export type GlassProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -4150,6 +4300,13 @@ export type GlassProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -4555,9 +4712,24 @@ export type ScrollProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -4601,6 +4773,13 @@ export type ScrollProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -5023,9 +5202,24 @@ export type TextProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -5069,6 +5263,13 @@ export type TextProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -5450,9 +5651,24 @@ export type MarkdownViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -5496,6 +5712,13 @@ export type MarkdownViewProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -5667,10 +5890,21 @@ export type SpanProps = {
 	-- How far below the baseline the underline sits (CSS's
 	-- `text-underline-offset`).
 	underline_offset: number?,
+	-- The underline breaks around descenders (g, j, p, q, y), as CSS's
+	-- `text-decoration-skip-ink: auto` does.
+	underline_skip_ink: boolean?,
 	-- How far its background reaches past the text on each side, taking no
 	-- room (CSS's negative inline margin under the same padding): a search
 	-- match's mark.
 	outset: number?,
+	-- An outline round its box, as CSS's inline border: `width` points
+	-- (1) in `color`. It takes room all round, inside the padding's outside,
+	-- and follows `radius`: a keycap in a sentence.
+	border: { width: number?, color: Color }?,
+	-- The least width of its box, border and padding included (CSS's
+	-- border-box `min-width` on an inline-block): the text sits centred in
+	-- what room is over.
+	min_w: number?,
 	-- How the underline is drawn, its colour and its thickness; any of them
 	-- underlines the span (unless `underline = false`). `"wavy"` marks a
 	-- mistake or a diagnostic.
@@ -5687,7 +5921,27 @@ export type SpanProps = {
 	}?,
 	-- A link (`on_click`) under the pointer: underlined, recoloured. With
 	-- it, the link isn't underlined at rest unless `underline` says so.
-	hover: { underline: boolean?, color: Color? }?,
+	-- `bg` its background, `underline_color` its underline's colour, `icon`
+	-- another icon in place of the span's own (a file pill's download glyph).
+	hover: {
+		underline: boolean?,
+		color: Color?,
+		bg: Color?,
+		underline_color: Color?,
+		icon: {
+			src: string?,
+			code: string?,
+			size: number?,
+			gap: number?,
+			margin: number?,
+			dy: number?,
+			tint: Color?,
+			bg: Color?,
+			radius: number?,
+			pad: number?,
+			align: ("center" | "baseline")?,
+		}?,
+	}?,
 	-- An icon before the text, in the line (a file chip's file type):
 	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
 	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,
@@ -5700,10 +5954,21 @@ export type SpanProps = {
 		code: string?,
 		size: number?,
 		gap: number?,
+		-- Room on each side of it (0), inline only: no well, no taller line,
+		-- as CSS's `margin: 0 Npx` on an inline image.
+		margin: number?,
+		-- Moved down by this many points (negative: up): web's inline
+		-- icons sit at `vertical-align: -3px`, one below centre.
+		dy: number?,
 		tint: Color?,
 		bg: Color?,
 		radius: number?,
 		pad: number?,
+		-- "center" (the default): centred on the line, which it does not
+		-- make taller. "baseline": its bottom edge on the text's baseline,
+		-- as an inline image's is in CSS, the line growing to hold it (no
+		-- well).
+		align: ("center" | "baseline")?,
 	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
 	-- a link: told the keys held. Returning `true` handled it: its `href`
@@ -5713,6 +5978,9 @@ export type SpanProps = {
 	-- it with the system's handler (after `on_click`'s), and whose context
 	-- menu opens or copies it.
 	href: string?,
+	-- What assistive technology reads for the run in place of its text: a
+	-- citation badge's "Citation 1, Sleep study.pdf".
+	label: string?,
 	-- The run's own context menu, as an element's: on a link, in place of
 	-- Open Link and Copy Link. Inside the text selected, the selection's
 	-- menu shows instead; returning nil lets the click through to the
@@ -5979,9 +6247,24 @@ export type RichProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -6025,6 +6308,13 @@ export type RichProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -6400,9 +6690,24 @@ export type ImageProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -6446,6 +6751,13 @@ export type ImageProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -6838,9 +7150,24 @@ export type SvgProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -6884,6 +7211,13 @@ export type SvgProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -7387,9 +7721,24 @@ export type Scene3DProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -7433,6 +7782,13 @@ export type Scene3DProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -7831,9 +8187,24 @@ export type CanvasProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -7877,6 +8248,13 @@ export type CanvasProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -8284,9 +8662,24 @@ export type CheckboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -8330,6 +8723,13 @@ export type CheckboxProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -8715,9 +9115,24 @@ export type InputProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -8761,6 +9176,13 @@ export type InputProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -9247,9 +9669,24 @@ export type ProgressProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -9293,6 +9730,13 @@ export type ProgressProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -9666,9 +10110,24 @@ export type SliderProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -9712,6 +10171,13 @@ export type SliderProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -10106,9 +10572,24 @@ export type SegmentedProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -10152,6 +10633,13 @@ export type SegmentedProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -10539,9 +11027,24 @@ export type StepperProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -10585,6 +11088,13 @@ export type StepperProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -10973,9 +11483,24 @@ export type DisclosureProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -11019,6 +11544,13 @@ export type DisclosureProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -11418,9 +11950,24 @@ export type AccordionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -11464,6 +12011,13 @@ export type AccordionProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -11837,9 +12391,24 @@ export type SectionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -11883,6 +12452,13 @@ export type SectionProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -12281,9 +12857,24 @@ export type SeparatorProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -12327,6 +12918,13 @@ export type SeparatorProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -12708,9 +13306,24 @@ export type TabsProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -12754,6 +13367,13 @@ export type TabsProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -13157,9 +13777,24 @@ export type TreeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -13203,6 +13838,13 @@ export type TreeProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -13602,9 +14244,24 @@ export type DataGridProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -13648,6 +14305,13 @@ export type DataGridProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -14043,9 +14707,24 @@ export type CalendarProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -14089,6 +14768,13 @@ export type CalendarProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -14477,9 +15163,24 @@ export type DatePickerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -14523,6 +15224,13 @@ export type DatePickerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -14909,9 +15617,24 @@ export type TimeFieldProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -14955,6 +15678,13 @@ export type TimeFieldProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -15340,9 +16070,24 @@ export type ComboboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -15386,6 +16131,13 @@ export type ComboboxProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -15779,9 +16531,24 @@ export type CommandPaletteProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -15825,6 +16592,13 @@ export type CommandPaletteProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -16206,9 +16980,24 @@ export type SelectProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -16252,6 +17041,13 @@ export type SelectProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -16640,9 +17436,24 @@ export type SplitProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -16686,6 +17497,13 @@ export type SplitProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -17130,9 +17948,24 @@ export type ListProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -17176,6 +18009,13 @@ export type ListProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -17331,14 +18171,16 @@ export type ListProps = {
 	-- as a state; built again when the item changes, or, taking a third
 	-- parameter, its item as a state kept current (it updates in place).
 	data: Readable<{ any }>?,
-	-- Builds row `index` (from 1); with `key`, the row of item `key`, given
-	-- its index as a state that follows where the row is. With `data`,
-	-- the row of an item.
+	-- Builds row `index` (from 1). With `key`, `row` is called with the key
+	-- (the value `key(index)` gave), not the index: `row(key, index)`, the
+	-- index a state that follows where the row is. With `data`, the row of
+	-- an item.
 	row: ((index: number) -> Node)
 		| ((key: any, index: State<number>) -> Node)
 		| ((item: any, index: State<number>, row: State<any>) -> Node),
 	-- Each row's item's key (a number, string or boolean), as a function of
-	-- its index (with `data`, of its item): a row follows its item as the
+	-- its index (with `data`, of its item); `row` then receives the key,
+	-- not the index (see `row`). A row follows its item as the
 	-- list changes, moved rather than written again (rows a removal or an
 	-- insertion shifts keep their nodes, text and layout). With `data`, a
 	-- field's name (`key = "id"`) is read without making any item a table.
@@ -17372,8 +18214,9 @@ export type ListProps = {
 	-- a state or a function saying it is followed (a composer growing).
 	scroll_padding: (ScrollPadding | State<ScrollPadding> | (() -> ScrollPadding))?,
 	-- Each row's own height instead, in order: a list, a state holding one
-	-- (a host's shared value costs the script nothing), or a function
-	-- returning one (tracked). The row count is its length.
+	-- (a `ui.state` or `ui.computed`; a host's shared value costs the script
+	-- nothing), or a function returning one (tracked). The row count is its
+	-- length. Anything but a list of numbers is an error, not no rows.
 	heights: ({ number } | Readable<{ number }> | (() -> { number }))?,
 	-- Rows (from 1, in order) that stick to the top while their section
 	-- scrolls past, each pushed up by the next: section headers. With
@@ -17651,9 +18494,24 @@ export type LayerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -17697,6 +18555,13 @@ export type LayerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -18092,9 +18957,24 @@ export type ModalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -18138,6 +19018,13 @@ export type ModalProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -18307,6 +19194,12 @@ export type ModalProps = {
 	-- What lies behind the backdrop blurs by this sigma, the panel sharp
 	-- (CSS `backdrop-filter: blur()` on a dialog's backdrop).
 	scrim_blur: number?,
+	-- Where focus goes as it opens: the `id` of a node in it, or false for
+	-- none (the panel itself); left out, its first control.
+	initial_focus: (string | false)?,
+	-- Where focus goes as it closes: the `id` of any node, or false for
+	-- nothing; left out, what had it before.
+	final_focus: (string | false)?,
 }
 -- Where an anchored popover or menu opens: on `side` of its trigger
 -- (flipping when that side lacks room), lined up with its start, centre
@@ -18315,7 +19208,29 @@ export type Placement = {
 	side: ("bottom" | "top" | "left" | "right")?,
 	align: ("start" | "center" | "end")?,
 	offset: number?,
+	-- Points kept between it and the screen's edges (0).
+	padding: number?,
+	-- Slide along the edge to stay on screen (true); false keeps its
+	-- aligned place and lets it reach past.
+	shift: boolean?,
+	-- Where its alignment would reach past the screen, line up with the
+	-- trigger's other edge when that fits (false).
+	flip_align: boolean?,
+	-- Where neither side has room, take the one with more (false: keep the
+	-- preferred side).
+	more_room: boolean?,
 }
+-- The tooltips under a node (`tooltip_group`), in milliseconds.
+export type TooltipGroup = { delay: number?, close_delay: number?, reshow_within: number?, reshow_delay: number? }
+-- How long the pointer rests on a trigger before its popup opens, and how
+-- long after it leaves the trigger and the popup before it closes, in
+-- milliseconds (Base UI's `delay` and `closeDelay`); left out, a popover's
+-- or menu's opens at 300 and a submenu's at 100, and each closes at 0.
+-- Heading for the popup across the space between, the pointer is held in
+-- the triangle to it (a safe polygon), so a diagonal crossing keeps it open;
+-- out of it, or at rest in it for 300 ms, it closes. One opened by a click
+-- stays open.
+export type HoverDelay = { open: number?, close: number? }
 export type PopoverProps = {
 	-- Size and position.
 	w: Props_w,
@@ -18554,9 +19469,24 @@ export type PopoverProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -18600,6 +19530,13 @@ export type PopoverProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -18774,8 +19711,21 @@ export type PopoverProps = {
 	arrow: number?,
 	-- At least as wide as its trigger, as a select's list is.
 	match_anchor_width: boolean?,
+	-- The anchor's slot takes its share of its row like any child, so an
+	-- anchor that grows or fills its width (a composer's textarea) has the
+	-- room to, with no `on_resize` measuring. Popover only.
+	anchor_fill: boolean?,
 	-- A popover only: false keeps it open on a click outside.
 	dismiss_on_backdrop: boolean?,
+	-- Opens as the pointer rests on `anchor` (see `HoverDelay`).
+	hover_delay: HoverDelay?,
+	-- Where focus goes as it opens: the `id` of a node in it, or false for
+	-- none (the panel itself); left out, its first control.
+	initial_focus: (string | false)?,
+	-- Where focus goes as it closes: the `id` of any node, or false for
+	-- nothing; left out, what had it before (else the trigger, if it was
+	-- opened from the keyboard).
+	final_focus: (string | false)?,
 	-- A popover only: at the caret of the input in its `anchor`, following
 	-- it (typing, a new line, scrolling, an input method's composition),
 	-- and taking no focus: keys go on to the input, which drives it (a
@@ -19019,9 +19969,24 @@ export type MenuItemProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -19065,6 +20030,13 @@ export type MenuItemProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -19449,9 +20421,24 @@ export type SubmenuProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -19495,6 +20482,13 @@ export type SubmenuProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -19657,6 +20651,9 @@ export type SubmenuProps = {
 	-- label, a value, a chevron); the label and a "›" otherwise. It opens
 	-- when the pointer moves onto it.
 	trigger: Node?,
+	-- How long it waits under the pointer before it opens (100) and, off
+	-- its trigger and itself, before it closes (0); see `HoverDelay`.
+	hover_delay: HoverDelay?,
 }
 export type WebViewProps = {
 	-- Size and position.
@@ -19896,9 +20893,24 @@ export type WebViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -19942,6 +20954,13 @@ export type WebViewProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -20343,9 +21362,24 @@ export type TerminalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -20389,6 +21423,13 @@ export type TerminalProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -20765,9 +21806,24 @@ export type HostViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -20811,6 +21867,13 @@ export type HostViewProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -21187,9 +22250,24 @@ export type SlotProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -21233,6 +22311,13 @@ export type SlotProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -21660,9 +22745,24 @@ export type EachOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -21706,6 +22806,13 @@ export type EachOptions = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -22097,9 +23204,24 @@ export type PresenceOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -22143,6 +23265,13 @@ export type PresenceOptions = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	hover: Props_hover,
@@ -22799,6 +23928,9 @@ declare ui: {
 	-- `handle` names, as `zgx inspect click` does. False, doing nothing,
 	-- for a handle whose control is gone, hidden or covered.
 	press: (handle: number) -> boolean,
+	-- The text a control (`ui.controls`' `handle`) shows, a word apart, at most
+	-- `cap` (400) characters; "" once it is gone. A dialog's, for a notice.
+	text_of: (handle: number, cap: number?) -> string,
 	dismiss_toast: (id: number) -> (),
 	-- JSON: `encode(value, { pretty = true })` writes what state could hold
 	-- (lists as arrays, tables as objects, `ui.null` as null); `decode(text)`
@@ -22818,8 +23950,15 @@ declare ui: {
 	-- "1,234.50", `{ style = "percent" }` takes a fraction (0.05 is "5%"),
 	-- `{ notation = "compact" }` gives "1.2K", `{ sign = "always" }` "+3".
 	number: (n: number, opts: NumberOptions?) -> string,
+	-- The way text runs by its first strong character: "rtl" for Arabic,
+	-- Hebrew and the like, "ltr" for another letter, nil for none (HTML's
+	-- `dir=auto`): what `dir` takes for a container showing that text.
+	direction_of: (text: string) -> ("ltr" | "rtl")?,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
+	-- A radial gradient centred on (cx, cy): the first colour at the centre, the
+	-- last at `radius` and beyond, the colours evenly between.
+	radial: (cx: number, cy: number, radius: number, colors: { read [number]: Color }) -> Brush,
 }
 
 ---------------------------------------------------------------------------

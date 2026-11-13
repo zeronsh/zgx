@@ -27,7 +27,7 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | `relative` | `boolean` | `false` | a containing block for absolute descendants |
 | `top`, `left`, `right`, `bottom` | `Length` | | insets of an absolute node |
 | `inset_start`, `inset_end` | `Length` | | its inset from the start or end of a line (CSS's `inset-inline-start`/`-end`): `left` and `right` left to right, `right` and `left` with `dir = "rtl"` |
-| `dir` | `"ltr" \| "rtl"` | its parent's (`"ltr"` at the root) | which way lines run in it and what it holds (HTML's `dir`): `"rtl"` runs rows from the right, starts a column's children and text at the right, and turns the `ps`/`pe`, `ms`/`me`, `inset_start`/`inset_end` edges round; `pl`, `ml` and `left` stay on the left A function or state follows: [text from people](#which-way-text-from-people-runs), which may run either way |
+| `dir` | `"ltr" \| "rtl" \| "auto"` | its parent's (`"ltr"` at the root) | which way lines run in it and what it holds (HTML's `dir`): `"rtl"` runs rows from the right, starts a column's children and text at the right, and turns the `ps`/`pe`, `ms`/`me`, `inset_start`/`inset_end` edges round; `pl`, `ml` and `left` stay on the left. `"auto"` on text takes the way of its first strong character (Arabic and Hebrew letters run right to left; text with none, and what is not text, take the parent's) and follows the text as it changes; on a container, set `dir = ui.direction_of(text)` for the text it shows, so a list item's marker and text swap sides in an Arabic answer. Bidi reordering within a line is the shaper's, by the Unicode algorithm. A function or state follows: [text from people](#which-way-text-from-people-runs), which may run either way |
 
 ## Spacing
 
@@ -364,7 +364,7 @@ return ui.div {
 | `bold`, `italic` | `boolean` | `false` | |
 | `align` | `"start" \| "left" \| "center" \| "right"` | `"start"` | |
 | `font` | `string` | the system's | `"mono"` (`"monospace"`), `"sans"` (`"sans-serif"`), `"serif"`, or a family name the host registered |
-| `wrap` | `boolean \| "balance"` | `false` | wrap at the box's width. `"balance"` also balances the lines (CSS's `text-wrap: balance`): they break at the narrowest width that keeps as many, so a heading's last line isn't left short, for up to six lines, the box as it was. It's inherited: on a container, the text in it balances |
+| `wrap` | `boolean \| "balance" \| "pretty"` | `false` | wrap at the box's width. `"balance"` and `"pretty"` also fit the lines as Chrome's `text-wrap: balance` and `pretty` do (its own line-breaking scorer, so the same widths break in the same places): `"balance"` evens up to six lines; `"pretty"` fits the last four lines of a paragraph again when the last is a short word. The box and its line count are as they were. A paragraph whose fitted breaks fall other than at a space (after an inline icon, between ideographs) breaks greedily. It's inherited: on a container, the text in it is fitted |
 | `truncate` | `boolean` | `false` | end the text with "…" where it overflows: on one line, or on the last of `lines` when that is set, here or on a parent |
 | `lines` | `number` | all | clamp to that many lines |
 | `line_height` | `number` | the font's | points |

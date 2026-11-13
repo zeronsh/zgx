@@ -1110,7 +1110,9 @@ impl Scene {
             .force_width
             .or(root_style.width)
             .or_else(|| percentage(root_style.width_percent, constraints.percent_width))
+            .or(root_options.percent_basis_width)
             .map(|width| (width - padding.left - padding.right).max(0.));
+        let basis_width = root_options.percent_basis_width;
         let child_percent_height = constraints
             .force_height
             .or(root_style.height)
@@ -1161,6 +1163,9 @@ impl Scene {
                 self.compute_retained(&mut cache, &ids, &children, least_space, bases);
                 let least = cache.tree.layout(root).expect("computed root").size.width;
                 found = found.min(least.max(room));
+            }
+            if let Some(basis) = basis_width {
+                found = found.max(basis);
             }
             let mut fixed = cache.tree.style(root).expect("retained root style").clone();
             fixed.size.width = t::Dimension::length(found);

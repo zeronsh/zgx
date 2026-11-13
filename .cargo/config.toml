@@ -4,9 +4,3 @@
 # 2 MiB for the deepest example interfaces, so tests run with the main
 # thread's stack.
 RUST_MIN_STACK = "8388608"
-
-# Luau checks its asserts unless NDEBUG is defined, and the cc crate that
-# builds it never defines it: every script loop, call and table access
-# paid for them in release builds (a fifth of a filter over a list). Debug
-# builds keep them (luau0-src defines LUAU_ENABLE_ASSERT there).
-LUAU_CXXFLAGS = "-DNDEBUG"

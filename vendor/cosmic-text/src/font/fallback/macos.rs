@@ -66,7 +66,10 @@ fn script_fallback(script: Script, locale: &str) -> &'static [&'static str] {
     //TODO: pull more data from about:config font.name-list.sans-serif in Firefox
     match script {
         Script::Adlam => &["Noto Sans Adlam"],
-        Script::Arabic => &["Geeza Pro"],
+        // zgx: SF Arabic and SF Hebrew first, as Core Text's cascade for the system
+        // font and Chrome give (variable: weights between Regular and Bold draw at
+        // their own axis value; Geeza Pro has no Medium).
+        Script::Arabic => &[".SF Arabic", "Geeza Pro"],
         Script::Armenian => &["Noto Sans Armenian"],
         Script::Bengali => &["Bangla Sangam MN"],
         Script::Buhid => &["Noto Sans Buhid"],
@@ -81,7 +84,7 @@ fn script_fallback(script: Script, locale: &str) -> &'static [&'static str] {
         Script::Han => han_unification(locale),
         Script::Hangul => han_unification("ko"),
         Script::Hanunoo => &["Noto Sans Hanunoo"],
-        Script::Hebrew => &["Arial"],
+        Script::Hebrew => &[".SF Hebrew", "Arial"],
         Script::Hiragana => han_unification("ja"),
         Script::Javanese => &["Noto Sans Javanese"],
         Script::Kannada => &["Noto Sans Kannada"],

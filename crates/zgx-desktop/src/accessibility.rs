@@ -869,10 +869,19 @@ impl AccessibilityTree {
             if let Some(expanded) = semantic.expanded {
                 n.set_expanded(expanded);
             }
+            if semantic.busy {
+                n.set_busy();
+            }
+            if semantic.context_menu {
+                n.add_action(Action::ShowContextMenu);
+            }
             if let Some(popup) = semantic.has_popup {
                 n.set_has_popup(match popup {
                     zgx::semantics::PopupKind::Menu => accesskit::HasPopup::Menu,
                     zgx::semantics::PopupKind::Dialog => accesskit::HasPopup::Dialog,
+                    zgx::semantics::PopupKind::Listbox => accesskit::HasPopup::Listbox,
+                    zgx::semantics::PopupKind::Tree => accesskit::HasPopup::Tree,
+                    zgx::semantics::PopupKind::Grid => accesskit::HasPopup::Grid,
                 });
             }
             if semantic.modal {
@@ -1839,6 +1848,7 @@ fn role(r: Role) -> accesskit::Role {
         Role::Image => accesskit::Role::Image,
         Role::Document => accesskit::Role::Document,
         Role::Article => accesskit::Role::Article,
+        Role::Region => accesskit::Role::Region,
         Role::Heading => accesskit::Role::Heading,
         Role::List => accesskit::Role::List,
         Role::ListBox => accesskit::Role::ListBox,
@@ -3832,6 +3842,91 @@ mod vocabulary_tests {
             .filter(|n| n.role() == accesskit::Role::TextRun && n.value() == Some("Notes\n"))
             .count();
         assert_eq!(runs, 1);
+    }
+
+    #[test]
+    fn sr_only_text_stays_in_the_tree_and_invisible_and_hidden_text_leave_it() {
+        let mut ui = Ui::new(400., 300.);
+        ui.mount(
+            column()
+                .child(text("Shown").id("shown"))
+                .child(text("Invisible").invisible())
+                .child(text("Spoken").sr_only())
+                .child(text("Gone").hidden()),
+        );
+        let nodes = project(&mut ui);
+        let names: Vec<_> = nodes
+            .iter()
+            .filter_map(|n| n.value().or(n.label()).map(str::to_owned))
+            .collect();
+        assert!(names.iter().any(|n| n == "Shown"));
+        assert!(
+            !names.iter().any(|n| n == "Invisible"),
+            "invisible leaves the tree: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "Spoken"),
+            "sr_only stays: {names:?}"
+        );
+        assert!(!names.iter().any(|n| n == "Gone"), "{names:?}");
+    }
+
+    #[test]
+    fn a_busy_view_is_marked_busy_while_it_is() {
+        let mut ui = Ui::new(400., 300.);
+        let busy = ui.signal(true);
+        let read = busy.clone();
+        ui.mount(
+            column()
+                .role(Role::Region)
+                .accessible_label("Results")
+                .busy_when(move || read.get())
+                .child(text("loading")),
+        );
+        let group = |ui: &mut Ui| {
+            let nodes = project(ui);
+            find(&nodes, accesskit::Role::Region)
+                .iter()
+                .find(|n| n.label() == Some("Results"))
+                .map(|n| n.is_busy())
+        };
+        assert_eq!(group(&mut ui), Some(true));
+        busy.set(false);
+        assert_eq!(group(&mut ui), Some(false));
+    }
+
+    #[test]
+    fn a_region_is_a_named_landmark() {
+        let mut ui = Ui::new(400., 300.);
+        ui.mount(
+            column()
+                .role(Role::Region)
+                .accessible_label("Notices")
+                .child(text("A notice")),
+        );
+        let nodes = project(&mut ui);
+        let regions = find(&nodes, accesskit::Role::Region);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].label(), Some("Notices"));
+    }
+
+    #[test]
+    fn a_view_with_a_context_menu_offers_show_menu() {
+        let mut ui = Ui::new(400., 300.);
+        ui.mount(
+            column()
+                .child(
+                    button()
+                        .accessible_label("Report")
+                        .context_menu(|_| vec![menu_item("Rename")]),
+                )
+                .child(button().accessible_label("Plain")),
+        );
+        let nodes = project(&mut ui);
+        let buttons = find(&nodes, accesskit::Role::Button);
+        let by = |label: &str| *buttons.iter().find(|n| n.label() == Some(label)).unwrap();
+        assert!(by("Report").supports_action(Action::ShowContextMenu));
+        assert!(!by("Plain").supports_action(Action::ShowContextMenu));
     }
 
     #[test]

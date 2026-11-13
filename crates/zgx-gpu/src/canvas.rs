@@ -449,6 +449,31 @@ pub fn rasterize_viewed(
                 )
                 .ok_or_else(|| GpuError("invalid gradient geometry".into()))?
             }
+            Brush::Radial {
+                center,
+                radius,
+                stops,
+            } => {
+                if stops.len() < 2
+                    || stops.len() > 1024
+                    || !radius.is_finite()
+                    || *radius <= 0.
+                    || stops
+                        .iter()
+                        .any(|s| !s.offset.is_finite() || !(0. ..=1.).contains(&s.offset))
+                {
+                    return Err(GpuError("invalid gradient stops".into()));
+                }
+                sk::RadialGradient::new(
+                    point(*center),
+                    point(*center),
+                    *radius,
+                    premultiplied_stops(stops),
+                    sk::SpreadMode::Pad,
+                    sk::Transform::identity(),
+                )
+                .ok_or_else(|| GpuError("invalid gradient geometry".into()))?
+            }
             Brush::Slash {
                 background,
                 foreground,

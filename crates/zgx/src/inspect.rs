@@ -1074,10 +1074,11 @@ fn check(ui: &Ui, labels: &HashMap<NodeId, Label>) -> Vec<Warning> {
         }
         // Content overflowing a clip that does not scroll.
         let (clip_x, clip_y) = scene.clips(id);
-        let scrolls = scene
-            .children(id)
-            .iter()
-            .any(|c| scene.is_scroll_content(*c));
+        let scrolls = scene.is_scroll_view(id)
+            || scene
+                .children(id)
+                .iter()
+                .any(|c| scene.is_scroll_content(*c));
         if (clip_x || clip_y) && !scrolls && !ui.is_editor(id) && children > 0 {
             let mut extent: Option<Rect> = None;
             for child in scene.children(id).iter().filter(in_flow) {

@@ -206,7 +206,8 @@ pub(crate) fn settle(ui: &Ui) {
         return;
     }
     let want = (|| {
-        if !blink.native.get() || !blink.bare.get() || !ui.is_presented() {
+        if !blink.native.get() || !blink.bare.get() || !ui.is_presented() || !ui.window_is_active()
+        {
             return None;
         }
         let (caret, color, settings, since) = (
@@ -299,6 +300,32 @@ pub(crate) fn settle(ui: &Ui) {
     scene.set_effects(caret, effects);
 }
 
+/// The window became key or stopped being: the caret hides with it, as
+/// AppKit's does, and blinks again from solid when it comes back.
+pub(crate) fn window_active_changed(ui: &Ui, active: bool) {
+    let blink = ui.caret_blink();
+    let (Some(caret), Some(color)) = (blink.caret.get(), blink.color.get()) else {
+        return;
+    };
+    if active {
+        blink.show(ui, caret, color);
+        blink.restart(caret, color, crate::clock::now(), blink.bare.get());
+    } else {
+        blink.show(ui, caret, color);
+        blink.next.set(None);
+        blink.stop.set(None);
+        if blink.drawn.replace(None).is_some() {
+            blink.serial.set(blink.serial.get().wrapping_add(1));
+        }
+    }
+    let mut scene = ui.scene.borrow_mut();
+    if scene.contains(caret) {
+        let mut effects = scene.effects(caret);
+        effects.opacity = if active { 1. } else { 0. };
+        scene.set_effects(caret, effects);
+    }
+}
+
 /// When the caret next changes, while one blinks in a presented window.
 pub(crate) fn next(ui: &Ui) -> Option<Instant> {
     let blink = ui.caret_blink();
@@ -307,7 +334,7 @@ pub(crate) fn next(ui: &Ui) -> Option<Instant> {
         return blink.next.get().filter(|_| ui.is_presented());
     }
     let caret = blink.caret.get()?;
-    if !ui.is_presented() || !ui.scene.borrow().contains(caret) {
+    if !ui.is_presented() || !ui.window_is_active() || !ui.scene.borrow().contains(caret) {
         return None;
     }
     blink.next.get()

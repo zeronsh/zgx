@@ -12,7 +12,7 @@ categories = ["gui"]
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["svg", "png", "jpeg", "gif", "private-api", "cjk-thai-words"]
+default = ["svg", "png", "jpeg", "gif", "webp", "private-api", "cjk-thai-words"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # Words break at their hyphenation points where text asks (zgx-gpu's
@@ -21,6 +21,7 @@ hyphens = ["zgx-gpu/hyphens"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
+webp = ["zgx-gpu/webp"]
 gif = ["zgx-gpu/gif"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]

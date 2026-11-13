@@ -60,6 +60,8 @@ pub(crate) struct Link {
     /// Where it goes (`TextSpan::href`): a click opens it, its context menu
     /// opens or copies it.
     pub href: Option<Arc<str>>,
+    /// What assistive technology reads in place of its text (`TextSpan::label`).
+    pub label: Option<Arc<str>>,
     /// It restyles under the pointer, so no hover ring.
     pub styled_hover: bool,
     /// Its own context menu, in place of a link's.
@@ -97,6 +99,8 @@ pub(crate) struct InlineIcon {
     /// How far into the room it starts (the span's padding before it, and
     /// its well's room round it).
     pub inset: f32,
+    /// Its vertical nudge (`SpanIcon::dy`).
+    pub dy: f32,
     /// The well it sits on (`SpanIcon::bg`), resolved: drawn under it,
     /// `pad` larger on every side.
     pub well: Option<IconWell>,
@@ -112,6 +116,16 @@ pub(crate) struct IconWell {
     pub radius: f32,
     pub pad: f32,
 }
+/// How a span's icon sits in its line (`SpanIcon::align`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IconAlign {
+    /// Centred on the line, which it does not make taller.
+    #[default]
+    Center,
+    /// Its bottom edge on the text's baseline, as an inline image's is in
+    /// CSS (`vertical-align: baseline`): the line grows to hold it. No well.
+    Baseline,
+}
 /// A span's leading icon: `size` square, `gap` before the text, tinted
 /// with `tint` (a colour or token) if set, else as the SVG says (one that
 /// follows the text colour takes the span's).
@@ -123,6 +137,12 @@ pub struct SpanIcon {
     pub size: f32,
     /// The room between it and the text.
     pub gap: f32,
+    /// Room on each side of it, inline only: no well, no taller line (CSS
+    /// `margin: 0 Npx` on an inline image).
+    pub margin: f32,
+    /// How far it is moved down from where it sits, in points (negative:
+    /// up): CSS `vertical-align` of an inline image, 1 below centre at -3px.
+    pub dy: f32,
     /// Its colour, or a colour token; `None` paints it as the SVG says.
     pub tint: Option<crate::theme::Themed<Color>>,
     /// A well under it (a file chip's): its fill, a colour or a token;
@@ -133,6 +153,8 @@ pub struct SpanIcon {
     pub radius: f32,
     /// The well's room round the icon, on every side.
     pub pad: f32,
+    /// How it sits in its line.
+    pub align: IconAlign,
 }
 /// What keeps an icon's room in the line: a word joiner (zero width, and
 /// no line break either side, so the icon stays with its text), padded.
@@ -143,6 +165,7 @@ pub(crate) const ICON_PLACEHOLDER: &str = "\u{2060}";
 pub struct TextSpan {
     pub(crate) action: Option<InlineAction>,
     pub(crate) href: Option<Arc<str>>,
+    pub(crate) label: Option<Arc<str>>,
     pub(crate) text: Arc<str>,
     pub(crate) styles: Styles,
     pub(crate) background: Option<Color>,
@@ -171,6 +194,10 @@ pub(crate) struct SpanExtras {
     pub fade: Option<TextFade>,
     /// Its background reaching past the text across (`TextSpan::outset`).
     pub outset: f32,
+    /// An outline round its box (`TextSpan::border`): width and colour.
+    pub border: Option<(f32, crate::theme::Themed<Color>)>,
+    /// The least width of its box (`TextSpan::min_width`).
+    pub min_width: f32,
     /// A picture in place of its text (`TextSpan::inline_svg`).
     pub inline: Option<InlineSvg>,
     /// Told of the pointer coming and going (`TextSpan::on_hover`).
@@ -235,12 +262,17 @@ pub struct SpanHover {
     pub text_color: Option<crate::theme::Themed<Color>>,
     /// The background under the pointer, or a colour token (a badge's `:hover`).
     pub background: Option<crate::theme::Themed<Color>>,
+    /// The underline's colour under the pointer, or a colour token.
+    pub underline_color: Option<crate::theme::Themed<Color>>,
+    /// The icon under the pointer, in place of the span's own.
+    pub icon: Option<SpanIcon>,
 }
 /// A span of `text`, styled as the paragraph is.
 pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
     TextSpan {
         action: None,
         href: None,
+        label: None,
         text: text.into(),
         styles: Styles::new(),
         background: None,
@@ -307,6 +339,22 @@ impl TextSpan {
         self.extras.get_or_insert_default().outset = x.max(0.);
         self
     }
+    /// An outline round the span's box, as CSS's inline border: `width`
+    /// points in `color`, taking room as the border does (its box grows by
+    /// it all round).
+    pub fn border(mut self, width: f32, color: impl Into<crate::theme::Themed<Color>>) -> Self {
+        if width > 0. {
+            self.extras.get_or_insert_default().border = Some((width, color.into()));
+        }
+        self
+    }
+    /// The least width of the span's box, padding and border included, as
+    /// CSS's `min-width` on an inline box: its text sits centred in what
+    /// room is over.
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.extras.get_or_insert_default().min_width = width.max(0.);
+        self
+    }
     /// The span background's corner radius.
     pub fn radius(mut self, radius: f32) -> Self {
         self.radius = radius.max(0.);
@@ -355,6 +403,12 @@ impl TextSpan {
         build: impl FnMut(&crate::compose::ContextMenuEvent) -> Vec<View> + 'static,
     ) -> Self {
         self.extras.get_or_insert_default().menu = Some(SpanMenu(Rc::new(RefCell::new(build))));
+        self
+    }
+    /// What assistive technology reads for this run in place of its text
+    /// (`aria-label`): a citation badge's "Citation 1, Sleep study.pdf".
+    pub fn label(mut self, label: impl Into<Arc<str>>) -> Self {
+        self.label = Some(label.into());
         self
     }
     /// A link to `url`: a click (after `on_click`'s, if it has one) opens it
@@ -740,10 +794,9 @@ impl SpanLocator {
         }
         let (local_x, local_y) = scene.local_point(self.paragraph, x, y);
         let bounds = scene.bounds(self.paragraph);
-        let (wrap, inset) = scene.text_wrap(self.paragraph, bounds.width);
-        let layout = crate::text_layout::Inset::around(
-            scene.shape_rich_text(&content.rich, Some(wrap)),
-            inset,
+        let layout = scene.shape_rich_text(
+            &scene.fit_rich(self.paragraph, bounds.width, &content.rich),
+            Some(bounds.width),
         );
         let at = layout.hit_test(local_x, local_y);
         // At a run's end the offset is the next one's start too: the one
@@ -865,13 +918,12 @@ pub(crate) fn mount_links(
             geometry = if data.links.is_empty() {
                 Vec::new()
             } else {
-                // At the width its lines wrap at, where they show
-                // (balanced). A change of balance moves `engine`.
+                // As its lines break where they show (fitted). A change of
+                // fit moves `engine`.
                 let scene = ui.scene.borrow();
-                let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-                let layout = crate::text_layout::Inset::around(
-                    scene.shape_rich_text(&data.rich, Some(wrap)),
-                    inset,
+                let layout = scene.shape_rich_text(
+                    &scene.fit_rich(paragraph, bounds.width, &data.rich),
+                    Some(bounds.width),
                 );
                 drop(scene);
                 data.links
@@ -1092,7 +1144,17 @@ pub(crate) fn mount_links(
             if link.is_link() {
                 ui.semantics.borrow_mut().set(
                     entry.node,
-                    SemanticNode::new(Role::Link, &data.rich.text()[link.range.clone()]),
+                    SemanticNode::new(
+                        // A run that only acts is a button (Space too), one that goes somewhere a link.
+                        if link.href.is_some() {
+                            Role::Link
+                        } else {
+                            Role::Button
+                        },
+                        link.label
+                            .as_deref()
+                            .unwrap_or(&data.rich.text()[link.range.clone()]),
+                    ),
                 );
             }
             let rects = &geometry[index];
@@ -1194,10 +1256,9 @@ pub(crate) fn mount_icons(
         if geometry_key.as_ref() != Some(&key) {
             let scene = ui.scene.borrow();
             // As links' (above).
-            let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-            let layout = crate::text_layout::Inset::around(
-                scene.shape_rich_text(&data.rich, Some(wrap)),
-                inset,
+            let layout = scene.shape_rich_text(
+                &scene.fit_rich(paragraph, bounds.width, &data.rich),
+                Some(bounds.width),
             );
             let placed = if data.icons.iter().any(|icon| icon.boxed.is_some()) {
                 layout.inline_boxes()
@@ -1237,7 +1298,8 @@ pub(crate) fn mount_icons(
                 margin: crate::scene::Insets {
                     left: bounds.x - owner_bounds.x + rect.x + icon.inset - padding.left,
                     top: bounds.y - owner_bounds.y + rect.y + (rect.height - height) / 2.
-                        - padding.top,
+                        - padding.top
+                        + icon.dy,
                     ..Default::default()
                 },
                 ..Default::default()

@@ -389,6 +389,7 @@ pub fn combobox(
                     side: PlacementSide::Bottom,
                     align: PlacementEdge::Start,
                     offset: 4.,
+                    ..Default::default()
                 })
                 .match_anchor_width()
                 .p(4.)

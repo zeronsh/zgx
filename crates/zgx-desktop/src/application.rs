@@ -1028,6 +1028,12 @@ impl Application {
     /// return once the application quits.
     pub fn run(self, build: impl FnOnce(&mut WindowContext)) -> Result<(), Box<dyn Error>> {
         zgx::profile::mark("run");
+        // `ZGX_FREEZE_TIME=1`: every animation, timer, caret and frame stands
+        // at one time until `zgx inspect clock advance` moves it, so a
+        // screenshot run is the same each time.
+        if zgx::env::var_os("ZGX_FREEZE_TIME").is_some_and(|v| !v.is_empty() && v != "0") {
+            zgx::clock::freeze();
+        }
         // Who the app is to the system's notifications and badge.
         crate::notify::set_identity(crate::notify::Identity {
             application_id: self.application_id.clone(),
@@ -3845,6 +3851,21 @@ impl Host {
                 self.context.ui.scroll_into_view(node);
                 self.accessibility_revealed = true;
             }
+            accesskit::Action::ShowContextMenu => {
+                self.context
+                    .ui
+                    .input
+                    .focus(&self.context.ui.scene, Some(node));
+                self.context.ui.input.dispatch_to(
+                    &self.context.ui.scene,
+                    node,
+                    InputEvent::KeyDown {
+                        key: zgx::input::Key::ContextMenu,
+                        modifiers: Default::default(),
+                        repeat: false,
+                    },
+                );
+            }
             accesskit::Action::Click => {
                 self.context.ui.input.dispatch_to(
                     &self.context.ui.scene,
@@ -4458,6 +4479,7 @@ impl Host {
                 let _ = proxy.send_event(Event::Zoom(token));
             });
         }
+        self.context.ui.set_window_active(window.has_focus());
         self.window = Some(window);
         #[cfg(target_os = "macos")]
         {
@@ -8289,7 +8311,14 @@ impl WindowManager {
         if !std::mem::take(&mut self.focus_moved) {
             return;
         }
-        let active = self.hosts.values().any(|host| host.native_focused);
+        // A session that renders as covered (`ZGX_RENDER_WHEN_COVERED`,
+        // `ZGX_OFFSCREEN`) takes no focus and is meant to be driven all the
+        // same: its popups open, rather than wait for an app that never
+        // comes forward.
+        let active = app_is_active(
+            *RENDER_WHEN_COVERED,
+            self.hosts.values().any(|host| host.native_focused),
+        );
         if self.app_was_active != active {
             self.app_was_active = active;
             for host in self.hosts.values() {
@@ -9395,6 +9424,14 @@ fn key_repeat_now() -> bool {
     NSApplication::sharedApplication(mtm)
         .currentEvent()
         .is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat())
+}
+
+/// Whether the app counts as forward for its popups (`Ui::set_app_active`):
+/// one of its windows is focused, or the session renders as covered
+/// (`ZGX_RENDER_WHEN_COVERED`, `ZGX_OFFSCREEN`), which takes no focus and is
+/// driven all the same.
+fn app_is_active(renders_when_covered: bool, focused: bool) -> bool {
+    renders_when_covered || focused
 }
 
 #[cfg(test)]
@@ -10945,6 +10982,15 @@ mod tests {
         assert!(!probe.held_after_wait, "and the loop's wait");
     }
 
+    #[test]
+    fn a_session_rendering_as_covered_is_forward_for_its_popups_without_focus() {
+        assert!(super::app_is_active(true, false));
+        assert!(super::app_is_active(false, true));
+        assert!(
+            !super::app_is_active(false, false),
+            "an app at the back holds its popups"
+        );
+    }
     #[test]
     fn window_handles_can_close_from_worker_threads() {
         fn assert_send_sync<T: Send + Sync>() {}

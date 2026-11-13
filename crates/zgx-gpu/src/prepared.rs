@@ -98,6 +98,7 @@ impl Key {
                         && *size == run.font_size
                         && *padding == 0.
                         && run.padding[0] == 0.
+                        && run.min_width == 0.
                         && range.end == run.range.start =>
                 {
                     range.end = run.range.end;
@@ -1235,9 +1236,14 @@ impl TextCache {
             .runs(None)
             .fold((0., 0.), |(w, h), run| size(w, h, run));
         match crate::text::truncated(fonts, rich, width, limit, &rows) {
-            Some(cut) => cut
-                .layout_runs()
-                .fold((0., 0.), |(w, h), run| size(w, h, run)),
+            // A text cut to fit takes the width it was given, as CSS's box does
+            // under `text-overflow`, not the width of the glyphs that fit.
+            Some(cut) => {
+                let (w, h) = cut
+                    .layout_runs()
+                    .fold((0., 0.), |(w, h), run| size(w, h, run));
+                (width.map_or(w, |cap| w.max(cap)), h)
+            }
             None => uncut,
         }
     }
@@ -1758,7 +1764,7 @@ impl TextCache {
                     let mut at = 0;
                     while index < runs.len() {
                         let run = &runs[index];
-                        if run.padding[0] != 0. || run.range.start != at {
+                        if run.padding[0] != 0. || run.min_width != 0. || run.range.start != at {
                             return None;
                         }
                         let mut end = index + 1;
@@ -1767,6 +1773,7 @@ impl TextCache {
                             && runs[end].font_size == run.font_size
                             && runs[end].range.start == runs[end - 1].range.end
                             && runs[end].padding[0] == 0.
+                            && runs[end].min_width == 0.
                         {
                             end += 1;
                         }
@@ -2395,9 +2402,10 @@ mod tests {
                         let width = Some(width as f32 + 0.29);
                         let measured = cache.measure(&mut fonts, &clamped, width);
                         let shaped = ShapedText::with_runs(&mut fonts, &clamped, width).size();
-                        assert_eq!(
-                            (measured.0.to_bits(), measured.1.to_bits()),
-                            (shaped.0.to_bits(), shaped.1.to_bits()),
+                        // A text cut to fit takes the width it was given.
+                        let width_ok = measured.0 == shaped.0 || Some(measured.0) == width;
+                        assert!(
+                            width_ok && measured.1.to_bits() == shaped.1.to_bits(),
                             "{text:?} {options:?} at {width:?}: {measured:?} vs {shaped:?}"
                         );
                     }
@@ -2644,7 +2652,9 @@ mod tests {
             },
         );
         assert!(!TextCache::handles(&clamped));
-        let expected = ShapedText::with_runs(&mut fonts, &clamped, Some(120.)).size();
+        // Cut to fit, it takes the width it was given.
+        let shaped = ShapedText::with_runs(&mut fonts, &clamped, Some(120.)).size();
+        let expected = (120., shaped.1);
         assert_eq!(cache.measure(&mut fonts, &clamped, Some(120.)), expected);
         let hits = cache.hits;
         assert_eq!(cache.measure(&mut fonts, &clamped, Some(120.)), expected);
@@ -2656,8 +2666,11 @@ mod tests {
             overflow: zgx::text_layout::TextOverflow::Ellipsis,
             line_clamp: std::num::NonZeroU32::new(2),
         });
-        let expected = ShapedText::with_runs(&mut fonts, &two, Some(120.)).size();
-        assert_eq!(cache.measure(&mut fonts, &two, Some(120.)), expected);
+        let shaped = ShapedText::with_runs(&mut fonts, &two, Some(120.)).size();
+        assert_eq!(
+            cache.measure(&mut fonts, &two, Some(120.)),
+            (120., shaped.1)
+        );
     }
 
     /// A paragraph streamed in, a word or a character at a time, is laid
@@ -3558,8 +3571,9 @@ mod tests {
         };
         let held = words(&mut cache, "kept words");
         drop(words(&mut cache, "gone soon"));
-        // kept, words, gone, soon and the blank between each.
-        assert_eq!(cache.len(), 5);
+        // kept, words, gone, soon and the blank between each (a blank is kerned
+        // with the letter after it, so each is its own shape).
+        assert_eq!(cache.len(), 6);
         cache.sweep();
         assert_eq!(cache.len(), 3, "kept, words and the blank");
         drop(held);

@@ -386,6 +386,16 @@ pub enum Brush {
         /// The colours along it, in offset order.
         stops: Arc<[GradientStop]>,
     },
+    /// A radial gradient from `center` out to `radius` (see [`Brush::radial`]):
+    /// offset 0 at the center, 1 at the radius, the last colour beyond.
+    Radial {
+        /// Where offset 0 lies.
+        center: Point,
+        /// The distance at which offset 1 lies.
+        radius: f32,
+        /// The colours along it, in offset order.
+        stops: Arc<[GradientStop]>,
+    },
     /// Diagonal parallel stripes in logical coordinates.
     Slash {
         /// The colour between the stripes.
@@ -404,6 +414,34 @@ impl From<Color> for Brush {
     }
 }
 impl Brush {
+    /// A radial gradient centred on `center`, or an error unless the centre
+    /// is finite, the radius finite and positive and there are 2 to 1,024
+    /// stops with offsets from 0 to 1 in order.
+    pub fn radial(
+        center: Point,
+        radius: f32,
+        stops: impl Into<Arc<[GradientStop]>>,
+    ) -> Result<Self, &'static str> {
+        let stops = stops.into();
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !radius.is_finite()
+            || radius <= 0.
+            || stops.len() < 2
+            || stops.len() > 1024
+            || stops
+                .iter()
+                .any(|s| !s.offset.is_finite() || !(0. ..=1.).contains(&s.offset))
+            || stops.windows(2).any(|s| s[0].offset > s[1].offset)
+        {
+            return Err("invalid radial gradient");
+        }
+        Ok(Self::Radial {
+            center,
+            radius,
+            stops,
+        })
+    }
     /// A linear gradient from `start` to `end`, or an error unless the points
     /// are finite and distinct and there are 2 to 1,024 stops with offsets
     /// from 0 to 1 in order.

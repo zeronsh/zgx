@@ -60,6 +60,8 @@ pub struct Font {
     /// zgx: whether its glyphs' shapes are only in a table swash can't draw
     /// (Apple's `hvgl`), for the platform's rasterizer.
     platform_outlines: bool,
+    /// zgx: the weight its variable axis is set to.
+    weight: fontdb::Weight,
 }
 
 impl fmt::Debug for Font {
@@ -73,6 +75,11 @@ impl fmt::Debug for Font {
 impl Font {
     pub const fn id(&self) -> fontdb::ID {
         self.id
+    }
+
+    /// zgx: the weight it was instanced at.
+    pub const fn weight(&self) -> fontdb::Weight {
+        self.weight
     }
 
     pub fn monospace_em_width(&self) -> Option<f32> {
@@ -280,6 +287,7 @@ impl Font {
         Some(Self {
             id: info.id,
             optical: has_optical,
+            weight,
             platform_outlines,
             monospace_fallback,
             #[cfg(feature = "swash")]

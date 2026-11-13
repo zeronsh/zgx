@@ -25,6 +25,8 @@
 //! The `ui` and `anime` libraries are documented in `docs/scripting.md`.
 #![warn(missing_docs)]
 mod actions;
+mod gc_paths;
+pub use gc_paths::{GcFound, GcHolder, GcQuery};
 mod anim;
 mod anime;
 pub mod app_config;
@@ -84,7 +86,7 @@ mod rules;
 pub mod scaffold;
 #[cfg(feature = "scene3d")]
 mod scene3d;
-pub use host_views::host_view;
+pub use host_views::{host_view, remove_host_view};
 mod socket;
 mod sorted;
 mod sources;
@@ -450,6 +452,8 @@ pub(crate) struct Vm {
     pub(crate) warnings: SharedWarnings,
     /// Makes a pointer event's table (`point_table`), compiled once.
     pub(crate) point: std::cell::OnceCell<mlua::Function>,
+    /// The objects at the last `zgx inspect gc --mark` (their heap addresses).
+    gc_mark: RefCell<Option<std::collections::HashSet<String>>>,
 }
 impl Vm {
     /// A pointer event's table for a handler: `x`, `y`, `local_x`,
@@ -2673,6 +2677,18 @@ impl ScriptHost {
             });
             self.0.window_state.borrow_mut().push((false, effect));
         }
+        let popups = ui.observe_popups();
+        let state = self.0.shared.state(
+            windows::POPUPS,
+            popup_value(&popups.with_untracked(Clone::clone)),
+        );
+        let effect = self.0.runtime.effect(move || {
+            let now = popup_value(&popups.get());
+            if state.with_untracked(|was| *was != now) {
+                state.set(now);
+            }
+        });
+        self.0.window_state.borrow_mut().push((false, effect));
     }
     /// Keep `ui.window.full_screen` as whether the window is in full
     /// screen (pass its `WindowInfo::fullscreen`), and
@@ -2953,6 +2969,20 @@ impl ScriptHost {
     /// would otherwise stay until the scripts next ran a while.
     pub fn collect_garbage(&self) {
         collect_garbage(&self.0);
+    }
+    /// A full collection in each VM (`collect_garbage`'s, the conversion cache
+    /// let go of too), and what each held before and after, with what is left
+    /// by object type, userdata type and the chunk each function's code came
+    /// from: to tell garbage a collection frees from what scripts keep.
+    pub fn gc_report(&self, query: &GcQuery) -> Vec<GcVm> {
+        let loaded = self.0.current.borrow().clone();
+        let vms: Vec<Rc<Vm>> = loaded.iter().flat_map(|l| l._vms.iter().cloned()).collect();
+        let before: Vec<usize> = vms.iter().map(|vm| vm.lua.used_memory()).collect();
+        collect_garbage(&self.0);
+        vms.iter()
+            .zip(before)
+            .map(|(vm, before)| gc_vm(vm, before, query))
+            .collect()
     }
     /// A full collection in each VM and nothing else: one the scripts'
     /// allocations bring on as they run, with none of what the host does as
@@ -4253,13 +4283,6 @@ impl ScriptHost {
             Grants::All
         });
         let code = script.code(files)?;
-        #[cfg(all(luau_asserts, not(debug_assertions)))]
-        warning(
-            Some(&self.0.warnings),
-            "Luau was built with its asserts, which slow scripts by about a fifth: \
-             build with LUAU_CXXFLAGS=-DNDEBUG (docs/scripting.md, Cost)"
-                .into(),
-        );
         // The handle `Lua::new` returns collects all garbage when it drops,
         // a full pass over everything the script just built; a clone does
         // not, and the VM frees all it holds when the last one goes.
@@ -4296,6 +4319,7 @@ impl ScriptHost {
             locate: self.0.locate.clone(),
             warnings: self.0.warnings.clone(),
             point: Default::default(),
+            gc_mark: Default::default(),
         });
         let store = self
             .0
@@ -4355,7 +4379,7 @@ impl ScriptHost {
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
-        lazy.ui(&["path", "linear"], canvas::install);
+        lazy.ui(&["path", "linear", "radial"], canvas::install);
         lazy.ui(&["glass"], node::install_glass);
         lazy.ui(&["map"], node::install_map);
         #[cfg(feature = "scene3d")]
@@ -4363,7 +4387,7 @@ impl ScriptHost {
             &["scene3d", "mesh", "light", "group", "model"],
             scene3d::install,
         );
-        lazy.ui(&["json", "number", "sort"], data::install);
+        lazy.ui(&["json", "number", "sort", "direction_of"], data::install);
         let terms = self.0.terms.clone();
         lazy.ui(&["term"], move |lua, ui| term::install(lua, ui, terms));
         let webs = self.0.webs.clone();
@@ -4606,6 +4630,30 @@ async fn wake(
 /// Everything `inner`'s loaded VMs can free, freed: two full collections in
 /// each, as one leaves what a userdata's finalizer held (a node's or an
 /// element's, and the closures and values only they reached) for the next.
+/// `ui.window.popups`: each open popup's window as `{ x, y, w, h, kind }`.
+fn popup_value(popups: &[zgx::widgets::PopupInfo]) -> Value {
+    let n = |v: f32| Value::Num(f64::from(v));
+    let list: Vec<Value> = popups
+        .iter()
+        .map(|popup| {
+            let kind = match popup.role {
+                Some(zgx::scene::PopupRole::Menu) => "menu",
+                Some(zgx::scene::PopupRole::Popover) => "popover",
+                Some(zgx::scene::PopupRole::Tooltip) => "tooltip",
+                Some(zgx::scene::PopupRole::Topmost) => "topmost",
+                None => "popup",
+            };
+            Value::Map(Rc::from([
+                (Rc::from("h"), n(popup.rect.height)),
+                (Rc::from("kind"), Value::from(kind)),
+                (Rc::from("w"), n(popup.rect.width)),
+                (Rc::from("x"), n(popup.rect.x)),
+                (Rc::from("y"), n(popup.rect.y)),
+            ]))
+        })
+        .collect();
+    Value::List(list.into())
+}
 fn collect_garbage(inner: &Inner) {
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
@@ -4618,6 +4666,10 @@ fn collect_garbage(inner: &Inner) {
         value::sweep_idle(&vm.lua);
         collect_fully(&vm.lua);
         vm.interrupt.heap_settled(vm.lua.used_memory());
+    }
+    inner.shared.sweep_unheld();
+    for store in inner.stores.borrow().values() {
+        store.sweep_unheld();
     }
 }
 /// Full collections until one frees nothing more: a collection finalizes
@@ -4700,7 +4752,7 @@ mod tests {
             let current = host.0.current.borrow().clone().expect("loaded");
             current._vms[0].interrupt.goal_is_tight()
         };
-        let asked = ScriptHost::inline(&runtime, "large", script).large_heap_goal(150);
+        let asked = ScriptHost::inline(&runtime, "large", script).large_heap_goal(120);
         assert!(tight(&asked), "tightened past the line");
         let default = ScriptHost::inline(&runtime, "large", script);
         assert!(!tight(&default), "Luau's own without the option");
@@ -4867,6 +4919,7 @@ mod tests {
             locate: Rc::default(),
             warnings: Rc::default(),
             point: Default::default(),
+            gc_mark: Default::default(),
         };
         let host = vm
             .lua
@@ -4913,4 +4966,104 @@ mod budget_tests {
         // A runaway is stopped once it reads a tick beyond.
         assert!(past_budget(60 * MS, 3 * tick, 30 * MS, tick));
     }
+}
+
+/// What one script VM held around a full collection (`ScriptHost::gc_report`).
+#[derive(Debug, Clone, Default)]
+pub struct GcVm {
+    /// The VM's name (the app's, or a plugin's).
+    pub name: String,
+    /// Bytes it held before the collection, garbage included.
+    pub before: usize,
+    /// Bytes it holds after: what live objects need.
+    pub after: usize,
+    /// What is left by object type: its name, objects and bytes (largest first).
+    pub by_type: Vec<(String, usize, u64)>,
+    /// Userdata by type: its name, objects and bytes.
+    pub userdata: Vec<(String, usize, u64)>,
+    /// Compiled code by the chunk it came from: its name, functions and the
+    /// bytes of their code (the largest first).
+    pub chunks: Vec<(String, usize, u64)>,
+    /// The mark, the objects since it and the holders asked for.
+    pub found: GcFound,
+    /// Resources kept for the script's whole life (made at no scope, in a
+    /// handler), and how many of them are timers that have ended.
+    pub app_resources: (usize, usize),
+    /// Nodes alive in every script (made, not yet dropped), and the node
+    /// userdata the VM holds: more of the first after full collections
+    /// than of the second are held from Rust.
+    pub live_nodes: (usize, usize),
+    /// Lua values Rust holds handles to, the effects alive and the values
+    /// effects own: counts that keep climbing after full collections name a
+    /// Rust holder.
+    pub rust_holds: (usize, usize, usize),
+}
+
+fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
+    let mut report = GcVm {
+        name: vm.name.clone(),
+        before,
+        after: vm.lua.used_memory(),
+        ..Default::default()
+    };
+    if let Some(env) = vm.lua.app_data_ref::<node::Env>() {
+        let kept = env.retained.borrow();
+        let done = kept
+            .iter()
+            .filter(|r| {
+                r.downcast_ref::<timers::Stop>()
+                    .is_some_and(timers::Stop::done)
+            })
+            .count();
+        report.app_resources = (kept.len(), done);
+    }
+    report.live_nodes.0 = node::LIVE_NODES.load(std::sync::atomic::Ordering::Relaxed);
+    report.rust_holds = (
+        vm.lua.handles_alive(),
+        vm.runtime.effect_count(),
+        vm.runtime.owned_count(),
+    );
+    let Ok(dump) = vm.lua.heap_dump() else {
+        return report;
+    };
+    let mut by_type: Vec<(String, usize, u64)> = dump
+        .size_by_type(None)
+        .into_iter()
+        .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
+        .collect();
+    by_type.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.by_type = by_type;
+    let mut userdata: Vec<(String, usize, u64)> = dump
+        .size_by_userdata(None)
+        .into_iter()
+        .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
+        .collect();
+    userdata.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.live_nodes.1 = userdata
+        .iter()
+        .find(|(name, ..)| name == "NodeUd")
+        .map_or(0, |(_, count, _)| *count);
+    report.userdata = userdata;
+    if query.mark || query.since_mark || query.retained.is_some() {
+        report.found = gc_paths::find(dump.to_json(), query, &mut vm.gc_mark.borrow_mut());
+    }
+    // Code by chunk: each function's proto names its source.
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(dump.to_json())
+        && let Some(objects) = json["objects"].as_object()
+    {
+        let mut chunks: std::collections::HashMap<String, (usize, u64)> = Default::default();
+        for object in objects.values() {
+            if object["type"] == "proto" {
+                let source = object["source"].as_str().unwrap_or("?");
+                let entry = chunks.entry(source.to_string()).or_default();
+                entry.0 += 1;
+                entry.1 += object["size"].as_u64().unwrap_or(0);
+            }
+        }
+        let mut chunks: Vec<(String, usize, u64)> =
+            chunks.into_iter().map(|(n, (c, b))| (n, c, b)).collect();
+        chunks.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+        report.chunks = chunks;
+    }
+    report
 }

@@ -1369,6 +1369,20 @@ impl UserData for ElementUd {
             };
             Ok(e.0.handle.get().is_some_and(|h| h.focus_with(scroll)))
         });
+        // How far a scroll view or list is scrolled and how far it can go:
+        // `{ offset, range, at_start, at_end }` along its axis, nil for
+        // anything else.
+        methods.add_method("scroll_info", |lua, e, ()| {
+            let Some((offset, range)) = e.0.handle.get().and_then(|h| h.scroll_extent()) else {
+                return Ok(None);
+            };
+            let info = lua.create_table()?;
+            info.set("offset", offset)?;
+            info.set("range", range)?;
+            info.set("at_start", offset <= 0.5)?;
+            info.set("at_end", offset >= range - 0.5)?;
+            Ok(Some(info))
+        });
         // A list's row in view: `el:scroll_to_row(i, { align = "center" })`,
         // `i` from 1, `align` start, center, end or nearest (the default).
         methods.add_method(

@@ -461,6 +461,11 @@ struct PortalOptions {
     top: bool,
     /// `topmost`: that layer shown in a popup window above every other.
     topmost: bool,
+    /// `hover_delay`: opens as the pointer rests on its trigger.
+    hover: Option<crate::compose_hover::HoverDelay>,
+    /// `initial_focus` and `final_focus`.
+    initial_focus: crate::compose_modal::FocusTarget,
+    final_focus: crate::compose_modal::FocusTarget,
     /// `hoist`: in that layer, over its parent.
     hoist: Option<Box<crate::compose_modal::Hoist>>,
     /// `View::autofocus`.
@@ -476,6 +481,8 @@ struct PortalOptions {
     /// `View::at_caret`: placed at the caret of the editor in its trigger,
     /// focus left there.
     at_caret: bool,
+    /// `View::anchor_fill`: the anchor's slot takes its share of its row.
+    anchor_fill: bool,
 }
 /// A declarative view: a node to mount, its styles, children, handlers and
 /// semantics. Built with the functions here ([`column()`], [`text()`],
@@ -587,6 +594,8 @@ pub(crate) struct Rare {
     secure: Option<bool>,
     input_mode: Option<crate::text_edit::InputMode>,
     spellcheck: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::inert_when`.
+    inert: Option<Box<dyn FnMut() -> bool>>,
     line_numbers: Option<bool>,
     /// What a code editor adds to a text area (`View::highlighter`, …).
     code: Option<Box<CodeOptions>>,
@@ -709,6 +718,9 @@ impl Rare {
         }
         if self.spellcheck.is_some() {
             inner.spellcheck = self.spellcheck;
+        }
+        if self.inert.is_some() {
+            inner.inert = self.inert;
         }
         if self.secure.is_some() {
             inner.secure = self.secure;
@@ -1110,6 +1122,13 @@ impl View {
         self.rare_mut().active_descendant = Some(Box::new(id));
         self
     }
+    /// A popover's anchor slot is a child of its row like any other: it
+    /// grows and stretches with the row, so an anchor that grows or fills
+    /// its width has the room to, with no measuring.
+    pub fn anchor_fill(mut self) -> Self {
+        self.rare_mut().portal.get_or_insert_default().anchor_fill = true;
+        self
+    }
     /// A popover placed at the caret of the text editor in its trigger, not
     /// at the trigger's box, following it as it moves (typing, a click, a
     /// line wrapping, the editor scrolling, an input method's composition),
@@ -1159,6 +1178,36 @@ impl View {
         portal.top = true;
         portal.topmost = true;
         self.w_full().h_full()
+    }
+    /// Where focus goes as this modal, popover or menu opens, as Base UI's
+    /// `initialFocus`: `FocusTarget::Id(id)` (the node `View::id` names, in
+    /// it), `None` (the panel itself, no control), or by default its first
+    /// control.
+    pub fn initial_focus(mut self, target: FocusTarget) -> Self {
+        self.rare_mut().portal.get_or_insert_default().initial_focus = target;
+        self
+    }
+    /// Where focus goes as this modal, popover or menu closes, as Base UI's
+    /// `finalFocus`: `FocusTarget::Id(id)` (any node `View::id` names),
+    /// `None` (nothing focused), or by default what had focus before (else
+    /// its trigger, as it was opened from the keyboard).
+    pub fn final_focus(mut self, target: FocusTarget) -> Self {
+        self.rare_mut().portal.get_or_insert_default().final_focus = target;
+        self
+    }
+    /// Open this popover, menu or submenu as the pointer rests on its trigger
+    /// for `open`, and close it once the pointer has been off the trigger and
+    /// it for `close`, as Base UI's `openOnHover`, `delay` and `closeDelay`
+    /// do. Heading from the trigger to the popup, the pointer is held in the
+    /// triangle between them (a safe polygon: it closes as the pointer
+    /// strays out of it or rests in it 300 ms), so a diagonal crossing keeps
+    /// it open. One opened any other way (a click) stays until closed. A
+    /// submenu opens on hover by default after 100 ms and closes at once; this
+    /// sets its own.
+    pub fn hover_delay(mut self, open: std::time::Duration, close: std::time::Duration) -> Self {
+        self.rare_mut().portal.get_or_insert_default().hover =
+            Some(crate::compose_hover::HoverDelay { open, close });
+        self
     }
     /// Open a menu with its item `id` over the trigger, as a pop-up button's
     /// menu (a select's) opens with the chosen item over the button, rather
@@ -1451,7 +1500,7 @@ impl View {
             None => self.accessible_label(label),
         }
     }
-    fn accessibility_mut(&mut self) -> &mut Accessibility {
+    pub(crate) fn accessibility_mut(&mut self) -> &mut Accessibility {
         self.rare_mut()
             .accessibility
             .get_or_insert_with(Default::default)
@@ -1579,6 +1628,32 @@ impl View {
     /// (`aria-hidden`): decoration, or what is said elsewhere already.
     pub fn accessible_hidden(mut self) -> Self {
         self.accessibility_mut().hidden = true;
+        self
+    }
+    /// While `busy` says so this subtree is still being filled in
+    /// (`aria-busy`): assistive technology waits for it to settle rather than
+    /// announce each change.
+    pub fn busy_when(mut self, busy: impl FnMut() -> bool + 'static) -> Self {
+        self.accessibility_mut().busy_when = Some(Box::new(busy));
+        self
+    }
+    /// `accessible_hidden`, following the reactive values it reads
+    /// (`aria-hidden` as a state changes it).
+    pub fn accessible_hidden_when(mut self, hidden: impl FnMut() -> bool + 'static) -> Self {
+        self.accessibility_mut().hidden_when = Some(Box::new(hidden));
+        self
+    }
+    /// Take this subtree out of the pointer's reach, the focus order and
+    /// the accessibility tree while `inert` says so (HTML's `inert`): focus
+    /// inside it moves on as it goes inert, and no key activates it.
+    pub fn inert_when(mut self, inert: impl FnMut() -> bool + 'static) -> Self {
+        self.rare_mut().inert = Some(Box::new(inert));
+        self
+    }
+    /// What this control opens (`aria-haspopup`): a dialog, a menu, a list
+    /// box. A popover's or menu's trigger says so already, unless this does.
+    pub fn accessible_has_popup(mut self, kind: crate::semantics::PopupKind) -> Self {
+        self.accessibility_mut().has_popup = Some(kind);
         self
     }
     /// While this shows, assistive technology reads it alone, not what lies
@@ -2507,16 +2582,20 @@ pub fn text_message(message: crate::i18n::Message) -> View {
     text_signal(move || message.get())
 }
 pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
+pub use crate::compose_hover::HoverDelay;
+pub use crate::compose_modal::FocusTarget;
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
-pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
+pub use crate::compose_popover::{
+    Collision, Edge as PlacementEdge, Placement, Side as PlacementSide,
+};
 pub use crate::compose_rich::{
-    InlineSvg, RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now, rich_text,
-    text_span,
+    IconAlign, InlineSvg, RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now,
+    rich_text, text_span,
 };
 pub use crate::compose_scrollbar::{ScrollbarEase, ScrollbarStyle};
 pub use crate::compose_tooltip::{
-    Tooltip, TooltipLook, TooltipTiming, set_tooltip_look, set_tooltip_timing,
+    Tooltip, TooltipGroup, TooltipLook, TooltipTiming, set_tooltip_look, set_tooltip_timing,
 };
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
@@ -4274,17 +4353,24 @@ fn mount_portal(
     is_submenu: bool,
 ) -> NodeId {
     let anchored = anchor.is_some();
+    let fill = anchored
+        && view
+            .rare
+            .as_ref()
+            .and_then(|r| r.portal.as_ref())
+            .is_some_and(|p| p.anchor_fill);
     let owner = ui.container(
         parent,
         Layout::Overlay,
         crate::scene::Style {
             absolute: !anchored,
-            align: if is_submenu {
+            flex_grow: if fill { 1. } else { 0. },
+            align: if is_submenu || fill {
                 crate::scene::Align::Stretch
             } else {
                 crate::scene::Align::Start
             },
-            justify: if is_submenu {
+            justify: if is_submenu || fill {
                 crate::scene::Justify::Stretch
             } else {
                 crate::scene::Justify::Start
@@ -4310,6 +4396,18 @@ fn mount_portal(
     let anchor = anchor.map(|anchor| mount(ui, owner, *anchor, environment.clone()));
     if let Some(anchor) = anchor {
         ui.listen_popup_soon(anchor);
+        // What the trigger opens, from the start (a lazy panel isn't built
+        // until it opens): a tooltip's trigger says nothing.
+        if !view.rare.as_ref().is_some_and(|r| r.panel_hidden) {
+            let kind = if is_menu {
+                crate::semantics::PopupKind::Menu
+            } else {
+                crate::semantics::PopupKind::Dialog
+            };
+            ui.semantics.borrow_mut().update(anchor, |node| {
+                node.has_popup.get_or_insert(kind);
+            });
+        }
     }
     // A bare button opening a menu (no handlers of its own) is a menu
     // button, as WAI-ARIA's: a press, Enter, Space or Down opens it, even
@@ -4345,6 +4443,24 @@ fn mount_portal(
         }
     }
     let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
+    // Opened as the pointer rests on its trigger (a submenu's own is
+    // mounted with its menu, `compose_menu::mount`): wired before a lazy
+    // panel is built, which is what the first hover opens.
+    let panel_cell: Rc<Cell<Option<NodeId>>> = Rc::default();
+    if let (Some(hover), Some(anchor)) = (options.and_then(|p| p.hover), anchor)
+        && !is_submenu
+    {
+        crate::compose_hover::mount(
+            ui,
+            owner,
+            anchor,
+            panel_cell.clone(),
+            open.clone(),
+            hover,
+            environment.services.get::<TaskRunner>(),
+        );
+    }
+    let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
     if !options.is_some_and(|p| p.lazy) {
         built.set(true);
         mount_portal_panel(
@@ -4357,6 +4473,7 @@ fn mount_portal(
             environment,
             is_menu,
             is_submenu,
+            panel_cell,
         );
         return owner;
     }
@@ -4385,6 +4502,7 @@ fn mount_portal(
                 environment,
                 is_menu,
                 is_submenu,
+                panel_cell.clone(),
             )
         });
     });
@@ -4402,6 +4520,7 @@ fn mount_portal_panel(
     mut environment: Environment,
     is_menu: bool,
     is_submenu: bool,
+    hover_panel: Rc<Cell<Option<NodeId>>>,
 ) {
     let anchored = anchor.is_some();
     let panel_hidden = view.rare.as_ref().is_some_and(|r| r.panel_hidden);
@@ -4513,6 +4632,12 @@ fn mount_portal_panel(
         }
     }
     environment.portal = Some((portal.overlay, portal.visible.clone()));
+    let hover = (view.rare.as_ref())
+        .and_then(|r| r.portal.as_ref())
+        .and_then(|p| p.hover);
+    let focus_targets = (view.rare.as_ref())
+        .and_then(|r| r.portal.as_ref())
+        .map(|p| (p.initial_focus.clone(), p.final_focus.clone()));
     let menu_context = is_menu.then(|| {
         crate::compose_menu::MenuContext::new(
             open.clone(),
@@ -4522,6 +4647,9 @@ fn mount_portal_panel(
         )
     });
     if let Some(menu) = &menu_context {
+        if let Some(hover) = hover {
+            menu.hover.set(hover);
+        }
         environment.menu = Some(menu.clone());
     }
 
@@ -4675,6 +4803,7 @@ fn mount_portal_panel(
         view,
         environment.clone(),
     );
+    hover_panel.set(Some(panel));
     if let Some(menu) = menu_context.clone() {
         menu.panel.set(Some(panel));
         let viewport = ui.container(
@@ -4705,7 +4834,15 @@ fn mount_portal_panel(
         if !is_submenu {
             crate::compose_menu::mount_press(ui, trigger, portal.overlay, panel, open.clone());
         }
-        crate::compose_menu::mount(ui, panel, menu, trigger, portal.overlay, dismiss_backdrop);
+        crate::compose_menu::mount(
+            ui,
+            panel,
+            menu,
+            trigger,
+            portal.overlay,
+            dismiss_backdrop,
+            environment.services.get::<TaskRunner>(),
+        );
     }
     let mut over_focus = None;
     if let Some(anchor) = anchor {
@@ -4822,6 +4959,21 @@ fn mount_portal_panel(
     let open_signal = open.clone();
     let popup_open = open.clone();
     let unnamed = label.is_empty();
+    let focus_hooks = focus_targets
+        .filter(|(initial, last)| *initial != FocusTarget::Default || *last != FocusTarget::Default)
+        .map(|(initial, last)| {
+            let registry = environment.registry.clone();
+            crate::compose_modal::FocusHooks {
+                initial,
+                last,
+                find: Rc::new(move |id: &str| {
+                    registry
+                        .borrow()
+                        .get(id)
+                        .and_then(|nodes| nodes.last().copied())
+                }),
+            }
+        });
     crate::compose_modal::activate(
         ui,
         owner,
@@ -4844,6 +4996,7 @@ fn mount_portal_panel(
         keeps_focus,
         on_dismiss,
         environment.services.get::<TaskRunner>(),
+        focus_hooks,
     );
     // An unnamed popover or menu is named by its trigger, as a browser's
     // popover target is (`aria-labelledby`).
@@ -4876,7 +5029,8 @@ fn mount_portal_panel(
         ui.bind(panel, move || {
             let expanded = popup_open.get();
             semantics.borrow_mut().update(anchor, |node| {
-                node.has_popup = Some(crate::semantics::PopupKind::Dialog);
+                node.has_popup
+                    .get_or_insert(crate::semantics::PopupKind::Dialog);
                 node.expanded = Some(expanded);
             });
         });
@@ -4909,6 +5063,9 @@ fn mount_portal_panel(
             (_, true) => crate::scene::PopupRole::Tooltip,
             _ => crate::scene::PopupRole::Popover,
         };
+        if !topmost {
+            ui.register_popup(portal.position, open_signal.clone(), role);
+        }
         ui.bind(owner, move || {
             let popup = visible.get()
                 && screens.with(|screens| !screens.is_empty())
@@ -4925,9 +5082,6 @@ fn mount_portal_panel(
                 }
             }
         });
-        if !topmost {
-            ui.register_popup(portal.position, open_signal);
-        }
     }
     // A submenu's layer lets the pointer through to its parent menu.
     if is_submenu {
@@ -5161,6 +5315,8 @@ fn paragraph_effect<const LOCATING: bool>(
                     padding: [0., 0.],
                     radius: 0.,
                     outset: 0.,
+                    border: None,
+                    min_width: 0.,
                     range: at..content.len(),
                     font: base.font_in(Some(&theme)),
                     font_size,
@@ -5171,6 +5327,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     svg: std::sync::Arc::new(inline.svg.tinted(color)),
                     size: width,
                     inset: 0.,
+                    dy: 0.,
                     well: None,
                     boxed: Some(height),
                 });
@@ -5181,37 +5338,48 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after, outset, on_hover) = match span.extras.take()
-            {
-                None => (None, None, None, false, -1., 0., None),
-                Some(extras) => {
-                    let extras = *extras;
-                    let end = extras.padding_end.unwrap_or(span.padding[0]);
-                    let apart = extras.icon.is_some() || end != span.padding[0];
-                    // Its text's run comes next, after the room before it
-                    // when that's apart. Noted here, where only spans with
-                    // extras come, so a plain span pays nothing for fades.
-                    if let Some(fade) = extras.fade {
-                        fading.note(runs.len() + usize::from(apart), fade);
+            let (hover, mut icon, menu, plain, room_after, outset, on_hover, border, min_width) =
+                match span.extras.take() {
+                    None => (None, None, None, false, -1., 0., None, None, 0.),
+                    Some(extras) => {
+                        let extras = *extras;
+                        let end = extras.padding_end.unwrap_or(span.padding[0]);
+                        let apart = extras.icon.is_some() || end != span.padding[0];
+                        // Its text's run comes next, after the room before it
+                        // when that's apart. Noted here, where only spans with
+                        // extras come, so a plain span pays nothing for fades.
+                        if let Some(fade) = extras.fade {
+                            fading.note(runs.len() + usize::from(apart), fade);
+                        }
+                        (
+                            extras.hover,
+                            extras.icon,
+                            extras.menu,
+                            extras.plain,
+                            if apart { end } else { -1. },
+                            extras.outset,
+                            extras.on_hover,
+                            extras.border,
+                            extras.min_width,
+                        )
                     }
-                    (
-                        extras.hover,
-                        extras.icon,
-                        extras.menu,
-                        extras.plain,
-                        if apart { end } else { -1. },
-                        extras.outset,
-                        extras.on_hover,
-                    )
-                }
-            };
-            let hover = hover.as_ref();
+                };
+            let mut hover = hover;
             let styled_hover = hover.is_some();
             if link && !styled_hover && !plain {
                 span.underline.get_or_insert_with(Default::default);
             }
             let mut hover_background = None;
-            if let Some(hover) = hover.filter(|_| link && hovered == Some(links.len())) {
+            if let Some(hover) = hover
+                .as_mut()
+                .filter(|_| link && hovered == Some(links.len()))
+            {
+                if let Some(swap) = hover.icon.take() {
+                    icon = Some(swap);
+                }
+                if let Some(color) = hover.underline_color {
+                    span.underline_color = Some(color);
+                }
                 if let Some(underline) = hover.underline {
                     span.underline = Some(underline);
                 }
@@ -5234,9 +5402,18 @@ fn paragraph_effect<const LOCATING: bool>(
             // An icon keeps its room before the text: a padded
             // placeholder run of its own. So does the room before the text
             // where it isn't the room after it (`padding_end`).
+            let on_baseline = icon
+                .as_ref()
+                .is_some_and(|icon| icon.align == crate::compose_rich::IconAlign::Baseline);
             let icon_at = (room_after >= 0.).then(|| {
                 let at = content.len();
-                content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                // On the baseline, an inline box holds its room, and the
+                // line grows to hold it; else a padded placeholder does.
+                content.push_str(if on_baseline {
+                    crate::rich_text::INLINE_BOX_TEXT
+                } else {
+                    crate::compose_rich::ICON_PLACEHOLDER
+                });
                 at..content.len()
             });
             let start = content.len();
@@ -5254,6 +5431,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     hit_start: icon_at.as_ref().map_or(start, |icon| icon.start),
                     action: span.action,
                     href: span.href,
+                    label: span.label,
                     styled_hover,
                     menu,
                     on_hover,
@@ -5317,25 +5495,31 @@ fn paragraph_effect<const LOCATING: bool>(
                     padding: [span.padding[0] / 2., span.padding[1]],
                     radius: span.radius,
                     outset: 0.,
+                    border: None,
+                    min_width: 0.,
                     range,
                     font: font.clone(),
                     font_size,
                     color,
                 }),
-                (Some(icon), Some(range)) => {
+                (Some(icon), Some(range)) if on_baseline => {
                     let lead = span.padding[0];
-                    // (A well takes its room round the icon too.)
-                    let pad = if icon.bg.is_some() { icon.pad } else { 0. };
+                    box_labels.push("".into());
+                    boxes.push(crate::rich_text::InlineBox {
+                        width: lead + icon.margin + icon.size + icon.gap + icon.margin,
+                        height: icon.size,
+                        baseline: icon.size,
+                        ..crate::rich_text::InlineBox::new(range.start)
+                    });
                     runs.push(crate::rich_text::TextRun {
-                        background: span.background,
+                        background: None,
                         underline: None,
                         strikethrough: None,
-                        padding: [
-                            (lead + icon.size + 2. * pad + icon.gap) / 2.,
-                            span.padding[1],
-                        ],
-                        radius: span.radius,
+                        padding: [0., 0.],
+                        radius: 0.,
                         outset: 0.,
+                        border: None,
+                        min_width: 0.,
                         range: range.clone(),
                         font: font.clone(),
                         font_size,
@@ -5361,7 +5545,55 @@ fn paragraph_effect<const LOCATING: bool>(
                             None => icon.svg,
                         },
                         size: icon.size,
-                        inset: lead,
+                        inset: lead + icon.margin,
+                        dy: icon.dy,
+                        well: None,
+                        boxed: Some(icon.size),
+                    });
+                }
+                (Some(icon), Some(range)) => {
+                    let lead = span.padding[0];
+                    // (A well takes its room round the icon too.)
+                    let pad = if icon.bg.is_some() { icon.pad } else { 0. };
+                    runs.push(crate::rich_text::TextRun {
+                        background: span.background,
+                        underline: None,
+                        strikethrough: None,
+                        padding: [
+                            (lead + icon.size + 2. * pad + icon.gap + 2. * icon.margin) / 2.,
+                            span.padding[1],
+                        ],
+                        radius: span.radius,
+                        outset: 0.,
+                        border: None,
+                        min_width: 0.,
+                        range: range.clone(),
+                        font: font.clone(),
+                        font_size,
+                        color,
+                    });
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range,
+                        svg: match icon.tint {
+                            Some(crate::theme::Themed::Value(tint)) => {
+                                std::sync::Arc::new(icon.svg.tinted(tint))
+                            }
+                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                icon.svg.tinted(
+                                    theme
+                                        .get(token)
+                                        .color()
+                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                                ),
+                            ),
+                            None if icon.svg.follows_text_color() => {
+                                std::sync::Arc::new(icon.svg.tinted(color))
+                            }
+                            None => icon.svg,
+                        },
+                        size: icon.size,
+                        inset: lead + icon.margin,
+                        dy: icon.dy,
                         well: icon.bg.and_then(|bg| {
                             let color = match bg {
                                 crate::theme::Themed::Value(color) => Some(color),
@@ -5400,10 +5632,22 @@ fn paragraph_effect<const LOCATING: bool>(
                 padding: if room_after >= 0. {
                     [0., span.padding[1]]
                 } else {
-                    span.padding
+                    let edge = border.as_ref().map_or(0., |(width, _)| *width);
+                    [span.padding[0] + edge, span.padding[1] + edge]
                 },
                 radius: span.radius,
                 outset,
+                border: border.map(|(width, color)| {
+                    let color = match color {
+                        crate::theme::Themed::Value(color) => color,
+                        crate::theme::Themed::Token(token) => theme
+                            .get(token)
+                            .color()
+                            .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                    };
+                    (width, color)
+                }),
+                min_width,
                 range: start..text_end,
                 font: font.clone(),
                 font_size,
@@ -5419,6 +5663,8 @@ fn paragraph_effect<const LOCATING: bool>(
                     padding: [room_after / 2., span.padding[1]],
                     radius: span.radius,
                     outset: 0.,
+                    border: None,
+                    min_width: 0.,
                     range: text_end..content.len(),
                     font,
                     font_size,
@@ -6471,6 +6717,20 @@ fn open_element(
     {
         ui.scene.borrow_mut().set_contents(root, true);
     }
+    if let Some(mut inert) = rare.as_deref_mut().and_then(|r| r.inert.take()) {
+        let weak = ui.downgrade();
+        ui.bind(root, move || {
+            let inert = inert();
+            if let Some(ui) = weak.upgrade()
+                && ui.scene.borrow().contains(root)
+            {
+                ui.scene.borrow_mut().set_inert(root, inert);
+                if inert {
+                    ui.input.leave_inert(&ui.scene);
+                }
+            }
+        });
+    }
     if let Some(active) = rare.as_deref_mut().and_then(|r| r.active_descendant.take()) {
         watch_active_descendant(ui, root, environment.registry.clone(), active);
     }
@@ -6563,10 +6823,11 @@ fn open_element(
             .as_ref()
             .and_then(|_| environment.services.get::<TaskRunner>());
         let weak_ui = ui.downgrade();
-        // A submenu waits this long under the pointer before it opens, as
-        // Base UI's and AppKit's do, so a pointer passing over on its way to
-        // another item doesn't open it; a press or the keyboard opens it at once.
-        const SUBMENU_HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+        // A submenu waits under the pointer before it opens (its menu's
+        // `hover_delay`: 100 ms, as Base UI's and AppKit's do), so a pointer
+        // passing over on its way to another item doesn't open it; a press or
+        // the keyboard opens it at once. Heading for an open submenu across
+        // the items between (its safe polygon) closes and opens nothing.
         let hover_open: Rc<RefCell<Option<TaskToken>>> = Rc::default();
         ui.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Capture
@@ -6589,20 +6850,30 @@ fn open_element(
                 && (cx.target == root || matches!(cx.event, InputEvent::PointerDown { .. }))
                 && let Some(menu) = &item_menu
             {
-                menu.close_children(menu_trigger.as_ref());
+                let heading = matches!(cx.event, InputEvent::PointerEnter) && menu.holding();
+                if !heading {
+                    menu.close_children(menu_trigger.as_ref());
+                }
                 // (A press opens it on activation, as a click always has.)
                 if let Some(open) = &menu_trigger
                     && matches!(cx.event, InputEvent::PointerEnter)
                 {
+                    let delay = menu.child_hover(open).open;
                     match &runner {
-                        Some(runner) => {
-                            let open = open.clone();
+                        Some(runner) if !delay.is_zero() || heading => {
+                            let (open, menu) = (open.clone(), menu.clone());
                             *hover_open.borrow_mut() = Some(runner.spawn(Box::pin(async move {
-                                crate::timer::sleep(SUBMENU_HOVER_DELAY).await;
+                                crate::timer::sleep(delay).await;
+                                // Still heading for the one open: wait for the
+                                // pointer to arrive there, or stray.
+                                while menu.holding() {
+                                    crate::timer::sleep(std::time::Duration::from_millis(30)).await;
+                                }
+                                menu.close_children(Some(&open));
                                 open.set(true);
                             })));
                         }
-                        None => {
+                        _ => {
                             open.set(true);
                         }
                     }
@@ -7804,32 +8075,51 @@ fn mount_scroll(
         // it holds (its measured height would be its content's, circularly:
         // 0), or as a parent stretching it makes it: the viewport and the
         // content take all of a definite height, none of an indefinite one.
-        let fitted = horizontal && {
+        let (unsized_w, unsized_h, capped_w, capped_h) = {
             let style = scene.style(root);
-            style.height.is_none() && style.height_percent.is_none()
+            (
+                style.width.is_none() && style.width_percent.is_none(),
+                style.height.is_none() && style.height_percent.is_none(),
+                style.max_width.is_some(),
+                style.max_height.is_some(),
+            )
         };
+        let fitted = horizontal && unsized_h;
+        // Along an axis it has no size of its own on (given only a cap,
+        // `max_h`, `max_w`), it is as large as what it holds up to the cap:
+        // the viewport and its content are in flow there, taking their
+        // own size, and the cap cuts the root.
+        let (grows_w, grows_h) = (unsized_w && capped_w, unsized_h && capped_h && !horizontal);
         // (Fitted, it's as tall as what it holds: in its flow. As wide as a
         // scroll view that knows its width, with no word from here as that
         // changes; else what it holds is what sizes that.)
         let follows = fitted && scene.knows_its_size(root, (true, false), &sized_by_content);
         let style = Style {
-            width: (!follows).then_some(width),
+            width: (!follows && !grows_w).then_some(width),
             width_percent: follows.then_some(1.),
-            height: (!fitted).then_some(height),
+            height: (!fitted && !grows_h).then_some(height),
             height_percent: fitted.then_some(1.),
             clip: true,
-            absolute: !fitted,
+            absolute: !(fitted || grows_w || grows_h),
             ..Default::default()
         };
-        match fitted {
+        match fitted || grows_w || grows_h {
             true => scene.set_style(viewport, style),
             false => scene.set_style_within(viewport, style, root),
         }
         let mut content_style = scene.style(content);
-        content_style.width = (!horizontal).then_some(width);
+        content_style.width = (!horizontal && !grows_w).then_some(width);
         content_style.height = (horizontal && !fitted).then_some(height);
         content_style.height_percent = fitted.then_some(1.);
         content_style.flex_shrink = 0.;
+        let mut options = content_style
+            .layout_options
+            .as_deref()
+            .copied()
+            .unwrap_or_default();
+        options.percent_basis_width = horizontal.then_some(width);
+        content_style.layout_options =
+            (options != Default::default()).then(|| std::sync::Arc::new(options));
         scene.set_style(content, content_style);
         let rtl = rtl_of(&scene);
         // Fitting (resized, or its content shrank), it can't scroll and
@@ -8547,6 +8837,10 @@ pub(crate) struct Accessibility {
     checked: Option<Box<dyn FnMut() -> bool>>,
     radio_item: bool,
     expanded: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::accessible_has_popup` (`aria-haspopup`).
+    has_popup: Option<crate::semantics::PopupKind>,
+    /// Set by `View::context_menu` (`AXShowMenu`).
+    pub(crate) context_menu: bool,
     value: Option<Box<dyn FnMut() -> String>>,
     numeric: Option<(f64, f64, NumericValue)>,
     live: Option<Live>,
@@ -8555,6 +8849,10 @@ pub(crate) struct Accessibility {
     description_when: Option<Box<dyn FnMut() -> String>>,
     error: Option<Box<dyn FnMut() -> Option<String>>>,
     hidden: bool,
+    /// `View::accessible_hidden_when`.
+    hidden_when: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::busy_when`.
+    busy_when: Option<Box<dyn FnMut() -> bool>>,
     /// `View::accessible_modal`: while it shows, nothing else is read.
     modal: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -8584,6 +8882,10 @@ impl Accessibility {
         if outer.expanded.is_some() {
             inner.expanded = outer.expanded;
         }
+        if outer.has_popup.is_some() {
+            inner.has_popup = outer.has_popup;
+        }
+        inner.context_menu |= outer.context_menu;
         if outer.value.is_some() {
             inner.value = outer.value;
         }
@@ -8598,6 +8900,12 @@ impl Accessibility {
         }
         if outer.description_when.is_some() {
             inner.description_when = outer.description_when;
+        }
+        if outer.hidden_when.is_some() {
+            inner.hidden_when = outer.hidden_when;
+        }
+        if outer.busy_when.is_some() {
+            inner.busy_when = outer.busy_when;
         }
         if outer.error.is_some() {
             inner.error = outer.error;
@@ -8653,6 +8961,8 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         checked,
         radio_item,
         expanded,
+        has_popup,
+        context_menu,
         value,
         numeric,
         live,
@@ -8660,6 +8970,8 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         description_when,
         error,
         hidden,
+        hidden_when,
+        busy_when,
         modal,
         focus_group,
         label,
@@ -8717,6 +9029,8 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             node.description = description.or(node.description.take());
             node.hidden |= hidden;
             node.modal |= modal;
+            node.has_popup = has_popup.or(node.has_popup);
+            node.context_menu |= context_menu;
         });
     }
     // A name or value worked out from state is read by assistive technology
@@ -8733,6 +9047,20 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut busy) = busy_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let busy = busy();
+            tree.borrow_mut().update(root, |node| node.busy = busy);
+        });
+    }
+    if let Some(mut hidden) = hidden_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let hidden = hidden();
+            tree.borrow_mut().update(root, |node| node.hidden = hidden);
         });
     }
     if let Some(mut description) = description_when {
@@ -9281,6 +9609,12 @@ impl NodeHandle {
             return false;
         };
         ui.input.lock_pointer(&ui.scene, self.node)
+    }
+    /// If this is a scroll view or list (or inside one's root), how far it is
+    /// scrolled along its axis and how far it can scroll: `(offset, range)`.
+    pub fn scroll_extent(&self) -> Option<(f32, f32)> {
+        let (offset, range, _) = self.ui.upgrade()?.scroll_report(self.node)?;
+        Some((offset, range))
     }
     /// Let the pointer go, if the node holds its lock.
     pub fn unlock_pointer(&self) {

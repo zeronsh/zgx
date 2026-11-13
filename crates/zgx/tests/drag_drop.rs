@@ -88,6 +88,36 @@ fn typed_drop_preview_and_click_suppression() {
     assert_eq!(ui.scene.borrow().children(ui.root()).len(), original);
     assert!(view.is_mounted());
 }
+/// A preview is built with what its source's tree provides: a component in it asks for the frame
+/// clock the window provides, rather than finding none (a panic, the red banner).
+#[test]
+fn a_drag_preview_sees_the_services_its_source_has() {
+    let mut ui = Ui::new(400., 200.);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let log = seen.clone();
+    ui.mount(provide(
+        zgx::frame::FrameClock::new(),
+        div()
+            .id("source")
+            .size(100., 80.)
+            .on_drag(|| Card(1))
+            .drag_preview(move |_: &Card| {
+                let log = log.clone();
+                component(move |cx| {
+                    // Panics without the provider.
+                    let _frames = cx.frames();
+                    log.borrow_mut().push("preview");
+                    div().id("preview").size(40., 40.)
+                })
+            }),
+    ));
+    ui.prepare_frame();
+    down(&ui, 20., 20.);
+    moved(&ui, 35., 20.);
+    assert!(ui.input.is_dragging());
+    assert_eq!(&*seen.borrow(), &["preview"]);
+    up(&ui, 35., 20.);
+}
 #[test]
 fn a_drag_starts_past_the_systems_drag_threshold() {
     let mut ui = Ui::new(400., 200.);

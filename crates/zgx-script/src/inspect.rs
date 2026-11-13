@@ -573,9 +573,16 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   contributions                                  each plugin's targets: where, live matches, error
   elements                                       named elements by the context they read (provide)
   lint                                           zgx lint over the app's scripts, file:line
-  frames  [n=10] [runs=5] [all] [since] [keep]   the last frames that did anything: their phases, GPU
-                                                 time, notes, what ran and why (since: a mark or frame)
+  frames  [n=10] [runs=5] [all] [since] [until] [summary] [keep]
+                                                 the last frames that did anything: their phases, GPU
+                                                 time, notes, what ran and why (since, until: a mark or
+                                                 frame; summary: what they cost together)
+  reloads                                        each hot reload: files, partial or full, and why
   mark    [name=mark]                            mark now: `frames since=name` reads what follows
+  clock   [freeze|thaw|advance <ms>]             freeze every animation, timer and caret at one time (also ZGX_FREEZE_TIME=1 at launch), move it by hand, or let it run
+  gc      [top] [retained] [sample=5] [mark] [since_mark] [lua_only]
+                                                 a full Luau collection in each VM: heap before and after, what is left by type, userdata and code chunk; retained=State: what holds those objects, from a root; mark, then since_mark: what survives after it
+  text    <target>                               how a text node was shaped: the family it asks for and what that resolves to, each line's baseline, ascent and descent, and the face each run used
   switch  [name] [on]                            list fast paths, or switch one on or off, to compare
   search  [query] [next] [prev] [all] [n=5] [close]  find in page: the count, the current match, the first n
   zoom    [to: in|out|reset|1.5|150%]            the window's zoom (Cmd/Ctrl +, -, 0) and its viewport in points
@@ -734,6 +741,179 @@ impl Session {
                 );
                 Ok((driver::tree_lines_text(&shown, hidden), data))
             })(),
+            "gc" => {
+                let top = number("top").map_or(10, |n| n.max(1.) as usize);
+                let flag = |key: &str| field(key).is_some_and(|v| v.truthy());
+                let query = crate::GcQuery {
+                    top,
+                    retained: text("retained"),
+                    sample: number("sample").map_or(5, |n| n.max(1.) as usize),
+                    mark: flag("mark"),
+                    lua_only: flag("lua_only"),
+                    since_mark: flag("since_mark"),
+                };
+                let report = self.0.host.gc_report(&query);
+                let mb = |bytes: usize| format!("{:.2} MB", bytes as f64 / 1_048_576.);
+                let kb = |bytes: u64| format!("{:.1} KB", bytes as f64 / 1024.);
+                let mut lines = Vec::new();
+                let mut vms = Vec::new();
+                for vm in &report {
+                    lines.push(format!(
+                        "{}: {} before, {} after a full collection ({} of garbage)",
+                        vm.name,
+                        mb(vm.before),
+                        mb(vm.after),
+                        mb(vm.before.saturating_sub(vm.after))
+                    ));
+                    lines.push("  by type:".to_string());
+                    for (name, count, bytes) in vm.by_type.iter().take(top) {
+                        lines.push(format!("    {name}: {count} objects, {}", kb(*bytes)));
+                    }
+                    if !vm.userdata.is_empty() {
+                        lines.push("  userdata:".to_string());
+                        for (name, count, bytes) in vm.userdata.iter().take(top) {
+                            lines.push(format!("    {name}: {count}, {}", kb(*bytes)));
+                        }
+                    }
+                    lines.push("  code by chunk:".to_string());
+                    for (name, count, bytes) in vm.chunks.iter().take(top) {
+                        lines.push(format!("    {name}: {count} functions, {}", kb(*bytes)));
+                    }
+                    lines.push(format!(
+                        "  kept for the script's life: {} ({} ended timers)",
+                        vm.app_resources.0, vm.app_resources.1
+                    ));
+                    lines.push(format!(
+                        "  Rust holds: {} Lua values, {} effects alive, {} owned values",
+                        vm.rust_holds.0, vm.rust_holds.1, vm.rust_holds.2
+                    ));
+                    lines.push(format!(
+                        "  nodes alive: {} (script nodes the VM holds: {})",
+                        vm.live_nodes.0, vm.live_nodes.1
+                    ));
+                    let found = &vm.found;
+                    if let Some(count) = found.marked {
+                        lines.push(format!("  marked {count} objects"));
+                    }
+                    if found.no_mark {
+                        lines.push("  no mark: run `gc --mark` first".to_string());
+                    }
+                    if !found.since.is_empty() {
+                        lines.push("  survived since the mark:".to_string());
+                        for (name, count, bytes) in found.since.iter().take(top) {
+                            lines.push(format!("    {name}: {count}, {}", kb(*bytes)));
+                        }
+                    }
+                    if query.retained.is_some() {
+                        lines.push(format!(
+                            "  {} objects match, {} reachable without Rust's handles; held by:",
+                            found.matched, found.lua_reachable
+                        ));
+                        for holder in &found.holders {
+                            lines.push(format!("    {} ×", holder.count));
+                            for step in &holder.path {
+                                lines.push(format!("      {step}"));
+                            }
+                        }
+                    }
+                    let list = |items: &[(String, usize, u64)]| {
+                        Value::List(
+                            items
+                                .iter()
+                                .take(top)
+                                .map(|(name, count, bytes)| {
+                                    Value::record([
+                                        ("name", Value::from(name.as_str())),
+                                        ("count", Value::Num(*count as f64)),
+                                        ("bytes", Value::Num(*bytes as f64)),
+                                    ])
+                                })
+                                .collect::<Vec<_>>()
+                                .into(),
+                        )
+                    };
+                    vms.push(Value::record([
+                        ("name", Value::from(vm.name.as_str())),
+                        ("before", Value::Num(vm.before as f64)),
+                        ("after", Value::Num(vm.after as f64)),
+                        ("by_type", list(&vm.by_type)),
+                        ("userdata", list(&vm.userdata)),
+                        ("chunks", list(&vm.chunks)),
+                        (
+                            "marked",
+                            vm.found.marked.map_or(Value::Nil, |n| Value::Num(n as f64)),
+                        ),
+                        ("since", list(&vm.found.since)),
+                        ("matched", Value::Num(vm.found.matched as f64)),
+                        (
+                            "holders",
+                            Value::List(
+                                vm.found
+                                    .holders
+                                    .iter()
+                                    .map(|h| {
+                                        Value::record([
+                                            ("count", Value::Num(h.count as f64)),
+                                            (
+                                                "path",
+                                                Value::List(
+                                                    h.path
+                                                        .iter()
+                                                        .map(|s| Value::from(s.as_str()))
+                                                        .collect::<Vec<_>>()
+                                                        .into(),
+                                                ),
+                                            ),
+                                        ])
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            ),
+                        ),
+                    ]));
+                }
+                if report.is_empty() {
+                    lines.push("no script is loaded".to_string());
+                }
+                Ok((
+                    lines.join("\n"),
+                    Value::record([("vms", Value::List(vms.into()))]),
+                ))
+            }
+            "text" => target(&ui).and_then(|node| {
+                // The text node under a target (a `ui.text`'s node holds it, or
+                // wraps it in a box).
+                let scene = ui.scene.borrow();
+                let mut at = node;
+                while !matches!(
+                    scene.kind(at),
+                    zgx::scene::NodeKind::Text { .. } | zgx::scene::NodeKind::RichText { .. }
+                ) {
+                    at = *scene
+                        .children(at)
+                        .first()
+                        .ok_or("the target holds no text")?;
+                }
+                let width = scene.bounds(at).width;
+                let lines = scene
+                    .describe_text(at, width)
+                    .ok_or("no text shaper that can describe it is installed")?;
+                let data = Value::record([
+                    ("node", Value::from(format!("{at:?}").as_str())),
+                    ("width", Value::Num(f64::from(width))),
+                    (
+                        "lines",
+                        Value::List(
+                            lines
+                                .iter()
+                                .map(|l| Value::from(l.as_str()))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        ),
+                    ),
+                ]);
+                Ok((lines.join("\n"), data))
+            }),
             "node" => target(&ui).map(|node| {
                 let fields = driver::node(&ui, self.0.inspector.as_ref(), node);
                 let text = fields
@@ -1229,6 +1409,39 @@ impl Session {
                     ]),
                 ))
             }
+            "clock" => (|| {
+                let action = text("action").unwrap_or_default();
+                match action.as_str() {
+                    "" | "state" => {}
+                    "freeze" => zgx::clock::freeze(),
+                    "thaw" => zgx::clock::thaw(),
+                    "advance" => {
+                        let ms = number("ms").ok_or("`clock advance` takes `ms`")?;
+                        let by = std::time::Duration::from_secs_f64(ms.max(0.) / 1000.);
+                        if !zgx::clock::advance_frozen(by, || {}) {
+                            return Err("the clock isn't frozen (`clock freeze` first)".into());
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "`clock` takes freeze, thaw, advance <ms> or nothing, not `{other}`"
+                        ));
+                    }
+                }
+                let elapsed = zgx::clock::frozen_elapsed();
+                let text = match elapsed {
+                    Some(elapsed) => format!("frozen, {} ms in", elapsed.as_millis()),
+                    None => "running".to_string(),
+                };
+                let data = Value::record([
+                    ("frozen", Value::Bool(elapsed.is_some())),
+                    (
+                        "elapsed_ms",
+                        elapsed.map_or(Value::Nil, |e| Value::Num(e.as_secs_f64() * 1000.)),
+                    ),
+                ]);
+                Ok((text, data))
+            })(),
             "switch" => (|| {
                 let set = match field("on") {
                     None => None,
@@ -1433,16 +1646,40 @@ impl Session {
         })
     }
 
-    /// This window's size, and its popups open (`windows`).
-    fn about(&self) -> Option<(zgx::scene::Rect, Vec<String>)> {
+    /// This window's size, and its popups wanted open (`windows`), each as
+    /// text and as a record: what it is, its role, whether it shows or is
+    /// held back (the app at the back), and its box.
+    fn about(&self) -> Option<(zgx::scene::Rect, Vec<Panel>)> {
         let ui = self.0.ui.upgrade()?;
         let scene = ui.scene.borrow();
         let size = scene.bounds(scene.root());
-        let popups = scene.popups().to_vec();
+        let roots = scene.wanted_popups().to_vec();
+        let panels: Vec<_> = roots
+            .iter()
+            .map(|root| {
+                let role = scene.popup_role(*root).map_or("popup", |role| match role {
+                    zgx::scene::PopupRole::Menu => "menu",
+                    zgx::scene::PopupRole::Popover => "popover",
+                    zgx::scene::PopupRole::Tooltip => "tooltip",
+                    zgx::scene::PopupRole::Topmost => "topmost",
+                });
+                (
+                    *root,
+                    role,
+                    scene.in_held_popup(*root),
+                    scene.popup_bounds(*root),
+                )
+            })
+            .collect();
         drop(scene);
-        let popups = popups
+        let popups = panels
             .into_iter()
-            .map(|popup| driver::describe(&ui, popup))
+            .map(|(root, role, held, bounds)| Panel {
+                what: driver::describe(&ui, root),
+                role,
+                held,
+                bounds,
+            })
             .collect();
         Some((size, popups))
     }
@@ -2019,6 +2256,15 @@ fn window_session(name: &str) -> Result<Session, String> {
         }
     })
 }
+/// A popup panel as `windows` lists it: its window shows it in a panel of its
+/// own where the host has them (macOS, Windows, X11), or in the window.
+struct Panel {
+    what: String,
+    role: &'static str,
+    /// Held back: wanted open, not shown nor hit, the app being at the back.
+    held: bool,
+    bounds: Option<zgx::scene::Rect>,
+}
 /// `windows`: the main window and the app's others, each with its size and
 /// its popups open (menus, popovers past the window: targets inside reach
 /// them, as the window's own nodes).
@@ -2036,9 +2282,32 @@ fn windows(main: &Session) -> (String, Value) {
             line.push_str(&format!("  \"{title}\""));
         }
         for popup in &popups {
-            line.push_str(&format!("\n  popup {popup}"));
+            line.push_str(&format!(
+                "\n  popup {}  {}  {}  owner {id}",
+                popup.what,
+                popup.role,
+                if popup.held { "held" } else { "shown" },
+            ));
         }
         lines.push(line);
+        let panels = popups.iter().map(|popup| {
+            let mut fields = vec![
+                ("what", Value::from(popup.what.as_str())),
+                ("role", Value::from(popup.role)),
+                ("owner", Value::from(id.as_str())),
+                ("shown", Value::Bool(!popup.held)),
+                ("held", Value::Bool(popup.held)),
+            ];
+            if let Some(b) = popup.bounds {
+                fields.extend([
+                    ("x", Value::Num(b.x.round() as f64)),
+                    ("y", Value::Num(b.y.round() as f64)),
+                    ("width", Value::Num(b.width.round() as f64)),
+                    ("height", Value::Num(b.height.round() as f64)),
+                ]);
+            }
+            Value::record(fields)
+        });
         data.push(Value::record([
             ("id", Value::from(id.as_str())),
             ("title", Value::from(title.as_str())),
@@ -2046,8 +2315,14 @@ fn windows(main: &Session) -> (String, Value) {
             ("height", Value::Num(size.height.round() as f64)),
             (
                 "popups",
-                Value::List(popups.iter().map(|p| Value::from(p.as_str())).collect()),
+                Value::List(
+                    popups
+                        .iter()
+                        .map(|p| Value::from(p.what.as_str()))
+                        .collect(),
+                ),
             ),
+            ("panels", Value::List(panels.collect::<Vec<_>>().into())),
         ]));
     }
     (lines.join("\n"), Value::List(data.into()))

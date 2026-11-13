@@ -1103,3 +1103,26 @@ return ui.column { w = 200, h = 300,
     assert_eq!(code, Some(0), "{text}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_test_reads_the_named_states_and_how_many_the_scripts_hold() {
+    let dir = app(
+        "states",
+        &[(
+            "states.test.luau",
+            r##"
+test("states lists names in order and retained_states counts States", function()
+    local app = mount()
+    local names = app:states()
+    expect(#names >= 3).to_be(true)
+    local sorted = table.clone(names)
+    table.sort(sorted)
+    expect(table.concat(names, ",")).to_be(table.concat(sorted, ","))
+    expect(app:retained_states() >= 1).to_be(true)
+end)
+"##,
+        )],
+    );
+    let (code, text) = run(&dir, &[]);
+    assert_eq!(code, Some(0), "{text}");
+}

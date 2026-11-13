@@ -108,3 +108,28 @@ fn timers_made_in_handlers_fire_and_stop_as_those_before_them_go() {
     h.frames(2);
     assert_eq!(h.text("stopped"), "0");
 }
+
+/// A timer chain of `ui.after(0)`, each started by the last's callback, makes
+/// progress a millisecond a step on the test's clock and ends the turn: it
+/// does not run for ever inside one drain.
+#[test]
+fn a_chain_of_after_zero_timers_advances_with_time_and_ends_each_frame() {
+    let mut h = Harness::inline(
+        r##"local n = ui.state("n", 0)
+        local function step()
+            n:set(n:peek() + 1)
+            ui.after(0, step)
+        end
+        ui.after(0, step)
+        return ui.text { id = "n", "{n}" }"##,
+    );
+    h.frames(2);
+    let steps: u32 = h.text("n").parse().unwrap();
+    assert!(steps >= 2, "the chain ran: {steps}");
+    h.frames(2);
+    let later: u32 = h.text("n").parse().unwrap();
+    assert!(
+        later > steps,
+        "and goes on as time does: {steps} then {later}"
+    );
+}

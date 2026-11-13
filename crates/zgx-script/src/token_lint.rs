@@ -649,8 +649,44 @@ fn in_data_table(t: &[Token], at: usize) -> bool {
     }
     match &t[open - 2] {
         key if key.kind == Kind::Name => !style_table_keys().contains(key.text.as_str()),
-        key => key.text == "]",
+        key if key.text == "]" => true,
+        // `local SELECTED: { [string]: string } = { … }`: data, unless the
+        // annotation says it holds styles.
+        _ => typed_as_data(t, open - 1),
     }
+}
+
+/// Whether the annotation ending just before the `=` at `equals` (`local
+/// name: T =`) is a type that isn't a style table.
+fn typed_as_data(t: &[Token], equals: usize) -> bool {
+    let mut depth = 0usize;
+    let mut j = equals;
+    while j > 0 {
+        j -= 1;
+        let token = &t[j];
+        if token.kind == Kind::Punct {
+            match token.text.as_str() {
+                ")" | "]" | "}" | ">" => depth += 1,
+                "(" | "[" | "{" | "<" => match depth.checked_sub(1) {
+                    Some(d) => depth = d,
+                    None => return false,
+                },
+                ":" if depth == 0 => {
+                    // The name annotated, then what the annotation names.
+                    let named = j > 0 && t[j - 1].kind == Kind::Name;
+                    let styles = t[j + 1..equals]
+                        .iter()
+                        .any(|token| token.kind == Kind::Name && token.text.contains("Styles"));
+                    return named && !styles;
+                }
+                ";" => return false,
+                _ => {}
+            }
+        } else if depth == 0 && token.kind == Kind::Name && token.text == "local" {
+            return false;
+        }
+    }
+    false
 }
 
 /// The field the value at `at` is given to (`bg` in `bg = "$…"`), also
@@ -751,6 +787,21 @@ return ui.button { bg = SELECTED.outline, hover = { outline = "$surface.raised" 
                 && found[0].contains(":7:"),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn a_typed_table_of_data_is_no_style() {
+        // ui/metal/button.luau: a local with an annotation.
+        let found = lint(&[(
+            "button.luau",
+            r##"local SELECTED: { [string]: string } = {
+	primary = "$text.primary",
+	outline = "$surface.raised",
+	["accent-muted"] = "$surface.raised",
+}
+return ui.button { bg = SELECTED.outline }"##,
+        )]);
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]

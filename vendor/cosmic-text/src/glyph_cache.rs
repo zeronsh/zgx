@@ -19,6 +19,10 @@ bitflags::bitflags! {
         /// (`InlineAlign::Top`, `Bottom`), with `INLINE_BOX`.
         const INLINE_LINE_TOP = 16;
         const INLINE_LINE_BOTTOM = 32;
+        /// zgx: the coverage table a mask takes by its text's luminance
+        /// (macOS, as Chrome's: two bits, `LUMINANCE_SHIFT`).
+        const LUMINANCE_LOW = 64;
+        const LUMINANCE_HIGH = 128;
     }
 }
 
@@ -41,6 +45,19 @@ pub struct CacheKey {
     pub font_optical: u16,
     /// [`CacheKeyFlags`]
     pub flags: CacheKeyFlags,
+}
+
+impl CacheKeyFlags {
+    /// Where the luminance bucket's two bits sit.
+    pub const LUMINANCE_SHIFT: u32 = 6;
+    /// The flags saying luminance bucket `bucket` (0 to 3).
+    pub fn luminance(bucket: u8) -> Self {
+        Self::from_bits_truncate(u32::from(bucket & 3) << Self::LUMINANCE_SHIFT)
+    }
+    /// The luminance bucket these flags say.
+    pub fn luminance_bucket(self) -> u8 {
+        ((self.bits() >> Self::LUMINANCE_SHIFT) & 3) as u8
+    }
 }
 
 impl CacheKey {
@@ -82,6 +99,15 @@ pub enum SubpixelBin {
 }
 
 impl SubpixelBin {
+    /// zgx: the bin of `quarter` quarters of a pixel (0 to 3).
+    pub fn from_quarter(quarter: i32) -> Self {
+        match quarter {
+            1 => Self::One,
+            2 => Self::Two,
+            3 => Self::Three,
+            _ => Self::Zero,
+        }
+    }
     pub fn new(pos: f32) -> (i32, Self) {
         let trunc = pos as i32;
         let fract = pos - trunc as f32;

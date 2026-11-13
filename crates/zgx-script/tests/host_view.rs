@@ -69,3 +69,15 @@ fn an_unregistered_name_is_an_empty_box_of_its_size() {
     let gone = h.bounds("gone");
     assert_eq!((gone.width, gone.height), (50., 20.));
 }
+
+#[test]
+fn a_removed_view_mounts_as_an_empty_slot_and_its_key_is_gone() {
+    zgx_script::host_view("probe", || div().id("probe-view"));
+    zgx_script::remove_host_view("probe");
+    let mut h = Harness::inline(APP);
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    assert!(h.find("probe-view").is_none());
+    let slot = h.bounds("slot");
+    assert_eq!((slot.width, slot.height), (120., 40.));
+}

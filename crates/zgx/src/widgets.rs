@@ -1305,6 +1305,15 @@ impl Drop for FramePreparationGuard<'_> {
     }
 }
 
+/// An open popup: where its window is, in window coordinates, and what it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopupInfo {
+    /// Its window's rectangle.
+    pub rect: Rect,
+    /// A menu, a popover or a tooltip, if it says.
+    pub role: Option<crate::scene::PopupRole>,
+}
+
 /// One retained document. Application code keeps returned node IDs as stable widget handles.
 pub struct Ui {
     /// The reactive runtime its signals and effects live in.
@@ -1592,6 +1601,8 @@ pub(crate) struct UiStorage {
     /// Open signals of anchored popups, by their popup roots
     /// (`Ui::dismiss_popups`).
     popups: RefCell<Vec<(NodeId, Signal<bool>)>>,
+    /// What each of those is (`register_popup`).
+    popup_kinds: RefCell<Vec<(NodeId, crate::scene::PopupRole)>>,
     /// Portals' owners and overlays, in the order they mounted (`Ui::portals`).
     portals: RefCell<Vec<(NodeId, NodeId)>>,
     /// The context menu opened last: the node it took the focus from, and
@@ -1676,6 +1687,9 @@ pub(crate) struct UiStorage {
     scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
     /// Run once after the next frame preparation's layout.
     after_layout: RefCell<Vec<Box<dyn FnOnce()>>>,
+    /// The open popups' windows, once something observes them
+    /// (`Ui::observe_popups`).
+    popups_observed: RefCell<Option<Signal<Vec<PopupInfo>>>>,
     /// Run after every layout pass that changes the layout, by owning node.
     layout_listeners: RefCell<crate::scene::NodeMap<Vec<LayoutListener>>>,
     /// Boxes views' container queries read (`View::container`).
@@ -2015,6 +2029,7 @@ impl Ui {
             popup_limits: runtime.signal(Vec::new()),
             popup_flips: runtime.signal(Vec::new()),
             popups: RefCell::new(Vec::new()),
+            popup_kinds: RefCell::new(Vec::new()),
             portals: RefCell::new(Vec::new()),
             context_menu: RefCell::new(None),
             popup_soon: RefCell::new(None),
@@ -2057,6 +2072,7 @@ impl Ui {
             margins_checked: Cell::new(0),
             scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
+            popups_observed: RefCell::default(),
             layout_listeners: RefCell::default(),
             containers: RefCell::default(),
             mount_initialization: RefCell::new(None),
@@ -2260,12 +2276,14 @@ impl Ui {
     }
     /// Run `f` now and whenever what it reads changes, for as long as `owner`
     /// is mounted.
+    #[track_caller]
     pub fn bind(&mut self, owner: NodeId, f: impl FnMut() + 'static) {
         self.bind_marked(owner, false, f);
     }
     /// [`Ui::bind`]. `mount_pure`: `f` reads no layout, so a mount's
     /// deferred input draws need not be made before it runs
     /// (`watch_geometry`).
+    #[track_caller]
     pub(crate) fn bind_marked(
         &mut self,
         owner: NodeId,
@@ -2299,11 +2317,23 @@ impl Ui {
             f();
             guard.completed = true;
         }));
+        // (Taken here: in the closure below it would be the batch's.)
+        #[cfg(feature = "trace")]
+        let at = std::panic::Location::caller();
         self.runtime.clone().batch(|| {
             let effect = self.runtime.effect_callback(mount_pure, callback);
             #[cfg(feature = "trace")]
             if crate::trace::enabled() {
-                crate::trace::name(effect.number(), format!("@{} binding", owner.number()));
+                // Where in zgx the binding was made says which prop or feature it is.
+                crate::trace::name(
+                    effect.number(),
+                    format!(
+                        "@{} binding {}:{}",
+                        owner.number(),
+                        at.file().rsplit('/').next().unwrap_or(at.file()),
+                        at.line()
+                    ),
+                );
             }
             self.storage
                 .owned
@@ -2316,6 +2346,7 @@ impl Ui {
     }
     /// [`Ui::bind`] for a text input's model or typography: `mount_pure`,
     /// as it reads no geometry before its draw lays out (`watch_geometry`).
+    #[track_caller]
     pub(crate) fn bind_input(&mut self, owner: NodeId, f: impl FnMut() + 'static) {
         self.bind_marked(owner, true, f);
         INPUT_DRAWS.with_borrow_mut(|draws| {
@@ -2921,8 +2952,45 @@ impl Ui {
             .or_default()
             .push(Rc::new(RefCell::new(f)));
     }
+    fn popup_infos(&self) -> Vec<PopupInfo> {
+        let scene = self.scene.borrow();
+        let kinds = self.storage.popup_kinds.borrow();
+        self.storage
+            .popups
+            .borrow()
+            .iter()
+            .filter(|(root, open)| scene.contains(*root) && open.with_untracked(|open| *open))
+            .map(|(root, _)| PopupInfo {
+                rect: scene.transformed_bounds(*root),
+                role: kinds
+                    .iter()
+                    .find(|(node, _)| node == root)
+                    .map(|(_, role)| *role),
+            })
+            .collect()
+    }
+    /// The open popups' windows, menus, popovers and tooltips, in window
+    /// coordinates, as of the last layout.
+    pub fn observe_popups(&self) -> Signal<Vec<PopupInfo>> {
+        let existing = self.storage.popups_observed.borrow().clone();
+        existing.unwrap_or_else(|| {
+            let signal = self.signal(self.popup_infos());
+            *self.storage.popups_observed.borrow_mut() = Some(signal.clone());
+            signal
+        })
+    }
+    fn publish_popups(&self) {
+        let Some(signal) = self.storage.popups_observed.borrow().clone() else {
+            return;
+        };
+        let now = self.popup_infos();
+        if signal.with_untracked(|was| *was != now) {
+            signal.set(now);
+        }
+    }
     /// Whether any after-layout work ran.
     fn run_after_layout(&self) -> bool {
+        self.publish_popups();
         let pending = std::mem::take(&mut *self.storage.after_layout.borrow_mut());
         if pending.is_empty() {
             return false;
@@ -3517,11 +3585,19 @@ impl Ui {
         });
         self.retain(node, binding);
     }
-    pub(crate) fn register_popup(&self, root: NodeId, open: Signal<bool>) {
+    pub(crate) fn register_popup(
+        &self,
+        root: NodeId,
+        open: Signal<bool>,
+        role: crate::scene::PopupRole,
+    ) {
         let scene = self.scene.borrow();
         let mut popups = self.storage.popups.borrow_mut();
         popups.retain(|(node, _)| scene.contains(*node));
         popups.push((root, open));
+        let mut kinds = self.storage.popup_kinds.borrow_mut();
+        kinds.retain(|(node, _)| scene.contains(*node));
+        kinds.push((root, role));
     }
     /// A context menu opening, showing while `shown` is
     /// (`compose_context_menu`): it takes the focus from what has it.
@@ -4483,7 +4559,7 @@ impl Ui {
     pub(crate) fn observe_text_geometry_revision(&self) -> Signal<u64> {
         self.storage.text_geometry_revision.clone()
     }
-    /// Text's lines moved in a box that did not (`Scene::set_text_balance`):
+    /// Text's lines moved in a box that did not (`Scene::set_text_fit`):
     /// what follows text geometry (`observe_text_geometry_revision`) looks
     /// again.
     pub(crate) fn text_geometry_moved(&self) {
@@ -5349,6 +5425,7 @@ impl Ui {
         let focus = focused.clone();
         let draw_caret_width = self.storage.caret_width.clone();
         let draw_blink = self.storage.caret_blink.clone();
+        let draw_window_active = self.observe_window_active();
         let scroll_for_draw = scroll.clone();
         let reveal_caret = Rc::new(Cell::new(true));
         let draw_reveal_caret = reveal_caret.clone();
@@ -5868,6 +5945,7 @@ impl Ui {
             let mut effects = s.effects(caret);
             // Read-only text shows a selection but no caret.
             let caret_shown = *focus.borrow()
+                && draw_window_active.get()
                 && !draw_read_only.get()
                 && e.preedit().is_none_or(|preedit| preedit.cursor.is_some());
             // Shown, it paints unless the host draws it (`Ui::native_caret`).

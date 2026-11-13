@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-In Luau: put this in `hello/app.luau` and run `zgx-run hello/` (`LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-run`). Saving the file updates the window and keeps the count.
+In Luau: put this in `hello/app.luau` and run `zgx-run hello/` (`cargo install zgx-run`). Saving the file updates the window and keeps the count.
 
 ```lua
 local count = ui.state("count", 0)

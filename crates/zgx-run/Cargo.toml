@@ -37,6 +37,7 @@ scene3d = ["zgx-script/scene3d"]
 # Localized messages' plural rules and numbers for every locale
 # (zgx-script's `i18n`, about 90 KB).
 i18n = ["zgx-script/i18n"]
+i18n-intl = ["i18n", "zgx-script/i18n-intl"]
 # `ui.webview` on Linux (zgx-desktop's `webkitgtk`): WebKitGTK 4.1 pages,
 # the library opened as a page is first shown; where it is missing pages are
 # placeholders. Nothing elsewhere.

@@ -105,6 +105,9 @@ pub enum Role {
     /// (`role="article"`): a message, a post, a comment. Screen readers
     /// move between them.
     Article,
+    /// A named section of the page a reader can jump to (`role="region"`, a
+    /// landmark): it needs a label to be one.
+    Region,
 }
 /// How a change to a node's text is announced (ARIA's `aria-live`): only
 /// once the reader is idle, or at once, interrupting it.
@@ -157,6 +160,12 @@ pub enum PopupKind {
     Menu,
     /// It opens a dialog.
     Dialog,
+    /// It opens a list box.
+    Listbox,
+    /// It opens a tree.
+    Tree,
+    /// It opens a grid.
+    Grid,
 }
 /// A node's accessibility information: its role, name, value and state,
 /// which the desktop host projects to the platform's accessibility API.
@@ -188,6 +197,9 @@ pub struct SemanticNode {
     pub expanded: Option<bool>,
     /// What it opens, if anything.
     pub has_popup: Option<PopupKind>,
+    /// It has a context menu (`View::context_menu`): assistive technology
+    /// can ask for it (`AXShowMenu`), as Shift+F10 does.
+    pub context_menu: bool,
     /// None preserves the vertical default of legacy scroll views.
     pub scroll_axis: Option<ScrollAxis>,
     /// The label was given (`View::accessible_label`), not derived from the
@@ -200,6 +212,9 @@ pub struct SemanticNode {
     /// Left out of the accessibility tree with its subtree (`aria-hidden`):
     /// decoration, or a copy of what is said elsewhere.
     pub hidden: bool,
+    /// Still being filled in (`aria-busy`): a reader waits for it to settle
+    /// rather than announce each change.
+    pub busy: bool,
     /// A checkable menu item that is one of a group: a radio item.
     pub radio: bool,
     /// What few nodes have: `None` until one is set.
@@ -300,10 +315,12 @@ impl SemanticNode {
             modal: false,
             expanded: None,
             has_popup: None,
+            context_menu: false,
             scroll_axis: None,
             selected: None,
             live: None,
             hidden: false,
+            busy: false,
             radio: false,
             rare: RareFields::default(),
         }

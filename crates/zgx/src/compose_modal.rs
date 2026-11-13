@@ -57,6 +57,31 @@ pub(crate) fn create(ui: &mut Ui, owner: NodeId, parent: NodeId) -> Portal {
         visible: ui.signal(false),
     }
 }
+/// Where focus goes as a modal, popover or menu opens (`View::initial_focus`)
+/// or closes (`View::final_focus`): Base UI's `initialFocus` and
+/// `finalFocus`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum FocusTarget {
+    /// As it is: opening, its first control (the panel for one that takes
+    /// none); closing, what had focus (else its trigger, from the keyboard).
+    #[default]
+    Default,
+    /// Nothing is picked: opening, the panel itself; closing, nothing is
+    /// focused.
+    None,
+    /// The node `id` names (`View::id`): one that is in it and takes focus,
+    /// opening; any, closing. As `Default` where there is none.
+    Id(String),
+}
+/// What `View::initial_focus` and `View::final_focus` say, and how to find a
+/// node by id.
+type FindById = std::rc::Rc<dyn Fn(&str) -> Option<NodeId>>;
+#[derive(Clone)]
+pub(crate) struct FocusHooks {
+    pub initial: FocusTarget,
+    pub last: FocusTarget,
+    pub find: FindById,
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn activate(
     ui: &mut Ui,
@@ -84,6 +109,8 @@ pub(crate) fn activate(
     on_dismiss: Option<std::rc::Rc<dyn Fn()>>,
     // Runs a menu's fade (`MenuLook::fade`).
     runner: Option<std::rc::Rc<crate::compose::TaskRunner>>,
+    // Where focus goes as it opens and closes, if the view says.
+    focus: Option<FocusHooks>,
 ) {
     if layer {
         ui.input.set_layer(portal.overlay, true);
@@ -342,8 +369,37 @@ pub(crate) fn activate(
                     }
                     result
                 };
+                // `initial_focus`: a node it names, or none (the panel).
+                let autofocus = autofocus
+                    && focus
+                        .as_ref()
+                        .is_none_or(|focus| focus.initial != FocusTarget::None);
+                let named = focus.as_ref().and_then(|focus| match &focus.initial {
+                    FocusTarget::Id(id) => (focus.find)(id),
+                    _ => None,
+                });
+                let placed = named.is_some_and(|node| {
+                    let inside = {
+                        let scene = ui.scene.borrow();
+                        scene.contains(node)
+                            && (node == panel || scene.ancestors(node).any(|up| up == panel))
+                    };
+                    inside
+                        && ui
+                            .input
+                            .options(node)
+                            .is_some_and(|options| options.focusable)
+                        && (ui.input.focused() == Some(node)
+                            || ui.input.focus(&ui.scene, Some(node)))
+                });
                 // Not focusing a control: the panel holds focus (keys reach it).
-                let candidates = if autofocus { candidates } else { vec![panel] };
+                let candidates = if placed {
+                    Vec::new()
+                } else if autofocus {
+                    candidates
+                } else {
+                    vec![panel]
+                };
                 for candidate in candidates {
                     if candidate == panel && !autofocus {
                         if ui.input.focus(&ui.scene, Some(panel)) {
@@ -375,6 +431,22 @@ pub(crate) fn activate(
                 visible.set(false);
             }
             unwind(&ui, overlay);
+            // `final_focus`: where focus goes as it has closed.
+            if was_shown && let Some(focus) = &focus {
+                match &focus.last {
+                    FocusTarget::Default => {}
+                    FocusTarget::None => {
+                        ui.input.focus(&ui.scene, None);
+                    }
+                    FocusTarget::Id(id) => {
+                        if let Some(node) = (focus.find)(id)
+                            && ui.scene.borrow().contains(node)
+                        {
+                            ui.input.focus(&ui.scene, Some(node));
+                        }
+                    }
+                }
+            }
         }
         start_fade(&ui);
     });

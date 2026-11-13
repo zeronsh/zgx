@@ -47,7 +47,11 @@ impl FontMatchKey {
     ) -> FontMatchKey {
         // TODO: smarter way of detecting emoji
         let not_emoji = !face.post_script_name.contains("Emoji");
-        let font_weight_diff = attrs.weight.0.abs_diff(face.weight.0);
+        // zgx patch: macOS's Hiragino Sans is drawn in two weights by Core
+        // Text's cascade (W3 up to 500, W6 from 600): a face counts as the
+        // weight it is used for.
+        let face_weight = matched_weight(face, attrs.weight.0);
+        let font_weight_diff = attrs.weight.0.abs_diff(face_weight);
 
         // zgx patch: the face's weight axis is read from its file once, not
         // for every new family, weight and style asked for.
@@ -59,7 +63,7 @@ impl FontMatchKey {
                     let w = attrs.weight.0 as f32;
                     w >= min && w <= max
                 });
-        let font_weight = face.weight.0;
+        let font_weight = face_weight;
         let font_stretch_diff = attrs.stretch.to_number().abs_diff(face.stretch.to_number());
         let font_stretch = face.stretch.to_number();
         let font_style_diff = match (attrs.style, face.style) {
@@ -87,7 +91,99 @@ impl FontMatchKey {
     }
 }
 
+/// zgx patch: the weight `face` is matched as for a request of `asked`: its
+/// own, except Hiragino Sans's on macOS, of which Core Text's cascade draws
+/// two faces: W3 (class 300) for 500 and lighter, W6 (class 600) for 600 and
+/// heavier (the others are never taken: no request is as far as `u16::MAX`).
+fn matched_weight(face: &FaceInfo, asked: u16) -> u16 {
+    let hiragino = cfg!(target_os = "macos")
+        && face.families.iter().any(|(name, _)| name == "Hiragino Sans");
+    if hiragino {
+        hiragino_matched_weight(face.weight.0, asked)
+    } else {
+        face.weight.0
+    }
+}
+/// A Hiragino Sans face's OS/2 weight class as the weight it serves for a
+/// request of `asked` (`matched_weight`).
+pub(crate) fn hiragino_matched_weight(class: u16, asked: u16) -> u16 {
+    match class {
+        300 if asked <= 500 => asked,
+        600 if asked >= 600 => asked,
+        300 | 600 => class,
+        _ => u16::MAX,
+    }
+}
+
 /// zgx patch: a face's `wght` axis range, from its file.
+/// zgx patch: a variable face's named instances as (the CSS weight each
+/// stands for, its `wght` value), ascending: SF's Medium sits at 510 on an
+/// axis of 1 to 1000, and is the face for 500. A family of nine is the
+/// hundreds in order; otherwise each is the hundred nearest its value.
+fn read_named_weights(db: &fontdb::Database, id: fontdb::ID) -> Vec<(u16, u16)> {
+    db.with_face_data(id, |font_data, face_index| {
+        let font_ref = skrifa::FontRef::from_index(font_data, face_index).ok()?;
+        let axes = font_ref.axes();
+        let index = axes.iter().position(|axis| axis.tag() == skrifa::Tag::new(b"wght"))?;
+        let mut values: Vec<u16> = font_ref
+            .named_instances()
+            .iter()
+            .filter_map(|instance| {
+                let value = instance.user_coords().nth(index)?;
+                (value >= 1.0).then_some(value.round() as u16)
+            })
+            .collect();
+        values.sort_unstable();
+        values.dedup();
+        let nine = values.len() == 9;
+        Some(
+            values
+                .iter()
+                .enumerate()
+                .map(|(i, value)| {
+                    let nominal = if nine {
+                        (i as u16 + 1) * 100
+                    } else {
+                        ((f32::from(*value) / 100.0).round() as u16).clamp(1, 9) * 100
+                    };
+                    (nominal, *value)
+                })
+                .collect(),
+        )
+    })
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// zgx patch: the `wght` value CSS font matching takes for `desired` among
+/// `named` (`read_named_weights`; a face with none has the hundreds its axis
+/// holds): 400 to 500 look up to 500 first, then down, then above 500;
+/// lighter weights look down, then up; heavier ones up, then down.
+pub(crate) fn snap_weight(desired: u16, named: &[(u16, u16)], min: f32, max: f32) -> u16 {
+    let hundreds: Vec<(u16, u16)>;
+    let named = if named.is_empty() {
+        hundreds = (1..=9u16)
+            .map(|n| (n * 100, n * 100))
+            .filter(|(_, w)| f32::from(*w) >= min && f32::from(*w) <= max)
+            .collect();
+        &hundreds[..]
+    } else {
+        named
+    };
+    let up = |from: u16, to: u16| named.iter().find(|(n, _)| *n >= from && *n <= to);
+    let down = |from: u16| named.iter().rev().find(|(n, _)| *n <= from);
+    let picked = if (400..=500).contains(&desired) {
+        up(desired, 500)
+            .or_else(|| down(desired))
+            .or_else(|| up(501, u16::MAX))
+    } else if desired < 400 {
+        down(desired).or_else(|| up(desired, u16::MAX))
+    } else {
+        up(desired, u16::MAX).or_else(|| down(desired))
+    };
+    picked.map_or_else(|| desired.clamp(min as u16, max as u16), |(_, value)| *value)
+}
+
 fn read_weight_axis(db: &fontdb::Database, id: fontdb::ID) -> Option<(f32, f32)> {
     db.with_face_data(id, |font_data, face_index| {
         let font_ref = skrifa::FontRef::from_index(font_data, face_index).ok()?;
@@ -221,6 +317,8 @@ pub struct FontSystem {
     /// zgx patch: each face's `wght` axis range (`None`: not variable in
     /// weight), read from its file the first time a match needs it.
     weight_axes: HashMap<fontdb::ID, Option<(f32, f32)>>,
+    /// zgx patch: a variable face's named weights (`snap_weight`).
+    named_weights: HashMap<fontdb::ID, Vec<(u16, u16)>>,
 
     /// zgx patch: what a fallback search's last stage, every face in turn,
     /// found for each character it was asked for: the first face holding
@@ -342,6 +440,30 @@ impl FontSystem {
             .or_insert_with(|| read_weight_axis(db, id))
     }
 
+    /// zgx patch: a face a glyph falls back to, at the weight CSS font
+    /// matching picks among its named instances for `weight` (Chrome draws
+    /// 450 in Medium and 350 in Light there); the text's own face keeps
+    /// following the axis (`get_font_at`).
+    pub fn get_fallback_font_at(
+        &mut self,
+        id: fontdb::ID,
+        weight: fontdb::Weight,
+        optical: u16,
+    ) -> Option<Arc<Font>> {
+        let weight = match self.weight_axis(id) {
+            Some((min, max)) => {
+                let db = &self.db;
+                let named = self
+                    .named_weights
+                    .entry(id)
+                    .or_insert_with(|| read_named_weights(db, id));
+                fontdb::Weight(snap_weight(weight.0, named, min, max))
+            }
+            None => weight,
+        };
+        self.get_font_at(id, weight, optical)
+    }
+
     /// zgx patch: gives font matching a face's `wght` axis range (from a
     /// cache), so it need not read the face's file.
     pub fn set_weight_axis(&mut self, id: fontdb::ID, axis: Option<(f32, f32)>) {
@@ -410,6 +532,7 @@ impl FontSystem {
             full_scans: 0,
             hyphenator: None,
             weight_axes: HashMap::default(),
+            named_weights: HashMap::default(),
             font_codepoint_support_info_cache: HashMap::default(),
             monospace_fallbacks_buffer: BTreeSet::default(),
             #[cfg(feature = "shape-run-cache")]

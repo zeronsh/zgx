@@ -135,6 +135,39 @@ pub fn has_rtl(text: &str) -> bool {
         matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
     })
 }
+/// Text to describe (`Scene::describe_text`): plain text in its font, or rich.
+pub enum TextDescription<'a> {
+    /// A text node's text at `size` in `font`.
+    Plain {
+        /// Its text.
+        text: &'a str,
+        /// Its font size.
+        size: f32,
+        /// Its font.
+        font: &'a FontStyle,
+    },
+    /// A rich text node's paragraph.
+    Rich(&'a crate::rich_text::RichText),
+}
+/// The way `text` runs by its first strong character, as the Unicode bidi
+/// algorithm's rule P2 and HTML's `dir=auto` take it (isolates skipped):
+/// Arabic and Hebrew letters right to left, others left to right; `None`
+/// where it has none (digits, punctuation, spaces).
+pub fn first_strong_direction(text: &str) -> Option<crate::scene::Direction> {
+    use unicode_bidi::BidiClass::*;
+    let mut isolates = 0_u32;
+    for c in text.chars() {
+        match unicode_bidi::bidi_class(c) {
+            LRI | RLI | FSI => isolates += 1,
+            PDI => isolates = isolates.saturating_sub(1),
+            _ if isolates > 0 => {}
+            L => return Some(crate::scene::Direction::Ltr),
+            R | AL => return Some(crate::scene::Direction::Rtl),
+            _ => {}
+        }
+    }
+    None
+}
 /// Physical paragraph alignment within an allocated text width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TextAlign {
@@ -454,6 +487,12 @@ pub struct FontStyle {
     /// Shown masked, a bullet per character (a password field's text). Set
     /// by an editor on its own text; never inherited.
     pub masked: bool,
+    /// Its paragraphs run right to left whatever their first strong character
+    /// is (CSS `direction: rtl`): set by the scene for text in a right to left
+    /// node, so Latin text in an Arabic answer places its punctuation as
+    /// Chrome's right to left paragraph does. Left to right text keeps the
+    /// first strong character's way.
+    pub paragraph_rtl: bool,
     /// Underlined (CSS `text-decoration: underline`): inherited.
     pub underline: Option<TextUnderline>,
 }
@@ -488,6 +527,7 @@ impl Default for FontStyle {
                 EMPTY.get_or_init(|| std::sync::Arc::from([])).clone()
             },
             masked: false,
+            paragraph_rtl: false,
             underline: None,
         }
     }
@@ -564,80 +604,6 @@ pub struct TextPosition {
 /// break, a sliver as in an editor.
 pub fn empty_line_width(line_height: f32) -> f32 {
     line_height * 0.25
-}
-/// A layout drawn `dx` to the right of its own origin: balanced text that is
-/// centred or right-aligned in its box (`Scene::text_wrap`).
-pub(crate) struct Inset {
-    inner: Box<dyn TextLayout>,
-    dx: f32,
-}
-impl Inset {
-    /// `layout`, moved `dx` right; itself if not moved.
-    pub(crate) fn around(layout: Box<dyn TextLayout>, dx: f32) -> Box<dyn TextLayout> {
-        if dx == 0. {
-            layout
-        } else {
-            Box::new(Self { inner: layout, dx })
-        }
-    }
-    fn moved(&self, rect: Rect) -> Rect {
-        Rect::new(rect.x + self.dx, rect.y, rect.width, rect.height)
-    }
-}
-impl TextLayout for Inset {
-    fn cache_weight(&self) -> Option<usize> {
-        self.inner.cache_weight()
-    }
-    fn size(&self) -> (f32, f32) {
-        let (width, height) = self.inner.size();
-        (width + self.dx, height)
-    }
-    fn hit_test(&self, x: f32, y: f32) -> usize {
-        self.inner.hit_test(x - self.dx, y)
-    }
-    fn caret(&self, byte_offset: usize) -> Rect {
-        self.moved(self.inner.caret(byte_offset))
-    }
-    fn selection(&self, range: Range<usize>) -> Vec<Rect> {
-        let rects = self.inner.selection(range);
-        rects.into_iter().map(|rect| self.moved(rect)).collect()
-    }
-    fn selection_within(&self, range: Range<usize>, top: f32, bottom: f32) -> Vec<Rect> {
-        let rects = self.inner.selection_within(range, top, bottom);
-        rects.into_iter().map(|rect| self.moved(rect)).collect()
-    }
-    fn hit_position(&self, x: f32, y: f32) -> TextPosition {
-        self.inner.hit_position(x - self.dx, y)
-    }
-    fn caret_position(&self, position: TextPosition) -> Rect {
-        self.moved(self.inner.caret_position(position))
-    }
-    fn line_carets(&self, text: &str) -> Option<Vec<LineCarets>> {
-        let mut lines = self.inner.line_carets(text)?;
-        for line in &mut lines {
-            for x in &mut line.carets {
-                *x += self.dx;
-            }
-        }
-        Some(lines)
-    }
-    fn carets_x(&self, offsets: &[usize]) -> Vec<f32> {
-        let xs = self.inner.carets_x(offsets);
-        xs.into_iter().map(|x| x + self.dx).collect()
-    }
-    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
-        let mut boxes = self.inner.inline_boxes();
-        for (_, x, _) in &mut boxes {
-            *x += self.dx;
-        }
-        boxes
-    }
-    fn visual_line_range(&self, position: TextPosition) -> (TextPosition, TextPosition) {
-        self.inner.visual_line_range(position)
-    }
-    fn visual_line_edge(&self, position: TextPosition, end: bool) -> TextPosition {
-        self.inner.visual_line_edge(position, end)
-    }
 }
 /// Whether this build hyphenates (zgx's `hyphens` feature): without it,
 /// features with `FontFeatures::HYPHENS` break words as before.
@@ -772,6 +738,9 @@ pub struct FallbackTextLayout {
     cells: Vec<(Range<usize>, Rect)>,
     end: Rect,
     size: (f32, f32),
+    /// Where its inline boxes are (`TextLayout::inline_boxes`): offset, left
+    /// and top. None for text without.
+    places: Vec<(usize, f32, f32)>,
 }
 impl FallbackTextLayout {
     /// Mixed-size approximate cells used when no native rich shaper is installed.
@@ -822,6 +791,7 @@ impl FallbackTextLayout {
             cells,
             end: Rect::new(x, y, 1., pitch),
             size: (max_x.max(x), y + pitch),
+            places: Vec::new(),
         };
         layout.finished(rich, width)
     }
@@ -836,8 +806,10 @@ impl FallbackTextLayout {
             cells: boxes.cells,
             end: Rect::new(x, y, 1., height),
             size: (wide, y + height),
+            places: Vec::new(),
         }
         .finished(rich, width)
+        .placed(rich, width)
     }
     /// Where each of `rich`'s inline boxes is at `width` (as
     /// `TextLayout::inline_boxes`): its character's offset, left and top.
@@ -859,6 +831,21 @@ impl FallbackTextLayout {
                 Some((range.start, rect.x, top))
             })
             .collect()
+    }
+    /// Its inline boxes' places, as `inline_places` has them.
+    fn placed(mut self, rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
+        let boxes = crate::rich_text::fallback_boxes(rich, width);
+        let mut kept = self.cells.iter();
+        self.places = boxes
+            .places
+            .iter()
+            .filter_map(|&(cell, top)| {
+                let (range, _) = boxes.cells.get(cell)?;
+                let (_, rect) = kept.find(|(kept, _)| kept == range)?;
+                Some((range.start, rect.x, top))
+            })
+            .collect();
+        self
     }
     /// `with_rich`'s cells cut as its clamp says, and aligned.
     #[inline(always)]
@@ -952,7 +939,12 @@ impl FallbackTextLayout {
         let (end, size) = Self::place(text, size, max_width, font, |range, rect| {
             cells.push((range, rect))
         });
-        let mut layout = Self { cells, end, size };
+        let mut layout = Self {
+            cells,
+            end,
+            size,
+            places: Vec::new(),
+        };
         layout.align(max_width, font.align);
         layout
     }
@@ -1095,6 +1087,7 @@ impl FallbackTextLayout {
             cells: out,
             end,
             size,
+            places: Vec::new(),
         };
         layout.align(max_width, font.align);
         layout
@@ -1273,6 +1266,9 @@ impl Iterator for AsciiClusters<'_> {
     }
 }
 impl TextLayout for FallbackTextLayout {
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        self.places.clone()
+    }
     fn cache_weight(&self) -> Option<usize> {
         Some(
             std::mem::size_of::<Self>().saturating_add(

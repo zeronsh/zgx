@@ -877,6 +877,11 @@ impl Runtime {
                 .sum::<usize>();
         report.add("reactive", "owned values", Some(values), Some(owned_bytes));
     }
+    /// How many values effects own (`own`): resources kept for what made
+    /// them, until it goes.
+    pub fn owned_count(&self) -> usize {
+        self.inner.owned.borrow().values().map(Vec::len).sum()
+    }
     /// How many effects are alive (not stopped).
     pub fn effect_count(&self) -> usize {
         self.inner.effects.borrow().len() - self.inner.stopped.get()
@@ -1060,6 +1065,12 @@ impl Drop for HeldEffects {
 /// that changes it re-runs its subscribers. Clones share the value.
 pub struct Signal<T> {
     inner: Rc<SignalInner<T>>,
+}
+impl<T> Signal<T> {
+    /// Handles to this signal that exist, this one included.
+    pub fn handles(&self) -> usize {
+        Rc::strong_count(&self.inner)
+    }
 }
 impl<T> Clone for Signal<T> {
     fn clone(&self) -> Self {

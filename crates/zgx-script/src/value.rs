@@ -3423,6 +3423,9 @@ pub struct Store {
     /// Keys a plugin's default made (`shared`), which the app's own default
     /// replaces.
     provisional: RefCell<std::collections::HashSet<String>>,
+    /// What each state started at, so one nothing holds and nobody moved
+    /// can go (`sweep_unheld`).
+    initials: RefCell<HashMap<String, Value>>,
 }
 impl Store {
     /// An empty store on `runtime`.
@@ -3431,6 +3434,7 @@ impl Store {
             runtime: runtime.clone(),
             signals: RefCell::default(),
             provisional: RefCell::default(),
+            initials: RefCell::default(),
         }
     }
     /// Shared state `key` (`ui.shared`), as [`Store::state`], except that a
@@ -3456,11 +3460,35 @@ impl Store {
     }
     /// The existing state for `key`, or new state starting at `initial`.
     pub fn state(&self, key: &str, initial: Value) -> Signal<Value> {
-        self.signals
+        let mut signals = self.signals.borrow_mut();
+        if let Some(signal) = signals.get(key) {
+            return signal.clone();
+        }
+        self.initials
             .borrow_mut()
-            .entry(key.to_owned())
-            .or_insert_with(|| self.runtime.signal(initial))
-            .clone()
+            .insert(key.to_owned(), initial.clone());
+        let signal = self.runtime.signal(initial);
+        signals.insert(key.to_owned(), signal.clone());
+        signal
+    }
+    /// Drops the states nothing else holds that are nil or still at their first value:
+    /// a key declared for a tab that has since closed comes back the same.
+    pub(crate) fn sweep_unheld(&self) -> usize {
+        let mut signals = self.signals.borrow_mut();
+        let mut initials = self.initials.borrow_mut();
+        let before = signals.len();
+        signals.retain(|key, s| {
+            s.handles() > 1
+                || s.with_untracked(|v| !matches!(v, Value::Nil))
+                    && initials
+                        .get(key)
+                        .is_none_or(|first| !s.with_untracked(|v| v == first))
+        });
+        initials.retain(|k, _| signals.contains_key(k));
+        self.provisional
+            .borrow_mut()
+            .retain(|k| signals.contains_key(k));
+        before - signals.len()
     }
     /// The state for `key`, if there is any.
     pub fn get(&self, key: &str) -> Option<Signal<Value>> {

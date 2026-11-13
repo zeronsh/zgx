@@ -155,3 +155,27 @@ fn an_editor_without_them_asks_the_system_nothing() {
     assert_eq!(editor.text(), "teh \"x\"");
     assert!(system.asked.borrow().is_empty());
 }
+
+#[test]
+fn a_spellchecked_editor_lets_go_of_its_caret_handler_as_it_unmounts() {
+    let mut ui = Ui::new(400., 200.);
+    let value = ui.signal(String::new());
+    let token = Rc::new(());
+    let held = token.clone();
+    let view = ui.mount(provide(
+        PlatformService(Rc::new(System::default())),
+        text_area("Notes", value)
+            .id("field")
+            .w(300.)
+            .h(80.)
+            .spellcheck(true)
+            .on_caret(move |_| {
+                let _ = &held;
+            }),
+    ));
+    ui.prepare_frame();
+    assert_eq!(Rc::strong_count(&token), 2);
+    view.unmount();
+    ui.prepare_frame();
+    assert_eq!(Rc::strong_count(&token), 1, "the handler is let go");
+}

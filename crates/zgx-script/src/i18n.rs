@@ -191,7 +191,230 @@ impl UserData for LocaleUd {
             l.i18n()?.set_locale(locale.as_deref());
             Ok(())
         });
+        // `Intl`-style formatting in the locale shown; each follows it as
+        // a state or message would when read in a binding.
+        methods.add_method(
+            "format_list",
+            |_, l, (items, options): (Table, Option<Table>)| intl::list(&l.i18n()?, items, options),
+        );
+        methods.add_method(
+            "format_number",
+            |_, l, (n, options): (f64, Option<Table>)| intl::number(&l.i18n()?, n, options),
+        );
+        methods.add_method("format_date", |_, l, (t, options): (f64, Option<Table>)| {
+            intl::date(&l.i18n()?, t, options)
+        });
+        methods.add_method(
+            "format_relative",
+            |_, l, (delta, unit, options): (f64, String, Option<Table>)| {
+                intl::relative(&l.i18n()?, delta, &unit, options)
+            },
+        );
     }
+}
+
+/// `ui.locale.format_*`: ECMA-402's `Intl` options in a table, as the
+/// `intl` feature has them.
+mod intl {
+    use mlua::Table;
+    use zgx::i18n::I18n;
+
+    #[cfg(not(feature = "i18n-intl"))]
+    fn missing() -> mlua::Result<String> {
+        Err(mlua::Error::runtime(
+            "ui.locale.format_* needs zgx-script's `i18n-intl` feature, which this build left out",
+        ))
+    }
+    #[cfg(not(feature = "i18n-intl"))]
+    pub(super) fn list(_: &I18n, _: Table, _: Option<Table>) -> mlua::Result<String> {
+        missing()
+    }
+    #[cfg(not(feature = "i18n-intl"))]
+    pub(super) fn number(_: &I18n, _: f64, _: Option<Table>) -> mlua::Result<String> {
+        missing()
+    }
+    #[cfg(not(feature = "i18n-intl"))]
+    pub(super) fn date(_: &I18n, _: f64, _: Option<Table>) -> mlua::Result<String> {
+        missing()
+    }
+    #[cfg(not(feature = "i18n-intl"))]
+    pub(super) fn relative(_: &I18n, _: f64, _: &str, _: Option<Table>) -> mlua::Result<String> {
+        missing()
+    }
+
+    #[cfg(feature = "i18n-intl")]
+    mod on {
+        use super::*;
+        use zgx::i18n::intl::*;
+
+        fn text(options: &Option<Table>, key: &str) -> mlua::Result<Option<String>> {
+            options
+                .as_ref()
+                .map_or(Ok(None), |options| options.get::<Option<String>>(key))
+        }
+        fn style(options: &Option<Table>) -> mlua::Result<Style> {
+            Ok(match text(options, "style")?.as_deref() {
+                None | Some("long") => Style::Long,
+                Some("short") => Style::Short,
+                Some("narrow") => Style::Narrow,
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "`style` is long, short or narrow, not {other:?}"
+                    )));
+                }
+            })
+        }
+        fn width(options: &Option<Table>, key: &str) -> mlua::Result<Option<Width>> {
+            Ok(match text(options, key)?.as_deref() {
+                None => None,
+                Some("long") => Some(Width::Long),
+                Some("short") => Some(Width::Short),
+                Some("narrow") => Some(Width::Narrow),
+                Some("numeric" | "2-digit") => Some(Width::Numeric),
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "`{key}` is long, short, narrow, numeric or 2-digit, not {other:?}"
+                    )));
+                }
+            })
+        }
+        fn date_style(options: &Option<Table>, key: &str) -> mlua::Result<Option<DateStyle>> {
+            Ok(match text(options, key)?.as_deref() {
+                None => None,
+                Some("full") => Some(DateStyle::Full),
+                Some("long") => Some(DateStyle::Long),
+                Some("medium") => Some(DateStyle::Medium),
+                Some("short") => Some(DateStyle::Short),
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "`{key}` is full, long, medium or short, not {other:?}"
+                    )));
+                }
+            })
+        }
+        fn digits(options: &Option<Table>, key: &str) -> mlua::Result<Option<u8>> {
+            options
+                .as_ref()
+                .map_or(Ok(None), |options| options.get::<Option<u8>>(key))
+        }
+
+        pub(in super::super) fn list(
+            i18n: &I18n,
+            items: Table,
+            options: Option<Table>,
+        ) -> mlua::Result<String> {
+            let items = items
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            let kind = match text(&options, "type")?.as_deref() {
+                None | Some("conjunction") => ListType::Conjunction,
+                Some("disjunction") => ListType::Disjunction,
+                Some("unit") => ListType::Unit,
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "`type` is conjunction, disjunction or unit, not {other:?}"
+                    )));
+                }
+            };
+            Ok(format_list(&i18n.current(), &items, kind, style(&options)?))
+        }
+        pub(in super::super) fn number(
+            i18n: &I18n,
+            n: f64,
+            options: Option<Table>,
+        ) -> mlua::Result<String> {
+            let kind = match text(&options, "style")?.as_deref() {
+                None | Some("decimal") => NumberStyle::Decimal,
+                Some("percent") => NumberStyle::Percent,
+                Some("currency") => NumberStyle::Currency,
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "`style` is decimal, percent or currency, not {other:?}"
+                    )));
+                }
+            };
+            let currency = text(&options, "currency")?;
+            if kind == NumberStyle::Currency && currency.is_none() {
+                return Err(mlua::Error::runtime("a currency style needs a `currency`"));
+            }
+            let grouping = options
+                .as_ref()
+                .map_or(Ok(None), |o| o.get::<Option<bool>>("useGrouping"))?;
+            let options = NumberOptions {
+                style: kind,
+                currency,
+                minimum_fraction_digits: digits(&options, "minimumFractionDigits")?,
+                maximum_fraction_digits: digits(&options, "maximumFractionDigits")?,
+                use_grouping: grouping,
+            };
+            Ok(format_number(&i18n.current(), n, &options))
+        }
+        pub(in super::super) fn date(
+            i18n: &I18n,
+            t: f64,
+            options: Option<Table>,
+        ) -> mlua::Result<String> {
+            let hour12 = options
+                .as_ref()
+                .map_or(Ok(None), |o| o.get::<Option<bool>>("hour12"))?;
+            let zone = text(&options, "timeZone")?;
+            let offset = match zone.as_deref() {
+                None => None,
+                Some("UTC" | "utc" | "GMT") => Some(0),
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "`timeZone` is \"UTC\" or left out (this machine's), not {other:?}"
+                    )));
+                }
+            };
+            let mut date_options = DateOptions {
+                date_style: date_style(&options, "dateStyle")?,
+                time_style: date_style(&options, "timeStyle")?,
+                weekday: width(&options, "weekday")?,
+                year: width(&options, "year")?,
+                month: width(&options, "month")?,
+                day: width(&options, "day")?,
+                hour: width(&options, "hour")?,
+                minute: width(&options, "minute")?,
+                second: width(&options, "second")?,
+                hour12,
+            };
+            if date_options == DateOptions::default() {
+                date_options.date_style = Some(DateStyle::Short);
+            }
+            Ok(format_date(&i18n.current(), t, offset, &date_options))
+        }
+        pub(in super::super) fn relative(
+            i18n: &I18n,
+            delta: f64,
+            unit: &str,
+            options: Option<Table>,
+        ) -> mlua::Result<String> {
+            let unit = Unit::parse(unit).ok_or_else(|| {
+                mlua::Error::runtime(format!(
+                    "a relative time's unit is second, minute, hour, day, week, month, quarter or year, not {unit:?}"
+                ))
+            })?;
+            let auto = match text(&options, "numeric")?.as_deref() {
+                None | Some("always") => false,
+                Some("auto") => true,
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "`numeric` is always or auto, not {other:?}"
+                    )));
+                }
+            };
+            Ok(format_relative(
+                &i18n.current(),
+                delta,
+                unit,
+                auto,
+                style(&options)?,
+            ))
+        }
+    }
+    #[cfg(feature = "i18n-intl")]
+    pub(super) use on::{date, list, number, relative};
 }
 
 /// A script value as a message's argument: a number or text as it is, a

@@ -14,7 +14,7 @@ description = "Luau scripts that describe zgx component trees, with hot reload."
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["components", "svg", "png", "jpeg", "gif", "cjk-thai-words"]
+default = ["components", "svg", "png", "jpeg", "gif", "webp", "cjk-thai-words"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # The component library's `ui.*` (zgx-components): the data grid, tree,
@@ -32,12 +32,17 @@ scene3d = ["dep:zgx-3d"]
 # it. Without it `ui.i18n` and `ui.t` work, with English's plural rules
 # (`one`, `other`) and numbers as Rust writes them. zgx-run turns it on.
 i18n = ["zgx/i18n"]
+# `ui.locale.format_list`, `format_number`, `format_date` and `format_relative`,
+# ICU4X's compiled data for every locale (several MB). Without it they raise
+# an error that names the feature. zgx-run turns it on.
+i18n-intl = ["i18n", "zgx/i18n-intl"]
 # `ui.model`: glTF 2.0 models (`.glb`, `.gltf`) in 3D scenes, read by
 # zgx-3d's `gltf`.
 gltf = ["scene3d", "zgx-3d/gltf"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
+webp = ["zgx-gpu/webp"]
 gif = ["zgx-gpu/gif"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]
@@ -93,6 +98,10 @@ name = "script_layout_bench"
 path = "examples/layout_bench.rs"
 
 [[example]]
+name = "stream_bench"
+path = "examples/stream_bench.rs"
+
+[[example]]
 name = "script_web_view"
 path = "examples/web_view.rs"
 
@@ -133,6 +142,11 @@ path = "tests/md_chunk_flat.rs"
 # Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
 name = "md_chunk_flat_render"
 path = "tests/md_chunk_flat_render.rs"
+
+[[test]]
+# Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
+name = "stream_update"
+path = "tests/stream_update.rs"
 
 [[test]]
 # Its own process: what `compile_ahead` compiled is the process's.

@@ -111,7 +111,13 @@ impl FrameClock {
     }
     /// Host entry point: deliver one display refresh. Returns how many
     /// requests it resolved.
-    pub fn deliver(&self, frame: Frame) -> usize {
+    pub fn deliver(&self, mut frame: Frame) -> usize {
+        // Under a virtual or frozen clock a frame is at that clock's time,
+        // not the display's: animations step as it moves and stand still
+        // while it does.
+        if crate::clock::is_virtual() {
+            frame.time = crate::clock::now();
+        }
         self.0.last.set(Some(frame));
         let refresh = frame.refresh_rate();
         let mut wakers = Vec::new();
@@ -421,5 +427,26 @@ mod tests {
         assert_eq!(clock.deliver(frame(start, 1, 120.)), 0);
         assert_eq!(clock.deliver(frame(start, 2, 120.)), 0);
         assert_eq!(clock.deliver(frame(start, 3, 120.)), 2);
+    }
+
+    #[test]
+    fn a_frozen_clock_gives_every_frame_its_time() {
+        let clock = crate::clock::VirtualClock::new();
+        let frames = FrameClock::new();
+        let real = Instant::now();
+        frames.deliver(frame(real, 1, 60.));
+        let first = frames.last().unwrap().time;
+        frames.deliver(frame(real, 5, 60.));
+        assert_eq!(
+            frames.last().unwrap().time,
+            first,
+            "stands still while it does"
+        );
+        clock.advance(Duration::from_millis(40), || {});
+        frames.deliver(frame(real, 6, 60.));
+        assert_eq!(
+            frames.last().unwrap().time - first,
+            Duration::from_millis(40)
+        );
     }
 }

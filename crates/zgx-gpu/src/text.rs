@@ -2,14 +2,26 @@
 pub use cosmic_text::Affinity;
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 
-/// `key`'s glyph image: swash's, or for a face whose shapes swash can't
-/// draw (macOS 26's PingFang, `hvgl` only) Core Text's. Asked only where
-/// swash gave none: a glyph cache miss with nothing to show.
+/// `key`'s glyph image: on macOS at 2x and over, the mask Chrome draws
+/// (`core_text_glyphs::chrome_glyph`: Core Text with font smoothing, through
+/// Skia's coverage table), else swash's, or for a face whose shapes swash
+/// can't draw (macOS 26's PingFang, `hvgl` only) Core Text's. `scale`: device
+/// pixels a point, 0 to leave Chrome's recipe out.
 pub(crate) fn glyph_image(
     swash: &mut cosmic_text::SwashCache,
     fonts: &mut FontSystem,
     key: cosmic_text::CacheKey,
+    scale: f32,
 ) -> Option<cosmic_text::SwashImage> {
+    #[cfg(target_os = "macos")]
+    if scale >= 2.
+        && let Some(font) = fonts.get_font(key.font_id, key.font_weight)
+        && !font.is_color()
+        && let Some(image) = crate::core_text_glyphs::chrome_glyph(fonts, key, scale)
+    {
+        return Some(image);
+    }
+    let _ = scale;
     let image = swash.get_image_uncached(fonts, key);
     #[cfg(target_os = "macos")]
     if image
@@ -138,6 +150,7 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         // titles get their display cut, tighter and narrower.
         .optical(size.round().clamp(1., 1000.) as u16)
         .masked(font.masked)
+        .paragraph_rtl(font.paragraph_rtl)
         .weight(cosmic_text::Weight(font.weight.clamp(1, 1000)))
         .style(if font.italic {
             cosmic_text::Style::Italic
@@ -292,6 +305,66 @@ pub struct ShapedText {
     line_height: f32,
 }
 impl ShapedText {
+    /// What each line of this text came out as, for `zgx inspect text`: its
+    /// baseline, the ascent and descent that put it there, and the face each
+    /// run of its glyphs was drawn in, with the family the text asked for
+    /// and what that resolves to.
+    pub fn report(&self, fonts: &FontSystem, asked: &[(String, u16)]) -> Vec<String> {
+        let db = fonts.db();
+        let mut out = Vec::new();
+        for (family, weight) in asked {
+            let family_enum = match family.as_str() {
+                "sans-serif" => Family::SansSerif,
+                "serif" => Family::Serif,
+                "monospace" => Family::Monospace,
+                name => Family::Name(name),
+            };
+            let query = cosmic_text::fontdb::Query {
+                families: &[family_enum],
+                weight: cosmic_text::fontdb::Weight(*weight),
+                ..Default::default()
+            };
+            let face = db.query(&query).and_then(|id| db.face(id));
+            out.push(format!(
+                "asked family {family:?} weight {weight}: resolves to family {:?}, face {}",
+                db.family_name(&family_enum),
+                face.map_or("none".to_string(), |f| format!(
+                    "{:?} ps={} class={}",
+                    f.families.first().map(|(n, _)| n.as_str()).unwrap_or(""),
+                    f.post_script_name,
+                    f.weight.0
+                ))
+            ));
+        }
+        for (n, run) in self.buffer.layout_runs().enumerate() {
+            out.push(format!(
+                "line {n}: baseline {} top {} height {} ascent {} descent {} (rounded, strut included) width {:.2}",
+                run.line_y, run.line_top, run.line_height, run.ascent, run.descent, run.line_w
+            ));
+            let mut at = 0;
+            while at < run.glyphs.len() {
+                let first = &run.glyphs[at];
+                let mut end = at + 1;
+                while end < run.glyphs.len() && run.glyphs[end].font_id == first.font_id {
+                    end += 1;
+                }
+                let (start, stop) = run.glyphs[at..end]
+                    .iter()
+                    .fold((usize::MAX, 0), |(a, b), g| (a.min(g.start), b.max(g.end)));
+                let face = db.face(first.font_id);
+                out.push(format!(
+                    "  glyphs {at}..{end} bytes {start}..{stop}: face {:?} ps={} class={} asked weight {} size {}",
+                    face.and_then(|f| f.families.first().map(|(n, _)| n.as_str())).unwrap_or("?"),
+                    face.map_or("?", |f| f.post_script_name.as_str()),
+                    face.map_or(0, |f| f.weight.0),
+                    first.font_weight.0,
+                    first.font_size
+                ));
+                at = end;
+            }
+        }
+        out
+    }
     /// `text` shaped in the default font at `font_size`, wrapped at `width`
     /// if given.
     pub fn new(
@@ -424,6 +497,11 @@ impl ShapedText {
                 return Some(Rect::new(0., run.line_top, 1., run.line_height));
             }
             for glyph in run.glyphs {
+                // A mark's zero-width glyph shares its letter's cluster (SF
+                // Arabic's dots): the letter's glyph places the caret.
+                if shares_cluster_with_a_wider_glyph(run.glyphs, glyph) {
+                    continue;
+                }
                 let start = offset + glyph.start;
                 let end = offset + glyph.end;
                 if cursor.byte_index < start || cursor.byte_index > end {
@@ -662,6 +740,7 @@ impl zgx::text_layout::TextLayout for ShapedText {
             let mut clusters: Vec<(usize, usize, f32, f32, bool)> = run
                 .glyphs
                 .iter()
+                .filter(|g| !shares_cluster_with_a_wider_glyph(run.glyphs, g))
                 .map(|g| (offset + g.start, offset + g.end, g.x, g.w, g.level.is_rtl()))
                 .collect();
             #[cfg(test)]
@@ -893,7 +972,8 @@ impl CpuTextRaster {
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let p = glyph.physical((0., 0.), 1.);
-                if let Some(image) = glyph_image(&mut self.swash, &mut self.fonts, p.cache_key) {
+                if let Some(image) = glyph_image(&mut self.swash, &mut self.fonts, p.cache_key, 0.)
+                {
                     images.push((
                         p.x,
                         p.y + run.line_y as i32,
@@ -903,7 +983,7 @@ impl CpuTextRaster {
                 }
             }
         }
-        (images, rich_decorations(&buffer, rich))
+        (images, rich_decorations(&self.fonts, 1., &buffer, rich))
     }
     /// Rasterize `text` at `size` in `font`, laid out in `width` by `height`:
     /// each glyph's position and image.
@@ -925,7 +1005,7 @@ impl CpuTextRaster {
             for glyph in run.glyphs {
                 let physical = glyph.physical((0., 0.), 1.);
                 if let Some(image) =
-                    glyph_image(&mut self.swash, &mut self.fonts, physical.cache_key)
+                    glyph_image(&mut self.swash, &mut self.fonts, physical.cache_key, 0.)
                 {
                     images.push((physical.x, physical.y + run.line_y as i32, image));
                 }
@@ -1992,10 +2072,15 @@ pub(crate) fn rich_buffer_unshaped(
             // A padded run's room goes around it alone (an inline box is one).
             && run.padding[0] == 0.
             && runs[end].padding[0] == 0.
+            && run.min_width == 0.
+            && runs[end].min_width == 0.
         {
             end += 1;
         }
         let mut attributes = attrs(&run.font, run.font_size.max(1.));
+        if run.min_width > 0. {
+            attributes = attributes.min_width(run.min_width / run.font_size.max(1.));
+        }
         if run.padding[0] > 0. {
             attributes = attributes.padding(run.padding[0] / run.font_size.max(1.));
             if run.font.features.is_inline_box() {
@@ -2138,9 +2223,9 @@ mod rich_tests {
         use zgx::text_layout::{TextOptions, TextOverflow};
         let mut fonts = FontSystem::new();
         let text = "aa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             text,
-            vec![TextRun {
+            vec![zgx::rich_text::TextRun {
                 range: 0..text.len(),
                 font_size: 14.,
                 ..Default::default()
@@ -2167,9 +2252,9 @@ mod rich_tests {
         use zgx::text_layout::{TextOptions, TextOverflow};
         let mut fonts = FontSystem::new();
         let text = "alpha βeta 👩‍💻 words continue across several wrapped lines";
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             text,
-            vec![TextRun {
+            vec![zgx::rich_text::TextRun {
                 range: 0..text.len(),
                 font_size: 20.,
                 ..Default::default()
@@ -2252,7 +2337,7 @@ mod rich_tests {
         for mut fonts in [bundled_test_fonts(), FontSystem::new()] {
             for text in texts {
                 let split = text.char_indices().nth(text.chars().count() / 3).unwrap().0;
-                let one = vec![TextRun {
+                let one = vec![zgx::rich_text::TextRun {
                     range: 0..text.len(),
                     font_size: 16.,
                     ..Default::default()
@@ -2413,9 +2498,9 @@ mod rich_tests {
             style.features,
             FontFeatures::new([(*b"clig", 0), (*b"liga", 1), (*b"liga", 0)])
         );
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             "office ffi",
-            vec![TextRun {
+            vec![zgx::rich_text::TextRun {
                 range: 0..10,
                 font: style,
                 font_size: 24.,
@@ -2436,7 +2521,7 @@ mod rich_tests {
         let mut fonts = FontSystem::new();
         let content = "Hello العربية world e\u{301} end";
         let split = "Hello ".len();
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             content,
             vec![
                 TextRun {
@@ -2606,6 +2691,8 @@ pub struct RichDecoration {
     pub background: bool,
     /// A background's corner radius.
     pub radius: f32,
+    /// A background's outline: its width and colour.
+    pub border: Option<(f32, zgx::scene::Color)>,
     /// The styled run it decorates, to recolour it without re-shaping.
     pub run: usize,
     /// A line decoration: strikethrough rather than underline.
@@ -2676,6 +2763,7 @@ pub fn plain_underlines<'a>(
             color: zgx::scene::Color(255, 255, 255, 255),
             background: false,
             radius: 0.,
+            border: None,
             run: 0,
             strike: false,
         })
@@ -2704,6 +2792,8 @@ fn joined_wash<'o>(
         && (spacer(&runs[index]) || spacer(&runs[index - 1]))
         && before.color == color
         && before.radius == radius
+        && before.border.is_none()
+        && runs[index].border.is_none()
         && (before.bounds.y - bounds.y).abs() < 0.01
         && (before.bounds.height - bounds.height).abs() < 0.01
         && ((bounds.x - (before.bounds.x + before.bounds.width)).abs() < 0.5
@@ -2717,11 +2807,205 @@ fn joined_wash<'o>(
     }
 }
 /// Derive decoration geometry from shaped visual fragments, including bidi and wrapping.
-pub fn rich_decorations(buffer: &Buffer, rich: &zgx::rich_text::RichText) -> Vec<RichDecoration> {
-    rich_decorations_in(buffer.layout_runs(), &line_starts(buffer), rich)
+pub fn rich_decorations(
+    fonts: &FontSystem,
+    scale: f32,
+    buffer: &Buffer,
+    rich: &zgx::rich_text::RichText,
+) -> Vec<RichDecoration> {
+    rich_decorations_in(
+        fonts,
+        scale,
+        buffer.layout_runs(),
+        &line_starts(buffer),
+        rich,
+    )
+}
+/// A face's ascent (its hhea ascender) in ems, as Blink takes it from the
+/// platform font; none where the face can't be read.
+fn ascent_em(fonts: &FontSystem, id: cosmic_text::fontdb::ID) -> Option<f32> {
+    thread_local! {
+        static KNOWN: std::cell::RefCell<std::collections::HashMap<cosmic_text::fontdb::ID, Option<f32>>> =
+            Default::default();
+    }
+    if let Some(known) = KNOWN.with(|known| known.borrow().get(&id).copied()) {
+        return known;
+    }
+    let found = fonts
+        .db()
+        .with_face_data(id, |data, index| {
+            let face = ttf_parser::Face::parse(data, index).ok()?;
+            let em = f32::from(face.units_per_em());
+            (em > 0. && face.ascender() > 0).then(|| f32::from(face.ascender()) / em)
+        })
+        .flatten();
+    KNOWN.with(|known| known.borrow_mut().insert(id, found));
+    found
+}
+/// A line-through's top and height, in points, as Blink draws it
+/// (`TextDecorationInfo::ComputeLineThroughLineData` and
+/// `DecorationLinePainter::SnapYAxis`), worked in device pixels: with the
+/// font's ascent `A` rounded, its top is `2A/3 - t/2` below the line's top
+/// (`A` above the baseline), `t` the thickness (an auto one a tenth of the
+/// size, at least 1), the top rounded to a pixel and the height floored
+/// (at least 1). A font without an ascent keeps 0.3 em, a point thick.
+fn strike_rect(
+    ascent: Option<f32>,
+    size: f32,
+    scale: f32,
+    baseline: f32,
+    style: zgx::rich_text::Decoration,
+) -> (f32, f32) {
+    let Some(ascent) = ascent else {
+        return (baseline - size * 0.3, style.thickness());
+    };
+    let scale = if scale.is_finite() && scale > 0. {
+        scale
+    } else {
+        1.
+    };
+    let thickness = if style.is_auto() {
+        size * scale / 10.
+    } else {
+        (style.thickness() * scale).round()
+    }
+    .max(1.);
+    let ascent = (ascent * size * scale).round();
+    let baseline = (baseline * scale).round();
+    let top = (2. * ascent / 3. - thickness / 2. + 0.5).floor();
+    (
+        (baseline - ascent + top) / scale,
+        thickness.floor().max(1.) / scale,
+    )
+}
+/// The x ranges where `glyphs`' outlines cross a band `height` thick from `y`
+/// (an underline), widened by its thickness each side, as CSS's skip-ink
+/// does: where the underline must stop for descenders.
+fn ink_gaps<'a>(
+    fonts: &FontSystem,
+    glyphs: impl Iterator<Item = &'a cosmic_text::LayoutGlyph>,
+    baseline: f32,
+    y: f32,
+    height: f32,
+) -> Vec<(f32, f32)> {
+    struct Outline {
+        lines: Vec<((f32, f32), (f32, f32))>,
+        at: (f32, f32),
+        start: (f32, f32),
+    }
+    impl Outline {
+        fn line(&mut self, to: (f32, f32)) {
+            self.lines.push((self.at, to));
+            self.at = to;
+        }
+    }
+    impl ttf_parser::OutlineBuilder for Outline {
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.at = (x, y);
+            self.start = (x, y);
+        }
+        fn line_to(&mut self, x: f32, y: f32) {
+            self.line((x, y));
+        }
+        fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+            let from = self.at;
+            for i in 1..=8 {
+                let t = i as f32 / 8.;
+                let u = 1. - t;
+                self.line((
+                    u * u * from.0 + 2. * u * t * x1 + t * t * x,
+                    u * u * from.1 + 2. * u * t * y1 + t * t * y,
+                ));
+            }
+        }
+        fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+            let from = self.at;
+            for i in 1..=8 {
+                let t = i as f32 / 8.;
+                let u = 1. - t;
+                self.line((
+                    u * u * u * from.0 + 3. * u * u * t * x1 + 3. * u * t * t * x2 + t * t * t * x,
+                    u * u * u * from.1 + 3. * u * u * t * y1 + 3. * u * t * t * y2 + t * t * t * y,
+                ));
+            }
+        }
+        fn close(&mut self) {
+            let start = self.start;
+            self.line(start);
+        }
+    }
+    let (top, bottom) = (y - height, y + 2. * height);
+    let mut gaps = Vec::new();
+    for glyph in glyphs {
+        let found = fonts.db().with_face_data(glyph.font_id, |data, index| {
+            let face = ttf_parser::Face::parse(data, index).ok()?;
+            let scale = glyph.font_size / f32::from(face.units_per_em());
+            let mut outline = Outline {
+                lines: Vec::new(),
+                at: (0., 0.),
+                start: (0., 0.),
+            };
+            face.outline_glyph(ttf_parser::GlyphId(glyph.glyph_id), &mut outline)?;
+            let origin = glyph.x + glyph.x_offset * glyph.font_size;
+            let mut span: Option<(f32, f32)> = None;
+            for ((x0, y0), (x1, y1)) in outline.lines {
+                // Down-positive page coordinates.
+                let (ax, ay) = (origin + x0 * scale, baseline - y0 * scale);
+                let (bx, by) = (origin + x1 * scale, baseline - y1 * scale);
+                let (low, high) = (ay.min(by), ay.max(by));
+                if high < top || low > bottom {
+                    continue;
+                }
+                // The part of the segment inside the band.
+                let along = |t: f32| ax + (bx - ax) * t;
+                let (t0, t1) = if (by - ay).abs() < 1e-6 {
+                    (0., 1.)
+                } else {
+                    let a = ((top - ay) / (by - ay)).clamp(0., 1.);
+                    let b = ((bottom - ay) / (by - ay)).clamp(0., 1.);
+                    (a.min(b), a.max(b))
+                };
+                let (p, q) = (along(t0), along(t1));
+                let (lo, hi) = (p.min(q), p.max(q));
+                span = Some(span.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+            }
+            span
+        });
+        if let Some((lo, hi)) = found.flatten() {
+            gaps.push((lo - height, hi + height));
+        }
+    }
+    gaps.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f32, f32)> = Vec::new();
+    for (lo, hi) in gaps {
+        match merged.last_mut() {
+            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    merged
+}
+/// `from..to` without `gaps` (sorted, merged), the pieces wider than a
+/// half point.
+fn pieces_between(from: f32, to: f32, gaps: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut pieces = Vec::new();
+    let mut at = from;
+    for (lo, hi) in gaps {
+        if *lo > at {
+            pieces.push((at, lo.min(to)));
+        }
+        at = at.max(*hi);
+    }
+    if at < to {
+        pieces.push((at, to));
+    }
+    pieces.retain(|(a, b)| b - a >= 0.5);
+    pieces
 }
 /// `rich_decorations` over any laid-out runs, given where each line starts.
 pub fn rich_decorations_in<'a>(
+    fonts: &FontSystem,
+    scale: f32,
     runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
     starts: &[usize],
     rich: &zgx::rich_text::RichText,
@@ -2730,7 +3014,11 @@ pub fn rich_decorations_in<'a>(
     for line in runs {
         let start = starts[line.line_i];
         for (index, run) in rich.runs().iter().enumerate() {
-            if run.background.is_none() && run.underline.is_none() && run.strikethrough.is_none() {
+            if run.background.is_none()
+                && run.border.is_none()
+                && run.underline.is_none()
+                && run.strikethrough.is_none()
+            {
                 continue;
             }
             let mut spans: Vec<_> = line
@@ -2749,6 +3037,17 @@ pub fn rich_decorations_in<'a>(
                 .map(|g| (g.x, g.x + g.w))
                 .collect();
             spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let face = line
+                .glyphs
+                .iter()
+                .find(|g| {
+                    g.metadata != usize::MAX && {
+                        let byte = start + g.start;
+                        byte >= run.range.start && byte < run.range.end
+                    }
+                })
+                .map(|g| g.font_id);
+            let ascent = face.and_then(|id| ascent_em(fonts, id));
             let mut merged: Vec<(f32, f32)> = Vec::new();
             for (left, right) in spans {
                 if let Some(last) = merged.last_mut()
@@ -2760,7 +3059,11 @@ pub fn rich_decorations_in<'a>(
                 }
             }
             for (left, right) in merged {
-                if let Some(color) = run.background {
+                // (An outline alone is a clear background with a border.)
+                if let Some(color) = run
+                    .background
+                    .or(run.border.map(|_| zgx::scene::Color(0, 0, 0, 0)))
+                {
                     // A padded or rounded background hugs the text (CSS's
                     // content area, about 0.92 em above the baseline and
                     // 0.24 below) plus its padding; a plain one fills the line.
@@ -2787,6 +3090,7 @@ pub fn rich_decorations_in<'a>(
                         color,
                         background: true,
                         radius: run.radius,
+                        border: run.border,
                         run: index,
                         strike: false,
                     });
@@ -2801,23 +3105,165 @@ pub fn rich_decorations_in<'a>(
                                 .unwrap_or(run.font_size * 0.1),
                         false,
                     ),
-                    (run.strikethrough, line.line_y - run.font_size * 0.3, true),
+                    (run.strikethrough, 0., true),
                 ] {
                     if let Some(style) = decoration {
-                        output.push(RichDecoration {
-                            bounds: Rect::new(left, y, right - left, style.thickness()),
-                            color: style.color.unwrap_or(run.color),
-                            background: false,
-                            radius: 0.,
-                            run: index,
-                            strike,
-                        });
+                        let (y, height) = if strike {
+                            strike_rect(ascent, run.font_size, scale, line.line_y, style)
+                        } else {
+                            (y, style.thickness())
+                        };
+                        // An underline that skips ink breaks round what
+                        // reaches it (descenders).
+                        let pieces = if !strike && style.skips_ink() {
+                            let glyphs = line.glyphs.iter().filter(|g| {
+                                let byte = start + g.start;
+                                g.metadata != usize::MAX
+                                    && byte >= run.range.start
+                                    && byte < run.range.end
+                                    && g.x + g.w > left
+                                    && g.x < right
+                            });
+                            let gaps = ink_gaps(fonts, glyphs, line.line_y, y, height);
+                            pieces_between(left, right, &gaps)
+                        } else {
+                            vec![(left, right)]
+                        };
+                        for (from, to) in pieces {
+                            output.push(RichDecoration {
+                                bounds: Rect::new(from, y, to - from, height),
+                                color: style.color.unwrap_or(run.color),
+                                background: false,
+                                radius: 0.,
+                                border: None,
+                                run: index,
+                                strike,
+                            });
+                        }
                     }
                 }
             }
         }
     }
     output
+}
+
+#[cfg(test)]
+mod strikeout_tests {
+    use super::*;
+
+    const GEIST: &[u8] = include_bytes!("../../zgx-desktop/examples/support/fonts/Geist.ttf");
+
+    fn laid(scale: f32, size: f32) -> (f32, RichDecoration) {
+        let mut fonts = FontSystem::new_with_fonts([cosmic_text::fontdb::Source::Binary(
+            std::sync::Arc::new(GEIST),
+        )]);
+        let rich = zgx::rich_text::RichText::new(
+            "struck",
+            vec![zgx::rich_text::TextRun {
+                range: 0..6,
+                font_size: size,
+                strikethrough: Some(zgx::rich_text::Decoration::default()),
+                font: zgx::text_layout::FontStyle {
+                    family: zgx::text_layout::FontFamily::Named("Geist".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let buffer = rich_buffer(&mut fonts, &rich, None, None);
+        let line_y = buffer.layout_runs().next().unwrap().line_y;
+        let strike = rich_decorations(&fonts, scale, &buffer, &rich)
+            .into_iter()
+            .find(|d| d.strike)
+            .expect("a line-through");
+        (line_y, strike)
+    }
+
+    /// Chrome (Geist 13 px at 2x) fills the two device rows from 10 to 8
+    /// above the baseline: an ascent of 26 device pixels, a thickness of
+    /// 2.6 floored to 2, and a top at `2 * 26 / 3 - 1.3` below the line's,
+    /// rounded.
+    #[test]
+    fn a_line_through_lands_on_blinks_device_rows() {
+        let face = ttf_parser::Face::parse(GEIST, 0).unwrap();
+        let ascent = f32::from(face.ascender()) / f32::from(face.units_per_em());
+        eprintln!("Geist ascent {ascent} em");
+        let (line_y, strike) = laid(2., 13.);
+        let baseline = (line_y * 2.).round();
+        let a = (ascent * 26.).round();
+        let top = baseline - a + (2. * a / 3. - 1.3 + 0.5).floor();
+        assert_eq!(strike.bounds.y * 2., top);
+        assert_eq!(strike.bounds.height * 2., 2.);
+        assert_eq!(
+            baseline - strike.bounds.y * 2.,
+            10.,
+            "rows 178 and 179, the baseline at 188"
+        );
+    }
+
+    #[test]
+    fn a_line_through_at_one_x_snaps_to_whole_pixels() {
+        for size in [13., 14.] {
+            let (_, strike) = laid(1., size);
+            assert_eq!(strike.bounds.y, strike.bounds.y.round(), "{size}");
+            assert_eq!(strike.bounds.height, (size / 10.).floor().max(1.), "{size}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod skip_ink_tests {
+    use super::*;
+
+    const DEJAVU: &[u8] = include_bytes!("../../../comparisons/fonts/DejaVuSans.ttf");
+
+    fn underlines(text: &str, skip: bool) -> Vec<RichDecoration> {
+        let mut fonts = FontSystem::new_with_fonts([cosmic_text::fontdb::Source::Binary(
+            std::sync::Arc::new(DEJAVU),
+        )]);
+        let rich = zgx::rich_text::RichText::new(
+            text,
+            vec![zgx::rich_text::TextRun {
+                range: 0..text.len(),
+                font_size: 24.,
+                underline: Some(zgx::rich_text::Decoration::new(1.5).skip_ink(skip)),
+                font: zgx::text_layout::FontStyle {
+                    family: zgx::text_layout::FontFamily::Named("DejaVu Sans".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let buffer = rich_buffer(&mut fonts, &rich, None, None);
+        rich_decorations(&fonts, 1., &buffer, &rich)
+            .into_iter()
+            .filter(|d| !d.background && !d.strike)
+            .collect()
+    }
+
+    /// An underline that skips ink stops round the tails of g and y, and is
+    /// one line where nothing reaches it; without skip-ink it is one line.
+    #[test]
+    fn an_underline_breaks_round_descenders_when_it_skips_ink() {
+        let plain = underlines("gay", false);
+        assert_eq!(plain.len(), 1);
+        let skipped = underlines("gay", true);
+        assert!(skipped.len() >= 2, "{skipped:?}");
+        let covered: f32 = skipped.iter().map(|d| d.bounds.width).sum();
+        assert!(
+            covered < plain[0].bounds.width - 4.,
+            "{covered} of {}",
+            plain[0].bounds.width
+        );
+        // The pieces lie inside the line and don't overlap.
+        for pair in skipped.windows(2) {
+            assert!(pair[0].bounds.x + pair[0].bounds.width <= pair[1].bounds.x + 0.01);
+        }
+        assert_eq!(underlines("abc", true).len(), 1, "no descenders: one line");
+    }
 }
 
 #[cfg(test)]
@@ -2894,7 +3340,7 @@ mod wash_tests {
     fn washes(rich: &RichText) -> Vec<Rect> {
         let mut fonts = FontSystem::new();
         let buffer = rich_buffer(&mut fonts, rich, Some(600.), None);
-        rich_decorations(&buffer, rich)
+        rich_decorations(&fonts, 1., &buffer, rich)
             .into_iter()
             .filter(|d| d.background)
             .map(|d| d.bounds)
@@ -2922,7 +3368,7 @@ mod wash_tests {
         let red = Color(255, 0, 0, 255);
         let text = "Look at \u{2060}chat.rs\u{2060} please";
         let (icon, name) = (8..11, 11..18);
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             text,
             vec![
                 run(0..8, None),
@@ -2950,4 +3396,16 @@ mod wash_tests {
         .unwrap();
         assert_eq!(washes(&apart).len(), 2, "two spans side by side: two");
     }
+}
+
+/// Whether `glyph` has no width and another glyph of `glyphs` covers its
+/// cluster with some.
+fn shares_cluster_with_a_wider_glyph(
+    glyphs: &[cosmic_text::LayoutGlyph],
+    glyph: &cosmic_text::LayoutGlyph,
+) -> bool {
+    glyph.w == 0.
+        && glyphs
+            .iter()
+            .any(|other| other.start == glyph.start && other.end == glyph.end && other.w > 0.)
 }

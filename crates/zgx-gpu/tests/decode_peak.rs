@@ -198,3 +198,95 @@ fn a_jpeg_drawn_small_never_decodes_whole() {
         "mean error {mae:.2}, PSNR {psnr:.1} dB, worst {worst}"
     );
 }
+
+fn png_of(width: u32, height: u32) -> Vec<u8> {
+    use image::{ExtendedColorType, ImageEncoder};
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut png,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    )
+    .write_image(
+        &photo(width, height),
+        width,
+        height,
+        ExtendedColorType::Rgb8,
+    )
+    .unwrap();
+    png
+}
+
+/// A PNG drawn at a quarter of its size is read row by row and averaged in
+/// four-by-four blocks, never decoded whole, and draws what decoding it
+/// whole and halving it twice does.
+#[test]
+fn a_png_drawn_small_never_decodes_whole() {
+    let _alone = ALONE.lock().unwrap_or_else(|p| p.into_inner());
+    let (width, height) = (1024_u32, 768_u32);
+    let image_bytes = width as usize * height as usize * 4;
+    let png = png_of(width, height);
+    let size = (256, 192);
+    let image = zgx_gpu::assets::decode_image_kept(png.clone().into()).unwrap();
+    image.set_decoding(zgx::image::Decoding::Sync);
+    let before = NOW.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let scaled = image.pixels_at(size).expect("decoded").pixels.to_vec();
+    let peak = PEAK.load(Ordering::Relaxed) - before;
+    // (The decoder's own buffers come to a good part of a small image.)
+    assert!(
+        peak * 3 <= image_bytes,
+        "a decode drawn at a quarter held {:.2} images at once",
+        peak as f64 / image_bytes as f64
+    );
+    let whole = zgx_gpu::assets::decode_image(&png).unwrap();
+    let mut reference = whole.pixels().to_vec();
+    let (mut w, mut h) = (width, height);
+    while w.div_ceil(2) >= size.0 && h.div_ceil(2) >= size.1 {
+        (reference, w, h) = zgx::image::resample::halve(&reference, w, h);
+    }
+    assert_eq!((w, h), size);
+    let worst = scaled
+        .iter()
+        .zip(&reference)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(worst <= 2, "worst difference {worst}");
+}
+
+/// A 4000 by 3000 photo drawn 448 points wide at 2x holds about 896 pixels
+/// across, never its 48 MB; drawn larger, it decodes again at that size.
+#[test]
+fn a_big_png_holds_the_size_it_is_drawn_at_and_decodes_again_larger() {
+    let _alone = ALONE.lock().unwrap_or_else(|p| p.into_inner());
+    let png = png_of(4000, 3000);
+    let image = zgx_gpu::assets::decode_image_kept(png.into()).unwrap();
+    image.set_decoding(zgx::image::Decoding::Sync);
+    let before = NOW.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let drawn = zgx::image::fitted_size(4000, 3000, Some((896., 672.)));
+    let held = image.pixels_at(drawn).expect("decoded");
+    let peak = PEAK.load(Ordering::Relaxed) - before;
+    assert_eq!((held.width, held.height), (896, 672));
+    assert!(
+        peak < 8 * 1024 * 1024,
+        "{:.1} MB at once, not the 48 MB of the whole image",
+        peak as f64 / 1e6
+    );
+    let decodes = zgx::image::decodes();
+    let again = image.pixels_at(drawn).expect("held");
+    assert_eq!(
+        zgx::image::decodes(),
+        decodes,
+        "the same size decodes nothing"
+    );
+    assert_eq!(again.width, 896);
+    let larger = image.pixels_at((1792, 1344)).expect("decoded");
+    assert_eq!((larger.width, larger.height), (1792, 1344));
+    assert_eq!(
+        zgx::image::decodes(),
+        decodes + 1,
+        "drawn larger decodes again"
+    );
+}

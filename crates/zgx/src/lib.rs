@@ -52,6 +52,7 @@ pub mod rich_text;
 mod scroll_keys;
 pub mod selection;
 pub mod text_layout;
+pub mod text_wrap;
 mod typeahead;
 pub mod zoom;
 
@@ -60,6 +61,7 @@ pub mod background;
 
 pub mod compose;
 mod compose_checkbox;
+mod compose_hover;
 mod compose_menu;
 mod compose_menu_scroll;
 mod compose_modal;

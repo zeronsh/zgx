@@ -496,6 +496,10 @@ jobs:
       # stopped at 157 ms of CPU), as an app's few threads never do.
       - run: cargo test -p zgx-script --test state --locked -- --test-threads=1 script::runaway script::a_script_short_of_its_budget script::garbage_from_builtins script::copies_of_state script::a_script_keeping_nodes
       - run: cargo test --workspace --doc --locked
+      # The CLI as `cargo install` builds it: zgx-script alone, with the
+      # formatters, so its feature set is not the workspace's.
+      - run: cargo install --path crates/zgx-script --locked --features i18n-intl --root "$RUNNER_TEMP/zgx-cli" --debug
+      - run: '"$RUNNER_TEMP/zgx-cli/bin/zgx" --help > /dev/null'
       # Without ffmpeg, the tests of what it encodes pass by skipping: here it
       # must be there.
       - name: Video

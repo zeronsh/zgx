@@ -178,7 +178,7 @@ fn wrapped_links_use_real_fragments_one_tab_stop_and_owned_callbacks() {
         .semantics
         .borrow()
         .iter()
-        .filter(|(_, s)| s.role == Role::Link)
+        .filter(|(_, s)| matches!(s.role, Role::Link | Role::Button))
         .map(|(id, _)| id)
         .collect();
     assert_eq!(links.len(), 1);
@@ -244,7 +244,7 @@ fn link_geometry_reuses_shape_until_text_width_or_backend_changes() {
         .semantics
         .borrow()
         .iter()
-        .find(|(_, s)| s.role == Role::Link)
+        .find(|(_, s)| matches!(s.role, Role::Link | Role::Button))
         .unwrap()
         .0;
     ui.input.focus(&ui.scene, Some(link));

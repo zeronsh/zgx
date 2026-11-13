@@ -103,6 +103,10 @@ pub struct ShapeBuffer {
     /// Buffer for shape words.
     words: Vec<ShapeWord>,
 
+    /// zgx: the kerning a font gives a pair of characters a break opportunity
+    /// or a space separates (`pair_kerning`), in em, by what asks for it.
+    pair_kern: crate::HashMap<(fontdb::ID, u16, u16, char, char), f32>,
+
     /// zgx: the hyphenation of the line about to be laid out
     /// (`ShapeLine::hyphenate`), taken by its layout: nothing a line keeps.
     hyphenation: Option<Box<Hyphenation>>,
@@ -331,7 +335,7 @@ fn shape_fallback(
             descent,
             font_monospace_em_width: font.monospace_em_width(),
             font_id: font.id(),
-            font_weight: attrs.weight,
+            font_weight: font.weight(),
             font_optical: if font.has_optical() { attrs.optical } else { 0 },
             glyph_id: info.glyph_id.try_into().expect("failed to cast glyph ID"),
             //TODO: color should not be related to shaping
@@ -630,6 +634,8 @@ fn shape_run(
     // faces it gives next: with that face kept, it is done only when a
     // character is missing from it.
     let mut searched = true;
+    // zgx patch: whether the first font is the default family's face.
+    let mut font_is_default = false;
     let font = match kept {
         Some(font) if attrs.family == Family::Monospace => {
             searched = false;
@@ -637,6 +643,7 @@ fn shape_run(
         }
         Some(font) => {
             font_iter.pass_default();
+            font_is_default = true;
             font
         }
         None => {
@@ -659,6 +666,7 @@ fn shape_run(
                     && (attrs.family != Family::Monospace || font_iter.is_default_face(&font))
                 {
                     font_iter.font_system().keep_first_font(&attrs, &fonts, &font);
+                    font_is_default = attrs.family != Family::Monospace;
                 } else if attrs.family != Family::Monospace && font_iter.past_default() {
                     let place = font_iter.place();
                     font_iter
@@ -797,6 +805,56 @@ fn shape_run(
     }
     */
 
+    // zgx patch: the line keeps its text's own font (its default family's
+    // face) as its strut, as a browser's does: under a set line height the
+    // line's ascent and descent are the font the text asked for's, whatever
+    // face a glyph falls back to (a line of fallback glyphs alone would
+    // otherwise stand on the fallback face's baseline). Only a run that fell
+    // back looks.
+    if !font_is_default || glyphs[glyph_start..].iter().any(|g| g.font_id != font.id()) {
+        let default_name = font_system.db().family_name(&attrs.family).to_string();
+        let in_family = |id: fontdb::ID| {
+            font_system
+                .db()
+                .face(id)
+                .is_some_and(|face| face.families.iter().any(|(name, _)| *name == default_name))
+        };
+        let strut = fonts
+            .iter()
+            .filter(|key| key.font_weight_diff == 0 || key.variable_weight_match)
+            .find(|key| in_family(key.id))
+            .or_else(|| fonts.first().filter(|key| key.query).filter(|key| in_family(key.id)))
+            .map(|key| key.id)
+            // The default family isn't installed: Core Text's own, the first
+            // common fallback that is (macOS's `.SF NS`), is the text's font.
+            .or_else(|| {
+                let common = font_system.fallbacks.common_fallback().to_vec();
+                common.iter().find_map(|name| {
+                    fonts
+                        .iter()
+                        .filter(|key| key.font_weight_diff == 0 || key.variable_weight_match)
+                        .find(|key| {
+                            font_system
+                                .db()
+                                .face(key.id)
+                                .is_some_and(|face| face.families.iter().any(|(n, _)| n == name))
+                        })
+                        .map(|key| key.id)
+                })
+            });
+        if let Some(strut) = strut {
+            if let Some(face) = font_system.get_font(strut, attrs.weight) {
+                let metrics = face.as_swash().metrics(&[]);
+                let upem = f32::from(metrics.units_per_em);
+                let (ascent, descent) = (metrics.ascent / upem, metrics.descent / upem);
+                for glyph in glyphs[glyph_start..].iter_mut().filter(|g| g.font_id != strut) {
+                    glyph.ascent = ascent;
+                    glyph.descent = descent;
+                }
+            }
+        }
+    }
+
     // Restore the scripts buffer.
     font_system.shape_buffer.scripts = scripts;
 }
@@ -829,6 +887,25 @@ fn pad(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, attrs: &At
         if glyph.end >= line.len() || attrs_list.get_span(glyph.end) != attrs {
             glyph.x_advance += padding.0;
         }
+    }
+    // A span's least width: what it lacks is added half before and half after.
+    let mut first = 0;
+    while first < glyphs.len() {
+        let attrs = attrs_list.get_span(glyphs[first].start);
+        let mut last = first;
+        while last + 1 < glyphs.len() && attrs_list.get_span(glyphs[last + 1].start) == attrs {
+            last += 1;
+        }
+        if let Some(least) = attrs.min_width_opt {
+            let width: f32 = glyphs[first..=last].iter().map(|g| g.x_advance).sum();
+            let lack = least.0 - width;
+            if lack > 0. {
+                glyphs[first].x_advance += lack / 2.;
+                glyphs[first].x_offset += lack / 2.;
+                glyphs[last].x_advance += lack / 2.;
+            }
+        }
+        first = last + 1;
     }
 }
 
@@ -1092,6 +1169,59 @@ fn shape_skip(
     }
 }
 
+/// zgx patch: the pair kerning the font `glyph` was shaped in gives it (its
+/// GPOS) before `next`, which a word boundary separates (as Chrome and Core
+/// Text shape across it), in em: how much the glyph's advance changes beside
+/// it. Asked of two kana, or of a space and what is next to it; `c1` is the
+/// glyph's character.
+pub fn pair_kerning(
+    font_system: &mut FontSystem,
+    glyph: &ShapeGlyph,
+    attrs_list: &AttrsList,
+    c1: char,
+    c2: char,
+) -> f32 {
+    let kana = |c: char| {
+        matches!(
+            unicode_script::Script::from(c),
+            unicode_script::Script::Hiragana | unicode_script::Script::Katakana
+        )
+    };
+    if !(kana(c1) && kana(c2)) && (c1 == ' ') == (c2 == ' ') {
+        return 0.;
+    }
+    if c1.is_whitespace() && c1 != ' ' || c2.is_whitespace() && c2 != ' ' {
+        return 0.;
+    }
+    let key = (glyph.font_id, glyph.font_weight.0, glyph.font_optical, c1, c2);
+    if let Some(known) = font_system.shape_buffer.pair_kern.get(&key) {
+        return *known;
+    }
+    let Some(font) = font_system.get_font_at(glyph.font_id, glyph.font_weight, glyph.font_optical)
+    else {
+        return 0.;
+    };
+    let pair = format!("{c1}{c2}");
+    let mut scratch = mem::take(&mut font_system.shape_buffer);
+    let (mut both, mut alone) = (Vec::new(), Vec::new());
+    shape_fallback(&mut scratch, &mut both, &font, &pair, attrs_list, 0, pair.len(), false);
+    let first = &pair[..c1.len_utf8()];
+    shape_fallback(&mut scratch, &mut alone, &font, first, attrs_list, 0, first.len(), false);
+    let mut kerning = 0.;
+    if let (Some(b), Some(a)) = (both.first(), alone.first()) {
+        if both.len() == 2
+            && alone.len() == 1
+            && b.glyph_id == a.glyph_id
+            && b.glyph_id != 0
+        {
+            kerning = b.x_advance - a.x_advance;
+        }
+    }
+    scratch.pair_kern.insert(key, kerning);
+    font_system.shape_buffer = scratch;
+    kerning
+}
+
 #[cfg(feature = "swash")]
 fn shape_skip_glyphs(
     glyphs: &mut Vec<ShapeGlyph>,
@@ -1155,7 +1285,7 @@ fn shape_skip_glyphs_as(
                     descent,
                     font_monospace_em_width,
                     font_id,
-                    font_weight: attrs.weight,
+                    font_weight: font.weight(),
                     font_optical: if font.has_optical() { attrs.optical } else { 0 },
                     glyph_id,
                     color_opt: attrs.color_opt,
@@ -1883,6 +2013,9 @@ impl ShapeSpan {
                     break;
                 }
             }
+            // The kerning a word boundary would lose: between the last
+            // character of a word and what follows it (a space, or a kana),
+            // and between a space and the next word's first.
             if start_word < start_lb {
                 let mut word = cached_words.pop().unwrap_or_else(ShapeWord::empty);
                 word.build(
@@ -1895,6 +2028,18 @@ impl ShapeSpan {
                     shaping,
                 );
                 words.push(word);
+                let c1 = span[..start_lb].chars().last();
+                let c2 = span[start_lb..].chars().next();
+                if let (Some(c1), Some(c2)) = (c1, c2) {
+                    if let Some(glyph) = words.last().and_then(|w| w.glyphs.last()).cloned() {
+                        let kern = pair_kerning(font_system, &glyph, attrs_list, c1, c2);
+                        if kern != 0. {
+                            if let Some(last) = words.last_mut().and_then(|w| w.glyphs.last_mut()) {
+                                last.x_advance += kern;
+                            }
+                        }
+                    }
+                }
             }
             if start_lb < end_lb {
                 for (i, c) in span[start_lb..end_lb].char_indices() {
@@ -1911,6 +2056,18 @@ impl ShapeSpan {
                         shaping,
                     );
                     words.push(word);
+                }
+                let c1 = span[start_lb..end_lb].chars().last();
+                let c2 = span[end_lb..].chars().next();
+                if let (Some(c1), Some(c2)) = (c1, c2) {
+                    if let Some(glyph) = words.last().and_then(|w| w.glyphs.last()).cloned() {
+                        let kern = pair_kerning(font_system, &glyph, attrs_list, c1, c2);
+                        if kern != 0. {
+                            if let Some(last) = words.last_mut().and_then(|w| w.glyphs.last_mut()) {
+                                last.x_advance += kern;
+                            }
+                        }
+                    }
                 }
             }
             start_word = end_lb;
@@ -2246,9 +2403,11 @@ impl ShapeLine {
         // paragraph at one level, as the bidi analysis would find: one span.
         // Any other line goes apart (`build_mixed`), so ASCII's path has
         // none of the analysis or what else a line beyond it may need.
-        let simple = line
-            .bytes()
-            .all(|b| b.is_ascii() && !matches!(b, b'\n' | b'\r' | 0x1C..=0x1E));
+        let forced = attrs_list.defaults().paragraph_rtl;
+        let simple = !forced
+            && line
+                .bytes()
+                .all(|b| b.is_ascii() && !matches!(b, b'\n' | b'\r' | 0x1C..=0x1E));
         if simple {
             self.build_spans(font_system, line, attrs_list, shaping, tab_width, None);
         } else {
@@ -2268,8 +2427,15 @@ impl ShapeLine {
         shaping: Shaping,
         tab_width: u16,
     ) {
+        let forced = attrs_list.defaults().paragraph_rtl;
         match line_kind(attrs_list, line) {
             LineKind::Hinted => self.build_hinted(font_system, line, attrs_list, shaping, tab_width),
+            _ if forced => {
+                // zgx: CSS `direction: rtl`: the paragraph's base level is
+                // right to left whatever its first strong character is.
+                let bidi = unicode_bidi::BidiInfo::new(line, Some(unicode_bidi::Level::rtl()));
+                self.build_spans(font_system, line, attrs_list, shaping, tab_width, Some(bidi));
+            }
             LineKind::LeftToRight => {
                 self.build_spans(font_system, line, attrs_list, shaping, tab_width, None);
             }

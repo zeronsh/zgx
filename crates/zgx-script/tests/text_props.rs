@@ -238,18 +238,19 @@ fn a_restyled_span_keeps_a_selection_across_it() {
     assert_eq!(h.error(), None);
 }
 
-/// `wrap = "balance"` balances a text's lines; a state switches it.
+/// `wrap = "balance"` and `"pretty"` fit a text's lines as Chrome does; a
+/// state switches them.
 #[test]
-fn wrap_balance_narrows_the_lines_and_follows_state() {
+fn wrap_fits_the_lines_and_follows_state() {
     use zgx::scene::NodeKind;
     let mut h = Harness::inline(
         r##"local mode = ui.state("mode", "balance")
         return ui.column {
             w = 600,
             ui.text {
-                "Balance this heading so that its words wrap more nicely",
+                "aaaa bbbb cccc dd",
                 id = "t",
-                w = 300,
+                w = 134.4,
                 text_size = 16,
                 wrap = mode,
             },
@@ -266,18 +267,23 @@ fn wrap_balance_narrows_the_lines_and_follows_state() {
             scene.children(node)[0]
         }
     };
-    let wrap = |h: &mut Harness| h.ui.scene.borrow().text_wrap(text, 300.).0;
-    assert!(wrap(&mut h) < 300.);
+    let fitted = |h: &mut Harness| h.ui.scene.borrow().fitted_breaks(text, 134.4);
+    assert_eq!(fitted(&mut h).as_deref(), Some(&[9][..]));
     h.host
         .set_state("mode", zgx_script::Value::Bool(true))
         .unwrap();
     h.frames(1);
-    assert_eq!(wrap(&mut h), 300., "plain wrapping");
+    assert_eq!(fitted(&mut h), None, "plain wrapping");
     h.host
         .set_state("mode", zgx_script::Value::Str("balance".into()))
         .unwrap();
     h.frames(1);
-    assert!(wrap(&mut h) < 300., "balanced again");
+    assert_eq!(fitted(&mut h).as_deref(), Some(&[9][..]), "balanced again");
+    h.host
+        .set_state("mode", zgx_script::Value::Str("pretty".into()))
+        .unwrap();
+    h.frames(1);
+    assert_eq!(fitted(&mut h).as_deref(), Some(&[9][..]), "and pretty");
 }
 
 /// `font_features = "hyphens"` hyphenates where the build can, and says
@@ -369,4 +375,87 @@ fn a_texts_lang_is_inherited_follows_state_and_a_span_says_its_own() {
         .unwrap();
     h.frames(1);
     assert_eq!(han(&mut h, "followed"), 6);
+}
+
+/// A `min_w = "100%"` row in a scroll given only a `max_h` fills its viewport.
+#[test]
+fn a_percent_min_width_in_a_capped_scroll_fills_the_viewport() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            w = 500,
+            ui.scroll {
+                id = "s",
+                max_h = 100,
+                ui.row {
+                    id = "r",
+                    min_w = "100%",
+                    justify = "center",
+                    ui.column { w = 100, h = 40 },
+                },
+            },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let (s, r) = (h.find("s").unwrap(), h.find("r").unwrap());
+    let scene = h.ui.scene.borrow();
+    assert_eq!(scene.bounds(s).width, 500.);
+    assert_eq!(scene.bounds(r).width, 500.);
+}
+
+/// A `min_w = "100%"` row in a `scroll_x` given only a `max_h` fills its viewport.
+#[test]
+fn a_percent_min_width_in_a_sideways_scroll_fills_the_viewport() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            w = 500,
+            ui.scroll_x {
+                id = "s",
+                max_h = 100,
+                ui.row {
+                    id = "r",
+                    min_w = "100%",
+                    justify = "center",
+                    ui.column { w = 100, h = 40 },
+                },
+            },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let (s, r) = (h.find("s").unwrap(), h.find("r").unwrap());
+    let scene = h.ui.scene.borrow();
+    assert_eq!(scene.bounds(s).width, 500.);
+    assert_eq!(scene.bounds(r).width, 500.);
+}
+
+/// `dir = "auto"` on text takes its first strong character's way, and
+/// `ui.direction_of` says it for a container.
+#[test]
+fn dir_auto_follows_the_text_and_direction_of_says_it() {
+    use zgx::scene::{Direction, NodeKind};
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            w = 400,
+            ui.text { "مرحبا", id = "ar", dir = "auto", w = 200 },
+            ui.text { "Hello", id = "en", dir = "auto", w = 200 },
+            ui.row { id = "row", dir = ui.direction_of("שלום") or "ltr", ui.text { "x" } },
+            ui.text { tostring(ui.direction_of("12")), id = "none" },
+        }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let way = |h: &mut Harness, id: &str| {
+        let mut node = h.find(id).unwrap();
+        let scene = h.ui.scene.borrow();
+        while !matches!(scene.kind(node), NodeKind::Text { .. }) {
+            node = scene.children(node)[0];
+        }
+        scene.direction(node)
+    };
+    assert_eq!(way(&mut h, "ar"), Direction::Rtl);
+    assert_eq!(way(&mut h, "en"), Direction::Ltr);
+    let row = h.find("row").unwrap();
+    assert_eq!(h.ui.scene.borrow().direction(row), Direction::Rtl);
+    assert_eq!(h.text("none"), "nil");
 }

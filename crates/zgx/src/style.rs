@@ -774,8 +774,8 @@ pub(crate) struct ColdStyles {
     pub(crate) layers: Option<std::sync::Arc<LayerStyles>>,
     /// `Styled::w_calc` and the like.
     pub(crate) size_calcs: Option<std::sync::Arc<crate::size_calc::SizeCalcs>>,
-    /// `Styled::text_balance`.
-    pub(crate) text_balance: Option<bool>,
+    /// `Styled::text_balance` and `text_pretty`.
+    pub(crate) text_fit: Option<Option<crate::text_wrap::TextWrap>>,
     /// `Styled::lang`.
     pub(crate) lang: Option<std::sync::Arc<str>>,
 }
@@ -865,6 +865,8 @@ pub(crate) struct RareStyles {
     pub(crate) snap: Option<bool>,
     /// `Styled::direction`: which way its lines run.
     pub(crate) direction: Option<crate::scene::Direction>,
+    /// `Styled::dir_auto`: its text sets which way it runs.
+    pub(crate) direction_auto: bool,
     pub(crate) border_style: Option<crate::decoration::BorderStyle>,
     /// `Styled::border_over`.
     pub(crate) border_over: Option<bool>,
@@ -921,6 +923,7 @@ impl RareStyles {
         fade_overflow: None,
         snap: None,
         direction: None,
+        direction_auto: false,
         border_style: None,
         border_over: None,
         outline: None,
@@ -978,6 +981,9 @@ impl RareStyles {
         if other.direction.is_some() {
             self.direction = other.direction;
         }
+        if other.direction_auto {
+            self.direction_auto = true;
+        }
         if other.border_over.is_some() {
             self.border_over = other.border_over;
         }
@@ -1014,8 +1020,8 @@ impl RareStyles {
             if theirs.object_position.is_some() {
                 mine.object_position = theirs.object_position;
             }
-            if theirs.text_balance.is_some() {
-                mine.text_balance = theirs.text_balance;
+            if theirs.text_fit.is_some() {
+                mine.text_fit = theirs.text_fit;
             }
             if theirs.lang.is_some() {
                 mine.lang = theirs.lang.clone();
@@ -2018,6 +2024,18 @@ pub trait Styled: Sized {
         self.styles_mut().fields_mut(bit::ABSOLUTE).absolute = Some(true);
         self
     }
+    /// Present to assistive technology and nowhere else (Tailwind's
+    /// `sr-only`): a 1 by 1 clipped box, absolute, painting nothing, so it
+    /// takes no room and stays in the accessibility tree, as a live region's
+    /// text must (`invisible` leaves the tree, as `visibility: hidden` does,
+    /// and so does a node at no opacity: this keeps a thousandth, which no
+    /// pixel shows).
+    fn sr_only(self) -> Self {
+        self.absolute()
+            .size(1., 1.)
+            .overflow_hidden()
+            .opacity(0.001)
+    }
     /// Make the view the containing block of its `absolute` descendants
     /// (CSS `position: relative`), and keep it in normal flow (undoing
     /// `absolute`). It changes nothing about its own layout.
@@ -2938,15 +2956,25 @@ pub trait Styled: Sized {
         rare.cold.get_or_insert_default().lang = Some(language.into());
         self
     }
-    /// Wrap text with its lines balanced (CSS's `text-wrap: balance`): at
-    /// the narrowest width that keeps as many lines, so a heading's last line
-    /// isn't left short. For up to six lines; its box is as it was.
-    fn text_balance(mut self, balance: bool) -> Self {
-        if balance {
+    /// Wrap text with its lines balanced (CSS's `text-wrap: balance`), as
+    /// Chrome breaks them: evenly, for up to six lines. Its box is as it was.
+    fn text_balance(self, balance: bool) -> Self {
+        self.text_fit(balance.then_some(crate::text_wrap::TextWrap::Balance))
+    }
+    /// Wrap text so its last lines don't end on a short one (CSS's
+    /// `text-wrap: pretty`), as Chrome breaks them: the last four lines
+    /// of a paragraph fitted again.
+    fn text_pretty(self, pretty: bool) -> Self {
+        self.text_fit(pretty.then_some(crate::text_wrap::TextWrap::Pretty))
+    }
+    /// `text_balance` or `text_pretty`, or neither (`None`, which stops
+    /// what an ancestor asked).
+    fn text_fit(mut self, fit: Option<crate::text_wrap::TextWrap>) -> Self {
+        if fit.is_some() {
             self.styles_mut().fields_mut(bit::TEXT_WRAP).text_wrap = Some(true);
         }
         let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
-        cold.text_balance = Some(balance);
+        cold.text_fit = Some(fit);
         self
     }
     /// `w(width).h(height)`.
@@ -3381,6 +3409,15 @@ pub trait Styled: Sized {
     /// have: a toolbar that stays put, a canvas that zooms itself.
     fn zoom_fixed(mut self) -> Self {
         self.styles_mut().rare_mut().zoom = Some(ZoomStyle::Fixed);
+        self
+    }
+    /// Text that runs the way its first strong character does (HTML's
+    /// `dir=auto`): right to left for Arabic, Hebrew, Persian or Urdu
+    /// letters, so its lines start at the right and its mirrored edges follow;
+    /// text with no strong character, and what isn't text, take their
+    /// parent's. Re-decided as the text changes.
+    fn dir_auto(mut self) -> Self {
+        self.styles_mut().rare_mut().direction_auto = true;
         self
     }
     /// `direction(Direction::Rtl)`: Arabic, Hebrew, Persian, Urdu.

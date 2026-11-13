@@ -2286,8 +2286,8 @@ fn submenu_side_flip_and_dismissal_match_full_repaint_without_layout() {
     let parent_bounds = ui.scene.borrow().bounds(parent);
     // Beside its parent: on Windows, its trigger inset by the item's margin
     // and the submenu opened beside that, over the parent's edge by 4, as a
-    // Windows submenu laps its parent.
-    let overlap = if cfg!(windows) { 4. } else { 0. };
+    // Windows submenu laps its parent (and Base UI's sits 1 over its menu's edge).
+    let overlap = if cfg!(windows) { 4. } else { 1. };
     assert!(bounds.x >= parent_bounds.x + parent_bounds.width - overlap);
     let pixel = |pixels: &[u8], rect: Rect| {
         let i = ((rect.y as usize + 50) * 400 + rect.x as usize + 90) * 4;
