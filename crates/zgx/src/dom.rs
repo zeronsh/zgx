@@ -299,6 +299,9 @@ pub struct Overlay {
     pub interactive: bool,
     /// A modal's backdrop, as CSS.
     pub backdrop: Option<String>,
+    /// A popover's arrow (`View::arrow`): how far it reaches from the
+    /// panel's edge, 0 for none.
+    pub arrow: f32,
 }
 
 /// A part of the tree that changes shape: one view at a time, keyed rows or
@@ -917,8 +920,16 @@ fn overlay(
             } else {
                 tok::SURFACE_OVERLAY
             })
-            .rounded(radius)
-            .overflow_hidden();
+            .rounded(radius);
+        // Its content clipped to its corners, unless an arrow shows past
+        // its edge.
+        let arrowed = kind == OverlayKind::Popover
+            && options
+                .as_ref()
+                .is_some_and(|o| o.arrow.is_some_and(|a| a > 0.));
+        if !arrowed {
+            defaults = defaults.overflow_hidden();
+        }
         if is_menu {
             defaults = defaults.items_stretch();
         }
@@ -986,6 +997,11 @@ fn overlay(
         delay_ms: delay.as_millis().min(u32::MAX as u128) as u32,
         interactive,
         backdrop,
+        // Anchored popovers have one; menus none.
+        arrow: match kind {
+            OverlayKind::Popover => options.as_ref().and_then(|o| o.arrow).unwrap_or(0.),
+            _ => 0.,
+        },
     };
     let mut el = primitive(
         view,

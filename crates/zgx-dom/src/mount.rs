@@ -863,6 +863,7 @@ fn mount_overlay(overlay: Overlay, panel: u32, runtime: &Runtime, block: &mut Bl
         delay_ms,
         interactive,
         backdrop,
+        arrow,
     } = overlay;
     let anchor = anchor.map(|anchor| mount_view(anchor, &outer, block));
     let write = open.clone();
@@ -897,6 +898,7 @@ fn mount_overlay(overlay: Overlay, panel: u32, runtime: &Runtime, block: &mut Bl
             offset.to_bits(),
             flags,
             delay_ms,
+            arrow.to_bits(),
         ]);
         wrapper
     });

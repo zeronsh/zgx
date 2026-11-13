@@ -43,7 +43,7 @@ fn layout(code: u32) -> Option<&'static [Field]> {
         ops::IMAGE => &[W, W, W, W, W],
         ops::VISIBLE => &[W, W, W],
         ops::SHOW => &[W, W],
-        ops::OVERLAY => &[W, S, W, W, W, W, W, W, W, W],
+        ops::OVERLAY => &[W, S, W, W, W, W, W, W, W, W, W],
         _ => return None,
     })
 }

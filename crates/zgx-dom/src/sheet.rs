@@ -31,6 +31,8 @@ pub(crate) const BASE_CSS: &str = "\
 .zp[data-layer]{inset:0;width:auto;height:auto;max-width:none;max-height:none;pointer-events:none;}\
 .zp[data-layer]>*{pointer-events:auto;}\
 .zp[role=tooltip]{transition:opacity .14s ease-out;}\
+.zp.za{overflow:visible;}\
+.za::before{content:\"\";position:absolute;z-index:-1;left:var(--zx);top:var(--zy);width:var(--zs);height:var(--zs);background:inherit;transform:translate(-50%,-50%) rotate(45deg);}\
 @starting-style{.zp[role=tooltip]:popover-open{opacity:0;}}\
 ";
 
