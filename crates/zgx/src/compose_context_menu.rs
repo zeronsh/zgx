@@ -64,6 +64,7 @@ impl View {
         let rare = self.rare_mut();
         rare.context_menu = Some(Box::new(move |event, _| build(event)));
         rare.context_menu_spans = false;
+        self.accessibility_mut().context_menu = true;
         self
     }
     /// `context_menu`, told the run of the paragraph it was asked for on
@@ -75,6 +76,7 @@ impl View {
         mut self,
         mut build: impl FnMut(&ContextMenuEvent, Option<&ContextMenuSpan>) -> Vec<View> + 'static,
     ) -> Self {
+        self.accessibility_mut().context_menu = true;
         let rare = self.rare_mut();
         // The run, found as it is asked (`compose_rich::locate_for`): its
         // paragraph keeps what finds it, and nothing else pays for it.

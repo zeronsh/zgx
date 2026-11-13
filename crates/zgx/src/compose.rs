@@ -1495,7 +1495,7 @@ impl View {
             None => self.accessible_label(label),
         }
     }
-    fn accessibility_mut(&mut self) -> &mut Accessibility {
+    pub(crate) fn accessibility_mut(&mut self) -> &mut Accessibility {
         self.rare_mut()
             .accessibility
             .get_or_insert_with(Default::default)
@@ -8799,6 +8799,8 @@ pub(crate) struct Accessibility {
     expanded: Option<Box<dyn FnMut() -> bool>>,
     /// `View::accessible_has_popup` (`aria-haspopup`).
     has_popup: Option<crate::semantics::PopupKind>,
+    /// Set by `View::context_menu` (`AXShowMenu`).
+    pub(crate) context_menu: bool,
     value: Option<Box<dyn FnMut() -> String>>,
     numeric: Option<(f64, f64, NumericValue)>,
     live: Option<Live>,
@@ -8839,6 +8841,7 @@ impl Accessibility {
         if outer.has_popup.is_some() {
             inner.has_popup = outer.has_popup;
         }
+        inner.context_menu |= outer.context_menu;
         if outer.value.is_some() {
             inner.value = outer.value;
         }
@@ -8909,6 +8912,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         radio_item,
         expanded,
         has_popup,
+        context_menu,
         value,
         numeric,
         live,
@@ -8974,6 +8978,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             node.hidden |= hidden;
             node.modal |= modal;
             node.has_popup = has_popup.or(node.has_popup);
+            node.context_menu |= context_menu;
         });
     }
     // A name or value worked out from state is read by assistive technology

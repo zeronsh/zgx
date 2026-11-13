@@ -3851,6 +3851,21 @@ impl Host {
                 self.context.ui.scroll_into_view(node);
                 self.accessibility_revealed = true;
             }
+            accesskit::Action::ShowContextMenu => {
+                self.context
+                    .ui
+                    .input
+                    .focus(&self.context.ui.scene, Some(node));
+                self.context.ui.input.dispatch_to(
+                    &self.context.ui.scene,
+                    node,
+                    InputEvent::KeyDown {
+                        key: zgx::input::Key::ContextMenu,
+                        modifiers: Default::default(),
+                        repeat: false,
+                    },
+                );
+            }
             accesskit::Action::Click => {
                 self.context.ui.input.dispatch_to(
                     &self.context.ui.scene,

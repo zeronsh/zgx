@@ -143,3 +143,25 @@ fn a_pointer_menu_hangs_two_along_and_four_under_the_pointer_as_base_ui() {
     let b = scene.bounds(panel);
     assert_eq!((b.x, b.y), (102., 104.), "the panel's corner: {b:?}");
 }
+
+#[test]
+fn a_view_with_a_menu_tells_assistive_technology_it_has_one() {
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        div().p(40.).child(
+            button()
+                .id("file")
+                .size(120., 30.)
+                .child(text("Report.pdf"))
+                .context_menu(|_| vec![menu_item("Rename")]),
+        ),
+    );
+    ui.prepare_frame();
+    let file = view.find("file").unwrap();
+    assert!(
+        ui.semantics
+            .borrow()
+            .get(file)
+            .is_some_and(|n| n.context_menu)
+    );
+}

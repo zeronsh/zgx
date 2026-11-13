@@ -869,6 +869,9 @@ impl AccessibilityTree {
             if let Some(expanded) = semantic.expanded {
                 n.set_expanded(expanded);
             }
+            if semantic.context_menu {
+                n.add_action(Action::ShowContextMenu);
+            }
             if let Some(popup) = semantic.has_popup {
                 n.set_has_popup(match popup {
                     zgx::semantics::PopupKind::Menu => accesskit::HasPopup::Menu,
@@ -3835,6 +3838,25 @@ mod vocabulary_tests {
             .filter(|n| n.role() == accesskit::Role::TextRun && n.value() == Some("Notes\n"))
             .count();
         assert_eq!(runs, 1);
+    }
+
+    #[test]
+    fn a_view_with_a_context_menu_offers_show_menu() {
+        let mut ui = Ui::new(400., 300.);
+        ui.mount(
+            column()
+                .child(
+                    button()
+                        .accessible_label("Report")
+                        .context_menu(|_| vec![menu_item("Rename")]),
+                )
+                .child(button().accessible_label("Plain")),
+        );
+        let nodes = project(&mut ui);
+        let buttons = find(&nodes, accesskit::Role::Button);
+        let by = |label: &str| *buttons.iter().find(|n| n.label() == Some(label)).unwrap();
+        assert!(by("Report").supports_action(Action::ShowContextMenu));
+        assert!(!by("Plain").supports_action(Action::ShowContextMenu));
     }
 
     #[test]

@@ -194,6 +194,9 @@ pub struct SemanticNode {
     pub expanded: Option<bool>,
     /// What it opens, if anything.
     pub has_popup: Option<PopupKind>,
+    /// It has a context menu (`View::context_menu`): assistive technology
+    /// can ask for it (`AXShowMenu`), as Shift+F10 does.
+    pub context_menu: bool,
     /// None preserves the vertical default of legacy scroll views.
     pub scroll_axis: Option<ScrollAxis>,
     /// The label was given (`View::accessible_label`), not derived from the
@@ -306,6 +309,7 @@ impl SemanticNode {
             modal: false,
             expanded: None,
             has_popup: None,
+            context_menu: false,
             scroll_axis: None,
             selected: None,
             live: None,
