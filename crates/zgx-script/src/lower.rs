@@ -9106,6 +9106,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
                     out = out.icon(span_icon(&vm, &low, icon));
                 }
+                if let Some(icon) = rare.and_then(|rare| rare.trailing_icon.as_ref()) {
+                    out = out.trailing_icon(span_icon(&vm, &low, icon));
+                }
                 out
             })
             .collect();

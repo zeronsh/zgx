@@ -5898,6 +5898,17 @@ export type SpanProps = {
 		-- well).
 		align: ("center" | "baseline")?,
 	}?,
+	-- An icon after the text, in the line (a chip's arrow): `size` square,
+	-- centred on the line, `gap` from the text (the link's box includes it).
+	trailing_icon: {
+		src: string?,
+		code: string?,
+		size: number?,
+		gap: number?,
+		margin: number?,
+		dy: number?,
+		tint: Color?,
+	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
 	-- a link: told the keys held. Returning `true` handled it: its `href`
 	-- doesn't open.

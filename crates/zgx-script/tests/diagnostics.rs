@@ -1212,3 +1212,22 @@ return ui.column { w = 200, h = 100,
     assert_eq!(effects.filter_blur, 0., "{effects:?}");
     assert_eq!(effects.blur_radius, 0., "{effects:?}");
 }
+
+#[test]
+fn a_span_takes_a_leading_and_a_trailing_icon() {
+    let widths: Vec<f32> = ["", "trailing_icon = { code = '<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><rect width=\"16\" height=\"16\"/></svg>', size = 12, gap = 4 },"]
+        .iter()
+        .map(|extra| {
+            let mut h = Harness::inline(&format!(
+                r##"return ui.row {{ w = 400, h = 100,
+    ui.rich {{ id = "r", ui.span {{ "Notion", on_click = function() end, {extra} }} }},
+}}"##
+            ));
+            h.settle();
+            h.frames(3);
+            let r = h.find("r").unwrap();
+            h.ui.scene.borrow().bounds(r).width
+        })
+        .collect();
+    assert!(widths[1] >= widths[0] + 15.9, "{widths:?}");
+}

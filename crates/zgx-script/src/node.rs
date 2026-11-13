@@ -1598,6 +1598,8 @@ pub(crate) type HoverFill = (
 pub(crate) struct SpanRare {
     /// An icon before the text, in the line.
     pub icon: Option<SpanIcon>,
+    /// An icon after the text, in the line.
+    pub trailing_icon: Option<SpanIcon>,
     /// The icon in its place while the pointer is on a link span
     /// (`hover = { icon = … }`).
     pub hover_icon: Option<SpanIcon>,
@@ -5286,6 +5288,10 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"icon" => {
                     let icon: Table = lua.unpack(given)?;
                     rare_mut(&mut span).icon = Some(span_icon(&icon)?);
+                }
+                b"trailing_icon" => {
+                    let icon: Table = lua.unpack(given)?;
+                    rare_mut(&mut span).trailing_icon = Some(span_icon(&icon)?);
                 }
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
                 b"on_click" => span.click = Some(handler(given)?),

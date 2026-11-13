@@ -5383,32 +5383,50 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, mut icon, menu, plain, room_after, outset, on_hover, border, min_width) =
-                match span.extras.take() {
-                    None => (None, None, None, false, -1., 0., None, None, 0.),
-                    Some(extras) => {
-                        let extras = *extras;
-                        let end = extras.padding_end.unwrap_or(span.padding[0]);
-                        let apart = extras.icon.is_some() || end != span.padding[0];
-                        // Its text's run comes next, after the room before it
-                        // when that's apart. Noted here, where only spans with
-                        // extras come, so a plain span pays nothing for fades.
-                        if let Some(fade) = extras.fade {
-                            fading.note(runs.len() + usize::from(apart), fade);
-                        }
-                        (
-                            extras.hover,
-                            extras.icon,
-                            extras.menu,
-                            extras.plain,
-                            if apart { end } else { -1. },
-                            extras.outset,
-                            extras.on_hover,
-                            extras.border,
-                            extras.min_width,
-                        )
+            let (
+                hover,
+                mut icon,
+                menu,
+                plain,
+                room_after,
+                outset,
+                on_hover,
+                border,
+                min_width,
+                trailing,
+            ) = match span.extras.take() {
+                None => (None, None, None, false, -1., 0., None, None, 0., None),
+                Some(extras) => {
+                    let extras = *extras;
+                    let end = extras.padding_end.unwrap_or(span.padding[0]);
+                    let apart = extras.icon.is_some()
+                        || extras.trailing_icon.is_some()
+                        || end != span.padding[0];
+                    let end = end
+                        + extras
+                            .trailing_icon
+                            .as_ref()
+                            .map_or(0., |t| t.size + t.gap + 2. * t.margin);
+                    // Its text's run comes next, after the room before it
+                    // when that's apart. Noted here, where only spans with
+                    // extras come, so a plain span pays nothing for fades.
+                    if let Some(fade) = extras.fade {
+                        fading.note(runs.len() + usize::from(apart), fade);
                     }
-                };
+                    (
+                        extras.hover,
+                        extras.icon,
+                        extras.menu,
+                        extras.plain,
+                        if apart { end } else { -1. },
+                        extras.outset,
+                        extras.on_hover,
+                        extras.border,
+                        extras.min_width,
+                        extras.trailing_icon,
+                    )
+                }
+            };
             let mut hover = hover;
             let styled_hover = hover.is_some();
             if link && !styled_hover && !plain {
@@ -5474,6 +5492,7 @@ fn paragraph_effect<const LOCATING: bool>(
                 links.push(crate::compose_rich::Link {
                     range: start..content.len(),
                     hit_start: icon_at.as_ref().map_or(start, |icon| icon.start),
+                    hit_end: content.len(),
                     action: span.action,
                     href: span.href,
                     label: span.label,
@@ -5701,6 +5720,37 @@ fn paragraph_effect<const LOCATING: bool>(
             // The room after the text: a placeholder of its own.
             if room_after > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                if let Some(link) = links.last_mut().filter(|l| l.range.end == text_end) {
+                    link.hit_end = content.len();
+                }
+                if let Some(icon) = trailing {
+                    let tint = match icon.tint {
+                        Some(crate::theme::Themed::Value(tint)) => {
+                            std::sync::Arc::new(icon.svg.tinted(tint))
+                        }
+                        Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                            icon.svg.tinted(
+                                theme
+                                    .get(token)
+                                    .color()
+                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                            ),
+                        ),
+                        None if icon.svg.follows_text_color() => {
+                            std::sync::Arc::new(icon.svg.tinted(color))
+                        }
+                        None => icon.svg,
+                    };
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range: text_end..content.len(),
+                        svg: tint,
+                        size: icon.size,
+                        inset: icon.gap + icon.margin,
+                        dy: icon.dy,
+                        well: None,
+                        boxed: None,
+                    });
+                }
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
