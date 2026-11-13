@@ -63,6 +63,7 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 | --- | --- |
 | `div`, `column`, `row`, `overlay` | `<div>` |
 | `text`, `text_signal` | a text node, or a `<span>` when styled |
+| `rich_text`, `rich_text_signal` | one paragraph: a span with nothing of its own is a text node, others a `<span>` with a class for its look (weight, italic, size, family, colour, letter spacing, background, padding, radius, underline and strikethrough with their style, thickness, colour and offset), a link an `<a>`: a web or mail `href` opens in a tab of its own, a click that says it handled the link (`on_click_handled`) keeps it from opening, and a link with no `href` is `role=link`, focusable and pressed with Enter. A `hover` style is a `:hover` rule, an icon a masked box before the text (tinted, or as drawn, on its well), and `fade_in` a CSS animation. As the spans change, those that still look the same keep their nodes (streamed text appends) |
 | `button` | `<button type=button>` (keyboard activation is the browser's) |
 | `text_input`, `text_area` | `<input>`, `<textarea>`: the browser's editing, selection, clipboard, spellcheck and IME; the value is written only when it differs, so a composition is never interrupted |
 | `checkbox`, `slider`, `progress` | `<input type=checkbox>` in a `<label>`, `<input type=range>`, `<progress>` (NaN: indeterminate) |
@@ -85,7 +86,7 @@ Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau apps' host services**: `ui.fetch`, sockets, files, plugins from the disk, hot reload and `zgx check` need hosts zgx-dom doesn't have yet; images in Luau apps show their labels (zgx-script decodes them with zgx-gpu, which isn't linked in the browser).
-- **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
+- **Not yet mapped**: a span's own context menu, canvas drawing (its display list maps to Canvas 2D), SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 
 ## Performance
