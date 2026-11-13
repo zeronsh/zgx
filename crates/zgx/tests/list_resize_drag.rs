@@ -153,7 +153,7 @@ fn spare_on(ui: &Ui, clock: &zgx::clock::VirtualClock) {
     while ui.spare_work_wanted() {
         ui.run_spare_work(Instant::now(), Duration::from_secs(60))
             .unwrap();
-        later(&clock, Duration::from_millis(10));
+        later(clock, Duration::from_millis(10));
         turns += 1;
         assert!(turns < 10_000);
     }
