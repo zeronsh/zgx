@@ -862,7 +862,9 @@ jobs:
       # read once a process), so what it can't draw shows here and not
       # silently. Each skip has its reason beside it; drop the skip with
       # its reason. (The d3d11_* tests set it themselves, and run again
-      # here as they are.)
+      # here as they are.) Unoptimized like the steps above: some eighty
+      # test binaries built with the release profile's LTO took past the
+      # job's hour.
       - name: zgx-gpu's tests drawn with Direct3D 11
         shell: bash
         run: |
@@ -885,7 +887,7 @@ jobs:
           )
           args=()
           for skip in "${skips[@]}"; do args+=(--skip "$skip"); done
-          cargo test -p zgx-gpu --features d3d11 --release --locked --tests -- "${args[@]}"
+          cargo test -p zgx-gpu --features d3d11 --locked --tests -- "${args[@]}"
         env:
           ZGX_D3D11: "1"
       # Its ahead-compiled shaders (dxbc/) are FXC's bytecode of naga's HLSL
