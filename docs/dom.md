@@ -68,7 +68,7 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 | `text_input`, `text_area` | `<input>`, `<textarea>`: the browser's editing, selection, clipboard, spellcheck and IME; the value is written only when it differs, so a composition is never interrupted |
 | `checkbox`, `slider`, `progress` | `<input type=checkbox>` in a `<label>`, `<input type=range>`, `<progress>` (NaN: indeterminate) |
 | `scroll`, `scroll_x` | `overflow: auto`, its offset signal both ways |
-| `virtual_list` | a scroller holding only the rows that show, positioned in a spacer as tall as all of them |
+| `virtual_list`, `variable_virtual_list`, `measured_virtual_list`, `measured_rows` | a scroller holding only the rows that show, positioned in a spacer as tall as all of them, each at its own height. A measured list's rows are as tall as they lay out, reported by ResizeObserver into its heights (at least a pixel). As heights above the view change, the row first in view stays where it shows, or the end for heights anchored there (`anchor_end`); resting at the top, nothing anchors |
 | `image` | a `<canvas>` with the image's pixels, `role=img` and its label |
 | `switch`, `keyed`, `child_when` | a region (`display: contents` unless styled) |
 | roles, labels, levels, live regions, checked, selected, expanded, values, descriptions, hidden, modal | ARIA: `role`, `aria-label`, `aria-level`, `aria-live`, `aria-checked`… |
@@ -86,7 +86,7 @@ Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau apps' host services**: `ui.fetch`, sockets, files, plugins from the disk, hot reload and `zgx check` need hosts zgx-dom doesn't have yet; images in Luau apps show their labels (zgx-script decodes them with zgx-gpu, which isn't linked in the browser).
-- **Not yet mapped**: a span's own context menu, canvas drawing (its display list maps to Canvas 2D), SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
+- **Not yet mapped**: a span's own context menu, canvas drawing (its display list maps to Canvas 2D), SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 
 ## Performance

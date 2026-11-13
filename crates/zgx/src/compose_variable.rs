@@ -121,6 +121,19 @@ impl VariableHeights {
         self.index.borrow().row_at(offset)
     }
 }
+#[cfg(feature = "dom")]
+impl VariableHeights {
+    /// Measured rows' one-pixel floor, as a measured list applies it.
+    pub(crate) fn floor_measured(&self) {
+        if self.index.borrow_mut().enforce_minimum(1.) {
+            self.changed();
+        }
+    }
+    /// Whether a viewport resting at its end stays there (`anchor_end`).
+    pub(crate) fn anchors_end(&self) -> bool {
+        self.end.get()
+    }
+}
 struct Anchor {
     revision: u64,
     length: usize,
@@ -584,6 +597,12 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
     measured: bool,
 ) -> View {
+    #[cfg(feature = "dom")]
+    if __dom::DOM_ONLY {
+        return __dom::region_only(__dom::variable_region(
+            offset, heights, measured, overscan, key, build,
+        ));
+    }
     let rows = RowSource::new(key, build);
     let source = rows.rows({
         let heights = heights.clone();

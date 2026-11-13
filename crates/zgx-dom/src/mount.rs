@@ -1324,17 +1324,37 @@ struct VirtualRow {
     block: Block,
     holder: u32,
     index: Signal<usize>,
+    /// Where it lies and how tall it is, as last written (a measured row's
+    /// height is its own: NaN).
+    place: (f32, f32),
 }
 
+/// A row's place: its top, and its height unless it is measured (then as
+/// tall as it lays out).
+fn row_css(top: f32, height: f32) -> String {
+    match height.is_nan() {
+        true => format!("top:{top}px;"),
+        false => format!("top:{top}px;height:{height}px;"),
+    }
+}
+
+/// A virtual list (`virtual_list`, `variable_virtual_list`,
+/// `measured_virtual_list`): a scroller holding only the rows in view and
+/// its overscan, each at its offset in a space as tall as all of them. A
+/// measured list's rows report their heights (ResizeObserver) into its
+/// heights; as heights change above the view, the first row in view stays
+/// where it shows (or the end, for one anchored there), as the desktop
+/// anchors it.
 fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut Block) {
     let VirtualRegion {
         offset,
-        row_height,
+        heights,
         overscan,
         mut count,
         mut key,
         build,
     } = region;
+    let heights = Rc::new(heights);
     let runtime = scope.runtime().clone();
     let viewport = runtime.signal(0_f32);
     let space = ops::with(|ops| {
@@ -1371,9 +1391,14 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
     let (state, scope) = (rows.clone(), scope.clone());
     let mut wanted: Vec<(usize, u32)> = Vec::new();
     let mut extent = f32::NAN;
+    // The row first in view, how far into it the view's top was, and the
+    // offset then: kept where it shows as heights above it change.
+    let mut anchor: Option<(usize, f32, f32)> = None;
+    let mut at_end = false;
+    let measured = heights.measured();
     block.effect(space, &runtime.clone(), move || {
         let n = count();
-        let total = n as f32 * row_height;
+        let total = heights.total(n);
         if total != extent {
             extent = total;
             ops::with(|ops| {
@@ -1384,13 +1409,44 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
                 )
             });
         }
-        let (top, height) = (offset.get().max(0.), viewport.get().max(row_height));
-        let first = ((top / row_height) as usize).saturating_sub(overscan);
-        let last = (((top + height) / row_height).ceil() as usize + overscan).min(n);
+        let seen = viewport.get();
+        let mut top = offset.get().max(0.);
+        // The view didn't scroll, but heights changed: it stays on its row
+        // (or its end), unless resting at the top.
+        if let Some((index, within, was)) = anchor
+            && top == was
+        {
+            let kept = if at_end {
+                (total - seen).max(0.)
+            } else {
+                heights.top(index.min(n)) + within
+            };
+            if (kept - top).abs() >= 0.5 && top > 0. {
+                top = kept;
+                runtime.untracked(|| offset.set(top));
+            }
+        }
+        let height = seen.max(1.);
+        at_end = heights.anchors_end() && top > 0. && top + height >= total - 1.;
+        let first = heights.row_at(top, n);
+        anchor = (n > 0).then(|| (first, top - heights.top(first), top));
+        let first = first.saturating_sub(overscan);
+        let last = (heights.row_at(top + height, n) + 1 + overscan).min(n);
         wanted.clear();
         for index in first.min(last)..last {
             wanted.push((index, key(index)));
         }
+        let places: Vec<(f32, f32)> = wanted
+            .iter()
+            .map(|&(index, _)| {
+                let height = if measured {
+                    f32::NAN
+                } else {
+                    heights.height(index)
+                };
+                (heights.top(index), height)
+            })
+            .collect();
         runtime.untracked(|| {
             let mut rows = state.borrow_mut();
             let keep: std::collections::HashSet<u32> = wanted.iter().map(|(_, id)| *id).collect();
@@ -1402,17 +1458,16 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
                 }
                 kept
             });
-            for &(index, id) in &wanted {
-                let top = index as f32 * row_height;
-                if let Some(row) = rows.get(&id) {
+            for (&(index, id), &place) in wanted.iter().zip(&places) {
+                if let Some(row) = rows.get_mut(&id) {
                     if row.index.with_untracked(|i| *i) != index {
                         row.index.set(index);
+                    }
+                    // (NaN never equals: compare a measured row's top alone.)
+                    if row.place.0 != place.0 || (!measured && row.place.1 != place.1) {
+                        row.place = place;
                         ops::with(|ops| {
-                            ops.op_str(
-                                ops::STYLE,
-                                row.holder,
-                                &format!("top:{top}px;height:{row_height}px;"),
-                            )
+                            ops.op_str(ops::STYLE, row.holder, &row_css(place.0, place.1))
                         });
                     }
                     continue;
@@ -1427,13 +1482,17 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
                     ops.op(&[ops::CREATE, row_holder, Tag::Div as u32]);
                     let class = sheet::plain(ops, "z zv");
                     ops.op(&[ops::CLASS, row_holder, class]);
-                    ops.op_str(
-                        ops::STYLE,
-                        row_holder,
-                        &format!("top:{top}px;height:{row_height}px;"),
-                    );
+                    ops.op_str(ops::STYLE, row_holder, &row_css(place.0, place.1));
                     row_holder
                 });
+                if measured {
+                    let (heights, index) = (heights.clone(), index_signal.clone());
+                    row_block.on(row_holder, ops::ON_RESIZE, move |event| {
+                        if let Event::Resize(_, height, _, _) = event {
+                            heights.measure(index.with_untracked(|i| *i), height);
+                        }
+                    });
+                }
                 let root = mount_view(view, &scope, &mut row_block);
                 row_block.root = row_holder;
                 ops::with(|ops| {
@@ -1446,6 +1505,7 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
                         block: row_block,
                         holder: row_holder,
                         index: index_signal,
+                        place,
                     },
                 );
             }
