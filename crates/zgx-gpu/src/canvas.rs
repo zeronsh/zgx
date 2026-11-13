@@ -1678,7 +1678,7 @@ fn draw_label(
 fn blend_glyphs(
     pixmap: &mut sk::Pixmap,
     (left, top): (i32, i32),
-    glyphs: &[(i32, i32, cosmic_text::SwashImage)],
+    glyphs: &[(i32, i32, Arc<cosmic_text::SwashImage>)],
     label: &CanvasText,
     zoom: f32,
     mask: Option<&sk::Mask>,
@@ -1768,22 +1768,14 @@ fn rasterize_scaled(
     height: f32,
     font: &zgx::text_layout::FontStyle,
     scale: f32,
-) -> Vec<(i32, i32, cosmic_text::SwashImage)> {
-    use crate::text::{glyph_image, set_buffer_text, wrap_width};
-    use cosmic_text::{Buffer, Metrics};
-    let (fonts, swash) = raster.parts();
-    let size = size.max(1.);
-    let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
-    buffer.set_size(wrap_width(Some(width)), Some(height));
-    set_buffer_text(fonts, &mut buffer, text, font, size);
-    buffer.shape_until_scroll(fonts, false);
-    let glyphs = crate::styled_glyphs(Vec::new(), buffer.layout_runs(), scale, |_, _| 0);
+) -> Vec<(i32, i32, Arc<cosmic_text::SwashImage>)> {
+    // Laid out in points once, placed at this scale each time.
+    let lines = raster.layout(text, size, width, height, font);
+    let runs = lines.iter().map(crate::text::LaidLine::run);
+    let glyphs = crate::styled_glyphs(Vec::new(), runs, scale, |_, _| 0);
     glyphs
         .into_iter()
-        .filter_map(|glyph| {
-            let image = glyph_image(swash, fonts, glyph.key)?;
-            Some((glyph.x as i32, glyph.y as i32, image))
-        })
+        .filter_map(|glyph| Some((glyph.x as i32, glyph.y as i32, raster.glyph(glyph.key)?)))
         .collect()
 }
 /// `image` as a JPEG file's bytes at `quality` (1 to 100). JPEG keeps no
