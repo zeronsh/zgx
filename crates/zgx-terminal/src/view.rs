@@ -567,7 +567,10 @@ impl Engine {
             Vec::new()
         };
         let news = if output && listening {
-            self.news_of(&shown, &changed, scrolled)
+            match scrolled {
+                0 => self.news_of(&shown, &changed),
+                _ => self.scrolled_news_of(&shown, &changed, scrolled),
+            }
         } else {
             String::new()
         };
@@ -658,16 +661,56 @@ impl Engine {
     /// What a reader hears of rows `changed` from what the rows show: new
     /// lines and what lines gained, less the shell's echo of what was typed.
     /// `shown`, every row's paint, when every row changed (output may have
-    /// scrolled them); otherwise empty. `scrolled`: the lines shown moved up
-    /// that many rows first, the changed rows built after (before the slots
-    /// move with them, which the batch does). Rows that didn't all change
-    /// are compared alone, each with the row whose line it now shows (none
-    /// for a line brought in); otherwise every row. Out of line: worked out
-    /// only while a reader listens, it leaves the paint of every other frame
-    /// as it was.
+    /// scrolled them); otherwise empty, and only the changed rows are read.
+    /// Out of line: worked out only while a reader listens, it leaves the
+    /// paint of every other frame as it was.
     #[cold]
     #[inline(never)]
-    fn news_of(
+    fn news_of(&self, shown: &[Rc<RowPaint>], changed: &[(usize, RowPaint)]) -> String {
+        if changed.is_empty() {
+            return String::new();
+        }
+        let news = if shown.is_empty() {
+            // Rows that didn't all change didn't scroll: what each changed
+            // row showed is all there is to compare.
+            let rows = self.rows.borrow();
+            let slots = self.slots.borrow();
+            // Top first, as a reader hears the screen.
+            let mut was: Vec<(usize, Rc<RowPaint>, &RowPaint)> = changed
+                .iter()
+                .filter_map(|(row, now)| {
+                    let slot = slots.get(*row)?;
+                    Some((*row, rows[*slot].with_untracked(Rc::clone), now))
+                })
+                .collect();
+            was.sort_unstable_by_key(|(row, ..)| *row);
+            crate::news::changed_news(
+                was.iter()
+                    .map(|(_, was, now)| (was.text.as_str(), now.text.as_str())),
+            )
+        } else {
+            let mut after: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
+            let before: Vec<&str> = after.clone();
+            for (row, paint) in changed {
+                if let Some(text) = after.get_mut(*row) {
+                    *text = &paint.text;
+                }
+            }
+            crate::news::news(&before, &after)
+        };
+        crate::news::less_echo(&mut self.typed.borrow_mut(), news)
+    }
+
+    /// `news_of` for a frame whose output scrolled the screen `scrolled`
+    /// rows (the changed rows built after the lines shown moved up, before
+    /// the slots move with them, which the batch does): each changed row is
+    /// compared with the row whose line it now shows (none for a line
+    /// brought in); every row, when every row changed, its lines moved up
+    /// first. Apart from `news_of`, which frames that don't scroll (every
+    /// frame of output pouring in) take as they always did.
+    #[cold]
+    #[inline(never)]
+    fn scrolled_news_of(
         &self,
         shown: &[Rc<RowPaint>],
         changed: &[(usize, RowPaint)],
@@ -701,8 +744,10 @@ impl Engine {
                 )
             }))
         } else {
-            let before: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
-            let mut after: Vec<&str> = before.iter().skip(scrolled).copied().collect();
+            let mut after: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
+            let before: Vec<&str> = after.clone();
+            // The rows scrolled off left out, the lines brought in blank.
+            after.drain(..scrolled.min(after.len()));
             after.resize(before.len(), "");
             for (row, paint) in changed {
                 if let Some(text) = after.get_mut(*row) {
