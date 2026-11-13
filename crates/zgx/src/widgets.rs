@@ -269,6 +269,33 @@ pub struct EditorHandle {
     geometry: Rc<RefCell<Option<EditorGeometry>>>,
     position: Rc<Cell<TextPosition>>,
     hint: Rc<EditorHint>,
+    /// How far its text is scrolled, across and down, the most it can be, and whether its next draw brings the
+    /// caret into view (not after a scroll of its own).
+    scroll: Rc<RefCell<(f32, f32)>>,
+    scroll_limit: Rc<Cell<(f32, f32)>>,
+    reveal_caret: Rc<Cell<bool>>,
+}
+/// A text area's scrollbar (`View::scrollbar`): what `compose_scrollbar` reads and writes, set as the editor draws.
+struct EditorScrollbar {
+    /// How far down the text is scrolled: the bar's drag writes it.
+    offset: Signal<f32>,
+    /// The editor's whole box, the bar's track as tall, at its edge.
+    size: Signal<(f32, f32)>,
+    /// What scrolls in that box: the text's height and the box's room around its viewport.
+    extent: Signal<f32>,
+    /// The bar's corner, moved from the editor's content corner to its box's.
+    holder: NodeId,
+    origin: Cell<(f32, f32)>,
+}
+/// What an editor's last draw scrolled: how far down, in a viewport how high, a text how high; its box's size and
+/// its content's corner in it.
+#[derive(Clone, Copy, Default)]
+struct ScrollDrawn {
+    offset: f32,
+    view: f32,
+    content: f32,
+    node: (f32, f32),
+    origin: (f32, f32),
 }
 /// What an editor shows while it is empty, whether focus selects all, and
 /// the value it is bound to (here, once, for its handle and handlers).
@@ -284,6 +311,8 @@ struct EditorHint {
     /// at a time at any length (`editor_lines`), so an edit shapes the line
     /// it touched alone (a single line is shaped whole either way).
     lines: bool,
+    scrollbar: RefCell<Option<EditorScrollbar>>,
+    scroll_drawn: Cell<ScrollDrawn>,
     /// A wheel over it stays with it at its edges (`View::overscroll_contain`).
     contain: Cell<bool>,
     /// A password field: its text shows masked and never leaves it.
@@ -553,6 +582,8 @@ impl EditorHint {
             caret: Cell::default(),
             select_on_focus: Cell::default(),
             lines,
+            scrollbar: RefCell::default(),
+            scroll_drawn: Cell::default(),
             contain: Cell::default(),
             secure: Cell::default(),
             input_mode: Cell::default(),
@@ -569,6 +600,33 @@ impl EditorHint {
             themed: Cell::default(),
             theme_watch: Cell::default(),
         }
+    }
+    /// Tell its scrollbar what the last draw scrolled (after the draw: nothing is borrowed, and what follows the
+    /// signals may draw).
+    fn publish_scroll(&self, scene: &RefCell<Scene>) {
+        let (offset, size, extent, drawn) = {
+            let bar = self.scrollbar.borrow();
+            let Some(bar) = bar.as_ref() else {
+                return;
+            };
+            let drawn = self.scroll_drawn.get();
+            if bar.origin.replace(drawn.origin) != drawn.origin {
+                let mut scene = scene.borrow_mut();
+                if scene.contains(bar.holder) {
+                    let (x, y) = (-drawn.origin.0, -drawn.origin.1);
+                    scene.set_transform(bar.holder, Transform { x, y });
+                }
+            }
+            (
+                bar.offset.clone(),
+                bar.size.clone(),
+                bar.extent.clone(),
+                drawn,
+            )
+        };
+        size.set(drawn.node);
+        extent.set((drawn.content - drawn.view).max(0.) + drawn.node.1);
+        offset.set(drawn.offset);
     }
     /// Redraw `root` when a theme colour it has shown in changes: one
     /// effect, made again only when it shows in another, and stopped when
@@ -1126,6 +1184,68 @@ impl EditorHandle {
     pub fn scroll_to_line(&self, line: usize, align: crate::compose::RowAlign) {
         let at = self.editor.borrow().line_start(line);
         self.hint.reveal_at.set(Some((at, align)));
+        self.refresh();
+    }
+    /// How far down its text is scrolled, in points.
+    pub fn scroll_offset(&self) -> f32 {
+        self.scroll.borrow().1
+    }
+    /// Its viewport's height and its text's, as last drawn: it scrolls by as much as the text is the taller.
+    pub fn scroll_extent(&self) -> (f32, f32) {
+        let drawn = self.hint.scroll_drawn.get();
+        (drawn.view, drawn.content)
+    }
+    /// Scroll its text `y` points down (clamped to what it has), its caret and selection left as they are.
+    pub fn set_scroll_offset(&self, y: f32) {
+        if !self.multiline || !y.is_finite() {
+            return;
+        }
+        let y = y.clamp(0., self.scroll_limit.get().1.max(0.));
+        if self.scroll.borrow().1 == y {
+            return;
+        }
+        self.scroll.borrow_mut().1 = y;
+        self.reveal_caret.set(false);
+        self.refresh();
+    }
+    /// Show a scrollbar at its right edge (`View::scrollbar` on a text area): the one scroll views show, over its
+    /// box (it takes no room from the text), following and moving its scroll.
+    pub(crate) fn mount_scrollbar(&self, ui: &mut Ui) {
+        if !self.multiline || self.hint.scrollbar.borrow().is_some() {
+            return;
+        }
+        let mut style = fixed(0., 0.);
+        style.absolute = true;
+        let holder = ui.container(self.node, Layout::Overlay, style);
+        if let Some(style) = ui.take_scrollbar_style(self.node) {
+            ui.keep_scrollbar_style(holder, style);
+        }
+        let (offset, size, extent) = (
+            ui.signal(0_f32),
+            ui.signal((0_f32, 0_f32)),
+            ui.signal(0_f32),
+        );
+        *self.hint.scrollbar.borrow_mut() = Some(EditorScrollbar {
+            offset: offset.clone(),
+            size: size.clone(),
+            extent: extent.clone(),
+            holder,
+            origin: Cell::new((0., 0.)),
+        });
+        crate::compose_scrollbar::mount(ui, holder, offset.clone(), size, extent, false);
+        // The bar's drag, its track's press and its keys write the offset: the text follows.
+        let (editor, runtime) = (self.clone(), ui.runtime.clone());
+        ui.bind(self.node, move || {
+            let wanted = offset.get();
+            runtime.untracked(|| {
+                editor.set_scroll_offset(wanted);
+                // Past what it has: the bar shows where the text stopped.
+                let at = editor.scroll_offset();
+                if at != wanted {
+                    offset.set(at);
+                }
+            });
+        });
         self.refresh();
     }
     /// A colour behind the caret's row (a code editor's current line).
@@ -5960,6 +6080,13 @@ impl Ui {
                 // One line, centred in the box (negative: pushed down).
                 (line_height - inner_height) / 2.
             };
+            draw_hint.scroll_drawn.set(ScrollDrawn {
+                offset: scroll.1,
+                view: inner_height,
+                content: th,
+                node: (bounds.width, bounds.height),
+                origin: (padding.left, padding.top),
+            });
             if let Some(code) = draw_hint.code()
                 && code.top_line_listened.get()
             {
@@ -6098,16 +6225,25 @@ impl Ui {
                         s.set_font(*id, font.clone());
                         let shaped = lines.line(*i).size();
                         let width = lines.draw_width(*i, wrap_width).unwrap_or(shaped.0 + 2.);
+                        let inset = lines.inset(*i);
                         let mut style = fixed(width, lines.height(*i));
-                        style.text_wrap = draw_wrap.get();
+                        // A cell wraps in its own width, in an editor that does not wrap too.
+                        style.text_wrap = draw_wrap.get() || inset.width.is_some();
                         s.set_style(*id, style);
                         // The size its line was shaped to here: showing it,
                         // or moving it, shapes it no more. A node just made is
                         // asked for its ink in the empty box it had (where it
                         // painted nothing; a line's box is never empty).
-                        let inset = lines.inset(*i);
                         // A cell's node is as wide as the cell: its size is known at that width.
-                        s.know_text_size(*id, if inset.width.is_some() { Some(width) } else { wrap_width }, shaped);
+                        s.know_text_size(
+                            *id,
+                            if inset.width.is_some() {
+                                Some(width)
+                            } else {
+                                wrap_width
+                            },
+                            shaped,
+                        );
                         if s.bounds(*id).width == 0. {
                             s.know_text_size(*id, Some(0.), shaped);
                         }
@@ -6239,7 +6375,8 @@ impl Ui {
                                 label_font.family = crate::text_layout::FontFamily::Monospace;
                             }
                             if mark.height.is_finite() && mark.height > 0. {
-                                label_font.line_height = crate::text_layout::LineHeight::px(mark.height);
+                                label_font.line_height =
+                                    crate::text_layout::LineHeight::px(mark.height);
                             }
                             s.set_font(id, label_font);
                             s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
@@ -6828,6 +6965,7 @@ impl Ui {
             let hook = interaction_refresh.clone();
             let told = hint.clone();
             let told_editor = editor.clone();
+            let told_scene = self.scene.clone();
             let storage = Rc::downgrade(&self.storage);
             Rc::new(move || {
                 if told.held.get() != 0 {
@@ -6845,6 +6983,7 @@ impl Ui {
                 {
                     refresh();
                 }
+                told.publish_scroll(&told_scene);
                 EditorHint::watch_theme(&told, &storage, root, &watched_theme);
                 // Where the caret is, told once drawn (nothing borrowed),
                 // if it moved. The callback is out while it runs: a refresh
@@ -6943,6 +7082,9 @@ impl Ui {
             geometry,
             position: position.clone(),
             hint: hint.clone(),
+            scroll: scroll.clone(),
+            scroll_limit: scroll_limit.clone(),
+            reveal_caret: reveal_caret.clone(),
         };
         self.storage
             .editors

@@ -199,7 +199,11 @@ impl LineInset {
     }
     /// A line's height with its room: its text's `bare` height, or nothing when hidden.
     fn height(&self, bare: f32) -> f32 {
-        if self.hidden { 0. } else { bare + self.above + self.below }
+        if self.hidden {
+            0.
+        } else {
+            bare + self.above + self.below
+        }
     }
 }
 /// Each line's room, by its index.
@@ -853,7 +857,11 @@ impl Heights {
     }
     /// Line `i`'s own height.
     fn own(&self, i: usize) -> f32 {
-        if self.own.is_empty() { self.each[i] } else { self.own[i] }
+        if self.own.is_empty() {
+            self.each[i]
+        } else {
+            self.own[i]
+        }
     }
     /// The heights of the lines above line `i`.
     fn above(&self, i: usize) -> f64 {
@@ -1032,7 +1040,11 @@ impl LinesLayout {
             let mut each = spliced(&old.each);
             let new = if joined {
                 // The rows the edit touches take their heights again; the rest keep theirs.
-                let own = if old.own.is_empty() { each.clone() } else { spliced(&old.own) };
+                let own = if old.own.is_empty() {
+                    each.clone()
+                } else {
+                    spliced(&old.own)
+                };
                 let joins = |i: usize| i + 1 < count && layout.inset(i).joins_next;
                 let mut start = kept - 1;
                 while start > 0 && joins(start - 1) {
@@ -1164,7 +1176,9 @@ impl LinesLayout {
             return self.height(i);
         }
         let last = self.row_of(i).end - 1;
-        self.heights.as_ref().map_or(self.row, |h| h.borrow().each[last])
+        self.heights
+            .as_ref()
+            .map_or(self.row, |h| h.borrow().each[last])
     }
     /// The line at `y` down the layout: of a row, the last.
     fn last_line_at(&self, y: f32) -> usize {
@@ -1177,7 +1191,11 @@ impl LinesLayout {
     /// The line at `y` down the layout (of a row, the first).
     pub(crate) fn line_at(&self, y: f32) -> usize {
         let i = self.last_line_at(y);
-        if self.has_rows() { self.row_of(i).start } else { i }
+        if self.has_rows() {
+            self.row_of(i).start
+        } else {
+            i
+        }
     }
     /// The line at `x`, `y`: in a row, the one whose room holds `x` (the first before them all, the last after).
     /// Whether it is a cell of a row.
@@ -1219,7 +1237,10 @@ impl LinesLayout {
     /// The width line `i` is drawn in when the text wraps at `wrap`: what its indent leaves, as it was wrapped.
     pub(crate) fn draw_width(&self, i: usize, wrap: Option<f32>) -> Option<f32> {
         let inset = self.inset(i);
-        inset.width.map(|w| w.max(1.)).or(wrap.map(|w| (w - inset.left).max(1.)))
+        inset
+            .width
+            .map(|w| w.max(1.))
+            .or(wrap.map(|w| (w - inset.left).max(1.)))
     }
     /// Line `i`'s room (`LineCache::set_insets`).
     pub(crate) fn inset(&self, i: usize) -> LineInset {
@@ -1403,7 +1424,12 @@ impl TextLayout for LinesLayout {
         }
         let layout = self.line(i);
         let caret = layout.caret_position(self.local(i, from));
-        let to = caret.y + if down { caret.height * 1.5 } else { -caret.height * 0.5 };
+        let to = caret.y
+            + if down {
+                caret.height * 1.5
+            } else {
+                -caret.height * 0.5
+            };
         // Another of its own wrapped rows: found as in any line.
         if to >= 0. && to < layout.size().1 {
             return None;
@@ -1720,13 +1746,25 @@ mod tests {
         let row = layout.row;
         assert_eq!(layout.top(1), layout.height(0));
         assert_eq!(layout.top(2), layout.top(1));
-        assert!(layout.height(1) >= 2. * row, "the first cell wraps: {}", layout.height(1));
-        assert_eq!(layout.height(2), row + 5., "a cell's own height, its room included");
+        assert!(
+            layout.height(1) >= 2. * row,
+            "the first cell wraps: {}",
+            layout.height(1)
+        );
+        assert_eq!(
+            layout.height(2),
+            row + 5.,
+            "a cell's own height, its room included"
+        );
         assert_eq!(layout.row_height(1), layout.height(1));
         assert_eq!(layout.row_height(2), layout.height(1));
         assert_eq!(layout.top(3), layout.top(1) + layout.row_height(1));
         assert_eq!(layout.top(4), layout.top(3));
-        assert_eq!(layout.row_height(3), row + 5., "the second row: its cell with room is the tallest");
+        assert_eq!(
+            layout.row_height(3),
+            row + 5.,
+            "the second row: its cell with room is the tallest"
+        );
         assert_eq!(layout.top(5), layout.top(3) + row + 5.);
         assert_eq!(layout.size().1, layout.top(5) + layout.height(5));
         assert_eq!(layout.row_of(1), 1..3);
@@ -1746,14 +1784,24 @@ mod tests {
         let at = |needle: &str| TABLE.find(needle).unwrap();
         let (a1, b1, a2, b2) = (at("A1"), at("B1"), at("A2"), at("B2"));
         let (top, row) = (layout.top(1), layout.row);
-        assert_eq!(layout.caret(a1), Rect::new(0., top, layout.caret(a1).width, row));
+        assert_eq!(
+            layout.caret(a1),
+            Rect::new(0., top, layout.caret(a1).width, row)
+        );
         assert_eq!((layout.caret(b1).x, layout.caret(b1).y), (110., top + 2.));
-        assert_eq!((layout.caret(b2).x, layout.caret(b2).y), (110., layout.top(3) + 2.));
+        assert_eq!(
+            (layout.caret(b2).x, layout.caret(b2).y),
+            (110., layout.top(3) + 2.)
+        );
         assert_eq!(layout.caret(a2).y, layout.top(3));
         assert_eq!(layout.hit_test(1., top + 1.), a1);
         assert_eq!(layout.hit_test(-20., top + 1.), a1);
         assert_eq!(layout.hit_test(111., top + 3.), b1);
-        assert_eq!(layout.hit_test(900., top + 3.), b1 + 2, "past the last cell: its end");
+        assert_eq!(
+            layout.hit_test(900., top + 3.),
+            b1 + 2,
+            "past the last cell: its end"
+        );
         // between the cells: the cell before the gap
         let gap = layout.hit_test(105., top + 1.);
         assert!((a1..b1).contains(&gap), "{gap}");
@@ -1761,7 +1809,10 @@ mod tests {
         let low = layout.hit_position(111., top + layout.row_height(1) - 1.);
         assert_eq!(low.byte_offset, b1, "its row at that x, not its end");
         let wrapped = layout.hit_test(1., top + row * 1.5);
-        assert!(wrapped > a1 && wrapped < b1, "the first cell's second row: {wrapped}");
+        assert!(
+            wrapped > a1 && wrapped < b1,
+            "the first cell's second row: {wrapped}"
+        );
         assert_eq!(layout.hit_test(1., layout.top(3) + 1.), a2);
         assert_eq!(layout.hit_test(111., layout.top(3) + 3.), b2);
         assert_eq!(layout.hit_test(1., layout.top(5) + 1.), at("after"));
@@ -1797,11 +1848,17 @@ mod tests {
             }
         }
         assert!(left >= 2 && right == 1, "{rects:?}");
-        assert_eq!(layout.selection_between(a1 + 3..b1 + 2, top + 1., top + 2.), rects);
+        assert_eq!(
+            layout.selection_between(a1 + 3..b1 + 2, top + 1., top + 2.),
+            rects
+        );
         // into the next row: its first cell only
         let a2 = TABLE.find("A2").unwrap();
         let more = layout.selection(b1..a2 + 1);
-        assert!(more.iter().any(|r| r.y == layout.top(3) && r.x == 0.), "{more:?}");
+        assert!(
+            more.iter().any(|r| r.y == layout.top(3) && r.x == 0.),
+            "{more:?}"
+        );
         assert!(more.iter().all(|r| r.x + r.width <= 210.5), "{more:?}");
     }
 
@@ -1828,15 +1885,28 @@ mod tests {
         let before = geometry(&layout);
         let mut text = String::from(TABLE);
         let b1 = text.find("B1").unwrap();
-        text.insert_str(b1 + 2, " grows until it is the tallest cell of its row by far, three rows or more");
+        text.insert_str(
+            b1 + 2,
+            " grows until it is the tallest cell of its row by far, three rows or more",
+        );
         let grown = relaid(&cache, &text);
         let after = geometry(&grown);
         assert_eq!(after, geometry(&table(&text, 1).1));
-        assert!(after[2].1 > before[1].1, "the second cell is the tallest now");
+        assert!(
+            after[2].1 > before[1].1,
+            "the second cell is the tallest now"
+        );
         assert_eq!(after[1].2, after[2].1);
-        assert_eq!(after[3].0, after[1].0 + after[2].1, "the next row starts below it");
+        assert_eq!(
+            after[3].0,
+            after[1].0 + after[2].1,
+            "the next row starts below it"
+        );
         assert!(after[5].0 > before[5].0);
-        assert_eq!(after[1].1, before[1].1, "the first cell's own height is its own");
+        assert_eq!(
+            after[1].1, before[1].1,
+            "the first cell's own height is its own"
+        );
         // a line break above the table: its lines move down one, their rows with them
         text.insert_str(0, "new\n");
         first.set(2);
@@ -1845,11 +1915,20 @@ mod tests {
         assert_eq!(geometry(&moved), geometry(&table(&text, 2).1));
         // the last cell of the table edited, then the line after it
         let b2 = text.find("B2").unwrap();
-        text.insert_str(b2, "taller than the first cell beside it, wrapping onto a few rows ");
-        assert_eq!(geometry(&relaid(&cache, &text)), geometry(&table(&text, 2).1));
+        text.insert_str(
+            b2,
+            "taller than the first cell beside it, wrapping onto a few rows ",
+        );
+        assert_eq!(
+            geometry(&relaid(&cache, &text)),
+            geometry(&table(&text, 2).1)
+        );
         let end = text.len();
         text.insert_str(end, "\nlast");
-        assert_eq!(geometry(&relaid(&cache, &text)), geometry(&table(&text, 2).1));
+        assert_eq!(
+            geometry(&relaid(&cache, &text)),
+            geometry(&table(&text, 2).1)
+        );
         // and before any of it is shaped again, the heights the edit keeps are a fresh layout's
         text.replace_range(0..4, "");
         first.set(1);
@@ -1891,14 +1970,24 @@ mod tests {
         assert_eq!(layout.lines_between(0., 10_000.), 0..6);
         let row = layout.row;
         assert_eq!(layout.row_of(2), 1..4);
-        assert_eq!((layout.top(1), layout.top(2), layout.top(3)), (row, row, row));
+        assert_eq!(
+            (layout.top(1), layout.top(2), layout.top(3)),
+            (row, row, row)
+        );
         assert_eq!(layout.height(2), 0.);
-        assert_eq!(layout.row_height(1), row, "the hidden cell's wrapped text adds nothing");
+        assert_eq!(
+            layout.row_height(1),
+            row,
+            "the hidden cell's wrapped text adds nothing"
+        );
         assert_eq!(layout.top(4), 2. * row);
         assert_eq!(layout.top(5), 2. * row);
         assert_eq!(layout.size().1, 3. * row);
         assert_eq!(layout.hit_test(111., row + 1.), text.find("C1").unwrap());
-        assert_eq!(layout.hit_test(1., 2. * row + 1.), text.find("after").unwrap());
+        assert_eq!(
+            layout.hit_test(1., 2. * row + 1.),
+            text.find("after").unwrap()
+        );
     }
 
     /// Up and down leave a row for the line above or below it at the caret's x (the cell under it, if that is a
@@ -1915,16 +2004,39 @@ mod tests {
             };
             layout.vertical_step(from, x, down).map(|to| to.byte_offset)
         };
-        assert_eq!(step(at("B1"), 110., true), Some(at("B2")), "the cell below, not B1's end");
-        assert_eq!(step(at("B2"), 110., true), Some(TABLE.len()), "the line below, at its x");
+        assert_eq!(
+            step(at("B1"), 110., true),
+            Some(at("B2")),
+            "the cell below, not B1's end"
+        );
+        assert_eq!(
+            step(at("B2"), 110., true),
+            Some(TABLE.len()),
+            "the line below, at its x"
+        );
         assert_eq!(step(at("B2"), 110., false), Some(at("B1")));
         assert_eq!(step(at("A1"), 0., false), Some(0));
         assert_eq!(step(at("A1"), 0., true), None, "its own second row first");
-        assert_eq!(step(at("B1") - 1, 0., true), Some(at("A2")), "from the cell's last row");
-        assert_eq!(step(at("A2"), 0., false).map(|to| layout.line_of(to)), Some(1));
-        assert_eq!(step(at("after"), 0., false), None, "an ordinary line steps by a hit");
+        assert_eq!(
+            step(at("B1") - 1, 0., true),
+            Some(at("A2")),
+            "from the cell's last row"
+        );
+        assert_eq!(
+            step(at("A2"), 0., false).map(|to| layout.line_of(to)),
+            Some(1)
+        );
+        assert_eq!(
+            step(at("after"), 0., false),
+            None,
+            "an ordinary line steps by a hit"
+        );
         let above = layout.hit_test(110., layout.top(5) - layout.row * 0.5);
-        assert_eq!(layout.line_of(above), 4, "which finds the cell above at its x");
+        assert_eq!(
+            layout.line_of(above),
+            4,
+            "which finds the cell above at its x"
+        );
         let plain = lines(TABLE, Some(400.));
         assert!(!plain.has_rows());
         let from = TextPosition {
