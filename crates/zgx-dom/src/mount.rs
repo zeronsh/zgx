@@ -16,7 +16,8 @@ use wasm_bindgen::prelude::*;
 use zgx::{
     compose::{
         __dom::{
-            self, Element, ElementKind, KeyedRegion, Region, Scope, SwitchRegion, VirtualRegion,
+            self, Element, ElementKind, KeyedRegion, Overlay, OverlayKind, Region, Scope,
+            SwitchRegion, VirtualRegion,
         },
         View,
     },
@@ -34,6 +35,8 @@ pub(crate) enum Event {
     /// Width, height, and where it lies in the viewport.
     Resize(f32, f32, f32, f32),
     Visible(bool),
+    /// An overlay shown or hidden by the browser (or by its signal).
+    Toggle(bool),
 }
 
 /// What runs for a node's events. A click handler is the view's own closure
@@ -164,7 +167,8 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
             );
             Event::Resize(number as f32, h, x, y)
         }
-        _ => Event::Visible(number == 1.),
+        6 => Event::Visible(number == 1.),
+        _ => Event::Toggle(number == 1.),
     };
     handler.call(event);
     let dropped = HANDLERS.with(|handlers| {
@@ -183,7 +187,7 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
     // What input wrote shows before the browser reads or paints; scroll
     // reads and observers' reports, delivered many at once, are applied
     // together in this task's one flush (scheduled already).
-    if kind <= 3 {
+    if kind <= 3 || kind == 7 {
         flush();
     }
 }
@@ -419,6 +423,10 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         ElementKind::Progress { .. } => (Tag::Progress, "z"),
         ElementKind::Image { .. } => (Tag::Canvas, "z"),
         ElementKind::Unsupported(_) => (Tag::Div, "z zu"),
+        ElementKind::Overlay(overlay) if overlay.kind == OverlayKind::Dialog => {
+            (Tag::Dialog, "z zd")
+        }
+        ElementKind::Overlay(_) => (Tag::Div, "z zp"),
         _ => (Tag::Div, "z"),
     };
     let base = if el.contents { "z zc" } else { base };
@@ -490,7 +498,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         block.on_click(id, runtime.clone(), click);
     }
     let kind = std::mem::replace(&mut el.kind, ElementKind::Text(String::new()));
-    mount_kind(kind, id, scope, &runtime, block);
+    let root = mount_kind(kind, id, scope, &runtime, block);
     let mut holds_absolute = false;
     for child in std::mem::take(&mut el.children) {
         let (child, absolute) = mount_placed(child, scope, block);
@@ -533,7 +541,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
             f(__dom::node_handle(id, hooks.clone()));
         }
     }
-    (id, absolute)
+    (root.unwrap_or(id), absolute)
 }
 
 /// A mounted node's measurements, for `NodeHandle`'s observers: a
@@ -641,7 +649,15 @@ impl Drop for HooksOwner {
     }
 }
 
-fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, block: &mut Block) {
+/// The rest of an element of `kind`: what it holds and follows. Returns
+/// the node placed for it, when that isn't the element itself.
+fn mount_kind(
+    kind: ElementKind,
+    id: u32,
+    scope: &Scope,
+    runtime: &Runtime,
+    block: &mut Block,
+) -> Option<u32> {
     match kind {
         ElementKind::Text(text) => ops::with(|ops| {
             let node = block.node(ops);
@@ -822,6 +838,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
             });
         }
         ElementKind::Region(region) => mount_region(region, id, scope, block),
+        ElementKind::Overlay(overlay) => return Some(mount_overlay(*overlay, id, runtime, block)),
         ElementKind::Unsupported(name) => ops::with(|ops| {
             let text = block.node(ops);
             ops.op_str(ops::TEXT, text, &format!("{name}: not shown in the DOM"));
@@ -831,6 +848,70 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
         }),
         ElementKind::Box(_) | ElementKind::Button => {}
     }
+    None
+}
+
+/// An overlay: its anchor (in the flow) and its panel `panel` in a box
+/// laid out as its children. The browser shows the panel in its top layer
+/// (a modal `<dialog>`, or a popover placed against the anchor), and its
+/// closing it (Escape, a click outside) is reported into `open`.
+fn mount_overlay(overlay: Overlay, panel: u32, runtime: &Runtime, block: &mut Block) -> u32 {
+    let Overlay {
+        kind,
+        open,
+        anchor,
+        outer,
+        side,
+        align,
+        offset,
+        dismiss_backdrop,
+        match_anchor_width,
+        autofocus,
+        delay_ms,
+        interactive,
+        backdrop,
+    } = overlay;
+    let anchor = anchor.map(|anchor| mount_view(anchor, &outer, block));
+    let write = open.clone();
+    let reported = handler(move |event| {
+        if let Event::Toggle(on) = event
+            && write.with_untracked(|open| *open) != on
+        {
+            write.set(on);
+        }
+    });
+    block.handlers.push(reported);
+    let flags = dismiss_backdrop as u32
+        | (match_anchor_width as u32) << 1
+        | (autofocus as u32) << 2
+        | (interactive as u32) << 3;
+    let wrapper = ops::with(|ops| {
+        let wrapper = block.node(ops);
+        ops.op(&[ops::CREATE, wrapper, Tag::Div as u32]);
+        let class = sheet::plain(ops, "z zc");
+        ops.op(&[ops::CLASS, wrapper, class]);
+        if let Some(anchor) = anchor {
+            ops.op(&[ops::APPEND, wrapper, anchor]);
+        }
+        ops.op(&[ops::APPEND, wrapper, panel]);
+        ops.op_str(ops::OVERLAY, panel, backdrop.as_deref().unwrap_or(""));
+        ops.words.extend_from_slice(&[
+            kind as u32,
+            anchor.unwrap_or(u32::MAX),
+            reported,
+            side,
+            align,
+            offset.to_bits(),
+            flags,
+            delay_ms,
+        ]);
+        wrapper
+    });
+    block.effect(runtime, move || {
+        let on = open.get();
+        ops::with(|ops| ops.op(&[ops::SHOW, panel, on as u32]));
+    });
+    wrapper
 }
 
 fn mount_region(region: Region, holder: u32, scope: &Scope, block: &mut Block) {

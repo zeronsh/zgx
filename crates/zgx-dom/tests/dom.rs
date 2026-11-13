@@ -735,3 +735,34 @@ fn virtual_list_rows_lie_inside_the_list() {
     mounted.unmount();
     host.remove();
 }
+
+#[wasm_bindgen_test]
+fn rows_observing_their_visibility_mount_whole() {
+    let runtime = Runtime::new();
+    let rows = runtime.signal((0..4).collect::<Vec<u32>>());
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(keyed(
+            move || rows.get(),
+            |n: u32, _| {
+                row()
+                    .child(text(format!("Row {n}")))
+                    .child(text("seen"))
+                    .on_mount(|node| {
+                        let _ = node.observe_visibility();
+                    })
+            },
+        )),
+    );
+    // A row's block replayed (or stamped) whole, its observer's op among
+    // the others.
+    let list = first(&host).first_element_child().unwrap();
+    assert_eq!(
+        texts(&list),
+        ["Row 0seen", "Row 1seen", "Row 2seen", "Row 3seen"]
+    );
+    mounted.unmount();
+    host.remove();
+}

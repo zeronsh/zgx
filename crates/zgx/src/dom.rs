@@ -9,7 +9,7 @@ use crate::{
     reactive::{Runtime, Signal},
     scene::{Align, Color, Justify, Layout},
     semantics::{Live, Role},
-    style::Styles,
+    style::{Styled, Styles},
 };
 use std::{any::Any, cell::RefCell, collections::HashMap, fmt::Write, rc::Rc};
 
@@ -247,8 +247,58 @@ pub enum ElementKind {
         source: Box<dyn FnMut() -> std::sync::Arc<crate::image::ImageData>>,
     },
     Region(Region),
+    /// A modal, popover, menu, submenu or tooltip: the element is its panel.
+    Overlay(Box<Overlay>),
     /// What only a GPU or native host draws: a labelled box.
     Unsupported(&'static str),
+}
+
+/// What an overlay's panel is to the browser.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum OverlayKind {
+    /// A modal (`modal`): a `<dialog>` shown with `showModal`.
+    Dialog = 0,
+    /// An anchored popup (`popover`): an auto popover.
+    Popover = 1,
+    /// `menu`: an auto popover of menu items.
+    Menu = 2,
+    /// `submenu`: one nested in its menu's.
+    Submenu = 3,
+    /// `View::tooltip`: a manual popover shown on hover and keyboard focus.
+    Tooltip = 4,
+    /// A non-modal layer (`View::layer`): a manual popover over the page.
+    Layer = 5,
+}
+
+/// An overlay (`modal`, `popover`, `menu`, `submenu`, `View::tooltip`): its
+/// panel is the element, its children the panel's.
+pub struct Overlay {
+    pub kind: OverlayKind,
+    /// Whether it shows; the browser closing it (Escape, a click outside)
+    /// sets it false.
+    pub open: Signal<bool>,
+    /// What it is anchored to, in the flow where the overlay is.
+    pub anchor: Option<View>,
+    /// The scope the anchor mounts in (the panel's own holds its menu).
+    pub outer: Scope,
+    /// Its placement against the anchor: side (bottom, top, left, right),
+    /// alignment (start, centre, end) and offset.
+    pub side: u32,
+    pub align: u32,
+    pub offset: f32,
+    /// A click on a modal's backdrop closes it.
+    pub dismiss_backdrop: bool,
+    /// At least as wide as its anchor.
+    pub match_anchor_width: bool,
+    /// Focus moves into it as it opens.
+    pub autofocus: bool,
+    /// A tooltip: how long the pointer rests before it shows, and whether
+    /// the pointer may move into it.
+    pub delay_ms: u32,
+    pub interactive: bool,
+    /// A modal's backdrop, as CSS.
+    pub backdrop: Option<String>,
 }
 
 /// A part of the tree that changes shape: one view at a time, keyed rows or
@@ -593,10 +643,33 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
                         }
                     }
                     Kind::RichText(_) => ElementKind::Unsupported("rich text"),
-                    Kind::MenuItem(_) | Kind::Submenu { .. } | Kind::Menu { .. } => {
-                        ElementKind::Unsupported("menu")
+                    Kind::MenuItem(label) => {
+                        return menu_item(view, label, parent, scope, resources);
                     }
-                    Kind::Modal { .. } => ElementKind::Unsupported("modal"),
+                    Kind::Submenu { label, open } => {
+                        return submenu(view, label, open, parent, scope, resources);
+                    }
+                    Kind::Menu {
+                        label,
+                        open,
+                        anchor,
+                    } => {
+                        let kind = OverlayKind::Menu;
+                        let anchor = Some(*anchor);
+                        return overlay(view, kind, label, open, anchor, parent, scope, resources);
+                    }
+                    Kind::Modal {
+                        label,
+                        open,
+                        anchor,
+                    } => {
+                        let kind = match anchor {
+                            Some(_) => OverlayKind::Popover,
+                            None => OverlayKind::Dialog,
+                        };
+                        let anchor = anchor.map(|anchor| *anchor);
+                        return overlay(view, kind, label, open, anchor, parent, scope, resources);
+                    }
                     Kind::Canvas(_) => ElementKind::Unsupported("canvas"),
                     Kind::Svg { .. } => ElementKind::Unsupported("svg"),
                     #[cfg(target_os = "macos")]
@@ -609,6 +682,334 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
             }
         }
     }
+}
+
+/// `view` (a popover) as a tooltip: the host shows it as the pointer rests
+/// on its anchor for `delay`, or keyboard focus reaches the anchor.
+pub(crate) fn hover(mut view: View, delay: std::time::Duration, interactive: bool) -> View {
+    view.rare_mut().portal.get_or_insert_default().dom_hover = Some((delay, interactive));
+    view
+}
+
+/// A menu item: a button that closes its menu (and the menus it opened
+/// from) before running its click, or a submenu's trigger, which opens it.
+fn menu_item(
+    mut view: View,
+    label: String,
+    parent: &Scope,
+    scope: Option<Scope>,
+    resources: Resources,
+) -> Element {
+    use super::OVERLAY;
+    use crate::theme::tok;
+    super::dim_when_disabled(&mut view);
+    let mut defaults = super::widget_style(|w| &w.menu_item);
+    if OVERLAY.menu_item_min_height.is_some()
+        && (view.styles.height.is_some() || view.styles.height_percent.is_some())
+    {
+        defaults = defaults.min_h(0.);
+    }
+    defaults.merge(&view.styles);
+    view.styles = defaults;
+    if view.variants.hover.is_none() {
+        view.variants.defaults[0] = Some(|| super::widget_style(|w| &w.menu_hover));
+    }
+    if view.variants.focus.is_none() {
+        view.variants.defaults[2] = Some(super::menu_focus(&view.styles));
+    }
+    let menu = scope.as_ref().unwrap_or(parent).environment.menu.clone();
+    let (trigger, check, shortcut) = match view.rare.as_deref_mut() {
+        Some(rare) => (
+            rare.menu_trigger.take(),
+            rare.menu_check.clone(),
+            rare.shortcut.clone(),
+        ),
+        None => (None, None, None),
+    };
+    let named = !view.children.is_empty();
+    if !named {
+        // The check (or a radio's dot) in a gutter of its own.
+        if let Some((checked, radio)) = check.clone() {
+            let mark = if radio { "•" } else { "✓" };
+            view.children.push(
+                super::text_signal(move || {
+                    if checked() {
+                        mark.into()
+                    } else {
+                        String::new()
+                    }
+                })
+                .w(16.)
+                .shrink_0()
+                .accessible_hidden(),
+            );
+        }
+        let drawn = super::menu_text(label.clone(), view.rare.as_deref_mut());
+        if trigger.is_some() || shortcut.is_some() {
+            view.children.push(drawn.flex_grow(1.));
+        } else {
+            view.children.push(drawn);
+        }
+        if let Some(keys) = shortcut {
+            view.children.push(
+                super::text(keys)
+                    .ml(OVERLAY.shortcut_gap)
+                    .text_color(tok::TEXT_TERTIARY)
+                    .accessible_hidden(),
+            );
+        }
+        if trigger.is_some() {
+            view.children.push(
+                super::text("›")
+                    .ml(OVERLAY.shortcut_gap)
+                    .text_color(tok::TEXT_TERTIARY)
+                    .accessible_hidden(),
+            );
+        }
+    }
+    // In a menu the arrows move among its items (one Tab stop: the menu).
+    if menu.is_some() && view.focusable.is_none() {
+        view.focusable = Some(false);
+    }
+    let mut own = view.click.take();
+    view.click = Some(match trigger.clone() {
+        Some(open) => Box::new(move |modifiers| {
+            open.set(true);
+            if let Some(click) = own.as_mut() {
+                click(modifiers);
+            }
+        }),
+        None => Box::new(move |modifiers| {
+            if let Some(menu) = &menu {
+                menu.close_chain();
+            }
+            if let Some(click) = own.as_mut() {
+                click(modifiers);
+            }
+        }),
+    });
+    let mut el = primitive(view, ElementKind::Button, parent, scope, resources);
+    let role = match &check {
+        Some((_, true)) => "menuitemradio",
+        Some(_) => "menuitemcheckbox",
+        None => "menuitem",
+    };
+    el.attrs.insert(0, ("role", role.into()));
+    if named {
+        el.attrs.insert(1, ("aria-label", label));
+    }
+    if let Some((checked, _)) = check {
+        el.bound_attrs
+            .push(("aria-checked", Box::new(move || Some(bool_str(checked())))));
+    }
+    if let Some(open) = trigger {
+        el.attrs.push(("aria-haspopup", "menu".into()));
+        el.bound_attrs.push((
+            "aria-expanded",
+            Box::new(move || Some(bool_str(open.get()))),
+        ));
+    }
+    el
+}
+
+/// A submenu: its trigger (the app's, or a menu item of its label) in the
+/// menu it is in, its panel beside it.
+fn submenu(
+    mut view: View,
+    label: String,
+    open: Signal<bool>,
+    parent: &Scope,
+    scope: Option<Scope>,
+    resources: Resources,
+) -> Element {
+    super::dim_when_disabled(&mut view);
+    let trigger = (view.rare.as_mut())
+        .and_then(|r| r.portal.as_mut())
+        .and_then(|p| p.trigger.take());
+    let mut anchor = match trigger {
+        Some(trigger) => trigger,
+        None => match super::followed_label(view.rare.as_deref_mut()) {
+            Some(followed) => {
+                super::menu_item(label.clone()).accessible_label_when(move || followed.get())
+            }
+            None => super::menu_item(label.clone()),
+        },
+    };
+    anchor.rare_mut().menu_trigger = Some(open.clone());
+    if let Some(id) = view.rare.as_mut().and_then(|r| r.trigger_id.take()) {
+        anchor.id = Some(id);
+    }
+    // Disabled, its trigger is (it never opens).
+    if let Some(disabled) = view.disabled.take() {
+        anchor.disabled = Some(disabled);
+    }
+    let kind = OverlayKind::Submenu;
+    overlay(
+        view,
+        kind,
+        label,
+        open,
+        Some(anchor),
+        parent,
+        scope,
+        resources,
+    )
+}
+
+/// An overlay's panel, with the card a desktop panel of its kind has.
+#[allow(clippy::too_many_arguments)]
+fn overlay(
+    mut view: View,
+    mut kind: OverlayKind,
+    label: String,
+    open: Signal<bool>,
+    mut anchor: Option<View>,
+    parent: &Scope,
+    scope: Option<Scope>,
+    resources: Resources,
+) -> Element {
+    use super::{OVERLAY, PlacementEdge, PlacementSide};
+    use crate::theme::tok;
+    let outer = scope.unwrap_or_else(|| parent.clone());
+    let (options, dismiss, match_anchor_width, hidden) = match view.rare.as_deref_mut() {
+        Some(rare) => (
+            rare.portal.take(),
+            rare.dismiss_backdrop.take(),
+            rare.match_anchor_width,
+            rare.panel_hidden,
+        ),
+        None => (None, None, false, false),
+    };
+    let layer = options.as_ref().is_some_and(|o| o.layer);
+    let hover = options.as_ref().and_then(|o| o.dom_hover);
+    if hover.is_some() {
+        kind = OverlayKind::Tooltip;
+    } else if layer && anchor.is_none() {
+        kind = OverlayKind::Layer;
+    }
+    let anchored = anchor.is_some();
+    let is_menu = matches!(kind, OverlayKind::Menu | OverlayKind::Submenu);
+    // A layer's panel is only what it holds; a dialog's or menu's is a card
+    // (as `mount_portal_panel`).
+    if !layer {
+        let (padding, radius) = match (is_menu, anchored) {
+            (true, _) => (OVERLAY.menu_padding, OVERLAY.menu_radius),
+            (false, true) => (
+                (OVERLAY.popover_padding, OVERLAY.popover_padding),
+                OVERLAY.popover_radius,
+            ),
+            (false, false) => ((16., 16.), crate::theme::Themed::Token(tok::RADIUS_MD.0)),
+        };
+        let card = Styles::new().w(if anchored { 240. } else { 360. });
+        let card = match padding {
+            (x, y) if x == y => card.p(x),
+            (x, y) => card.px(x).py(y),
+        };
+        let card = match (OVERLAY.panel_shadows, anchored) {
+            (Some(shadows), true) => card.shadows(shadows.to_vec()),
+            _ => card,
+        };
+        let mut defaults = card
+            .bg(if is_menu {
+                tok::MENU_BG
+            } else if anchored {
+                tok::POPOVER_BG
+            } else {
+                tok::SURFACE_OVERLAY
+            })
+            .rounded(radius)
+            .overflow_hidden();
+        if is_menu {
+            defaults = defaults.items_stretch();
+        }
+        defaults.merge(&view.styles);
+        view.styles = defaults;
+    }
+    // Focus lands on the panel only with nothing in it to take it.
+    if view.focusable.is_none() && !matches!(kind, OverlayKind::Tooltip | OverlayKind::Layer) {
+        view.focusable = Some(false);
+    }
+    // A bare button opening a menu is a menu button: a press opens it.
+    if kind == OverlayKind::Menu
+        && let Some(anchor) = anchor.as_mut()
+        && anchor.click.is_none()
+        && matches!(anchor.kind, Kind::Button)
+    {
+        let open = open.clone();
+        anchor.click = Some(Box::new(move |_: crate::input::Modifiers| {
+            open.set(true);
+        }));
+    }
+    let mut inner = outer.clone();
+    if is_menu {
+        inner.environment.menu = Some(crate::compose_menu::MenuContext::new(
+            open.clone(),
+            outer.environment.menu.clone(),
+            None,
+            kind == OverlayKind::Submenu,
+        ));
+    }
+    let placement = match options.as_ref().and_then(|o| o.placement) {
+        Some(placement) => placement,
+        None if kind == OverlayKind::Submenu => super::Placement {
+            side: PlacementSide::Right,
+            align: PlacementEdge::Start,
+            offset: 0.,
+        },
+        None => Default::default(),
+    };
+    let side = match placement.side {
+        PlacementSide::Bottom => 0,
+        PlacementSide::Top => 1,
+        PlacementSide::Left => 2,
+        PlacementSide::Right => 3,
+    };
+    let align = match placement.align {
+        PlacementEdge::Start => 0,
+        PlacementEdge::Center => 1,
+        PlacementEdge::End => 2,
+    };
+    let (delay, interactive) = hover.unwrap_or_default();
+    let backdrop = (kind == OverlayKind::Dialog)
+        .then(|| color_value(outer.environment.theme.color(tok::BACKDROP)));
+    let overlay = Overlay {
+        kind,
+        open,
+        anchor,
+        outer,
+        side,
+        align,
+        offset: placement.offset,
+        dismiss_backdrop: dismiss.unwrap_or(kind != OverlayKind::Submenu),
+        match_anchor_width,
+        autofocus: options.as_ref().and_then(|o| o.autofocus).unwrap_or(true),
+        delay_ms: delay.as_millis().min(u32::MAX as u128) as u32,
+        interactive,
+        backdrop,
+    };
+    let mut el = primitive(
+        view,
+        ElementKind::Overlay(Box::new(overlay)),
+        parent,
+        Some(inner),
+        resources,
+    );
+    let role = match kind {
+        OverlayKind::Popover => Some("dialog"),
+        OverlayKind::Menu | OverlayKind::Submenu => Some("menu"),
+        OverlayKind::Tooltip => Some("tooltip"),
+        OverlayKind::Dialog | OverlayKind::Layer => None,
+    };
+    if !matches!(kind, OverlayKind::Tooltip | OverlayKind::Layer) {
+        el.attrs.insert(0, ("aria-label", label));
+    }
+    if let Some(role) = role {
+        el.attrs.insert(0, ("role", role.into()));
+    }
+    if hidden {
+        el.attrs.push(("aria-hidden", "true".into()));
+    }
+    el
 }
 
 fn primitive(
