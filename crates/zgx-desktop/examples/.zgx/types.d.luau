@@ -1839,6 +1839,10 @@ export type CommandOptions = {
 	-- a focused web page or terminal, which otherwise get each key first
 	-- (as a browser keeps ⌘T from its pages). Not a plugin's to set.
 	reserved: boolean?,
+	-- Whether it can run now (true): a boolean, or a state or function saying
+	-- (followed, no reload). Off, its menu item is dimmed and its shortcut
+	-- does nothing.
+	enabled: (boolean | State<boolean> | (() -> boolean))?,
 	-- Held, its shortcut runs it again on each auto-repeat; without it, once a press.
 	["repeat"]: boolean?,
 	run: (() -> ...unknown)?,

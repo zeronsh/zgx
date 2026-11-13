@@ -42,7 +42,8 @@ pub fn menus(commands: &[Command]) -> Vec<AppMenu> {
         // `menu = false`: no menu shows it, zgx's keymap runs it.
         if command.menu.is_empty() {
             if !command.separator {
-                let item = AppMenuEntry::item(command.title.clone(), command.id.as_str());
+                let item = AppMenuEntry::item(command.title.clone(), command.id.as_str())
+                    .enabled(command.enabled);
                 keys_only
                     .entries
                     .push(match command.key.as_deref().and_then(accelerator) {
@@ -65,7 +66,8 @@ pub fn menus(commands: &[Command]) -> Vec<AppMenu> {
         let entry = if command.separator {
             AppMenuEntry::Separator
         } else {
-            let item = AppMenuEntry::item(command.title.clone(), command.id.as_str());
+            let item = AppMenuEntry::item(command.title.clone(), command.id.as_str())
+                .enabled(command.enabled);
             match command.key.as_deref().and_then(accelerator) {
                 Some(key) => item.accelerator(key),
                 None => item,
@@ -832,6 +834,7 @@ mod tests {
             key: key.map(Into::into),
             separator: false,
             repeat: false,
+            enabled: true,
         }
     }
     fn shape(menu: &AppMenu) -> Vec<String> {

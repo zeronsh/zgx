@@ -1318,3 +1318,33 @@ return ui.column { w = 200, h = 100,
     let x = h.ui.scene.borrow().bounds(b).x;
     assert_eq!(x, 10.5, "rests on a half point at 2x, not at 10.3");
 }
+
+#[test]
+fn a_disabled_command_is_dimmed_and_does_not_run() {
+    let mut h = Harness::inline(
+        r##"local closed = ui.state("closed", 0)
+local ran = ui.state("ran", 0)
+ui.command { id = "reopen", title = "Reopen", key = "cmd+shift+t", enabled = function() return closed:get() > 0 end, run = function() ran:set(ran:get() + 1) end }
+return ui.column { w = 100, h = 100, ui.text { id = "out", function() return tostring(ran:get()) end } }"##,
+    );
+    h.settle();
+    let enabled = |h: &Harness| {
+        h.host
+            .commands()
+            .get()
+            .iter()
+            .find(|c| c.id == "reopen")
+            .map(|c| c.enabled)
+    };
+    assert_eq!(enabled(&h), Some(false));
+    assert!(!h.host.run_command("reopen"));
+    assert_eq!(h.text("out"), "0");
+    h.host
+        .set_state("closed", zgx_script::Value::Num(1.))
+        .unwrap();
+    h.settle();
+    assert_eq!(enabled(&h), Some(true));
+    assert!(h.host.run_command("reopen"));
+    h.frames(2);
+    assert_eq!(h.text("out"), "1");
+}

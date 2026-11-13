@@ -36,6 +36,9 @@ pub struct Command {
     pub separator: bool,
     /// Held, its shortcut runs it again on each auto-repeat (`repeat = true`); else once a press.
     pub repeat: bool,
+    /// Whether it can run now (`enabled = …`): off, its menu item is
+    /// dimmed and its shortcut does nothing.
+    pub enabled: bool,
 }
 
 /// A command's shortcut zgx dropped because a command declared before it
@@ -89,12 +92,40 @@ impl KeySource {
         }
     }
 }
+/// A command's `enabled` that follows what it reads (a state or function).
+#[derive(Clone)]
+enum EnabledSource {
+    State(Signal<crate::Value>),
+    Function(Function, Weak<Vm>),
+}
+impl EnabledSource {
+    /// Whether it can run now (tracked: read in the commands' effect).
+    fn read(&self) -> bool {
+        match self {
+            EnabledSource::State(state) => state.get().truthy(),
+            EnabledSource::Function(f, vm) => {
+                let Some(vm) = vm.upgrade() else {
+                    return true;
+                };
+                match vm.call::<crate::Value>(f, ()) {
+                    Ok(value) => value.truthy(),
+                    Err(error) => {
+                        vm.report(error);
+                        true
+                    }
+                }
+            }
+        }
+    }
+}
 /// What a load declared, kept to publish again as dynamic shortcuts change.
 struct Declared {
     commands: Vec<(Command, Option<Rc<str>>)>,
     /// The commands whose shortcut follows what it reads, by index, and
     /// whether a key alone is refused.
     keys: Vec<(usize, KeySource, bool)>,
+    /// The commands whose `enabled` follows what it reads, by index.
+    enabled: Vec<(usize, EnabledSource)>,
     reserved: Vec<String>,
 }
 pub(crate) struct Commands {
@@ -102,6 +133,8 @@ pub(crate) struct Commands {
     /// Pending commands' dynamic shortcuts, by id, and whether a key alone
     /// is refused (a plugin's, without the grant).
     pending_keys: RefCell<Vec<(String, KeySource, bool)>>,
+    /// Pending commands' dynamic `enabled`, by id.
+    pending_enabled: RefCell<Vec<(String, EnabledSource)>>,
     /// While a load's commands have dynamic shortcuts: what publishes them
     /// again as those change.
     following: RefCell<Option<Effect>>,
@@ -121,6 +154,7 @@ impl Commands {
         Self {
             pending: RefCell::default(),
             pending_keys: RefCell::default(),
+            pending_enabled: RefCell::default(),
             following: RefCell::default(),
             runtime: runtime.clone(),
             pending_reserved: RefCell::default(),
@@ -134,6 +168,7 @@ impl Commands {
     pub fn begin(&self) {
         self.pending.borrow_mut().clear();
         self.pending_keys.borrow_mut().clear();
+        self.pending_enabled.borrow_mut().clear();
         self.pending_reserved.borrow_mut().clear();
     }
     /// Where the load's declarations are, before a script runs.
@@ -156,10 +191,12 @@ impl Commands {
     pub fn publish(self: &Rc<Self>) {
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
         let mut dynamic = std::mem::take(&mut *self.pending_keys.borrow_mut());
+        let mut dynamic_enabled = std::mem::take(&mut *self.pending_enabled.borrow_mut());
         let mut runners = HashMap::new();
         let mut declared = Declared {
             commands: Vec::with_capacity(pending.len()),
             keys: Vec::new(),
+            enabled: Vec::new(),
             reserved: std::mem::take(&mut *self.pending_reserved.borrow_mut()),
         };
         for (command, runner, plugin) in pending {
@@ -174,12 +211,18 @@ impl Commands {
                     .keys
                     .push((declared.commands.len(), source, no_bare));
             }
+            if !dynamic_enabled.is_empty()
+                && let Some(at) = dynamic_enabled.iter().position(|(id, _)| *id == command.id)
+            {
+                let (_, source) = dynamic_enabled.swap_remove(at);
+                declared.enabled.push((declared.commands.len(), source));
+            }
             declared.commands.push((command, plugin));
         }
         *self.runners.borrow_mut() = runners;
         // The last load's following, if any, is done with.
         drop(self.following.borrow_mut().take());
-        if declared.keys.is_empty() {
+        if declared.keys.is_empty() && declared.enabled.is_empty() {
             // Published once, as declared.
             let pending = declared
                 .commands
@@ -208,6 +251,9 @@ impl Commands {
             .map(|(command, plugin)| (command.clone(), None, plugin.clone()))
             .collect();
         let mut refused = Vec::new();
+        for (at, source) in &declared.enabled {
+            pending[*at].0.enabled = source.read();
+        }
         for (at, source, no_bare) in &declared.keys {
             let entry = &mut pending[*at];
             entry.0.key = source.read();
@@ -270,6 +316,13 @@ impl Commands {
     }
     /// Run the command `id`; whether one ran.
     pub fn run(&self, id: &str) -> bool {
+        // A disabled command's shortcut does nothing.
+        if self
+            .list
+            .with_untracked(|list| list.iter().any(|c| c.id == id && !c.enabled))
+        {
+            return false;
+        }
         let runner = self.runners.borrow().get(id).cloned();
         let Some((f, vm)) = runner else {
             return false;
@@ -401,6 +454,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                         key: None,
                         separator: true,
                         repeat: false,
+                        enabled: true,
                     },
                     None,
                     None,
@@ -422,6 +476,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                         key: None,
                         separator: false,
                         repeat: false,
+                        enabled: true,
                     },
                     None,
                     None,
@@ -466,6 +521,22 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                     }
                 },
             };
+            // Whether it can run: a boolean, or a state or function saying.
+            let (enabled, enabled_source) = match table.get::<mlua::Value>("enabled")? {
+                mlua::Value::Nil => (true, None),
+                mlua::Value::Boolean(on) => (on, None),
+                mlua::Value::Function(f) => {
+                    (true, Some(EnabledSource::Function(f, env.vm.clone())))
+                }
+                state => match crate::node::state_of(&state) {
+                    Some(state) => (true, Some(EnabledSource::State(state))),
+                    None => {
+                        return Err(mlua::Error::runtime(format!(
+                            "ui.command `{id}`: `enabled` is a boolean, a state or a function"
+                        )));
+                    }
+                },
+            };
             // A key alone from a plugin would be taken from every field,
             // page and terminal. One a state says is refused as it's read.
             let no_bare = plugin.is_some()
@@ -503,6 +574,12 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                     .borrow_mut()
                     .push((id.clone(), source, no_bare));
             }
+            if let Some(source) = enabled_source {
+                commands
+                    .pending_enabled
+                    .borrow_mut()
+                    .push((id.clone(), source));
+            }
             pending.push((
                 Command {
                     id,
@@ -511,6 +588,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
                     key,
                     separator: false,
                     repeat: table.get::<Option<bool>>("repeat")?.unwrap_or(false),
+                    enabled,
                 },
                 Some((run, vm)),
                 plugin,
