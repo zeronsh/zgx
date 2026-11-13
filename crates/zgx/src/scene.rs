@@ -565,6 +565,23 @@ impl Rect {
 /// A colour: red, green, blue and alpha, each 0 to 255.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
+/// What `Scene::world_bounds_kept` keeps of a node's sum of translations:
+/// its nearest scroll content strictly above it (`anchor`), the sum from the
+/// node up to just below that (`below`), and what it holds while: the
+/// node's own translation (`own`) and the scene's count of other moves
+/// (`translated`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScrollAnchor {
+    anchor: Option<NodeId>,
+    below: Transform,
+    own: Transform,
+    translated: u64,
+}
+/// Whether two translations are the same to the bit (a zero's sign too:
+/// `-0. + -0.` is `-0.`, `0. + -0.` is `0.`).
+fn same_bits(a: Transform, b: Transform) -> bool {
+    a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
+}
 /// A translation, in logical points.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Transform {
@@ -3407,7 +3424,17 @@ pub struct Scene {
     /// layout moves them (`changed_geometry_readers`).
     geometry_reader: std::cell::Cell<Option<u64>>,
     geometry_reads: std::cell::RefCell<Vec<(u64, NodeId, Rect)>>,
+    /// Changes to geometry other than those `unmoved` counts: every
+    /// translation but a scroll's and a leaf's, clips, nodes shown or
+    /// hidden, which nodes are scroll content (`translated`). With
+    /// `unmoved`, all of them (`geometry_revision()`).
     geometry_revision: u64,
+    /// Changes to geometry that move no node under scroll content against
+    /// it, counted here instead: a scroll (`scroll_copy`'s move), a leaf's
+    /// move (which moves only itself) and layout (which moves boxes, read
+    /// as they are). Each site counts one change, as before, in one field
+    /// or the other.
+    unmoved: u64,
     /// The last moved node's parent and its context (`shown_context`: its
     /// translation and clip, or hidden): a reorder animation moves every row
     /// of one parent each frame, and moving a child leaves its parent's
@@ -3706,6 +3733,7 @@ impl Scene {
             geometry_reader: Default::default(),
             geometry_reads: Default::default(),
             geometry_revision: 0,
+            unmoved: 0,
             move_context: None,
             #[cfg(test)]
             no_move_context: false,
@@ -4138,6 +4166,68 @@ impl Scene {
             parent = ancestor.parent;
         }
         node.bounds.translated(transform)
+    }
+    /// Changes to geometry that drop every kept sum: all but a scroll, a
+    /// leaf's move and layout (`unmoved`). While it holds, a node's
+    /// ancestors' translations up to its nearest scroll content hold.
+    #[inline(always)]
+    pub(crate) fn translated(&self) -> u64 {
+        self.geometry_revision
+    }
+    /// `world_bounds(id)`, to the bit, keeping in `kept` what of its sum
+    /// holds while only scroll content moves: the translations from `id` up
+    /// to just below its nearest scroll content (`ScrollAnchor`). A scroll
+    /// then walks only from there up, not through the rows and boxes a
+    /// transcript nests below it. Any translation set but scroll content's
+    /// on a node with children, or a node made scroll content or not, drops
+    /// what every node kept (`translated`); `id`'s own is checked each time.
+    /// A node's ancestors stay its ancestors as long as it lives (a move
+    /// mounts it again), and layout's boxes are read as they are now.
+    pub(crate) fn world_bounds_kept(&self, id: NodeId, kept: &mut Option<ScrollAnchor>) -> Rect {
+        let node = self.node(id);
+        let own = node.transform;
+        let anchor = match kept {
+            Some(anchor)
+                if anchor.translated == self.translated() && same_bits(anchor.own, own) =>
+            {
+                *anchor
+            }
+            _ => *kept.insert(self.scroll_anchor(id)),
+        };
+        // The same additions as `world_bounds`, in the same order: the sum
+        // below the anchor, then the anchor's and each of its ancestors'.
+        let mut transform = anchor.below;
+        let mut at = anchor.anchor;
+        while let Some(id) = at {
+            let ancestor = self.tree_node(id);
+            transform.x += ancestor.transform.x;
+            transform.y += ancestor.transform.y;
+            at = ancestor.parent;
+        }
+        node.bounds.translated(transform)
+    }
+    /// `id`'s nearest scroll content strictly above it, and its translations
+    /// summed from it upwards to just below that (`world_bounds`'s sum, cut
+    /// there; no anchor and the whole sum where none is).
+    fn scroll_anchor(&self, id: NodeId) -> ScrollAnchor {
+        let node = self.node(id);
+        let mut below = node.transform;
+        let mut parent = node.parent;
+        while let Some(at) = parent {
+            let ancestor = self.tree_node(at);
+            if ancestor.scroll_copy {
+                break;
+            }
+            below.x += ancestor.transform.x;
+            below.y += ancestor.transform.y;
+            parent = ancestor.parent;
+        }
+        ScrollAnchor {
+            anchor: parent,
+            below,
+            own: node.transform,
+            translated: self.translated(),
+        }
     }
     /// Where layout put `id`, in window coordinates, before any translation
     /// (its own or its ancestors', scrolling included): what moves only when
@@ -5510,7 +5600,7 @@ impl Scene {
     /// Counts changes that affect what is under the pointer (geometry,
     /// cursors): unchanged, a host needn't hit test again.
     pub fn interaction_revision(&self) -> u64 {
-        self.geometry_revision
+        self.geometry_revision()
     }
     /// The cursor at `x`, `y`: a selectable text's, or the topmost node's.
     pub fn cursor_at(&self, x: f32, y: f32) -> Option<crate::cursor::Cursor> {
@@ -6018,7 +6108,7 @@ impl Scene {
         let key = (
             x.to_bits(),
             y.to_bits(),
-            self.geometry_revision,
+            self.geometry_revision(),
             self.content_revision,
         );
         // Asked again inside `f` (no caller does now): walked, not kept.
@@ -9431,7 +9521,7 @@ impl Scene {
             }
             self.move_context = None;
             self.node_mut(id).transform = transform;
-            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+            self.unmoved = self.unmoved.wrapping_add(1);
             self.invalidate(id, COMPOSITE);
             return;
         }
@@ -9473,8 +9563,12 @@ impl Scene {
         }
         self.move_context = None;
         self.node_mut(id).transform = to;
-        self.geometry_revision = self.geometry_revision.wrapping_add(1);
-        if !leaf {
+        if leaf {
+            // A leaf moves no node but itself, which its observer checks
+            // (`world_bounds_kept`): a scrollbar thumb leaves the rest kept.
+            self.unmoved = self.unmoved.wrapping_add(1);
+        } else {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
             self.damage_subtree_with(id, &mut context);
         }
         self.invalidate(id, COMPOSITE);
@@ -14635,7 +14729,7 @@ impl Scene {
         self.move_context = None;
     }
     pub(crate) fn geometry_revision(&self) -> u64 {
-        self.geometry_revision
+        self.geometry_revision.wrapping_add(self.unmoved)
     }
     pub(crate) fn layout_revision(&self) -> u64 {
         self.layout_revision
@@ -14762,7 +14856,7 @@ impl Scene {
         }
         self.pending_layout_nodes += report.layout_nodes;
         self.layout_revision = self.layout_revision.wrapping_add(1);
-        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        self.unmoved = self.unmoved.wrapping_add(1);
     }
     /// Lay out, paint and composite what changed since the last flush, and
     /// report the damage.
@@ -14958,6 +15052,7 @@ impl Scene {
     /// device pixels (`set_pixel_scale`).
     pub fn set_scroll_copy(&mut self, id: NodeId, enabled: bool) {
         self.node_mut(id).scroll_copy = enabled;
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
     }
     /// How many device pixels a point is (the window's scale factor).
     /// Scroll content then moves by whole device pixels, as Safari's and
@@ -16789,6 +16884,149 @@ mod tests {
         assert!(relayered.has_inline_boxes());
     }
     use super::*;
+
+    /// What `world_bounds_kept` keeps gives `world_bounds` to the bit after
+    /// every change a scene takes, in any order: scroll content and the
+    /// nodes in it moving (by pixel-rounded and fractional amounts, to
+    /// zero, transparent, with effects), nested scroll content, scroll
+    /// content inside a translated parent, nodes made scroll content and
+    /// not, boxes laid out again, nodes mounted and removed, a row moved
+    /// from one scroll view to another and a scroll view moved (both mount
+    /// again, as `Ui` moves them), and frames between some of those.
+    #[test]
+    fn kept_world_bounds_are_the_full_walks_to_the_bit() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        let boxed = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            clip: true,
+            ..Style::default()
+        };
+        for _ in 0..12 {
+            let mut scene = Scene::new(400., 300.);
+            scene.set_pixel_scale(2.);
+            scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+            let mut nodes = vec![scene.root()];
+            let mut kept: NodeMap<Option<ScrollAnchor>> = NodeMap::default();
+            for step in 0..1500 {
+                nodes.retain(|id| scene.contains(*id));
+                let pick = |n: u64| nodes[n as usize % nodes.len()];
+                let at = pick(next(1 << 20));
+                let amount = |n: u64| match n % 6 {
+                    0 => 0.,
+                    1 => -0.,
+                    2 => (n % 400) as f32 / 3. - 60.,
+                    3 => -((n % 97) as f32) * 0.1,
+                    4 => (n % 1000) as f32 * 1.375,
+                    _ => 1e-3 * (n % 7) as f32,
+                };
+                let to = Transform {
+                    x: amount(next(1 << 20)),
+                    y: amount(next(1 << 20)),
+                };
+                match next(14) {
+                    // Mostly moves: of scroll content (a scroll) and not.
+                    0..=4 if at != scene.root() => scene.set_transform(at, to),
+                    5 if at != scene.root() => {
+                        let opacity = [0., 0.5, 1.][next(3) as usize];
+                        scene.set_transform_and_effects(
+                            at,
+                            to,
+                            Effects {
+                                opacity,
+                                ..Effects::default()
+                            },
+                        );
+                    }
+                    6 if at != scene.root() => {
+                        let opacity = [0., 1.][next(2) as usize];
+                        scene.set_effects(
+                            at,
+                            Effects {
+                                opacity,
+                                ..Effects::default()
+                            },
+                        );
+                    }
+                    7 => scene.set_scroll_copy(at, next(3) != 0),
+                    8 => {
+                        let w = 20. + next(300) as f32;
+                        let h = 10. + next(200) as f32;
+                        scene.set_style(at, boxed(w, h));
+                    }
+                    // Mounted: under any node, a box or a leaf.
+                    9 | 10 if nodes.len() < 160 => {
+                        let kind = match next(3) {
+                            0 => NodeKind::Rect(Color(9, 9, 9, 255)),
+                            1 => NodeKind::Container(Layout::Overlay),
+                            _ => NodeKind::Container(Layout::Column),
+                        };
+                        let w = 10. + next(200) as f32;
+                        let h = 5. + next(80) as f32;
+                        nodes.push(scene.append(at, kind, boxed(w, h)));
+                    }
+                    // Removed, or moved under another node: mounted again
+                    // there with what it held (a row between scroll views,
+                    // a scroll view under another parent).
+                    11 if at != scene.root() => {
+                        let to = pick(next(1 << 20));
+                        let inside = |mut id: NodeId| loop {
+                            if id == at {
+                                break true;
+                            }
+                            match scene.parent(id) {
+                                Some(parent) => id = parent,
+                                None => break false,
+                            }
+                        };
+                        if next(2) == 0 && !inside(to) {
+                            let scroll = scene.node(at).scroll_copy;
+                            let from = scene.transform(at);
+                            let again = scene.append(
+                                to,
+                                NodeKind::Container(Layout::Column),
+                                boxed(90., 40.),
+                            );
+                            scene.set_scroll_copy(again, scroll);
+                            scene.set_transform(again, from);
+                            let row = scene.append(
+                                again,
+                                NodeKind::Rect(Color(1, 1, 1, 255)),
+                                boxed(30., 9.),
+                            );
+                            nodes.extend([again, row]);
+                        }
+                        scene.remove(at);
+                    }
+                    12 => {
+                        scene.flush();
+                    }
+                    _ => {}
+                }
+                // Layout runs at times, as a frame does, between steps that
+                // move.
+                if step % 5 == 0 {
+                    scene.prepare_layout();
+                }
+                for &id in &nodes {
+                    if !scene.contains(id) {
+                        kept.remove(&id);
+                        continue;
+                    }
+                    let fresh = scene.world_bounds(id);
+                    let got = scene.world_bounds_kept(id, kept.entry(id).or_insert(None));
+                    let bits = |r: Rect| [r.x, r.y, r.width, r.height].map(f32::to_bits);
+                    assert_eq!(bits(got), bits(fresh), "node {id:?} at step {step}");
+                }
+            }
+        }
+    }
     /// A node painted outside its parent's fade, removed, leaves its entry
     /// (let go only as the map grows): asking what paints plainly passes
     /// it by rather than looking it up.
@@ -21561,12 +21799,12 @@ mod nonfinite_transform_tests {
             && r.height.is_finite()));
         assert_eq!(scene.hit_test(5., 30.), Some(node));
         assert_ne!(scene.hit_test(45., 30.), Some(node));
-        let revision = scene.geometry_revision;
+        let revision = scene.geometry_revision();
         for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0., 0.] {
             scene.set_transform(node, Transform { x, y: 25. });
             assert_eq!(scene.transform(node).x.to_bits(), 0);
             assert!(scene.flush().is_idle());
-            assert_eq!(scene.geometry_revision, revision);
+            assert_eq!(scene.geometry_revision(), revision);
         }
         scene.set_transform(
             node,
