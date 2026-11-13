@@ -290,13 +290,11 @@ fn a_readbacks_buffers_go_back_at_rest_but_the_one_held() {
     unsafe extern "C" {
         fn getpid() -> i32;
     }
-    let surfaces = || {
-        let out = std::process::Command::new("footprint")
-            // SAFETY: getpid has no preconditions.
-            .args(["-p", &unsafe { getpid() }.to_string()])
-            .output()
-            .expect("footprint");
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    // `footprint` can hang (seen on an M5, then outliving its killed test
+    // and holding every later one up): given `FOOTPRINT_WAIT` to answer,
+    // then killed, the test skipped. None: it didn't answer.
+    let surfaces = || -> Option<i64> {
+        let text = footprint(&unsafe { getpid() }.to_string())?;
         let line = text
             .lines()
             .find(|line| line.trim_end().ends_with(" IOSurface"))
@@ -310,7 +308,7 @@ fn a_readbacks_buffers_go_back_at_rest_but_the_one_held() {
             "GB" => 1024. * 1024. * 1024.,
             _ => panic!("{line}"),
         };
-        (number.parse::<f64>().unwrap() * scale) as i64
+        Some((number.parse::<f64>().unwrap() * scale) as i64)
     };
     let (width, height) = (1280u32, 720u32);
     let frame_bytes = (width * height * 4) as i64;
@@ -333,13 +331,51 @@ fn a_readbacks_buffers_go_back_at_rest_but_the_one_held() {
     drop(held);
     // At rest (a player's comes 5 s after its last frame).
     std::thread::sleep(std::time::Duration::from_millis(1500));
-    let before = surfaces();
+    let Some(before) = surfaces() else {
+        return eprintln!("skipped: footprint didn't answer in {FOOTPRINT_WAIT:?}");
+    };
     assert!(before >= 2 * frame_bytes, "{before} bytes of surfaces held");
     staging.release_unused();
-    let after = surfaces();
+    let Some(after) = surfaces() else {
+        return eprintln!("skipped: footprint didn't answer in {FOOTPRINT_WAIT:?}");
+    };
     assert!(
         after < 2 * frame_bytes,
         "{after} bytes of surfaces held at rest (from {before}), a frame being {frame_bytes}"
     );
     drop(shown);
+}
+
+/// How long `footprint` is given to answer before it's killed.
+const FOOTPRINT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What `footprint -p pid` prints, or None if it doesn't finish within
+/// `FOOTPRINT_WAIT`: then it's killed and reaped, never outliving the test.
+/// Its output is read on a thread, so a full pipe can't hold it up.
+fn footprint(pid: &str) -> Option<String> {
+    use std::io::Read;
+    let mut child = std::process::Command::new("footprint")
+        .args(["-p", pid])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("footprint");
+    let mut stdout = child.stdout.take().expect("piped");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    let deadline = std::time::Instant::now() + FOOTPRINT_WAIT;
+    loop {
+        if child.try_wait().expect("footprint's status").is_some() {
+            return Some(reader.join().expect("footprint's output"));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
