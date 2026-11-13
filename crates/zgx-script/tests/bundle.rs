@@ -171,3 +171,42 @@ fn bytecode_load_time() {
         source / bytecode
     );
 }
+
+/// `ui.find_look`'s icons named by path are read from the bundle, as images
+/// are: the app loads and the find bar shows the icon.
+#[test]
+fn a_find_look_icon_named_by_path_is_read_from_the_bundle() {
+    let ui = bundle(
+        "find-look-app",
+        &[
+            (
+                "app.luau",
+                r#"ui.find_look { icons = { search = "icons/search.svg" } }
+return ui.column { w = 400, h = 300, ui.text { "apple", id = "label" } }"#,
+            ),
+            (
+                "icons/search.svg",
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='5'/></svg>",
+            ),
+        ],
+    );
+    let mut h = Harness::new(|runtime| ScriptHost::bundled(runtime, ui, "app.luau"));
+    let error = h.host.error().get();
+    let label = h.text("label");
+    assert!(h.ui.open_find());
+    h.frames(2);
+    let icons = {
+        let scene = h.ui.scene.borrow();
+        let mut pending = vec![scene.root()];
+        let mut icons = 0;
+        while let Some(id) = pending.pop() {
+            icons += usize::from(matches!(scene.kind(id), zgx::scene::NodeKind::Svg(_)));
+            pending.extend(scene.children(id).iter().copied());
+        }
+        icons
+    };
+    zgx::find::set_find_look(Default::default());
+    assert_eq!(error, None);
+    assert_eq!(label, "apple");
+    assert_eq!(icons, 1, "the bar's search icon");
+}

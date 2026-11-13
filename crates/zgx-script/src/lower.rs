@@ -370,7 +370,6 @@ impl Assets {
         self.source.set(Some(files));
     }
     /// Where its files come from: the disk, or the app's bundle.
-    #[cfg(feature = "gltf")]
     pub(crate) fn source(&self) -> crate::Files {
         self.source.get().unwrap_or(crate::Files::Disk)
     }
@@ -5658,7 +5657,7 @@ pub(crate) fn try_load_image_in(
             assets.keep_image(src.to_owned(), image.clone());
             Ok(Some(image))
         }
-        Err(e) => Err(match literal_site(vm, src) {
+        Err(e) => Err(match literal_site(vm, assets.source(), src) {
             Some(site) => format!("{site}: {e}"),
             None => e,
         }),
@@ -5670,25 +5669,23 @@ pub(crate) fn try_load_image_in(
 /// load keep nothing of where they were named.
 #[cold]
 #[inline(never)]
-fn literal_site(vm: &Vm, src: &str) -> Option<String> {
+fn literal_site(vm: &Vm, source: crate::Files, src: &str) -> Option<String> {
     let base = vm.base.as_ref()?;
     let quoted = [format!("\"{src}\""), format!("'{src}'")];
     let mut dirs = vec![base.clone()];
     let mut files = Vec::new();
     while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        for path in source.list(&dir) {
             // Not tools' files (`.zgx/types.d.luau`) nor declarations: no
             // script line runs there.
-            let name = entry.file_name();
+            let Some(name) = path.file_name() else {
+                continue;
+            };
             let name = name.to_string_lossy();
             if name.starts_with('.') || name.ends_with(".d.luau") {
                 continue;
             }
-            if path.is_dir() {
+            if source.is_dir(&path) {
                 dirs.push(path);
             } else if path.extension().is_some_and(|e| e == "luau" || e == "lua") {
                 files.push(path);
@@ -5697,7 +5694,7 @@ fn literal_site(vm: &Vm, src: &str) -> Option<String> {
     }
     files.sort();
     files.iter().find_map(|file| {
-        let text = std::fs::read_to_string(file).ok()?;
+        let text = source.read_to_string(file).ok()?;
         let line = text
             .lines()
             .position(|line| quoted.iter().any(|q| line.contains(q.as_str())))?;
@@ -5746,7 +5743,7 @@ fn load_svg(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Arc<SvgData> {
             // As a picture's: the file's doing, warned of with the line.
             unshown(
                 vm,
-                match literal_site(vm, src) {
+                match literal_site(vm, low.assets.source(), src) {
                     Some(site) => format!("{site}: {e}"),
                     None => e,
                 },
@@ -9371,11 +9368,13 @@ pub(crate) fn install_menu_look(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Resu
 /// Installs `ui.find_look { panel, group, field, field_focus, count, button,
 /// button_hover, button_active, icon, icons, placeholder, short_count,
 /// navigator_after }`: the look of the find bar zgx builds. `icons` are SVG
-/// paths from the script's folder, or SVG markup.
+/// paths from the script's folder, read from the host's files (the disk, or
+/// the app's bundle) as images are, or SVG markup.
 pub(crate) fn install_find_look(
     lua: &mlua::Lua,
     ui: &mlua::Table,
     vm: std::rc::Weak<Vm>,
+    assets: Rc<Assets>,
 ) -> mlua::Result<()> {
     ui.set(
         "find_look",
@@ -9407,7 +9406,7 @@ pub(crate) fn install_find_look(
                         .upgrade()
                         .ok_or_else(|| mlua::Error::runtime("find_look: the script has ended"))?;
                     let path = resolve_path(&vm, &src).map_err(mlua::Error::runtime)?;
-                    std::fs::read(&path).map_err(|e| {
+                    assets.source().read(&path).map_err(|e| {
                         mlua::Error::runtime(format!(
                             "find_look.icons.{name}: {}: {e}",
                             path.display()
