@@ -118,6 +118,9 @@ fn main() {
         let updated = Instant::now();
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+        }
         let laid = Instant::now();
         if let Some(gpu) = &mut gpu {
             gpu.render(&ui.scene.borrow(), &report.damage).unwrap();

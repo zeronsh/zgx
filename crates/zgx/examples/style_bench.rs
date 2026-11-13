@@ -28,7 +28,12 @@ fn main() {
         }
     }));
     ui.mount(view);
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     let started = Instant::now();
     let frames: u32 = std::env::var("FRAMES")
         .ok()
@@ -37,7 +42,13 @@ fn main() {
     for frame in 1..=frames {
         t.set(frame as f32 / 120.);
         ui.prepare_frame();
-        std::hint::black_box(ui.scene.borrow_mut().flush());
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+            std::hint::black_box(flushed);
+        }
     }
     println!(
         "{}: {:.1} us per frame",

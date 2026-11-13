@@ -45,7 +45,12 @@ fn main() {
         }));
     let _handle = ui.mount(page);
     ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     // Back and forth along a diagonal: most moves stay in the boxes they were
     // in, some cross into the next.
     let mut cursors = 0;
@@ -57,7 +62,12 @@ fn main() {
         cursors += usize::from(ui.input.cursor_at(&scene, x, y).is_some());
         drop(scene);
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
     }
     println!("{moves} moves, a cursor on {cursors}");
 }

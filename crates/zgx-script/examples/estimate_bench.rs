@@ -125,13 +125,22 @@ fn main() {
         .shared("bench.rows", Value::Nil)
         .set(Value::List(Rc::from(rows.clone())));
     app.frames(10);
+    if zgx_fingerprint::on() {
+        zgx_fingerprint::paint_only(&app.ui.scene.borrow());
+    }
     for _ in 0..200 {
         app.scroll("#bench", 300.);
         app.frame();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::paint_only(&app.ui.scene.borrow());
+        }
     }
     for width in [700., 900.] {
         app.ui.scene.borrow_mut().resize(width, 800.);
         app.frames(5);
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::paint_only(&app.ui.scene.borrow());
+        }
     }
     for i in 0..20 {
         let row = Value::record([
@@ -144,6 +153,9 @@ fn main() {
             .shared("bench.rows", Value::Nil)
             .set(Value::List(Rc::from(rows.clone())));
         app.frames(2);
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::paint_only(&app.ui.scene.borrow());
+        }
     }
     println!("{}", if on { "estimating" } else { "off" });
 }

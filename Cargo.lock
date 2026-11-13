@@ -5123,6 +5123,7 @@ dependencies = [
  "web-time",
  "zerotrie",
  "zerovec",
+ "zgx-fingerprint",
  "zgx-taffy",
 ]
 
@@ -5135,6 +5136,7 @@ dependencies = [
  "wgpu",
  "zgx",
  "zgx-desktop",
+ "zgx-fingerprint",
  "zgx-gpu",
  "zgx-workload",
 ]
@@ -5258,6 +5260,7 @@ dependencies = [
  "zgx",
  "zgx-components",
  "zgx-cosmic-text",
+ "zgx-fingerprint",
  "zgx-ghostty-sys",
  "zgx-gpu",
  "zgx-run",
@@ -5276,6 +5279,13 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+ "zgx",
+]
+
+[[package]]
+name = "zgx-fingerprint"
+version = "0.1.10"
+dependencies = [
  "zgx",
 ]
 
@@ -5399,6 +5409,7 @@ dependencies = [
  "zgx-3d",
  "zgx-components",
  "zgx-desktop",
+ "zgx-fingerprint",
  "zgx-gpu",
  "zgx-mlua",
  "zgx-workload",
@@ -5437,6 +5448,7 @@ dependencies = [
  "windows-sys 0.59.0",
  "zgx",
  "zgx-alacritty-terminal",
+ "zgx-fingerprint",
  "zgx-gpu",
  "zgx-workload",
 ]
@@ -5450,6 +5462,7 @@ dependencies = [
  "serde_json",
  "wgpu",
  "zgx",
+ "zgx-fingerprint",
  "zgx-gpu",
  "zgx-run",
  "zgx-script",

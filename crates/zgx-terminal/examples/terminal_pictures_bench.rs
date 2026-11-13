@@ -165,6 +165,9 @@ fn main() {
     ));
     ui.prepare_frame();
     let report = ui.scene.borrow_mut().flush();
+    if zgx_fingerprint::on() {
+        zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+    }
     gpu.render(&ui.scene.borrow(), &report.damage)
         .expect("a frame");
     let steps = gate_marks::outside(|| steps(rounds));
@@ -176,6 +179,9 @@ fn main() {
         }
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+        }
         let scene = ui.scene.borrow();
         gpu.render(&scene, &report.damage).expect("a frame");
         drawn += gate_marks::outside(|| {

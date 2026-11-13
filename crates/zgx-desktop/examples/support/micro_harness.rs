@@ -158,6 +158,9 @@ impl Bench {
     fn frame(&mut self) {
         self.ui.prepare_frame();
         let report = self.ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&self.ui.scene.borrow(), &report);
+        }
         if let Some(gpu) = &mut self.gpu {
             gpu.render(&self.ui.scene.borrow(), &report.damage)
                 .expect("render");
