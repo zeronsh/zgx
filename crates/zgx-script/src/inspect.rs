@@ -580,7 +580,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   reloads                                        each hot reload: files, partial or full, and why
   mark    [name=mark]                            mark now: `frames since=name` reads what follows
   clock   [freeze|thaw|advance <ms>]             freeze every animation, timer and caret at one time (also ZGX_FREEZE_TIME=1 at launch), move it by hand, or let it run
-  gc      [top] [retained] [sample=5] [mark] [since_mark]
+  gc      [top] [retained] [sample=5] [mark] [since_mark] [lua_only]
                                                  a full Luau collection in each VM: heap before and after, what is left by type, userdata and code chunk; retained=State: what holds those objects, from a root; mark, then since_mark: what survives after it
   text    <target>                               how a text node was shaped: the family it asks for and what that resolves to, each line's baseline, ascent and descent, and the face each run used
   switch  [name] [on]                            list fast paths, or switch one on or off, to compare
@@ -749,6 +749,7 @@ impl Session {
                     retained: text("retained"),
                     sample: number("sample").map_or(5, |n| n.max(1.) as usize),
                     mark: flag("mark"),
+                    lua_only: flag("lua_only"),
                     since_mark: flag("since_mark"),
                 };
                 let report = self.0.host.gc_report(&query);
@@ -804,7 +805,10 @@ impl Session {
                         }
                     }
                     if query.retained.is_some() {
-                        lines.push(format!("  {} objects match; held by:", found.matched));
+                        lines.push(format!(
+                            "  {} objects match, {} reachable without Rust's handles; held by:",
+                            found.matched, found.lua_reachable
+                        ));
                         for holder in &found.holders {
                             lines.push(format!("    {} ×", holder.count));
                             for step in &holder.path {

@@ -591,3 +591,39 @@ return ui.column { ui.show(function() return on:get() end, Outer {}) }"##;
         found.holders.first().map(|h| &h.path)
     );
 }
+
+/// `gc --retained` says how many matches a Luau holder alone reaches: a
+/// mounted node's state, held only by the handle Rust keeps to its handler's
+/// closure, is not one.
+#[test]
+fn gc_tells_luau_holders_from_rust_handles() {
+    let code = r##"
+local on = ui.state("on", false)
+local Probe = ui.component(function()
+    local s = ui.use_state(0)
+    return ui.div { id = "p", w = 10, h = 10, on_hover = function() s:set(1) end }
+end)
+return ui.column { ui.show(function() return on:get() end, Probe {}) }"##;
+    let h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    h.host
+        .set_state("on", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.settle();
+    h.frames(2);
+    let found = &h.host.gc_report(&zgx_script::GcQuery {
+        retained: Some("State".into()),
+        sample: 3,
+        ..Default::default()
+    })[0]
+        .found;
+    assert!(found.matched >= 1, "{found:?}");
+    assert_eq!(found.lua_reachable, 0, "held from Rust only: {found:?}");
+    assert!(
+        found
+            .holders
+            .iter()
+            .any(|h| h.path.iter().any(|step| step.contains("on_hover"))),
+        "{found:?}"
+    );
+}

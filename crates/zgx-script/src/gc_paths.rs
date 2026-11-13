@@ -16,6 +16,9 @@ pub struct GcQuery {
     pub sample: usize,
     /// Remember the objects there are now.
     pub mark: bool,
+    /// Find the holders without going through Rust's handles (the auxiliary
+    /// thread's stack): what a Luau holder keeps, as against a Rust one.
+    pub lua_only: bool,
     /// Only the objects that weren't there at the mark.
     pub since_mark: bool,
 }
@@ -40,6 +43,9 @@ pub struct GcFound {
     pub since: Vec<(String, usize, u64)>,
     /// How many objects matched `retained`, and the paths holding them.
     pub matched: usize,
+    /// Of the matches, how many a Luau holder alone reaches (not through the
+    /// handles Rust holds): the rest are held from Rust.
+    pub lua_reachable: usize,
     /// The commonest holder paths, most first.
     pub holders: Vec<GcHolder>,
 }
@@ -198,24 +204,47 @@ pub fn find(json: &str, query: &GcQuery, mark: &mut Option<HashSet<String>>) -> 
     if let Some(wanted) = query.retained.as_deref() {
         let matches = |addr: &str| {
             let kind = objects[addr]["type"].as_str().unwrap_or("");
-            kind != "proto" && (kind == wanted || describe(&objects, addr).contains(wanted))
+            kind != "proto"
+                && kind != "string"
+                && (kind == wanted || describe(&objects, addr).contains(wanted))
         };
-        let mut parent: HashMap<&str, (&str, String)> = HashMap::new();
-        let mut seen: HashSet<&str> = roots.iter().map(String::as_str).collect();
-        let mut queue: VecDeque<&str> = roots.iter().map(String::as_str).collect();
-        let mut targets = Vec::new();
-        while let Some(at) = queue.pop_front() {
-            if at != "0" && fresh(at) && objects.contains_key(at) && matches(at) {
-                targets.push(at);
-            }
-            for (label, to) in edges(&objects, at) {
-                if seen.insert(to) {
-                    parent.insert(to, (at, label));
-                    queue.push_back(to);
+        let main = root["roots"]["mainthread"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let walk = |skip_threads: bool| {
+            let mut parent: HashMap<&str, (&str, String)> = HashMap::new();
+            let mut seen: HashSet<&str> = roots.iter().map(String::as_str).collect();
+            let mut queue: VecDeque<&str> = roots.iter().map(String::as_str).collect();
+            let mut targets = Vec::new();
+            while let Some(at) = queue.pop_front() {
+                if at != "0" && fresh(at) && objects.contains_key(at) && matches(at) {
+                    targets.push(at);
+                }
+                if skip_threads
+                    && at != main
+                    && objects.get(at).is_some_and(|o| o["type"] == "thread")
+                {
+                    continue;
+                }
+                for (label, to) in edges(&objects, at) {
+                    if seen.insert(to) {
+                        parent.insert(to, (at, label));
+                        queue.push_back(to);
+                    }
                 }
             }
-        }
-        found.matched = targets.len();
+            (targets, parent)
+        };
+        let (via_rust, _) = walk(false);
+        let (via_lua, lua_parent) = walk(true);
+        found.lua_reachable = via_lua.len();
+        let (targets, parent) = if query.lua_only {
+            (via_lua, lua_parent)
+        } else {
+            walk(false)
+        };
+        found.matched = via_rust.len();
         let mut groups: HashMap<Vec<String>, usize> = HashMap::new();
         for target in targets {
             let mut path = Vec::new();

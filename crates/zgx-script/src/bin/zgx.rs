@@ -476,7 +476,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
   clock [freeze|thaw|advance <ms>]   text <target>
-  gc [--top N] [--retained KIND] [--sample N] [--mark] [--since-mark]
+  gc [--top N] [--retained KIND] [--sample N] [--mark] [--since-mark] [--lua-only]
                        a full Luau collection: heap before and after, what is left; --retained
                        State: the chains of holders from a root; --mark, then --since-mark: what
                        survives after it
@@ -973,8 +973,9 @@ const TOOLS: &[Tool] = &[
             ("sample", "number", false),
             ("mark", "boolean", false),
             ("since_mark", "boolean", false),
+            ("lua_only", "boolean", false),
         ],
-        "Run a full Luau collection in each script VM and report the heap before and after (garbage freed), and what is left by object type, userdata type and the chunk its code came from: tell garbage from a leak by running it again after the same actions. `retained` names a kind (a userdata type such as State, `table`, `function`, or part of a function's name or chunk) and prints the chains of holders from a root to those objects (registry → .key → upvalue → …, each function with its chunk:line), the commonest `sample` of them with counts. `mark` remembers the objects there are now; after more actions, `since_mark` lists what survived a collection that wasn't there then, and with `retained` only holders of those.",
+        "Run a full Luau collection in each script VM and report the heap before and after (garbage freed), and what is left by object type, userdata type and the chunk its code came from: tell garbage from a leak by running it again after the same actions. `retained` names a kind (a userdata type such as State, `table`, `function`, or part of a function's name or chunk) and prints the chains of holders from a root to those objects (registry → .key → upvalue → …, each function with its chunk:line), the commonest `sample` of them with counts. `mark` remembers the objects there are now; after more actions, `since_mark` lists what survived a collection that wasn't there then, and with `retained` only holders of those. Every `retained` answer also says how many of the matches a Luau holder alone reaches (the rest are held through Rust's handles); `lua_only` shows those Luau holders' chains instead of the handle chains.",
     ),
     (
         "zgx_text",
