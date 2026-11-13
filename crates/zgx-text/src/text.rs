@@ -862,17 +862,88 @@ impl zgx::text_layout::TextLayout for ShapedText {
 }
 
 /// Lazy software shaping/rasterization for the reference backend's styled fonts.
-/// Glyph images are not retained in Swash's unbounded internal image map.
+/// Glyph images are not retained in Swash's unbounded internal image map;
+/// `glyph` and `layout` keep theirs in bounded caches of their own.
 pub struct CpuTextRaster {
     fonts: FontSystem,
     swash: cosmic_text::SwashCache,
+    glyphs: Generations<cosmic_text::CacheKey, Option<Arc<cosmic_text::SwashImage>>>,
+    layouts: Generations<LayoutKey, Arc<[LaidLine]>>,
 }
 impl Default for CpuTextRaster {
     fn default() -> Self {
         Self {
             fonts: crate::font_cache::system_fonts(),
             swash: cosmic_text::SwashCache::new(),
+            glyphs: Generations::default(),
+            layouts: Generations::default(),
         }
+    }
+}
+/// What a text is laid out from: its text, size, box's width and height
+/// (their bits) and font.
+type LayoutKey = (String, u32, u32, u32, zgx::text_layout::FontStyle);
+/// A line of laid-out text: its index, baseline and glyphs, in points.
+#[doc(hidden)]
+pub struct LaidLine {
+    pub line_i: usize,
+    pub line_y: f32,
+    pub glyphs: Vec<cosmic_text::LayoutGlyph>,
+}
+impl LaidLine {
+    /// It as a buffer's layout run (without its text or decorations).
+    pub fn run(&self) -> cosmic_text::LayoutRun<'_> {
+        cosmic_text::LayoutRun {
+            line_i: self.line_i,
+            text: "",
+            rtl: false,
+            glyphs: &self.glyphs,
+            decorations: &[],
+            line_y: self.line_y,
+            line_top: 0.,
+            line_height: 0.,
+            line_w: 0.,
+        }
+    }
+}
+/// The bytes a `Generations`' new generation holds before it is the old one.
+const GENERATION_BYTES: usize = 8 << 20;
+/// A bounded cache: what is put in goes in the new generation; when that
+/// holds `GENERATION_BYTES`, it becomes the old one and the old one goes.
+/// What is asked from the old one moves back to the new.
+struct Generations<K, V> {
+    new: std::collections::HashMap<K, V>,
+    old: std::collections::HashMap<K, V>,
+    bytes: usize,
+}
+impl<K, V> Default for Generations<K, V> {
+    fn default() -> Self {
+        Self {
+            new: Default::default(),
+            old: Default::default(),
+            bytes: 0,
+        }
+    }
+}
+impl<K: std::hash::Hash + Eq, V: Clone> Generations<K, V> {
+    /// What `key` has, else `make`'s, kept as `bytes` big.
+    fn get(&mut self, key: K, make: impl FnOnce() -> V, bytes: impl Fn(&V) -> usize) -> V {
+        if let Some(value) = self.new.get(&key) {
+            return value.clone();
+        }
+        let value = self.old.remove(&key).unwrap_or_else(make);
+        self.bytes += bytes(&value) + 64;
+        if self.bytes > GENERATION_BYTES {
+            self.old = std::mem::take(&mut self.new);
+            self.bytes = 0;
+        }
+        self.new.insert(key, value.clone());
+        value
+    }
+    fn clear(&mut self) {
+        self.new.clear();
+        self.old.clear();
+        self.bytes = 0;
     }
 }
 /// Rich text rasterized: each glyph's position, colour and image, then
@@ -885,6 +956,8 @@ impl CpuTextRaster {
     /// Make `font` available to the text it rasterizes.
     pub fn register_font(&mut self, font: &FontData) {
         font.install(&mut self.fonts);
+        self.glyphs.clear();
+        self.layouts.clear();
     }
     /// Shape `font`'s families with it alone from now on, in place of their
     /// faces (`FontData::replace_in`), as a window does after
@@ -947,9 +1020,69 @@ impl CpuTextRaster {
     }
     /// Its fonts and glyph cache, for a renderer that places glyphs its own
     /// way (zgx-gpu's canvas labels, as the GPU renderer places them).
+    /// Its glyphs and layouts kept are dropped: the fonts may change.
     #[doc(hidden)]
     pub fn parts(&mut self) -> (&mut FontSystem, &mut cosmic_text::SwashCache) {
+        self.glyphs.clear();
+        self.layouts.clear();
         (&mut self.fonts, &mut self.swash)
+    }
+    /// `key`'s glyph image (`glyph_image`), kept for the next time it is asked.
+    #[doc(hidden)]
+    pub fn glyph(&mut self, key: cosmic_text::CacheKey) -> Option<Arc<cosmic_text::SwashImage>> {
+        let (swash, fonts) = (&mut self.swash, &mut self.fonts);
+        self.glyphs.get(
+            key,
+            || glyph_image(swash, fonts, key).map(Arc::new),
+            |image| image.as_ref().map_or(0, |image| image.data.len()),
+        )
+    }
+    /// `text` at `size` in `font`, laid out in `width` by `height` as
+    /// `rasterize` lays it out: its lines in points, kept for the next time
+    /// it is asked.
+    #[doc(hidden)]
+    pub fn layout(
+        &mut self,
+        text: &str,
+        size: f32,
+        width: f32,
+        height: f32,
+        font: &zgx::text_layout::FontStyle,
+    ) -> Arc<[LaidLine]> {
+        let key = (
+            text.to_owned(),
+            size.to_bits(),
+            width.to_bits(),
+            height.to_bits(),
+            font.clone(),
+        );
+        let fonts = &mut self.fonts;
+        self.layouts.get(
+            key,
+            || {
+                let size = size.max(1.);
+                let mut buffer =
+                    Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
+                buffer.set_size(wrap_width(Some(width)), Some(height));
+                set_buffer_text(fonts, &mut buffer, text, font, size);
+                buffer.shape_until_scroll(fonts, false);
+                buffer
+                    .layout_runs()
+                    .map(|run| LaidLine {
+                        line_i: run.line_i,
+                        line_y: run.line_y,
+                        glyphs: run.glyphs.to_vec(),
+                    })
+                    .collect()
+            },
+            |lines| {
+                text.len()
+                    + lines
+                        .iter()
+                        .map(|line| line.glyphs.len() * size_of::<cosmic_text::LayoutGlyph>())
+                        .sum::<usize>()
+            },
+        )
     }
     /// The width and height `text` takes at `size` in `font`, wrapped at
     /// `width` if given, as a scene measures it
@@ -1447,6 +1580,43 @@ mod line_height_tests {
                 .visual_line_edge(TextPosition::default(), true)
                 .byte_offset
         );
+    }
+
+    #[test]
+    fn a_raster_keeps_its_layouts_and_glyphs_until_its_fonts_change() {
+        let mut raster = CpuTextRaster::default();
+        let font = FontStyle::default();
+        let text = "Kept text\nwraps";
+        let laid = |raster: &mut CpuTextRaster, size| raster.layout(text, size, 60., 200., &font);
+        let lines = laid(&mut raster, 18.);
+        assert!(lines.len() >= 2);
+        assert!(Arc::ptr_eq(&lines, &laid(&mut raster, 18.)));
+        assert!(!Arc::ptr_eq(&lines, &laid(&mut raster, 19.)));
+        // As `rasterize` lays it out: the same glyphs and lines.
+        let images = raster.rasterize(text, 18., 60., 200., &font);
+        let key = lines[0].glyphs[0].physical((0., 0.), 1.).cache_key;
+        let image = raster.glyph(key).expect("a glyph image");
+        assert_eq!(image.data, images[0].2.data);
+        assert!(Arc::ptr_eq(&image, &raster.glyph(key).expect("kept")));
+        // Its fonts lent out to change: what it kept goes.
+        raster.parts();
+        assert!(!Arc::ptr_eq(&lines, &laid(&mut raster, 18.)));
+        let again = raster.glyph(key).expect("made again");
+        assert!(!Arc::ptr_eq(&image, &again));
+    }
+
+    #[test]
+    fn generations_hold_at_most_two_generations_and_keep_what_is_asked() {
+        let mut cache = Generations::<u32, u32>::default();
+        let chunk = GENERATION_BYTES / 4;
+        for key in 0..100 {
+            cache.get(key, || key, |_| chunk);
+            // Asked every time: it never goes.
+            assert_eq!(cache.get(0, || unreachable!(), |_| chunk), 0);
+            assert!(cache.new.len() + cache.old.len() <= 9);
+        }
+        assert!(cache.new.contains_key(&0) || cache.old.contains_key(&0));
+        assert!(!cache.new.contains_key(&1) && !cache.old.contains_key(&1));
     }
 
     #[test]
