@@ -137,3 +137,51 @@ fn a_press_from_a_handler_is_refused() {
     assert_eq!(h.text("result"), "false");
     assert_eq!(h.text("log"), "none");
 }
+
+const CHECKED: &str = r##"
+local listing = ui.state("listing", "")
+local open = ui.state("open", true)
+local wrap = ui.state("wrap", true)
+ui.command { id = "scan", run = function()
+    local names = {}
+    for _, c in ui.controls() do
+        table.insert(names, c.role .. ":" .. c.name .. ":" .. tostring(c.checked))
+    end
+    listing:set(table.concat(names, "|"))
+end }
+return ui.column { gap = 8, w_full = true, h_full = true,
+    ui.text { id = "listing", function() return listing:get() end },
+    ui.button { "Plain" },
+    ui.checkbox { label = "On", value = ui.state("on", true) },
+    ui.checkbox { label = "Off", value = ui.state("off", false) },
+    ui.menu { id = "m", open = open,
+        anchor = ui.button { id = "opener", "Menu" },
+        build = function() return ui.column {
+            ui.menu_item { "Word Wrap", checked = wrap },
+            ui.menu_item { "Small", radio = true, checked = true },
+            ui.menu_item { "Large", radio = true, checked = false },
+            ui.menu_item { "Copy" },
+        } end },
+}
+"##;
+
+/// A checkbox, a radio or a checked menu item says whether it is on; what cannot be checked says
+/// nothing (nil), so a script can tell an already chosen option.
+#[test]
+fn controls_carry_checked_where_they_can_be_checked() {
+    let mut h = Harness::inline(CHECKED);
+    h.frames(3);
+    run(&mut h, "scan");
+    let listing = h.text("listing");
+    for want in [
+        "button:Plain:nil",
+        "checkbox:On:true",
+        "checkbox:Off:false",
+        "menuitemcheckbox:Word Wrap:true",
+        "menuitemradio:Small:true",
+        "menuitemradio:Large:false",
+        "menuitem:Copy:nil",
+    ] {
+        assert!(listing.contains(want), "{want} in {listing}");
+    }
+}

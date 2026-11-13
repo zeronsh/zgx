@@ -1603,7 +1603,7 @@ fn control_window(lua: &Lua, what: &str) -> mlua::Result<Option<zgx::widgets::Ui
 
 /// `ui.controls { limit? }`: the controls on screen as a list, in document
 /// order with popups and modals last: `{ role, name, x, y, w, h, disabled,
-/// selected, expanded, focused, handle }`, window points. `{}` where the
+/// selected, checked, expanded, focused, handle }`, window points. `{}` where the
 /// host gave no window (`ScriptHost::window_controls`).
 fn controls(lua: &Lua, options: Option<Table>) -> mlua::Result<Table> {
     let limit = match &options {
@@ -1626,6 +1626,7 @@ fn controls(lua: &Lua, options: Option<Table>) -> mlua::Result<Table> {
         item.set("h", control.bounds.height)?;
         item.set("disabled", control.disabled)?;
         item.set("selected", control.selected)?;
+        item.set("checked", control.checked)?;
         item.set("expanded", control.expanded)?;
         item.set("focused", control.focused)?;
         // A number a script can hold exactly (2^53): a slot reused two million times wraps.

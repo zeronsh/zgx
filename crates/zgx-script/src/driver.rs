@@ -1230,6 +1230,9 @@ pub struct Control {
     pub disabled: bool,
     /// Selected, if it can be (a tab, an option).
     pub selected: Option<bool>,
+    /// Checked, if it can be (a checkbox, a radio, a switch, a checked or
+    /// radio menu item): on or off.
+    pub checked: Option<bool>,
     /// Open, if it can be (a menu's trigger, a disclosure).
     pub expanded: Option<bool>,
     /// It has the keyboard focus.
@@ -1291,6 +1294,7 @@ pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
             bounds,
             disabled: s.disabled,
             selected: s.selected,
+            checked: s.checked,
             expanded: s.expanded,
             focused: focused == Some(node),
             handle: node.to_bits(),
