@@ -183,6 +183,18 @@ SCENES = [
     ('terminal-slow', 'zgx-terminal', 'terminal_bench', {'LINES': '1000', 'PER_FRAME': '1',
                                                           'READS': 'PER_FRAME',
                                                           'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
+    # A search through that log at 100,000 lines of scrollback (Ghostty's
+    # `search:` binding): every match counted, those in view highlighted,
+    # the oldest selected and scrolled to; the log made, fed and freed
+    # uncounted (`gate_marks`). And a search held open while the 10,000
+    # lines arrive, as `terminal` without one: what an open search costs a
+    # flood (each new line searched once, the screen again each read).
+    ('terminal-search', 'zgx-terminal', 'terminal_bench', {'LINES': '100000', 'SCROLLBACK': '100000',
+                                                            'SEARCH': 'error', 'READS': 'SEARCH',
+                                                            'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
+    ('terminal-search-open', 'zgx-terminal', 'terminal_bench', {'SEARCH': 'error', 'SEARCH_OPEN': '1',
+                                                                 'READS': 'SEARCH',
+                                                                 'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
     # Pictures in that terminal, drawn by wgpu's no-op backend: placed (RGBA
     # in chunks, a PNG), scrolled, replaced under their ids and deleted;
     # sixel images placed over one another. What `terminal` guards having no
