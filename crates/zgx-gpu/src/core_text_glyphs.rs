@@ -196,9 +196,13 @@ fn descriptor(fonts: &mut FontSystem, id: cosmic_text::fontdb::ID) -> Option<Own
         }
         // Core Text gives another font for a name it doesn't know: kept only
         // if its name is the face's.
-        let by_name = Owned(CTFontDescriptorCreateWithNameAndSize(cf_name.0, 0.));
-        if !by_name.0.is_null() && named(by_name.0, &name) {
-            return Some(Owned(CFRetain(by_name.0)));
+        // (A hidden system face, `.SFNS-Regular`, isn't found by name: Core Text
+        // logs that it gives Times, so its file is read instead.)
+        if !name.starts_with('.') {
+            let by_name = Owned(CTFontDescriptorCreateWithNameAndSize(cf_name.0, 0.));
+            if !by_name.0.is_null() && named(by_name.0, &name) {
+                return Some(Owned(CFRetain(by_name.0)));
+            }
         }
         let all = match path.as_deref().and_then(|path| path.to_str()) {
             Some(path) => CTFontManagerCreateFontDescriptorsFromURL(
@@ -378,24 +382,21 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
     })
 }
 
-/// Whether Core Text draws glyphs of `face` through Chrome's recipe: any
-/// face but a colour one (emoji draw their own colours through swash).
-fn chrome_weight(fonts: &mut FontSystem, key: CacheKey) -> u16 {
-    // SF's weights between Medium and Semibold: Chrome draws them heavier
-    // than the axis value (measured against Chrome's ink: 510 as about 551,
-    // 550 as 598, 590 as 637, the ends as they are).
-    let weight = key.font_weight.0;
-    let system = fonts
-        .db()
-        .face(key.font_id)
-        .is_some_and(|face| face.post_script_name.starts_with(".SFNS-"));
-    if system && weight > 500 && weight < 600 {
-        (595.4 + 1.067 * (f32::from(weight) - 550.)).round() as u16
-    } else {
-        weight
-    }
+static SMOOTHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether glyphs draw with macOS's font smoothing (Chrome's default, `-webkit-font-smoothing:
+/// auto`: Core Graphics dilates the stems and Skia blends the mask through its
+/// luminance tables) rather than antialiased (what `-webkit-font-smoothing:
+/// antialiased` gives, and Anara's web build sets: the plain coverage, with no
+/// table). Set it once, before any text draws.
+pub fn set_font_smoothing(on: bool) {
+    SMOOTHING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+pub(crate) fn font_smoothing() -> bool {
+    SMOOTHING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether Core Text draws glyphs of `face` through Chrome's recipe: any
+/// face but a colour one (emoji draw their own colours through swash).
 /// `key`'s glyph as Chrome draws it on macOS: Skia draws it through Core
 /// Graphics, black on white with font smoothing on, in a colour context at
 /// the point size under the device scale (so the font's optical size and
@@ -410,10 +411,11 @@ pub(crate) fn chrome_glyph(
     scale: f32,
 ) -> Option<SwashImage> {
     let mut key = key;
-    key.font_weight = cosmic_text::fontdb::Weight(chrome_weight(fonts, key));
     let k = f64::from(scale.max(1.));
     key.font_size_bits = (f32::from_bits(key.font_size_bits) / scale.max(1.)).to_bits();
     let table = crate::chrome_mask_tables::for_luminance_bucket(key.flags.luminance_bucket());
+    let smoothing = font_smoothing();
+    let identity = !smoothing;
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let font = font_for(&mut cache, fonts, key)?;
@@ -465,7 +467,7 @@ pub(crate) fn chrome_glyph(
             );
             CGContextSetRGBFillColor(context.0, 0., 0., 0., 1.);
             CGContextSetShouldAntialias(context.0, true);
-            CGContextSetShouldSmoothFonts(context.0, true);
+            CGContextSetShouldSmoothFonts(context.0, smoothing);
             CGContextSetAllowsFontSubpixelPositioning(context.0, true);
             CGContextSetShouldSubpixelPositionFonts(context.0, true);
             CGContextSetAllowsFontSubpixelQuantization(context.0, false);
@@ -483,7 +485,11 @@ pub(crate) fn chrome_glyph(
             .iter()
             .map(|px| {
                 let gray = (u32::from(px[0]) + u32::from(px[1]) + u32::from(px[2])) / 3;
-                table[usize::from(255 - gray as u8)]
+                if identity {
+                    255 - gray as u8
+                } else {
+                    table[usize::from(255 - gray as u8)]
+                }
             })
             .collect();
         let mut image = SwashImage::new();

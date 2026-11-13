@@ -8,13 +8,13 @@ use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
 
 mod bands;
+#[cfg(target_os = "macos")]
+mod chrome_mask_tables;
 mod compile;
 #[cfg(all(windows, feature = "composition"))]
 mod composition;
 #[cfg(target_os = "macos")]
 mod core_text_glyphs;
-#[cfg(target_os = "macos")]
-mod chrome_mask_tables;
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(windows)]
@@ -36,6 +36,8 @@ mod view_host;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub use core_text_glyphs::core_text_glyph;
+#[cfg(target_os = "macos")]
+pub use core_text_glyphs::set_font_smoothing;
 #[cfg(target_os = "macos")]
 mod layer_present;
 #[cfg(target_os = "macos")]
@@ -1372,12 +1374,15 @@ fn set_baseline_snap(scale: f32) {
 /// glyphs keep their subpixel places and outlines' plain coverage.
 const SHARP_TEXT_BELOW: f32 = 2.;
 /// The coverage table flags for text of `color` at `scale`: on macOS at 2x
-/// and over, Chrome's, by the colour's luminance (`chrome_mask_tables`);
+/// and over with font smoothing on (`set_font_smoothing`), Chrome's, by the
+/// colour's luminance (`chrome_mask_tables`);
 /// elsewhere none, so glyphs share their atlas entries.
 fn luminance_flags(color: zgx::scene::Color, scale: f32) -> CacheKeyFlags {
     #[cfg(target_os = "macos")]
-    if scale >= SHARP_TEXT_BELOW {
-        return CacheKeyFlags::luminance(chrome_mask_tables::bucket_of([color.0, color.1, color.2]));
+    if scale >= SHARP_TEXT_BELOW && core_text_glyphs::font_smoothing() {
+        return CacheKeyFlags::luminance(chrome_mask_tables::bucket_of([
+            color.0, color.1, color.2,
+        ]));
     }
     let _ = (color, scale);
     CacheKeyFlags::empty()
@@ -10790,9 +10795,10 @@ impl GpuRenderer {
                                 shaped.colored = false;
                                 for glyph in &shaped.glyphs {
                                     let run_lum = match shaped.rich.as_ref() {
-                                        Some(rich) => {
-                                            luminance_flags(rich.runs()[glyph.run].color, self.scale)
-                                        }
+                                        Some(rich) => luminance_flags(
+                                            rich.runs()[glyph.run].color,
+                                            self.scale,
+                                        ),
                                         None => lum,
                                     };
                                     let (key, carry) = drawn_glyph(glyph, quarter_x, run_lum);
@@ -14840,7 +14846,13 @@ impl GpuRenderer {
                 colored |= entry.color;
                 let mut placed = glyph.clone();
                 placed.x += carry;
-                visible.push(glyph_quad(&placed, entry, self.scale, self.atlas_size, color));
+                visible.push(glyph_quad(
+                    &placed,
+                    entry,
+                    self.scale,
+                    self.atlas_size,
+                    color,
+                ));
             }
         }
         let lines_from = visible.len();
@@ -14908,8 +14920,12 @@ impl GpuRenderer {
             self.warn("more than 8192 glyphs in a frame: the rest aren't drawn");
             return Ok(None);
         }
-        let Some(image) = text::glyph_image(&mut self.swash, &mut self.fonts.borrow_mut(), key, self.scale)
-        else {
+        let Some(image) = text::glyph_image(
+            &mut self.swash,
+            &mut self.fonts.borrow_mut(),
+            key,
+            self.scale,
+        ) else {
             self.entries.insert(AtlasKey::from(key), None);
             return Ok(None);
         };
@@ -15189,8 +15205,12 @@ impl GpuRenderer {
         if let Some(entry) = self.blurred.as_ref().and_then(|b| b.glyphs.get(&slot)) {
             return Ok(*entry);
         }
-        let image =
-            text::glyph_image(&mut self.swash, &mut self.fonts.borrow_mut(), key, self.scale);
+        let image = text::glyph_image(
+            &mut self.swash,
+            &mut self.fonts.borrow_mut(),
+            key,
+            self.scale,
+        );
         let Some(image) = image.filter(|i| i.placement.width > 0 && i.placement.height > 0) else {
             self.blurred
                 .get_or_insert_default()

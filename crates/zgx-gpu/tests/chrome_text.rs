@@ -1,6 +1,6 @@
-//! Text on macOS at 2x draws as Chrome's does: Core Text's mask with font
-//! smoothing, blended through Skia's coverage table by the text's
-//! luminance, at the quarter pixel its origin falls in. The frame is
+//! Text on macOS at 2x draws as Chrome's does with `-webkit-font-smoothing:
+//! antialiased` (the default here, and Anara's web build's): Core Text's
+//! plain coverage, at the quarter pixel its origin falls in. The frame is
 //! compared with Chrome's own pixels (`fixtures/chrome_text.png`, headless
 //! Chrome 157 at a device scale of 2; four bands: Geist 400 at 14 px black
 //! on white, 600 at 16 px navy on white at x 10.25, 400 at 14 px white on
