@@ -5406,6 +5406,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     hit_start: icon_at.as_ref().map_or(start, |icon| icon.start),
                     action: span.action,
                     href: span.href,
+                    label: span.label,
                     styled_hover,
                     menu,
                     on_hover,

@@ -103,6 +103,10 @@ pub struct ShapeBuffer {
     /// Buffer for shape words.
     words: Vec<ShapeWord>,
 
+    /// zgx: the kerning a font gives a pair of characters a break opportunity
+    /// or a space separates (`pair_kerning`), in em, by what asks for it.
+    pair_kern: crate::HashMap<(fontdb::ID, u16, u16, char, char), f32>,
+
     /// zgx: the hyphenation of the line about to be laid out
     /// (`ShapeLine::hyphenate`), taken by its layout: nothing a line keeps.
     hyphenation: Option<Box<Hyphenation>>,
@@ -1165,58 +1169,57 @@ fn shape_skip(
     }
 }
 
-/// zgx patch: the pair kerning a font's GPOS asks of two kana that a line
-/// break opportunity separates (as Chrome and Core Text shape across it),
-/// in em: how much the first glyph's advance changes beside the second.
-fn kana_pair_kerning(
+/// zgx patch: the pair kerning the font `glyph` was shaped in gives it (its
+/// GPOS) before `next`, which a word boundary separates (as Chrome and Core
+/// Text shape across it), in em: how much the glyph's advance changes beside
+/// it. Asked of two kana, or of a space and what is next to it; `c1` is the
+/// glyph's character.
+pub fn pair_kerning(
     font_system: &mut FontSystem,
+    glyph: &ShapeGlyph,
     attrs_list: &AttrsList,
-    span: &str,
-    span_start: usize,
-    end_lb: usize,
+    c1: char,
+    c2: char,
 ) -> f32 {
-    if end_lb == 0 || end_lb >= span.len() {
-        return 0.;
-    }
-    let (Some(c1), Some(c2)) = (span[..end_lb].chars().last(), span[end_lb..].chars().next()) else {
-        return 0.;
-    };
     let kana = |c: char| {
         matches!(
             unicode_script::Script::from(c),
             unicode_script::Script::Hiragana | unicode_script::Script::Katakana
         )
     };
-    if !kana(c1) || !kana(c2) {
+    if !(kana(c1) && kana(c2)) && (c1 == ' ') == (c2 == ' ') {
         return 0.;
     }
-    let pair = format!("{c1}{c2}");
-    let attrs = attrs_list.get_span(span_start + end_lb);
-    let fonts = font_system.get_font_matches(&attrs);
-    let families = [&attrs.family];
-    let mut iter = FontFallbackIter::new(
-        font_system,
-        &fonts,
-        &families,
-        &[],
-        &pair,
-        attrs.weight,
-        attrs.optical,
-    );
-    let Some(font) = iter.next() else {
+    if c1.is_whitespace() && c1 != ' ' || c2.is_whitespace() && c2 != ' ' {
+        return 0.;
+    }
+    let key = (glyph.font_id, glyph.font_weight.0, glyph.font_optical, c1, c2);
+    if let Some(known) = font_system.shape_buffer.pair_kern.get(&key) {
+        return *known;
+    }
+    let Some(font) = font_system.get_font_at(glyph.font_id, glyph.font_weight, glyph.font_optical)
+    else {
         return 0.;
     };
-    let scratch = iter.shape_caches();
+    let pair = format!("{c1}{c2}");
+    let mut scratch = mem::take(&mut font_system.shape_buffer);
     let (mut both, mut alone) = (Vec::new(), Vec::new());
-    shape_fallback(scratch, &mut both, &font, &pair, attrs_list, 0, pair.len(), false);
+    shape_fallback(&mut scratch, &mut both, &font, &pair, attrs_list, 0, pair.len(), false);
     let first = &pair[..c1.len_utf8()];
-    shape_fallback(scratch, &mut alone, &font, first, attrs_list, 0, first.len(), false);
-    match (both.first(), alone.first()) {
-        (Some(b), Some(a)) if both.len() == 2 && alone.len() == 1 && b.glyph_id == a.glyph_id => {
-            b.x_advance - a.x_advance
+    shape_fallback(&mut scratch, &mut alone, &font, first, attrs_list, 0, first.len(), false);
+    let mut kerning = 0.;
+    if let (Some(b), Some(a)) = (both.first(), alone.first()) {
+        if both.len() == 2
+            && alone.len() == 1
+            && b.glyph_id == a.glyph_id
+            && b.glyph_id != 0
+        {
+            kerning = b.x_advance - a.x_advance;
         }
-        _ => 0.,
     }
+    scratch.pair_kern.insert(key, kerning);
+    font_system.shape_buffer = scratch;
+    kerning
 }
 
 #[cfg(feature = "swash")]
@@ -1998,8 +2001,6 @@ impl ShapeSpan {
                 }
             }
 
-            let kana_kern = kana_pair_kerning(font_system, attrs_list, span, span_range.start, end_lb);
-
             let mut start_lb = end_lb;
             for (i, c) in span[start_word..end_lb].char_indices().rev() {
                 // TODO: Not all whitespace characters are linebreakable, e.g. 00A0 (No-break
@@ -2012,6 +2013,9 @@ impl ShapeSpan {
                     break;
                 }
             }
+            // The kerning a word boundary would lose: between the last
+            // character of a word and what follows it (a space, or a kana),
+            // and between a space and the next word's first.
             if start_word < start_lb {
                 let mut word = cached_words.pop().unwrap_or_else(ShapeWord::empty);
                 word.build(
@@ -2024,9 +2028,16 @@ impl ShapeSpan {
                     shaping,
                 );
                 words.push(word);
-                if start_lb == end_lb && kana_kern != 0. {
-                    if let Some(last) = words.last_mut().and_then(|w| w.glyphs.last_mut()) {
-                        last.x_advance += kana_kern;
+                let c1 = span[..start_lb].chars().last();
+                let c2 = span[start_lb..].chars().next();
+                if let (Some(c1), Some(c2)) = (c1, c2) {
+                    if let Some(glyph) = words.last().and_then(|w| w.glyphs.last()).cloned() {
+                        let kern = pair_kerning(font_system, &glyph, attrs_list, c1, c2);
+                        if kern != 0. {
+                            if let Some(last) = words.last_mut().and_then(|w| w.glyphs.last_mut()) {
+                                last.x_advance += kern;
+                            }
+                        }
                     }
                 }
             }
@@ -2045,6 +2056,18 @@ impl ShapeSpan {
                         shaping,
                     );
                     words.push(word);
+                }
+                let c1 = span[start_lb..end_lb].chars().last();
+                let c2 = span[end_lb..].chars().next();
+                if let (Some(c1), Some(c2)) = (c1, c2) {
+                    if let Some(glyph) = words.last().and_then(|w| w.glyphs.last()).cloned() {
+                        let kern = pair_kerning(font_system, &glyph, attrs_list, c1, c2);
+                        if kern != 0. {
+                            if let Some(last) = words.last_mut().and_then(|w| w.glyphs.last_mut()) {
+                                last.x_advance += kern;
+                            }
+                        }
+                    }
                 }
             }
             start_word = end_lb;

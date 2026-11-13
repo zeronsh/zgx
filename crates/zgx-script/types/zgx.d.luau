@@ -5729,6 +5729,9 @@ export type SpanProps = {
 	-- it with the system's handler (after `on_click`'s), and whose context
 	-- menu opens or copies it.
 	href: string?,
+	-- What assistive technology reads for the run in place of its text: a
+	-- citation badge's "Citation 1, Sleep study.pdf".
+	label: string?,
 	-- The run's own context menu, as an element's: on a link, in place of
 	-- Open Link and Copy Link. Inside the text selected, the selection's
 	-- menu shows instead; returning nil lets the click through to the

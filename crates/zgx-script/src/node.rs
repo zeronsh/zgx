@@ -1526,6 +1526,8 @@ pub(crate) struct Span {
     pub click: Option<Handler>,
     /// Where it links (`href = "https://…"`): a click opens it.
     pub href: Option<std::sync::Arc<str>>,
+    /// What assistive technology reads for it instead of its text.
+    pub label: Option<std::sync::Arc<str>>,
     /// How far below the baseline its underline sits.
     pub underline_offset: Option<f32>,
     /// How its underline is drawn: a line style, a colour, a thickness.
@@ -5099,6 +5101,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
         radius: 0.,
         click: None,
         href: None,
+        label: None,
         underline_offset: None,
         underline_style: None,
         underline_color: None,
@@ -5219,6 +5222,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         Some((t.get::<String>("svg")?, num("w")?, num("h")?, num("d")?));
                 }
                 b"href" => span.href = Some(lua.unpack::<String>(given)?.into()),
+                b"label" => span.label = Some(lua.unpack::<String>(given)?.into()),
                 b"context_menu" => match given {
                     mlua::Value::Function(f) => rare_mut(&mut span).menu = Some(f),
                     _ => return Err(mlua::Error::runtime("context_menu takes a function")),

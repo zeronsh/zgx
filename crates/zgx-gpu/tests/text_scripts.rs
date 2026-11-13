@@ -1388,3 +1388,36 @@ fn kana_pairs_kern_across_break_opportunities() {
     let width = buffer.layout_runs().next().unwrap().line_w;
     assert!((width - 154.83).abs() < 0.01, "{width}");
 }
+
+/// A kern pair a space or a comma and a space make crosses a word boundary
+/// as Chrome sets it (SF at 24 px/600: 401.92 over the line, where each word
+/// shaped alone gave 403.01).
+#[cfg(target_os = "macos")]
+#[test]
+fn kerning_crosses_the_space_between_words() {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+    let gpu = zgx_gpu::GpuRenderer::new(64, 64).unwrap();
+    let fonts_rc = gpu.text_system();
+    let mut fonts = fonts_rc.borrow_mut();
+    if !fonts
+        .db()
+        .faces()
+        .any(|f| f.post_script_name.starts_with(".SFNS-"))
+    {
+        eprintln!("no SF: nothing checked");
+        return;
+    }
+    let width = |fonts: &mut cosmic_text::FontSystem, text: &str, size: f32, weight: u16| {
+        let mut buffer = Buffer::new(fonts, Metrics::new(size, size * 1.5));
+        let attrs = Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight(weight))
+            .optical(size.round() as u16);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        buffer.layout_runs().next().unwrap().line_w
+    };
+    let line = "Sphinx of black quartz, judge my vow";
+    assert!((width(&mut fonts, line, 24., 600) - 401.922).abs() < 0.05);
+    assert!((width(&mut fonts, line, 20., 600) - 340.766).abs() < 0.05);
+}
