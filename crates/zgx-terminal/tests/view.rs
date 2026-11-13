@@ -1456,3 +1456,91 @@ fn closing_a_terminal_asks_for_the_idle_trim() {
     assert!(!zgx::idle::take_request(&runtime));
     drop(app);
 }
+
+/// The fills a search's matches draw behind the text: `(matches, selected)`.
+fn search_fills(app: &Harness) -> (usize, usize) {
+    use zgx::canvas::{Brush, Draw};
+    let found = zgx::scene::Color(0xd8, 0xa8, 0x30, 0x70);
+    let selected = zgx::scene::Color(0xf0, 0x80, 0x18, 0xc8);
+    let scene = app.ui.scene.borrow();
+    let (mut matches, mut chosen) = (0, 0);
+    for item in scene.paint_items() {
+        let NodeKind::Canvas(canvas) = item.kind else {
+            continue;
+        };
+        for draw in canvas.commands() {
+            if let Draw::Fill {
+                brush: Brush::Solid(color),
+                ..
+            } = draw
+            {
+                matches += usize::from(*color == found);
+                chosen += usize::from(*color == selected);
+            }
+        }
+    }
+    (matches, chosen)
+}
+
+/// A search through the engine-drawn terminal by Ghostty's bindings: every
+/// match in the scrollback counted into the state, the ones in view
+/// highlighted, the selected one apart and scrolled to, and nothing left
+/// once it ends.
+#[test]
+fn a_search_counts_highlights_and_scrolls_to_its_matches() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let output: String = (0..100)
+        .map(|i| match i % 10 {
+            0 => format!("{i} error here\r\n"),
+            _ => format!("{i} fine\r\n"),
+        })
+        .collect();
+    replay.feed(output.as_bytes());
+    app.ui.prepare_frame();
+    let search = || term.state().get().search;
+    term.binding("search:ERROR");
+    app.ui.prepare_frame();
+    assert_eq!(search().and_then(|s| s.total), Some(0), "case counts");
+    term.binding("search:error");
+    app.ui.prepare_frame();
+    let found = search().expect("open");
+    assert_eq!((found.total, found.selected), (Some(10), None));
+    let (shown, _) = search_fills(&app);
+    assert!(shown >= 1, "the matches in view highlighted: {shown}");
+    // The newest first, then older: the oldest scrolled into view.
+    term.binding("navigate_search:next");
+    app.ui.prepare_frame();
+    assert_eq!(search().and_then(|s| s.selected), Some(0));
+    assert_eq!(search_fills(&app).1, 1, "the selected one apart");
+    for _ in 0..9 {
+        term.binding("navigate_search:next");
+    }
+    app.ui.prepare_frame();
+    assert_eq!(search().and_then(|s| s.selected), Some(9), "the oldest");
+    assert!(
+        app.shows("0 error here"),
+        "scrolled to it: {:?}",
+        app.texts()
+    );
+    assert_eq!(search_fills(&app).1, 1);
+    // Output while it is open: counted as it arrives.
+    replay.feed(b"one more error\r\n");
+    app.ui.prepare_frame();
+    assert_eq!(search().and_then(|s| s.total), Some(11));
+    term.binding("end_search");
+    app.ui.prepare_frame();
+    assert_eq!(search(), None);
+    assert_eq!(search_fills(&app), (0, 0), "no highlights left");
+}

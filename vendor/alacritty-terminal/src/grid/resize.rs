@@ -33,6 +33,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Restore template cell.
         self.cursor.template = template;
+
+        // zgx: lines a reflow moved into the history count as pushed, so a
+        // line's number (`pushed`) is never below zero; numbers may move with
+        // a resize.
+        self.pushed = self.pushed.max(self.history_size() as u64);
     }
 
     /// Add lines to the visible area.

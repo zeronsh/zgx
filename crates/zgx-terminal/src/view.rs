@@ -15,6 +15,8 @@
 use crate::{
     GridSize, Session, SessionEvent, SessionOptions, keys,
     paint::{self, CursorAt, Look, Metrics, RowPaint},
+    search::{Highlight, Search},
+    session::Term,
 };
 use alacritty_terminal::{
     grid::{Dimensions, Scroll},
@@ -141,6 +143,14 @@ struct Engine {
     last_selection: RefCell<Option<SelectionRange>>,
     last_offset: Cell<usize>,
     last_focus: Cell<bool>,
+    /// The search open (`TerminalState::search`), if one is; `searching`
+    /// says so for a paint to test once. The matches it last highlighted,
+    /// and the counts it last reported.
+    search: RefCell<Option<Search>>,
+    searching: Cell<bool>,
+    last_highlights: RefCell<Vec<Highlight>>,
+    last_counts: Cell<Option<(usize, Option<usize>)>>,
+    counts_due: Cell<bool>,
     /// The content box last laid out, in points.
     size: Cell<(f32, f32)>,
     /// A press being dragged: selecting, or reported to the program.
@@ -243,6 +253,11 @@ impl EngineTerminal {
             last_selection: RefCell::new(None),
             last_offset: Cell::new(0),
             last_focus: Cell::new(false),
+            search: RefCell::new(None),
+            searching: Cell::new(false),
+            last_highlights: RefCell::new(Vec::new()),
+            last_counts: Cell::new(None),
+            counts_due: Cell::new(false),
             size: Cell::new((0., 0.)),
             pressed: Cell::new(None),
             scroll_rest: Cell::new(0.),
@@ -500,6 +515,12 @@ impl Engine {
             // focus, a selection) are no news to a reader.
             output = !all;
             *self.last_selection.borrow_mut() = selection;
+            // The search's matches in view, worked out again: other ones
+            // draw every row again. One test while none is open.
+            let highlights = match self.searching.get() {
+                true => self.search_in_view(&term, &mut all),
+                false => None,
+            };
             let mut damaged = vec![false; rows];
             // Lines the screen scrolled up, their damage moved with them:
             // what the slots drew moves up as many rows, and only the rows
@@ -542,11 +563,17 @@ impl Engine {
                         paint::row(&term, row, look, metrics, cursor, selection.as_ref()),
                     ));
                 }
+                if let Some(highlights) = &highlights {
+                    paint::highlight(&mut changed, highlights, look, metrics);
+                }
             });
             if !term.placements().is_empty() || self.any_pictures.get() {
                 self.work_out_pictures(&term, session, metrics);
             }
             term.reset_damage();
+        }
+        if self.searching.get() {
+            self.report_search();
         }
         self.fit_slots(screen_rows);
         // Worked out only while a screen reader listens.
@@ -1425,11 +1452,97 @@ impl Engine {
                     .unwrap_or(FONT_SIZE);
                 self.set_font_size(size);
             }
+            // The search (`TerminalState::search`): a needle (empty ends
+            // it), the next older match or newer, scrolled to.
+            "search" => self.set_search(argument),
+            "end_search" => self.set_search(""),
+            "navigate_search" => self.navigate_search(argument != "previous"),
             "text" => self.write(unescape(argument)),
             "csi" => self.write([b"\x1b[".as_slice(), argument.as_bytes()].concat()),
             "esc" => self.write([b"\x1b".as_slice(), argument.as_bytes()].concat()),
             _ => {}
         }
+    }
+
+    /// Search for `needle` from now on (none, empty), every row drawn again.
+    fn set_search(&self, needle: &str) {
+        let search = (!needle.is_empty()).then(|| Search::new(needle));
+        self.searching.set(search.is_some());
+        *self.search.borrow_mut() = search;
+        self.last_highlights.borrow_mut().clear();
+        self.last_counts.set(None);
+        self.full.set(true);
+        self.paint();
+    }
+
+    /// Select the next `older` match, or newer, and scroll the view to it
+    /// (in its middle, if it wasn't in view).
+    fn navigate_search(&self, older: bool) {
+        let line = {
+            let mut search = self.search.borrow_mut();
+            let Some(search) = search.as_mut() else {
+                return;
+            };
+            search.navigate(older);
+            search.selected_line()
+        };
+        if let Some(line) = line {
+            self.with_session(|session| {
+                let mut term = session.term();
+                let grid = term.grid();
+                let rows = grid.screen_lines() as i64;
+                let offset = grid.display_offset() as i64;
+                let line = line as i64 - grid.pushed() as i64;
+                if line < -offset || line >= rows - offset {
+                    let target = (rows / 2 - line).clamp(0, grid.history_size() as i64);
+                    term.scroll_display(Scroll::Delta((target - offset) as i32));
+                }
+            });
+        }
+        self.paint();
+    }
+
+    /// The search brought up to date with what `term` holds, and its
+    /// matches in view; `all` when they differ from the last drawn. Its
+    /// counts go to the state. Out of `paint`'s line: only while a search
+    /// is open.
+    #[cold]
+    #[inline(never)]
+    fn search_in_view(&self, term: &Term, all: &mut bool) -> Option<Vec<Highlight>> {
+        let mut search = self.search.borrow_mut();
+        let search = search.as_mut()?;
+        search.update(term);
+        let highlights = search.in_view(term);
+        let mut last = self.last_highlights.borrow_mut();
+        if *last != highlights {
+            *all = true;
+            last.clone_from(&highlights);
+        }
+        let counts = (search.total(), search.selected());
+        if self.last_counts.replace(Some(counts)) != Some(counts) {
+            self.counts_due.set(true);
+        }
+        Some(highlights)
+    }
+
+    /// The search's counts, changed, to the state (`report_search` after
+    /// the screen is unlocked: what the state change runs may paint).
+    #[cold]
+    #[inline(never)]
+    fn report_search(&self) {
+        if !self.counts_due.replace(false) {
+            return;
+        }
+        let (Some((total, selected)), Some(term)) = (self.last_counts.get(), self.controller())
+        else {
+            return;
+        };
+        term.update_state(|state| {
+            if let Some(search) = &mut state.search {
+                search.total = Some(total);
+                search.selected = selected;
+            }
+        });
     }
 
     /// Ask again what is in front once the output settles: `PROCESS_CHECK`
@@ -1675,13 +1788,30 @@ impl Replay {
 /// timer or a wake, so what a bench counts is the same each run.
 #[doc(hidden)]
 pub fn replay_terminal(term: &Terminal, runtime: Runtime) -> Replay {
+    replay_terminal_with_scrollback(term, runtime, SessionOptions::default().scrollback)
+}
+
+/// `replay_terminal`, keeping `scrollback` lines (a bench's search through
+/// a long history).
+#[doc(hidden)]
+pub fn replay_terminal_with_scrollback(
+    term: &Terminal,
+    runtime: Runtime,
+    scrollback: usize,
+) -> Replay {
     let executor = Rc::new(RefCell::new(zgx::task::LocalExecutor::new()));
     let engine = EngineTerminal::start(
         term,
         runtime,
         TaskRunner::from_executor(executor),
         None,
-        |options, wake| Ok(Session::replay(options, GridSize::new(80, 24), wake)),
+        move |options, wake| {
+            let options = SessionOptions {
+                scrollback,
+                ..options.clone()
+            };
+            Ok(Session::replay(&options, GridSize::new(80, 24), wake))
+        },
     )
     .expect("a replay starts");
     let shared = engine.0.clone();

@@ -26,6 +26,7 @@ mod osc;
 mod paint;
 mod palette;
 mod process;
+mod search;
 mod session;
 mod sixel;
 mod view;
@@ -37,7 +38,10 @@ pub use process::process_name;
 pub use session::{
     ClipboardRequest, GridSize, Listener, Session, SessionEvent, SessionOptions, Term,
 };
-pub use view::{EngineTerminal, Replay, is_engine_drawn, reads, replay_terminal, terminal_view};
+pub use view::{
+    EngineTerminal, Replay, is_engine_drawn, reads, replay_terminal,
+    replay_terminal_with_scrollback, terminal_view,
+};
 
 /// A program's progress report (OSC 9;4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

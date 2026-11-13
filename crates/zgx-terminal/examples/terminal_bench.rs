@@ -13,7 +13,11 @@
 //! screen a line, and what it costs shouldn't grow with the screen's
 //! height (`HEIGHT`, in points, 600 by default).
 //! Run: cargo run -p zgx-terminal --release --example terminal_bench
-//! (`LINES` sets the lines, 10,000 by default.)
+//! (`LINES` sets the lines, 10,000 by default; `SEARCH`, `SEARCH_OPEN` and
+//! `SCROLLBACK` a search, below.)
+#[path = "support/gate_marks.rs"]
+mod gate_marks;
+
 use std::fmt::Write;
 use zgx::{
     compose::prelude::*,
@@ -116,6 +120,14 @@ impl<'a> Lines<'a> {
     }
 }
 
+/// The frame flushed, its fingerprint taken when asked (`zgx_fingerprint`).
+fn flush(ui: &Ui) {
+    let flushed = ui.scene.borrow_mut().flush();
+    if zgx_fingerprint::on() {
+        zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+    }
+}
+
 fn main() {
     let lines: usize = std::env::var("LINES")
         .ok()
@@ -132,8 +144,18 @@ fn main() {
         .expect("the bundled font");
     font.install(&mut text.text_system().borrow_mut());
     text.install(&mut ui.scene.borrow_mut());
+    // `SEARCH`: a search for it, opened after the output (its cost alone,
+    // the output fed uncounted) or, with `SEARCH_OPEN`, before it and held
+    // open through it. `SCROLLBACK`: the lines kept (10,000).
+    let search = std::env::var("SEARCH").ok();
+    let search_open = std::env::var("SEARCH_OPEN").is_ok();
+    let scrollback: usize = std::env::var("SCROLLBACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000);
     let term = Terminal::new(&ui.runtime, TerminalOptions::default());
-    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let replay =
+        zgx_terminal::replay_terminal_with_scrollback(&term, ui.runtime.clone(), scrollback);
     // The grid in the bundled font: the machine's monospaced font would
     // make the count the machine's.
     ui.mount(provide(
@@ -144,13 +166,14 @@ fn main() {
         ),
     ));
     ui.prepare_frame();
-    {
-        let flushed = ui.scene.borrow_mut().flush();
-        if zgx_fingerprint::on() {
-            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
-        }
-    }
-    let output = output(lines);
+    flush(&ui);
+    // A search after the output counts the search alone: the output's
+    // making, feeding and freeing aren't counted.
+    let search_alone = search.is_some() && !search_open;
+    let output = match search_alone {
+        true => gate_marks::outside(|| output(lines)),
+        false => output(lines),
+    };
     // A frame's worth each: 4 KB reads, or so many lines. Taken as they go,
     // nothing allocated for them: the 4 KB reads cost what they did before
     // `PER_FRAME` (a list of them moved the heap, and `terminal-reader`
@@ -162,19 +185,43 @@ fn main() {
     };
     let started = std::time::Instant::now();
     let mut frames = 0;
-    while let Some(read) = match per_frame {
-        None => chunks.next(),
-        Some(_) => trickle.next_read(),
-    } {
-        replay.feed(read);
-        ui.prepare_frame();
-        {
-            let flushed = ui.scene.borrow_mut().flush();
-            if zgx_fingerprint::on() {
-                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
-            }
+    let mut feed = |ui: &mut Ui| {
+        while let Some(read) = match per_frame {
+            None => chunks.next(),
+            Some(_) => trickle.next_read(),
+        } {
+            replay.feed(read);
+            ui.prepare_frame();
+            flush(ui);
+            frames += 1;
         }
-        frames += 1;
+    };
+    match &search {
+        Some(needle) if search_open => {
+            term.binding(format!("search:{needle}"));
+            feed(&mut ui);
+        }
+        Some(needle) => {
+            gate_marks::outside(|| feed(&mut ui));
+            let searched = std::time::Instant::now();
+            term.binding(format!("search:{needle}"));
+            ui.prepare_frame();
+            flush(&ui);
+            // The oldest match: the whole history's matches in order, and
+            // the view scrolled to its top.
+            term.binding("navigate_search:previous");
+            ui.prepare_frame();
+            flush(&ui);
+            println!(
+                "searched in {:.1} ms",
+                searched.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        None => feed(&mut ui),
+    }
+    if let Some(found) = term.state().get().search {
+        println!("search: {:?} of {:?} matches", found.selected, found.total);
+        assert!(found.total.is_some(), "it didn't search");
     }
     let state = term.state().get();
     println!(
@@ -184,4 +231,7 @@ fn main() {
         state.rows,
         started.elapsed().as_secs_f64() * 1e3 / frames as f64,
     );
+    if search_alone {
+        gate_marks::outside(move || drop((ui, term, replay, output)));
+    }
 }

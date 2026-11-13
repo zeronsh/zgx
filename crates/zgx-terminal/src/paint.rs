@@ -34,6 +34,9 @@ pub(crate) struct Look {
     pub selection_text: Option<Color>,
     /// Text under a block cursor; `None` is the background.
     pub cursor_text: Option<Color>,
+    /// Behind a search's matches, and its selected one.
+    pub found: Color,
+    pub found_selected: Color,
 }
 impl Default for Look {
     fn default() -> Self {
@@ -42,6 +45,8 @@ impl Default for Look {
             selection: Color(0x4a, 0x78, 0xc0, 0x88),
             selection_text: None,
             cursor_text: None,
+            found: Color(0xd8, 0xa8, 0x30, 0x70),
+            found_selected: Color(0xf0, 0x80, 0x18, 0xc8),
         }
     }
 }
@@ -642,6 +647,33 @@ fn styled_underline<L>(
         height,
         color,
     });
+}
+
+/// A search's `highlights` behind the text of the `rows` built, over their
+/// cells' own fills. Out of the rows' building: only while a search is
+/// open.
+#[cold]
+#[inline(never)]
+pub(crate) fn highlight(
+    rows: &mut [(usize, RowPaint)],
+    highlights: &[crate::search::Highlight],
+    look: &Look,
+    metrics: Metrics,
+) {
+    for (row, paint) in rows {
+        for highlight in highlights.iter().filter(|highlight| highlight.row == *row) {
+            paint.fills.push(Fill {
+                x: highlight.first as f32 * metrics.cell_width,
+                y: 0.,
+                width: (highlight.last + 1 - highlight.first) as f32 * metrics.cell_width,
+                height: metrics.cell_height,
+                color: match highlight.selected {
+                    true => look.found_selected,
+                    false => look.found,
+                },
+            });
+        }
+    }
 }
 
 /// The grid's font: the platform's monospaced one, without ligatures.
