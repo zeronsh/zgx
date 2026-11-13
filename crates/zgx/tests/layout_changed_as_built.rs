@@ -465,15 +465,10 @@ fn a_tree_with_absolute_boxes_changed_lays_out_as_one_built_whole() {
 /// at (`relayout_alone`): twice the other trees' rounds.
 #[test]
 fn a_tree_with_fixed_size_boxes_changed_lays_out_as_one_built_whole() {
-    // Seeds 134, 223, 260, 333 and 563 lay a box out stale, as main did
-    // before this test (a floor dropped under a shrinking column; a stop's
-    // result kept past a boundary laid out from the root): left out until
-    // those are fixed.
-    // Seed 149 since #1941: a box's content measured at its own width lets
-    // its floor change with its text, and a floor dropped under a shrinking
-    // column is laid out from the root without that column again: fixed by #1882.
-    let stale = [134, 149, 223, 260, 333, 563];
-    for seed in (1..=600).filter(|seed| !stale.contains(seed)) {
+    // Every seed: those that laid a box out stale (a floor dropped under a
+    // shrinking column, laid out from the root without that column) are
+    // fixed by #1882.
+    for seed in 1..=600 {
         run(seed, seed % 4 == 0, seed % 2 == 0, true);
     }
 }
