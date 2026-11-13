@@ -1877,6 +1877,12 @@ const BOUNDS_VALID: u8 = 1;
 const HIT_DIRECTION: u8 = 2;
 const HIT_CHECKED: u8 = 32;
 const NON_RTL: u8 = 64;
+/// On a container whose rows a hit test searches (`hit_rows`): its rows'
+/// boxes were found running down in order and each proved both ways, so
+/// a search needs no look at every row. Set with `BOUNDS_VALID` on it and
+/// each row, so any change to a row or to its children clears it through
+/// the invalidation walk. `NON_RTL`'s bit, which only text uses.
+const ROWS_VERIFIED: u8 = NON_RTL;
 const INK_VALID: u8 = 128;
 // Pin the original font/children region despite UnsafeCell suppressing
 // the Vec's niche. No extra fields or allocation.
@@ -3446,6 +3452,19 @@ pub struct Scene {
     /// Long lists a hit test searched (`hit_rows`). For tests.
     #[cfg(test)]
     hit_rows_searched: std::cell::Cell<u64>,
+    /// Rows `hit_rows` looked at to check a list it searched. For tests.
+    #[cfg(test)]
+    hit_rows_checked: std::cell::Cell<u64>,
+    /// Long lists whose rows don't each prove both ways (content past a
+    /// row's box): `hit_rows` checks them per hit, as it always did, and
+    /// doesn't try to verify them for good each time.
+    unprovable_rows: std::cell::RefCell<std::collections::HashSet<NodeId, crate::KeyHasher>>,
+    /// The long list the last hit test searched (`hit_rows`), by its node's
+    /// address, and where it was: a hit finding it elsewhere since (scrolled
+    /// under a resting pointer) tries verifying its rows. (An address a
+    /// node freed since is reused only by another node: at worst one
+    /// verification that a hit then doesn't use.)
+    rows_last_hit: std::cell::Cell<(usize, Transform)>,
     /// Worked out with `ink`, for each node of `SEARCHED_CHILDREN` children
     /// or more whose boxes (in its space, translated) run down in order,
     /// tops and bottoms both never going back up (a column's rows): how far
@@ -3722,6 +3741,12 @@ impl Scene {
             long_lists: false,
             #[cfg(test)]
             hit_rows_searched: Default::default(),
+            #[cfg(test)]
+            hit_rows_checked: Default::default(),
+            unprovable_rows: std::cell::RefCell::new(std::collections::HashSet::with_hasher(
+                crate::key_hasher(),
+            )),
+            rows_last_hit: Default::default(),
             long_children: std::cell::RefCell::new(std::collections::HashMap::with_hasher(
                 crate::key_hasher(),
             )),
@@ -6210,6 +6235,86 @@ impl Scene {
         }
         extent
     }
+    /// Of a plain walk's node's many `children`, placed by `transform`,
+    /// those a hit test at `point` must look at (`hit_rows_checked`). Once a
+    /// container's rows are in order and each proves both ways, it says so
+    /// (`ROWS_VERIFIED`) until one of them or its children change: a hit
+    /// test after it looks at no row but the searches'
+    /// (`hit_rows_verified`). Verifying looks at every row more closely
+    /// than a check, so it's tried only for a list found moved since the
+    /// last hit on it, scrolled under a resting pointer, where the hits
+    /// after it use it; a list hovered in place (its rows restyled between
+    /// hits) is checked as it always was. Out of the checking's line, which
+    /// runs as it always did.
+    #[cold]
+    #[inline(never)]
+    fn hit_rows<'a>(
+        &self,
+        parent: &'a Node,
+        transform: Transform,
+        point: (f32, f32),
+    ) -> &'a [NodeId] {
+        let children = self.children_raw(parent);
+        #[cfg(test)]
+        if self.linear_walks {
+            return children;
+        }
+        let container = matches!(parent.kind, NodeKind::Container(_));
+        if container && parent.bounds_valid.get() & ROWS_VERIFIED != 0 {
+            return self.hit_rows_verified(children, transform, point);
+        }
+        let found = self.hit_rows_checked(children, transform, point);
+        if container && found.len() < children.len() {
+            let at = parent as *const Node as usize;
+            let (was, then) = self.rows_last_hit.replace((at, transform));
+            if was == at && then != transform {
+                self.verify_rows(parent, children);
+            }
+        }
+        found
+    }
+    /// `hit_rows` for verified rows (`ROWS_VERIFIED`): the run whose boxes
+    /// reach the point's height, found by two searches alone.
+    #[inline(never)]
+    fn hit_rows_verified<'a>(
+        &self,
+        children: &'a [NodeId],
+        transform: Transform,
+        point: (f32, f32),
+    ) -> &'a [NodeId] {
+        #[cfg(test)]
+        self.hit_rows_searched.set(self.hit_rows_searched.get() + 1);
+        let edges = |child: &NodeId| self.hit_row_edges(*child, transform);
+        let y = point.1;
+        let first = children.partition_point(|child| {
+            let (_, bottom, slack) = edges(child);
+            y >= bottom + slack
+        });
+        let end = children
+            .partition_point(|child| {
+                let (top, _, slack) = edges(child);
+                y >= top - slack
+            })
+            .max(first);
+        &children[first..end]
+    }
+    /// A row's box as a hit test's walk places it, by `transform`: top,
+    /// bottom, and the slack `hit_outside_at` grants a moved box.
+    #[inline(always)]
+    fn hit_row_edges(&self, child: NodeId, transform: Transform) -> (f32, f32, f32) {
+        let node = self.tree_node(child);
+        let (bx, by) = (
+            transform.x + node.transform.x,
+            transform.y + node.transform.y,
+        );
+        let top = node.bounds.y + by;
+        let bottom = top + node.bounds.height;
+        let slack = match bx == 0. && by == 0. {
+            true => 0.,
+            false => (top.abs().max(bottom.abs()) + by.abs()) * (32. * f32::EPSILON),
+        };
+        (top, bottom, slack)
+    }
     /// Of a plain walk's node's many `children`, placed by `transform` (the
     /// node's, summed as the walk sums it), those a hit test at `point` must
     /// look at. Where their boxes run down in order, none transformed, it
@@ -6221,18 +6326,16 @@ impl Scene {
     /// Each proof is the one the walk would ask, worked out here where it
     /// isn't known. Anything else gets all of them. Each frame it checks
     /// the order and the proofs again, a few loads a row, and walks no row.
-    #[cold]
     #[inline(never)]
-    fn hit_rows<'a>(
+    fn hit_rows_checked<'a>(
         &self,
         children: &'a [NodeId],
         transform: Transform,
         point: (f32, f32),
     ) -> &'a [NodeId] {
         #[cfg(test)]
-        if self.linear_walks {
-            return children;
-        }
+        self.hit_rows_checked
+            .set(self.hit_rows_checked.get() + children.len() as u64);
         // A child's box as the walk places it: top, bottom, and the slack
         // `hit_outside_at` grants a moved box.
         let edges = |child: &NodeId| {
@@ -6272,23 +6375,12 @@ impl Scene {
             })
             .max(first);
         // What the walk would ask of each: its bottom, or its top.
-        let proves = |child: &NodeId, bottom: bool| {
-            let node = self.tree_node(*child);
-            if self.children_raw(node).is_empty() {
-                return true;
-            }
-            let bit = HIT_DIRECTION << if bottom { 3 } else { 2 };
-            if node.bounds_valid.get() & bit == 0 {
-                let b = node.bounds;
-                match bottom {
-                    true => self.hit_projection::<3>(node, 0., 0, b.y + b.height),
-                    false => self.hit_projection::<2>(node, 0., 0, b.y),
-                };
-            }
-            node.bounds_valid.get() & bit != 0
-        };
-        match children[..first].iter().all(|child| proves(child, true))
-            && children[end..].iter().all(|child| proves(child, false))
+        match children[..first]
+            .iter()
+            .all(|child| self.hit_row_proves(*child, true))
+            && children[end..]
+                .iter()
+                .all(|child| self.hit_row_proves(*child, false))
         {
             true => {
                 #[cfg(test)]
@@ -6297,6 +6389,60 @@ impl Scene {
             }
             false => children,
         }
+    }
+    /// What the walk would ask of a row: that nothing under it reaches past
+    /// its bottom (`bottom`), or its top. Worked out where it isn't known.
+    #[inline(always)]
+    fn hit_row_proves(&self, child: NodeId, bottom: bool) -> bool {
+        let node = self.tree_node(child);
+        if self.children_raw(node).is_empty() {
+            return true;
+        }
+        let bit = HIT_DIRECTION << if bottom { 3 } else { 2 };
+        if node.bounds_valid.get() & bit == 0 {
+            let b = node.bounds;
+            match bottom {
+                true => self.hit_projection::<3>(node, 0., 0, b.y + b.height),
+                false => self.hit_projection::<2>(node, 0., 0, b.y),
+            };
+        }
+        node.bounds_valid.get() & bit != 0
+    }
+    /// After `hit_rows` found `parent`'s rows in order: if each row proves
+    /// both ways, wherever a later point lies the searches' run is all a
+    /// hit test needs, until a row or the children change. Each row and the
+    /// parent are marked valid so that any such change, which clears the
+    /// changed node's validity and its ancestors' up to the first already
+    /// clear, clears `ROWS_VERIFIED` too. Rows that don't (content past a
+    /// box) leave the list checked per hit, and aren't tried again.
+    ///
+    #[cold]
+    #[inline(never)]
+    fn verify_rows(&self, parent: &Node, children: &[NodeId]) {
+        let Some(id) = children.first().and_then(|row| self.tree_node(*row).parent) else {
+            return;
+        };
+        if self.unprovable_rows.borrow().contains(&id) {
+            return;
+        }
+        #[cfg(test)]
+        self.hit_rows_checked
+            .set(self.hit_rows_checked.get() + children.len() as u64);
+        if !children
+            .iter()
+            .all(|child| self.hit_row_proves(*child, true) && self.hit_row_proves(*child, false))
+        {
+            self.unprovable_rows.borrow_mut().insert(id);
+            return;
+        }
+        for child in children {
+            let node = self.tree_node(*child);
+            node.bounds_valid
+                .set(node.bounds_valid.get() | BOUNDS_VALID);
+        }
+        parent
+            .bounds_valid
+            .set(parent.bounds_valid.get() | BOUNDS_VALID | ROWS_VERIFIED);
     }
     /// `POPUPS`: popup roots exist, whose subtrees are hit past the viewport.
     /// `SEARCH`: some node may hold a long column (`long_lists`), whose rows
@@ -6416,7 +6562,7 @@ impl Scene {
                 true => self.paint_order(id, node).iter(),
                 false => match self.children_raw(node) {
                     all if SEARCH && all.len() >= SEARCHED_CHILDREN => {
-                        self.hit_rows(all, transform, point).iter()
+                        self.hit_rows(node, transform, point).iter()
                     }
                     all => all.iter(),
                 },
@@ -16904,6 +17050,235 @@ mod tests {
         }
         assert!(scene.long_lists);
         assert!(hits(&mut scene) > 0, "200 rows: searched");
+    }
+    /// A long column's rows, found in order and each proving both ways, are
+    /// looked at once (`ROWS_VERIFIED`): as the column scrolls, moved by an
+    /// ancestor or itself, a hit test looks at no row but the searches'.
+    /// Any change to a row or the rows (one resized, moved, moved back, a
+    /// leaf row moved, one added, removed, the rows reordered, a row's
+    /// content past its box) is seen: after each, hits find what the walk
+    /// over every row does. A change of kind clears the bit it shares with
+    /// text's `NON_RTL`.
+    #[test]
+    fn a_long_columns_rows_are_checked_once_until_one_changes() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let quad = |n: u32| {
+            NodeKind::Quad(QuadStyle {
+                fill: Color((n % 251) as u8, 70, 90, 255),
+                ..Default::default()
+            })
+        };
+        let mut scene = Scene::new(300., 400.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let content = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        let column = scene.append(
+            content,
+            NodeKind::Container(Layout::Column),
+            Style::default(),
+        );
+        let mut rows = Vec::new();
+        let mut cells = Vec::new();
+        // Every fifth row a leaf: no proof of its own marks it.
+        for i in 0..300u32 {
+            if i % 5 == 0 {
+                let row = scene.append(column, quad(i), sized(300., 20.));
+                cells.push(row);
+                rows.push(row);
+                continue;
+            }
+            let row = scene.append(column, NodeKind::Container(Layout::Row), sized(300., 20.));
+            cells.push(scene.append(row, quad(i), sized(40. + (i % 4) as f32 * 30., 20.)));
+            rows.push(row);
+        }
+        let same_as_walk = |scene: &mut Scene, what: &str| {
+            scene.flush();
+            for yi in 0..80 {
+                for x in [3., 20., 90., 150.] {
+                    let y = yi as f32 * 5.03 + 0.5;
+                    scene.linear_walks = false;
+                    let searched = scene.hit_test_all_walked(x, y);
+                    scene.linear_walks = true;
+                    let walked = scene.hit_test_all_walked(x, y);
+                    scene.linear_walks = false;
+                    assert_eq!(searched, walked, "{what}, at ({x}, {y})");
+                }
+            }
+        };
+        same_as_walk(&mut scene, "at first");
+        // Scrolled by an ancestor under a resting pointer: the first hit
+        // after it moved verifies the rows, and the hits after look at no
+        // row.
+        scene.set_transform(content, Transform { x: 0., y: -37.25 });
+        scene.flush();
+        scene.hit_test_all_walked(50., 1.);
+        let before = scene.hit_rows_checked.get();
+        for frame in 2..40 {
+            let by = -(frame as f32) * 37.25;
+            scene.set_transform(content, Transform { x: 0., y: by });
+            scene.flush();
+            for yi in 0..20 {
+                scene.hit_test_all_walked(50., yi as f32 * 19.7 + 1.);
+            }
+        }
+        assert_eq!(
+            scene.hit_rows_checked.get(),
+            before,
+            "scrolling looks at no row"
+        );
+        // Scrolled by moving the column itself: its bit goes with each move,
+        // and hits still find what the walk does.
+        for frame in 1..4 {
+            scene.set_transform(
+                column,
+                Transform {
+                    x: 0.,
+                    y: frame as f32 * -11.5,
+                },
+            );
+            same_as_walk(&mut scene, "the column itself moved");
+        }
+        scene.set_transform(column, Transform::default());
+        // Over the rows that change, from 55 on.
+        scene.set_transform(column, Transform::default());
+        scene.set_transform(content, Transform { x: 0., y: -1100. });
+        same_as_walk(&mut scene, "scrolled to row 55");
+        let checked = scene.hit_rows_checked.get();
+        scene.set_style(rows[60], sized(300., 70.));
+        same_as_walk(&mut scene, "a row resized");
+        assert!(scene.hit_rows_checked.get() > checked, "a resize is seen");
+        scene.set_transform(rows[61], Transform { x: 0., y: 45. });
+        same_as_walk(&mut scene, "a row moved");
+        scene.set_transform(rows[61], Transform::default());
+        same_as_walk(&mut scene, "the row moved back");
+        scene.set_transform(rows[65], Transform { x: 0., y: -45. });
+        same_as_walk(&mut scene, "a leaf row moved");
+        scene.set_transform(rows[65], Transform::default());
+        same_as_walk(&mut scene, "the leaf moved back");
+        let added = scene.append(column, NodeKind::Container(Layout::Row), sized(300., 33.));
+        scene.append(added, quad(7), sized(250., 33.));
+        let mut order = scene.children(column).to_vec();
+        order.pop();
+        order.insert(62, added);
+        assert!(scene.reorder_children(column, &order));
+        same_as_walk(&mut scene, "a row added among them");
+        order.swap(63, 66);
+        assert!(scene.reorder_children(column, &order));
+        same_as_walk(&mut scene, "rows reordered");
+        scene.remove(rows[64]);
+        same_as_walk(&mut scene, "a row removed");
+        scene.set_style(cells[67], sized(40., 90.));
+        same_as_walk(&mut scene, "a row's content past its box");
+        scene.set_style(cells[67], sized(40., 20.));
+        same_as_walk(&mut scene, "and back within it");
+        // Its bit is `NON_RTL`'s on text: a change of kind clears it, so one
+        // meaning is never read as the other.
+        let mut scene = Scene::new(300., 400.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let column = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        for i in 0..100u32 {
+            let row = scene.append(column, NodeKind::Container(Layout::Row), sized(300., 20.));
+            scene.append(row, quad(i), sized(60., 20.));
+        }
+        same_as_walk(&mut scene, "a second column");
+        let bit = |scene: &Scene| scene.node(column).bounds_valid.get() & ROWS_VERIFIED != 0;
+        // Moved under the pointer: the hit after verifies its rows.
+        scene.set_transform(column, Transform { x: 0., y: -3. });
+        scene.flush();
+        scene.hit_test_all_walked(50., 30.);
+        assert!(bit(&scene), "its rows verified");
+        let text = NodeKind::Text {
+            text: "plain".into(),
+            color: Color(255, 255, 255, 255),
+            font_size: 14.,
+        };
+        scene.set_kind(column, text);
+        assert!(!bit(&scene), "text: no longer verified rows");
+        scene.flush();
+        scene.node(column).bounds_valid.set(NON_RTL);
+        scene.set_kind(column, NodeKind::Container(Layout::Column));
+        assert!(!bit(&scene), "a container again: not text's NON_RTL");
+        same_as_walk(&mut scene, "a container again");
+    }
+    /// A long column hovered in place, a row restyled between hits, is never
+    /// verified: its hits check it as they always did, and nothing looks at
+    /// every row more closely for a verification no hit would use.
+    /// Scrolled under a resting pointer, the first hit after it moved
+    /// verifies it, and the hits after look at no row.
+    #[test]
+    fn a_long_column_is_verified_as_it_scrolls_not_as_it_is_hovered() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let quad = |n: u32| {
+            NodeKind::Quad(QuadStyle {
+                fill: Color((n % 251) as u8, 70, 90, 255),
+                ..Default::default()
+            })
+        };
+        let mut scene = Scene::new(300., 400.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let content = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        let column = scene.append(
+            content,
+            NodeKind::Container(Layout::Column),
+            Style::default(),
+        );
+        let mut cells = Vec::new();
+        for i in 0..200u32 {
+            let row = scene.append(column, NodeKind::Container(Layout::Row), sized(300., 20.));
+            cells.push(scene.append(row, quad(i), sized(60., 20.)));
+        }
+        scene.flush();
+        let hit = |scene: &mut Scene, y: f32| {
+            scene.linear_walks = true;
+            let walked = scene.hit_test_all_walked(30., y);
+            scene.linear_walks = false;
+            assert_eq!(scene.hit_test_all_walked(30., y), walked, "at {y}");
+        };
+        let verified = |scene: &Scene| scene.node(column).bounds_valid.get() & ROWS_VERIFIED != 0;
+        // A hover per hit, each restyling a row.
+        for step in 0..100u32 {
+            scene.set_style(
+                cells[(step % 20) as usize],
+                sized(60. + (step % 3) as f32, 20.),
+            );
+            scene.flush();
+            hit(&mut scene, 4. + (step % 20) as f32 * 19.);
+            assert!(!verified(&scene), "hovered in place, at step {step}");
+        }
+        // Scrolled under a resting pointer.
+        let scroll = |scene: &mut Scene, frame: u32| {
+            scene.set_transform(
+                content,
+                Transform {
+                    x: 0.,
+                    y: -(frame as f32) * 13.,
+                },
+            );
+            scene.flush();
+        };
+        scroll(&mut scene, 1);
+        hit(&mut scene, 50.);
+        assert!(verified(&scene), "verified as it scrolls");
+        let checked = scene.hit_rows_checked.get();
+        for frame in 2..12 {
+            scroll(&mut scene, frame);
+            scene.hit_test_all_walked(30., 50.);
+        }
+        assert_eq!(
+            scene.hit_rows_checked.get(),
+            checked,
+            "the hits after look at no row"
+        );
     }
     /// A hit test over a long column searches its rows (`hit_rows`) and
     /// finds what the walk over every row finds (`linear_walks`): at points
