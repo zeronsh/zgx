@@ -299,3 +299,32 @@ fn dates_follow_the_locale_and_length() {
     assert_eq!(i18n.t("on").arg("d", day.clone()).get(), "on Oct 28, 2026");
     assert_eq!(i18n.t("long").arg("d", day).get(), "October 28, 2026");
 }
+
+#[test]
+fn zgx_own_words_read_from_the_apps_catalog_else_as_written() {
+    let mut ui = Ui::new(100., 100.);
+    assert_eq!(zgx::i18n::label("Copy"), "Copy");
+    assert_eq!(zgx::i18n::label_args("Page {page} of {total}", &[("page", 2.into()), ("total", 15.into())]), "Page 2 of 15");
+
+    let i18n = I18n::new(&ui.runtime, "en");
+    i18n.insert("en", r#"{ "Copy": "Copy", "Page {page} of {total}": "Page {page} of {total}" }"#).unwrap();
+    i18n.insert("de", r#"{ "Copy": "Kopieren", "Page {page} of {total}": "Seite {page} von {total}" }"#).unwrap();
+    i18n.set_locale(Some("de"));
+    i18n.install_as_app();
+    assert_eq!(zgx::i18n::label("Copy"), "Kopieren");
+    assert_eq!(zgx::i18n::label_args("Page {page} of {total}", &[("page", 2.into()), ("total", 15.into())]), "Seite 2 von 15");
+    // a word the app's catalog doesn't have stays as zgx wrote it, with no issue told
+    let told = Rc::new(Cell::new(0));
+    let count = told.clone();
+    i18n.on_issue(move |_| count.set(count.get() + 1));
+    assert_eq!(zgx::i18n::label("Dismiss"), "Dismiss");
+    assert_eq!(told.get(), 0);
+
+    // read in a view, it follows the locale
+    let view = ui.mount(text_signal(|| zgx::i18n::label("Copy")));
+    ui.prepare_frame();
+    assert_eq!(texts(&ui, view.node()), ["Kopieren"]);
+    i18n.set_locale(Some("en"));
+    ui.prepare_frame();
+    assert_eq!(texts(&ui, view.node()), ["Copy"]);
+}

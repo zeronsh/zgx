@@ -6075,7 +6075,7 @@ impl Ui {
                         }
                         s.set_font(*id, font.clone());
                         let shaped = lines.line(*i).size();
-                        let width = wrap_width.unwrap_or(shaped.0 + 2.);
+                        let width = lines.draw_width(*i, wrap_width).unwrap_or(shaped.0 + 2.);
                         let mut style = fixed(width, lines.height(*i));
                         style.text_wrap = draw_wrap.get();
                         s.set_style(*id, style);

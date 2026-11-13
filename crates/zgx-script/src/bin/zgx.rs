@@ -371,8 +371,12 @@ fn print_report(report: &Report) {
         println!("{d}");
     }
     let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let notes = match report.notes() {
+        0 => String::new(),
+        n => format!(", {}", plural(n, "note")),
+    };
     eprintln!(
-        "{}, {} in {}",
+        "{}, {}{notes} in {}",
         plural(report.errors(), "error"),
         plural(report.warnings(), "warning"),
         plural(report.files, "file")
@@ -426,6 +430,7 @@ fn lint(args: Vec<String>) -> ExitCode {
                         "line": d.line,
                         "column": d.column,
                         "rule": d.code,
+                        "severity": d.severity.to_string(),
                         "message": d.message,
                     })
                 })
@@ -434,7 +439,7 @@ fn lint(args: Vec<String>) -> ExitCode {
                 "{}",
                 serde_json::json!({ "files": report.files, "findings": findings })
             );
-            if report.diagnostics.is_empty() {
+            if report.passes() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -442,7 +447,7 @@ fn lint(args: Vec<String>) -> ExitCode {
         }
         Ok(report) => {
             print_report(&report);
-            if report.diagnostics.is_empty() {
+            if report.passes() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE

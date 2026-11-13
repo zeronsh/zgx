@@ -33,6 +33,9 @@ pub enum Severity {
     Error,
     /// A lint, such as an unused variable.
     Warning,
+    /// Worth knowing, not wrong: a lint run still passes with notes (a locale's untranslated keys, which show the
+    /// source locale's text until translated).
+    Note,
 }
 
 /// One finding, at a 1-based line and column.
@@ -51,12 +54,18 @@ pub struct Diagnostic {
     /// What it says.
     pub message: String,
 }
-impl fmt::Display for Diagnostic {
+impl fmt::Display for Severity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let severity = match self.severity {
+        f.write_str(match self {
             Severity::Error => "error",
             Severity::Warning => "warning",
-        };
+            Severity::Note => "note",
+        })
+    }
+}
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let severity = self.severity;
         write!(
             f,
             "{}:{}:{}: {severity}[{}]: {}",
@@ -85,6 +94,14 @@ impl Report {
     /// How many warnings it found.
     pub fn warnings(&self) -> usize {
         self.count(Severity::Warning)
+    }
+    /// How many notes it found.
+    pub fn notes(&self) -> usize {
+        self.count(Severity::Note)
+    }
+    /// Whether it passes: no errors and no warnings (notes don't fail a run).
+    pub fn passes(&self) -> bool {
+        self.errors() == 0 && self.warnings() == 0
     }
     fn count(&self, severity: Severity) -> usize {
         self.diagnostics

@@ -3285,7 +3285,7 @@ impl ScriptHost {
             let _ = app_types::write_types(&dir);
         }
         for d in lint::lint_app(&sources) {
-            if inline.as_ref() == Some(&d.file) {
+            if inline.as_ref() == Some(&d.file) || d.severity == check::Severity::Note {
                 continue;
             }
             let name = d.file.file_name().unwrap_or(d.file.as_os_str());

@@ -550,6 +550,8 @@ pub(crate) fn load_dir(
         return Err(dir);
     }
     let i18n = I18n::new(runtime, source);
+    // zgx's own words (a code block's Copy) read from the app's catalog
+    i18n.install_as_app();
     let warnings = warnings.clone();
     let told = warnings.clone();
     i18n.on_issue(move |issue| {

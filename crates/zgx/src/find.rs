@@ -1199,7 +1199,7 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
                  name: &'static str,
                  act: Rc<dyn Fn()>| {
         let mut b = button()
-            .accessible_label(name)
+            .accessible_label(crate::i18n::label(name))
             .px(6.)
             .py(2.)
             .on_click(move || act())
@@ -1213,7 +1213,7 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
         }
         b
     };
-    let mut field = text_input("Find", typed)
+    let mut field = text_input(crate::i18n::label("Find"), typed)
         .id(FIELD)
         .w(180.)
         .merge_styles(&look.field);
@@ -1267,7 +1267,7 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
         .border(1.)
         .border_color(tok::BORDER_SUBTLE)
         .merge_styles(&look.panel)
-        .accessible_label("Find")
+        .accessible_label(crate::i18n::label("Find"))
         .reactive_style(move || {
             typing();
             Styles::new()

@@ -986,6 +986,10 @@ impl LinesLayout {
         first..end.max(first + 1).min(self.line_count())
     }
     /// Line `i`, shaped.
+    /// The width line `i` is drawn in when the text wraps at `wrap`: what its indent leaves, as it was wrapped.
+    pub(crate) fn draw_width(&self, i: usize, wrap: Option<f32>) -> Option<f32> {
+        wrap.map(|w| (w - self.inset(i).left).max(1.))
+    }
     /// Line `i`'s room (`LineCache::set_insets`).
     pub(crate) fn inset(&self, i: usize) -> LineInset {
         self.cache
@@ -1267,6 +1271,39 @@ mod tests {
         let third = text.find("third").unwrap();
         assert!(inset.caret(third).y > plain.caret(third).y + 11.);
         assert_eq!(inset.caret(0), plain.caret(0));
+    }
+
+    /// An indented line is drawn in the width it was wrapped to, not the whole text's: its rows end at the same edge.
+    #[test]
+    fn an_indented_line_draws_in_the_width_it_wraps_to() {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| {
+            if i == 1 {
+                LineInset {
+                    left: 36.,
+                    ..LineInset::default()
+                }
+            } else {
+                LineInset::default()
+            }
+        })));
+        let text = "first\nsecond line that is long enough to wrap in a narrow box";
+        let layout = cache.layout(
+            || Text::new(text),
+            None,
+            14.,
+            Some(200.),
+            &FontStyle::default(),
+            0,
+            shaper,
+        );
+        assert_eq!(layout.draw_width(1, Some(200.)), Some(164.));
+        assert_eq!(layout.draw_width(0, Some(200.)), Some(200.));
+        assert!(
+            layout.line(1).size().0 <= 164.,
+            "its rows fit the width it is drawn in"
+        );
+        assert_eq!(layout.draw_width(1, None), None);
     }
 
     /// A note's heading, then a paragraph and a list item: each line starts where the one above ends (its taller

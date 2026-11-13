@@ -206,7 +206,7 @@ pub const RULES: &[(&str, &str)] = &[
     ("i18n-parse", "a locale file or message that doesn't parse"),
     (
         "i18n-missing",
-        "a key the source locale has and this locale lacks",
+        "a note per locale: how many of the source locale's keys it lacks (they show the source's text; a run still passes)",
     ),
     (
         "i18n-extra",
@@ -576,13 +576,22 @@ fn lint_locales(files: &[crate::token_lint::File]) -> Vec<Diagnostic> {
                 }
             }
             if locale != source_locale {
-                for key in source_keys.keys().filter(|k| !keys.contains_key(*k)) {
+                // One note a locale: keys still to translate show the source's text, so they don't fail a run.
+                let lacking: Vec<&String> = source_keys.keys().filter(|k| !keys.contains_key(*k)).collect();
+                if !lacking.is_empty() {
+                    let first: Vec<&str> = lacking.iter().take(3).map(|k| k.as_str()).collect();
+                    let more = if lacking.len() > first.len() { ", …" } else { "" };
                     report(
                         path,
                         (1, 1),
-                        Severity::Warning,
+                        Severity::Note,
                         "i18n-missing",
-                        format!("{locale} lacks {key} (it shows {source_locale}'s)"),
+                        format!(
+                            "{locale} lacks {} of {source_locale}'s {} keys (they show {source_locale}'s): {}{more}",
+                            lacking.len(),
+                            source_keys.len(),
+                            first.join(", ")
+                        ),
                     );
                 }
             }

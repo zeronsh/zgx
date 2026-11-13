@@ -227,7 +227,7 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
             .grow(),
         );
     if options.copy {
-        let label: Signal<String> = cx.runtime().signal("Copy".to_string());
+        let label: Signal<bool> = cx.runtime().signal(false);
         let platform = cx.try_service::<zgx::platform::PlatformService>();
         let tasks = cx.tasks();
         let (shown, copied, body) = (label.clone(), label, body.clone());
@@ -241,15 +241,15 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                     if let Some(platform) = &platform {
                         platform.0.set_clipboard_text(body.clone());
                     }
-                    copied.set("Copied".into());
+                    copied.set(true);
                     let again = copied.clone();
                     tasks.spawn(async move {
                         zgx::timer::sleep(Duration::from_millis(1500)).await;
-                        again.set("Copy".into());
+                        again.set(false);
                     });
                 })
                 .child(
-                    zgx::compose::text_signal(move || shown.get())
+                    zgx::compose::text_signal(move || zgx::i18n::label(if shown.get() { "Copied" } else { "Copy" }))
                         .text_size(themed("font.size.sm")),
                 ),
         );
@@ -258,9 +258,9 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
         .w_full()
         .role(Role::Group)
         .accessible_label(if lang.is_empty() {
-            "Code".to_string()
+            zgx::i18n::label("Code")
         } else {
-            format!("{lang} code")
+            zgx::i18n::label_args("{lang} code", &[("lang", lang.as_str().into())])
         })
         .bg(themed("surface.sunken"))
         .rounded(8.)
@@ -574,7 +574,7 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                 .grow(),
         );
     if options.copy {
-        let label: Signal<String> = cx.runtime().signal("Copy".to_string());
+        let label: Signal<bool> = cx.runtime().signal(false);
         let platform = cx.try_service::<zgx::platform::PlatformService>();
         let tasks = cx.tasks();
         let (shown, copied, body) = (label.clone(), label, cell.clone());
@@ -590,15 +590,15 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                             .0
                             .set_clipboard_text(body.with_untracked(|b| text_of(b.field("text"))));
                     }
-                    copied.set("Copied".into());
+                    copied.set(true);
                     let again = copied.clone();
                     tasks.spawn(async move {
                         zgx::timer::sleep(Duration::from_millis(1500)).await;
-                        again.set("Copy".into());
+                        again.set(false);
                     });
                 })
                 .child(
-                    zgx::compose::text_signal(move || shown.get())
+                    zgx::compose::text_signal(move || zgx::i18n::label(if shown.get() { "Copied" } else { "Copy" }))
                         .text_size(themed("font.size.sm")),
                 ),
         );
@@ -610,9 +610,9 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         .accessible_label_when(move || {
             let lang = lang();
             if lang == "text" {
-                "Code".to_string()
+                zgx::i18n::label("Code")
             } else {
-                format!("{lang} code")
+                zgx::i18n::label_args("{lang} code", &[("lang", lang.as_str().into())])
             }
         })
         .bg(themed("surface.sunken"))
