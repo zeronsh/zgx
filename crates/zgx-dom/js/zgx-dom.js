@@ -8,6 +8,8 @@ const decoder = new TextDecoder();
 let sheet = null;
 let dispatch = null;
 let flush = null;
+let elementEvent = null;
+let resolveKeys = null;
 let scheduled = false;
 let root = null;
 // Scroll reads wait for the next frame, apart from the writes.
@@ -18,10 +20,12 @@ let prevented = false;
 
 const TAGS = ["div", "span", "button", "input", "textarea", "progress", "label", "img", "canvas", "dialog", "a"];
 
-export function zgx_init(baseCss, onDispatch, onFlush) {
+export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   root = document;
   dispatch = onDispatch;
   flush = onFlush;
+  elementEvent = onEvent;
+  resolveKeys = onKeys;
   const style = document.createElement("style");
   style.textContent = baseCss;
   document.head.appendChild(style);
@@ -39,6 +43,9 @@ export function zgx_init(baseCss, onDispatch, onFlush) {
   document.addEventListener("keydown", onKeyDown);
   addEventListener("resize", placeAll);
   document.addEventListener("scroll", placeAll, true);
+  document.addEventListener("keydown", onKeymaps, true);
+  document.addEventListener("keydown", onGroupKey);
+  document.addEventListener("focusin", onGroupFocus);
   document.addEventListener("keydown", onLinkKey);
 }
 
@@ -264,6 +271,9 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         else if (kind === 2) node.$$s = handler;
         else if (kind === 3) node.$$h = 1;
         else if (kind === 4) observeSize(node, handler);
+        else if (kind === 5) listen(node, handler);
+        else if (kind === 6) node.$$k = handler;
+        else if (kind === 7) group(node, handler);
         break;
       }
       case 15: { // VALUE id str: an editor's text, unless it holds it
@@ -762,4 +772,185 @@ function onFocusIn(event) {
 
 function onFocusOut(event) {
   if (tip && tipAnchorOf(event.target) && !tip.contains(event.relatedTarget)) hideTip();
+}
+
+// An element's `on_event` listeners: the events zgx routes, heard in each
+// phase (at the element once), each a call into its listeners, whose
+// decisions (prevent, stop, focus, capture) apply at once.
+const EVENTS = {
+  pointerdown: 0,
+  pointerup: 1,
+  pointermove: 2,
+  pointerenter: 3,
+  pointerleave: 4,
+  wheel: 5,
+  keydown: 6,
+  keyup: 7,
+  focusin: 8,
+  focusout: 9,
+  click: 10,
+  zgxaction: 11,
+  pointercancel: 12,
+};
+
+function listen(node, handler) {
+  node.$$e = handler;
+  for (const type in EVENTS) {
+    node.addEventListener(type, heardCapturing, true);
+    node.addEventListener(type, heard, false);
+  }
+}
+
+function heardCapturing(event) {
+  // At the element itself, the bubbling listener runs it, once.
+  if (event.eventPhase !== 2) run(this, event, 0);
+}
+
+function heard(event) {
+  run(this, event, event.eventPhase === 2 ? 1 : 2);
+}
+
+function run(node, event, phase) {
+  const handler = node.$$e;
+  if (handler === undefined) return;
+  const kind = EVENTS[event.type];
+  const mods =
+    (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);
+  const clicks = Math.min(event.detail | 0, 255);
+  const bits = kind | (phase << 8) | (mods << 12) | (clicks << 16) | (event.repeat ? 1 << 24 : 0);
+  let x = 0, y = 0, dx = 0, dy = 0, keys;
+  if (event.clientX !== undefined) {
+    x = event.clientX;
+    y = event.clientY;
+  }
+  if (kind === 5) {
+    // Lines and pages, as points.
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? innerHeight : 1;
+    dx = event.deltaX * unit;
+    dy = event.deltaY * unit;
+  } else if (kind <= 1) dx = event.button;
+  else if (kind === 11) dx = event.detail;
+  else if (kind === 6 || kind === 7) keys = event.key + "\n" + event.code;
+  const self = event.target === node || kind === 3 || kind === 4 ? 1 : 0;
+  const outcome = elementEvent(handler, bits, self, x, y, dx, dy, keys);
+  if (outcome & 1) event.preventDefault();
+  if (outcome & 4) event.stopImmediatePropagation();
+  else if (outcome & 2) event.stopPropagation();
+  if (outcome & 8) node.focus({ preventScroll: true });
+  if (outcome & 16 && event.pointerId !== undefined) node.setPointerCapture(event.pointerId);
+  if (outcome & 32 && event.pointerId !== undefined && node.hasPointerCapture(event.pointerId))
+    node.releasePointerCapture(event.pointerId);
+}
+
+// Keymaps (`View::keymap`): a key down goes to the keymaps from the focused
+// element out before anything hears it. A sequence's first keys are taken;
+// a match's actions go out in turn as `zgxaction` events from the focused
+// element, until one is handled (a listener prevents its default).
+function onKeymaps(event) {
+  const path = [];
+  for (let n = event.target; n && n !== document; n = n.parentNode) if (n.$$k !== undefined) path.push(n.$$k);
+  if (!path.length) return;
+  const mods =
+    (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);
+  const found = resolveKeys(path.join(","), event.key, event.code, mods | (event.repeat ? 16 : 0));
+  if (found === 0) return;
+  if (found > 1) {
+    let handled = false;
+    for (let c = 0; c < found - 2 && !handled; c++) {
+      const action = new CustomEvent("zgxaction", { bubbles: true, cancelable: true, detail: c });
+      event.target.dispatchEvent(action);
+      handled = action.defaultPrevented;
+    }
+    if (!handled) return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+// Focus groups (`View::focus_group`, list boxes, tab lists, toolbars, radio
+// groups): one Tab stop, the arrows (and Home, End) moving among its own
+// members; a radio group's wrap and choose.
+function group(node, bits) {
+  node.$$fg = bits;
+  queueMicrotask(() => node.isConnected && rove(node, null));
+}
+
+function groupOf(node) {
+  for (let n = node && node.parentNode; n && n !== document; n = n.parentNode) if (n.$$fg !== undefined) return n;
+  return null;
+}
+
+function members(group) {
+  const out = [];
+  for (const el of group.querySelectorAll("button,input,select,textarea,a[href],[tabindex]")) {
+    if (el.disabled || el.getAttribute("aria-disabled") === "true" || groupOf(el) !== group) continue;
+    if (el.tabIndex < 0 && !el.$$rove) continue;
+    out.push(el);
+  }
+  return out;
+}
+
+// One member a Tab stop: `to`, else the checked or selected one, else the first.
+function rove(group, to) {
+  const all = members(group);
+  if (!all.length) return;
+  const stop =
+    to ||
+    all.find((el) => el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true" || el.checked) ||
+    all[0];
+  for (const el of all) {
+    el.$$rove = true;
+    el.tabIndex = el === stop ? 0 : -1;
+  }
+}
+
+function onGroupFocus(event) {
+  const group = groupOf(event.target);
+  if (group && event.target.$$rove) rove(group, event.target);
+}
+
+function onGroupKey(event) {
+  if (event.defaultPrevented) return;
+  const group = groupOf(event.target);
+  if (!group) return;
+  const axis = group.$$fg & 3;
+  const wraps = (group.$$fg & 4) !== 0;
+  const vertical = axis & 1;
+  const horizontal = axis & 2;
+  const rtl = getComputedStyle(group).direction === "rtl";
+  let step;
+  switch (event.key) {
+    case "ArrowUp":
+      if (vertical) step = -1;
+      break;
+    case "ArrowDown":
+      if (vertical) step = 1;
+      break;
+    case "ArrowLeft":
+      if (horizontal) step = rtl ? 1 : -1;
+      break;
+    case "ArrowRight":
+      if (horizontal) step = rtl ? -1 : 1;
+      break;
+    case "Home":
+      step = "first";
+      break;
+    case "End":
+      step = "last";
+      break;
+  }
+  if (step === undefined) return;
+  const all = members(group);
+  const at = all.indexOf(event.target);
+  if (at < 0) return;
+  let to;
+  if (step === "first") to = all[0];
+  else if (step === "last") to = all[all.length - 1];
+  else if (wraps) to = all[(at + step + all.length) % all.length];
+  else to = all[at + step];
+  if (!to || to === event.target) return;
+  event.preventDefault();
+  rove(group, to);
+  to.focus();
+  if (wraps) to.click();
 }
