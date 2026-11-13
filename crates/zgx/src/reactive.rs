@@ -1066,6 +1066,12 @@ impl Drop for HeldEffects {
 pub struct Signal<T> {
     inner: Rc<SignalInner<T>>,
 }
+impl<T> Signal<T> {
+    /// Handles to this signal that exist, this one included.
+    pub fn handles(&self) -> usize {
+        Rc::strong_count(&self.inner)
+    }
+}
 impl<T> Clone for Signal<T> {
     fn clone(&self) -> Self {
         Self {

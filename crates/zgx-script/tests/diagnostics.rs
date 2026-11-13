@@ -676,3 +676,42 @@ return ui.column { ui.show(function() return on:get() end, Probe {}) }"##;
         found.holders.first().map(|h| &h.path)
     );
 }
+
+/// A state keyed by a tab that has since closed is dropped once nothing holds
+/// it and it has not moved, so a window that opens tabs all day stays flat.
+#[test]
+fn states_keyed_by_closed_tabs_do_not_pile_up() {
+    let code = r##"
+local ids = ui.state("ids", { "start" })
+local Tab = ui.component(function(props)
+	local open = ui.state(`open:{props.id}`, false)
+	local feed = ui.shared(`feed:{props.id}`, nil)
+	return ui.div { id = "t", w = 10, h = 10 }
+end)
+return ui.column { ui.each(ids, function(id) return Tab { id = id } end) }"##;
+    let mut h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    let flip = |h: &mut Harness, k: i64| {
+        let ids = zgx_script::Value::List(
+            vec![zgx_script::Value::from(format!("tab-{k}").as_str())].into(),
+        );
+        h.host.set_state("ids", ids).unwrap();
+        h.settle();
+        h.frames(2);
+    };
+    for k in 0..6 {
+        flip(&mut h, k);
+    }
+    h.host.collect_garbage();
+    let before = h.host.states().len();
+    for k in 6..86 {
+        flip(&mut h, k);
+    }
+    h.host.collect_garbage();
+    let after = h.host.states().len();
+    assert!(
+        after <= before + 2,
+        "80 tabs left {} more states",
+        after - before
+    );
+}

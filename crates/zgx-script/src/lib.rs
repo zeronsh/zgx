@@ -4631,6 +4631,10 @@ fn collect_garbage(inner: &Inner) {
         collect_fully(&vm.lua);
         vm.interrupt.heap_settled(vm.lua.used_memory());
     }
+    inner.shared.sweep_unheld();
+    for store in inner.stores.borrow().values() {
+        store.sweep_unheld();
+    }
 }
 /// Full collections until one frees nothing more: a collection finalizes
 /// the garbage's userdata, and what only they held goes in the next.
