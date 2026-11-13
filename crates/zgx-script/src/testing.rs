@@ -26,10 +26,11 @@
 //! clipboard and file dialogs ([`FakeDesktop`]) that answer as the test
 //! says a person would: open and save run as they do in a window.
 use crate::ScriptHost;
+use crate::time::Instant;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use zgx::{
     compose::{TaskRunner, View, ViewHandle, provide},

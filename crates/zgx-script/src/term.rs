@@ -299,9 +299,10 @@ fn dispatch(handlers: &Handlers, event: &TerminalEvent) {
         TerminalEvent::ProcessChanged { process, .. } => {
             call(&handlers.process, pack(vec![text(process)]))
         }
-        TerminalEvent::Exited { code } => {
-            call(&handlers.exit, pack(vec![LuaValue::Integer(*code as i64)]))
-        }
+        TerminalEvent::Exited { code } => call(
+            &handlers.exit,
+            pack(vec![LuaValue::Integer(*code as mlua::Integer)]),
+        ),
         TerminalEvent::CloseRequested { process_alive } => call(
             &handlers.close,
             pack(vec![LuaValue::Boolean(*process_alive)]),
@@ -313,7 +314,7 @@ fn dispatch(handlers: &Handlers, event: &TerminalEvent) {
         } => call(
             &handlers.command,
             pack(vec![
-                exit_code.map_or(LuaValue::Nil, |c| LuaValue::Integer(c as i64)),
+                exit_code.map_or(LuaValue::Nil, |c| LuaValue::Integer(c as mlua::Integer)),
                 LuaValue::Number(*duration_ms as f64),
             ]),
         ),

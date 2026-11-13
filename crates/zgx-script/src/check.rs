@@ -5,6 +5,7 @@
 //! shows only at run time: a misspelled property or event, a call with the
 //! wrong arguments, a local function used before its definition (`nil`
 //! until called).
+use crate::time::Instant;
 use std::{
     fmt,
     io::Read,
@@ -14,7 +15,7 @@ use std::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// The `ui` and `anime` globals' types, as shipped with this crate.

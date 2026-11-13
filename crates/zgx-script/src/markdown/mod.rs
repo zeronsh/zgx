@@ -829,7 +829,7 @@ pub(crate) fn rest(lua: &mlua::Lua) {
     *parsed.texts.borrow_mut() = Texts::new();
     let mut streams = parsed.streams.borrow_mut();
     let mut order = parsed.stream_order.borrow_mut();
-    let now = std::time::Instant::now();
+    let now = crate::time::Instant::now();
     while order
         .front()
         .is_some_and(|(_, used)| now.duration_since(*used) > STREAM_QUIET)
@@ -866,16 +866,16 @@ struct Parsed {
     texts: std::cell::RefCell<Texts>,
     streams: std::cell::RefCell<Streams>,
     /// Streams by last use, oldest first.
-    stream_order: std::cell::RefCell<std::collections::VecDeque<(String, std::time::Instant)>>,
+    stream_order: std::cell::RefCell<std::collections::VecDeque<(String, crate::time::Instant)>>,
 }
 /// `key` was just used: last in the order, and the oldest streams go past
 /// `KEPT`.
 fn touch(
-    order: &mut std::collections::VecDeque<(String, std::time::Instant)>,
+    order: &mut std::collections::VecDeque<(String, crate::time::Instant)>,
     key: String,
     streams: &mut Streams,
 ) {
-    let now = std::time::Instant::now();
+    let now = crate::time::Instant::now();
     match order.back_mut() {
         Some((last, used)) if *last == key => *used = now,
         _ => {
@@ -1996,7 +1996,7 @@ mod tests {
             let parsed = lua.app_data_ref::<Parsed>().expect("installed");
             let mut order = parsed.stream_order.borrow_mut();
             let long_ago =
-                std::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
+                crate::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
             order.iter_mut().for_each(|(_, used)| *used = long_ago);
         }
         rest(&lua);

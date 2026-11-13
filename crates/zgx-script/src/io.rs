@@ -191,6 +191,11 @@ fn off_thread(
 ) -> mlua::Result<PromiseUd> {
     let (tell, mut heard) = zgx::task::latest::<Result<Option<String>, String>>();
     let promise = pending(lua, name)?;
+    // No threads in the browser (wasm32): the work runs here, and fails
+    // there as its file access does.
+    #[cfg(target_arch = "wasm32")]
+    tell.send(work());
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(move || {
         tell.send(work());
     });

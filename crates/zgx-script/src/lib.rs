@@ -54,6 +54,7 @@ mod file_events;
 mod file_events;
 mod folder;
 mod form;
+mod gpu;
 mod handlers;
 mod hook_targets;
 mod i18n;
@@ -90,11 +91,14 @@ mod term;
 pub mod test_runner;
 pub mod testing;
 mod theme;
+mod time;
 mod timers;
 mod token_lint;
 mod transform;
 mod value;
 mod variants;
+#[cfg(target_arch = "wasm32")]
+mod web;
 mod windows;
 
 pub use bundle::{Bundle, BundleFile, build};
@@ -116,13 +120,14 @@ pub use value::{
 };
 pub use windows::{Window, WindowExtras};
 
+use crate::time::Instant;
 use mlua::Lua;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
-    time::{Duration, Instant, SystemTime},
+    time::Duration,
 };
 use zgx::{
     compose::{View, prelude::*, switch},
@@ -417,7 +422,7 @@ fn on_virtual_clock(lua: &Lua) -> mlua::Result<()> {
             Some(date) => time.call::<mlua::Value>(date),
             None => Ok(mlua::Value::Number(
                 zgx::clock::system_now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                    .duration_since(crate::time::SystemTime::UNIX_EPOCH)
                     .map_or(0., |date| date.as_secs() as f64),
             )),
         })?,
@@ -1697,7 +1702,7 @@ struct Inner {
     /// Where focus was as a reload began, before its scripts ran.
     focus: zgx::compose::FocusHold,
     error: Signal<Option<String>>,
-    stamps: RefCell<Vec<(PathBuf, Option<SystemTime>)>>,
+    stamps: RefCell<Vec<(PathBuf, Option<std::time::SystemTime>)>>,
     /// Files scripts `require`d in the last load: watched with the scripts.
     required: RefCell<Vec<PathBuf>>,
     /// The packages lent to each plugin, and how many of their modules it
@@ -1822,6 +1827,8 @@ impl ScriptHost {
         )
     }
     fn with(runtime: &Runtime, app: Script) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        web::start();
         let elements = Rc::new(element::Elements::default());
         let warnings = SharedWarnings::default();
         if let Some(mode) = DesignLint::from_env() {
@@ -3828,9 +3835,9 @@ impl ScriptHost {
     /// The script files whose bytes differ from what the last load read,
     /// once each: those whose times moved and whose bytes aren't what is
     /// loaded, those new to `stamps`, and those it no longer finds.
-    fn changed(&self, stamps: &[(PathBuf, Option<SystemTime>)]) -> Vec<PathBuf> {
+    fn changed(&self, stamps: &[(PathBuf, Option<std::time::SystemTime>)]) -> Vec<PathBuf> {
         let loaded = self.0.stamps.borrow();
-        let before: HashMap<&std::path::Path, Option<SystemTime>> =
+        let before: HashMap<&std::path::Path, Option<std::time::SystemTime>> =
             loaded.iter().map(|(p, t)| (p.as_path(), *t)).collect();
         let now: HashSet<&std::path::Path> = stamps.iter().map(|(p, _)| p.as_path()).collect();
         let mut seen = HashSet::new();
@@ -3851,7 +3858,7 @@ impl ScriptHost {
             .map(std::path::Path::to_path_buf)
             .collect()
     }
-    fn stamps(&self) -> Vec<(PathBuf, Option<SystemTime>)> {
+    fn stamps(&self) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
         let mut paths: Vec<_> = self
             .scripts()
             .into_iter()

@@ -3209,7 +3209,9 @@ pub(crate) fn array_items(table: &Table) -> mlua::Result<Vec<mlua::Value>> {
         if let mlua::Value::Integer(i) = key
             && i >= 1
         {
-            items.push((i, value));
+            // An `i32` in the browser (Luau's integer on wasm32).
+            #[allow(clippy::unnecessary_cast)]
+            items.push((i as i64, value));
         }
         Ok(())
     })?;
@@ -3248,7 +3250,9 @@ fn child_items(table: &Table) -> mlua::Result<Vec<(i64, Child)>> {
         if let mlua::Value::Integer(i) = key.to_value()?
             && i >= 1
         {
-            items.push((i, Child::of(&value)?));
+            // An `i32` in the browser (Luau's integer on wasm32).
+            #[allow(clippy::unnecessary_cast)]
+            items.push((i as i64, Child::of(&value)?));
         }
         Ok(())
     })?;
@@ -4126,7 +4130,9 @@ fn fill_from(
                 mlua::Value::Integer(1) if let Some(text) = text.as_deref_mut() => {
                     text.content = value.to_value()?;
                 }
-                mlua::Value::Integer(i) if i >= 1 => items.push((i, Child::of(&value)?)),
+                // An `i32` in the browser (Luau's integer on wasm32).
+                #[allow(clippy::unnecessary_cast)]
+                mlua::Value::Integer(i) if i >= 1 => items.push((i as i64, Child::of(&value)?)),
                 _ => {}
             }
             return Ok(());
@@ -6534,7 +6540,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             // A shader that does not compile is the script's error, shown
             // with its line, not a plain fill.
-            zgx_gpu::check_fill_shader(&source)
+            crate::gpu::check_fill_shader(&source)
                 .map_err(|e| mlua::Error::runtime(format!("ui.shader: {e}")))?;
             let key = (source, fps.map(f32::to_bits));
             let shader = SHADERS.with(|shaders| {
@@ -6545,7 +6551,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         // Compiled from now, off the frame, so the first
                         // frame drawing it need not wait for it.
                         let shader = zgx::decoration::FillShader::new(key.0.clone(), fps);
-                        zgx_gpu::warm_fill_shader(&shader);
+                        crate::gpu::warm_fill_shader(&shader);
                         shader
                     })
                     .clone()
@@ -6562,7 +6568,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             if let Some(inputs) = opts.as_ref().map(shader_inputs).transpose()?.flatten() {
                 // A running effect of its own: textures aren't shared.
-                zgx_gpu::check_layer_inputs(&source, &inputs)
+                crate::gpu::check_layer_inputs(&source, &inputs)
                     .map_err(|e| mlua::Error::runtime(format!("ui.layer_shader: {e}")))?;
                 let shader = zgx::decoration::FillShader::with_inputs(source, fps, inputs);
                 zgx::decoration::declare_layer_shader(&shader);
@@ -6577,7 +6583,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
             // A shader that does not compile is the script's error, shown
             // with its line, not a layer composited as painted.
-            zgx_gpu::check_layer_shader(&source)
+            crate::gpu::check_layer_shader(&source)
                 .map_err(|e| mlua::Error::runtime(format!("ui.layer_shader: {e}")))?;
             let key = (source, fps.map(f32::to_bits));
             let shader = LAYER_SHADERS.with(|shaders| {
@@ -6839,7 +6845,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let vm = env.vm.clone();
                 let done = std::cell::RefCell::new(done);
                 let elapsed_cell = std::cell::Cell::new(0f64);
-                let began = std::time::Instant::now();
+                let began = crate::time::Instant::now();
                 let (speed_from, shown_from) = (
                     velocity.get(),
                     state
@@ -7002,7 +7008,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "now",
         lua.create_function(|_, ()| {
             Ok(zgx::clock::system_now()
-                .duration_since(std::time::UNIX_EPOCH)
+                .duration_since(crate::time::SystemTime::UNIX_EPOCH)
                 .map_or(0., |d| d.as_secs_f64() * 1000.))
         })?,
     )?;

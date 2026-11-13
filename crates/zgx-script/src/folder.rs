@@ -152,7 +152,7 @@ fn list(root: &Path, path: &str, recursive: bool, limit: usize) -> Result<Vec<En
                 modified: meta
                     .modified()
                     .ok()
-                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|at| at.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                     .map_or(0., |at| at.as_secs_f64() * 1000.),
                 full,
             });
@@ -361,6 +361,11 @@ fn off_thread<T: Send + 'static>(
 ) -> mlua::Result<PromiseUd> {
     let (tell, mut heard) = zgx::task::latest::<Result<T, Trouble>>();
     let promise = pending(lua, name)?;
+    // No threads in the browser (wasm32): the work runs here, and fails
+    // there as its file access does.
+    #[cfg(target_arch = "wasm32")]
+    tell.send(work());
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(move || {
         tell.send(work());
     });

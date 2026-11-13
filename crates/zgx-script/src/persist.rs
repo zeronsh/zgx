@@ -9,6 +9,9 @@
 //! writer thread, which writes a temporary file and renames it over the old
 //! one, so a crash leaves the old file or the new one, never half of one.
 //! Steady typing is saved every 250 ms rather than never.
+// The writer thread, and what it alone runs, are not built for the
+// browser, which has no disk (`Persist::send`).
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 use crate::value::Value;
 use std::{
     cell::{Cell, RefCell},
@@ -286,6 +289,15 @@ impl Persist {
         self.send(Job::Barrier(tx));
         let _ = rx.recv();
     }
+    /// No disk in the browser (wasm32): nothing is written, and a barrier
+    /// answers at once.
+    #[cfg(target_arch = "wasm32")]
+    fn send(&self, job: Job) {
+        if let Job::Barrier(done) = job {
+            let _ = done.send(());
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     fn send(&self, job: Job) {
         let mut writer = self.writer.borrow_mut();
         let (tx, _) = writer.get_or_insert_with(|| {

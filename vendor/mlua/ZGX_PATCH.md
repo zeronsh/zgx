@@ -155,3 +155,10 @@ Anything but a table converts as before, its error the same.
 take, every VM's together: memory outside the program's heap, which a VM's
 `used_memory` counts with the rest. The pool counts the slots it maps as it
 maps a chunk, so taking and giving a page do as they did (zgx #1841).
+
+## In the browser (zgx-mlua 0.12.9)
+
+Built for wasm32-unknown-unknown (zgx-script under zgx-dom), `Lua::heap_dump`
+declares the C file functions it reads Luau's dump back with itself (Rust's
+`libc` has none for that target; the wasi-libc zgx-dom links has them). The
+browser has no files, so `tmpfile` fails and there is no dump.

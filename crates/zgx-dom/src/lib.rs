@@ -29,3 +29,8 @@ mod sheet;
 mod template;
 
 pub use mount::{Mounted, flush, live_nodes, mount, mount_in_body};
+
+/// zgx-script, whose Luau apps zgx-dom mounts (`luau`): a host's `view()`
+/// mounts as any view does.
+#[cfg(feature = "luau")]
+pub use zgx_script as script;
