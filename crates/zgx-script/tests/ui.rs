@@ -3158,6 +3158,87 @@ fn shader_params_follow_registered_theme_tokens_while_time_loops() {
     );
 }
 
+/// A clocked shader's (`shader_clock`, `layer_clock`) parameters given as
+/// theme tokens, drawn over `frames` frames with a theme switched halfway:
+/// its uniforms before and after the switch.
+fn clocked_under_themes(
+    node: &str,
+) -> (
+    zgx::decoration::ShaderUniforms,
+    zgx::decoration::ShaderUniforms,
+) {
+    let mut h = common::Harness::inline(&format!(
+        r##"ui.theme.register {{ name = "t-dark", type = "dark", tokens = {{ ["app.ink"] = "#ff0000" }} }}
+        ui.theme.register {{ name = "t-light", type = "light", tokens = {{ ["app.ink"] = "#0000ff" }} }}
+        ui.theme.set("t-dark")
+        local S = ui.shader("fn fill(input: FillInput) -> vec4<f32> {{ return input.params[1]; }}")
+        local L = ui.layer_shader("fn layer(input: LayerInput) -> vec4<f32> {{ return input.params[1]; }}")
+        return ui.column {{
+            ui.button {{ id = "light", w = 10, h = 10, on_click = function() ui.theme.set("t-light") end }},
+            {node},
+        }}"##
+    ));
+    let run = |h: &mut common::Harness| {
+        for _ in 0..10 {
+            h.frame();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    h.ui.prepare_frame();
+    run(&mut h);
+    assert_eq!(h.host.error().get(), None);
+    let id = h.find("shaded").unwrap();
+    let read = |h: &common::Harness| {
+        let scene = h.ui.scene.borrow();
+        match scene.layer_shader(id) {
+            Some(layer) => layer.uniforms,
+            None => scene.shader_uniforms(id),
+        }
+    };
+    let before = read(&h);
+    h.click("light");
+    run(&mut h);
+    (before, read(&h))
+}
+
+/// Under the engine's clock (`shader_clock`), a fill's parameters given as
+/// theme tokens are the token's colour, not zeros, and follow a theme
+/// switched mid-clock without putting its time back.
+#[test]
+fn a_clocked_shader_fills_params_follow_theme_tokens() {
+    let (dark, light) = clocked_under_themes(
+        r##"ui.div { id = "shaded", w = 10, h = 10, bg = "#00000000", bg_shader = S, shader_clock = true,
+            shader_params = { { 1, 2, 3, 4 }, "$app.ink" }, pointer_events = "none" }"##,
+    );
+    assert!(dark.time > 0., "the clock steps: {dark:?}");
+    assert_eq!(dark.params[0], [1., 2., 3., 4.], "the literal row");
+    assert_eq!(dark.params[1], [1., 0., 0., 1.], "the token: dark ink");
+    assert_eq!(light.params[1], [0., 0., 1., 1.], "it follows the theme");
+    assert_eq!(light.params[0], [1., 2., 3., 4.]);
+    assert!(
+        light.time > dark.time,
+        "the switch keeps its time: {dark:?} -> {light:?}"
+    );
+}
+
+/// As a fill's: a layer shader's parameters under `layer_clock`.
+#[test]
+fn a_clocked_layer_shaders_params_follow_theme_tokens() {
+    let (dark, light) = clocked_under_themes(
+        r##"ui.div { id = "shaded", w = 10, h = 10, bg = "#222222", layer_shader = L, layer_clock = true,
+            layer_params = { { 1, 2, 3, 4 }, "$app.ink" }, pointer_events = "none" }"##,
+    );
+    assert!(dark.time > 0., "the clock steps: {dark:?}");
+    assert_eq!(dark.params[0], [1., 2., 3., 4.], "the literal row");
+    assert_eq!(dark.params[1], [1., 0., 0., 1.], "the token: dark ink");
+    assert_eq!(light.params[1], [0., 0., 1., 1.], "it follows the theme");
+    assert_eq!(light.params[0], [1., 2., 3., 4.]);
+    assert!(
+        light.time > dark.time,
+        "the switch keeps its time: {dark:?} -> {light:?}"
+    );
+}
+
 /// An `id` given to a component replaces one on its root: nothing changes,
 /// and a warning names both.
 #[test]

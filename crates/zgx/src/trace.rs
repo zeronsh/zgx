@@ -5,12 +5,12 @@
 //! Built without the feature, none of this exists. Built with it, it does
 //! nothing until [`set_enabled`]: a relaxed load on each write and run, no
 //! allocation and no bookkeeping.
+use crate::time::Instant;
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     rc::Rc,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    time::Instant,
 };
 
 static ON: AtomicBool = AtomicBool::new(false);

@@ -253,3 +253,138 @@ fn a_paragraph_given_new_runs_lays_out_its_row_alone() {
         assert_eq!(live.bounds(*text), fresh.bounds(*fresh_text), "text {i}");
     }
 }
+
+/// Text 7 points a character, 18 a line, wrapped at the room it is given.
+fn measure(text: &str, _: f32, limit: Option<f32>) -> (f32, f32) {
+    let width = text.len() as f32 * 7.;
+    let room = limit.unwrap_or(width).max(7.);
+    (width.min(room), (width / room).ceil().max(1.) * 18.)
+}
+
+fn label(scene: &mut Scene, parent: NodeId, value: &str) -> NodeId {
+    scene.append(
+        parent,
+        NodeKind::Text {
+            text: value.into(),
+            color: Color(255, 255, 255, 255),
+            font_size: 14.,
+        },
+        Style {
+            text_wrap: true,
+            ..Style::default()
+        },
+    )
+}
+
+#[test]
+fn a_card_its_column_holds_at_its_floor_shrinks_when_its_text_does() {
+    // A card of a set height in a column too short for it and a label: the
+    // column shrinks it no further than its text, which is taller. Its text
+    // cut short, the card answers its own height as it did, but its floor
+    // is its text's now, and its column shrinks it to that.
+    let build = |words: &str| {
+        let mut scene = Scene::new(300., 600.);
+        scene.set_text_measurer(measure);
+        let root = scene.root();
+        let column = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(110.),
+                height: Some(38.),
+                gap: 2.,
+                ..Style::default()
+            },
+        );
+        let card = scene.append(
+            column,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width_percent: Some(0.8),
+                height: Some(48.),
+                padding: 1.5,
+                align: Align::Stretch,
+                ..Style::default()
+            },
+        );
+        let text = label(&mut scene, card, words);
+        label(&mut scene, column, "t6");
+        scene.flush();
+        (scene, card, text)
+    };
+    let long = "a few words that wrap past the card's height";
+    let (mut live, card, text) = build(long);
+    assert_eq!(live.bounds(card).height, 48., "held at its own height");
+    live.set_text(text, "ab");
+    live.flush();
+    let (fresh, fresh_card, fresh_text) = build("ab");
+    assert!(fresh.bounds(fresh_card).height < 48., "shrunk to its text");
+    assert_eq!(live.bounds(card), fresh.bounds(fresh_card), "the card");
+    assert_eq!(live.bounds(text), fresh.bounds(fresh_text), "its text");
+}
+
+#[test]
+fn a_box_found_not_to_stand_after_one_laid_out_alone_lays_out_inside_it() {
+    // A band laid out alone first (its label changed, the same size): it
+    // answers as it did, from what a box of a set size inside it answered
+    // before. That box's text, cut short in the same frame, drops the floor
+    // its column held it at: laid out from the top after all, the band's
+    // answer, given before, mustn't serve, or nothing lays the box out.
+    let build = |status: &str, words: &str| {
+        let mut scene = Scene::new(300., 600.);
+        scene.set_text_measurer(measure);
+        let root = scene.root();
+        let page = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(280.),
+                ..Style::default()
+            },
+        );
+        let band = scene.append(
+            page,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width_percent: Some(0.8),
+                height: Some(17.),
+                align: Align::Stretch,
+                ..Style::default()
+            },
+        );
+        let frame = scene.append(
+            band,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(174.),
+                height: Some(81.),
+                gap: 6.,
+                align: Align::Center,
+                ..Style::default()
+            },
+        );
+        let held = scene.append(
+            frame,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(56.),
+                height: Some(72.),
+                align: Align::Center,
+                ..Style::default()
+            },
+        );
+        let text = label(&mut scene, held, words);
+        label(&mut scene, frame, "a caption");
+        let shown = label(&mut scene, band, status);
+        scene.flush();
+        (scene, held, text, shown)
+    };
+    let long = "w ".repeat(48);
+    let (mut live, held, text, shown) = build("ab", &long);
+    live.set_text(shown, "cd");
+    live.set_text(text, "ab");
+    live.flush();
+    let (fresh, fresh_held, fresh_text, _) = build("cd", "ab");
+    assert_eq!(live.bounds(held), fresh.bounds(fresh_held), "the box");
+    assert_eq!(live.bounds(text), fresh.bounds(fresh_text), "its text");
+}

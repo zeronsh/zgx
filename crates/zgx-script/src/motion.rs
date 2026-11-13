@@ -216,6 +216,25 @@ fn play(
 
 // `ui.each` ------------------------------------------------------------------
 
+/// The hasher of this module's maps, keyed by a list's row keys (an app's
+/// data): zgx's, seeded once per process, where std's default (SipHash)
+/// took 3% of a list animating its rows.
+#[derive(Clone)]
+struct Keyed(zgx::KeyHasher);
+impl Default for Keyed {
+    fn default() -> Self {
+        Keyed(zgx::key_hasher())
+    }
+}
+impl std::hash::BuildHasher for Keyed {
+    type Hasher = <zgx::KeyHasher as std::hash::BuildHasher>::Hasher;
+    fn build_hasher(&self) -> Self::Hasher {
+        self.0.build_hasher()
+    }
+}
+type KeyMap<K, V> = HashMap<K, V, Keyed>;
+type KeySet<K> = HashSet<K, Keyed>;
+
 /// A row: its identity in the list, and which time it came in under it (a
 /// row leaving can still be on screen as one with its key comes back).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -225,19 +244,19 @@ struct RowKey(Rc<str>, u64);
 struct Rows {
     /// What is mounted, in order: the list's rows and those still leaving.
     shown: Vec<RowKey>,
-    exiting: HashSet<RowKey>,
+    exiting: KeySet<RowKey>,
     /// Each identity in the list, and the row it has now.
-    live: HashMap<Rc<str>, u64>,
+    live: KeyMap<Rc<str>, u64>,
     /// Each identity's index in the list, for building its row.
-    indices: HashMap<Rc<str>, usize>,
+    indices: KeyMap<Rc<str>, usize>,
     next: u64,
     /// Rows from before this generation were there from the start.
     first_end: Option<u64>,
-    elements: HashMap<RowKey, Rc<Element>>,
+    elements: KeyMap<RowKey, Rc<Element>>,
     region: Option<NodeHandle>,
     /// Where each row was (from the region's corner) before a change whose
     /// layout pass has not run yet.
-    before: Option<HashMap<RowKey, (f32, f32)>>,
+    before: Option<KeyMap<RowKey, (f32, f32)>>,
 }
 
 /// Where layout put `node`, from `origin`'s corner.
@@ -259,7 +278,9 @@ fn identities(
     item_keys: &mut crate::lower::ItemKeys,
     vm: &Vm,
 ) -> Vec<Rc<str>> {
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    // Sized for the list: grown otherwise, rehashing as it goes.
+    let mut seen: KeyMap<String, usize> =
+        KeyMap::with_capacity_and_hasher(list.list().len(), Keyed::default());
     let keys = key.as_ref().map(|f| item_keys.of(list.list(), f, vm));
     list.list()
         .iter()
@@ -324,20 +345,23 @@ pub(crate) fn each(
                             return None;
                         }
                         let origin = scene.layout_bounds(region.node());
-                        let before = st
-                            .elements
-                            .iter()
-                            .filter(|(k, _)| !st.exiting.contains(k))
-                            .filter_map(|(k, e)| {
-                                let node = e.node().filter(|n| scene.contains(*n))?;
-                                Some((k.clone(), placed(&scene, node, origin)?))
-                            })
-                            .collect();
+                        // Sized for the rows: grown otherwise, rehashing.
+                        let mut before =
+                            KeyMap::with_capacity_and_hasher(st.elements.len(), Keyed::default());
+                        before.extend(
+                            st.elements
+                                .iter()
+                                .filter(|(k, _)| !st.exiting.contains(k))
+                                .filter_map(|(k, e)| {
+                                    let node = e.node().filter(|n| scene.contains(*n))?;
+                                    Some((k.clone(), placed(&scene, node, origin)?))
+                                }),
+                        );
                         st.before = Some(before);
                         Some(region)
                     });
-                let mut live = HashMap::with_capacity(ids.len());
-                let mut indices = HashMap::with_capacity(ids.len());
+                let mut live = KeyMap::with_capacity_and_hasher(ids.len(), Keyed::default());
+                let mut indices = KeyMap::with_capacity_and_hasher(ids.len(), Keyed::default());
                 let mut keys = Vec::with_capacity(ids.len());
                 for (i, id) in ids.into_iter().enumerate() {
                     let generation = st.live.remove(&id).unwrap_or_else(|| {
@@ -396,9 +420,9 @@ pub(crate) fn each(
                 }
                 // Leaving rows keep their place in the order (it decides
                 // what paints over what), after the row they followed.
-                let staying: HashSet<&RowKey> = keys.iter().collect();
+                let staying: KeySet<&RowKey> = keys.iter().collect();
                 let mut head = Vec::new();
-                let mut after: HashMap<RowKey, Vec<RowKey>> = HashMap::new();
+                let mut after: KeyMap<RowKey, Vec<RowKey>> = KeyMap::default();
                 let mut anchor: Option<&RowKey> = None;
                 for k in &st.shown {
                     if st.exiting.contains(k) {
@@ -644,7 +668,7 @@ impl Tracker {
 /// A script's mounted `layout_id` nodes, and those just unmounted (until
 /// the next layout pass): what a node mounting with the same id starts from.
 #[derive(Default)]
-pub(crate) struct LayoutIds(RefCell<HashMap<Rc<str>, Rc<Tracker>>>);
+pub(crate) struct LayoutIds(RefCell<KeyMap<Rc<str>, Rc<Tracker>>>);
 
 /// Tracks a mounted node's layout moves (`layout = "position"`, a
 /// `layout_id`) until it is removed.

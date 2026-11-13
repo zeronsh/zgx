@@ -13,6 +13,7 @@
 //! rows would show), a slice each frame until all are counted, so a list of
 //! a million rows never stalls one; nothing runs once the count is done, or
 //! while no find is open.
+use crate::time::Instant;
 use crate::{
     compose::{View, ViewHandle},
     input::{EventPhase, InputEvent, Key},
@@ -23,11 +24,7 @@ use crate::{
     theme::tok,
     widgets::Ui,
 };
-use std::{
-    ops::Range,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::{ops::Range, rc::Rc, time::Duration};
 
 /// Where a match is.
 #[derive(Clone, Debug, PartialEq)]

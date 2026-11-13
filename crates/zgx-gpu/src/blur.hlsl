@@ -62,29 +62,34 @@ struct FragmentInput_fs_reduce {
     float4 p_8 : SV_Position;
 };
 
-struct FragmentInput_fs_across {
+struct FragmentInput_fs_reduce4_ {
     nointerpolation uint index_3 : LOC0;
     float4 p_9 : SV_Position;
 };
 
-struct FragmentInput_fs_down {
+struct FragmentInput_fs_across {
     nointerpolation uint index_4 : LOC0;
     float4 p_10 : SV_Position;
 };
 
-struct FragmentInput_fs {
+struct FragmentInput_fs_down {
     nointerpolation uint index_5 : LOC0;
     float4 p_11 : SV_Position;
 };
 
-struct FragmentInput_fs_both {
+struct FragmentInput_fs {
     nointerpolation uint index_6 : LOC0;
     float4 p_12 : SV_Position;
 };
 
-struct FragmentInput_fs_mix {
+struct FragmentInput_fs_both {
     nointerpolation uint index_7 : LOC0;
     float4 p_13 : SV_Position;
+};
+
+struct FragmentInput_fs_mix {
+    nointerpolation uint index_8 : LOC0;
+    float4 p_14 : SV_Position;
 };
 
 float sigma(Blur b, float2 p)
@@ -132,20 +137,20 @@ uint2 NagaDimensions2D(Texture2D<float4> tex)
     return ret.xy;
 }
 
-float4 along(Vertex v_6, int2 step_)
+float4 along(Vertex v_7, int2 step_)
 {
     float ratio = (float)0;
     float w = 1.0;
-    float4 sum_1 = (float4)0;
+    float4 sum_2 = (float4)0;
     float total = 1.0;
     int i_1 = int(1);
     bool local_1 = (bool)0;
     int k = (int)0;
 
-    Slot s = ConstructSlot(asfloat(slots.Load4(v_6.index*48+0)), asfloat(slots.Load4(v_6.index*48+16)), asuint(slots.Load4(v_6.index*48+32)));
+    Slot s = ConstructSlot(asfloat(slots.Load4(v_7.index*48+0)), asfloat(slots.Load4(v_7.index*48+16)), asuint(slots.Load4(v_7.index*48+32)));
     int2 o = naga_f2i32(s.atlas.xy);
     int2 n_1 = naga_f2i32(s.atlas.zw);
-    int2 l = asint(asuint(naga_f2i32(v_6.p.xy)) - asuint(o));
+    int2 l = asint(asuint(naga_f2i32(v_7.p.xy)) - asuint(o));
     float st = s.region.w;
     int r = naga_f2i32(ceil((3.0 * st)));
     float q = exp((-0.5 / (st * st)));
@@ -155,7 +160,7 @@ float4 along(Vertex v_6, int2 step_)
     float2 axis = float2(step_);
     ratio = q;
     float4 _e38 = source.Load(int3(asint(asuint(o) + asuint(l)), int(0)));
-    sum_1 = _e38;
+    sum_2 = _e38;
     uint2 loop_bound = uint2(4294967295u, 4294967295u);
     bool loop_init = true;
     while(true) {
@@ -198,10 +203,10 @@ float4 along(Vertex v_6, int2 step_)
                 int _e79 = i_1;
                 float2 offset = (axis * (float(_e79) + (wb / (wa + wb))));
                 float2 center_ = (float2(asint(asuint(o) + asuint(l))) + (0.5).xx);
-                float4 _e90 = sum_1;
+                float4 _e90 = sum_2;
                 float4 _e96 = source.SampleLevel(linear_, ((center_ - offset) / size_1), 0.0);
                 float4 _e102 = source.SampleLevel(linear_, ((center_ + offset) / size_1), 0.0);
-                sum_1 = (_e90 + ((_e96 + _e102) * (wa + wb)));
+                sum_2 = (_e90 + ((_e96 + _e102) * (wa + wb)));
             } else {
                 k = int(0);
                 uint2 loop_bound_1 = uint2(4294967295u, 4294967295u);
@@ -226,11 +231,11 @@ float4 along(Vertex v_6, int2 step_)
                         const int _e116 = mirror(asint(asuint(at) - asuint(j)), extent);
                         const int _e118 = mirror(asint(asuint(at) + asuint(j)), extent);
                         int2 across = asint(asuint(l) - asuint(asint(asuint(step_) * asuint(at))));
-                        float4 _e121 = sum_1;
+                        float4 _e121 = sum_2;
                         float4 _e127 = source.Load(int3(asint(asuint(asint(asuint(o) + asuint(across))) + asuint(asint(asuint(step_) * asuint(_e116)))), int(0)));
                         float4 _e133 = source.Load(int3(asint(asuint(asint(asuint(o) + asuint(across))) + asuint(asint(asuint(step_) * asuint(_e118)))), int(0)));
                         int _e135 = k;
-                        sum_1 = (_e121 + ((_e127 + _e133) * ((_e135 == int(1)) ? wb : wa)));
+                        sum_2 = (_e121 + ((_e127 + _e133) * ((_e135 == int(1)) ? wb : wa)));
                     }
                 }
             }
@@ -238,7 +243,7 @@ float4 along(Vertex v_6, int2 step_)
             total = (_e144 + (2.0 * (wa + wb)));
         }
     }
-    float4 _e152 = sum_1;
+    float4 _e152 = sum_2;
     float _e153 = total;
     return (_e152 / (_e153).xxxx);
 }
@@ -335,8 +340,8 @@ Vertex ConstructVertex(float4 arg0, uint arg1) {
 
 VertexOutput_vs vs(uint i : SV_VertexID, uint index : SV_InstanceID)
 {
-    float2 p_14 = ((float2(float((((_NagaConstants.first_vertex + i) << 1u) & 2u)), float(((_NagaConstants.first_vertex + i) & 2u))) * 2.0) - (1.0).xx);
-    const Vertex vertex = ConstructVertex(float4(p_14, 0.0, 1.0), (_NagaConstants.first_instance + index));
+    float2 p_15 = ((float2(float((((_NagaConstants.first_vertex + i) << 1u) & 2u)), float(((_NagaConstants.first_vertex + i) & 2u))) * 2.0) - (1.0).xx);
+    const Vertex vertex = ConstructVertex(float4(p_15, 0.0, 1.0), (_NagaConstants.first_instance + index));
     const VertexOutput_vs vertex_1 = { vertex.index, vertex.p };
     return vertex_1;
 }
@@ -401,54 +406,19 @@ float4 fs_reduce(FragmentInput_fs_reduce fragmentinput_fs_reduce) : SV_Target0
                 break;
             }
             case 8: {
-                float4 _e72 = sum;
-                const float4 _e75 = tap(start_1, int(0), int(0), size_2);
-                sum = (_e72 + _e75);
+                int2 m_1 = asint(asuint(int(2)) * asuint(naga_f2i32(v.p.xy)));
                 float4 _e77 = sum;
-                const float4 _e80 = tap(start_1, int(2), int(0), size_2);
+                float4 _e80 = original.Load(int3(m_1, int(0)));
                 sum = (_e77 + _e80);
                 float4 _e82 = sum;
-                const float4 _e85 = tap(start_1, int(4), int(0), size_2);
-                sum = (_e82 + _e85);
-                float4 _e87 = sum;
-                const float4 _e90 = tap(start_1, int(6), int(0), size_2);
-                sum = (_e87 + _e90);
-                float4 _e92 = sum;
-                const float4 _e95 = tap(start_1, int(0), int(2), size_2);
-                sum = (_e92 + _e95);
-                float4 _e97 = sum;
-                const float4 _e100 = tap(start_1, int(2), int(2), size_2);
-                sum = (_e97 + _e100);
-                float4 _e102 = sum;
-                const float4 _e105 = tap(start_1, int(4), int(2), size_2);
-                sum = (_e102 + _e105);
-                float4 _e107 = sum;
-                const float4 _e110 = tap(start_1, int(6), int(2), size_2);
-                sum = (_e107 + _e110);
-                float4 _e112 = sum;
-                const float4 _e115 = tap(start_1, int(0), int(4), size_2);
-                sum = (_e112 + _e115);
-                float4 _e117 = sum;
-                const float4 _e120 = tap(start_1, int(2), int(4), size_2);
-                sum = (_e117 + _e120);
-                float4 _e122 = sum;
-                const float4 _e125 = tap(start_1, int(4), int(4), size_2);
-                sum = (_e122 + _e125);
-                float4 _e127 = sum;
-                const float4 _e130 = tap(start_1, int(6), int(4), size_2);
-                sum = (_e127 + _e130);
-                float4 _e132 = sum;
-                const float4 _e135 = tap(start_1, int(0), int(6), size_2);
-                sum = (_e132 + _e135);
-                float4 _e137 = sum;
-                const float4 _e140 = tap(start_1, int(2), int(6), size_2);
-                sum = (_e137 + _e140);
-                float4 _e142 = sum;
-                const float4 _e145 = tap(start_1, int(4), int(6), size_2);
-                sum = (_e142 + _e145);
-                float4 _e147 = sum;
-                const float4 _e150 = tap(start_1, int(6), int(6), size_2);
-                sum = (_e147 + _e150);
+                float4 _e89 = original.Load(int3(asint(asuint(m_1) + asuint(int2(int(1), int(0)))), int(0)));
+                sum = (_e82 + _e89);
+                float4 _e91 = sum;
+                float4 _e98 = original.Load(int3(asint(asuint(m_1) + asuint(int2(int(0), int(1)))), int(0)));
+                sum = (_e91 + _e98);
+                float4 _e100 = sum;
+                float4 _e107 = original.Load(int3(asint(asuint(m_1) + asuint(int2(int(1), int(1)))), int(0)));
+                sum = (_e100 + _e107);
                 break;
             }
             default: {
@@ -458,12 +428,12 @@ float4 fs_reduce(FragmentInput_fs_reduce fragmentinput_fs_reduce) : SV_Target0
                     if (all(loop_bound_2 == uint2(0u, 0u))) { break; }
                     loop_bound_2 -= uint2(loop_bound_2.y == 0u, 1u);
                     if (!loop_init_2) {
-                        int _e168 = y;
-                        y = asint(asuint(_e168) + asuint(int(2)));
+                        int _e125 = y;
+                        y = asint(asuint(_e125) + asuint(int(2)));
                     }
                     loop_init_2 = false;
-                    int _e154 = y;
-                    if ((_e154 < f)) {
+                    int _e111 = y;
+                    if ((_e111 < f)) {
                     } else {
                         break;
                     }
@@ -475,21 +445,21 @@ float4 fs_reduce(FragmentInput_fs_reduce fragmentinput_fs_reduce) : SV_Target0
                             if (all(loop_bound_3 == uint2(0u, 0u))) { break; }
                             loop_bound_3 -= uint2(loop_bound_3.y == 0u, 1u);
                             if (!loop_init_3) {
-                                int _e165 = x;
-                                x = asint(asuint(_e165) + asuint(int(2)));
+                                int _e122 = x;
+                                x = asint(asuint(_e122) + asuint(int(2)));
                             }
                             loop_init_3 = false;
-                            int _e158 = x;
-                            if ((_e158 < f)) {
+                            int _e115 = x;
+                            if ((_e115 < f)) {
                             } else {
                                 break;
                             }
                             {
-                                float4 _e160 = sum;
-                                int _e161 = x;
-                                int _e162 = y;
-                                const float4 _e163 = tap(start_1, _e161, _e162, size_2);
-                                sum = (_e160 + _e163);
+                                float4 _e117 = sum;
+                                int _e118 = x;
+                                int _e119 = y;
+                                const float4 _e120 = tap(start_1, _e118, _e119, size_2);
+                                sum = (_e117 + _e120);
                             }
                         }
                     }
@@ -497,8 +467,8 @@ float4 fs_reduce(FragmentInput_fs_reduce fragmentinput_fs_reduce) : SV_Target0
                 break;
             }
         }
-        float4 _e171 = sum;
-        return ((_e171 * 4.0) / (float(asint(asuint(f) * asuint(f)))).xxxx);
+        float4 _e128 = sum;
+        return ((_e128 * 4.0) / (float(asint(asuint(f) * asuint(f)))).xxxx);
     }
     y_1 = start_1.y;
     uint2 loop_bound_4 = uint2(4294967295u, 4294967295u);
@@ -507,12 +477,12 @@ float4 fs_reduce(FragmentInput_fs_reduce fragmentinput_fs_reduce) : SV_Target0
         if (all(loop_bound_4 == uint2(0u, 0u))) { break; }
         loop_bound_4 -= uint2(loop_bound_4.y == 0u, 1u);
         if (!loop_init_4) {
-            int _e200 = y_1;
-            y_1 = asint(asuint(_e200) + asuint(int(1)));
+            int _e157 = y_1;
+            y_1 = asint(asuint(_e157) + asuint(int(1)));
         }
         loop_init_4 = false;
-        int _e180 = y_1;
-        if ((_e180 < end.y)) {
+        int _e137 = y_1;
+        if ((_e137 < end.y)) {
         } else {
             break;
         }
@@ -524,48 +494,72 @@ float4 fs_reduce(FragmentInput_fs_reduce fragmentinput_fs_reduce) : SV_Target0
                 if (all(loop_bound_5 == uint2(0u, 0u))) { break; }
                 loop_bound_5 -= uint2(loop_bound_5.y == 0u, 1u);
                 if (!loop_init_5) {
-                    int _e197 = x_1;
-                    x_1 = asint(asuint(_e197) + asuint(int(1)));
+                    int _e154 = x_1;
+                    x_1 = asint(asuint(_e154) + asuint(int(1)));
                 }
                 loop_init_5 = false;
-                int _e185 = x_1;
-                if ((_e185 < end.x)) {
+                int _e142 = x_1;
+                if ((_e142 < end.x)) {
                 } else {
                     break;
                 }
                 {
-                    float4 _e188 = sum;
-                    int _e190 = x_1;
-                    int _e191 = y_1;
-                    float4 _e194 = source.Load(int3(int2(_e190, _e191), int(0)));
-                    sum = (_e188 + _e194);
+                    float4 _e145 = sum;
+                    int _e147 = x_1;
+                    int _e148 = y_1;
+                    float4 _e151 = source.Load(int3(int2(_e147, _e148), int(0)));
+                    sum = (_e145 + _e151);
                 }
             }
         }
     }
-    float4 _e202 = sum;
-    return (_e202 / (float(max(asint(asuint(asint(asuint(end.x) - asuint(start_1.x))) * asuint(asint(asuint(end.y) - asuint(start_1.y)))), int(1)))).xxxx);
+    float4 _e159 = sum;
+    return (_e159 / (float(max(asint(asuint(asint(asuint(end.x) - asuint(start_1.x))) * asuint(asint(asuint(end.y) - asuint(start_1.y)))), int(1)))).xxxx);
+}
+
+float4 fs_reduce4_(FragmentInput_fs_reduce4_ fragmentinput_fs_reduce4_) : SV_Target0
+{
+    Vertex v_1 = { fragmentinput_fs_reduce4_.p_9, fragmentinput_fs_reduce4_.index_3 };
+    float4 sum_1 = (0.0).xxxx;
+
+    Slot s_4 = ConstructSlot(asfloat(slots.Load4(v_1.index*48+0)), asfloat(slots.Load4(v_1.index*48+16)), asuint(slots.Load4(v_1.index*48+32)));
+    int2 start_2 = asint(asuint(naga_f2i32(s_4.region.xy)) + asuint(asint(asuint(asint(asuint(naga_f2i32(v_1.p.xy)) - asuint(asint(asuint(int(2)) * asuint(naga_f2i32(s_4.atlas.xy)))))) * asuint(int(4)))));
+    float2 size_3 = float2(NagaDimensions2D(source));
+    float4 _e26 = sum_1;
+    const float4 _e29 = tap(start_2, int(0), int(0), size_3);
+    sum_1 = (_e26 + _e29);
+    float4 _e31 = sum_1;
+    const float4 _e34 = tap(start_2, int(2), int(0), size_3);
+    sum_1 = (_e31 + _e34);
+    float4 _e36 = sum_1;
+    const float4 _e39 = tap(start_2, int(0), int(2), size_3);
+    sum_1 = (_e36 + _e39);
+    float4 _e41 = sum_1;
+    const float4 _e44 = tap(start_2, int(2), int(2), size_3);
+    sum_1 = (_e41 + _e44);
+    float4 _e46 = sum_1;
+    return _e46;
 }
 
 float4 fs_across(FragmentInput_fs_across fragmentinput_fs_across) : SV_Target0
 {
-    Vertex v_1 = { fragmentinput_fs_across.p_9, fragmentinput_fs_across.index_3 };
-    const float4 _e4 = along(v_1, int2(int(1), int(0)));
+    Vertex v_2 = { fragmentinput_fs_across.p_10, fragmentinput_fs_across.index_4 };
+    const float4 _e4 = along(v_2, int2(int(1), int(0)));
     return _e4;
 }
 
 float4 fs_down(FragmentInput_fs_down fragmentinput_fs_down) : SV_Target0
 {
-    Vertex v_2 = { fragmentinput_fs_down.p_10, fragmentinput_fs_down.index_4 };
-    const float4 _e4 = along(v_2, int2(int(0), int(1)));
+    Vertex v_3 = { fragmentinput_fs_down.p_11, fragmentinput_fs_down.index_5 };
+    const float4 _e4 = along(v_3, int2(int(0), int(1)));
     return _e4;
 }
 
 float4 fs(FragmentInput_fs fragmentinput_fs) : SV_Target0
 {
-    Vertex v_3 = { fragmentinput_fs.p_11, fragmentinput_fs.index_5 };
-    Blur _e4 = ConstructBlur(asfloat(blurs.Load4(v_3.index*144+0)), asfloat(blurs.Load4(v_3.index*144+16)), asfloat(blurs.Load4(v_3.index*144+32)), asfloat(blurs.Load4(v_3.index*144+48)), asuint(blurs.Load4(v_3.index*144+64)), asfloat(blurs.Load4(v_3.index*144+80)), asfloat(blurs.Load4(v_3.index*144+96)), asfloat(blurs.Load4(v_3.index*144+112)), asfloat(blurs.Load4(v_3.index*144+128)));
-    const float4 _e6 = composite(_e4, v_3.p);
+    Vertex v_4 = { fragmentinput_fs.p_12, fragmentinput_fs.index_6 };
+    Blur _e4 = ConstructBlur(asfloat(blurs.Load4(v_4.index*144+0)), asfloat(blurs.Load4(v_4.index*144+16)), asfloat(blurs.Load4(v_4.index*144+32)), asfloat(blurs.Load4(v_4.index*144+48)), asuint(blurs.Load4(v_4.index*144+64)), asfloat(blurs.Load4(v_4.index*144+80)), asfloat(blurs.Load4(v_4.index*144+96)), asfloat(blurs.Load4(v_4.index*144+112)), asfloat(blurs.Load4(v_4.index*144+128)));
+    const float4 _e6 = composite(_e4, v_4.p);
     return _e6;
 }
 
@@ -578,9 +572,9 @@ Both ConstructBoth(float4 arg0, float4 arg1) {
 
 Both fs_both(FragmentInput_fs_both fragmentinput_fs_both)
 {
-    Vertex v_4 = { fragmentinput_fs_both.p_12, fragmentinput_fs_both.index_6 };
-    Blur _e4 = ConstructBlur(asfloat(blurs.Load4(v_4.index*144+0)), asfloat(blurs.Load4(v_4.index*144+16)), asfloat(blurs.Load4(v_4.index*144+32)), asfloat(blurs.Load4(v_4.index*144+48)), asuint(blurs.Load4(v_4.index*144+64)), asfloat(blurs.Load4(v_4.index*144+80)), asfloat(blurs.Load4(v_4.index*144+96)), asfloat(blurs.Load4(v_4.index*144+112)), asfloat(blurs.Load4(v_4.index*144+128)));
-    const float4 _e6 = composite(_e4, v_4.p);
+    Vertex v_5 = { fragmentinput_fs_both.p_13, fragmentinput_fs_both.index_7 };
+    Blur _e4 = ConstructBlur(asfloat(blurs.Load4(v_5.index*144+0)), asfloat(blurs.Load4(v_5.index*144+16)), asfloat(blurs.Load4(v_5.index*144+32)), asfloat(blurs.Load4(v_5.index*144+48)), asuint(blurs.Load4(v_5.index*144+64)), asfloat(blurs.Load4(v_5.index*144+80)), asfloat(blurs.Load4(v_5.index*144+96)), asfloat(blurs.Load4(v_5.index*144+112)), asfloat(blurs.Load4(v_5.index*144+128)));
+    const float4 _e6 = composite(_e4, v_5.p);
     const Both both = ConstructBoth(_e6, _e6);
     return both;
 }
@@ -594,10 +588,10 @@ Mixed ConstructMixed(float4 arg0, float4 arg1) {
 
 Mixed fs_mix(FragmentInput_fs_mix fragmentinput_fs_mix)
 {
-    Vertex v_5 = { fragmentinput_fs_mix.p_13, fragmentinput_fs_mix.index_7 };
-    Blur b_7 = ConstructBlur(asfloat(blurs.Load4(v_5.index*144+0)), asfloat(blurs.Load4(v_5.index*144+16)), asfloat(blurs.Load4(v_5.index*144+32)), asfloat(blurs.Load4(v_5.index*144+48)), asuint(blurs.Load4(v_5.index*144+64)), asfloat(blurs.Load4(v_5.index*144+80)), asfloat(blurs.Load4(v_5.index*144+96)), asfloat(blurs.Load4(v_5.index*144+112)), asfloat(blurs.Load4(v_5.index*144+128)));
-    const Blend _e7 = blurred(b_7, v_5.p.xy);
-    const float _e10 = amount(b_7, v_5.p.xy);
+    Vertex v_6 = { fragmentinput_fs_mix.p_14, fragmentinput_fs_mix.index_8 };
+    Blur b_7 = ConstructBlur(asfloat(blurs.Load4(v_6.index*144+0)), asfloat(blurs.Load4(v_6.index*144+16)), asfloat(blurs.Load4(v_6.index*144+32)), asfloat(blurs.Load4(v_6.index*144+48)), asuint(blurs.Load4(v_6.index*144+64)), asfloat(blurs.Load4(v_6.index*144+80)), asfloat(blurs.Load4(v_6.index*144+96)), asfloat(blurs.Load4(v_6.index*144+112)), asfloat(blurs.Load4(v_6.index*144+128)));
+    const Blend _e7 = blurred(b_7, v_6.p.xy);
+    const float _e10 = amount(b_7, v_6.p.xy);
     float a = (_e10 * _e7.weight);
     const Mixed mixed = ConstructMixed((_e7.color * a), (a).xxxx);
     return mixed;

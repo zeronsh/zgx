@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zgx-dom table benchmark</title>
+<style>html,body{margin:0;background:#16181d;}</style>
+</head>
+<body>
+<script type="module">
+import init from "./out/bench.js";
+const wasm = await init();
+window.wasmMemory = wasm.memory;
+window.ready = true;
+</script>
+</body>
+</html>

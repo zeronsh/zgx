@@ -6,11 +6,13 @@ fcitx5
 fcitx5-chinese-addons
 ffmpeg
 fonts-droid-fallback
+fzf
 gdb
 gir1.2-atspi-2.0
 gir1.2-gtk-3.0
 grim
 gstreamer1.0-tools
+htop
 hunspell-en-us
 ibus
 ibus-libpinyin
@@ -32,6 +34,7 @@ python3-gi
 python3-pil
 sway
 swaybg
+tmux
 vulkan-tools
 weston
 wl-clipboard

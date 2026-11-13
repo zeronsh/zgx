@@ -1,0 +1,36 @@
+[package]
+name = "zgx-dom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+description = "zgx views as browser DOM (WebAssembly): fine-grained signals bound straight to their nodes, laid out and painted by the browser."
+keywords = ["gui", "ui", "wasm", "dom", "reactive"]
+categories = ["gui", "wasm", "web-programming"]
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Built for wasm32 only: elsewhere the crate is empty, and zgx's `dom`
+# feature, enabled only here, stays off in every native build.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+zgx = { path = "../zgx", version = "0.1.10", default-features = false, features = ["dom"] }
+wasm-bindgen = "=0.2.127"
+js-sys = "0.3.104"
+rustc-hash = "2.1"
+web-sys = { version = "0.3.104", features = ["Document", "Element", "HtmlElement", "Node", "Window"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+# Tracing on in tests: its clock is the browser's (`zgx::time`).
+zgx = { path = "../zgx", default-features = false, features = ["dom", "trace"] }
+wasm-bindgen-test = "=0.3.77"
+wasm-bindgen-futures = "0.4.77"
+web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlElement", "HtmlInputElement", "HtmlCollection", "MouseEvent", "MouseEventInit", "Node", "NodeList", "Window", "CssStyleDeclaration"] }
+
+# The table benchmark (`bench/`): a page's module, built for wasm32.
+[[example]]
+name = "bench"
+crate-type = ["cdylib"]
