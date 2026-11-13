@@ -539,8 +539,9 @@ pub struct Decoration {
     /// Some(empty) explicitly clears all shadows; None inherits the legacy shadow.
     pub shadows: Option<Arc<[BoxShadow]>>,
     /// Shadows inside the box (CSS's `inset`), over its fill and under its
-    /// border and children: the box less itself moved by the offset and
-    /// shrunk by the spread, cut to its corners (a 1-point top highlight is
+    /// children, from the padding edge inside its border: the padding box
+    /// less itself moved by the offset and shrunk by the spread, cut to its
+    /// inner corners (a 1-point top highlight is
     /// `inset 0 1px`), their blur as CSS's: softened into the box from that
     /// edge, half their colour on it.
     pub inset_shadows: Option<Arc<[BoxShadow]>>,
