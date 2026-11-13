@@ -2462,7 +2462,16 @@ export type NodeProps = {
 	error: (string | Readable<string?> | (() -> string?))?,
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
-	aria_hidden: boolean?,
+	aria_hidden: Reactive<boolean>?,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Reactive<boolean>?,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: boolean?,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Reactive<boolean>?,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: boolean?,
@@ -2901,6 +2910,15 @@ export type Props = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -3273,7 +3291,10 @@ export type Props_live = ("polite" | "assertive" | "off")?
 export type Props_description = (string | ReadOnlyState<string> | (() -> string))?
 export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
-export type Props_aria_hidden = boolean?
+export type Props_aria_hidden = Reactive<boolean>?
+export type Props_inert = Reactive<boolean>?
+export type Props_sr_only = boolean?
+export type Props_pressed = Reactive<boolean>?
 export type Props_aria_modal = boolean?
 export type Props_haspopup = ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?
 export type Props_focus_group = ("vertical" | "horizontal" | "both")?
@@ -3591,6 +3612,15 @@ export type ContainerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -4043,6 +4073,15 @@ export type GlassProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -4504,6 +4543,15 @@ export type ScrollProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -4982,6 +5030,15 @@ export type TextProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -5419,6 +5476,15 @@ export type MarkdownViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -6003,6 +6069,15 @@ export type RichProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -6434,6 +6509,15 @@ export type ImageProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -6882,6 +6966,15 @@ export type SvgProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -7441,6 +7534,15 @@ export type Scene3DProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -7895,6 +7997,15 @@ export type CanvasProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -8358,6 +8469,15 @@ export type CheckboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -8799,6 +8919,15 @@ export type InputProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -9341,6 +9470,15 @@ export type ProgressProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -9770,6 +9908,15 @@ export type SliderProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -10220,6 +10367,15 @@ export type SegmentedProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -10663,6 +10819,15 @@ export type StepperProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -11107,6 +11272,15 @@ export type DisclosureProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -11562,6 +11736,15 @@ export type AccordionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -11991,6 +12174,15 @@ export type SectionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -12445,6 +12637,15 @@ export type SeparatorProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -12882,6 +13083,15 @@ export type TabsProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -13341,6 +13551,15 @@ export type TreeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -13796,6 +14015,15 @@ export type DataGridProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -14247,6 +14475,15 @@ export type CalendarProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -14691,6 +14928,15 @@ export type DatePickerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -15133,6 +15379,15 @@ export type TimeFieldProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -15574,6 +15829,15 @@ export type ComboboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -16023,6 +16287,15 @@ export type CommandPaletteProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -16460,6 +16733,15 @@ export type SelectProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -16904,6 +17186,15 @@ export type SplitProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -17404,6 +17695,15 @@ export type ListProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -17938,6 +18238,15 @@ export type LayerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -18389,6 +18698,15 @@ export type ModalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -18889,6 +19207,15 @@ export type PopoverProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -19377,6 +19704,15 @@ export type MenuItemProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -19817,6 +20153,15 @@ export type SubmenuProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -20277,6 +20622,15 @@ export type WebViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -20734,6 +21088,15 @@ export type TerminalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -21166,6 +21529,15 @@ export type HostViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -21598,6 +21970,15 @@ export type SlotProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -22081,6 +22462,15 @@ export type EachOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
@@ -22528,6 +22918,15 @@ export type PresenceOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,

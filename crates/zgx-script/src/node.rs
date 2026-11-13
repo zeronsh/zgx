@@ -3446,6 +3446,10 @@ pub(crate) struct A11y {
     /// A `description` given as a state or function.
     pub description_of: Option<Source>,
     pub hidden: bool,
+    /// `aria_hidden` given as a state or function.
+    pub hidden_of: Option<Source>,
+    /// `inert`: out of focus order, reach and the accessibility tree, followed.
+    pub inert: Option<Source>,
     /// `aria_modal = true`: while it shows, nothing else is read.
     pub modal: bool,
     /// `haspopup = "dialog"`: what it opens (`aria-haspopup`).
@@ -4770,8 +4774,39 @@ fn fill_from(
                         Some(source(lua, Ty::Str, "description", value)?);
                 }
             },
-            "aria_hidden" => {
-                node.a11y.get_or_insert_default().hidden = lua.unpack(value)?;
+            "aria_hidden" => match value {
+                mlua::Value::Boolean(hidden) => node.a11y.get_or_insert_default().hidden = hidden,
+                value => {
+                    node.a11y.get_or_insert_default().hidden_of =
+                        Some(source(lua, Ty::Bool, "aria_hidden", value)?);
+                }
+            },
+            // Present to assistive technology alone: a 1 by 1 clipped box
+            // painting nothing (Tailwind's `sr-only`), still in the tree.
+            "sr_only" => {
+                if value.as_boolean() == Some(true) {
+                    let pair = lua.create_table()?;
+                    pair.push(1)?;
+                    pair.push(1)?;
+                    for (prop, name, value) in [
+                        (Prop::Absolute, "absolute", mlua::Value::Boolean(true)),
+                        (Prop::Size, "size", mlua::Value::Table(pair)),
+                        (Prop::Overflow, "overflow", mlua::Value::String(lua.create_string("hidden")?)),
+                        (Prop::Opacity, "opacity", mlua::Value::Number(0.001)),
+                    ] {
+                        node.props.push((prop, source(lua, prop.ty(), name, value)?));
+                    }
+                }
+            }
+            "inert" => {
+                node.a11y.get_or_insert_default().inert =
+                    Some(source(lua, Ty::Bool, "inert", value)?);
+            }
+            // A toggle button's state (`aria-pressed`): read as `checked` is,
+            // on a button.
+            "pressed" => {
+                node.a11y.get_or_insert_default().checked =
+                    Some(source(lua, Ty::Bool, "pressed", value)?);
             }
             "aria_modal" => {
                 node.a11y.get_or_insert_default().modal = lua.unpack(value)?;

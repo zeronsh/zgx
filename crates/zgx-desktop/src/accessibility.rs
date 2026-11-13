@@ -3841,6 +3841,33 @@ mod vocabulary_tests {
     }
 
     #[test]
+    fn sr_only_text_stays_in_the_tree_and_invisible_and_hidden_text_leave_it() {
+        let mut ui = Ui::new(400., 300.);
+        ui.mount(
+            column()
+                .child(text("Shown").id("shown"))
+                .child(text("Invisible").invisible())
+                .child(text("Spoken").sr_only())
+                .child(text("Gone").hidden()),
+        );
+        let nodes = project(&mut ui);
+        let names: Vec<_> = nodes
+            .iter()
+            .filter_map(|n| n.value().or(n.label()).map(str::to_owned))
+            .collect();
+        assert!(names.iter().any(|n| n == "Shown"));
+        assert!(
+            !names.iter().any(|n| n == "Invisible"),
+            "invisible leaves the tree: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "Spoken"),
+            "sr_only stays: {names:?}"
+        );
+        assert!(!names.iter().any(|n| n == "Gone"), "{names:?}");
+    }
+
+    #[test]
     fn a_view_with_a_context_menu_offers_show_menu() {
         let mut ui = Ui::new(400., 300.);
         ui.mount(

@@ -594,6 +594,8 @@ pub(crate) struct Rare {
     secure: Option<bool>,
     input_mode: Option<crate::text_edit::InputMode>,
     spellcheck: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::inert_when`.
+    inert: Option<Box<dyn FnMut() -> bool>>,
     line_numbers: Option<bool>,
     /// What a code editor adds to a text area (`View::highlighter`, …).
     code: Option<Box<CodeOptions>>,
@@ -716,6 +718,9 @@ impl Rare {
         }
         if self.spellcheck.is_some() {
             inner.spellcheck = self.spellcheck;
+        }
+        if self.inert.is_some() {
+            inner.inert = self.inert;
         }
         if self.secure.is_some() {
             inner.secure = self.secure;
@@ -1623,6 +1628,19 @@ impl View {
     /// (`aria-hidden`): decoration, or what is said elsewhere already.
     pub fn accessible_hidden(mut self) -> Self {
         self.accessibility_mut().hidden = true;
+        self
+    }
+    /// `accessible_hidden`, following the reactive values it reads
+    /// (`aria-hidden` as a state changes it).
+    pub fn accessible_hidden_when(mut self, hidden: impl FnMut() -> bool + 'static) -> Self {
+        self.accessibility_mut().hidden_when = Some(Box::new(hidden));
+        self
+    }
+    /// Take this subtree out of the pointer's reach, the focus order and
+    /// the accessibility tree while `inert` says so (HTML's `inert`): focus
+    /// inside it moves on as it goes inert, and no key activates it.
+    pub fn inert_when(mut self, inert: impl FnMut() -> bool + 'static) -> Self {
+        self.rare_mut().inert = Some(Box::new(inert));
         self
     }
     /// What this control opens (`aria-haspopup`): a dialog, a menu, a list
@@ -6692,6 +6710,20 @@ fn open_element(
     {
         ui.scene.borrow_mut().set_contents(root, true);
     }
+    if let Some(mut inert) = rare.as_deref_mut().and_then(|r| r.inert.take()) {
+        let weak = ui.downgrade();
+        ui.bind(root, move || {
+            let inert = inert();
+            if let Some(ui) = weak.upgrade()
+                && ui.scene.borrow().contains(root)
+            {
+                ui.scene.borrow_mut().set_inert(root, inert);
+                if inert {
+                    ui.input.leave_inert(&ui.scene);
+                }
+            }
+        });
+    }
     if let Some(active) = rare.as_deref_mut().and_then(|r| r.active_descendant.take()) {
         watch_active_descendant(ui, root, environment.registry.clone(), active);
     }
@@ -8810,6 +8842,8 @@ pub(crate) struct Accessibility {
     description_when: Option<Box<dyn FnMut() -> String>>,
     error: Option<Box<dyn FnMut() -> Option<String>>>,
     hidden: bool,
+    /// `View::accessible_hidden_when`.
+    hidden_when: Option<Box<dyn FnMut() -> bool>>,
     /// `View::accessible_modal`: while it shows, nothing else is read.
     modal: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -8857,6 +8891,9 @@ impl Accessibility {
         }
         if outer.description_when.is_some() {
             inner.description_when = outer.description_when;
+        }
+        if outer.hidden_when.is_some() {
+            inner.hidden_when = outer.hidden_when;
         }
         if outer.error.is_some() {
             inner.error = outer.error;
@@ -8921,6 +8958,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         description_when,
         error,
         hidden,
+        hidden_when,
         modal,
         focus_group,
         label,
@@ -8996,6 +9034,13 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut hidden) = hidden_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let hidden = hidden();
+            tree.borrow_mut().update(root, |node| node.hidden = hidden);
         });
     }
     if let Some(mut description) = description_when {

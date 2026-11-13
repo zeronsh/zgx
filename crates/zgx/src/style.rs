@@ -2024,6 +2024,18 @@ pub trait Styled: Sized {
         self.styles_mut().fields_mut(bit::ABSOLUTE).absolute = Some(true);
         self
     }
+    /// Present to assistive technology and nowhere else (Tailwind's
+    /// `sr-only`): a 1 by 1 clipped box, absolute, painting nothing, so it
+    /// takes no room and stays in the accessibility tree, as a live region's
+    /// text must (`invisible` leaves the tree, as `visibility: hidden` does,
+    /// and so does a node at no opacity: this keeps a thousandth, which no
+    /// pixel shows).
+    fn sr_only(self) -> Self {
+        self.absolute()
+            .size(1., 1.)
+            .overflow_hidden()
+            .opacity(0.001)
+    }
     /// Make the view the containing block of its `absolute` descendants
     /// (CSS `position: relative`), and keep it in normal flow (undoing
     /// `absolute`). It changes nothing about its own layout.

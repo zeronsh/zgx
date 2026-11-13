@@ -848,3 +848,70 @@ fn a_span_label_is_the_runs_accessible_name() {
             .collect();
     assert_eq!(names, vec!["Citation 1, Sleep study.pdf".to_string()]);
 }
+
+#[test]
+fn pressed_aria_hidden_and_inert_follow_their_states() {
+    use zgx_script::Value as V;
+    let mut h = Harness::inline(
+        r##"
+local on = ui.state("on", false)
+return ui.column { w = 400, h = 300,
+    ui.button { id = "toggle", label = "Bold", pressed = on, "B" },
+    ui.column { id = "deco", aria_hidden = on, ui.text { "decoration" } },
+    ui.column { id = "off", inert = on, ui.button { id = "inside", "Inside" } },
+    ui.button { id = "after", "After" },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    let node = |h: &mut Harness, id: &str| h.find(id).unwrap();
+    let sem = |h: &mut Harness, id: &str| {
+        let n = h.find(id).unwrap();
+        h.ui.semantics.borrow().get(n).cloned()
+    };
+    let toggle = sem(&mut h, "toggle").unwrap();
+    assert_eq!(toggle.role, zgx::semantics::Role::Button);
+    assert_eq!(toggle.checked, Some(false));
+    assert!(!sem(&mut h, "deco").is_some_and(|s| s.hidden));
+    h.host.set_state("on", V::Bool(true)).unwrap();
+    h.frames(3);
+    assert_eq!(sem(&mut h, "toggle").unwrap().checked, Some(true));
+    assert!(sem(&mut h, "deco").is_some_and(|s| s.hidden));
+    let inside = node(&mut h, "inside");
+    let off = node(&mut h, "off");
+    assert!(h.ui.scene.borrow().is_inert(off));
+    h.ui.input.focus(&h.ui.scene, Some(inside));
+    h.ui.dispatch(zgx::input::InputEvent::KeyDown {
+        key: zgx::input::Key::Tab,
+        modifiers: Default::default(),
+        repeat: false,
+    });
+    h.frames(2);
+    assert_ne!(
+        h.ui.input.focused(),
+        Some(inside),
+        "focus moved off the inert subtree"
+    );
+    h.host.set_state("on", V::Bool(false)).unwrap();
+    h.frames(3);
+    assert!(!h.ui.scene.borrow().is_inert(off));
+}
+
+#[test]
+fn an_sr_only_text_is_one_point_square_and_painted_nowhere() {
+    let mut h = Harness::inline(
+        r##"return ui.column { w = 400, h = 100,
+    ui.text { id = "live", sr_only = true, live = "polite", "3 results" },
+    ui.text { id = "after", "after" },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    let live = h.find("live").unwrap();
+    let bounds = h.bounds("live");
+    assert_eq!((bounds.width, bounds.height), (1., 1.));
+    assert!(h.ui.scene.borrow().effects(live).opacity < 0.01);
+    assert!(h.ui.semantics.borrow().get(live).is_some());
+    assert_eq!(h.bounds("after").y, 0., "it takes no room");
+}

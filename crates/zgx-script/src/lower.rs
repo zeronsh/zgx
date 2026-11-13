@@ -4714,6 +4714,17 @@ fn styled(
         if a11y.hidden {
             view = view.accessible_hidden();
         }
+        if let Some(hidden) = &a11y.hidden_of {
+            let (hidden, vm) = (resolve_owned(hidden), vm.clone());
+            view = view.accessible_hidden_when(move || {
+                resolve(&hidden, Ty::Bool, None, &vm) == Some(Lit::Bool(true))
+            });
+        }
+        if let Some(inert) = &a11y.inert {
+            let (inert, vm) = (resolve_owned(inert), vm.clone());
+            view = view
+                .inert_when(move || resolve(&inert, Ty::Bool, None, &vm) == Some(Lit::Bool(true)));
+        }
         if a11y.modal {
             view = view.accessible_modal();
         }

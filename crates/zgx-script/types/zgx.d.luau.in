@@ -2406,7 +2406,16 @@ export type NodeProps = {
 	error: (string | Readable<string?> | (() -> string?))?,
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
-	aria_hidden: boolean?,
+	aria_hidden: Reactive<boolean>?,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Reactive<boolean>?,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: boolean?,
+	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	pressed: Reactive<boolean>?,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: boolean?,
