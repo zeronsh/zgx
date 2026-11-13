@@ -339,7 +339,7 @@ impl Inner {
             record.callback.clone()
         };
         #[cfg(feature = "trace")]
-        let traced = crate::trace::enabled().then(std::time::Instant::now);
+        let traced = crate::trace::enabled().then(crate::time::Instant::now);
         {
             let _active = Active::run(&self.active, id);
             (*callback.borrow_mut())();

@@ -1,4 +1,5 @@
 //! Retained widgets with reactive values, keyboard input and accessibility semantics.
+use crate::time::Instant;
 use crate::{
     input::{EventPhase, InputBinding, InputDispatcher, InputEvent, Key, PointerButton},
     reactive::{Effect, Runtime, Signal},
@@ -13,7 +14,7 @@ use std::{
     any::Any,
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -4865,7 +4866,7 @@ impl Ui {
             self.shrink_storage();
             return false;
         }
-        let started = std::time::Instant::now();
+        let started = crate::time::Instant::now();
         loop {
             // A chunk at a time between looks at the clock.
             let chunk: Vec<NodeId> = {
@@ -9272,6 +9273,15 @@ mod input_draw_pass_tests {
                     && line.y + line.height <= bounds.y + bounds.height,
                 "{line:?} in {bounds:?}"
             );
+        }
+    }
+}
+/// A handle to no `Ui`, for a node `zgx-dom` mounted.
+#[cfg(feature = "dom")]
+impl WeakUi {
+    pub(crate) fn none() -> WeakUi {
+        WeakUi {
+            storage: Weak::new(),
         }
     }
 }

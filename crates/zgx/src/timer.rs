@@ -3,6 +3,7 @@
 //! A scheduler thread fires timers unless an event loop [`host`]s them: then
 //! the loop fires them as it wakes for its own deadlines, and a timer costs no
 //! thread wake-ups or cross-thread messages.
+use crate::time::Instant;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -12,7 +13,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll, Waker},
-    time::{Duration, Instant},
+    time::Duration,
 };
 type Wake = Arc<dyn Fn() + Send + Sync>;
 pub(crate) struct Driver {

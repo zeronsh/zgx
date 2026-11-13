@@ -10,6 +10,7 @@
 //! Animations read [`now`] where they'd read `Instant::now()`. Code measuring
 //! itself (a slice of work, a profile, a script's time budget) goes on reading
 //! the wall clock: its time isn't the interface's.
+use crate::time::{Instant, SystemTime};
 use crate::timer::Driver;
 use std::{
     cell::RefCell,
@@ -17,7 +18,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::Duration,
 };
 
 /// How many virtual clocks are installed, on any thread: none (every app that

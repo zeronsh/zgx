@@ -180,7 +180,7 @@ impl TextFade {
 /// thread's clock (`ui.now()`'s).
 pub fn fade_now() -> f64 {
     crate::clock::system_now()
-        .duration_since(std::time::UNIX_EPOCH)
+        .duration_since(crate::time::SystemTime::UNIX_EPOCH)
         .map_or(0., |d| d.as_secs_f64() * 1000.)
 }
 /// How a link span looks under the pointer (`TextSpan::hover`): CSS's

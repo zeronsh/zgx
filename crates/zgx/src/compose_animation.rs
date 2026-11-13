@@ -1,9 +1,7 @@
 use super::*;
+use crate::time::Instant;
 use crate::{animation::Animation, image::ImageData};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 #[derive(Default)]
 struct Playback {
     elapsed: Duration,

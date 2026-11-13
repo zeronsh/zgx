@@ -16,11 +16,11 @@ use crate::decoration::{FillShader, ShaderUniforms};
 use crate::frame::{Frame, FrameClock};
 use crate::scene::{NodeId, Scene};
 use crate::style::Styled;
+use crate::time::Instant;
 use crate::widgets::{Ui, WeakUi};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// What a node's shader draws with now (`View::shader_drive`).
 #[derive(Clone, Debug, Default)]

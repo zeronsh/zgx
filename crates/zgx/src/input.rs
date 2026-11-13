@@ -1,4 +1,5 @@
 //! Retained event routing. Bindings disconnect when dropped; callbacks run without a scene borrow.
+use crate::time::Instant;
 use crate::{
     reactive::{Runtime, Signal},
     scene::{NodeId, Scene},
@@ -6,7 +7,7 @@ use crate::{
 use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// The modifier keys held during an event.

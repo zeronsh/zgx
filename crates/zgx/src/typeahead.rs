@@ -3,7 +3,8 @@
 //! build a prefix, and the next item whose name starts with it (ignoring
 //! case) is the one; the same letter again cycles through those starting
 //! with it.
-use std::time::{Duration, Instant};
+use crate::time::Instant;
+use std::time::Duration;
 
 /// How long a prefix waits for its next letter.
 const PAUSE: Duration = Duration::from_millis(750);

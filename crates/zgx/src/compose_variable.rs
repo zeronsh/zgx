@@ -260,7 +260,7 @@ fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             );
             let runtime = cx.runtime();
             move |slice: Option<std::time::Duration>| {
-                let started = std::time::Instant::now();
+                let started = crate::time::Instant::now();
                 let default = heights.index.borrow().estimate();
                 let mut exact = Vec::new();
                 {
