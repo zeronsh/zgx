@@ -195,7 +195,6 @@ impl Fx {
             shader: (self.kind == FxKind::Fill || !idle).then(|| self.shader()),
             fill: self.kind == FxKind::Fill,
             params: self.uniforms(0., reduced, now).params,
-            tokens: [None; 4],
             bleed: self.bleed,
             reach: self.reach,
             frost: self.frost,
