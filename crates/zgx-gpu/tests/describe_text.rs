@@ -76,3 +76,25 @@ fn a_pure_japanese_line_stands_where_a_latin_one_does_when_the_default_family_is
     assert_eq!(mixed, latin);
     assert_eq!(japanese, latin);
 }
+
+/// The generic sans-serif family is the system face on macOS, not a family no
+/// Mac has: nothing depends on the fallback path for the text's own font.
+#[cfg(target_os = "macos")]
+#[test]
+fn sans_serif_resolves_to_the_system_face_on_macos() {
+    let mut scene = Scene::new(300., 100.);
+    zgx_gpu::TextServices::new().install(&mut scene);
+    let id = scene.append(
+        scene.root(),
+        NodeKind::Text {
+            text: "Hello".into(),
+            color: Color(255, 255, 255, 255),
+            font_size: 13.,
+        },
+        Style::default(),
+    );
+    let report = scene.describe_text(id, 300.).unwrap().join("\n");
+    let asked = report.lines().next().unwrap();
+    assert!(asked.contains("ps=.SFNS-"), "{asked}");
+    assert!(!asked.contains("face none"), "{asked}");
+}

@@ -109,6 +109,17 @@ fn platform_families(fonts: &mut FontSystem) {
             .any(|face| face.families.iter().any(|(family, _)| family == "Menlo"))
         {
             db.set_monospace_family("Menlo");
+        } // Sans-serif (and system-ui) is the system face, as Chrome's generic
+        // mapping gives it, not cosmic-text's Open Sans, which no Mac has:
+        // `.SF NS` (SFNS.ttf, hidden, variable) where it is installed.
+        let system = ["System Font", ".SF NS"].into_iter().find(|name| {
+            db.faces().any(|face| {
+                face.post_script_name.starts_with(".SFNS-")
+                    && face.families.iter().any(|(family, _)| family == name)
+            })
+        });
+        if let Some(system) = system {
+            db.set_sans_serif_family(system);
         }
     }
     // cosmic-text's monospace is Noto Sans Mono, which few Linux systems
@@ -727,6 +738,8 @@ mod tests {
     #[test]
     fn the_desktops_face_is_sans_serif() {
         let mut fonts = FontSystem::new();
+        // (What the platform makes it, macOS's system face among them.)
+        platform_families(&mut fonts);
         let default = fonts
             .db()
             .family_name(&fontdb::Family::SansSerif)
