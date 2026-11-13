@@ -565,6 +565,10 @@ impl Value {
                     .collect();
                 if unchanged {
                     old.clone()
+                } else if was.is_empty() {
+                    // Nothing of the old one's to reuse: the incoming list
+                    // itself, still shared with whoever else holds it.
+                    Value::List(new)
                 } else {
                     Value::List(items)
                 }
@@ -2080,6 +2084,17 @@ fn note_republished(old: &Value, new: &Value, depth: u32) {
         _ => {}
     }
 }
+/// `value` written to `signal` as a host's `Shared::set` writes it: the
+/// parts equal to the current value's kept, and the lists it replaced noted;
+/// whether anything changed.
+pub(crate) fn republish(signal: &Signal<Value>, value: Value) -> bool {
+    let next = signal.with_untracked(|old| {
+        let next = value.reconcile(old);
+        note_republished(old, &next, 0);
+        next
+    });
+    signal.set(next)
+}
 /// How many first items `list` shares with `from`, if it was grown from it
 /// (`Appended`): each the same value, none compared.
 pub(crate) fn shared_start(list: &Value, from: &Value) -> Option<usize> {
@@ -2830,12 +2845,7 @@ impl Shared {
     /// Sets the value, keeping the current one's parts where they are
     /// equal; whether anything changed.
     pub fn set(&self, value: Value) -> bool {
-        let next = self.0.with_untracked(|old| {
-            let next = value.reconcile(old);
-            note_republished(old, &next, 0);
-            next
-        });
-        self.0.set(next)
+        republish(&self.0, value)
     }
     /// The signal itself (its `set` replaces without reconciling).
     pub fn signal(&self) -> Signal<Value> {

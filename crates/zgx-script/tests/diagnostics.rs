@@ -1268,3 +1268,36 @@ return ui.column { w = 100, h = 100, ui.text { id = "out", function() return tos
         "only the changed row converts again: {tables} tables, {values} values"
     );
 }
+
+#[test]
+fn set_state_republishes_so_a_script_reuses_the_rows_it_kept() {
+    use zgx_script::{Value, values_converted};
+    let rows = |changed: usize| {
+        let items: Vec<String> = (0..1200)
+            .map(|i| {
+                let text = if i == changed { "edited" } else { "same" };
+                format!(r#"{{"id":{i},"text":"{text} {i}","refs":[{{"n":1}}]}}"#)
+            })
+            .collect();
+        Value::from_json(&format!("[{}]", items.join(","))).unwrap()
+    };
+    let mut h = Harness::inline(
+        r##"local rows = ui.shared("rows", {})
+local out = ui.state("out", 0)
+ui.command { id = "read", run = function() out:set(#rows:get()) end }
+return ui.column { w = 100, h = 100, ui.text { id = "out", function() return tostring(out:get()) end } }"##,
+    );
+    h.host.set_state("rows", rows(usize::MAX)).unwrap();
+    h.host.run_command("read");
+    h.frames(2);
+    h.host.set_state("rows", rows(600)).unwrap();
+    let before = values_converted();
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.text("out"), "1200");
+    assert!(
+        values_converted() - before < 100,
+        "{}",
+        values_converted() - before
+    );
+}

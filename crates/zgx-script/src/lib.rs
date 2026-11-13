@@ -45,6 +45,7 @@ mod estimate;
 mod fetch_policy;
 mod json;
 pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
+mod atoms;
 mod errors;
 #[cfg(target_os = "macos")]
 mod file_events;
@@ -58,7 +59,6 @@ mod folder;
 mod form;
 mod handlers;
 mod hook_targets;
-mod atoms;
 mod host_views;
 mod i18n;
 #[cfg(feature = "inspect")]
@@ -3129,7 +3129,9 @@ impl ScriptHost {
         };
         match found.as_slice() {
             [(_, signal)] => {
-                signal.set(value);
+                // As a host republishes (`Shared::set`): what did not change
+                // is kept, so a script's next read reuses its tables.
+                value::republish(signal, value);
                 Ok(())
             }
             [] => Err(format!("no state named `{name}`")),

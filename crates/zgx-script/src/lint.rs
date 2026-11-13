@@ -577,10 +577,17 @@ fn lint_locales(files: &[crate::token_lint::File]) -> Vec<Diagnostic> {
             }
             if locale != source_locale {
                 // One note a locale: keys still to translate show the source's text, so they don't fail a run.
-                let lacking: Vec<&String> = source_keys.keys().filter(|k| !keys.contains_key(*k)).collect();
+                let lacking: Vec<&String> = source_keys
+                    .keys()
+                    .filter(|k| !keys.contains_key(*k))
+                    .collect();
                 if !lacking.is_empty() {
                     let first: Vec<&str> = lacking.iter().take(3).map(|k| k.as_str()).collect();
-                    let more = if lacking.len() > first.len() { ", …" } else { "" };
+                    let more = if lacking.len() > first.len() {
+                        ", …"
+                    } else {
+                        ""
+                    };
                     report(
                         path,
                         (1, 1),

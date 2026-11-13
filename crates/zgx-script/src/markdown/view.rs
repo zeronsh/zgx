@@ -249,8 +249,10 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                     });
                 })
                 .child(
-                    zgx::compose::text_signal(move || zgx::i18n::label(if shown.get() { "Copied" } else { "Copy" }))
-                        .text_size(themed("font.size.sm")),
+                    zgx::compose::text_signal(move || {
+                        zgx::i18n::label(if shown.get() { "Copied" } else { "Copy" })
+                    })
+                    .text_size(themed("font.size.sm")),
                 ),
         );
     }
@@ -598,8 +600,10 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                     });
                 })
                 .child(
-                    zgx::compose::text_signal(move || zgx::i18n::label(if shown.get() { "Copied" } else { "Copy" }))
-                        .text_size(themed("font.size.sm")),
+                    zgx::compose::text_signal(move || {
+                        zgx::i18n::label(if shown.get() { "Copied" } else { "Copy" })
+                    })
+                    .text_size(themed("font.size.sm")),
                 ),
         );
     }
