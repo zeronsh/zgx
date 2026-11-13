@@ -2260,12 +2260,14 @@ impl Ui {
     }
     /// Run `f` now and whenever what it reads changes, for as long as `owner`
     /// is mounted.
+    #[track_caller]
     pub fn bind(&mut self, owner: NodeId, f: impl FnMut() + 'static) {
         self.bind_marked(owner, false, f);
     }
     /// [`Ui::bind`]. `mount_pure`: `f` reads no layout, so a mount's
     /// deferred input draws need not be made before it runs
     /// (`watch_geometry`).
+    #[track_caller]
     pub(crate) fn bind_marked(
         &mut self,
         owner: NodeId,
@@ -2303,7 +2305,17 @@ impl Ui {
             let effect = self.runtime.effect_callback(mount_pure, callback);
             #[cfg(feature = "trace")]
             if crate::trace::enabled() {
-                crate::trace::name(effect.number(), format!("@{} binding", owner.number()));
+                // Where in zgx the binding was made says which prop or feature it is.
+                let at = std::panic::Location::caller();
+                crate::trace::name(
+                    effect.number(),
+                    format!(
+                        "@{} binding {}:{}",
+                        owner.number(),
+                        at.file().rsplit('/').next().unwrap_or(at.file()),
+                        at.line()
+                    ),
+                );
             }
             self.storage
                 .owned
@@ -2316,6 +2328,7 @@ impl Ui {
     }
     /// [`Ui::bind`] for a text input's model or typography: `mount_pure`,
     /// as it reads no geometry before its draw lays out (`watch_geometry`).
+    #[track_caller]
     pub(crate) fn bind_input(&mut self, owner: NodeId, f: impl FnMut() + 'static) {
         self.bind_marked(owner, true, f);
         INPUT_DRAWS.with_borrow_mut(|draws| {
