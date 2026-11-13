@@ -1024,12 +1024,12 @@ fn a_line_of_fallback_glyphs_keeps_the_text_fonts_baseline() {
     }
 }
 
-/// Hiragino Sans, as macOS has it (its classes W3 300, W4 400, W6 600),
-/// serves Regular from W3, Medium from W4 and Bold from W6, as Core Text's
-/// cascade gives Chrome; elsewhere nothing is asserted.
+/// Hiragino Sans, as macOS has it, is drawn in W3 up to weight 500 and in W6
+/// from 600, as Core Text's cascade gives Chrome (measured: 400 and 500 draw
+/// the same pixels, 600 and 700 likewise); elsewhere nothing is asserted.
 #[cfg(target_os = "macos")]
 #[test]
-fn hiragino_sans_serves_css_weights_a_class_below() {
+fn hiragino_sans_is_drawn_in_w3_to_500_and_w6_from_600() {
     let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
         "ja-JP".into(),
         {
@@ -1047,7 +1047,14 @@ fn hiragino_sans_serves_css_weights_a_class_below() {
         eprintln!("no Hiragino Sans installed: nothing checked");
         return;
     }
-    for (css, class) in [(400, 300), (500, 400), (700, 600)] {
+    for (css, class) in [
+        (100, 300),
+        (400, 300),
+        (500, 300),
+        (600, 600),
+        (700, 600),
+        (900, 600),
+    ] {
         let mut buffer = cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(13., 20.));
         let attrs = cosmic_text::Attrs::new()
             .family(cosmic_text::Family::SansSerif)
@@ -1124,5 +1131,72 @@ fn latin_mixed_and_japanese_lines_share_a_baseline_with_the_real_system_faces() 
             baselines.windows(2).all(|w| w[0] == w[1]),
             "{size}px: Latin, mixed, Japanese: {baselines:?}"
         );
+    }
+}
+
+/// A run that is Japanese from end to end, in a text font that has no kana:
+/// every glyph falls back, yet the line stands on the text font's baseline
+/// (the real SF Pro and Hiragino Sans W3 at 13 px on a 20 px line: 15).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pure_japanese_line_stands_on_the_text_fonts_baseline_with_the_real_faces() {
+    let sf = std::path::Path::new("/System/Library/Fonts/SFNS.ttf");
+    let hiragino = std::fs::read_dir("/System/Library/Fonts")
+        .ok()
+        .and_then(|dir| {
+            dir.flatten()
+                .map(|e| e.path())
+                .find(|p| p.to_string_lossy().ends_with("シック W3.ttc"))
+        });
+    let Some(hiragino) = hiragino.filter(|_| sf.exists()) else {
+        eprintln!("the system faces aren't here: nothing checked");
+        return;
+    };
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_file(sf).unwrap();
+    let family = db
+        .faces()
+        .next()
+        .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+        .expect("SF's family");
+    db.load_font_file(&hiragino).unwrap();
+    struct Ja;
+    impl cosmic_text::Fallback for Ja {
+        fn common_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn forbidden_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn script_fallback(&self, script: unicode_script::Script, _: &str) -> &[&'static str] {
+            match script {
+                unicode_script::Script::Hiragana | unicode_script::Script::Katakana => {
+                    &["Hiragino Sans"]
+                }
+                _ => &[],
+            }
+        }
+    }
+    let mut fonts =
+        cosmic_text::FontSystem::new_with_locale_and_db_and_fallback("ja-JP".into(), db, Ja);
+    // The same text twice, so the second shaping takes the kept fallback.
+    for _ in 0..2 {
+        let mut buffer = cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(13., 20.));
+        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(&family));
+        buffer.set_text(
+            "こんにちは。あなたのガイドです。",
+            &attrs,
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut fonts, false);
+        let run = buffer.layout_runs().next().expect("a line");
+        assert!(run.glyphs.iter().all(|g| {
+            fonts
+                .db()
+                .face(g.font_id)
+                .is_some_and(|f| f.families.iter().any(|(n, _)| n == "Hiragino Sans"))
+        }));
+        assert_eq!(run.line_y, 15., "pure Japanese at 13/20");
     }
 }

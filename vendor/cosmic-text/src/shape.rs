@@ -630,6 +630,8 @@ fn shape_run(
     // faces it gives next: with that face kept, it is done only when a
     // character is missing from it.
     let mut searched = true;
+    // zgx patch: whether the first font is the default family's face.
+    let mut font_is_default = false;
     let font = match kept {
         Some(font) if attrs.family == Family::Monospace => {
             searched = false;
@@ -637,6 +639,7 @@ fn shape_run(
         }
         Some(font) => {
             font_iter.pass_default();
+            font_is_default = true;
             font
         }
         None => {
@@ -659,6 +662,7 @@ fn shape_run(
                     && (attrs.family != Family::Monospace || font_iter.is_default_face(&font))
                 {
                     font_iter.font_system().keep_first_font(&attrs, &fonts, &font);
+                    font_is_default = attrs.family != Family::Monospace;
                 } else if attrs.family != Family::Monospace && font_iter.past_default() {
                     let place = font_iter.place();
                     font_iter
@@ -802,7 +806,7 @@ fn shape_run(
     // to the line's ascent and descent, never replace what the font the text
     // asked for gives (a line of fallback glyphs alone would otherwise stand
     // on the fallback face's baseline). Only a run that fell back looks.
-    if glyphs[glyph_start..].iter().any(|g| g.font_id != font.id()) {
+    if !font_is_default || glyphs[glyph_start..].iter().any(|g| g.font_id != font.id()) {
         let default_name = font_system.db().family_name(&attrs.family).to_string();
         let in_family = |id: fontdb::ID| {
             font_system

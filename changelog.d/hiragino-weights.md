@@ -1,4 +1,4 @@
 ---
 section: fixed
 ---
-- **Japanese fallback text draws in the Hiragino Sans weight Core Text gives** (zgx-cosmic-text): macOS numbers Hiragino Sans a step below CSS (W3 is Regular, W4 Medium, W6 Bold), so a 400 or 500 asked for took W4 or W5, a weight heavier (about 30% more ink on the guide's ja bubbles). A Hiragino Sans face now counts as its OS/2 class plus 100.
+- **Japanese fallback text draws in the Hiragino Sans faces Core Text's cascade draws** (zgx-cosmic-text): measured against Chrome, Hiragino Sans is drawn in W3 for weights up to 500 and in W6 from 600 (400 and 500 draw the same pixels, 600 and 700 likewise). Before, 400 and 500 took W4 and W5, a step or two heavier.

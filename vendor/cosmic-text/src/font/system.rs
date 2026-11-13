@@ -47,10 +47,10 @@ impl FontMatchKey {
     ) -> FontMatchKey {
         // TODO: smarter way of detecting emoji
         let not_emoji = !face.post_script_name.contains("Emoji");
-        // zgx patch: macOS's Hiragino Sans numbers its weights a step below
-        // CSS's (W3 is Regular, W4 Medium, W6 Bold), as Core Text's cascade
-        // takes them: a face counts as the weight it is used for.
-        let face_weight = matched_weight(face);
+        // zgx patch: macOS's Hiragino Sans is drawn in two weights by Core
+        // Text's cascade (W3 up to 500, W6 from 600): a face counts as the
+        // weight it is used for.
+        let face_weight = matched_weight(face, attrs.weight.0);
         let font_weight_diff = attrs.weight.0.abs_diff(face_weight);
 
         // zgx patch: the face's weight axis is read from its file once, not
@@ -91,21 +91,28 @@ impl FontMatchKey {
     }
 }
 
-/// zgx patch: the weight `face` is matched as: its own, except Hiragino
-/// Sans's, whose W3 is the Regular Core Text gives for 400 (its OS/2 class
-/// is 300), W4 the Medium for 500 and W6 the Bold for 700: a hundred more.
-fn matched_weight(face: &FaceInfo) -> u16 {
+/// zgx patch: the weight `face` is matched as for a request of `asked`: its
+/// own, except Hiragino Sans's on macOS, of which Core Text's cascade draws
+/// two faces: W3 (class 300) for 500 and lighter, W6 (class 600) for 600 and
+/// heavier (the others are never taken: no request is as far as `u16::MAX`).
+fn matched_weight(face: &FaceInfo, asked: u16) -> u16 {
     let hiragino = cfg!(target_os = "macos")
         && face.families.iter().any(|(name, _)| name == "Hiragino Sans");
     if hiragino {
-        shifted_hiragino_weight(face.weight.0)
+        hiragino_matched_weight(face.weight.0, asked)
     } else {
         face.weight.0
     }
 }
-/// A Hiragino Sans face's OS/2 weight class as the CSS weight it serves.
-pub(crate) fn shifted_hiragino_weight(class: u16) -> u16 {
-    class.saturating_add(100).min(1000)
+/// A Hiragino Sans face's OS/2 weight class as the weight it serves for a
+/// request of `asked` (`matched_weight`).
+pub(crate) fn hiragino_matched_weight(class: u16, asked: u16) -> u16 {
+    match class {
+        300 if asked <= 500 => asked,
+        600 if asked >= 600 => asked,
+        300 | 600 => class,
+        _ => u16::MAX,
+    }
 }
 
 /// zgx patch: a face's `wght` axis range, from its file.
