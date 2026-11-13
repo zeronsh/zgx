@@ -536,6 +536,7 @@ fn dom_wrap(anchor: View, tip: Tooltip) -> View {
         let open = cx.runtime().signal(false);
         let panel = crate::compose::popover("Tooltip", open, anchor)
             .layer()
+            .lazy()
             .placement(placement)
             .child(content);
         let panel = crate::compose::__dom::hover(panel, delay, interactive);

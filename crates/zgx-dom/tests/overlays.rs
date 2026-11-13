@@ -325,3 +325,46 @@ fn overlays_in_keyed_rows_each_keep_their_own() {
     mounted.unmount();
     host.remove();
 }
+
+#[wasm_bindgen_test]
+async fn a_lazy_panel_is_built_the_first_time_it_opens() {
+    let runtime = Runtime::new();
+    let open = runtime.signal(false);
+    let built = Rc::new(Cell::new(0));
+    let count = built.clone();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            menu("File", open.clone(), button().child(text("File")))
+                .lazy()
+                .child(zgx::compose::component(move |_| {
+                    count.set(count.get() + 1);
+                    menu_item("New").into()
+                }))
+                .child(menu_item("Open")),
+        ),
+    );
+    let panel = find(&host, "[role=menu]");
+    // Nothing in it, nothing built, until it opens.
+    assert_eq!(panel.child_element_count(), 0);
+    assert_eq!(built.get(), 0);
+    find(&host, "button").click();
+    assert!(showing(&panel));
+    assert_eq!(built.get(), 1);
+    assert_eq!(panel.text_content().unwrap(), "NewOpen");
+    // Its first item there to take focus as it showed.
+    assert_eq!(active().unwrap().text_content().unwrap(), "New");
+    // Kept: closing and opening again builds nothing more.
+    open.set(false);
+    zgx_dom::flush();
+    open.set(true);
+    zgx_dom::flush();
+    assert_eq!(built.get(), 1);
+    assert_eq!(panel.child_element_count(), 2);
+    open.set(false);
+    zgx_dom::flush();
+    mounted.unmount();
+    host.remove();
+}
