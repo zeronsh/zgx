@@ -1435,6 +1435,10 @@ export type RenderCanvasOptions = {
 	background: Color?,
 	format: ("png" | "jpeg" | "webp")?,
 	quality: number?,
+	-- A file the user picked (`ui.save_file`): the picture is written there,
+	-- with no pixels through the script and up to 256 MiB of them (not 32),
+	-- and the promise gives nil.
+	file: (File | string)?,
 }
 
 -- `ui.web(opts)`: a web page's controller. Its fields are tracked, so a
@@ -22193,7 +22197,7 @@ declare ui: {
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
 	-- `draw` as a canvas would show it, as a PNG in base64, with no window:
 	-- `width * scale` by `height * scale` pixels, `x`, `y` at its top left.
-	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string>,
+	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string?>,
 	-- Out from (`cx`, `cy`) to radius `r` (`ry` down, for an ellipse), the
 	-- last colour past it; `transform` ({ a, b, c, d, e, f }) maps it after.
 	radial: (cx: number, cy: number, r: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush,

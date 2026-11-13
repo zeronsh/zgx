@@ -161,7 +161,7 @@ pub(crate) fn picker(opts: Option<Table>, title: &str) -> mlua::Result<FilePicke
 }
 /// A file a script names (`{ path }` from a dialog, or its path), if the
 /// user picked it.
-fn chosen(picked: &Picked, file: &mlua::Value, what: &str) -> mlua::Result<PathBuf> {
+pub(crate) fn chosen(picked: &Picked, file: &mlua::Value, what: &str) -> mlua::Result<PathBuf> {
     let path = match file {
         mlua::Value::String(path) => path.to_str()?.to_string(),
         mlua::Value::Table(file) => file.get::<String>("path")?,

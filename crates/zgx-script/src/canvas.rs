@@ -695,7 +695,7 @@ fn measuring(fonts: &Fonts) -> Rc<RefCell<zgx::scene::Scene>> {
 static TEXT: std::sync::Mutex<Option<(Fonts, zgx_gpu::text::CpuTextRaster)>> =
     std::sync::Mutex::new(None);
 
-/// `ui.render_canvas(draw, { width, height, scale, x, y, background, format, quality })`: a
+/// `ui.render_canvas(draw, { width, height, scale, x, y, background, format, quality, file })`: a
 /// promise of `draw(c, width, height)`'s drawing as a PNG (or a JPEG or
 /// WebP, `format`), in base64. The
 /// drawing is what a `ui.canvas` given that `draw` shows: its shapes and
@@ -738,6 +738,21 @@ fn render_canvas(
     let x = options.get::<Option<f32>>("x")?.unwrap_or(0.);
     let y = options.get::<Option<f32>>("y")?.unwrap_or(0.);
     let env = crate::node::env(lua)?;
+    // `file`: one the user picked (`ui.save_file`), written with the
+    // picture, made and encoded off the main thread with no pixels through
+    // the script, up to `FILE_BUDGET` (256 MiB of pixels, not the 32 a
+    // picture given back may take). The promise is nil then.
+    let target = match options.get::<mlua::Value>("file")? {
+        mlua::Value::Nil => None,
+        file => {
+            if !env.grants.allows(&crate::Capability::Files) {
+                return Err(crate::io::denied("ui.render_canvas { file }", "Files"));
+            }
+            let path = crate::io::chosen(&env.picked, &file, "ui.render_canvas")?;
+            crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
+            Some(path)
+        }
+    };
     let theme = zgx::theme::Themes::of(&env.runtime).root().clone();
     // The app's own fonts (bundled, loaded), as its windows shape with.
     let fonts: Fonts = (env.platform.borrow().as_ref()).map_or_else(Vec::new, |p| p.0.fonts());
@@ -758,7 +773,7 @@ fn render_canvas(
         x: -x,
         y: -y,
     };
-    let (tell, mut heard) = zgx::task::latest::<Result<String, String>>();
+    let (tell, mut heard) = zgx::task::latest::<Result<Option<String>, String>>();
     let promise = crate::calls::pending(lua, "ui.render_canvas".into())?;
     std::thread::spawn(move || {
         let mut held = TEXT.lock().unwrap_or_else(|e| e.into_inner());
@@ -771,16 +786,39 @@ fn render_canvas(
             *held = Some((fonts, text));
         }
         let text = &mut held.as_mut().expect("made just now").1;
+        let made = match &target {
+            Some(_) => zgx_gpu::canvas::picture_up_to(
+                &canvas,
+                view,
+                width,
+                height,
+                scale,
+                background,
+                text,
+                zgx_gpu::canvas::FILE_BUDGET,
+            ),
+            None => zgx_gpu::canvas::picture(&canvas, view, width, height, scale, background, text),
+        };
         tell.send(
-            zgx_gpu::canvas::picture(&canvas, view, width, height, scale, background, text)
-                .and_then(|image| encode(&image, format))
-                .map(|file| base64(&file))
-                .map_err(|e| e.0),
+            made.and_then(|image| encode(&image, format))
+                .map_err(|e| e.0)
+                .and_then(|file| match &target {
+                    // Beside it, then over it: never half a file.
+                    Some(path) => {
+                        let temp = path.with_extension("zgx-write");
+                        std::fs::write(&temp, &file)
+                            .and_then(|()| std::fs::rename(&temp, path))
+                            .map(|()| None)
+                            .map_err(|e| format!("{}: {e}", path.display()))
+                    }
+                    None => Ok(Some(base64(&file))),
+                }),
         );
     });
     crate::calls::settle_with(lua, &promise, crate::errors::Kind::Io, async move {
         match heard.recv().await {
-            Some(Ok(png)) => Ok(crate::Value::Str(png.into())),
+            Some(Ok(Some(file))) => Ok(crate::Value::Str(file.into())),
+            Some(Ok(None)) => Ok(crate::Value::Nil),
             Some(Err(error)) => Err(format!("ui.render_canvas: {error}")),
             None => Err("ui.render_canvas: the drawing thread stopped".into()),
         }
