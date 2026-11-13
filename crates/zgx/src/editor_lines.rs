@@ -190,7 +190,11 @@ pub struct LineMark {
     pub border_color: crate::scene::Color,
     /// The border's width.
     pub border_width: f32,
-    /// Text drawn from its top left (an ordinal), its colour and size.
+    /// Its `x` is how far its right edge sits from the area's right edge (a code block's language).
+    pub from_right: bool,
+    /// Its label in the monospaced font (a code block's line numbers).
+    pub mono: bool,
+    /// Text drawn from its top left (an ordinal), its colour and size; a finite height is its line pitch.
     pub label: Option<(std::sync::Arc<str>, crate::scene::Color, f32)>,
 }
 impl Default for LineMark {
@@ -201,6 +205,8 @@ impl Default for LineMark {
             width: 0.,
             height: 0.,
             bottom: 0.,
+            from_right: false,
+            mono: false,
             fill: crate::scene::Color(0, 0, 0, 0),
             radius: 0.,
             border_color: crate::scene::Color(0, 0, 0, 0),

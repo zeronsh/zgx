@@ -6134,10 +6134,12 @@ impl Ui {
                             } else {
                                 (tall - mark.y - mark.bottom).max(0.)
                             };
-                            wanted.push((
-                                Rect::new(mark.x - scroll.0, top + mark.y, width, height),
-                                mark,
-                            ));
+                            let x = if mark.from_right {
+                                inner_width - mark.x - width
+                            } else {
+                                mark.x - scroll.0
+                            };
+                            wanted.push((Rect::new(x, top + mark.y, width, height), mark));
                         }
                     }
                 }
@@ -6214,7 +6216,14 @@ impl Ui {
                                     },
                                 );
                             }
-                            s.set_font(id, font.clone());
+                            let mut label_font = font.clone();
+                            if mark.mono {
+                                label_font.family = crate::text_layout::FontFamily::Monospace;
+                            }
+                            if mark.height.is_finite() && mark.height > 0. {
+                                label_font.line_height = crate::text_layout::LineHeight::px(mark.height);
+                            }
+                            s.set_font(id, label_font);
                             s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
                             s.set_transform(
                                 id,
