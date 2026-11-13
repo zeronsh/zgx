@@ -6132,7 +6132,7 @@ impl Ui {
                             let height = if mark.height.is_finite() {
                                 mark.height
                             } else {
-                                (tall - mark.y).max(0.)
+                                (tall - mark.y - mark.bottom).max(0.)
                             };
                             wanted.push((
                                 Rect::new(mark.x - scroll.0, top + mark.y, width, height),

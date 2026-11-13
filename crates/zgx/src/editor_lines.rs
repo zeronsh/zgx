@@ -180,6 +180,8 @@ pub struct LineMark {
     pub width: f32,
     /// Its height; infinite: to the bottom of the line, its wrapped rows and its room below too.
     pub height: f32,
+    /// With an infinite height: how far above the line's bottom it ends.
+    pub bottom: f32,
     /// The fill colour.
     pub fill: crate::scene::Color,
     /// The corner radius.
@@ -198,6 +200,7 @@ impl Default for LineMark {
             y: 0.,
             width: 0.,
             height: 0.,
+            bottom: 0.,
             fill: crate::scene::Color(0, 0, 0, 0),
             radius: 0.,
             border_color: crate::scene::Color(0, 0, 0, 0),
