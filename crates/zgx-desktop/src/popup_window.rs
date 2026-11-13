@@ -758,6 +758,15 @@ mod macos {
     /// shadow's ink, and the window server's shadow, which follows what the
     /// window shows, would outline the whole soft shadow (on macOS 26 a
     /// dark rim round it) besides the panel's own.
+    /// Whether the window server shadows a popup's window: never a topmost layer, nor a tooltip or hover card,
+    /// which draws whatever shadow it has (AppKit's would ring it, a dark rim on macOS 26).
+    fn system_shadow(scene: &Scene, root: NodeId) -> bool {
+        use zgx::scene::PopupRole;
+        !matches!(
+            scene.popup_role(root),
+            Some(PopupRole::Topmost | PopupRole::Tooltip)
+        ) && window_shadow(scene, root)
+    }
     fn window_shadow(scene: &Scene, root: NodeId) -> bool {
         let Some(panel) = panel_of(scene, root) else {
             return true;
@@ -1727,7 +1736,7 @@ mod macos {
                 panel.back(material, frame);
                 panel.place(&parent, &content, frame);
                 if panel.preview.is_none() {
-                    let shadow = !topmost && window_shadow(scene, root);
+                    let shadow = system_shadow(scene, root);
                     if panel.window.hasShadow() != shadow {
                         panel.window.setHasShadow(shadow);
                     }
@@ -1941,7 +1950,7 @@ mod macos {
 
     #[cfg(test)]
     mod tests {
-        use super::{Material, window_shadow};
+        use super::{Material, system_shadow, window_shadow};
         use objc2_app_kit::NSVisualEffectMaterial;
         use zgx::{compose::prelude::*, widgets::Ui};
 
@@ -1987,6 +1996,20 @@ mod macos {
             assert_eq!(radius, -1.);
             assert_eq!((bounds.y, bounds.height), (y - 10., h + 10.));
             assert_eq!(bounds.width, w);
+        }
+
+        #[test]
+        fn a_tooltip_takes_no_shadow_from_the_window_server() {
+            use zgx::scene::PopupRole;
+            let mut ui = Ui::new(400., 300.);
+            let handle = ui.mount(div().child(chip()));
+            ui.prepare_frame();
+            let root = handle.node();
+            assert!(system_shadow(&ui.scene.borrow(), root), "a menu's rim");
+            ui.scene
+                .borrow_mut()
+                .set_popup_role(root, PopupRole::Tooltip);
+            assert!(!system_shadow(&ui.scene.borrow(), root));
         }
 
         #[test]
