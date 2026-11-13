@@ -143,3 +143,40 @@ async fn a_canvas_draws_its_commands_and_again_as_they_change() {
     mounted.unmount();
     host.remove();
 }
+
+#[wasm_bindgen_test]
+async fn measure_text_measures_while_a_canvas_draws() {
+    let runtime = Runtime::new();
+    let measured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = measured.clone();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            canvas(move |_| {
+                let font = zgx::text_layout::FontStyle::default();
+                seen.borrow_mut().push((
+                    zgx::canvas::measure_text("W", 20., &font),
+                    zgx::canvas::measure_text("WWWW", 20., &font),
+                ));
+                Canvas::new()
+            })
+            .w(50.)
+            .h(20.),
+        ),
+    );
+    sleep(60).await;
+    let (one, four) = *measured.borrow().last().unwrap();
+    let (one, four) = (one.unwrap(), four.unwrap());
+    assert!(one.0 > 5. && one.0 < 40., "{one:?}");
+    assert!((four.0 - 4. * one.0).abs() < 1., "{four:?} against {one:?}");
+    assert!(one.1 >= 18. && one.1 < 40., "a line's height: {one:?}");
+    // Outside a canvas's drawing, none, as on the desktop.
+    assert_eq!(
+        zgx::canvas::measure_text("W", 20., &Default::default()),
+        None
+    );
+    mounted.unmount();
+    host.remove();
+}

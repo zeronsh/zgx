@@ -1483,6 +1483,19 @@ fn cursor_css(cursor: crate::cursor::Cursor) -> String {
     }
 }
 
+/// Run `draw` (a canvas's drawing) with `measure` as what
+/// `canvas::measure_text` measures with, as the desktop measures while a
+/// canvas draws.
+pub fn drawing_with<R>(
+    measure: impl Fn(&str, f32, &crate::text_layout::FontStyle) -> (f32, f32) + 'static,
+    draw: impl FnOnce() -> R,
+) -> R {
+    let previous = crate::canvas::DOM_MEASURE.with(|slot| slot.replace(Some(Box::new(measure))));
+    let drawn = draw();
+    crate::canvas::DOM_MEASURE.with(|slot| *slot.borrow_mut() = previous);
+    drawn
+}
+
 /// A canvas text's font, as the CSS `font` shorthand Canvas 2D takes.
 pub fn font_css(font: &crate::text_layout::FontStyle, size: f32) -> String {
     format!(
