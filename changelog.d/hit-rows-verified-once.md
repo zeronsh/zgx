@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **A long list scrolled under a resting pointer hit-tests in time that doesn't grow with its rows** (zgx): each hit test searched a long column's rows but first checked, row by row, that their boxes ran down in order and that none outside the search reached past its neighbours, every time: 34 instructions a row, so a scroll view of 7,000 rows paid for every row on each hover test as it scrolled. Once a hit finds such a list moved since the last hit on it (scrolled under the pointer), it verifies the rows once, and the container remembers that they passed (`ROWS_VERIFIED`) until one of them or its children change, which the existing invalidation walk clears. A list hovered in place, a row restyled between hits, is checked as it always was. A wheel-scrolled frame of 7,000 keyed rows under a resting pointer costs 0.037M instructions rather than 0.207M (1,000 rows: 0.033M rather than 0.057M).
