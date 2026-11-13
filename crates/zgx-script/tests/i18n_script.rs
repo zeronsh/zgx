@@ -250,7 +250,13 @@ fn the_lint_compares_each_locale_with_the_source() {
     let has = |code: &str, text: &str| found.iter().any(|(c, m)| c == code && m.contains(text));
     assert!(has("i18n-args", "greeting names {nom}"), "{found:?}");
     assert!(has("i18n-extra", "extra"), "{found:?}");
+    assert!(has("i18n-missing", "fr lacks"), "{found:?}");
     assert!(has("i18n-missing", "inbox.count"), "{found:?}");
+    let missing: Vec<_> = report.diagnostics.iter().filter(|d| d.code == "i18n-missing").collect();
+    assert_eq!(missing.len(), 1, "one note a locale: {missing:?}");
+    assert_eq!(missing[0].severity, zgx_script::check::Severity::Note);
+    let others = report.diagnostics.iter().filter(|d| d.code != "i18n-missing").count();
+    assert_eq!(report.passes(), others == 0);
     assert!(has("i18n-parse", "search"), "{found:?}");
     assert!(has("i18n-key", "no.such"), "{found:?}");
     assert!(!has("i18n-key", "greeting"), "{found:?}");
