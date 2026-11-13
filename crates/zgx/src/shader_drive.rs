@@ -33,9 +33,6 @@ pub struct ShaderDrive {
     pub fill: bool,
     /// Its sixteen values.
     pub params: [[f32; 4]; 4],
-    /// Rows of `params` that are a theme's colours instead: each resolved
-    /// where the node is, and again when the theme changes.
-    pub tokens: [Option<crate::theme::TokenId>; 4],
     /// How far past the box it paints (`Scene::set_layer_extent`).
     pub bleed: f32,
     /// How far past that `zgx_backdrop` reads.
@@ -45,11 +42,15 @@ pub struct ShaderDrive {
     /// Whether its time steps.
     pub running: bool,
 }
+/// Rows of a drive's `params` that are a theme's colours instead: each
+/// resolved where the node is, and again when the theme changes.
+pub type ShaderTokens = [Option<crate::theme::TokenId>; 4];
+
 impl ShaderDrive {
-    /// Its theme colours (`tokens`) written into their rows, as `scope` has
+    /// The theme colours `tokens` written into their rows, as `scope` has
     /// them: read inside an effect, it follows them.
-    fn themed(&mut self, scope: &crate::theme::ThemeScope) {
-        for (row, token) in self.tokens.iter().enumerate() {
+    fn themed(&mut self, tokens: &ShaderTokens, scope: &crate::theme::ThemeScope) {
+        for (row, token) in tokens.iter().enumerate() {
             if let Some(token) = token
                 && let Some(c) = scope.get(*token).color()
             {
@@ -107,14 +108,24 @@ impl Clock {
 /// and its body inlined into a caller styling every node (zgx-script's
 /// `styled`) moved that caller's code for all of them.
 #[inline(never)]
-pub fn attach(
+pub fn attach(cx: &mut Context, view: View, make: impl FnMut() -> ShaderDrive + 'static) -> View {
+    attach_themed(cx, view, [None; 4], make)
+}
+
+/// `attach`, the rows `tokens` names following the theme where the view is.
+#[inline(never)]
+pub fn attach_themed(
     cx: &mut Context,
     view: View,
+    tokens: ShaderTokens,
     mut make: impl FnMut() -> ShaderDrive + 'static,
 ) -> View {
     let runner = cx.try_service::<TaskRunner>();
     let frames = cx.try_service::<FrameClock>();
-    let scope = cx.theme();
+    let themed = tokens
+        .iter()
+        .any(Option::is_some)
+        .then(|| (tokens, cx.theme()));
     let first = make();
     let view = match (&first.shader, first.fill) {
         // Its uniforms come from the scene (`ShaderDrive::apply`): none in the
@@ -127,7 +138,7 @@ pub fn attach(
     view.on_mount(move |handle| {
         let weak = handle.ui_handle().clone();
         if let Some(mut ui) = weak.upgrade() {
-            mount(&mut ui, weak, handle.node(), make, scope, runner, frames);
+            mount(&mut ui, weak, handle.node(), make, themed, runner, frames);
         }
     })
 }
@@ -137,7 +148,7 @@ fn mount(
     weak: WeakUi,
     node: NodeId,
     mut make: impl FnMut() -> ShaderDrive + 'static,
-    scope: Rc<crate::theme::ThemeScope>,
+    themed: Option<(ShaderTokens, Rc<crate::theme::ThemeScope>)>,
     runner: Option<Rc<TaskRunner>>,
     frames: Option<Rc<FrameClock>>,
 ) {
@@ -148,8 +159,8 @@ fn mount(
     ui.retain(node, clock.clone());
     ui.bind(node, move || {
         let mut drive = make();
-        if drive.tokens.iter().any(Option::is_some) {
-            drive.themed(&scope);
+        if let Some((tokens, scope)) = &themed {
+            drive.themed(tokens, scope);
         }
         let reduced = themes.system_preferences().reduced_motion;
         let shows = presented.get() && visible.get();
