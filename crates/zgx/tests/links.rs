@@ -45,7 +45,7 @@ fn links(ui: &Ui) -> Vec<NodeId> {
         .semantics
         .borrow()
         .iter()
-        .filter(|(_, s)| s.role == Role::Link)
+        .filter(|(_, s)| matches!(s.role, Role::Link | Role::Button) && !s.label.is_empty())
         .map(|(id, _)| id)
         .collect();
     links.sort_by(|a, b| {
@@ -275,7 +275,11 @@ fn a_link_follows_enter_as_it_goes_down_and_not_space() {
     ui.mount(
         rich_text()
             .text_size(16.)
-            .child(text_span("a link").on_click(move || *count.borrow_mut() += 1))
+            .child(
+                text_span("a link")
+                    .href("https://example.org")
+                    .on_click(move || *count.borrow_mut() += 1),
+            )
             .into(),
     );
     ui.prepare_frame();
@@ -303,6 +307,46 @@ fn a_link_follows_enter_as_it_goes_down_and_not_space() {
     assert_eq!(*clicks.borrow(), 1, "Enter follows it as it goes down");
     key(&mut ui, Key::Enter, false);
     assert_eq!(*clicks.borrow(), 1);
+}
+
+#[test]
+fn a_run_that_only_acts_is_a_button_enter_and_space_press() {
+    let clicks = Rc::new(RefCell::new(0));
+    let count = clicks.clone();
+    let mut ui = Ui::new(300., 100.);
+    ui.mount(
+        rich_text()
+            .text_size(16.)
+            .child(text_span("a link").on_click(move || *count.borrow_mut() += 1))
+            .into(),
+    );
+    ui.prepare_frame();
+    let link = links(&ui)[0];
+    ui.input.focus(&ui.scene, Some(link));
+    let key = |ui: &mut Ui, key: Key, down: bool| {
+        ui.dispatch(if down {
+            InputEvent::KeyDown {
+                key,
+                modifiers: Modifiers::default(),
+                repeat: false,
+            }
+        } else {
+            InputEvent::KeyUp {
+                key,
+                modifiers: Modifiers::default(),
+            }
+        });
+    };
+    assert_eq!(
+        ui.semantics.borrow().get(link).map(|s| s.role),
+        Some(Role::Button)
+    );
+    key(&mut ui, Key::Enter, true);
+    key(&mut ui, Key::Enter, false);
+    assert_eq!(*clicks.borrow(), 1, "Enter presses it");
+    key(&mut ui, Key::Space, true);
+    key(&mut ui, Key::Space, false);
+    assert_eq!(*clicks.borrow(), 2, "and Space, as a button's");
 }
 
 #[test]

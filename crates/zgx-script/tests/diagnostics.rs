@@ -809,3 +809,23 @@ fn unmounted_components_let_go_of_what_their_closures_held() {
         );
     }
 }
+
+/// A key the host published into and set back to nil, which no script holds,
+/// goes at the next collection.
+#[test]
+fn a_host_key_set_back_to_nil_goes_once_nothing_holds_it() {
+    use zgx_script::Value as V;
+    let h = Harness::inline(r##"return ui.column { w = 10, h = 10 }"##);
+    h.settle();
+    let shared = h.host.shared("chat_live:gone", V::from("rows"));
+    assert!(h.host.states().iter().any(|(n, _)| n == "chat_live:gone"));
+    shared.set(V::Nil);
+    h.host.collect_garbage();
+    assert!(
+        h.host.states().iter().any(|(n, _)| n == "chat_live:gone"),
+        "the host still holds it"
+    );
+    drop(shared);
+    h.host.collect_garbage();
+    assert!(!h.host.states().iter().any(|(n, _)| n == "chat_live:gone"));
+}

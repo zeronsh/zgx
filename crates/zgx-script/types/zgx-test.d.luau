@@ -71,6 +71,12 @@ declare extern type TestApp with
 	function states(self): { string }
 	-- A full collection in each VM; the heap the scripts hold after it, in KB.
 	function gc(self): number
+	-- What holds the objects of a kind (`State` if not given; a userdata type,
+	-- `function`, `table`, or part of a function's name), after a full
+	-- collection, as `zgx inspect gc --retained` lists: each holder's count and
+	-- path from a root, a hop a string. `mark` remembers the objects there are
+	-- now; `since_mark` finds only those made after; `lua_only` skips Rust's handles.
+	function gc_holders(self, kind: string?, options: { mark: boolean?, since_mark: boolean?, lua_only: boolean?, sample: number? }?): { { count: number, path: { string } } }
 	-- How many States the scripts hold after a full collection, as `zgx inspect gc --retained State` counts them.
 	function retained_states(self): number
 	-- A named state's value (`ui.state`, `ui.persist`, `ui.shared`).

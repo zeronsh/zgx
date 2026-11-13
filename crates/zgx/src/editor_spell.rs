@@ -62,8 +62,13 @@ pub(crate) fn mount(
                 editor.set_misspellings(next);
             })
         };
-    let all = check.clone();
-    editor.set_spell_recheck(Rc::new(move || all(true)));
+    // Weak: the editor holds this, and `check` holds the editor.
+    let all = Rc::downgrade(&check);
+    editor.set_spell_recheck(Rc::new(move || {
+        if let Some(check) = all.upgrade() {
+            check(true);
+        }
+    }));
     let value = editor.value().clone();
     ui.bind(editor.node, move || {
         value.track();

@@ -28,7 +28,7 @@ return ui.column {{ w = {width}, ui.rich {{ id = "p", wrap = true, w_full = true
 
 fn boxes(tree: &str) -> Vec<(f32, f32, f32, f32)> {
     tree.lines()
-        .filter(|l| l.contains(" link "))
+        .filter(|l| l.contains(" link ") || l.contains(" button "))
         .filter_map(|l| {
             let mut words = l.split_whitespace().rev();
             let size = words.next()?;

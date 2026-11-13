@@ -755,6 +755,37 @@ impl UserData for Mounted {
             let reports = m.app()?.host.gc_report(&Default::default());
             Ok(reports.iter().map(|vm| vm.after).sum::<usize>() / 1024)
         });
+        methods.add_method(
+            "gc_holders",
+            |lua, m, (kind, options): (Option<String>, Option<mlua::Table>)| {
+                let flag = |key: &str| {
+                    options
+                        .as_ref()
+                        .and_then(|o| o.get::<Option<bool>>(key).ok().flatten())
+                        .unwrap_or(false)
+                };
+                let query = crate::GcQuery {
+                    top: 10,
+                    retained: Some(kind.unwrap_or_else(|| "State".into())),
+                    sample: options
+                        .as_ref()
+                        .and_then(|o| o.get::<Option<usize>>("sample").ok().flatten())
+                        .unwrap_or(10),
+                    mark: flag("mark"),
+                    lua_only: flag("lua_only"),
+                    since_mark: flag("since_mark"),
+                };
+                let reports = m.app()?.host.gc_report(&query);
+                let out = lua.create_table()?;
+                for holder in reports.iter().flat_map(|vm| vm.found.holders.iter()) {
+                    let row = lua.create_table()?;
+                    row.set("count", holder.count)?;
+                    row.set("path", holder.path.clone())?;
+                    out.push(row)?;
+                }
+                Ok(out)
+            },
+        );
         methods.add_method("retained_states", |_, m, ()| {
             let query = crate::GcQuery {
                 retained: Some("State".into()),

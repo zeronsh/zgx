@@ -1134,7 +1134,15 @@ pub(crate) fn mount_links(
             if link.is_link() {
                 ui.semantics.borrow_mut().set(
                     entry.node,
-                    SemanticNode::new(Role::Link, &data.rich.text()[link.range.clone()]),
+                    SemanticNode::new(
+                        // A run that only acts is a button (Space too), one that goes somewhere a link.
+                        if link.href.is_some() {
+                            Role::Link
+                        } else {
+                            Role::Button
+                        },
+                        &data.rich.text()[link.range.clone()],
+                    ),
                 );
             }
             let rects = &geometry[index];

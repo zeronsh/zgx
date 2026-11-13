@@ -3471,7 +3471,7 @@ impl Store {
         signals.insert(key.to_owned(), signal.clone());
         signal
     }
-    /// Drops the states nothing else holds and still at their first value:
+    /// Drops the states nothing else holds that are nil or still at their first value:
     /// a key declared for a tab that has since closed comes back the same.
     pub(crate) fn sweep_unheld(&self) -> usize {
         let mut signals = self.signals.borrow_mut();
@@ -3479,9 +3479,10 @@ impl Store {
         let before = signals.len();
         signals.retain(|key, s| {
             s.handles() > 1
-                || initials
-                    .get(key)
-                    .is_none_or(|first| !s.with_untracked(|v| v == first))
+                || s.with_untracked(|v| !matches!(v, Value::Nil))
+                    && initials
+                        .get(key)
+                        .is_none_or(|first| !s.with_untracked(|v| v == first))
         });
         initials.retain(|k, _| signals.contains_key(k));
         self.provisional
