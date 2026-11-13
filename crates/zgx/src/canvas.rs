@@ -1063,8 +1063,12 @@ impl Canvas {
     /// order: a text goes under a later shape only where that shape can
     /// reach it, so a drawing that keeps its words clear of what follows
     /// is one layer (as is one with no text after its last command, which
-    /// measures nothing). `size` gives a text's width and height. At most
-    /// 8 layers: past them, the texts left go over what follows.
+    /// measures nothing). A stroke reaches only along its outline: a card's
+    /// border drawn after its own words leaves them in its layer. `size`
+    /// gives a text's width and height. At most 8 layers: past them, the
+    /// two neighbours whose joining puts the least text over a later shape
+    /// are joined, again and again, so a scrim or a dialog over many cards
+    /// keeps every card's words under it.
     pub fn layers(&self, mut size: impl FnMut(&CanvasText) -> (f32, f32)) -> Vec<CanvasLayer> {
         let all = || CanvasLayer {
             commands: 0..self.commands.len(),
@@ -1075,7 +1079,8 @@ impl Canvas {
         }
         let mut layers = Vec::new();
         let (mut first_command, mut first_text) = (0, 0);
-        // The boxes of this layer's texts, and their union.
+        // Every measured text's box (a text's index is its box's), and the
+        // union of this layer's.
         let mut boxes: Vec<Rect> = Vec::new();
         let mut covered: Option<Rect> = None;
         let mut next_text = 0;
@@ -1096,16 +1101,16 @@ impl Canvas {
             let Some(reach) = command_bounds(command) else {
                 continue;
             };
-            if layers.len() + 1 < MAX_LAYERS
-                && covered_now.intersects(reach)
-                && boxes.iter().any(|b| b.intersects(reach))
+            if covered_now.intersects(reach)
+                && boxes[first_text..next_text]
+                    .iter()
+                    .any(|b| covers(command, reach, *b) > 0.)
             {
                 layers.push(CanvasLayer {
                     commands: first_command..at,
                     texts: first_text..next_text,
                 });
                 (first_command, first_text) = (at, next_text);
-                boxes.clear();
                 covered = None;
             }
         }
@@ -1113,7 +1118,47 @@ impl Canvas {
             commands: first_command..self.commands.len(),
             texts: first_text..self.text.len(),
         });
+        if layers.len() > MAX_LAYERS {
+            self.join_cheapest(&mut layers, &boxes);
+        }
         layers
+    }
+    /// Join neighbouring layers until at most [`MAX_LAYERS`] are left, each
+    /// time the two whose joining lays the least area of the first's text
+    /// over the second's shapes (what goes wrong when they're one).
+    fn join_cheapest(&self, layers: &mut Vec<CanvasLayer>, boxes: &[Rect]) {
+        let cost = |a: &CanvasLayer, b: &CanvasLayer| -> f32 {
+            let mut area = 0.;
+            for command in &self.commands[b.commands.clone()] {
+                let Some(reach) = command_bounds(command) else {
+                    continue;
+                };
+                for text in a.texts.clone() {
+                    if let Some(at) = boxes.get(text) {
+                        area += covers(command, reach, *at);
+                    }
+                }
+            }
+            area
+        };
+        let mut costs: Vec<f32> = layers.windows(2).map(|w| cost(&w[0], &w[1])).collect();
+        while layers.len() > MAX_LAYERS {
+            let (at, _) = costs
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(b.1))
+                .expect("more than one layer");
+            let next = layers.remove(at + 1);
+            layers[at].commands.end = next.commands.end;
+            layers[at].texts.end = next.texts.end;
+            costs.remove(at);
+            if at > 0 {
+                costs[at - 1] = cost(&layers[at - 1], &layers[at]);
+            }
+            if at < costs.len() {
+                costs[at] = cost(&layers[at], &layers[at + 1]);
+            }
+        }
     }
     /// `layer`'s commands as a canvas of their own (no text): the clips
     /// open where it starts opened again first, and those open where it
@@ -1192,6 +1237,43 @@ fn clip_box(path: &Path) -> (Rect, f32) {
         _ => 0.,
     };
     (rect, radius)
+}
+/// How much of `text` (a text's box) `command` can paint over, `reach`
+/// being [`command_bounds`]'s: the boxes' overlap, less, for a stroke round a
+/// rectangle or an ellipse, what lies inside the outline clear of the line
+/// (a card's border over its own words paints none of them).
+fn covers(command: &Draw, reach: Rect, text: Rect) -> f32 {
+    let area = |r: Option<Rect>| r.map_or(0., |r| r.width * r.height);
+    let over = area(reach.intersection(text));
+    if over <= 0. {
+        return 0.;
+    }
+    let Draw::Stroke { path, style, .. } = command else {
+        return over;
+    };
+    // The line reaches half its width out of the outline (a miter more).
+    let half = style.width.max(0.) / 2. * style.miter_limit.max(1.);
+    let bounds = path_bounds(path);
+    let inside = match path.shape() {
+        // Clear of the corners: in by the radius too.
+        Some(Shape::Rect { radius, .. }) => bounds.expand(-(half + radius.max(0.))),
+        // The rectangle inscribed in it.
+        Some(Shape::Ellipse { .. }) => {
+            let k = std::f32::consts::FRAC_1_SQRT_2;
+            Rect::new(
+                bounds.x + bounds.width * (1. - k) / 2.,
+                bounds.y + bounds.height * (1. - k) / 2.,
+                bounds.width * k,
+                bounds.height * k,
+            )
+            .expand(-half)
+        }
+        _ => return over,
+    };
+    if inside.width <= 0. || inside.height <= 0. {
+        return over;
+    }
+    (over - area(inside.intersection(text))).max(0.)
 }
 /// What a command can paint, or `None` for a clip's.
 fn command_bounds(command: &Draw) -> Option<Rect> {
@@ -1339,14 +1421,85 @@ mod tests {
         assert_eq!((joined.text_after(0), joined.text_after(1)), (2, 4));
         assert_eq!(joined.texts_after().collect::<Vec<_>>(), [2, 4]);
         assert_eq!(joined.layers(size)[0].commands, 0..3);
-        // However many times a text is covered, at most 8 layers.
+        // However many times a text is covered, at most 8 layers: the
+        // cheapest neighbours joined, every text still in one of them.
         let mut many = Canvas::new();
         for _ in 0..20 {
             many.text(label("c", 0., 0.)).fill(square(0., 0.), red);
         }
         let layers = many.layers(size);
         assert_eq!(layers.len(), 8);
-        assert_eq!(layers[7].texts, 7..20, "the rest over what follows");
+        assert_eq!((layers[0].texts.start, layers[7].texts.end), (0, 20));
+    }
+
+    /// Cards (a fill, its words, its border), then a scrim and a dialog
+    /// over them all: the shape of P4, an overlay on a screen of cards.
+    fn cards_under_a_dialog(cards: usize, badge: bool) -> Canvas {
+        let (white, grey) = (Color(255, 255, 255, 255), Color(200, 200, 200, 255));
+        let border = Stroke {
+            width: 1.,
+            ..Default::default()
+        };
+        let mut canvas = Canvas::new();
+        for i in 0..cards {
+            let (x, y) = ((i % 3) as f32 * 280., (i / 3) as f32 * 100.);
+            let card = Rect::new(x, y, 260., 72.);
+            canvas
+                .fill(Path::rounded_rect(card, 12.).unwrap(), white)
+                .text(label("Card title", x + 16., y + 16.));
+            if badge {
+                // a mark drawn over the corner of its title
+                canvas.fill(Path::rectangle(Rect::new(x + 30., y + 18., 8., 8.)), grey);
+            }
+            canvas.stroke(Path::rounded_rect(card, 12.).unwrap(), grey, border.clone());
+        }
+        canvas
+            .fill(
+                Path::rectangle(Rect::new(0., 0., 900., 500.)),
+                Color(9, 9, 11, 200),
+            )
+            .fill(
+                Path::rounded_rect(Rect::new(200., 60., 480., 360.), 16.).unwrap(),
+                white,
+            )
+            .text(label("Dialog title", 224., 84.));
+        canvas
+    }
+
+    #[test]
+    fn a_border_drawn_after_its_own_words_keeps_them_in_its_layer() {
+        // Twelve stroked cards then a scrim and a dialog: two layers, every
+        // card's words under the scrim (once, past 8 borders, the words left
+        // went over the dialog).
+        let canvas = cards_under_a_dialog(12, false);
+        let layers = canvas.layers(|_| (60., 12.));
+        assert_eq!(layers.len(), 2, "{layers:?}");
+        assert_eq!(layers[0].texts, 0..12);
+        assert_eq!(layers[1].texts, 12..13);
+        // A stroke still reaches a text its line crosses.
+        let mut crossed = Canvas::new();
+        crossed.text(label("a", 0., 0.)).stroke(
+            Path::rounded_rect(Rect::new(10., -10., 50., 40.), 4.).unwrap(),
+            Color(0, 0, 0, 255),
+            Stroke::default(),
+        );
+        assert_eq!(crossed.layers(|_| (20., 10.)).len(), 2);
+    }
+
+    #[test]
+    fn past_8_layers_the_overlay_keeps_its_split() {
+        // Each card's mark over its title starts a layer: 13 of them. Joined
+        // down to 8, the cheapest first, never across the scrim: no card's
+        // words go over it.
+        let canvas = cards_under_a_dialog(12, true);
+        let layers = canvas.layers(|_| (60., 12.));
+        assert_eq!(layers.len(), 8, "{layers:?}");
+        let scrim = canvas.commands().len() - 2;
+        let over = layers
+            .iter()
+            .find(|l| l.commands.contains(&scrim))
+            .expect("the scrim's layer");
+        assert_eq!(over.texts.start, 12, "{layers:?}");
     }
 
     #[test]
