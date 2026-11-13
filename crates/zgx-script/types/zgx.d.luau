@@ -931,6 +931,13 @@ export type Response = {
 -- A file a dialog, a drop or the system gives (the web's `File`): `size` in
 -- bytes, `type` its media type by its extension ("image/png"; "" unknown).
 export type File = { path: string, name: string, size: number, type: string }
+-- `ui.zip(file)`: a .zip written into a file the user picked, an entry at a
+-- time (stored as given; names are relative paths). `close` comes after
+-- every `add`, in order, and only then is the file replaced.
+export type Zip = {
+	add: (self: Zip, name: string, data: string | { base64: string }) -> Promise<nil>,
+	close: (self: Zip) -> Promise<nil>,
+}
 export type FilePickerOptions = {
 	title: string?,
 	-- Where the dialog opens.
@@ -22072,6 +22079,9 @@ declare ui: {
 	read_file: (file: File | string) -> Promise<string>,
 	-- Write `text` to a file the user picked (beside it, then over it).
 	write_file: (file: File | string, text: string) -> Promise<nil>,
+	-- A .zip into a file the user picked (`ui.save_file`), one entry at a
+	-- time, so the whole archive is never held: see `Zip`.
+	zip: (file: File | string) -> Zip,
 	-- What the app was launched with after its script (`zgx-run app/
 	-- notes.txt` gives `{ "notes.txt" }`).
 	args: { string },

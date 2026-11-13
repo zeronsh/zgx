@@ -82,6 +82,19 @@ return ui.column {
     ui.button { id = "sneak", w = 40, h = 20, "x", on_click = function()
         ui.read_file("/etc/hosts")
     end },
+    ui.button { id = "zip", w = 40, h = 20, "z", on_click = function()
+        ui.task(function()
+            local file = ui.save_file({ name = "out.zip" }):await()
+            local z = ui.zip(file)
+            -- (Not awaited one by one: they're written in order anyway.)
+            z:add("01-trang-chủ.png", { base64 = "iVBORw0KGgo=" })
+            z:add("code/index.html", "<p>hi</p>")
+            local fine, why = pcall(function() z:add("../up.txt", "x") end)
+            z:close():await()
+            local after = pcall(function() z:add("late.txt", "x"):await() end)
+            shown:set(`zipped {fine} {string.find(tostring(why), "no `..`", 1, true) ~= nil} {after}`)
+        end)
+    end },
 }
 "#;
 
@@ -155,6 +168,47 @@ fn a_picked_file_reads_and_a_saved_one_is_written() {
         "saved text"
     );
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_zip_goes_into_a_saved_file_an_entry_at_a_time() {
+    let dir = dir("zip");
+    let mut h = app(&dir, APP, None);
+    h.click("zip");
+    wait_for(&mut h, "zipped false true false");
+    // (The fake dialog saves to out.txt.) Read back as unzip would.
+    let bytes = std::fs::read(dir.join("out.txt")).unwrap();
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]) as usize;
+    let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+    let end = bytes.len() - 22;
+    assert_eq!(u32_at(end), 0x0605_4b50);
+    assert_eq!(u16_at(end + 10), 2);
+    let mut at = u32_at(end + 16);
+    let mut entries = Vec::new();
+    for _ in 0..2 {
+        let (size, name_len, offset) = (u32_at(at + 20), u16_at(at + 28), u32_at(at + 42));
+        let name = String::from_utf8(bytes[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        let data_at = offset + 30 + u16_at(offset + 26);
+        entries.push((name, bytes[data_at..data_at + size].to_vec()));
+        at += 46 + name_len;
+    }
+    assert_eq!(
+        entries,
+        vec![
+            ("01-trang-chủ.png".to_string(), b"\x89PNG\r\n\x1a\n".to_vec()),
+            ("code/index.html".to_string(), b"<p>hi</p>".to_vec()),
+        ]
+    );
+    assert!(!dir.join("out.zgx-zip").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_plugin_zips_only_with_files() {
+    let dir = dir("zip-plugin");
+    let h = app(&dir, r#"return ui.text { "app", id = "label" }"#, Some(r#"ui.zip("x.zip")"#));
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("Capability::Files"), "{error}");
 }
 
 /// A dialog the person never answers, telling when the host drops it.

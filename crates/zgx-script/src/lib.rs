@@ -62,6 +62,7 @@ pub mod inspect;
 pub mod inspect_client;
 mod interrupt;
 mod io;
+mod zip;
 mod lazy;
 #[cfg(feature = "components")]
 mod library;
@@ -4394,6 +4395,7 @@ impl ScriptHost {
                 "remembered_folder",
                 "save_file",
                 "write_file",
+                "zip",
             ],
             move |lua, ui| {
                 folder::install(lua, ui, platform.clone(), folders, access)?;

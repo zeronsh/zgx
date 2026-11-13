@@ -470,6 +470,23 @@ pub(crate) fn install(
             })?,
         )?;
     }
+    {
+        // A .zip into a file the user picked, an entry at a time (zip.rs).
+        let picked = picked.clone();
+        ui.set(
+            "zip",
+            lua.create_function(move |lua, file: mlua::Value| {
+                if !files {
+                    return Err(denied("ui.zip", "Files"));
+                }
+                let path = chosen(&picked, &file, "ui.zip")?;
+                crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
+                let zip = crate::zip::open(path)
+                    .map_err(|e| mlua::Error::runtime(format!("ui.zip: {e}")))?;
+                lua.create_userdata(zip)
+            })?,
+        )?;
+    }
     ui.set(
         "write_file",
         lua.create_function(move |lua, (file, text): (mlua::Value, String)| {
