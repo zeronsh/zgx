@@ -69,6 +69,10 @@ pub struct SpanStyle {
     pub underline: bool,
     /// In the monospaced font (inline code): shaped so.
     pub mono: bool,
+    /// Room round its text inside its background, across and down (a chip): across, it takes room in the line.
+    pub padding: Option<[f32; 2]>,
+    /// Its background's corner radius.
+    pub radius: Option<f32>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -119,6 +123,12 @@ impl SpanStyle {
         self.underline = true;
         self
     }
+    /// Its background as a chip: `padding` across and down round its text, corners of `radius`.
+    pub const fn chip(mut self, padding: [f32; 2], radius: f32) -> Self {
+        self.padding = Some(padding);
+        self.radius = Some(radius);
+        self
+    }
     /// Its text in the monospaced font.
     pub const fn mono(mut self) -> Self {
         self.mono = true;
@@ -134,6 +144,8 @@ impl SpanStyle {
         self.line_height = self.line_height.or(style.line_height);
         self.underline |= style.underline;
         self.mono |= style.mono;
+        self.padding = self.padding.or(style.padding);
+        self.radius = self.radius.or(style.radius);
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
@@ -145,6 +157,8 @@ impl SpanStyle {
             && self.line_height.is_none()
             && !self.underline
             && !self.mono
+            && self.padding.is_none()
+            && self.radius.is_none()
     }
     /// Whether it changes how its text is shaped (and so its width or height).
     fn shapes(&self) -> bool {
@@ -153,6 +167,7 @@ impl SpanStyle {
             || self.size.is_some()
             || self.line_height.is_some()
             || self.mono
+            || self.padding.is_some()
     }
 }
 /// Room around one line of a text area (`EditorHandle::set_line_insets`): a list item's indent, a heading's space
@@ -165,9 +180,66 @@ pub struct LineInset {
     pub above: f32,
     /// Points below the line.
     pub below: f32,
+    /// Not shown and no room taken (a closed toggle's lines): the app keeps the caret out of it.
+    pub hidden: bool,
+}
+impl LineInset {
+    /// A line's height with its room: its text's `bare` height, or nothing when hidden.
+    fn height(&self, bare: f32) -> f32 {
+        if self.hidden { 0. } else { bare + self.above + self.below }
+    }
 }
 /// Each line's room, by its index.
 pub type LineInsets = Rc<dyn Fn(usize) -> LineInset>;
+/// A shape drawn beside a line of a text area (`EditorHandle::set_line_marks`): a list item's bullet or number, a
+/// to-do's box, a quote's rule, the wash behind a code line. It scrolls with its line, under the text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineMark {
+    /// Its left edge, in points from the text area's left content edge.
+    pub x: f32,
+    /// Its top, in points from the top of the line's text (below the line's room above).
+    pub y: f32,
+    /// Its width; infinite: to the area's right edge.
+    pub width: f32,
+    /// Its height; infinite: to the bottom of the line, its wrapped rows and its room below too.
+    pub height: f32,
+    /// With an infinite height: how far above the line's bottom it ends.
+    pub bottom: f32,
+    /// The fill colour.
+    pub fill: crate::scene::Color,
+    /// The corner radius.
+    pub radius: f32,
+    /// The border's colour.
+    pub border_color: crate::scene::Color,
+    /// The border's width.
+    pub border_width: f32,
+    /// Its `x` is how far its right edge sits from the area's right edge (a code block's language).
+    pub from_right: bool,
+    /// Its label in the monospaced font (a code block's line numbers).
+    pub mono: bool,
+    /// Text drawn from its top left (an ordinal), its colour and size; a finite height is its line pitch.
+    pub label: Option<(std::sync::Arc<str>, crate::scene::Color, f32)>,
+}
+impl Default for LineMark {
+    fn default() -> Self {
+        Self {
+            x: 0.,
+            y: 0.,
+            width: 0.,
+            height: 0.,
+            bottom: 0.,
+            from_right: false,
+            mono: false,
+            fill: crate::scene::Color(0, 0, 0, 0),
+            radius: 0.,
+            border_color: crate::scene::Color(0, 0, 0, 0),
+            border_width: 0.,
+            label: None,
+        }
+    }
+}
+/// Each line's marks, by its index.
+pub type LineMarks = Rc<dyn Fn(usize) -> Vec<LineMark>>;
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
 pub type LineSpans = Vec<(Range<usize>, SpanStyle)>;
 /// A `Highlighter` that styles its ranges (`SpanStyle`) beyond colouring
@@ -296,6 +368,8 @@ pub(crate) fn styled_line(
                 font_size: style.size.unwrap_or(size),
                 color: style.color.unwrap_or(color),
                 background: style.background,
+                padding: style.padding.unwrap_or_default(),
+                radius: style.radius.unwrap_or_default(),
                 underline: style
                     .underline
                     .then(|| crate::rich_text::Decoration::new(1.)),
@@ -849,12 +923,12 @@ impl LinesLayout {
                 .map(|i| {
                     let line = layout.line_text(i);
                     let inset = layout.inset(i);
-                    known
-                        .get(&*line)
-                        .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width))
-                        + inset.above
-                        + inset.below
+                    inset.height(
+                        known
+                            .get(&*line)
+                            .copied()
+                            .unwrap_or_else(|| layout.estimate(&line, width)),
+                    )
                 })
                 .collect();
             drop(known);
@@ -897,14 +971,12 @@ impl LinesLayout {
             for i in kept - 1..first_moved {
                 let line = layout.line_text(i);
                 let inset = layout.inset(i);
-                each.push(
+                each.push(inset.height(
                     known
                         .get(&*line)
                         .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width))
-                        + inset.above
-                        + inset.below,
-                );
+                        .unwrap_or_else(|| layout.estimate(&line, width)),
+                ));
             }
             each.extend_from_slice(&old_each[moved..]);
             drop(known);
@@ -1021,7 +1093,7 @@ impl LinesLayout {
         if let Some(heights) = &self.heights {
             // cached without its room: the same text elsewhere (or once its block changes) has its own
             let bare = height.max(self.row);
-            let height = bare + inset.above + inset.below;
+            let height = inset.height(bare);
             if heights.borrow().each[i] != height {
                 heights.borrow_mut().set(i, height);
                 self.cache.heights.borrow_mut().insert((*text).into(), bare);
@@ -1240,6 +1312,7 @@ mod tests {
                     left: 36.,
                     above: 8.,
                     below: 4.,
+                    hidden: false,
                 }
             } else {
                 LineInset::default()

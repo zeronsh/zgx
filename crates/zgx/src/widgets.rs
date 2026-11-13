@@ -18,7 +18,8 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{
-    Highlighter, LineColors, LineInset, LineInsets, LineSpans, SpanHighlighter, SpanStyle,
+    Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans,
+    SpanHighlighter, SpanStyle,
 };
 
 #[derive(Default)]
@@ -502,6 +503,10 @@ struct CodeHint {
     lines: RefCell<Option<Rc<crate::editor_lines::LineCache>>>,
     line_layer: Cell<Option<NodeId>>,
     line_nodes: RefCell<Vec<(usize, NodeId)>>,
+    /// Shapes beside the lines in view (`EditorHandle::set_line_marks`), on a layer under the text.
+    line_marks: RefCell<Option<LineMarks>>,
+    mark_layer: Cell<Option<NodeId>>,
+    mark_nodes: RefCell<Vec<NodeId>>,
     /// The lines last given assistive technology (`Semantics::set_text_lines`).
     told_lines: RefCell<Vec<(usize, NodeId)>>,
     /// Marks behind the selection (the current line, decorations), made
@@ -993,6 +998,15 @@ impl EditorHandle {
             return;
         }
         self.hint.line_cache().set_insets(insets);
+        self.refresh();
+    }
+    /// Shapes drawn beside each line of a text area (a list's bullet, a quote's rule), by line index: they scroll
+    /// with their lines, under the text. `None`: none.
+    pub fn set_line_marks(&self, marks: Option<LineMarks>) {
+        if !self.multiline {
+            return;
+        }
+        *self.hint.code_made().line_marks.borrow_mut() = marks;
         self.refresh();
     }
     /// The caret's colour (`None`: the text's, as by default) and width in
@@ -6026,8 +6040,16 @@ impl Ui {
                 let mut free: Vec<NodeId> = free.into_iter().map(|(_, id)| id).collect();
                 pool.extend(kept);
                 if let (Some(lines), Some(layer)) = (&long_lines, code.line_layer.get()) {
+                    // A hidden line has no node.
+                    pool.retain(|(line, id)| {
+                        let hidden = lines.inset(*line).hidden;
+                        if hidden {
+                            free.push(*id);
+                        }
+                        !hidden
+                    });
                     for i in shown_lines.clone() {
-                        if pool.iter().any(|(line, _)| *line == i) {
+                        if lines.inset(i).hidden || pool.iter().any(|(line, _)| *line == i) {
                             continue;
                         }
                         let id = free.pop().unwrap_or_else(|| {
@@ -6101,6 +6123,130 @@ impl Ui {
                     s.remove(id);
                 }
                 drop(pool);
+                // Each shown line's marks, under the text.
+                let marks_of = code.line_marks.borrow().clone();
+                let mut wanted: Vec<(Rect, LineMark)> = Vec::new();
+                if let (Some(lines), Some(marks_of)) = (&long_lines, marks_of) {
+                    for i in shown_lines.clone() {
+                        let inset = lines.inset(i);
+                        if inset.hidden {
+                            continue;
+                        }
+                        let top = lines.top(i) + inset.above - scroll.1;
+                        let tall = (lines.height(i) - inset.above).max(0.);
+                        for mark in marks_of(i) {
+                            let width = if mark.width.is_finite() {
+                                mark.width
+                            } else {
+                                (inner_width - mark.x).max(0.)
+                            };
+                            let height = if mark.height.is_finite() {
+                                mark.height
+                            } else {
+                                (tall - mark.y - mark.bottom).max(0.)
+                            };
+                            let x = if mark.from_right {
+                                inner_width - mark.x - width
+                            } else {
+                                mark.x - scroll.0
+                            };
+                            wanted.push((Rect::new(x, top + mark.y, width, height), mark));
+                        }
+                    }
+                }
+                if !wanted.is_empty()
+                    && code.mark_layer.get().is_none_or(|layer| !s.contains(layer))
+                {
+                    let layer = s.append(
+                        viewport,
+                        NodeKind::Container(Layout::Overlay),
+                        Style::default(),
+                    );
+                    let mut order = s.children(viewport).to_vec();
+                    order.retain(|id| *id != layer);
+                    let at = order.iter().position(|id| *id == text).unwrap_or(0);
+                    order.insert(at, layer);
+                    s.reorder_children(viewport, &order);
+                    code.mark_layer.set(Some(layer));
+                    code.mark_nodes.borrow_mut().clear();
+                }
+                let mut mark_nodes = code.mark_nodes.borrow_mut();
+                let count: usize = wanted
+                    .iter()
+                    .map(|(_, m)| 1 + usize::from(m.label.is_some()))
+                    .sum();
+                while mark_nodes.len() > count {
+                    s.remove(mark_nodes.pop().unwrap());
+                }
+                if let Some(layer) = code.mark_layer.get() {
+                    while mark_nodes.len() < count {
+                        mark_nodes.push(s.append(
+                            layer,
+                            NodeKind::Rect(Color(0, 0, 0, 0)),
+                            Style::default(),
+                        ));
+                    }
+                    let mut ids = mark_nodes.iter().copied();
+                    for (rect, mark) in wanted {
+                        let Some(id) = ids.next() else { break };
+                        let quad = crate::scene::QuadStyle {
+                            fill: mark.fill,
+                            radius: mark.radius,
+                            border_color: mark.border_color,
+                            border_width: mark.border_width,
+                            shadow: None,
+                            decoration: None,
+                            border_over: false,
+                            outline: None,
+                        };
+                        if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
+                            s.set_kind(id, NodeKind::Quad(quad));
+                        }
+                        s.set_style(id, fixed(rect.width, rect.height));
+                        s.set_transform(
+                            id,
+                            Transform {
+                                x: rect.x,
+                                y: rect.y,
+                            },
+                        );
+                        if let Some((label, label_color, label_size)) = mark.label {
+                            let Some(id) = ids.next() else { break };
+                            let unchanged = matches!(
+                                s.kind(id),
+                                NodeKind::Text { text, color: c, font_size }
+                                    if **text == *label && *c == label_color && *font_size == label_size
+                            );
+                            if !unchanged {
+                                s.set_kind(
+                                    id,
+                                    NodeKind::Text {
+                                        text: label,
+                                        color: label_color,
+                                        font_size: label_size,
+                                    },
+                                );
+                            }
+                            let mut label_font = font.clone();
+                            if mark.mono {
+                                label_font.family = crate::text_layout::FontFamily::Monospace;
+                            }
+                            if mark.height.is_finite() && mark.height > 0. {
+                                label_font.line_height = crate::text_layout::LineHeight::px(mark.height);
+                            }
+                            s.set_font(id, label_font);
+                            s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
+                            s.set_transform(
+                                id,
+                                Transform {
+                                    x: rect.x,
+                                    y: rect.y,
+                                },
+                            );
+                        }
+                    }
+                }
+                drop(mark_nodes);
             }
             s.set_transform(
                 caret,
