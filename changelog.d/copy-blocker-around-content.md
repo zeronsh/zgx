@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **A scroll frame decides whether to copy its pixels from what lies around its content** (zgx, zgx-gpu): when nothing the content holds paints otherwise than a plain item does (no layer, backdrop blur, fade of its own, dithered picture, layer shader, baked loop or raised child), its own paint items are no longer made each frame only to be checked. `Scene::paints_plainly` looks at its nodes as far down as the paint walk would go, and `Scene::layer_items_around` walks the window leaving out what the content holds. Anything else, or content that might cover what lies under it, takes the whole walk as before; debug builds have both decide and compare. Scrolling an expanded 1,000-call tool group in Zeron, paint goes from 274.6M to 255.0M instructions a second (−7.1%), copying as before.

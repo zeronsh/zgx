@@ -1,5 +1,7 @@
 //! Input, focus, pointer and drag. One test binary for the area (see AGENTS.md):
 //! a test file goes in the group for its area, listed here.
+#[path = "../acted_input.rs"]
+mod acted_input;
 #[path = "../actions.rs"]
 mod actions;
 #[path = "../active_disable_lifecycle.rs"]

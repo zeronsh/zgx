@@ -1013,3 +1013,63 @@ impl Drop for Player {
         let _ = self.asks.send(Ask::Quit);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::task::{Context, Waker};
+
+    /// Frames and the stop that follows them, arriving together (the thread
+    /// told all three before the window's loop came round): the latest
+    /// frame is told first, so what listens sees playback stop on the frame
+    /// it ended on. Before, the stop was told first and the frame after it.
+    #[test]
+    fn a_stop_follows_the_latest_frame_when_events_arrive_together() {
+        let runtime = Runtime::new();
+        let (asks, _asked) = channel();
+        let (tell, told) = channel();
+        let (wake, woken) = zgx::task::latest();
+        #[cfg(target_os = "macos")]
+        let (_surfaces_to, surfaces) = channel();
+        let player = Rc::new(Player {
+            asks,
+            events: RefCell::new(Some((told, woken))),
+            frame: runtime.signal(0),
+            playing: runtime.signal(true),
+            composition: runtime.signal(None),
+            tracks: runtime.signal(Vec::new()),
+            error: runtime.signal(None),
+            image: runtime.signal(None),
+            counts: Arc::new(Counts::default()),
+            #[cfg(target_os = "macos")]
+            surfaces,
+            #[cfg(target_os = "macos")]
+            surface: runtime.signal(None),
+        });
+        for frame in [58, 59] {
+            tell.send(Event::Frame {
+                frame,
+                width: 1,
+                height: 1,
+                pixels: Arc::from([0, 0, 0, 255]),
+            })
+            .unwrap();
+        }
+        tell.send(Event::Stopped).unwrap();
+        wake.send(());
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let recorded = seen.clone();
+        let current = player.clone();
+        let mut listen = std::pin::pin!(player.listen(move |event| {
+            recorded.borrow_mut().push(match event {
+                Event::Frame { frame, .. } => ("frame", *frame),
+                Event::Stopped => ("stopped", current.frame.with_untracked(|frame| *frame)),
+                _ => panic!("unexpected event"),
+            });
+        }));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(std::future::Future::poll(listen.as_mut(), &mut context).is_pending());
+        assert_eq!(*seen.borrow(), [("frame", 59), ("stopped", 59)]);
+        assert!(!player.playing.with_untracked(|playing| *playing));
+    }
+}

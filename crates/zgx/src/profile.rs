@@ -18,10 +18,11 @@
 //! On macOS each top-level span is also an `os_signpost` interval
 //! (subsystem `dev.zgx`, category `phases`), so Instruments' os_signpost
 //! track shows the phases on the timeline.
+use crate::time::Instant;
 use std::{
     cell::RefCell,
     sync::atomic::{AtomicU8, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// A part of a frame's work.
@@ -670,9 +671,9 @@ mod counter {
     #[cfg(not(target_os = "macos"))]
     pub fn since_start() -> (u64, f64) {
         use std::sync::OnceLock;
-        static FIRST: OnceLock<std::time::Instant> = OnceLock::new();
+        static FIRST: OnceLock<crate::time::Instant> = OnceLock::new();
         thread_local!(static COUNTER: Counter = Counter::new());
-        let first = *FIRST.get_or_init(std::time::Instant::now);
+        let first = *FIRST.get_or_init(crate::time::Instant::now);
         let count = COUNTER.with(Counter::read);
         (count, first.elapsed().as_secs_f64() * 1e3)
     }

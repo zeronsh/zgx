@@ -3070,7 +3070,7 @@ pub struct BakedLoop {
     pub frames: Vec<(f32, f32)>,
     pub fps: f32,
     /// When its first frame showed.
-    pub started: std::time::Instant,
+    pub started: crate::time::Instant,
     /// The renderer can't play it (`refuse`).
     refused: std::cell::Cell<bool>,
     wake: Box<dyn Fn()>,
@@ -3082,7 +3082,7 @@ impl BakedLoop {
         Self {
             frames,
             fps,
-            started: std::time::Instant::now(),
+            started: crate::time::Instant::now(),
             refused: std::cell::Cell::new(false),
             wake,
         }
@@ -3248,6 +3248,11 @@ pub struct Scene {
     /// row no longer holding one, or its slot reused) costs one layout from
     /// that row, which clears it.
     shrank: Vec<u64>,
+    /// Whether rows and columns shrank their children (`layout_shrinks`),
+    /// by slot: the generation of the node, the pass of the layout found so
+    /// (none: 0) and what was found. Asked again of their children as each
+    /// is laid out alone, frame after frame, while that layout stands.
+    shrinks_of: Vec<(u32, u64, bool)>,
     slots: Vec<Slot>,
     free: Vec<u32>,
     /// Slots of nodes removed and not yet freed (`kill`).
@@ -3416,6 +3421,14 @@ pub struct Scene {
     /// Tests: work every move's context out again (`move_context` unused).
     #[cfg(test)]
     pub(crate) no_move_context: bool,
+    /// Tests: a moved leaf damaged by the two subtree walks, as every move
+    /// was (`move_damaged`), to compare the two.
+    #[cfg(test)]
+    pub(crate) leaf_moves_off: bool,
+    /// Tests: moved leaves damaged together, and of those to the grid's
+    /// cells (`damage_moved_leaf`).
+    #[cfg(test)]
+    pub(crate) leaf_moves: [u64; 2],
     #[cfg(test)]
     pub(crate) move_context_kept: u64,
     /// Tests: damage subtrees by the walks as they were before they took
@@ -3557,6 +3570,7 @@ impl Scene {
         Self {
             pending_children: std::cell::Cell::new(u32::MAX),
             shrank: Default::default(),
+            shrinks_of: Vec::new(),
             identity: NEXT_SCENE_ID
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                 .expect("scene identity exhausted"),
@@ -3695,6 +3709,10 @@ impl Scene {
             move_context: None,
             #[cfg(test)]
             no_move_context: false,
+            #[cfg(test)]
+            leaf_moves_off: false,
+            #[cfg(test)]
+            leaf_moves: [0; 2],
             #[cfg(test)]
             move_context_kept: 0,
             #[cfg(test)]
@@ -4036,6 +4054,7 @@ impl Scene {
             + vec_bytes(&self.repaints)
             + vec_bytes(&self.inert)
             + vec_bytes(&self.shrank)
+            + vec_bytes(&self.shrinks_of)
             + map_bytes(&self.contents_styles)
             + map_bytes(&self.given_styles)
             + map_bytes(&self.directions)
@@ -4402,6 +4421,23 @@ impl Scene {
                 .children_raw(node)
                 .iter()
                 .any(|child| crate::deep(0, || self.paints(*child)))
+    }
+    /// Whether `id`, its box at `bounds` (its `world_bounds`), is wholly
+    /// above or below scroll view `view` around it, which clips it
+    /// vertically: then nothing of it shows (`visible_bounds` is `None`, or
+    /// no taller than nothing), told without working out its clips, and the
+    /// read noted as `visible_bounds` notes it. False where it may show, or
+    /// a transform or popup could place it elsewhere.
+    pub(crate) fn misses_view(&self, id: NodeId, bounds: Rect, view: NodeId) -> bool {
+        if self.transformed > 0 || !self.popups.is_empty() || !self.clips(view).1 {
+            return false;
+        }
+        let shown = self.world_bounds(view);
+        let misses = bounds.y >= shown.y + shown.height || bounds.y + bounds.height <= shown.y;
+        if misses {
+            self.note_geometry_read(id);
+        }
+        misses
     }
     /// The part of `id`'s box that shows: inside its clips and not fully
     /// transparent; `None` when nothing does. Under a popup root
@@ -9374,12 +9410,8 @@ impl Scene {
         // What it needs of the node, read once (a move is the hottest
         // setter: a reorder animation moves every row each frame).
         let node = self.node(id);
-        let (scroll_copy, from, transparent, parent) = (
-            node.scroll_copy,
-            node.transform,
-            node.effects.opacity <= 0.,
-            node.parent,
-        );
+        let (scroll_copy, from, transparent) =
+            (node.scroll_copy, node.transform, node.effects.opacity <= 0.);
         if scroll_copy {
             transform = self.on_pixels(transform);
         }
@@ -9407,20 +9439,151 @@ impl Scene {
             self.invalidate(id, COMPOSITE);
             return;
         }
+        self.move_damaged(id, &transform);
+    }
+    /// `set_transform`'s damage for `id` moved to `to` from where it is,
+    /// and the move itself. A leaf with nothing transformed or filtered (each row of
+    /// a list animating its order) has both its places worked out at once,
+    /// from one look at the node, and added together, as layout adds a
+    /// moved leaf's (`leaf_damage`); anything else is walked where it was
+    /// and where it lands (`damage_subtree_with`). Out of line, so
+    /// `set_transform`'s other paths stay as they were.
+    #[inline(never)]
+    fn move_damaged(&mut self, id: NodeId, to: &Transform) {
+        // Read here, not passed: `set_transform`'s own paths keep no more
+        // live for the call.
+        let node = self.node(id);
+        let (from, parent, to) = (node.transform, node.parent, *to);
         // Its old place and its new, under the same ancestors: their
         // context is worked out once, and kept for the next move under the
         // same parent while nothing else changed (`move_context`).
         let mut context = self.kept_context(parent);
-        self.damage_subtree_with(id, &mut context);
+        let leaf = self.transformed + self.filtered.get() == 0
+            && self.children_raw(self.node(id)).is_empty();
+        #[cfg(test)]
+        let leaf = leaf && !self.leaf_moves_off;
+        match leaf {
+            true => self.damage_moved_leaf(id, from, to, &mut context),
+            false => self.damage_subtree_with(id, &mut context),
+        }
         self.move_context = None;
-        self.node_mut(id).transform = transform;
+        self.node_mut(id).transform = to;
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
-        self.damage_subtree_with(id, &mut context);
+        if !leaf {
+            self.damage_subtree_with(id, &mut context);
+        }
         self.invalidate(id, COMPOSITE);
         // Moving a child (and marking it and its ancestors to repaint)
         // leaves the parent's places, clips and visibility as they were: a
         // child is never its own parent's ancestor.
         self.keep_context(parent, context);
+    }
+    /// A moved leaf's damage where it was (`from`) and where it lands
+    /// (`to`): to the grid's cells when it takes them, else as rounded
+    /// rectangles, those sharing their extent along an axis and
+    /// overlapping as one (as `add_moved_leaf_damage`, which stays
+    /// `arrange::<false>`'s alone), into the list as the walks add them.
+    fn damage_moved_leaf(
+        &mut self,
+        id: NodeId,
+        from: Transform,
+        to: Transform,
+        context: &mut Option<DamageContext>,
+    ) {
+        #[cfg(test)]
+        {
+            self.leaf_moves[0] += 1;
+            self.leaf_moves[1] += self.grid_takes_cells() as u64;
+        }
+        if self.grid_takes_cells() {
+            let (before, after) = self.moved_leaf_rects::<true>(id, context, from, to);
+            if let Some(grid) = &mut self.damage_grid {
+                grid.mark_clipped_pair(before, after);
+            }
+            return;
+        }
+        match self.moved_leaf_rects::<false>(id, context, from, to) {
+            (Some(before), Some(after))
+                if (before.x == after.x && before.width == after.width
+                    || before.y == after.y && before.height == after.height)
+                    && before.intersects(after) =>
+            {
+                self.add_damage(before.union(after));
+            }
+            (before, after) => {
+                for rect in [before, after].into_iter().flatten() {
+                    self.add_damage(rect);
+                }
+            }
+        }
+    }
+    /// What `damage_subtree_with` adds for leaf `id` under translation
+    /// `from` and then `to`, with nothing transformed or filtered: as
+    /// `leaf_damage` works a leaf's two boxes out, for one box at two
+    /// translations.
+    fn moved_leaf_rects<const CELLS: bool>(
+        &self,
+        id: NodeId,
+        context: &mut Option<DamageContext>,
+        from: Transform,
+        to: Transform,
+    ) -> (Option<Rect>, Option<Rect>) {
+        // Hidden, or never laid out (a row mounting as it moves in): it
+        // damages nothing, and its parent's context goes unworked, as
+        // `damage_subtree_with` leaves it.
+        let node = self.node(id);
+        let unplaced = node.measurement.is_none() && node.bounds == Rect::default();
+        if !own_visible(&node.style) || unplaced || self.damage_is_full() {
+            return (None, None);
+        }
+        let Some((parent, parent_clip)) =
+            *context.get_or_insert_with(|| self.damage_context(node.parent))
+        else {
+            return (None, None);
+        };
+        let at = |translation: Transform| Transform {
+            x: parent.x + translation.x,
+            y: parent.y + translation.y,
+        };
+        let (was, now) = (at(from), at(to));
+        let clips = clip_axes(&node.style) != (false, false);
+        let past_clip = clips && matches!(node.kind, NodeKind::Quad(_) | NodeKind::Panel { .. });
+        let bounds = node.bounds;
+        macro_rules! pair {
+            ($paint:expr) => {{
+                let paint = $paint;
+                let rect = |transform| {
+                    self.leaf_rect::<CELLS>(
+                        node,
+                        bounds,
+                        transform,
+                        parent_clip,
+                        clips,
+                        past_clip,
+                        &paint,
+                    )
+                };
+                (rect(was), rect(now))
+            }};
+        }
+        match &node.kind {
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
+                if quad.decoration.is_none() && quad.shadow.is_none() && quad.outline.is_none() {
+                    pair!(Some)
+                } else {
+                    pair!(|bounds| Some(quad.paint_bounds(bounds)))
+                }
+            }
+            NodeKind::Image(image) => pair!(|bounds| Some(image.paint_bounds(bounds))),
+            NodeKind::Svg(svg) => pair!(|bounds| Some(svg.paint_bounds(bounds))),
+            NodeKind::Text { .. } | NodeKind::RichText { .. }
+                if node.effects.blur_radius <= 0.0 =>
+            {
+                pair!(|bounds| Some(self.text_ink(id, bounds)))
+            }
+            NodeKind::Container(_) if node.effects.blur_radius <= 0.0 => (None, None),
+            _ => pair!(Some),
+        }
     }
     /// The context kept for `parent` (`move_context`), if any.
     #[inline(always)]
@@ -10129,9 +10292,16 @@ impl Scene {
         // Held (`set_style_within`): its parent chose its size, and it answers
         // that as it did or isn't let stand.
         let held = !self.held_alone.is_empty() && self.held_alone.contains(&id);
+        // Or, not sized by its parent along its axis, held at its floor by
+        // a parent that shrank it, a floor its content just lowered: its
+        // parent shrinks it now (as for a boundary, `floor_dropped`), though
+        // its own size answers as it did. Asked only under a row or column
+        // that shrank (`shrank`).
+        let floor = flexed.is_none() && !self.shrank.is_empty() && self.shrank_bit(parent);
         let stands = (held || flexed.is_none())
             && self.reads_bits(id) == kept_reads
-            && self.measure_full(id, asked) == was;
+            && self.measure_full(id, asked) == was
+            && !(floor && self.floor_dropped_alone(id));
         if stands && held {
             // What it answered to other questions read what just changed.
             let node = self.tree_node_mut(id);
@@ -10278,7 +10448,8 @@ impl Scene {
     /// held there and no longer holds: at its size under a parent that
     /// shrank its children (`shrank`), it was held at its automatic minimum,
     /// and that is now less than its size, so its parent would shrink it.
-    /// Asked only of the few boundaries a frame lays out alone.
+    /// Asked only of the few boundaries a frame lays out alone (and of the
+    /// stops `floor_dropped_alone` finds held).
     #[inline(never)]
     fn floor_dropped(&mut self, id: NodeId, constraints: Constraints, size: (f32, f32)) -> bool {
         let node = self.node(id);
@@ -10315,6 +10486,189 @@ impl Scene {
         }
         dropped
     }
+    /// `floor_dropped` for `id`, a stop laid out alone (`relayout_alone`)
+    /// at the size it holds, not sized by its parent along its axis, under a row or
+    /// column that shrank its children (`shrank`, set by any layout of
+    /// `parent`, a probe's too): only if the layout `parent` holds shrank
+    /// them, which held it at its automatic minimum, where it stands. Else
+    /// it stands where nothing was shrunk, and a floor below it changes
+    /// nothing. Its parent's layout told apart (`layout_shrinks`) or not,
+    /// as before.
+    #[cold]
+    #[inline(never)]
+    fn floor_dropped_alone(&mut self, id: NodeId) -> bool {
+        let Some(parent) = self.node(id).parent else {
+            return false;
+        };
+        // Of a pass: an expired result's (`EXPIRED_PASS`) is no layout's,
+        // and 0 is an empty slot's.
+        let pass = self.node(parent).measurement.as_ref().map(|m| m.pass);
+        let pass = pass.filter(|&pass| pass != EXPIRED_PASS && pass != 0);
+        let slot = parent.index as usize;
+        let known = pass.and_then(|pass| match self.shrinks_of.get(slot) {
+            Some(&(generation, of, shrinks)) if generation == parent.generation && of == pass => {
+                Some(shrinks)
+            }
+            _ => None,
+        });
+        let shrinks = match known {
+            Some(shrinks) => shrinks,
+            None => match self.layout_shrinks(parent) {
+                Some(shrinks) => {
+                    if let Some(pass) = pass {
+                        if self.shrinks_of.len() <= slot {
+                            self.shrinks_of.resize(slot + 1, (0, 0, false));
+                        }
+                        self.shrinks_of[slot] = (parent.generation, pass, shrinks);
+                    }
+                    shrinks
+                }
+                // Not told apart: the floor is looked at, as before.
+                None => true,
+            },
+        };
+        if !shrinks {
+            return false;
+        }
+        // Under the constraint it was laid out again at, at the size it
+        // answered as before: the result it holds.
+        let Some((constraints, size)) = self
+            .node(id)
+            .measurement
+            .as_ref()
+            .map(|m| (m.constraints, m.size))
+        else {
+            return false;
+        };
+        self.floor_dropped(id, constraints, size)
+    }
+    /// Whether the layout row or column `id` holds (its only result, with
+    /// its children's places) shrank its children: its children's bases
+    /// and gaps, more than the room along its axis, as the flex loop finds
+    /// them. A child its parent sized along that axis has its base in the
+    /// result it was measured at first (without that size); None where one
+    /// is gone, or the layout is not one this can tell.
+    fn layout_shrinks(&self, id: NodeId) -> Option<bool> {
+        let node = self.node(id);
+        let horizontal = match node.kind {
+            NodeKind::Container(Layout::Row) => true,
+            NodeKind::Container(Layout::Column) => false,
+            _ => return None,
+        };
+        let measured = node.measurement.as_ref()?;
+        let constraints = measured.constraints;
+        let resolved;
+        let style = match node.style.layout_options {
+            None => &node.style,
+            Some(_) => {
+                resolved = self.resolved_leaf_style(id, constraints);
+                &resolved
+            }
+        };
+        let padding = style.padding_edges.unwrap_or(Insets::all(style.padding));
+        // Along its axis, as its layout has them: its padding, the size it
+        // was given or sets, and the room its children were measured in.
+        let (padding, explicit, min, max, room) = if horizontal {
+            let explicit = constraints
+                .force_width
+                .or(style.width)
+                .or_else(|| percentage(style.width_percent, constraints.percent_width));
+            let (min, max) = (style.min_width, style.max_width);
+            (
+                padding.left.max(0.0) + padding.right.max(0.0),
+                explicit,
+                min,
+                max,
+                constraints.width,
+            )
+        } else {
+            let explicit = constraints
+                .force_height
+                .or(style.height)
+                .or_else(|| percentage(style.height_percent, constraints.percent_height));
+            let (min, max) = (style.min_height, style.max_height);
+            (
+                padding.top.max(0.0) + padding.bottom.max(0.0),
+                explicit,
+                min,
+                max,
+                constraints.height,
+            )
+        };
+        // Sized by its children, with no maximum (or room, across a row),
+        // it holds them all: it shrinks none.
+        if explicit.is_none() && max.is_none() && (!horizontal || room.is_none()) {
+            return Some(false);
+        }
+        let explicit = explicit.map(|size| dimension(size, min, max));
+        let room = explicit
+            .or_else(|| room.map(|size| size.min(max.unwrap_or(f32::INFINITY))))
+            .or(max)
+            .map(|size| (size - padding).max(0.0));
+        let mut bases = 0.0;
+        let mut count = 0usize;
+        for &(child, place, under) in &measured.children {
+            let child_node = self.node(child);
+            if child_node.style.absolute {
+                continue;
+            }
+            count += 1;
+            let m = child_node.style.margin;
+            bases += if horizontal {
+                m.left + m.right
+            } else {
+                m.top + m.bottom
+            };
+            let sized = if horizontal {
+                under.force_width
+            } else {
+                under.force_height
+            };
+            if sized.is_none() {
+                bases += if horizontal {
+                    place.width
+                } else {
+                    place.height
+                };
+                continue;
+            }
+            // Its base: the result it was measured at before it was sized,
+            // in the room it then had.
+            let natural = self.relevant(
+                child,
+                if horizontal {
+                    Constraints {
+                        width: room,
+                        force_width: None,
+                        ..under
+                    }
+                } else {
+                    Constraints {
+                        height: room,
+                        force_height: None,
+                        ..under
+                    }
+                },
+            );
+            let base = child_node
+                .measurement
+                .iter()
+                .chain(&child_node.alternates)
+                .map(|m| (m.constraints, m.size))
+                .chain(child_node.sizes.iter().map(|s| (s.constraints, s.size)))
+                .find(|(asked, _)| *asked == natural)?
+                .1;
+            bases += if horizontal { base.0 } else { base.1 };
+        }
+        bases += style.gap * count.saturating_sub(1) as f32;
+        // A row sized by its content fits it in its room (`measure_uncached`).
+        let content = explicit.unwrap_or(match room.filter(|_| horizontal) {
+            Some(room) => bases.min(room) + padding,
+            None => bases + padding,
+        });
+        let limit = dimension(content, min, max) - padding;
+        Some(limit - bases <= -0.001)
+    }
     /// Whether the row or column in slot `id` shrank its children when last
     /// laid out (`shrank`).
     fn shrank_bit(&self, id: NodeId) -> bool {
@@ -10342,11 +10696,18 @@ impl Scene {
         let style = &self.node(id).style;
         style.absolute && style.layout_options.is_none()
     }
-    /// Mark every ancestor up to the root, ignoring boundaries.
+    /// Mark every ancestor up to the root, ignoring boundaries. What one
+    /// answered this pass, laid out alone before this boundary was found
+    /// not to stand (`layout_alone`, which runs first), took its old
+    /// answer, and serves no more (`expire_this_pass`): the layout that
+    /// follows would keep it, and leave the boundary's subtree unarranged.
     fn invalidate_layout_to_root(&mut self, mut id: NodeId) {
         let mut own = true;
         loop {
-            self.invalidate_with(id, LAYOUT, false, std::mem::take(&mut own));
+            self.invalidate_with(id, LAYOUT, false, own);
+            if !std::mem::take(&mut own) {
+                self.expire_this_pass(id);
+            }
             match self.node(id).parent {
                 Some(parent) => id = parent,
                 None => break,
@@ -14786,14 +15147,37 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn removing_subtree(&mut self, id: NodeId) {
-        let mut ids = vec![id];
-        let mut at = 0;
-        while let Some(&id) = ids.get(at) {
-            at += 1;
-            let children = self.children_raw(self.node(id)).clone();
-            ids.extend(children);
+        // Walked into the list it is noted in (`removed`), which keeps its
+        // room from one flush to the next: no list of its own, and no copy
+        // of each node's children.
+        let Some(changes) = self.changes.get_mut() else {
+            return;
+        };
+        if changes.read.replace(false) {
+            changes.noted.clear();
+            changes.read_len.set(0);
+            changes.dropping = false;
         }
-        self.removed(&ids);
+        if changes.dropping {
+            return;
+        }
+        let mut noted = std::mem::take(&mut changes.noted);
+        let mut at = noted.len();
+        noted.push(id);
+        while let Some(&id) = noted.get(at) {
+            at += 1;
+            noted.extend_from_slice(self.children_raw(self.node(id)));
+        }
+        let flushes = self.repaint_flushes;
+        let changes = self.changes.get_mut().expect("noting changes");
+        changes.noted = noted;
+        if changes.noted.len() > REPAINTS_KEPT {
+            changes.noted = Vec::new();
+            changes.read_len.set(0);
+            // These were the next flush's: what is read next starts after.
+            changes.since.set(flushes + 2);
+            changes.dropping = true;
+        }
     }
     /// Note `ids`, a subtree's nodes removed at once, in
     /// [`Scene::resource_changes`]. Those a renderer has read go first. Past the bound, all go, and none are
@@ -15292,18 +15676,117 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         match self.plain_walks() {
             true => match damage {
-                Some(_) => self.layer_items_walk::<false, false, false>(
+                Some(_) => self.layer_items_walk::<false, false, false, false>(
                     root,
                     damage,
                     &mut Vec::new(),
                     None,
+                    None,
                 ),
                 None => self.layer_items_whole(root),
             },
-            false => {
-                self.layer_items_walk::<true, false, false>(root, damage, &mut Vec::new(), None)
-            }
+            false => self.layer_items_walk::<true, false, false, false>(
+                root,
+                damage,
+                &mut Vec::new(),
+                None,
+                None,
+            ),
         }
+    }
+    /// The window's paint items within `clip`, as
+    /// `layer_items_within(None, Some(&[clip]))` finds them, but for what
+    /// `node` holds: its own items stay, its descendants' are left out. Only
+    /// where what it holds paints as plain items alone, its paint order the
+    /// tree's (`paints_plainly`, and no raised or sticky children or popups
+    /// anywhere, which could paint between them); `None` otherwise. For a
+    /// renderer asking what lies around content that moves (zgx-gpu's
+    /// scroll copies). Renderer plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn layer_items_around(&self, node: NodeId, clip: Rect) -> Option<Vec<PaintItem<'_>>> {
+        if !self.plain_walks() || !self.paints_plainly(node, clip) {
+            return None;
+        }
+        Some(self.layer_items_walk::<false, false, false, true>(
+            None,
+            Some(&[clip]),
+            &mut Vec::new(),
+            None,
+            Some(node),
+        ))
+    }
+    /// Whether everything `root` holds that can show within `clip` (`root`
+    /// itself among it) paints as a plain item: no layer (isolated,
+    /// transformed or an effect's), backdrop blur, edge fade, picture drawn
+    /// with an effect, layer shader, baked loop, or node painted outside its
+    /// parent's fade. Its nodes are looked at, as far down as the paint walk
+    /// would go within `clip`, and no item is made; whatever might paint
+    /// otherwise, shown or not, says `false`.
+    #[doc(hidden)]
+    pub fn paints_plainly(&self, root: NodeId, clip: Rect) -> bool {
+        // (These lists can hold removed nodes until they're let go:
+        // `outside_fade` as it grows, the others on a flush or a free.)
+        let within = |id: &NodeId| self.contains(*id) && self.is_within(*id, root);
+        if self.blur_nodes.iter().any(within) || self.layer_shaders.keys().any(within) {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if self.baked_loops.iter().any(|(id, _)| within(id)) {
+            return false;
+        }
+        if let Some(cold) = &self.cold
+            && cold.outside_fade.keys().any(within)
+        {
+            return false;
+        }
+        self.settle_children();
+        let mut transform = Transform::default();
+        let mut parent = self.node(root).parent;
+        while let Some(id) = parent {
+            let n = self.node(id);
+            transform.x += n.transform.x;
+            transform.y += n.transform.y;
+            parent = n.parent;
+        }
+        let mut stack = vec![(root, transform)];
+        while let Some((id, parent_transform)) = stack.pop() {
+            let node = self.node(id);
+            if node.isolated
+                || node.transformed()
+                || node.effect_layer()
+                || node.effects.blur_radius > 0.
+                // A fade of its own, as the walk makes one: bands of a
+                // `fade_overflow` node the content doesn't run past are none.
+                || fades(&node.style)
+                    && fade_mask(None, Some(node.bounds), &node.style, self.overflow_of(id, node))
+                        .is_some()
+                || matches!(&node.kind, NodeKind::Image(image)
+                    if image.effect() != crate::image::ImageEffect::Plain)
+            {
+                return false;
+            }
+            let transform = Transform {
+                x: parent_transform.x + node.transform.x,
+                y: parent_transform.y + node.transform.y,
+            };
+            let children = match self.children_raw(node) {
+                all if all.len() >= SEARCHED_CHILDREN => {
+                    self.searched(id, node, all, transform, clip)
+                }
+                all => all,
+            };
+            // The children the walk goes on to, as it filters them.
+            stack.extend(
+                children
+                    .iter()
+                    .filter(|child| {
+                        self.ink(**child)
+                            .is_some_and(|ink| ink.translated(transform).intersects(clip))
+                    })
+                    .map(|child| (*child, transform)),
+            );
+        }
+        true
     }
     /// Of `node`'s `children`, those whose ink can meet `reach` (a damaged
     /// walk's damage, all of it, in the window) at `transform` (its
@@ -15356,7 +15839,7 @@ impl Scene {
     /// its damage already, and pays nothing for it.
     #[inline(never)]
     fn layer_items_whole(&self, root: Option<NodeId>) -> Vec<PaintItem<'_>> {
-        self.layer_items_walk::<false, false, true>(root, None, &mut Vec::new(), None)
+        self.layer_items_walk::<false, false, true, false>(root, None, &mut Vec::new(), None, None)
     }
     /// The window's paint items (as [`Scene::layer_items`] with `None`), and
     /// into `inherited` what each took from its ancestors, for
@@ -15364,8 +15847,11 @@ impl Scene {
     pub fn layer_items_recorded(&self, inherited: &mut Vec<Inherited>) -> Vec<PaintItem<'_>> {
         inherited.clear();
         match self.plain_walks() {
-            true => self.layer_items_walk::<false, true, false>(None, None, inherited, None),
-            false => self.layer_items_walk::<true, true, false>(None, None, inherited, None),
+            true => self
+                .layer_items_walk::<false, true, false, false>(None, None, inherited, None, None),
+            false => {
+                self.layer_items_walk::<true, true, false, false>(None, None, inherited, None, None)
+            }
         }
     }
     /// The paint items of `id`'s subtree as the window's walk makes them,
@@ -15382,12 +15868,20 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         out.clear();
         match self.plain_walks() {
-            true => {
-                self.layer_items_walk::<false, true, false>(None, None, out, Some((id, inherited)))
-            }
-            false => {
-                self.layer_items_walk::<true, true, false>(None, None, out, Some((id, inherited)))
-            }
+            true => self.layer_items_walk::<false, true, false, false>(
+                None,
+                None,
+                out,
+                Some((id, inherited)),
+                None,
+            ),
+            false => self.layer_items_walk::<true, true, false, false>(
+                None,
+                None,
+                out,
+                Some((id, inherited)),
+                None,
+            ),
         }
     }
     /// Plain node `id`'s box as [`Scene::item_in`] places it, from what it
@@ -15456,12 +15950,19 @@ impl Scene {
     /// `RECORD`: what each item inherits goes into `inherited`.
     /// `from`: a subtree alone, from what its root inherited (`root` and
     /// `damage` are then `None`).
-    fn layer_items_walk<const POPUPS: bool, const RECORD: bool, const CLIPS: bool>(
+    /// `AROUND`: what `around` holds is left out, its own items kept.
+    fn layer_items_walk<
+        const POPUPS: bool,
+        const RECORD: bool,
+        const CLIPS: bool,
+        const AROUND: bool,
+    >(
         &self,
         root: Option<NodeId>,
         damage: Option<&[Rect]>,
         inherited: &mut Vec<Inherited>,
         from: Option<(NodeId, &Inherited)>,
+        around: Option<NodeId>,
     ) -> Vec<PaintItem<'_>> {
         self.settle_children();
         let reach = damage.map(|damage| {
@@ -15730,6 +16231,7 @@ impl Scene {
                     .shared(),
                 };
                 let children = match POPUPS {
+                    _ if AROUND && around == Some(id) => &[][..],
                     true => self.paint_order(id, node),
                     false => match (reach, self.children_raw(node)) {
                         (Some(reach), all) if all.len() >= SEARCHED_CHILDREN => {
@@ -16179,6 +16681,24 @@ mod tests {
         assert!(relayered.has_inline_boxes());
     }
     use super::*;
+    /// A node painted outside its parent's fade, removed, leaves its entry
+    /// (let go only as the map grows): asking what paints plainly passes
+    /// it by rather than looking it up.
+    #[test]
+    fn paints_plainly_passes_removed_nodes_by() {
+        let mut scene = Scene::new(200., 200.);
+        let root = scene.root();
+        let view = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        let bar = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_outside_fade(bar);
+        scene.flush();
+        let clip = Rect::new(0., 0., 200., 200.);
+        assert!(!scene.paints_plainly(view, clip));
+        scene.remove(bar);
+        scene.flush();
+        assert!(scene.paints_plainly(view, clip));
+        assert!(scene.paints_plainly(root, clip));
+    }
     /// A long column's ink worked out from its kept union and the children
     /// that grew where they were (`grown_ink`) is, to the bit, the ink worked
     /// out over every child (`rescan_inks`), and so is every walk's: as its
@@ -23258,6 +23778,38 @@ mod local_transform_tests {
     /// renderer learns of as it draws and checks them. Kept until read,
     /// however many flushes; past its bound, given up, and its range starts
     /// past the gap.
+    /// A removed subtree is named whole to a renderer, its root first,
+    /// walked into the list it is noted in (`removing_subtree`): no list of
+    /// its own, and noted after what was noted before.
+    #[test]
+    fn a_removed_subtree_is_named_whole_after_what_was_noted_before() {
+        let mut scene = Scene::new(400., 400.);
+        let root = scene.root();
+        scene.resource_changes();
+        let row = |scene: &mut Scene| {
+            let row = scene.append(root, NodeKind::Container(Layout::Row), Style::default());
+            let cell = scene.append(row, NodeKind::Container(Layout::Column), Style::default());
+            let leaves: Vec<_> = (0..3)
+                .map(|_| scene.append(cell, NodeKind::Container(Layout::Row), Style::default()))
+                .collect();
+            (row, cell, leaves)
+        };
+        let (first, first_cell, first_leaves) = row(&mut scene);
+        let (second, second_cell, _) = row(&mut scene);
+        scene.flush();
+        scene.resource_changes();
+        scene.remove(first);
+        scene.remove(second);
+        let (_, changed) = scene.resource_changes();
+        assert_eq!(changed.len(), 10, "both subtrees, whole");
+        assert_eq!(
+            &changed[..2],
+            &[first, first_cell],
+            "the first's root, then its child"
+        );
+        assert_eq!(&changed[2..5], &first_leaves[..]);
+        assert_eq!(&changed[5..7], &[second, second_cell], "then the second's");
+    }
     #[test]
     fn resource_changes_name_the_nodes_whose_resources_changed() {
         let image = |n: u8| Arc::new(crate::image::ImageData::new(1, 1, vec![n; 4]).unwrap());
@@ -23493,4 +24045,247 @@ fn rect_minus(outer: Rect, inner: Rect) -> impl Iterator<Item = Rect> {
     ]
     .into_iter()
     .filter(|rect| rect.width > 0. && rect.height > 0.)
+}
+#[cfg(test)]
+mod leaf_move_tests {
+    use super::*;
+
+    /// A column (clipping or not) of leaves (boxes, panels with a shadow
+    /// past their clip) and a group of two: the scene the comparisons run.
+    fn built(scene: &mut Scene) -> (NodeId, NodeId, NodeId, Vec<NodeId>) {
+        let column = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(300.),
+                height: Some(16_000.),
+                ..Default::default()
+            },
+        );
+        let shadow = BoxShadow {
+            color: Color(0, 0, 0, 128),
+            offset: Transform { x: 3., y: 5. },
+            blur_radius: 6.,
+            spread: 1.,
+        };
+        let mut leaves: Vec<NodeId> = (0..200)
+            .map(|i| {
+                let style = Style {
+                    width: Some(40. + (i % 5) as f32 * 17.3),
+                    height: Some(12.4 + (i % 3) as f32 * 0.6),
+                    clip: i % 7 == 0,
+                    margin: Insets {
+                        top: 40.,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let kind = match i % 3 {
+                    // Some text: damaged by its ink (`text_ink`).
+                    0 if i % 2 == 0 => NodeKind::Text {
+                        text: format!("row {i}").into(),
+                        color: Color(0, 0, 0, 255),
+                        font_size: 12.,
+                    },
+                    0 => NodeKind::Rect(Color(1, 2, 3, 255)),
+                    _ => NodeKind::Panel {
+                        layout: Layout::Overlay,
+                        quad: QuadStyle {
+                            fill: Color(9, 200, 9, 255),
+                            radius: 4.,
+                            shadow: (i % 3 == 1).then_some(shadow),
+                            ..Default::default()
+                        },
+                    },
+                };
+                scene.append(column, kind, style)
+            })
+            .collect();
+        let group = scene.append(
+            column,
+            NodeKind::Container(Layout::Row),
+            Style {
+                width: Some(120.),
+                height: Some(30.),
+                ..Default::default()
+            },
+        );
+        for _ in 0..2 {
+            leaves.push(scene.append(
+                group,
+                NodeKind::Rect(Color(200, 9, 9, 255)),
+                Style {
+                    width: Some(50.),
+                    height: Some(20.),
+                    ..Default::default()
+                },
+            ));
+        }
+        // Beside the column, unrelated to what moves: scaled now and then,
+        // which turns every move over to the walks (`transformed`).
+        let badge = scene.append(
+            scene.root(),
+            NodeKind::Rect(Color(9, 9, 200, 255)),
+            Style {
+                width: Some(20.),
+                height: Some(20.),
+                ..Default::default()
+            },
+        );
+        scene.flush();
+        (column, group, badge, leaves)
+    }
+
+    /// What a frame of `step` damages, with moved leaves damaged together
+    /// (`leaf`) or by the two subtree walks: frame by frame, the damage and
+    /// where everything is.
+    /// Each frame's damage and where the leaves are.
+    type Frames = Vec<(Vec<Rect>, Vec<Rect>)>;
+
+    /// Also: moves made while something was transformed, and text moves.
+    fn frames(seed: u64, steps: usize, leaf: bool) -> (Frames, [u64; 2], [u64; 2]) {
+        let mut scene = Scene::new(400.5, 16_000.25);
+        scene.leaf_moves_off = !leaf;
+        let (column, group, badge, leaves) = built(&mut scene);
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mut next = move |n: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % n
+        };
+        let mut out = Vec::new();
+        let mut walked = [0; 2];
+        for _ in 0..steps {
+            let moves = match next(6) {
+                // Every leaf: more than the list holds, so the grid takes them.
+                0 => leaves.len(),
+                _ => 1 + next(4) as usize,
+            };
+            for _ in 0..moves {
+                let id = leaves[next(leaves.len() as u64) as usize];
+                walked[0] += (scene.transformed > 0) as u64;
+                walked[1] += matches!(scene.node(id).kind, NodeKind::Text { .. }) as u64;
+                // Within its own gap down the column: apart from its
+                // neighbours' areas, so a frame moving every leaf leaves more
+                // areas than the list holds.
+                let x = next(120) as f32 * 0.37 - 20.;
+                let y = next(60) as f32 * 0.29 - 8.;
+                scene.set_transform(id, Transform { x, y });
+            }
+            match next(10) {
+                0 => scene.set_transform(
+                    group,
+                    Transform {
+                        x: next(30) as f32 * 1.5,
+                        y: 2.25,
+                    },
+                ),
+                1 => {
+                    let mut style = scene.style(column).clone();
+                    style.clip = !style.clip;
+                    scene.set_style(column, style);
+                }
+                2 => {
+                    let id = leaves[next(leaves.len() as u64) as usize];
+                    let mut style = scene.style(id).clone();
+                    let mut options = style.layout_options.as_deref().cloned().unwrap_or_default();
+                    options.visible = Some(options.visible == Some(false));
+                    style.layout_options = Some(Arc::new(options));
+                    scene.set_style(id, style);
+                }
+                3 => {
+                    let id = leaves[next(leaves.len() as u64) as usize];
+                    let effects = Effects {
+                        blur_radius: next(2) as f32 * 4.,
+                        ..Default::default()
+                    };
+                    scene.set_effects(id, effects);
+                }
+                4 => {
+                    // Something filtered: no move takes the leaf path.
+                    let effects = Effects {
+                        filter_blur: next(2) as f32 * 3.,
+                        ..Default::default()
+                    };
+                    scene.set_effects(group, effects);
+                }
+                5 => {
+                    let local = match next(2) {
+                        0 => LocalTransform::IDENTITY,
+                        _ => LocalTransform {
+                            scale: (1.5, 1.5),
+                            ..LocalTransform::IDENTITY
+                        },
+                    };
+                    scene.set_local_transform(badge, local);
+                }
+                _ => {}
+            }
+            // In any order: a leaf's two areas added as one (or one after
+            // the other) can leave the list's rectangles in another order.
+            let mut damage = scene.flush().damage;
+            damage.sort_by(|a, b| {
+                [a.x, a.y, a.width, a.height]
+                    .partial_cmp(&[b.x, b.y, b.width, b.height])
+                    .unwrap()
+            });
+            let bounds = leaves.iter().map(|id| scene.bounds(*id)).collect();
+            out.push((damage, bounds));
+        }
+        (out, scene.leaf_moves, walked)
+    }
+
+    /// Leaves moved by `set_transform` (boxes, panels and text, with the
+    /// grid taking them or not, clipped, hidden, blurred behind, beside a
+    /// moved group, a filtered one and a scaled one) damage, frame by frame,
+    /// the same rectangles to the bit as the two subtree walks did.
+    #[test]
+    fn moved_leaves_damage_what_the_walks_did() {
+        let (mut taken, mut moved) = ([0; 2], [0; 2]);
+        for seed in 0..40 {
+            let (leaf, counted, also) = frames(seed, 30, true);
+            let (walked, none, _) = frames(seed, 30, false);
+            assert_eq!(leaf, walked, "seed {seed}");
+            assert_eq!(none, [0; 2], "the walks' run took no leaf path");
+            taken = [taken[0] + counted[0], taken[1] + counted[1]];
+            moved = [moved[0] + also[0], moved[1] + also[1]];
+        }
+        // Both ways ran: to the list, and to the grid's cells.
+        assert!(taken[1] > 1_000 && taken[0] - taken[1] > 1_000, "{taken:?}");
+        // Moves while something was transformed (walked instead), and
+        // text moved (damaged by its ink).
+        assert!(moved[0] > 100 && moved[1] > 100, "{moved:?}");
+    }
+
+    /// A leaf moved alone is damaged where it was and where it lands, as one
+    /// area when they share a column and overlap.
+    #[test]
+    fn a_leaf_moved_down_a_little_damages_one_area() {
+        let mut scene = Scene::new(400., 300.);
+        let leaf = scene.append(
+            scene.root(),
+            NodeKind::Rect(Color(1, 2, 3, 255)),
+            Style {
+                width: Some(40.),
+                height: Some(10.),
+                ..Default::default()
+            },
+        );
+        scene.flush();
+        scene.set_transform(leaf, Transform { x: 0., y: 4. });
+        assert_eq!(scene.flush().damage, [Rect::new(0., 0., 40., 14.)]);
+    }
+}
+/// An id for a node outside any scene: `zgx-dom`'s, by its DOM node.
+#[cfg(feature = "dom")]
+impl NodeId {
+    pub(crate) fn outside(index: u32) -> NodeId {
+        NodeId {
+            index,
+            generation: u32::MAX,
+        }
+    }
 }

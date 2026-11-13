@@ -46,6 +46,26 @@ pub struct Raster {
     origin: (f32, f32),
     /// The selection on the text being drawn, which recolours its glyphs.
     selected: Option<zgx::scene::TextHighlight>,
+    /// `flush_serial` of the scene drawn last: a scroll's pixels move only
+    /// over the frame of the flush before its own.
+    rendered: Option<u64>,
+    /// Scroll moves applied by moving pixels already drawn (for tests).
+    scroll_copies: u64,
+    /// The text services the scene is laid out with (`share_text`): plain
+    /// text drawn from their layout, as the GPU renderer draws it.
+    shared_text: Option<std::rc::Rc<std::cell::RefCell<SharedText>>>,
+}
+/// Text services a raster shares with its scene, and the glyph images it
+/// drew from them.
+struct SharedText {
+    fonts: std::rc::Rc<std::cell::RefCell<cosmic_text::FontSystem>>,
+    cache: std::rc::Rc<std::cell::RefCell<zgx_gpu::prepared::TextCache>>,
+    swash: cosmic_text::SwashCache,
+    images: HashMap<cosmic_text::CacheKey, Option<cosmic_text::SwashImage>>,
+    image_bytes: usize,
+    /// The prepared texts drawn this frame, kept when it trims the
+    /// services after it (`zgx_gpu::trim_text`).
+    drawn: Vec<u64>,
 }
 impl Raster {
     /// Register an additional validated font and invalidate retained glyph shapes.
@@ -79,27 +99,123 @@ impl Raster {
             background: 0x10141c,
             origin: (0., 0.),
             selected: None,
+            rendered: None,
+            scroll_copies: 0,
+            shared_text: None,
         }
+    }
+    /// Lay out and draw plain text with `fonts` and `cache`, the ones its
+    /// scenes are measured with (`TextServices::install`, a renderer's
+    /// `install_text`): the glyphs the GPU renderer draws, where it draws
+    /// them, rather than the bundled font's.
+    #[doc(hidden)]
+    pub fn share_text(
+        &mut self,
+        fonts: std::rc::Rc<std::cell::RefCell<cosmic_text::FontSystem>>,
+        cache: std::rc::Rc<std::cell::RefCell<zgx_gpu::prepared::TextCache>>,
+    ) {
+        self.shared_text = Some(std::rc::Rc::new(std::cell::RefCell::new(SharedText {
+            fonts,
+            cache,
+            swash: cosmic_text::SwashCache::new(),
+            images: HashMap::new(),
+            image_bytes: 0,
+            drawn: Vec::new(),
+        })));
     }
     /// Resize the store to `width` by `height`.
     pub fn resize(&mut self, width: usize, height: usize) {
         self.width = width;
         self.height = height;
         self.pixels.resize(width * height, 0x10141c);
+        self.rendered = None;
+    }
+    /// Scroll moves applied by moving the pixels already drawn (for tests).
+    #[doc(hidden)]
+    pub fn scroll_copies(&self) -> u64 {
+        self.scroll_copies
     }
     /// Repaint `damage` (and whatever scrolled) from `scene`.
     pub fn render(&mut self, scene: &Scene, damage: &[Rect]) {
         self.canvases.retain(scene);
         self.svgs.retain(scene);
-        // No pixel copies here: scrolled regions repaint in full.
-        let moved: Vec<Rect> = scene
+        let serial = scene.flush_serial();
+        // A scroll moves the pixels already drawn when they are the frame of
+        // the flush before and the move lies on whole pixels, as the GPU
+        // renderer's scroll copies do (`scroll_copy_repaints` says what else
+        // repaints); otherwise what it shows repaints.
+        let copyable = self
+            .rendered
+            .is_some_and(|drawn| drawn.wrapping_add(1) == serial);
+        let mut repaint = damage.to_vec();
+        for scroll in scene
             .scroll_moves()
             .iter()
-            .filter(|scroll| scroll.serial == scene.flush_serial())
-            .map(|scroll| scroll.clip)
-            .collect();
-        let damage = [damage, &moved].concat();
-        self.render_flat(scene, scene.layer_items(None), &damage);
+            .filter(|scroll| scroll.serial == serial)
+        {
+            let whole = |v: f32| (v - v.round()).abs() < 1e-3;
+            let copied = (copyable
+                && [scroll.dx, scroll.dy, scroll.clip.x, scroll.clip.y]
+                    .into_iter()
+                    .chain([scroll.clip.width, scroll.clip.height])
+                    .all(whole))
+            .then(|| zgx_gpu::scroll_copy_repaints(scene, scroll, damage, 1.))
+            .flatten();
+            match copied {
+                Some(rest) => {
+                    self.move_pixels(
+                        scroll.clip,
+                        scroll.dx.round() as i32,
+                        scroll.dy.round() as i32,
+                    );
+                    self.scroll_copies += 1;
+                    repaint.extend(rest);
+                }
+                None => repaint.push(scroll.clip),
+            }
+        }
+        self.render_flat(scene, scene.layer_items(None), &repaint);
+        self.rendered = Some(serial);
+        // Text laid out this frame: the shared services trimmed, as a
+        // renderer's frame trims its own.
+        if let Some(shared) = &self.shared_text {
+            let mut shared = shared.borrow_mut();
+            let drawn = std::mem::take(&mut shared.drawn);
+            if !drawn.is_empty() {
+                zgx_gpu::trim_text(
+                    &mut shared.fonts.borrow_mut(),
+                    &mut shared.cache.borrow_mut(),
+                    drawn.iter().copied(),
+                );
+            }
+            shared.drawn = drawn;
+            shared.drawn.clear();
+        }
+    }
+    /// Move the pixels within `clip` by `(dx, dy)`, as content that scrolled
+    /// by that much: what comes in at the edge the move leaves is left for a
+    /// repaint (the scene's damage has it).
+    fn move_pixels(&mut self, clip: Rect, dx: i32, dy: i32) {
+        let (x0, y0, x1, y1) = self.region(clip);
+        let (x0, y0, x1, y1) = (x0 as i32, y0 as i32, x1 as i32, y1 as i32);
+        let (left, right) = (x0 + dx.max(0), x1 + dx.min(0));
+        let (top, bottom) = (y0 + dy.max(0), y1 + dy.min(0));
+        if left >= right || top >= bottom {
+            return;
+        }
+        let (width, run) = (self.width as i32, (right - left) as usize);
+        let mut row = |y: i32| {
+            let from = ((y - dy) * width + left - dx) as usize;
+            self.pixels
+                .copy_within(from..from + run, (y * width + left) as usize);
+        };
+        // Rows moving down are copied from the bottom up, so each is read
+        // before a copy writes over it.
+        if dy > 0 {
+            (top..bottom).rev().for_each(&mut row);
+        } else {
+            (top..bottom).for_each(&mut row);
+        }
     }
     fn render_flat(
         &mut self,
@@ -327,7 +443,19 @@ impl Raster {
                                     rect.x -= inset;
                                 }
                             }
-                            if item.text_options != Default::default() {
+                            if item.text_options == Default::default()
+                                && self.shared_text.is_some()
+                                && self.shared_plain_text(
+                                    text,
+                                    bounds,
+                                    clip,
+                                    *color,
+                                    *font_size,
+                                    item.effects,
+                                    item.font,
+                                )
+                            {
+                            } else if item.text_options != Default::default() {
                                 let runs = if text.is_empty() {
                                     Vec::new()
                                 } else {
@@ -400,6 +528,9 @@ impl Raster {
             background,
             origin: (x, y),
             selected: None,
+            rendered: None,
+            scroll_copies: 0,
+            shared_text: self.shared_text.clone(),
         };
         let mut black = make(0);
         let mut white = make(0xffffff);
@@ -1023,6 +1154,126 @@ impl Raster {
         if oversized {
             self.rich_glyphs.pop();
         }
+    }
+    /// Plain text from the shared services' layout (`share_text`), each
+    /// glyph where and as the GPU renderer draws it at 1x: false for text
+    /// their prepared cache doesn't lay out.
+    #[allow(clippy::too_many_arguments)]
+    fn shared_plain_text(
+        &mut self,
+        text: &std::sync::Arc<str>,
+        bounds: Rect,
+        clip: Rect,
+        color: Color,
+        size: f32,
+        effects: Effects,
+        font: &zgx::text_layout::FontStyle,
+    ) -> bool {
+        const IMAGE_BUDGET: usize = 8 * 1024 * 1024;
+        let Some(shared) = self.shared_text.clone() else {
+            return false;
+        };
+        let mut shared = shared.borrow_mut();
+        let SharedText {
+            fonts,
+            cache,
+            swash,
+            images,
+            image_bytes,
+            drawn,
+        } = &mut *shared;
+        let mut fonts = fonts.borrow_mut();
+        let Some((places, underlines, key)) = zgx_gpu::plain_glyph_places(
+            &mut fonts,
+            &mut cache.borrow_mut(),
+            text,
+            size,
+            font,
+            bounds.width,
+            bounds.height,
+            1.,
+        ) else {
+            return false;
+        };
+        drawn.push(key);
+        let Some(clip) = intersect(bounds, clip) else {
+            return true;
+        };
+        let (x0, y0, x1, y1) = self.region(clip);
+        // Its origin on a whole pixel, as the GPU renderer snaps it.
+        let (ox, oy) = (bounds.x.round() as i32, bounds.y.round() as i32);
+        for (key, x, y) in places {
+            if !images.contains_key(&key) {
+                let image = zgx_gpu::glyph_image(swash, &mut fonts, key);
+                *image_bytes += image.as_ref().map_or(0, |i| i.data.capacity());
+                if *image_bytes > IMAGE_BUDGET {
+                    images.clear();
+                    *image_bytes = 0;
+                }
+                images.insert(key, image);
+            }
+            let Some(image) = &images[&key] else {
+                continue;
+            };
+            let gx = ox + x as i32 + image.placement.left;
+            let gy = oy + y as i32 - image.placement.top;
+            let color = selected_ink(&self.selected, bounds, gx, gy, image, color);
+            for by in 0..image.placement.height as usize {
+                let py = gy + by as i32;
+                if py < y0 as i32 || py >= y1 as i32 {
+                    continue;
+                }
+                for bx in 0..image.placement.width as usize {
+                    let px = gx + bx as i32;
+                    if px < x0 as i32 || px >= x1 as i32 {
+                        continue;
+                    }
+                    let i = by * image.placement.width as usize + bx;
+                    let (ink, alpha) = match image.content {
+                        cosmic_text::SwashContent::Mask => (
+                            color,
+                            zgx_gpu::glyph_coverage(image.data[i] as f32 / 255., color, 1.),
+                        ),
+                        cosmic_text::SwashContent::Color => (
+                            Color(
+                                image.data[i * 4],
+                                image.data[i * 4 + 1],
+                                image.data[i * 4 + 2],
+                                color.3,
+                            ),
+                            image.data[i * 4 + 3] as f32 / 255.,
+                        ),
+                        cosmic_text::SwashContent::SubpixelMask => (
+                            color,
+                            zgx_gpu::glyph_coverage(image.data[i * 4] as f32 / 255., color, 1.),
+                        ),
+                    };
+                    blend(
+                        &mut self.pixels[py as usize * self.width + px as usize],
+                        ink,
+                        effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade) * alpha,
+                    );
+                }
+            }
+        }
+        // Its underlines in its colour, as the GPU draws them: on whole
+        // pixels.
+        for line in underlines {
+            let (left, top) = ((line.x + ox as f32).round(), (line.y + oy as f32).round());
+            let right = (line.x + ox as f32 + line.width).round();
+            let line = Rect::new(left, top, right - left, line.height.round().max(1.));
+            let Some(shown) = intersect(line, clip) else {
+                continue;
+            };
+            let (lx0, ly0, lx1, ly1) = self.region(shown);
+            for py in ly0..ly1 {
+                let alpha = effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade);
+                for pixel in &mut self.pixels[py * self.width + lx0..py * self.width + lx1] {
+                    blend(pixel, color, alpha);
+                }
+            }
+        }
+        true
     }
     #[allow(clippy::too_many_arguments)]
     fn styled_text(

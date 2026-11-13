@@ -1,4 +1,5 @@
 //! Retained widgets with reactive values, keyboard input and accessibility semantics.
+use crate::time::Instant;
 use crate::{
     input::{EventPhase, InputBinding, InputDispatcher, InputEvent, Key, PointerButton},
     reactive::{Effect, Runtime, Signal},
@@ -13,7 +14,7 @@ use std::{
     any::Any,
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -2224,6 +2225,7 @@ impl Ui {
     /// [`Ui::bind`]. `mount_pure`: `f` reads no layout, so a mount's
     /// deferred input draws need not be made before it runs
     /// (`watch_geometry`).
+    #[inline]
     pub(crate) fn bind_marked(
         &mut self,
         owner: NodeId,
@@ -2235,28 +2237,41 @@ impl Ui {
             "cannot bind a removed UI node"
         );
         let mut initial = self.storage.mount_initialization.borrow().clone();
-        let callback: Rc<RefCell<dyn FnMut()>> = Rc::new(RefCell::new(move || {
-            let Some(token) = initial.take() else {
+        // Its place made first and the callback built in it: `f` holds what
+        // the binding renders from (a node's styles, hundreds of bytes), moved
+        // again otherwise by `Rc::new`.
+        let mut callback = Rc::new_uninit();
+        Rc::get_mut(&mut callback)
+            .expect("just made")
+            .write(RefCell::new(move || {
+                let Some(token) = initial.take() else {
+                    f();
+                    return;
+                };
+                if token.failed.get()
+                    || token
+                        .ui
+                        .upgrade()
+                        .is_none_or(|ui| !ui.scene.borrow().contains(owner))
+                {
+                    return;
+                }
+                let scope = token.enter();
+                let mut guard = InitialBindingGuard {
+                    token,
+                    scope: Some(scope),
+                    completed: false,
+                };
                 f();
-                return;
-            };
-            if token.failed.get()
-                || token
-                    .ui
-                    .upgrade()
-                    .is_none_or(|ui| !ui.scene.borrow().contains(owner))
-            {
-                return;
-            }
-            let scope = token.enter();
-            let mut guard = InitialBindingGuard {
-                token,
-                scope: Some(scope),
-                completed: false,
-            };
-            f();
-            guard.completed = true;
-        }));
+                guard.completed = true;
+            }));
+        // SAFETY: written just above.
+        let callback: Rc<RefCell<dyn FnMut()>> = unsafe { callback.assume_init() };
+        self.add_binding(owner, mount_pure, callback);
+    }
+    /// `bind_marked`'s effect, kept by `owner`: apart, so what is generic
+    /// over the callback stays small enough to inline where it is built.
+    fn add_binding(&mut self, owner: NodeId, mount_pure: bool, callback: Rc<RefCell<dyn FnMut()>>) {
         self.runtime.clone().batch(|| {
             let effect = self.runtime.effect_callback(mount_pure, callback);
             #[cfg(feature = "trace")]
@@ -4577,6 +4592,26 @@ impl Ui {
         self.storage.dispatching.set(false);
         Ok(result)
     }
+    /// When input that acts (a press or release, a key, text, an action)
+    /// was last dispatched: the frames it makes answer someone, and a host
+    /// draws each at once and shows it as soon as it's ready, rather than on
+    /// the refresh's tick and the cadence of frames before (zgx-desktop's
+    /// refresh grid). Renderer plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn acted_at(&self) -> Option<Instant> {
+        let ui = Rc::as_ptr(&self.storage) as usize;
+        ACTED
+            .with(Cell::get)
+            .and_then(|(by, at)| (by == ui).then_some(at))
+    }
+    /// Input that acts is being dispatched (`acted_at`). Cold and out of
+    /// line: `route`'s inlined body stays as it was for every other event.
+    #[cold]
+    #[inline(never)]
+    fn mark_acted(&self) {
+        let ui = Rc::as_ptr(&self.storage) as usize;
+        ACTED.with(|acted| acted.set(Some((ui, Instant::now()))));
+    }
     /// Whether the wheel being dispatched is a platform's, in the window's
     /// points, rather than one the engine made in a scroll view's own.
     pub(crate) fn wheel_in_window(&self) -> bool {
@@ -4595,6 +4630,9 @@ impl Ui {
         ),
         dispatch: impl FnOnce(&Self, InputEvent) -> crate::input::DispatchResult,
     ) -> crate::input::DispatchResult {
+        if acts(&event) {
+            self.mark_acted();
+        }
         let elastic = self.storage.elastic.borrow().enabled;
         let event = match event {
             InputEvent::ScrollGesture(phase) => {
@@ -4828,7 +4866,7 @@ impl Ui {
             self.shrink_storage();
             return false;
         }
-        let started = std::time::Instant::now();
+        let started = crate::time::Instant::now();
         loop {
             // A chunk at a time between looks at the clock.
             let chunk: Vec<NodeId> = {
@@ -8064,6 +8102,36 @@ fn input_draw_pending(node: NodeId, scene: &Rc<RefCell<Scene>>) -> bool {
     })
 }
 
+thread_local! {
+    /// The `Ui` that last dispatched input that acts (its storage's
+    /// address), and when (`Ui::acted_at`): kept here rather than in
+    /// `UiStorage`, whose layout the hot paths read (a field there moved
+    /// headless scenes that never act by up to 0.12%). Another window's input
+    /// takes its place: the one before had acted already.
+    static ACTED: Cell<Option<(usize, Instant)>> = const { Cell::new(None) };
+}
+/// Whether `event` is input that acts (a press or its release, where a
+/// click lands, a key, text, an action), which a frame answers: not a
+/// pointer passing over, nor focus moving, nor a scroll, which keeps the
+/// refresh's pace and has a liveness of its own (`Ui::acted_at`).
+fn acts(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::PointerDown { .. }
+            | InputEvent::PointerUp { .. }
+            | InputEvent::KeyDown { .. }
+            | InputEvent::Text(_)
+            | InputEvent::ImePreedit { .. }
+            | InputEvent::ImeCommit(_)
+            | InputEvent::Action(_)
+            | InputEvent::Activate
+            | InputEvent::Increment
+            | InputEvent::Decrement
+            | InputEvent::SetValue(_)
+            | InputEvent::SetNumericValue(_)
+    )
+}
+
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
@@ -9205,6 +9273,15 @@ mod input_draw_pass_tests {
                     && line.y + line.height <= bounds.y + bounds.height,
                 "{line:?} in {bounds:?}"
             );
+        }
+    }
+}
+/// A handle to no `Ui`, for a node `zgx-dom` mounted.
+#[cfg(feature = "dom")]
+impl WeakUi {
+    pub(crate) fn none() -> WeakUi {
+        WeakUi {
+            storage: Weak::new(),
         }
     }
 }

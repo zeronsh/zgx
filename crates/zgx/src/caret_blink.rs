@@ -22,9 +22,10 @@
 //! (M5, 2026-10-27), so a caret blinking through frames kept a window's
 //! footprint that high for as long as a field had the focus.
 use crate::scene::{Color, NodeId, NodeKind, Rect};
+use crate::time::Instant;
 use crate::widgets::Ui;
 use std::cell::Cell;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How a caret blinks: shown for `on`, hidden for `off`, and after `timeout`
 /// without the user typing or moving it, solid. Read from the system by the

@@ -17,6 +17,7 @@
 //! }
 //! # }
 //! ```
+use crate::time::Instant;
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
@@ -24,7 +25,7 @@ use std::{
     pin::Pin,
     rc::Rc,
     task::{Context, Poll, Waker},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// One display refresh delivered to waiting animations.

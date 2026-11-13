@@ -51,6 +51,32 @@ mod native_surface;
 mod surfaces;
 #[cfg(target_os = "macos")]
 pub use surfaces::{PixelBuffer, SurfaceReadback, blank_surface};
+/// The direct Metal path's first-frame libraries built ahead (build.rs):
+/// whether each still has its source's hash, or none built (no Metal
+/// toolchain where zgx was built): for tests.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_built_metal_libraries() -> Option<[bool; 2]> {
+    metal_frame::built_libraries()
+}
+/// The first-frame libraries loaded from those built ahead, and those
+/// compiled at start, so far in this process: for tests.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_metal_library_counts() -> (usize, usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        metal_frame::LOADED.load(Relaxed),
+        metal_frame::COMPILED.load(Relaxed),
+    )
+}
+/// Compile the first-frame libraries at start even when built ahead (for
+/// a test comparing the two).
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_compile_metal_libraries_at_start(on: bool) {
+    metal_frame::COMPILE_AT_START.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod phase_watch;
 mod planes;
@@ -108,6 +134,9 @@ fn premultiply_into_cell(cell: &mut [u8], pixels: &[u8], width: u32) {
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 /// The backdrop blur atlas's format (see `atlas_texture`).
 const BLUR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// A factor-8 reduce's halves (blur.wgsl's `fs_reduce4`): sums of four taps,
+/// in the atlas's format (rgba32f opens a driver block of its own on Metal).
+const HALVES_FORMAT: wgpu::TextureFormat = BLUR_FORMAT;
 /// Why rendering failed, in words.
 #[derive(Debug)]
 pub struct GpuError(pub String);
@@ -944,6 +973,45 @@ impl Within {
         }
     }
 }
+/// For a renderer that keeps its pixels (zgx-desktop's software `Raster`):
+/// what to repaint, beside the scene's damage, after moving `scroll`'s
+/// pixels already drawn by its `dx`, `dy` at `scale` (what the copy carried
+/// of what paints above or shows beneath the content, and the rounded clips
+/// around the view, where they are and where the copy took their pixels), or
+/// none when a copy can't reproduce the frame and the view repaints whole.
+/// The same rules as this renderer's own scroll copies (`copy_blocker`); a
+/// fade around the content is left to a repaint.
+#[doc(hidden)]
+pub fn scroll_copy_repaints(
+    scene: &Scene,
+    scroll: &zgx::scene::ScrollMove,
+    damage: &[Rect],
+    scale: f32,
+) -> Option<Vec<Rect>> {
+    let (mut repaint, mut fade) = (Vec::new(), None);
+    if copy_blocker(scene, scroll, damage, scale, &mut repaint, &mut fade).is_some()
+        || fade.is_some()
+    {
+        return None;
+    }
+    for corner in scene.scroll_corners(scroll.node)? {
+        let moved = Rect::new(
+            corner.x + scroll.dx,
+            corner.y + scroll.dy,
+            corner.width,
+            corner.height,
+        );
+        repaint.extend(
+            [
+                corner.intersection(scroll.clip),
+                moved.intersection(scroll.clip),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+    }
+    Some(repaint)
+}
 /// Whether moving `scroll`'s pixels reproduces the frame (`None`), and what
 /// keeps it from it otherwise: its content is one contiguous run of paint
 /// items none of which reads what lies under it; beneath it the clip shows a
@@ -964,19 +1032,79 @@ fn copy_blocker(
     fade: &mut Option<zgx::scene::FadeMask>,
 ) -> Option<CopyBlocker> {
     let clip = scroll.clip;
+    // What lies around the content alone, where its own items need no look
+    // (`Scene::layer_items_around`: they paint as plain items do, in the
+    // tree's order, so none of them blocks the copy or is carried): a
+    // transcript's 300 content items go unmade each frame it scrolls.
+    if let Some(items) = scene.layer_items_around(scroll.node, clip) {
+        let from = carried.len();
+        if let Some(blocker) =
+            copy_blocker_of(scene, scroll, damage, scale, carried, fade, &items, true)
+        {
+            #[cfg(debug_assertions)]
+            {
+                let (mut whole, mut whole_fade) = (Vec::new(), None);
+                let walked = scene.layer_items_within(None, Some(&[clip]));
+                let decided = copy_blocker_of(
+                    scene,
+                    scroll,
+                    damage,
+                    scale,
+                    &mut whole,
+                    &mut whole_fade,
+                    &walked,
+                    false,
+                );
+                assert_eq!(
+                    decided,
+                    Some(blocker),
+                    "the walk around the content decides as the whole walk"
+                );
+                assert_eq!(whole_fade, *fade);
+                // (Content covering the clip copies with less to carry.)
+                assert!(
+                    carried[from..].starts_with(&whole),
+                    "carried around {:?}, whole {whole:?}",
+                    &carried[from..]
+                );
+            }
+            return blocker;
+        }
+        carried.truncate(from);
+        *fade = None;
+    }
     let items = scene.layer_items_within(None, Some(&[clip]));
+    copy_blocker_of(scene, scroll, damage, scale, carried, fade, &items, false)
+        .expect("the whole walk decides")
+}
+/// `copy_blocker` from the window's paint `items` within the scroll's clip:
+/// all of them, or with `around_only` all but those the content holds (its
+/// own kept). `None` where those can't say what lies under the content: the
+/// content's own may cover it.
+#[allow(clippy::too_many_arguments)]
+fn copy_blocker_of(
+    scene: &Scene,
+    scroll: &zgx::scene::ScrollMove,
+    damage: &[Rect],
+    scale: f32,
+    carried: &mut Vec<Rect>,
+    fade: &mut Option<zgx::scene::FadeMask>,
+    items: &[zgx::scene::PaintItem<'_>],
+    around_only: bool,
+) -> Option<Option<CopyBlocker>> {
+    let clip = scroll.clip;
     let content = |item: &zgx::scene::PaintItem<'_>| scene.is_within(item.id, scroll.node);
     let Some(first) = items.iter().position(content) else {
-        return Some(CopyBlocker::NoContent);
+        return Some(Some(CopyBlocker::NoContent));
     };
     let last = items.iter().rposition(content).expect("found above");
     // What the content has from around it, which holds still as it moves:
     // the extras its own node was given. Any other an item has is its own.
     let Some(around) = items[first..=last].iter().find(|i| i.id == scroll.node) else {
-        return Some(CopyBlocker::NoContent);
+        return Some(Some(CopyBlocker::NoContent));
     };
     if around.outer_mask().is_some() {
-        return Some(CopyBlocker::TwoFades);
+        return Some(Some(CopyBlocker::TwoFades));
     }
     *fade = around.mask();
     let paints = |item: &zgx::scene::PaintItem<'_>| -> Option<Rect> {
@@ -1016,23 +1144,23 @@ fn copy_blocker(
     let mut within = Within::default();
     for item in &items[first..=last] {
         if !within.holds(scene, item.id, scroll.node) {
-            return Some(CopyBlocker::Between(item.id));
+            return Some(Some(CopyBlocker::Between(item.id)));
         }
         // What reads the pixels under it reads the view's, which hold still
         // where the content moves over them.
         if item.effects.blur_radius > 0. || (item.isolated && reads_under(scene, item.id)) {
-            return Some(CopyBlocker::Reads(item.id));
+            return Some(Some(CopyBlocker::Reads(item.id)));
         }
         // Dots on the screen's grid stay put as the picture slides under them.
         if let NodeKind::Image(image) = item.kind
             && image.effect() != zgx::image::ImageEffect::Plain
         {
-            return Some(CopyBlocker::Dots(item.id));
+            return Some(Some(CopyBlocker::Dots(item.id)));
         }
         // Under a fade, such a layer has its whole run fade item by item
         // where it paints whole, and a copy's bands are walked without it.
         if item.mask().is_some() && !bands::fades_apart(scene, item) {
-            return Some(CopyBlocker::FilteredUnderFade(item.id));
+            return Some(Some(CopyBlocker::FilteredUnderFade(item.id)));
         }
         // A loop a layer plays isn't in the frames, and its layer goes where
         // its node is whatever a frame walks (`sync_loops`): nothing of it
@@ -1082,10 +1210,16 @@ fn copy_blocker(
             // Something that stays put over the view (a composer floating
             // on a transcript): the copy moves the view's pixels, its among
             // them, so it repaints where it is, as the copy left what was
-            // under it, and where the copy put it. Only a blur reads past
-            // its own box, so a blurred one still repaints the whole view.
-            if item.isolated || item.effects.blur_radius > 0. {
-                return Some(CopyBlocker::Over(item.id));
+            // under it, and where the copy put it. A backdrop blur reads
+            // within its own box (its area is its bounds in its clip:
+            // `plan_blur`), which its ink holds: repainting there draws what
+            // moved under it first, which it blurs afresh. So does a layer
+            // (its ink its subtree's, a shader's bleed with it). Only one
+            // reading what lies under it (a blend, a shader reading the
+            // backdrop as far as its reach) may read past that: it still
+            // repaints the whole view.
+            if item.isolated && reads_under(scene, item.id) {
+                return Some(Some(CopyBlocker::Over(item.id)));
             }
             carried.push(ink);
         }
@@ -1108,7 +1242,7 @@ fn copy_blocker(
         items[first..=last].iter().filter(opaque).filter_map(paints),
         scale,
     ) {
-        return None;
+        return Some(None);
     }
     for item in items[..first].iter().rev() {
         let Some(rect) = paints(item) else {
@@ -1126,7 +1260,7 @@ fn copy_blocker(
             && !item.isolated
             && rect == clip
         {
-            return None;
+            return Some(None);
         }
         // One colour across the whole clip, however see-through (a card's
         // tint on the window's glass): the same under every pixel before
@@ -1139,11 +1273,13 @@ fn copy_blocker(
             continue;
         }
         if !repainted(rect) {
-            return Some(CopyBlocker::Under(item.id));
+            // Under it, beyond the view's own items, may lie content that
+            // covers the clip (`spans_cover`): the whole walk decides.
+            return (!around_only).then_some(Some(CopyBlocker::Under(item.id)));
         }
         carried.extend(carry(rect));
     }
-    None
+    Some(None)
 }
 /// Whether layer `id` draws from outside itself: a blend, or anywhere in it a
 /// backdrop filter or a shader reading the backdrop or the window, or whose
@@ -2861,6 +2997,8 @@ struct BlurPipelines {
     layout: wgpu::BindGroupLayout,
     linear: wgpu::Sampler,
     reduce: wgpu::RenderPipeline,
+    /// A factor-8 reduce's first half (`fs_reduce4`), into `HALVES_FORMAT`.
+    halves: wgpu::RenderPipeline,
     across: wgpu::RenderPipeline,
     down: wgpu::RenderPipeline,
     vertical: wgpu::RenderPipeline,
@@ -2929,8 +3067,9 @@ impl BlurPipelines {
             });
             Self::pipeline(device, &shader, Some(&layout), entry, &[target])
         };
-        let (reduce, across, down, vertical) = (
+        let (reduce, halves, across, down, vertical) = (
             pipeline("fs_reduce", BLUR_FORMAT),
+            pipeline("fs_reduce4", HALVES_FORMAT),
             pipeline("fs_across", BLUR_FORMAT),
             pipeline("fs_down", BLUR_FORMAT),
             pipeline("fs", FORMAT),
@@ -2964,6 +3103,7 @@ impl BlurPipelines {
             layout,
             linear,
             reduce,
+            halves,
             across,
             down,
             vertical,
@@ -4876,6 +5016,9 @@ pub struct GpuRenderer {
     blur_pipelines: Option<BlurPipelines>,
     /// Backdrop blur scratch, shared by the window and every isolated layer.
     blur_scratch: Option<BlurScratch>,
+    /// Twice the blur atlas's extent, where a batch has a factor-8 slot: its
+    /// reduce's first half (`plan_halves`, `halves_pass`).
+    blur_halves: Option<wgpu::Texture>,
     /// Blurred and masked layers' slots (effects.rs), made with the first.
     effects: Option<effects::EffectAtlas>,
     effect_pipelines: Option<effects::EffectPipelines>,
@@ -5563,6 +5706,7 @@ impl GpuRenderer {
             // As if last recycled long ago: the first fill recycles.
             atlas_recycled_at: 0_u64.wrapping_sub(ATLAS_THRASH_FRAMES),
             blur_scratch: None,
+            blur_halves: None,
             effects: None,
             effect_pipelines: None,
             effect_jobs: Vec::new(),
@@ -6153,6 +6297,7 @@ impl GpuRenderer {
                 .any(|texture| texture.width() > width * 2 || texture.height() > height * 2)
         }) {
             self.blur_scratch = None;
+            self.blur_halves = None;
         }
         self.width = width;
         self.height = height;
@@ -11711,7 +11856,8 @@ impl GpuRenderer {
                         (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h)
                     })
                     .collect();
-                Some((plan, slots, rects))
+                let halved = halved(&plan.slots);
+                Some((plan, slots, rects, halved))
             })
             .collect();
         let committed = {
@@ -11738,6 +11884,14 @@ impl GpuRenderer {
                 .as_ref()
                 .filter(|_| plans.iter().any(Option::is_some))
                 .map(|scratch| scratch.atlas.each_ref().map(raw));
+            let blur_halves = (self.blur_halves.as_ref())
+                .filter(|_| {
+                    plans
+                        .iter()
+                        .flatten()
+                        .any(|plan| plan.3.iter().any(Option::is_some))
+                })
+                .map(raw);
             // Effect slots drawn first, each pass of them into its atlas.
             let effect_passes = self.metal_effect_passes(effect_jobs, effect_first, &raw);
             let band_targets: Vec<_> = bands.iter().map(|band| raw(&band.texture)).collect();
@@ -11826,7 +11980,7 @@ impl GpuRenderer {
             // The batch drawn back at the start of the pass after its blur.
             let mut blurred = None;
             for (segment, end) in splits.chain([draws.len()]).enumerate() {
-                if let Some((plan, slots, _)) = blurred.take() {
+                if let Some((plan, slots, _, _)) = blurred.take() {
                     let plan: &BlurPlan = plan;
                     let records = metal_frame::BlurRecords {
                         blurs: bytemuck::cast_slice(&plan.blurs),
@@ -11871,7 +12025,7 @@ impl GpuRenderer {
                         stats.instances += (batch.end - batch.start) as usize;
                     });
                 }
-                let Some(Some((plan, slots, rects))) = plans.get(segment) else {
+                let Some(Some((plan, slots, rects, halved))) = plans.get(segment) else {
                     from = end;
                     continue;
                 };
@@ -11880,14 +12034,25 @@ impl GpuRenderer {
                     slots: bytemuck::cast_slice(slots),
                 };
                 let blur = blur_atlas.as_ref().expect("planned");
-                pass.blur(frame, &target, [&blur[0], &blur[1]], &records, rects);
+                let halves = (blur_halves.as_ref())
+                    .filter(|_| halved.iter().any(Option::is_some))
+                    .map(|halves| (&**halves, &halved[..]));
+                pass.blur(
+                    frame,
+                    &target,
+                    [&blur[0], &blur[1]],
+                    halves,
+                    &records,
+                    rects,
+                );
                 pass.resume(&target);
                 pass.texture(&atlas);
                 sampled = TextureSource::Atlas;
                 stats.draw_calls += 3 * rects.iter().filter(|r| r.2 > 0 && r.3 > 0).count();
-                stats.render_passes += 4;
+                stats.render_passes += 4 + usize::from(halves.is_some());
+                stats.draw_calls += halved.iter().flatten().count();
                 stats.blur_passes += 3;
-                blurred = Some((plan, slots, rects));
+                blurred = Some((plan, slots, rects, halved));
                 from = end;
             }
             let _span = zgx::profile::span(zgx::profile::Phase::Submit);
@@ -12070,9 +12235,31 @@ impl GpuRenderer {
             *sampled = batch.source;
         }
         frame.scissor(rect);
+        if self
+            .d3d11
+            .as_ref()
+            .is_some_and(|state| !state.chains.is_empty())
+        {
+            self.d3d11_inputs(frame, batch.shading);
+        }
         frame.quads(batch.shading, false, batch.start..batch.end);
         stats.draw_calls += 1;
         stats.instances += (batch.end - batch.start) as usize;
+    }
+    /// Bind what the layer shader `shading` draws with at its inputs'
+    /// registers, if it has inputs (`d3d11_frame::Frame::inputs`), as
+    /// `bind_inputs` binds them for wgpu. Out of line: only frames with such
+    /// a shader call it.
+    #[cfg(d3d11)]
+    #[cold]
+    #[inline(never)]
+    fn d3d11_inputs(&self, frame: &mut d3d11_frame::Frame<'_>, shading: Shading) {
+        let (Shading::Filter(id) | Shading::FilterBlend(id)) = shading else {
+            return;
+        };
+        if let Some(chain) = (self.d3d11.as_ref()).and_then(|state| state.chains.get(&id)) {
+            frame.inputs(chain);
+        }
     }
     /// Fade bands' passes with Direct3D 11 (`render_d3d11`): each band's
     /// texture (one of Direct3D 11's standing for its wgpu texture, as a
@@ -12251,6 +12438,8 @@ impl GpuRenderer {
             let texture = &scratch.atlas[0];
             (texture.width(), texture.height())
         });
+        // `plan_halves` fitted Direct3D 12's halves to every batch above.
+        let halves_size = (self.blur_halves.as_ref()).map(|h| (h.width(), h.height()));
         let state = self.d3d11.as_mut().expect("checked by the caller");
         let device = state.device.clone();
         let parts = [bytemuck::cast_slice(&quads)];
@@ -12339,6 +12528,16 @@ impl GpuRenderer {
                 .is_none_or(|a| (a[0].width, a[0].height) != (atlas_width, atlas_height))
         {
             state.blur_atlas = Some(device.blur_atlas(atlas_width, atlas_height)?);
+        }
+        // The halves where a batch reduces a slot by 8, of Direct3D 12's size.
+        if let Some((halves_width, halves_height)) = halves_size.filter(|_| {
+            (plans.iter().flatten()).any(|plan| halved(&plan.slots).iter().any(Option::is_some))
+        }) && state
+            .blur_halves
+            .as_ref()
+            .is_none_or(|h| (h.width, h.height) != (halves_width, halves_height))
+        {
+            state.blur_halves = Some(device.blur_halves(halves_width, halves_height)?);
         }
         let records = plans
             .iter()
@@ -12437,22 +12636,31 @@ impl GpuRenderer {
                     continue;
                 };
                 let slots: Vec<d3d11_frame::BlurSlot> = (plan.slots.iter())
-                    .map(|(record, (w, h), blurred)| d3d11_frame::BlurSlot {
-                        texels: (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h),
-                        blurred: *blurred,
-                    })
+                    .zip(halved(&plan.slots))
+                    .map(
+                        |((record, (w, h), blurred), halves)| d3d11_frame::BlurSlot {
+                            texels: (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h),
+                            blurred: *blurred,
+                            halves,
+                        },
+                    )
                     .collect();
                 let copies = plan.slots.iter().any(|slot| !slot.2);
                 let records = [&records[0], &records[1]];
                 let backdrop = state.popup_backdrop.as_ref();
-                let drawn = frame.blur(target, backdrop, atlas, records, &slots, copies)
+                let halves = state.blur_halves.as_ref();
+                let drawn = frame.blur(target, backdrop, atlas, halves, records, &slots, copies)
                     && frame.blur_back(target, &atlas[0], records, &plan.draws, plan.mixed);
                 if drawn {
+                    // With the halves pass where a slot reduces by 8.
+                    let halved = (slots.iter()).filter(|slot| slot.halves.is_some()).count()
+                        * usize::from(halves.is_some());
                     stats.blur_passes += 3;
-                    stats.render_passes += 3;
+                    stats.render_passes += 3 + usize::from(halved > 0);
                     stats.draw_calls += plan.draws.len()
                         + slots.iter().filter(|slot| slot.blurred).count() * 2
-                        + slots.len();
+                        + slots.len()
+                        + halved;
                 } else {
                     unpainted = true;
                 }
@@ -12497,6 +12705,9 @@ impl GpuRenderer {
                 Shading::FilterBlend(id) => Some(id),
                 _ => None,
             };
+            if glass.is_some() && !state.chains.is_empty() {
+                self.d3d11_inputs(&mut frame, draw.shading);
+            }
             for (index, (region, _)) in regions.iter().enumerate() {
                 let Some(rect) = region
                     .intersection(draw.clip)
@@ -13514,6 +13725,41 @@ impl GpuRenderer {
             }
         }
     }
+    /// Fit the halves (`blur_halves`) to a batch whose slots reduce by 8, at
+    /// twice its extent: grown, or kept for batches planned before; false
+    /// where twice the extent passes the device's limit (the batch draws no
+    /// blur). Out of `plan_blur`'s body: a frame without a blur never comes
+    /// here.
+    #[cold]
+    #[inline(never)]
+    fn plan_halves(
+        &mut self,
+        slots: &[(SlotRecord, (u32, u32), bool)],
+        (width, height): (u32, u32),
+        limit: u32,
+    ) -> bool {
+        if !slots
+            .iter()
+            .any(|(record, _, blurred)| *blurred && record.region[2] == 8.)
+        {
+            return true;
+        }
+        if width * 2 > limit || height * 2 > limit {
+            return false;
+        }
+        let fits = |h: &wgpu::Texture| h.width() >= width * 2 && h.height() >= height * 2;
+        if !self.blur_halves.as_ref().is_some_and(fits) {
+            let (current_w, current_h) =
+                (self.blur_halves.as_ref()).map_or((0, 0), |h| (h.width(), h.height()));
+            let grow = |want: u32, have: u32| want.max(have).next_multiple_of(128).min(limit);
+            self.blur_halves = Some(halves_texture(
+                &self.device,
+                grow(width * 2, current_w),
+                grow(height * 2, current_h),
+            ));
+        }
+        true
+    }
     /// Plan a batch of backdrop filters (see blur.wgsl): each one's levels
     /// as slots of the atlas, packed, the atlas grown to hold them.
     fn plan_blur(&mut self, filters: &[Filter]) -> Option<BlurPlan> {
@@ -13679,6 +13925,10 @@ impl GpuRenderer {
         if width > limit || height > limit {
             return None;
         }
+        // A factor-8 slot's reduce goes through the halves.
+        if !self.plan_halves(&slots, (width, height), limit) {
+            return None;
+        }
         let atlas = self.blur_scratch.take().map(|scratch| scratch.atlas);
         let atlas = [0, 1].map(|i| match &atlas {
             Some(atlas) if atlas[i].width() >= width && atlas[i].height() >= height => {
@@ -13777,11 +14027,21 @@ impl GpuRenderer {
         // (its shadow), not the window's pixels.
         let backdrop = self.backdrop.as_ref().map(|(_, view)| view);
         let source = backdrop.unwrap_or(&self.view);
+        let halves = self.blur_halves.as_ref();
         let passes = [
             (
                 "blur reduce",
                 &pipelines.reduce,
-                bind(source, &views[1]),
+                // After a factor-8 batch's halves pass, reading them.
+                halves_pass(
+                    encoder,
+                    pipelines,
+                    halves,
+                    slots,
+                    &|other| bind(source, other),
+                    &views[1],
+                    stats,
+                ),
                 &views[0],
                 backdrop.is_some(),
                 false,
@@ -16616,6 +16876,7 @@ impl GpuRenderer {
         // The font cache read at launch, checked as the host first goes idle.
         font_cache_check();
         self.blur_scratch = None;
+        self.blur_halves = None;
         // A frame's quads and draws: the next frame makes them again.
         self.frame_quads = Vec::new();
         self.frame_points = Vec::new();
@@ -16770,10 +17031,11 @@ impl GpuRenderer {
             frame.retain_fills(|id| fills.contains_key(&id));
         }
         #[cfg(d3d11)]
-        if let Some(state) = &self.d3d11 {
+        if let Some(state) = &mut self.d3d11 {
             state
                 .device
                 .retain_app_shaders(|id| fills.contains_key(&id) || filters.contains_key(&id));
+            state.chains.retain(|id, _| filters.contains_key(id));
         }
     }
     /// Input arrived: if the window idled (`trim`) and has drawn nothing
@@ -17013,13 +17275,12 @@ impl GpuRenderer {
     /// bytes in RGBA order. Single-pass renderers draw the pending frame
     /// through a non-sRGB view; others use the present blit, as on screen.
     pub fn debug_present_offscreen(&mut self) -> Result<Vec<u8>, GpuError> {
-        // Direct3D 11 presents through its own swap chain alone: the no-op
-        // shell would read back nothing.
+        // Direct3D 11 draws into what it presents (its swap chain's buffer,
+        // or offscreen its own target), with no blit between: what it would
+        // present is its frame as read back.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
-            return Err(GpuError(
-                "ZGX_D3D11 presents through no wgpu surface, offscreen either".into(),
-            ));
+            return self.readback();
         }
         let srgb = wgpu::TextureFormat::Bgra8UnormSrgb;
         let drawable = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -17688,6 +17949,81 @@ fn written(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView)
 }
 /// A backdrop blur atlas: half floats, so averaging down and blurring in
 /// steps adds no 8-bit banding to smooth frost.
+/// Encode a batch's halves pass where any of its slots reduces by 8 (its
+/// factor-8 slots' first halves into `halves`, cleared: `fs_reduce4`), and
+/// give the reduce's bind group: reading them, or `other` where there's no
+/// such pass. Out of `blur`'s body.
+#[inline(never)]
+fn halves_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    pipelines: &BlurPipelines,
+    halves: Option<&wgpu::Texture>,
+    slots: &[(SlotRecord, (u32, u32), bool)],
+    bind: &dyn Fn(&wgpu::TextureView) -> wgpu::BindGroup,
+    other: &wgpu::TextureView,
+    stats: &mut GpuStats,
+) -> wgpu::BindGroup {
+    let halved = halved(slots);
+    let Some(halves) = halves.filter(|_| halved.iter().any(Option::is_some)) else {
+        return bind(other);
+    };
+    let view = halves.create_view(&Default::default());
+    let group = bind(other);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("blur reduce halves"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_pipeline(&pipelines.halves);
+    pass.set_bind_group(0, &group, &[]);
+    for (k, rect) in halved.iter().enumerate() {
+        let Some((x, y, w, h)) = *rect else { continue };
+        pass.set_scissor_rect(x, y, w, h);
+        pass.draw(0..3, k as u32..k as u32 + 1);
+        stats.draw_calls += 1;
+    }
+    drop(pass);
+    stats.render_passes += 1;
+    bind(&view)
+}
+/// Each slot's place in the halves (`GpuRenderer::blur_halves`), twice its own,
+/// where it is blurred at factor 8.
+fn halved(slots: &[(SlotRecord, (u32, u32), bool)]) -> Vec<Option<Scissor>> {
+    slots
+        .iter()
+        .map(|(record, (w, h), blurred)| {
+            (*blurred && record.region[2] == 8. && *w > 0 && *h > 0).then(|| {
+                let (x, y) = (record.atlas[0] as u32, record.atlas[1] as u32);
+                (x * 2, y * 2, w * 2, h * 2)
+            })
+        })
+        .collect()
+}
+/// A factor-8 reduce's halves (`GpuRenderer::blur_halves`).
+fn halves_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("backdrop blur halves"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HALVES_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
 fn atlas_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("backdrop blur"),
@@ -19972,6 +20308,83 @@ impl TextServices {
         self.cache.borrow_mut().clear();
         self.fonts.borrow_mut().shape_run_cache.clear();
     }
+}
+
+/// `plain_glyph_places`: each glyph's key and pen position, the
+/// underlines' boxes, and the prepared text's key (for `trim_text`).
+#[doc(hidden)]
+pub type PlainGlyphs = (Vec<(CacheKey, f32, f32)>, Vec<Rect>, u64);
+/// Plain text's glyphs as a renderer at `scale` places them: each one's key
+/// and its pen position in device pixels from the text's origin (its box's,
+/// snapped to a device pixel), laid out by `cache` as layout measured it;
+/// then its underlines' boxes (`FontStyle::underline`), in points from
+/// there. For the software raster, to draw the glyphs the GPU draws where
+/// it does. `None` for text the prepared cache doesn't lay out
+/// (`handles_plain`).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn plain_glyph_places(
+    fonts: &mut FontSystem,
+    cache: &mut prepared::TextCache,
+    text: &Arc<str>,
+    font_size: f32,
+    font: &zgx::text_layout::FontStyle,
+    wrap: f32,
+    height: f32,
+    scale: f32,
+) -> Option<PlainGlyphs> {
+    if !prepared::TextCache::handles_plain(text, font_size) {
+        return None;
+    }
+    let laid = cache.layout_plain(fonts, text, font_size, font, Some(wrap));
+    let glyphs = styled_glyphs(Vec::new(), laid.runs(Some(height)), scale, |_, _| 0);
+    let underlines = font.underline.map_or_else(Vec::new, |line| {
+        text::plain_underlines(laid.runs(Some(height)), font_size, line)
+            .into_iter()
+            .map(|d| d.bounds)
+            .collect()
+    });
+    Some((
+        glyphs.into_iter().map(|g| (g.key, g.x, g.y)).collect(),
+        underlines,
+        laid.key(),
+    ))
+}
+/// After a frame that laid text out from `fonts` and `cache` without a
+/// renderer (the software raster), what a renderer's frame trims: words
+/// unused a few shaping frames, and prepared text past what was `drawn`
+/// and a little of the rest. Without it the words a changing value shapes
+/// pile up, frame after frame.
+#[doc(hidden)]
+pub fn trim_text(
+    fonts: &mut FontSystem,
+    cache: &mut prepared::TextCache,
+    drawn: impl IntoIterator<Item = u64>,
+) {
+    fonts.shape_run_cache.trim(SHAPE_RUN_AGES);
+    if cache.needs_trim() {
+        cache.trim(drawn);
+    }
+}
+/// A glyph's image as a renderer rasterizes it for its atlas.
+#[doc(hidden)]
+pub fn glyph_image(
+    swash: &mut SwashCache,
+    fonts: &mut FontSystem,
+    key: CacheKey,
+) -> Option<cosmic_text::SwashImage> {
+    text::glyph_image(swash, fonts, key)
+}
+/// A mask glyph's coverage `a` as `draw.wgsl` draws it in `color` at
+/// `scale`: firmed below `SHARP_TEXT_BELOW` (`firm`, `firmness`).
+#[doc(hidden)]
+pub fn glyph_coverage(a: f32, color: Color, scale: f32) -> f32 {
+    if scale >= SHARP_TEXT_BELOW {
+        return a;
+    }
+    let luma = (0.2126 * color.0 as f32 + 0.7152 * color.1 as f32 + 0.0722 * color.2 as f32) / 255.;
+    let k = (luma * 2.).clamp(0., 1.);
+    a + k * 0.67 * a * (1. - a)
 }
 
 /// `fonts` and `cache` as text services a scene whose host installed none
@@ -22773,6 +23186,14 @@ mod copy_refusal_tests {
         around: impl FnOnce(View) -> View,
         prepare: impl FnOnce(&mut Scene, NodeId),
     ) -> Option<(CopyBlocker, String)> {
+        refusal_around(around, prepare).0
+    }
+    /// `refusal`, and whether the walk around the content alone was taken
+    /// (`Scene::layer_items_around`).
+    fn refusal_around(
+        around: impl FnOnce(View) -> View,
+        prepare: impl FnOnce(&mut Scene, NodeId),
+    ) -> (Option<(CopyBlocker, String)>, bool) {
         let mut ui = Ui::new(240., 180.);
         let offset = ui.signal(0_f32);
         let page = column()
@@ -22794,19 +23215,27 @@ mod copy_refusal_tests {
         step(&mut ui);
         let content = ui.scene.borrow().scroll_moves()[0].node;
         prepare(&mut ui.scene.borrow_mut(), content);
+        // (A frame with what `prepare` made, then the move looked at.)
+        offset.set(12.);
+        step(&mut ui);
         offset.set(16.);
         let damage = step(&mut ui);
         let scene = ui.scene.borrow();
         let moved = scene.scroll_moves()[0].clone();
-        copy_blocker(&scene, &moved, &damage, 1., &mut Vec::new(), &mut None).map(|blocker| {
-            let note = blocker.describe(&scene);
-            (blocker, note)
-        })
+        let refused =
+            copy_blocker(&scene, &moved, &damage, 1., &mut Vec::new(), &mut None).map(|blocker| {
+                let note = blocker.describe(&scene);
+                (blocker, note)
+            });
+        let around = scene.layer_items_around(moved.node, moved.clip).is_some();
+        (refused, around)
     }
 
     #[test]
     fn a_plain_view_has_no_refusal() {
-        assert_eq!(refusal(|view| view, |_, _| {}), None);
+        let (refused, around) = refusal_around(|view| view, |_, _| {});
+        assert_eq!(refused, None);
+        assert!(around, "the walk around the content alone decides");
     }
 
     #[test]
@@ -22827,11 +23256,242 @@ mod copy_refusal_tests {
         assert!(note.contains("two fades"), "{note}");
     }
 
-    /// A loop in the content is no refusal (`baked_loops.rs` has it scrolling).
+    /// Every blocker `copy_blocker` names, by where it lies: in the content
+    /// (which the walk around the content doesn't look at, so it must not be
+    /// taken) or around it (which both walks see). A blocker added to
+    /// `CopyBlocker` doesn't compile here until it has a case, nor a case
+    /// until `made` has a scene making it.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Case {
+        Between,
+        Reads,
+        Dots,
+        FilteredUnderFade,
+        TwoFades,
+        Over,
+        Under,
+        NoContent,
+    }
+    const CASES: [Case; 8] = [
+        Case::Between,
+        Case::Reads,
+        Case::Dots,
+        Case::FilteredUnderFade,
+        Case::TwoFades,
+        Case::Over,
+        Case::Under,
+        Case::NoContent,
+    ];
+    fn case_of(blocker: CopyBlocker) -> Case {
+        match blocker {
+            CopyBlocker::Between(_) => Case::Between,
+            CopyBlocker::Reads(_) => Case::Reads,
+            CopyBlocker::Dots(_) => Case::Dots,
+            CopyBlocker::FilteredUnderFade(_) => Case::FilteredUnderFade,
+            CopyBlocker::TwoFades => Case::TwoFades,
+            CopyBlocker::Over(_) => Case::Over,
+            CopyBlocker::Under(_) => Case::Under,
+            CopyBlocker::NoContent => Case::NoContent,
+            CopyBlocker::Fade(..) => unreachable!("`scroll_copies` names it, not `copy_blocker`"),
+        }
+    }
+    /// Whether the case's blocker lies in the content.
+    fn inside(case: Case) -> bool {
+        match case {
+            Case::Between | Case::Reads | Case::Dots | Case::FilteredUnderFade => true,
+            Case::TwoFades | Case::Over | Case::Under | Case::NoContent => false,
+        }
+    }
+    /// The case's scene: what the copy makes of it, and whether the walk
+    /// around the content alone was taken.
+    fn made(case: Case) -> (Option<(CopyBlocker, String)>, bool) {
+        let first = |scene: &Scene, content: NodeId| scene.children(content)[0];
+        match case {
+            // A walk paints a subtree's items in one run (raised children
+            // are put in order among their siblings alone), so nothing
+            // paints between the content's: a raised row in it comes
+            // nearest, and the walk around it isn't taken.
+            Case::Between => refusal_around(
+                |view| {
+                    column()
+                        .child(view)
+                        .child(div().w(240.).h(20.).bg(rgb(0x334455)))
+                },
+                |scene, content| {
+                    let row = first(scene, content);
+                    scene.set_z(row, 1);
+                },
+            ),
+            // (A backdrop blur in the content keeps it from moving at all:
+            // `Scene::clear_of_blurs`.)
+            Case::Reads => refusal_around(
+                |view| view,
+                |scene, content| {
+                    let row = first(scene, content);
+                    scene.set_blend(row, zgx::scene::BlendMode::Multiply);
+                },
+            ),
+            Case::Dots => refusal_around(
+                |view| view,
+                |scene, content| {
+                    let row = first(scene, content);
+                    // The row's size, so the content stays as long.
+                    let picture = zgx::image::ImageData::new(240, 400, vec![128; 240 * 400 * 4])
+                        .expect("an image");
+                    let dotted = std::sync::Arc::new(picture.dithered(2.));
+                    scene.set_kind(row, NodeKind::Image(dotted));
+                },
+            ),
+            Case::FilteredUnderFade => refusal_around(
+                |view| view.fade_edges(20., 20.),
+                |scene, content| {
+                    let row = first(scene, content);
+                    scene.set_filter_blur(row, 4.);
+                },
+            ),
+            Case::TwoFades => refusal_around(
+                |view| {
+                    div()
+                        .w(240.)
+                        .h(180.)
+                        .overflow_hidden()
+                        .fade_edges(10., 10.)
+                        .child(view.fade_edges(20., 20.))
+                },
+                |_, _| {},
+            ),
+            // A layer that stays put over the view, mixing with what lies
+            // under it (a blend): what it reads moves under it, and may lie
+            // past its own ink.
+            Case::Over => refusal_around(
+                |view| {
+                    overlay().w(240.).h(180.).child(view).child(
+                        div()
+                            .absolute()
+                            .left(40.)
+                            .top(40.)
+                            .size(30., 30.)
+                            .bg(rgb(0xffffff))
+                            .blend(zgx::scene::BlendMode::Multiply),
+                    )
+                },
+                |_, _| {},
+            ),
+            // A see-through view over a picture: what shows under it holds
+            // still as the content moves.
+            Case::Under => refusal_around(
+                |view| {
+                    overlay()
+                        .w(240.)
+                        .h(180.)
+                        .child(
+                            div()
+                                .absolute()
+                                .left(0.)
+                                .top(0.)
+                                .size(240., 180.)
+                                .bg(rgb(0x101010))
+                                .child(div().size(60., 60.).bg(rgb(0xff0000))),
+                        )
+                        .child(view.bg(zgx::compose::prelude::rgba(0x00000000)))
+                },
+                // Its rows see-through too, so none covers what lies under.
+                |scene, content| {
+                    for row in scene.children(content).to_vec() {
+                        let effects = zgx::scene::Effects {
+                            opacity: 0.5,
+                            ..scene.effects(row)
+                        };
+                        scene.set_effects(row, effects);
+                    }
+                },
+            ),
+            Case::NoContent => refusal_around(
+                |view| view,
+                |scene, content| {
+                    let effects = zgx::scene::Effects {
+                        opacity: 0.,
+                        ..scene.effects(content)
+                    };
+                    scene.set_effects(content, effects);
+                },
+            ),
+        }
+    }
+
+    /// Each blocker, made in a scrolled view: the copy finds it, whichever
+    /// walk decides (a debug build has both decide and compares them), and
+    /// one in the content keeps the walk around it from being taken.
+    #[test]
+    fn every_blocker_is_found_whichever_walk_decides() {
+        for case in CASES {
+            let (refused, around) = made(case);
+            let found = refused.as_ref().map(|(blocker, _)| case_of(*blocker));
+            match case {
+                Case::Between => assert_eq!(found, None, "a raised row copies"),
+                case => assert_eq!(found, Some(case), "{refused:?}"),
+            }
+            match inside(case) {
+                true => assert!(
+                    !around,
+                    "{case:?} in the content: the walk around it was taken"
+                ),
+                // Taken, and compared with the whole walk; `Under` it hands
+                // to the whole walk, the content's rows unlooked at.
+                false => assert!(
+                    around,
+                    "{case:?} around the content: the whole walk alone was taken"
+                ),
+            }
+        }
+    }
+
+    /// A fade of the content's own, which the copy carries rather than
+    /// refuses (`cut_fades` repaints what it cuts): the walk around the
+    /// content isn't taken, and the whole walk copies.
+    #[test]
+    fn a_fade_in_the_content_takes_the_whole_walk() {
+        let (refused, around) = refusal_around(
+            |view| view,
+            |scene, content| {
+                let row = scene.children(content)[0];
+                let mut style = scene.style(row);
+                style.fade_edges = [12., 12.];
+                scene.set_style(row, style);
+            },
+        );
+        assert!(!around, "the walk around the content was taken");
+        assert_eq!(refused, None);
+    }
+
+    /// A `fade_overflow` box in the content whose content doesn't run past
+    /// it fades nothing (its bands are none), as a transcript's columns:
+    /// the walk around the content is taken, and copies.
+    #[test]
+    fn a_fade_with_nothing_past_it_is_no_fade() {
+        let (refused, around) = refusal_around(
+            |view| view,
+            |scene, content| {
+                let row = scene.children(content)[0];
+                let mut style = scene.style(row);
+                style.fade_edges = [12., 12.];
+                style.fade_overflow = true;
+                scene.set_style(row, style);
+            },
+        );
+        assert!(
+            around,
+            "a fade of none kept the walk around the content from deciding"
+        );
+        assert_eq!(refused, None);
+    }
+
+    /// A loop in the content is no refusal (`baked_loops.rs` has it
+    /// scrolling), and keeps the walk around the content from being taken.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_loop_in_the_content_is_no_refusal() {
-        let refused = refusal(
+        let (refused, around) = refusal_around(
             |view| view,
             |scene, content| {
                 let node = scene.children(content)[0];
@@ -22841,5 +23501,6 @@ mod copy_refusal_tests {
             },
         );
         assert_eq!(refused, None);
+        assert!(!around, "the walk around the content was taken");
     }
 }

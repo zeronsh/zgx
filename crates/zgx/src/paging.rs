@@ -7,12 +7,13 @@
 //! that moves it (a key, a reveal of what took focus, a script) settles on the
 //! nearest page once it stops. A paged view has this record; a view that doesn't
 //! page has nothing, and nothing here runs for it.
+use crate::time::Instant;
 use crate::{input::ScrollGesture, reactive::Signal, widgets::Ui};
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
     rc::{Rc, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// UIKit's paging spring, a step a millisecond: `v = (v + (target - x) * PULL) *

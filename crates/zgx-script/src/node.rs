@@ -433,6 +433,9 @@ pub(crate) struct Shaders {
     pub layer: Option<Arc<zgx::decoration::FillShader>>,
     /// `layer_params`: the layer shader's sixteen values, as four vec4s.
     pub layer_params: Option<[[f32; 4]; 4]>,
+    /// Its parameters given as theme colours: the engine's drive resolves
+    /// them (`ShaderDrive::tokens`), and follows the theme.
+    pub layer_tokens: [Option<zgx::theme::TokenId>; 4],
     /// `layer_bleed`: how far past the box the layer shader paints.
     pub layer_bleed: Option<f32>,
     /// `layer_reach`: how far past that its `zgx_backdrop` reads.
@@ -4276,8 +4279,13 @@ fn fill_from(
                         shaders.drive.get_or_insert_default().layer_params_of = Some(f.clone());
                     }
                     _ => {
-                        shaders.layer_params =
-                            Some(shader_params(lua, &value, "layer_params", None)?);
+                        let params =
+                            shader_params(lua, &value, "layer_params", Some(&mut shaders.layer_tokens))?;
+                        shaders.layer_params = Some(params);
+                        // A layer's theme colours are the drive's to keep up.
+                        if shaders.layer_tokens.iter().any(Option::is_some) {
+                            shaders.drive.get_or_insert_default();
+                        }
                     }
                 }
             }

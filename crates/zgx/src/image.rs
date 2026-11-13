@@ -1482,8 +1482,8 @@ mod kept_tests {
     static SLOW_GO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     fn slow(_: &[u8]) -> Result<Arc<[u8]>, String> {
         SLOW_STARTED.store(true, Ordering::Relaxed);
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !SLOW_GO.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+        let until = crate::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !SLOW_GO.load(Ordering::Relaxed) && crate::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         Ok([0, 0, 0, 255].repeat(300 * 300).into())
@@ -1494,10 +1494,10 @@ mod kept_tests {
         SLOW_GO.store(false, Ordering::Relaxed);
         let image = ImageData::kept(300, 300, Arc::from(&b"slow"[..]), slow).unwrap();
         let ahead = image.decode_ahead((300, 300)).expect("asked ahead");
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let until = crate::time::Instant::now() + std::time::Duration::from_secs(10);
         while !SLOW_STARTED.load(Ordering::Relaxed) {
             assert!(
-                std::time::Instant::now() < until,
+                crate::time::Instant::now() < until,
                 "the slow decode never began"
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1550,9 +1550,9 @@ mod kept_tests {
         drop(ahead);
         SLOW_GO.store(true, Ordering::Relaxed);
         wait_for(&slow, (300, 300));
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let until = crate::time::Instant::now() + std::time::Duration::from_secs(10);
         while pending(&image).is_some() {
-            assert!(std::time::Instant::now() < until, "still under way");
+            assert!(crate::time::Instant::now() < until, "still under way");
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert_eq!(

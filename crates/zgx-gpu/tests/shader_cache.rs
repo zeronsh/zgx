@@ -98,14 +98,16 @@ fn compiled_shaders_are_kept_and_read_back_by_the_next_device() {
         "the vertex and fragment shaders kept: {files:?}"
     );
     // The next device reads them back: with their bytecode spoilt, its
-    // pipeline fails, where one it compiled itself would not.
+    // pipeline fails, where one it compiled itself would not. The
+    // container's 32-byte header stays (its size is what the cache checks
+    // to take it as whole); its chunks after it are spoilt.
     let originals: Vec<_> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
     for (file, bytes) in files.iter().zip(&originals) {
         let code = bytes
             .windows(4)
             .position(|w| w == b"DXBC")
             .expect("the bytecode");
-        let mut spoilt = bytes[..code + 4].to_vec();
+        let mut spoilt = bytes[..code + 32].to_vec();
         spoilt.resize(bytes.len(), 0xAB);
         std::fs::write(file, spoilt).unwrap();
     }
