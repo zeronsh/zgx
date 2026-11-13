@@ -33,6 +33,8 @@ pub(crate) struct Timers {
 struct Clocks {
     /// A test's time, in place of the wall clock.
     test: RefCell<Option<Rc<TestClock>>>,
+    /// A timer's callback is running (`Timers::start`).
+    firing: Cell<bool>,
 }
 impl Timers {
     /// Keep the test's time from now on: see [`TestClock`].
@@ -85,6 +87,14 @@ impl Timers {
         repeat: bool,
         mut fire: impl FnMut() -> bool + 'static,
     ) -> Stop {
+        // `ui.after(0)` from inside a timer's callback waits a millisecond, as a
+        // window's next-frame timer does: on a test or virtual clock a chain of
+        // them would otherwise run for ever inside one turn.
+        let period = if period.is_zero() && self.clocks.firing.get() {
+            Duration::from_millis(1)
+        } else {
+            period
+        };
         let alive = Rc::new(Cell::new(true));
         let running = alive.clone();
         let clocks = self.clocks.clone();
@@ -98,7 +108,10 @@ impl Timers {
                     None if zgx::clock::is_virtual() => zgx::timer::sleep(period).await,
                     None => zgx::timer::sleep(period.max(Duration::from_millis(1))).await,
                 }
-                if !running.get() || !fire() || !repeat {
+                clocks.firing.set(true);
+                let keep = running.get() && fire();
+                clocks.firing.set(false);
+                if !keep || !repeat {
                     // (What keeps its `Stop` may let it go: `Stop::done`.)
                     running.set(false);
                     return;

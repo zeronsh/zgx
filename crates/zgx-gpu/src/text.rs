@@ -2855,6 +2855,130 @@ fn strike_rect(
         thickness.floor().max(1.) / scale,
     )
 }
+/// The x ranges where `glyphs`' outlines cross a band `height` thick from `y`
+/// (an underline), widened by its thickness each side, as CSS's skip-ink
+/// does: where the underline must stop for descenders.
+fn ink_gaps<'a>(
+    fonts: &FontSystem,
+    glyphs: impl Iterator<Item = &'a cosmic_text::LayoutGlyph>,
+    baseline: f32,
+    y: f32,
+    height: f32,
+) -> Vec<(f32, f32)> {
+    struct Outline {
+        lines: Vec<((f32, f32), (f32, f32))>,
+        at: (f32, f32),
+        start: (f32, f32),
+    }
+    impl Outline {
+        fn line(&mut self, to: (f32, f32)) {
+            self.lines.push((self.at, to));
+            self.at = to;
+        }
+    }
+    impl ttf_parser::OutlineBuilder for Outline {
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.at = (x, y);
+            self.start = (x, y);
+        }
+        fn line_to(&mut self, x: f32, y: f32) {
+            self.line((x, y));
+        }
+        fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+            let from = self.at;
+            for i in 1..=8 {
+                let t = i as f32 / 8.;
+                let u = 1. - t;
+                self.line((
+                    u * u * from.0 + 2. * u * t * x1 + t * t * x,
+                    u * u * from.1 + 2. * u * t * y1 + t * t * y,
+                ));
+            }
+        }
+        fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+            let from = self.at;
+            for i in 1..=8 {
+                let t = i as f32 / 8.;
+                let u = 1. - t;
+                self.line((
+                    u * u * u * from.0 + 3. * u * u * t * x1 + 3. * u * t * t * x2 + t * t * t * x,
+                    u * u * u * from.1 + 3. * u * u * t * y1 + 3. * u * t * t * y2 + t * t * t * y,
+                ));
+            }
+        }
+        fn close(&mut self) {
+            let start = self.start;
+            self.line(start);
+        }
+    }
+    let (top, bottom) = (y - height, y + 2. * height);
+    let mut gaps = Vec::new();
+    for glyph in glyphs {
+        let found = fonts.db().with_face_data(glyph.font_id, |data, index| {
+            let face = ttf_parser::Face::parse(data, index).ok()?;
+            let scale = glyph.font_size / f32::from(face.units_per_em());
+            let mut outline = Outline {
+                lines: Vec::new(),
+                at: (0., 0.),
+                start: (0., 0.),
+            };
+            face.outline_glyph(ttf_parser::GlyphId(glyph.glyph_id), &mut outline)?;
+            let origin = glyph.x + glyph.x_offset * glyph.font_size;
+            let mut span: Option<(f32, f32)> = None;
+            for ((x0, y0), (x1, y1)) in outline.lines {
+                // Down-positive page coordinates.
+                let (ax, ay) = (origin + x0 * scale, baseline - y0 * scale);
+                let (bx, by) = (origin + x1 * scale, baseline - y1 * scale);
+                let (low, high) = (ay.min(by), ay.max(by));
+                if high < top || low > bottom {
+                    continue;
+                }
+                // The part of the segment inside the band.
+                let along = |t: f32| ax + (bx - ax) * t;
+                let (t0, t1) = if (by - ay).abs() < 1e-6 {
+                    (0., 1.)
+                } else {
+                    let a = ((top - ay) / (by - ay)).clamp(0., 1.);
+                    let b = ((bottom - ay) / (by - ay)).clamp(0., 1.);
+                    (a.min(b), a.max(b))
+                };
+                let (p, q) = (along(t0), along(t1));
+                let (lo, hi) = (p.min(q), p.max(q));
+                span = Some(span.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+            }
+            span
+        });
+        if let Some((lo, hi)) = found.flatten() {
+            gaps.push((lo - height, hi + height));
+        }
+    }
+    gaps.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f32, f32)> = Vec::new();
+    for (lo, hi) in gaps {
+        match merged.last_mut() {
+            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    merged
+}
+/// `from..to` without `gaps` (sorted, merged), the pieces wider than a
+/// half point.
+fn pieces_between(from: f32, to: f32, gaps: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut pieces = Vec::new();
+    let mut at = from;
+    for (lo, hi) in gaps {
+        if *lo > at {
+            pieces.push((at, lo.min(to)));
+        }
+        at = at.max(*hi);
+    }
+    if at < to {
+        pieces.push((at, to));
+    }
+    pieces.retain(|(a, b)| b - a >= 0.5);
+    pieces
+}
 /// `rich_decorations` over any laid-out runs, given where each line starts.
 pub fn rich_decorations_in<'a>(
     fonts: &FontSystem,
@@ -2957,14 +3081,32 @@ pub fn rich_decorations_in<'a>(
                         } else {
                             (y, style.thickness())
                         };
-                        output.push(RichDecoration {
-                            bounds: Rect::new(left, y, right - left, height),
-                            color: style.color.unwrap_or(run.color),
-                            background: false,
-                            radius: 0.,
-                            run: index,
-                            strike,
-                        });
+                        // An underline that skips ink breaks round what
+                        // reaches it (descenders).
+                        let pieces = if !strike && style.skips_ink() {
+                            let glyphs = line.glyphs.iter().filter(|g| {
+                                let byte = start + g.start;
+                                g.metadata != usize::MAX
+                                    && byte >= run.range.start
+                                    && byte < run.range.end
+                                    && g.x + g.w > left
+                                    && g.x < right
+                            });
+                            let gaps = ink_gaps(fonts, glyphs, line.line_y, y, height);
+                            pieces_between(left, right, &gaps)
+                        } else {
+                            vec![(left, right)]
+                        };
+                        for (from, to) in pieces {
+                            output.push(RichDecoration {
+                                bounds: Rect::new(from, y, to - from, height),
+                                color: style.color.unwrap_or(run.color),
+                                background: false,
+                                radius: 0.,
+                                run: index,
+                                strike,
+                            });
+                        }
                     }
                 }
             }
@@ -3035,6 +3177,59 @@ mod strikeout_tests {
             assert_eq!(strike.bounds.y, strike.bounds.y.round(), "{size}");
             assert_eq!(strike.bounds.height, (size / 10.).floor().max(1.), "{size}");
         }
+    }
+}
+
+#[cfg(test)]
+mod skip_ink_tests {
+    use super::*;
+
+    const DEJAVU: &[u8] = include_bytes!("../../../comparisons/fonts/DejaVuSans.ttf");
+
+    fn underlines(text: &str, skip: bool) -> Vec<RichDecoration> {
+        let mut fonts = FontSystem::new_with_fonts([cosmic_text::fontdb::Source::Binary(
+            std::sync::Arc::new(DEJAVU),
+        )]);
+        let rich = zgx::rich_text::RichText::new(
+            text,
+            vec![zgx::rich_text::TextRun {
+                range: 0..text.len(),
+                font_size: 24.,
+                underline: Some(zgx::rich_text::Decoration::new(1.5).skip_ink(skip)),
+                font: zgx::text_layout::FontStyle {
+                    family: zgx::text_layout::FontFamily::Named("DejaVu Sans".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let buffer = rich_buffer(&mut fonts, &rich, None, None);
+        rich_decorations(&fonts, 1., &buffer, &rich)
+            .into_iter()
+            .filter(|d| !d.background && !d.strike)
+            .collect()
+    }
+
+    /// An underline that skips ink stops round the tails of g and y, and is
+    /// one line where nothing reaches it; without skip-ink it is one line.
+    #[test]
+    fn an_underline_breaks_round_descenders_when_it_skips_ink() {
+        let plain = underlines("gay", false);
+        assert_eq!(plain.len(), 1);
+        let skipped = underlines("gay", true);
+        assert!(skipped.len() >= 2, "{skipped:?}");
+        let covered: f32 = skipped.iter().map(|d| d.bounds.width).sum();
+        assert!(
+            covered < plain[0].bounds.width - 4.,
+            "{covered} of {}",
+            plain[0].bounds.width
+        );
+        // The pieces lie inside the line and don't overlap.
+        for pair in skipped.windows(2) {
+            assert!(pair[0].bounds.x + pair[0].bounds.width <= pair[1].bounds.x + 0.01);
+        }
+        assert_eq!(underlines("abc", true).len(), 1, "no descenders: one line");
     }
 }
 

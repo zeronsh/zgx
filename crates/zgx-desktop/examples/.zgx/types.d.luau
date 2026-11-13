@@ -5768,6 +5768,9 @@ export type SpanProps = {
 	-- How far below the baseline the underline sits (CSS's
 	-- `text-underline-offset`).
 	underline_offset: number?,
+	-- The underline breaks around descenders (g, j, p, q, y), as CSS's
+	-- `text-decoration-skip-ink: auto` does.
+	underline_skip_ink: boolean?,
 	-- How far its background reaches past the text on each side, taking no
 	-- room (CSS's negative inline margin under the same padding): a search
 	-- match's mark.
@@ -5804,6 +5807,9 @@ export type SpanProps = {
 		-- Room on each side of it (0), inline only: no well, no taller line,
 		-- as CSS's `margin: 0 Npx` on an inline image.
 		margin: number?,
+		-- Moved down by this many points (negative: up): web's inline
+		-- icons sit at `vertical-align: -3px`, one below centre.
+		dy: number?,
 		tint: Color?,
 		bg: Color?,
 		radius: number?,

@@ -141,6 +141,7 @@ fn spans_and_baseline_icons_are_measured_where_they_sit() {
         size: 20.,
         gap: 4.,
         margin: 0.,
+        dy: 0.,
         tint: None,
         bg: None,
         radius: 0.,

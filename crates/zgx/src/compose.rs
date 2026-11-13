@@ -5265,6 +5265,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     svg: std::sync::Arc::new(inline.svg.tinted(color)),
                     size: width,
                     inset: 0.,
+                    dy: 0.,
                     well: None,
                     boxed: Some(height),
                 });
@@ -5467,6 +5468,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         },
                         size: icon.size,
                         inset: lead + icon.margin,
+                        dy: icon.dy,
                         well: None,
                         boxed: Some(icon.size),
                     });
@@ -5511,6 +5513,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         },
                         size: icon.size,
                         inset: lead + icon.margin,
+                        dy: icon.dy,
                         well: icon.bg.and_then(|bg| {
                             let color = match bg {
                                 crate::theme::Themed::Value(color) => Some(color),

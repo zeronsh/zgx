@@ -97,6 +97,8 @@ pub(crate) struct InlineIcon {
     /// How far into the room it starts (the span's padding before it, and
     /// its well's room round it).
     pub inset: f32,
+    /// Its vertical nudge (`SpanIcon::dy`).
+    pub dy: f32,
     /// The well it sits on (`SpanIcon::bg`), resolved: drawn under it,
     /// `pad` larger on every side.
     pub well: Option<IconWell>,
@@ -136,6 +138,9 @@ pub struct SpanIcon {
     /// Room on each side of it, inline only: no well, no taller line (CSS
     /// `margin: 0 Npx` on an inline image).
     pub margin: f32,
+    /// How far it is moved down from where it sits, in points (negative:
+    /// up): CSS `vertical-align` of an inline image, 1 below centre at -3px.
+    pub dy: f32,
     /// Its colour, or a colour token; `None` paints it as the SVG says.
     pub tint: Option<crate::theme::Themed<Color>>,
     /// A well under it (a file chip's): its fill, a colour or a token;
@@ -1249,7 +1254,8 @@ pub(crate) fn mount_icons(
                 margin: crate::scene::Insets {
                     left: bounds.x - owner_bounds.x + rect.x + icon.inset - padding.left,
                     top: bounds.y - owner_bounds.y + rect.y + (rect.height - height) / 2.
-                        - padding.top,
+                        - padding.top
+                        + icon.dy,
                     ..Default::default()
                 },
                 ..Default::default()

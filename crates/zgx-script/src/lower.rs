@@ -8713,6 +8713,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         underline_style: Option<zgx::rich_text::LineStyle>,
         underline_color: Option<zgx::theme::Themed<Color>>,
         underline_thickness: Option<f32>,
+        underline_skip_ink: bool,
         hover: Option<crate::node::HoverFill>,
     }
     // Whether any span fades in: known as they're taken, so a paragraph
@@ -8755,6 +8756,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     underline_style: s.underline_style,
                     underline_color: s.underline_color,
                     underline_thickness: s.underline_thickness,
+                    underline_skip_ink: s.underline_skip_ink,
                     hover: s.hover,
                 },
                 font: s.font.clone(),
@@ -8840,11 +8842,13 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     underline_style,
                     underline_color,
                     underline_thickness,
+                    underline_skip_ink,
                     hover,
                 } = *style;
                 let decoration = || {
                     let d = zgx::rich_text::Decoration::new(underline_thickness.unwrap_or(1.))
-                        .line(underline_style.unwrap_or_default());
+                        .line(underline_style.unwrap_or_default())
+                        .skip_ink(underline_skip_ink);
                     match underline_offset {
                         Some(offset) => d.offset(offset),
                         None => d,
@@ -8969,6 +8973,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         size: icon.size,
                         gap: icon.gap,
                         margin: icon.margin,
+                        dy: icon.dy,
                         tint,
                         bg: icon.bg.as_ref().and_then(crate::node::themed_color),
                         radius: icon.radius,

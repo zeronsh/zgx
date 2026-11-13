@@ -71,6 +71,8 @@ pub struct Decoration {
     /// Whether the thickness is the font's (a line-through's OS/2
     /// yStrikeoutSize): the default's, not one asked for.
     auto: bool,
+    /// Whether it breaks around glyphs reaching it (CSS `text-decoration-skip-ink: auto`).
+    skip_ink: bool,
     line: LineStyle,
     /// How far below the baseline it sits (CSS `text-underline-offset`);
     /// None, a tenth of the font size.
@@ -88,6 +90,7 @@ impl Decoration {
                 1.
             },
             auto: false,
+            skip_ink: false,
             line: LineStyle::Solid,
             offset: None,
         }
@@ -96,6 +99,16 @@ impl Decoration {
     /// a line-through's is to its OS/2 yStrikeoutSize.
     pub fn is_auto(self) -> bool {
         self.auto
+    }
+    /// Broken around the parts of glyphs that cross it (descenders), as CSS's
+    /// `text-decoration-skip-ink: auto`, rather than drawn through them.
+    pub fn skip_ink(mut self, skip: bool) -> Self {
+        self.skip_ink = skip;
+        self
+    }
+    /// Whether it skips ink (`skip_ink`).
+    pub fn skips_ink(self) -> bool {
+        self.skip_ink
     }
     /// Drawn as `line`.
     pub fn line(mut self, line: LineStyle) -> Self {

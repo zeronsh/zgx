@@ -1519,6 +1519,8 @@ pub(crate) struct Span {
     pub underline_style: Option<zgx::rich_text::LineStyle>,
     pub underline_color: Option<Themed<Color>>,
     pub underline_thickness: Option<f32>,
+    /// Whether its underline breaks around descenders (CSS `text-decoration-skip-ink: auto`).
+    pub underline_skip_ink: bool,
     /// A link's look under the pointer: underlined, and its colour.
     pub hover: Option<HoverFill>,
     /// What few spans have (an icon, a menu), apart: most spans carry none.
@@ -1568,6 +1570,8 @@ pub(crate) struct SpanIcon {
     pub gap: f32,
     /// Room on each side of it, without a well or a taller line.
     pub margin: f32,
+    /// How far it is moved down, in points (negative: up).
+    pub dy: f32,
     /// A colour, or `"currentColor"` (the span's text colour).
     pub tint: Option<Value>,
     /// The well the icon sits on: its fill (a colour or token), its
@@ -4986,6 +4990,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
         underline_style: None,
         underline_color: None,
         underline_thickness: None,
+        underline_skip_ink: false,
         hover: None,
         rare: None,
     };
@@ -5063,6 +5068,9 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 b"underline_color" => span.underline_color = themed_color(&lua.unpack(given)?),
                 b"underline_thickness" => span.underline_thickness = number(given)?,
+                b"underline_skip_ink" => {
+                    span.underline_skip_ink = lua.unpack::<Value>(given)?.truthy()
+                }
                 // `hover = { underline = true, color = …, bg = … }`: a link's
                 // look under the pointer (CSS's `a:hover`).
                 b"hover" => {
@@ -5094,6 +5102,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
                         gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
                         margin: icon.get::<Option<f32>>("margin")?.unwrap_or(0.).max(0.),
+                        dy: icon.get::<Option<f32>>("dy")?.unwrap_or(0.),
                         tint: (!matches!(tint, Value::Nil)).then_some(tint),
                         bg: (!matches!(bg, Value::Nil)).then_some(bg),
                         radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
