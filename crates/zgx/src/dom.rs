@@ -1160,6 +1160,11 @@ fn inline(
         let _ = write!(css, "border-radius:{}px;", num(span.radius));
     }
     if link {
+        // In the paragraph's colour unless it has its own, as the desktop
+        // draws a link (not the browser's blue).
+        if span.styles.text_color.is_none() {
+            css.push_str("color:inherit;");
+        }
         css.push_str("cursor:pointer;");
     }
     let mut hover = String::new();
