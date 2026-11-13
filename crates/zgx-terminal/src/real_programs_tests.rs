@@ -49,15 +49,26 @@ fn path() -> String {
     }
 }
 
-/// Whether `program` is on `path()` (as `program.exe` on Windows); a run of
-/// one that isn't fails, so a probe can't pass by running nothing.
-fn require(program: &str) {
-    let found = path().split(SEPARATOR).any(|dir| {
-        let dir = Path::new(dir);
-        dir.join(program).is_file()
-            || (cfg!(windows) && dir.join(format!("{program}.exe")).is_file())
-    });
-    assert!(found, "{program} isn't installed (ZGX_TUI_PATH, PATH)");
+/// `program` as a command line names it, if it is on `path()`: its name on
+/// Unix, where the shell finds it on the session's `PATH`; its whole path,
+/// quoted, on Windows (`program.exe`), where the process creating it looks
+/// on the test's own `PATH`, not the one given to the session. A run of one
+/// that isn't there fails, so a probe can't pass by running nothing.
+fn require(program: &str) -> String {
+    let file = if cfg!(windows) {
+        format!("{program}.exe")
+    } else {
+        program.to_owned()
+    };
+    let found = path()
+        .split(SEPARATOR)
+        .map(|dir| Path::new(dir).join(&file))
+        .find(|candidate| candidate.is_file());
+    match found {
+        Some(_) if cfg!(unix) => program.to_owned(),
+        Some(found) => format!("\"{}\"", found.display()),
+        None => panic!("{program} isn't installed (ZGX_TUI_PATH, PATH)"),
+    }
 }
 
 impl Run {
@@ -257,11 +268,11 @@ fn repository(name: &str) -> PathBuf {
 /// `:wq` writing the file, and the shell's screen back once it ends (on
 /// Unix, where a shell prints a line before it).
 fn edits_and_writes(editor: &str, arguments: &str) {
-    require(editor);
+    let program = require(editor);
     let dir = scratch(editor);
     let command = match cfg!(unix) {
-        true => format!("printf 'before\\n'; {editor} {arguments} notes.txt"),
-        false => format!("{editor} {arguments} notes.txt"),
+        true => format!("printf 'before\\n'; {program} {arguments} notes.txt"),
+        false => format!("{program} {arguments} notes.txt"),
     };
     let run = Run::start(dir.clone(), &command);
     run.until("the editor's screen", |run| {
@@ -305,17 +316,15 @@ fn nvim_edits_and_writes() {
 #[test]
 #[ignore = "runs nvim, which may not be installed"]
 fn nvim_hears_direct_colour() {
-    require("nvim");
+    let nvim = require("nvim");
     let dir = scratch("nvim-caps");
     // Double quotes around the argument: one command line for `sh` and for
     // Windows' own parsing.
-    let run = Run::start_with(
-        dir.clone(),
-        "nvim --clean \"+lua vim.defer_fn(function() \
-         vim.fn.writefile({tostring(vim.o.termguicolors)}, 'caps') end, 1000)\"",
-        &[("COLORTERM", "")],
-        |_| {},
+    let command = format!(
+        "{nvim} --clean \"+lua vim.defer_fn(function() \
+         vim.fn.writefile({{tostring(vim.o.termguicolors)}}, 'caps') end, 1000)\""
     );
+    let run = Run::start_with(dir.clone(), &command, &[("COLORTERM", "")], |_| {});
     run.until("nvim's screen", |run| run.screen().contains('~'));
     let start = Instant::now();
     while !dir.join("caps").exists() {
@@ -498,8 +507,8 @@ fn fzf_filters_and_chooses() {
 #[test]
 #[ignore = "runs pwsh, which may not be installed"]
 fn powershell_runs_completes_and_recalls() {
-    require("pwsh");
-    let run = Run::start(scratch("pwsh"), "pwsh -NoLogo -NoProfile");
+    let pwsh = require("pwsh");
+    let run = Run::start(scratch("pwsh"), &format!("{pwsh} -NoLogo -NoProfile"));
     run.shows("PS ");
     run.type_text("Write-Output ('zgx' + 6*7)");
     run.key(Key::Enter);
@@ -528,8 +537,8 @@ fn powershell_runs_completes_and_recalls() {
 #[test]
 #[ignore = "runs cmd"]
 fn cmd_runs_commands() {
-    require("cmd");
-    let run = Run::start(scratch("cmd"), "cmd /q /k prompt $G");
+    let cmd = require("cmd");
+    let run = Run::start(scratch("cmd"), &format!("{cmd} /q /k prompt $G"));
     run.shows(">");
     run.type_text("echo zgx & set /a 6*7");
     run.key(Key::Enter);
@@ -582,8 +591,8 @@ fn git_bash_runs_and_pages() {
 #[test]
 #[ignore = "runs wsl, which may not be installed"]
 fn wsl_runs_a_linux_shell() {
-    require("wsl");
-    let run = Run::start(scratch("wsl"), "wsl.exe -e sh");
+    let wsl = require("wsl");
+    let run = Run::start(scratch("wsl"), &format!("{wsl} -e sh"));
     run.shows("$");
     run.type_text("uname -s; echo zgx$((6*7))");
     run.key(Key::Enter);
