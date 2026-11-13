@@ -1360,10 +1360,11 @@ fn glyphs_of<'a>(
         None => styled_glyphs(glyphs, runs, scale, |_, _| 0),
     }
 }
-/// The scale below which text is drawn for a low-density screen: glyphs on
-/// whole device pixels (`styled_glyphs`) and their coverage firmed
-/// (`FIRM_COVERAGE`). At 2x and over, where a pixel is too small to see,
-/// glyphs keep their subpixel places and outlines' plain coverage.
+/// The scale below which text is drawn for a low-density screen: lines
+/// starting on whole device pixels (`styled_glyphs`) and their glyphs'
+/// coverage firmed (`FIRM_COVERAGE`). At 2x and over, where a pixel is too
+/// small to see, lines keep their subpixel places and outlines' plain
+/// coverage.
 const SHARP_TEXT_BELOW: f32 = 2.;
 /// A glyph quad's `options.y` below `SHARP_TEXT_BELOW`: a mask whose coverage
 /// `draw.wgsl` firms by its colour (`firm`).
@@ -1387,25 +1388,20 @@ fn styled_glyphs<'a>(
     for run in runs {
         // Most texts are one line: one allocation at its size.
         glyphs.reserve(run.glyphs.len());
-        // Below 2x, the line's start on a whole pixel, and each glyph on one
-        // counted from there: a line that only moves keeps its spacing.
-        let sharp = scale < SHARP_TEXT_BELOW;
-        let line_start = match run.glyphs.first() {
-            Some(glyph) if sharp => (glyph.x + glyph.font_size * glyph.x_offset) * scale,
+        // Below 2x, the line's start on a whole pixel, and each glyph at its
+        // own quarter-pixel place counted from there: a line that only moves
+        // keeps its spacing. Each glyph rounded to a whole pixel on its own
+        // put a letter a pixel nearer or further from the next than its
+        // advance says, the gaps in a word uneven.
+        let shift = match run.glyphs.first() {
+            Some(glyph) if scale < SHARP_TEXT_BELOW => {
+                let start = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
+                start.round() - start
+            }
             _ => 0.,
         };
         for glyph in run.glyphs {
-            // Below 2x, each glyph on the nearest whole device pixel (its
-            // subpixel bin zero), as Windows' own text is: a stem a quarter
-            // pixel off lands on two columns at part strength, which reads
-            // as blur on a ~96 dpi screen. Its line keeps its layout.
-            let p = if sharp {
-                let exact = (glyph.x + glyph.font_size * glyph.x_offset) * scale;
-                let placed = line_start.round() + (exact - line_start).round();
-                glyph.physical((placed - exact, 0.), scale)
-            } else {
-                glyph.physical((0., 0.), scale)
-            };
+            let p = glyph.physical((shift, 0.), scale);
             let run_index = style(run.line_i, glyph);
             glyphs.push(Glyph {
                 key: p.cache_key,
@@ -22611,7 +22607,6 @@ mod rest_tests {
                 stats.shaped_nodes,
                 stats.shaped_bytes,
                 stats.cached_quads,
-                stats.atlas_entries,
                 stats.swash_images,
                 stats.swash_outlines,
                 stats.image_textures,
@@ -22666,10 +22661,13 @@ mod rest_tests {
             "{at_rest:?}"
         );
         // A long idle: the atlas too, back to its first size (a page of text
-        // grows it to that at once).
+        // grows it to that at once), and its glyphs to the small page's. (A
+        // grown atlas the big page didn't fill keeps them until then.)
         gpu.trim_atlas();
         let first = (INITIAL_ATLAS * INITIAL_ATLAS * 4) as usize;
-        assert!(gpu.debug_cache_stats().atlas_bytes <= first.max(baseline.atlas_bytes));
+        let trimmed = gpu.debug_cache_stats();
+        assert!(trimmed.atlas_bytes <= first.max(baseline.atlas_bytes));
+        assert_eq!(trimmed.atlas_entries, baseline.atlas_entries, "{trimmed:?}");
         // And the next frame draws.
         draw(&mut gpu, &mut small);
     }
