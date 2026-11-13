@@ -446,9 +446,12 @@ impl ShapedText {
                 .last_mut()
                 .unwrap()
                 .set_align(alignment(&font.font));
-            // (The buffer was shaped before the row joined it: lay the row out too.)
-            let last = buffer.lines.len() - 1;
-            buffer.line_layout(fonts, last);
+            // (The buffer was shaped before the row joined it: lay the row out
+            // too, where an editor's own break ends the text.)
+            if rich.text().ends_with('\u{1e}') {
+                let last = buffer.lines.len() - 1;
+                buffer.line_layout(fonts, last);
+            }
             buffer.shape_until_scroll(fonts, false);
         }
         let mut offset = 0;
