@@ -22503,6 +22503,17 @@ declare ui: {
 	-- a dialog holds focus. Raised over everything as it opens (`open`, a
 	-- state; open unless given).
 	layer: (props: LayerProps) -> Node,
+	-- A layer above everything the app shows: in a window of its own
+	-- where the host has them (macOS), over the app's menus, popovers,
+	-- selects, tooltips and a drag's preview, covering the window's content
+	-- (its root at 0, 0; it follows the window as it moves, resizes,
+	-- zooms and changes Space). A `ui.layer` otherwise: no focus, no
+	-- backdrop, the pointer passing through where a child has
+	-- `pointer_events = "none"` or holds nothing; a press on a control in
+	-- it closes no menu or popover. Of two, the later is above. Drawn only
+	-- while it paints something; shown while `open` (a state; open unless
+	-- given) and its window is. Elsewhere it is the window's own top layer.
+	topmost: (props: LayerProps) -> Node,
 	popover: (props: PopoverProps) -> Node,
 	menu: (props: PopoverProps) -> Node,
 	menu_item: (props: MenuItemProps) -> Node,

@@ -1304,6 +1304,8 @@ pub(crate) enum Kind {
         autofocus: bool,
         /// `ui.layer`: non-modal, over the window (toasts).
         layer: bool,
+        /// `ui.topmost`: that layer in a window above the app's popups.
+        topmost: bool,
         /// `dismiss_on_backdrop = false`: a click outside doesn't close it
         /// (a dialog that must be answered).
         dismiss: Option<bool>,
@@ -6096,6 +6098,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         placement: modal_placement_of(table.get("placement")?)?,
                         autofocus: table.get::<Option<bool>>("autofocus")?.unwrap_or(true),
                         layer: false,
+                        topmost: false,
                         dismiss: table.get("dismiss_on_backdrop")?,
                         scrim_blur: table.get("scrim_blur")?,
                         on_close,
@@ -6111,35 +6114,40 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     // `ui.layer { open?, placement?, … }`: over the window, non-modal (toasts).
-    ui.set(
-        "layer",
-        lua.create_function(|lua, table: Table| {
-            let open = match table.get::<mlua::Value>("open")? {
-                mlua::Value::Nil => env(lua)?.runtime.signal(Value::Bool(true)),
-                open => expect_state(&open, "`open`")?,
-            };
-            node_ud(
-                lua,
-                fill(
+    // `ui.topmost { open?, … }`: that layer drawn above the app's menus,
+    // popovers and tooltips, in a window of its own where the host has them.
+    for (name, topmost) in [("layer", false), ("topmost", true)] {
+        ui.set(
+            name,
+            lua.create_function(move |lua, table: Table| {
+                let open = match table.get::<mlua::Value>("open")? {
+                    mlua::Value::Nil => env(lua)?.runtime.signal(Value::Bool(true)),
+                    open => expect_state(&open, "`open`")?,
+                };
+                node_ud(
                     lua,
-                    Node::new(
-                        owner(lua)?,
-                        Kind::Modal {
-                            label: label(&table)?,
-                            open,
-                            placement: modal_placement_of(table.get("placement")?)?,
-                            autofocus: false,
-                            layer: true,
-                            dismiss: None,
-                            scrim_blur: None,
-                            on_close: None,
-                        },
-                    ),
-                    Some(&table),
-                )?,
-            )
-        })?,
-    )?;
+                    fill(
+                        lua,
+                        Node::new(
+                            owner(lua)?,
+                            Kind::Modal {
+                                label: label(&table)?,
+                                open,
+                                placement: modal_placement_of(table.get("placement")?)?,
+                                autofocus: false,
+                                layer: true,
+                                topmost,
+                                dismiss: None,
+                                scrim_blur: None,
+                                on_close: None,
+                            },
+                        ),
+                        Some(&table),
+                    )?,
+                )
+            })?,
+        )?;
+    }
     for name in ["popover", "menu"] {
         ui.set(
             name,

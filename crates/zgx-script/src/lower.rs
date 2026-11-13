@@ -3763,6 +3763,7 @@ fn kind_view(
             placement,
             autofocus,
             layer,
+            topmost,
             dismiss,
             scrim_blur,
             on_close,
@@ -3780,6 +3781,7 @@ fn kind_view(
                 view.autofocus(false)
             };
             let view = if *layer { view.layer() } else { view };
+            let view = if *topmost { view.topmost() } else { view };
             let view = match dismiss {
                 Some(d) => view.dismiss_on_backdrop(*d),
                 None => view,
