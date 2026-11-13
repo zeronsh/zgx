@@ -1628,7 +1628,7 @@ export type CommandOptions = {
 	-- (as a browser keeps ⌘T from its pages). Not a plugin's to set.
 	reserved: boolean?,
 	-- Held, its shortcut runs it again on each auto-repeat; without it, once a press.
-	repeat: boolean?,
+	["repeat"]: boolean?,
 	run: (() -> ...unknown)?,
 	-- A separator line in `menu` instead of a command.
 	separator: boolean?,

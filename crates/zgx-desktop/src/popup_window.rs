@@ -758,13 +758,29 @@ mod macos {
     /// shadow's ink, and the window server's shadow, which follows what the
     /// window shows, would outline the whole soft shadow (on macOS 26 a
     /// dark rim round it) besides the panel's own.
+    /// Whether the window server shadows a popup's window: never a topmost layer, nor a tooltip or hover card,
+    /// which draws whatever shadow it has (AppKit's would ring it, a dark rim on macOS 26).
+    fn system_shadow(scene: &Scene, root: NodeId) -> bool {
+        use zgx::scene::PopupRole;
+        !matches!(
+            scene.popup_role(root),
+            Some(PopupRole::Topmost | PopupRole::Tooltip)
+        ) && window_shadow(scene, root)
+    }
     fn window_shadow(scene: &Scene, root: NodeId) -> bool {
         let Some(panel) = panel_of(scene, root) else {
             return true;
         };
         match scene.kind(panel) {
             NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
-                quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
+                // A ring or border is its own edge (a dark theme's popover: no shadow, a 0.5 inset ring)
+                let ring = quad
+                    .decoration
+                    .as_ref()
+                    .and_then(|d| d.inset_shadows.as_deref())
+                    .is_some_and(|rings| rings.iter().any(|ring| ring.color.3 > 0));
+                let border = quad.border_width > 0. && quad.border_color.3 > 0;
+                !ring && !border && quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
             }
             _ => true,
         }
@@ -859,6 +875,9 @@ mod macos {
             );
             window.setAcceptsMouseMovedEvents(true);
             window.setBecomesKeyOnlyIfNeeded(true);
+            if *crate::window_chrome::OFFSCREEN {
+                crate::window_chrome::hide_ns_window(&window);
+            }
             let host = CALayer::new();
             host.setHidden(true);
             let content = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
@@ -1039,10 +1058,12 @@ mod macos {
                 let number = self.window.windowNumber();
                 PREVIEWS.with(|previews| previews.borrow_mut().retain(|other| *other != number));
             }
-            self.window.setAlphaValue(1.);
-            self.window.setIgnoresMouseEvents(false);
+            self.window
+                .setAlphaValue(crate::window_chrome::shown_alpha());
+            self.window
+                .setIgnoresMouseEvents(*crate::window_chrome::OFFSCREEN);
             // A menu's or a popover's rim, should a preview have had it off.
-            self.window.setHasShadow(true);
+            self.window.setHasShadow(!*crate::window_chrome::OFFSCREEN);
             if let Some(renderer) = &mut self.renderer {
                 renderer.trim();
             }
@@ -1384,7 +1405,9 @@ mod macos {
             .setFrameOrigin(NSPoint::new(-10_000., -10_000.));
         panel.window.orderFront(None);
         panel.window.orderOut(None);
-        panel.window.setAlphaValue(1.);
+        panel
+            .window
+            .setAlphaValue(crate::window_chrome::shown_alpha());
         POOL_PANELS.with(|pool| pool.borrow_mut().push(panel));
     }
 
@@ -1727,9 +1750,11 @@ mod macos {
                 panel.back(material, frame);
                 panel.place(&parent, &content, frame);
                 if panel.preview.is_none() {
-                    let shadow = !topmost && window_shadow(scene, root);
+                    let shadow = system_shadow(scene, root);
                     if panel.window.hasShadow() != shadow {
-                        panel.window.setHasShadow(shadow);
+                        panel
+                            .window
+                            .setHasShadow(shadow && !*crate::window_chrome::OFFSCREEN);
                     }
                 }
                 if new {
@@ -1941,7 +1966,7 @@ mod macos {
 
     #[cfg(test)]
     mod tests {
-        use super::{Material, window_shadow};
+        use super::{Material, system_shadow, window_shadow};
         use objc2_app_kit::NSVisualEffectMaterial;
         use zgx::{compose::prelude::*, widgets::Ui};
 
@@ -1987,6 +2012,45 @@ mod macos {
             assert_eq!(radius, -1.);
             assert_eq!((bounds.y, bounds.height), (y - 10., h + 10.));
             assert_eq!(bounds.width, w);
+        }
+
+        #[test]
+        fn a_panel_ringed_or_bordered_takes_no_shadow_from_the_window_server() {
+            use zgx::scene::{BoxShadow, Transform};
+            let shadow = |view: View| {
+                let mut ui = Ui::new(400., 300.);
+                let handle = ui.mount(view);
+                ui.prepare_frame();
+                window_shadow(&ui.scene.borrow(), handle.node())
+            };
+            let ring = BoxShadow {
+                color: rgba(0x262626ff),
+                offset: Transform { x: 0., y: 0. },
+                blur_radius: 0.,
+                spread: 0.5,
+            };
+            assert!(
+                !shadow(div().child(chip().inset_shadows(vec![ring]))),
+                "a dark popover's inset ring"
+            );
+            assert!(
+                !shadow(div().child(chip().border(1.).border_color(rgb(0x303030)))),
+                "a bordered panel"
+            );
+        }
+
+        #[test]
+        fn a_tooltip_takes_no_shadow_from_the_window_server() {
+            use zgx::scene::PopupRole;
+            let mut ui = Ui::new(400., 300.);
+            let handle = ui.mount(div().child(chip()));
+            ui.prepare_frame();
+            let root = handle.node();
+            assert!(system_shadow(&ui.scene.borrow(), root), "a menu's rim");
+            ui.scene
+                .borrow_mut()
+                .set_popup_role(root, PopupRole::Tooltip);
+            assert!(!system_shadow(&ui.scene.borrow(), root));
         }
 
         #[test]

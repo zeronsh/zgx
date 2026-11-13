@@ -775,3 +775,32 @@ fn an_anchored_preview_hangs_below_the_pointer_centred() {
     up(&ui, 150., 100.);
     view.unmount();
 }
+
+/// A preview built from a component that reads a provider (an animated one
+/// asks for the window's frame clock) finds it as its source did.
+#[test]
+fn a_drag_preview_keeps_the_providers_its_source_was_built_under() {
+    let mut ui = Ui::new(400., 300.);
+    let found = Rc::new(RefCell::new(None));
+    let seen = found.clone();
+    let view = ui.mount(zgx::compose::provide(
+        zgx::frame::FrameClock::new(),
+        div()
+            .size(100., 80.)
+            .on_drag(|| Card(1))
+            .drag_preview(move |_: &Card| {
+                let seen = seen.clone();
+                zgx::compose::component(move |cx| {
+                    *seen.borrow_mut() = Some(cx.try_service::<zgx::frame::FrameClock>().is_some());
+                    let _ = cx.frames();
+                    div().size(60., 40.)
+                })
+            }),
+    ));
+    ui.prepare_frame();
+    down(&ui, 20., 20.);
+    moved(&ui, 150., 100.);
+    assert_eq!(*found.borrow(), Some(true));
+    up(&ui, 150., 100.);
+    view.unmount();
+}

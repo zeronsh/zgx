@@ -256,7 +256,12 @@ impl Drop for Preview {
         }
     }
 }
-pub(crate) fn mount(ui: &mut Ui, source: NodeId, mut builder: PreviewBuilder) {
+pub(crate) fn mount(
+    ui: &mut Ui,
+    source: NodeId,
+    mut builder: PreviewBuilder,
+    services: crate::reactive::ServiceScope,
+) {
     let weak = ui.downgrade();
     let mut preview = Preview(None);
     let binding = ui.input.listen(source, move |cx| {
@@ -275,7 +280,7 @@ pub(crate) fn mount(ui: &mut Ui, source: NodeId, mut builder: PreviewBuilder) {
                     old.unmount();
                 }
                 if let Some(view) = (builder.build)(&event.payload) {
-                    let view = ui.mount(view);
+                    let view = ui.mount_scoped(view, services.clone());
                     let node = view.node();
                     let mut style = ui.scene.borrow().style(node);
                     style.absolute = true;
