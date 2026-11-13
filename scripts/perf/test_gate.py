@@ -225,5 +225,38 @@ class AllocationsTests(unittest.TestCase):
                                   'peak': 2048})
 
 
+
+class OutputTests(unittest.TestCase):
+    """The output table: the same paint and damage, or the first flush
+    where paint or damage parts, and what a scene without a fingerprint
+    says."""
+
+    def test_the_same_output_reads_same(self):
+        frames = [('a1', 'd1'), ('a2', 'd2')]
+        self.assertEqual(gate.output_of('x', frames, list(frames)), 'same output: paint and damage (2 flushes)')
+
+    def test_paint_parting_is_reported_at_its_flush(self):
+        before = [('a1', 'd1'), ('a2', 'd2'), ('a3', 'd3')]
+        after = [('a1', 'd1'), ('a2', 'd2'), ('b3', 'd3')]
+        self.assertEqual(gate.output_of('x', before, after), 'output differs from flush 2 (of 3)')
+
+    def test_same_paint_with_other_damage_says_so(self):
+        before = [('a1', 'd1'), ('a2', 'd2')]
+        after = [('a1', 'd1'), ('a2', 'e2')]
+        self.assertEqual(gate.output_of('x', before, after), 'same paint; damage differs from flush 1 (of 2)')
+
+    def test_a_harness_flush_compares_paint_alone(self):
+        before = [('a1', '-'), ('a2', '-')]
+        self.assertEqual(gate.output_of('x', before, list(before)), 'same output: paint (2 flushes)')
+
+    def test_unhooked_failed_and_new_scenes_say_so(self):
+        self.assertEqual(gate.output_of('video', [], []), gate.UNPRINTED['video'])
+        self.assertIn('not hooked', gate.output_of('some-scene', [], []))
+        self.assertEqual(gate.output_of('x', 'failed', [('a', 'd')]), 'the run failed')
+        self.assertEqual(gate.output_of('x', [('a', 'd')], None), 'the run failed')
+        self.assertEqual(gate.output_of('x', None, [('a', 'd')]), '(new) 1 flushes')
+        self.assertEqual(gate.output_of('x', [('a', 'd')], [('a', 'd'), ('b', 'e')]), 'flush count differs (1 vs 2)')
+
+
 if __name__ == '__main__':
     unittest.main()

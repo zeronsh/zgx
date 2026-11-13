@@ -666,6 +666,70 @@ def unit_of(env):
     return None
 
 
+# What a scene draws, flush by flush (`fingerprint`): compared base against
+# head beside the instruction rows, gating nothing yet.
+# `ZGX_GATE_FINGERPRINT=0` leaves it out.
+FINGERPRINT = os.environ.get('ZGX_GATE_FINGERPRINT', '1') != '0'
+# Scenes whose bench gives no fingerprint yet, and why: said so in the table.
+UNPRINTED = {
+    'video': 'not hooked: the video stage keeps its scene to itself',
+    '3d-textured': 'not hooked: a 3D world drawn without a scene',
+    '3d-mixed': 'not hooked: a 3D world drawn without a scene',
+}
+
+
+def fingerprint(binary, env, checkout):
+    """What `binary` draws in the scene `env` describes, as the bench's
+    flushes hash it (`scripts/perf/fingerprint`, `ZGX_FINGERPRINT`): a native
+    run of its own, as `allocations` is but without the counter (the hashing
+    allocates). A list of (paint, damage) hashes, a flush each (damage `-`
+    where the bench's flush is a harness's), [] for a bench that gives none,
+    or None when the run failed."""
+    warm(binary, env, checkout)
+    out = WORK / 'fingerprint.txt'
+    out.unlink(missing_ok=True)
+    environ = environment(binary, env, checkout)
+    environ['ZGX_FINGERPRINT'] = str(out)
+    result = subprocess.run([str(binary)], env=environ, capture_output=True, text=True)
+    if result.returncode:
+        return None
+    if not out.exists():
+        return []
+    return [tuple(line.split()) for line in out.read_text().splitlines() if line.strip()]
+
+
+def output_of(name, before, after):
+    """`fingerprint`'s two sides, read: the same paint and damage, or where
+    they first part (paint before damage: same paint with other damage is a
+    repaint change of its own)."""
+    if after is None or before == 'failed':
+        return 'the run failed'
+    if not after:
+        return UNPRINTED.get(name, 'no fingerprint: the bench is not hooked')
+    if before is None:
+        return f'(new) {len(after)} flushes'
+    if not before:
+        return 'no fingerprint on the base'
+    for index, ((paint, damage), (paint_, damage_)) in enumerate(zip(before, after)):
+        if paint != paint_:
+            return f'output differs from flush {index} (of {len(after)})'
+    for index, ((paint, damage), (paint_, damage_)) in enumerate(zip(before, after)):
+        if '-' not in (damage, damage_) and damage != damage_:
+            return f'same paint; damage differs from flush {index} (of {len(after)})'
+    if len(before) != len(after):
+        return f'flush count differs ({len(before)} vs {len(after)})'
+    damage = '' if any(d == '-' for _, d in after) else ' and damage'
+    return f'same output: paint{damage} ({len(after)} flushes)'
+
+
+def output_lines(rows):
+    """The output table: a line a scene (`output_of`)."""
+    lines = ["**Output** (each flush's paint and damage hashed in a native run of each side; report only, "
+             "gating nothing)", '', '| scene | base vs head |', '| --- | --- |']
+    lines += [f'| {name} | {output_of(name, before, after)} |' for name, before, after in rows]
+    return lines
+
+
 def allocation_lines(rows):
     """The allocations table, one row a scene: base and head, the change in
     allocations, reallocations, bytes and peak bytes, per unit where the
@@ -738,6 +802,7 @@ def main():
         build(base, target, WORK / 'gate-bin-base')
     rows, failed = [], []
     allocated, allocs_time = [], 0.0
+    printed, print_time = [], 0.0
     for name, package, example, env in SCENES:
         base_binary = WORK / 'gate-bin-base' / example
         head_binary = WORK / 'gate-bin-head' / example
@@ -758,6 +823,14 @@ def main():
             allocated_before = (allocations(base_binary, env, base) or {'failed': True}) if runs else None
             allocated.append((name, env, allocated_before, allocations(head_binary, env, ROOT)))
             allocs_time += time.monotonic() - started
+        if FINGERPRINT:
+            started = time.monotonic()
+            printed_before = None
+            if runs:
+                printed_before = fingerprint(base_binary, env, base)
+                printed_before = 'failed' if printed_before is None else printed_before
+            printed.append((name, printed_before, fingerprint(head_binary, env, ROOT)))
+            print_time += time.monotonic() - started
         shown = f'{before / 1e6:10.1f} M {after / 1e6:10.1f} M {delta:+7.2f}%' if before else f'{"new":>12} {after / 1e6:10.1f} M'
         if len(deltas) > 1:
             shown += f'  median of {", ".join(f"{d:+.3f}%" for d in deltas)}{layout_of(deltas)}'
@@ -782,6 +855,13 @@ def main():
     print(verdict, flush=True)
     if args.markdown:
         args.markdown.write_text('\n'.join(table) + '\n')
+    if printed:
+        lines = output_lines(printed)
+        lines.append(f'\n(the native runs took {print_time:.0f} s)')
+        print('\n'.join(lines), flush=True)
+        if args.markdown:
+            with args.markdown.open('a') as out:
+                out.write('\n' + '\n'.join(lines) + '\n')
     if allocated:
         lines = allocation_lines(allocated)
         lines.append(f'\n(the native runs took {allocs_time:.0f} s)')
