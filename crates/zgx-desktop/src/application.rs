@@ -115,8 +115,8 @@ pub struct WindowOptions {
     /// display, whatever the zoom. Other platforms place their own.
     pub caption_height: Option<f64>,
     /// Which renderer it draws with (`None`, the default: `ZGX_RENDERER`'s
-    /// choice, else the GPU's): the software raster, always or where the
-    /// only adapter is a software one.
+    /// choice, else `Auto`, the software raster where the only adapter is a
+    /// software one): the GPU's, or the raster always.
     #[doc(hidden)]
     pub renderer: Option<crate::RendererChoice>,
 }
@@ -1744,6 +1744,9 @@ struct Host {
     /// The software raster it draws with instead, where the GPU renderer's
     /// adapter is a software one (`raster_window`): `renderer` is then none.
     raster: Option<crate::raster_window::RasterWindow>,
+    /// A GPU renderer couldn't be made for content only it draws: the
+    /// raster draws on without it, and none is tried again.
+    gpu_refused: bool,
     /// When to try making a renderer again after the GPU device was lost
     /// (`recover_renderer`), while none could be made.
     renderer_retry: Option<std::time::Instant>,
@@ -2225,6 +2228,7 @@ impl Host {
             window: None,
             renderer: None,
             raster: None,
+            gpu_refused: false,
             renderer_retry: None,
             error_banner: None,
             render_fault: None,
@@ -2956,6 +2960,14 @@ impl Host {
             }
             self.force = true;
             self.hidden_background(&window, color);
+        }
+        // Content the raster doesn't draw (a GPU view, a layer shader): the
+        // window goes to the GPU, this frame drawn whole there.
+        if self.raster.is_some()
+            && !self.gpu_refused
+            && crate::raster_window::needs_gpu(&self.context.ui.scene.borrow())
+        {
+            self.raster_to_gpu();
         }
         let scene = self.context.ui.scene.clone();
         let mut scene = scene.borrow_mut();
@@ -4085,6 +4097,30 @@ impl Host {
             Some(_) => Vec::new(),
             None => crate::popup_window::popup_screens(window),
         }
+    }
+    /// A raster window (`raster_window`) moves to the GPU: a renderer made
+    /// as after a lost device (`recover_renderer`), its text and background
+    /// set up and the window drawn whole on it. None made, the raster draws
+    /// on.
+    fn raster_to_gpu(&mut self) {
+        let raster = self.raster.take();
+        self.recover_renderer();
+        if self.renderer.is_some() {
+            zgx_gpu::present_log::log(|| "raster to gpu".into());
+            // Its popups in windows of their own again, where the platform
+            // shows them so.
+            if let Some(window) = self.window.clone() {
+                self.context
+                    .ui
+                    .set_popup_screens(self.popup_screens(&window));
+            }
+            return;
+        }
+        eprintln!("zgx: no GPU renderer for what only it draws; the raster draws on without it");
+        self.renderer_retry = None;
+        self.gpu_refused = true;
+        self.raster = raster;
+        self.force = true;
     }
     /// The GPU device was lost (a driver reset, a GPU removed): a renderer
     /// on a new context, its text and background set up again, and the

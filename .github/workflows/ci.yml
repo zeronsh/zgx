@@ -72,6 +72,10 @@ concurrency:
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  # Runners have no GPU, where windows draw on the software raster by
+  # default (`ZGX_RENDERER=auto`): tests and probes test the GPU renderer
+  # (lavapipe, WARP); raster-window and the *-raster probes the raster.
+  ZGX_RENDERER: gpu
 jobs:
   # Named `plan`: admission (admit.py) leaves a job of that name out of reservations.
   plan:
@@ -868,7 +872,6 @@ jobs:
         shell: bash
         run: |
           skips=(
-            a_picture_is_sampled_by_name                                 # pictures read by layer shaders: left out on D3D11
             an_apps_view_is_drawn_with_its_device_and_sampled_by_name    # GPU views read by layer shaders: left out on D3D11
             backdrop_readers_apart_share_one_copy_and_pass               # counts copies: D3D11 makes 2 where D3D12 shares 1
             draws_around_a_reader_sharing_a_copy_do_not_draw_over_it     # counts copies: D3D11 makes 2 where D3D12 shares 1
@@ -883,6 +886,7 @@ jobs:
             a_long_column_s_damaged_frames_are_full_frames               # fails on WARP without D3D11 (#2124)
             a_node_mounted_and_gone_while_a_layered_list_moves_leaves_nothing  # fails on WARP without D3D11 (#2124)
             atlas_icons_survive_the_atlas_filling_up                     # fails on WARP without D3D11 (#2124)
+            a_frame_kept_before_a_scroll_patches_after_it_as_drawn_afresh  # its first scrolled frame differs on D3D11 (#2154)
           )
           args=()
           for skip in "${skips[@]}"; do args+=(--skip "$skip"); done

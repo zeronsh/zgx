@@ -4818,6 +4818,11 @@ impl Scene {
         }
         self.invalidate(id, COMPOSITE);
     }
+    /// Whether any node composites through a layer shader: a renderer that
+    /// draws none (the software raster) hands such a window to the GPU's.
+    pub fn has_layer_shaders(&self) -> bool {
+        !self.layer_shaders.is_empty()
+    }
     /// `id`'s layer shader and its uniforms, if either is set.
     pub fn layer_shader(&self, id: NodeId) -> Option<&LayerShader> {
         if self.layer_shaders.is_empty() {

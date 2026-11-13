@@ -9,27 +9,28 @@ use winit::window::Window;
 use zgx::scene::{Color, Rect, Scene};
 
 /// Which renderer a window draws with (`WindowOptions::renderer`, else
-/// `ZGX_RENDERER`): the GPU's (the default), the raster, or the raster
-/// where the only adapter is a software one.
+/// `ZGX_RENDERER`): the GPU's, the raster, or (the default) the raster
+/// where the only adapter is a software one, moving to the GPU for what
+/// only it draws (`needs_gpu`).
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RendererChoice {
     #[default]
+    Auto,
     Gpu,
     Raster,
-    Auto,
 }
 impl RendererChoice {
-    /// `ZGX_RENDERER`: `raster` or `auto`; anything else (or nothing) is
-    /// the GPU's.
+    /// `ZGX_RENDERER`: `gpu`, `raster` or `auto`; anything else (or
+    /// nothing) is `Auto`.
     pub(crate) fn from_env() -> Self {
         match zgx::env::var_os("ZGX_RENDERER")
             .as_deref()
             .and_then(|value| value.to_str())
         {
+            Some("gpu") => Self::Gpu,
             Some("raster") => Self::Raster,
-            Some("auto") => Self::Auto,
-            _ => Self::Gpu,
+            _ => Self::Auto,
         }
     }
 }
@@ -52,6 +53,13 @@ pub(crate) fn software_adapter(name: &str, device_type: zgx_gpu::wgpu::DeviceTyp
         ]
         .iter()
         .any(|driver| name.contains(driver))
+}
+
+/// Whether `scene` holds what only the GPU renderer draws: a GPU view's
+/// frames, a layer shader. A raster window that comes to hold either goes
+/// to the GPU.
+pub(crate) fn needs_gpu(scene: &Scene) -> bool {
+    scene.has_layer_shaders() || zgx::gpu_view::any_mounted()
 }
 
 /// The raster, the text services its scene is measured with, and the
@@ -182,6 +190,23 @@ mod tests {
         assert!(software_adapter("Microsoft Basic Render Driver", Other));
         assert!(!software_adapter("Apple M5 Max", IntegratedGpu));
         assert!(!software_adapter("NVIDIA GeForce RTX 4090", DiscreteGpu));
+    }
+
+    #[test]
+    fn a_layer_shader_needs_the_gpu_and_its_removal_does_not() {
+        let mut scene = Scene::new(100., 100.);
+        let node = scene.append(
+            scene.root(),
+            zgx::scene::NodeKind::Rect(Color(255, 0, 0, 255)),
+            zgx::scene::Style::default(),
+        );
+        assert!(!needs_gpu(&scene));
+        let shader =
+            zgx::decoration::FillShader::new("fn layer(c: vec4f) -> vec4f { return c; }", None);
+        scene.set_layer_shader(node, Some(shader));
+        assert!(needs_gpu(&scene));
+        scene.set_layer_shader(node, None);
+        assert!(!needs_gpu(&scene), "a node with its shader taken off");
     }
 
     #[test]
