@@ -49,6 +49,16 @@ fn per_publish(blocks: usize, publishes: usize) -> Vec<(Phase, u64)> {
             "return runs(b.s)",
             "local n = 0 for _, r in b.s do n += #r.x end return ui.div { id = tostring(n) }",
         ),
+        // Plain tables of the span's options: Luau's share of making them.
+        "tables" => SCRIPT.replace(
+            "return runs(b.s)",
+            "local n = 0 for _, r in b.s do local t = { r.x, literal = true, weight = if r.b then 600 else nil } n += #t[1] end return ui.div { id = tostring(n) }",
+        ),
+        // The spans made, without ui.rich lowering them.
+        "spans" => SCRIPT.replace(
+            "return runs(b.s)",
+            "local n = 0 for _, r in b.s do local sp = ui.span { r.x, literal = true, weight = if r.b then 600 else nil } n += 1 end return ui.div { id = tostring(n) }",
+        ),
         _ => SCRIPT.to_string(),
     };
     let host = match std::env::var("STREAM_FIXTURE") {
