@@ -973,7 +973,8 @@ impl View {
         self.edges_mut().ancestor = true;
         self
     }
-    /// Show an interactive overlay scrollbar on a scroll viewport or virtual list.
+    /// Show an interactive overlay scrollbar on a scroll viewport, virtual list or text area (at its box's edge,
+    /// over its padding: it takes no room from the text).
     pub fn scrollbar(mut self, visible: bool) -> Self {
         self.rare_mut().scrollbar = Some(visible);
         self
@@ -6259,8 +6260,16 @@ fn mount_element(
         .unwrap_or(false);
     assert!(
         rare.as_ref().is_none_or(|r| r.scrollbar.is_none())
-            || matches!(kind, Kind::Scroll { .. } | Kind::VirtualList(_)),
-        "scrollbar is only supported on scroll, scroll_x, and virtual_list views"
+            || matches!(
+                kind,
+                Kind::Scroll { .. }
+                    | Kind::VirtualList(_)
+                    | Kind::Editor {
+                        multiline: true,
+                        ..
+                    }
+            ),
+        "scrollbar is only supported on scroll, scroll_x, virtual_list and text_area views"
     );
     let scrollbar = rare.as_ref().and_then(|r| r.scrollbar).unwrap_or(false);
     let follow_end = rare.as_ref().and_then(|r| r.follow_end).unwrap_or(false);
@@ -7475,6 +7484,9 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
     }
     if let (Some(scroll), Some((viewport, content))) = (scroll_offset, scroll_nodes) {
         mount_scroll(ui, root, viewport, content, scroll, scrollbar, follow_end);
+    } else if scrollbar && let Some(editor) = ui.editor(root) {
+        // A text area's: over its box, once its own nodes are in it.
+        editor.mount_scrollbar(ui);
     }
     if let Some(mut compute) = compute {
         let weak = ui.downgrade();
