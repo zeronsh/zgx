@@ -1772,6 +1772,9 @@ declare extern type WindowApi with
 	-- is false is worth a notification or a badge.
 	active: State<boolean>
 	shown: State<boolean>
+	-- The open menus, popovers and tooltips: `{ x, y, w, h, kind }` each, in
+	-- window points, kind "menu", "popover", "tooltip" or "topmost"; read-only.
+	popups: State<{ { x: number, y: number, w: number, h: number, kind: string } }>
 	-- Whether the window is in full screen, read-only and followed, however
 	-- it went in or out (the green button, Ctrl+Cmd+F, the menu, Mission
 	-- Control, a script), turning as it begins to go; and while it goes
