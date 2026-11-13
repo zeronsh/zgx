@@ -55,6 +55,9 @@ const EXPIRED_PASS: u64 = u64::MAX - 1;
 /// The children a column has as it looks at its end alone
 /// (`Scene::children_outgrown`): fewer cost little to lay out whole.
 const COLUMN_KEPT_FROM: usize = 64;
+/// Children lists of removed nodes kept for containers made in their slots
+/// (`spare_children`): a few frames' rows scrolled out.
+const SPARE_CHILDREN: usize = 512;
 /// Layout passes in a row a column lays out whole before it stops looking at
 /// its end alone (`Scene::column_laid_out_whole`): one that isn't streamed
 /// into pays no more than this.
@@ -3248,6 +3251,11 @@ pub struct Scene {
     /// row no longer holding one, or its slot reused) costs one layout from
     /// that row, which clears it.
     shrank: Vec<u64>,
+    /// Children lists of removed nodes, emptied (`free_subtree`), for the
+    /// containers made next in the slots they left (`place_in_freed_slot`): a
+    /// list scrolling rows in and out makes and frees one a row a frame.
+    /// Made only by removals, and let go at rest (`Scene::rest`).
+    spare_children: Vec<Vec<NodeId>>,
     /// Whether rows and columns shrank their children (`layout_shrinks`),
     /// by slot: the generation of the node, the pass of the layout found so
     /// (none: 0) and what was found. Asked again of their children as each
@@ -3570,6 +3578,7 @@ impl Scene {
         Self {
             pending_children: std::cell::Cell::new(u32::MAX),
             shrank: Default::default(),
+            spare_children: Vec::new(),
             shrinks_of: Vec::new(),
             identity: NEXT_SCENE_ID
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
@@ -4054,6 +4063,8 @@ impl Scene {
             + vec_bytes(&self.repaints)
             + vec_bytes(&self.inert)
             + vec_bytes(&self.shrank)
+            + vec_bytes(&self.spare_children)
+            + self.spare_children.iter().map(vec_bytes).sum::<usize>()
             + vec_bytes(&self.shrinks_of)
             + map_bytes(&self.contents_styles)
             + map_bytes(&self.given_styles)
@@ -7758,6 +7769,17 @@ impl Scene {
         };
         let id = if let Some(index) = self.free.pop() {
             self.slots[index as usize].node = Some(node);
+            // Only a container can take a removed node's children list.
+            if !self.spare_children.is_empty()
+                && self.slots[index as usize]
+                    .node
+                    .as_ref()
+                    .is_some_and(|node| {
+                        matches!(node.kind, NodeKind::Container(_) | NodeKind::Panel { .. })
+                    })
+            {
+                self.give_spare_children(index);
+            }
             NodeId {
                 index,
                 generation: self.slots[index as usize].generation,
@@ -7804,6 +7826,29 @@ impl Scene {
         }
         self.children_changed(parent);
         id
+    }
+    /// The container just made in slot `index`, one a removal freed: it
+    /// takes a removed node's children list (`spare_children`, known not
+    /// empty). Out of line, and only where a node was removed: a mount into
+    /// new slots never comes here. After the node is in its slot: it is
+    /// built in place, most of a kilobyte, as on main.
+    #[cold]
+    #[inline(never)]
+    fn give_spare_children(&mut self, index: u32) {
+        let Some(node) = self.slots[index as usize].node.as_mut() else {
+            return;
+        };
+        if let Some(spare) = self.spare_children.pop() {
+            *node.head.children.get_mut() = spare;
+        }
+    }
+    /// A removed node's children list, emptied, for a container made in a
+    /// freed slot (`spare_children`).
+    #[cold]
+    #[inline(never)]
+    fn keep_children(&mut self, mut children: Vec<NodeId>) {
+        children.clear();
+        self.spare_children.push(children);
     }
     /// Remove `id` and its subtree, damaging where they painted. Panics for
     /// the root.
@@ -8061,8 +8106,12 @@ impl Scene {
         if node.style.fade_overflow {
             self.overflow_fades.retain(|(entry, _)| *entry != id);
         }
-        for child in node.head.children.into_inner() {
+        let children = node.head.children.into_inner();
+        for &child in &children {
             crate::deep(0, || self.free_subtree(child));
+        }
+        if children.capacity() != 0 && self.spare_children.len() < SPARE_CHILDREN {
+            self.keep_children(children);
         }
         self.slots[id.index as usize].generation = self.slots[id.index as usize]
             .generation
@@ -14947,6 +14996,8 @@ impl Scene {
         // slots above it free to go at the next rest.
         self.free.sort_unstable_by(|a, b| b.cmp(a));
         self.free.shrink_to_fit();
+        // Lists removed nodes left for containers made next.
+        self.spare_children = Vec::new();
     }
     /// Mark `id` as scroll content: translating it reports a `ScrollMove`
     /// instead of damaging everything it paints, and it moves by whole
@@ -23809,6 +23860,52 @@ mod local_transform_tests {
         );
         assert_eq!(&changed[2..5], &first_leaves[..]);
         assert_eq!(&changed[5..7], &[second, second_cell], "then the second's");
+    }
+    /// A container made in the slot a removal freed takes a removed node's
+    /// children list (`spare_children`); a leaf takes none, a mount into new
+    /// slots never looks, and a scene at rest keeps none.
+    #[test]
+    fn containers_made_where_rows_were_removed_take_their_children_lists() {
+        let mut scene = Scene::new(400., 400.);
+        let root = scene.root();
+        let row = |scene: &mut Scene| {
+            let row = scene.append(root, NodeKind::Container(Layout::Row), Style::default());
+            let cell = scene.append(row, NodeKind::Container(Layout::Column), Style::default());
+            for _ in 0..3 {
+                scene.append(
+                    cell,
+                    NodeKind::Text {
+                        text: "a".into(),
+                        color: Color(0, 0, 0, 255),
+                        font_size: 13.,
+                    },
+                    Style::default(),
+                );
+            }
+            row
+        };
+        let first = row(&mut scene);
+        scene.flush();
+        assert!(
+            scene.spare_children.is_empty(),
+            "a mount into new slots keeps none"
+        );
+        scene.remove(first);
+        // The row's and its cell's lists; the texts had none.
+        assert_eq!(scene.spare_children.len(), 2);
+        let kept: Vec<usize> = scene.spare_children.iter().map(Vec::capacity).collect();
+        assert!(kept.iter().all(|&room| room > 0));
+        let second = row(&mut scene);
+        assert!(
+            scene.spare_children.is_empty(),
+            "the next row's containers took both"
+        );
+        scene.flush();
+        assert_eq!(scene.children(second).len(), 1);
+        scene.remove(second);
+        assert!(!scene.spare_children.is_empty());
+        scene.rest();
+        assert_eq!(scene.spare_children.capacity(), 0, "none kept at rest");
     }
     #[test]
     fn resource_changes_name_the_nodes_whose_resources_changed() {
