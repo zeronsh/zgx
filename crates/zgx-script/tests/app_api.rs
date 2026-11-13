@@ -225,6 +225,28 @@ fn terminal_sessions_outlive_reloads_and_end_when_closed() {
     assert!(first.is_closed());
 }
 
+/// `~` is the user's home: their profile on Windows, where `HOME` is
+/// usually unset, so a terminal asked to start in `~` starts somewhere real.
+#[test]
+fn a_terminal_in_the_home_folder_starts_in_the_users_home() {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+        .expect("the platform names a home folder");
+    for (cwd, expected) in [("~", home.clone()), ("~/projects", home.join("projects"))] {
+        let mut h = Harness::inline(&format!(
+            r##"local term = ui.term("home", {{ cwd = "{cwd}" }})
+            return ui.terminal {{ term = term, w = 200, h = 100 }}"##
+        ));
+        let term = terminal(&mut h);
+        assert_eq!(
+            term.options().working_directory.as_deref(),
+            Some(expected.as_path()),
+            "{cwd}"
+        );
+        term.close();
+    }
+}
+
 #[test]
 fn options_after_a_lookup_still_say_how_the_session_starts() {
     // A list reading every pane's state looks a session up before the code
