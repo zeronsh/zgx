@@ -48,7 +48,7 @@ pub(crate) struct Assets {
     /// watching host sees an edited image (see `changed`).
     files: std::cell::RefCell<HashMap<String, (std::path::PathBuf, Option<std::time::SystemTime>)>>,
     /// Where they are read from: the disk, or the app's bundle.
-    source: std::cell::Cell<Option<crate::Files>>,
+    source: std::cell::RefCell<Option<crate::Files>>,
     /// Remote sources (`https://…`) by `remote_key`: fetched once by each
     /// asking (the app, or a plugin), so each request is its own to allow, and
     /// what comes is shared (`images`, `svgs`). What shows one follows its
@@ -367,17 +367,18 @@ impl Assets {
         *self.links.borrow_mut() = Some((timers, fetcher, policy));
     }
     pub(crate) fn set_files(&self, files: crate::Files) {
-        self.source.set(Some(files));
+        *self.source.borrow_mut() = Some(files);
     }
     /// Where its files come from: the disk, or the app's bundle.
     #[cfg(feature = "gltf")]
     pub(crate) fn source(&self) -> crate::Files {
-        self.source.get().unwrap_or(crate::Files::Disk)
+        self.source.borrow().clone().unwrap_or(crate::Files::Disk)
     }
     /// `src`'s bytes from `path`, the file kept to watch for changes.
     pub(crate) fn read(&self, src: &str, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let bytes = match self.source.get() {
+        let source = self.source.borrow().clone();
+        let bytes = match source {
             Some(files) => files.read(path)?,
             None => std::fs::read(path)?,
         };

@@ -189,6 +189,13 @@ impl Persist {
         self.entries.borrow().get(&id).map(|e| e.signal.clone())
     }
 
+    /// `script`'s `key` gone, unsaved: a load that made it failed
+    /// (`journal`). Its watch finds it gone and does nothing.
+    pub(crate) fn remove(&self, script: &str, key: &str) {
+        let id = format!("{script}\n{key}");
+        self.entries.borrow_mut().remove(&id);
+        self.dirty.borrow_mut().remove(&id);
+    }
     /// Forgets all of `script`'s saved state: what is held, what waits to be
     /// saved and its folder, gone by the time this returns. The next run
     /// that asks starts from its `initial`.

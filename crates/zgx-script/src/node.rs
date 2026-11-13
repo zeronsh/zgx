@@ -1987,6 +1987,8 @@ pub(crate) struct Env {
     pub meter: Option<Rc<crate::meter::Meter>>,
     /// The images the host sets (`host:` sources): pictures scripts take.
     pub assets: Rc<crate::lower::Assets>,
+    /// What a load writes to state that outlives it, while one runs.
+    pub journal: Rc<crate::journal::Journal>,
 }
 /// What a script adds to a slot: the slot, who added it (`ui.slot`'s
 /// `from`) and the node.
@@ -6671,7 +6673,11 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             {
                 meter.room(initial.weight())?;
             }
+            let made = env.journal.active() && env.store.get(&key).is_none();
             let signal = env.store.state(&key, initial);
+            if made {
+                env.journal.made_state(&env.store, &key);
+            }
             if let Some(meter) = &env.meter {
                 meter.set(&signal, signal.with_untracked(Value::weight));
             }
@@ -6693,7 +6699,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             {
                 meter.room(initial.weight())?;
             }
+            let made = env.journal.active() && env.persist.get(&env.persist_as, &key).is_none();
             let signal = env.persist.state(&env.persist_as, &key, initial);
+            if made {
+                env.journal
+                    .made_persist(&env.persist, &env.persist_as, &key);
+            }
             if let Some(meter) = &env.meter {
                 meter.set(&signal, signal.with_untracked(Value::weight));
             }
@@ -6706,7 +6717,11 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             let env = env(lua)?;
             env.permits(&env.exposed_shared, &key, "ui.shared")?;
             let plugin = matches!(*env.grants, crate::Grants::Only(_));
+            let made = env.journal.active() && env.shared.get(&key).is_none();
             let state = State::new(env.shared.shared(&key, initial, plugin));
+            if made {
+                env.journal.made_state(&env.shared, &key);
+            }
             if plugin && env.read_only_shared.borrow().contains(&key) {
                 let read = crate::value::ReadState(state, key.as_str().into());
                 return lua.create_userdata(read);

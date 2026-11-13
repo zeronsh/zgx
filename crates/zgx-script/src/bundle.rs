@@ -38,61 +38,204 @@ pub struct BundleFile {
     pub bytes: &'static [u8],
 }
 
-impl Bundle {
-    /// `path`'s place in the bundle ("" for its root), if it is under it.
-    /// Paths made on Windows separate with `\`; the bundle's with `/`.
+/// Files by path from a root no disk has (`/`-separated, sorted by path):
+/// a bundle's, or files held in memory. A lookup is a binary search.
+trait Table {
+    fn root(&self) -> &str;
+    fn len(&self) -> usize;
+    fn path(&self, at: usize) -> &str;
+    /// `path`'s place under the root ("" for the root itself), if it is
+    /// under it. Paths made on Windows separate with `\`; the table's with
+    /// `/`.
     fn rel<'p>(&self, path: &'p Path) -> Option<Cow<'p, str>> {
         let path = path.to_str()?;
         if cfg!(windows) && path.contains('\\') {
             let path = path.replace('\\', "/");
-            return self.rest(&path).map(|rest| Cow::Owned(rest.to_owned()));
+            return rest(self.root(), &path).map(|rest| Cow::Owned(rest.to_owned()));
         }
-        self.rest(path).map(Cow::Borrowed)
+        rest(self.root(), path).map(Cow::Borrowed)
     }
-    fn rest<'p>(&self, path: &'p str) -> Option<&'p str> {
-        let rest = path.strip_prefix(self.root)?;
-        if rest.is_empty() {
-            Some(rest)
-        } else {
-            rest.strip_prefix('/')
-        }
-    }
-    /// The file at `path`, if the bundle has it.
-    pub(crate) fn get(&self, path: &Path) -> Option<&'static [u8]> {
+    /// The index of the file at `path`, if there is one.
+    fn find(&self, path: &Path) -> Option<usize> {
         let rel = self.rel(path)?;
-        let at = self
-            .files
-            .binary_search_by(|file| (*file.path).cmp(&rel))
-            .ok()?;
-        Some(self.files[at].bytes)
+        let (mut low, mut high) = (0, self.len());
+        while low < high {
+            let mid = low + (high - low) / 2;
+            match self.path(mid).cmp(&rel) {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
+                std::cmp::Ordering::Equal => return Some(mid),
+            }
+        }
+        None
     }
-    /// The files under directory `rel` (sorted paths share the prefix, so
-    /// they are together).
-    fn under<'b>(&'b self, rel: &'b str) -> impl Iterator<Item = &'b BundleFile> + 'b {
-        let start = self.files.partition_point(|file| file.path < rel);
-        self.files[start..]
-            .iter()
-            .take_while(move |file| file.path.starts_with(rel))
-            .filter(move |file| {
-                rel.is_empty() || file.path.as_bytes().get(rel.len()) == Some(&b'/')
+    /// The indices of the files under directory `rel` (sorted paths share
+    /// the prefix, so they are together).
+    fn under(&self, rel: &str) -> std::ops::Range<usize> {
+        let (mut start, mut high) = (0, self.len());
+        while start < high {
+            let mid = start + (high - start) / 2;
+            if self.path(mid) < rel {
+                start = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let mut end = start;
+        while end < self.len() && self.path(end).starts_with(rel) {
+            end += 1;
+        }
+        start..end
+    }
+    /// The names of the packages it holds (`build::bundle` stores them
+    /// under `.packages/<name>/`), once each, sorted.
+    fn package_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = (0..self.len())
+            .filter_map(|at| {
+                let rest = self.path(at).strip_prefix(build::PACKAGES)?;
+                Some(rest.strip_prefix('/')?.split_once('/')?.0.to_owned())
             })
+            .collect();
+        names.dedup();
+        names
+    }
+    fn inside(&self, rel: &str, at: usize) -> bool {
+        rel.is_empty() || self.path(at).as_bytes().get(rel.len()) == Some(&b'/')
     }
     /// Whether `path` holds files.
-    pub(crate) fn is_dir(&self, path: &Path) -> bool {
+    fn is_dir(&self, path: &Path) -> bool {
         self.rel(path)
-            .is_some_and(|rel| self.under(&rel).next().is_some())
+            .is_some_and(|rel| self.under(&rel).any(|at| self.inside(&rel, at)))
     }
     /// The files directly in directory `path`.
-    pub(crate) fn list(&self, path: &Path) -> Vec<PathBuf> {
+    fn list(&self, path: &Path) -> Vec<PathBuf> {
         let Some(rel) = self.rel(path) else {
             return Vec::new();
         };
         let skip = if rel.is_empty() { 0 } else { rel.len() + 1 };
         self.under(&rel)
-            .map(|file| &file.path[skip..])
+            .filter(|&at| self.inside(&rel, at))
+            .map(|at| &self.path(at)[skip..])
             .filter(|name| !name.contains('/'))
             .map(|name| path.join(name))
             .collect()
+    }
+}
+fn rest<'p>(root: &str, path: &'p str) -> Option<&'p str> {
+    let rest = path.strip_prefix(root)?;
+    if rest.is_empty() {
+        Some(rest)
+    } else {
+        rest.strip_prefix('/')
+    }
+}
+impl Table for Bundle {
+    fn root(&self) -> &str {
+        self.root
+    }
+    fn len(&self) -> usize {
+        self.files.len()
+    }
+    fn path(&self, at: usize) -> &str {
+        self.files[at].path
+    }
+}
+impl Bundle {
+    /// The file at `path`, if the bundle has it.
+    pub(crate) fn get(&self, path: &Path) -> Option<&'static [u8]> {
+        Some(self.files[self.find(path)?].bytes)
+    }
+    /// Whether `path` holds files.
+    pub(crate) fn is_dir(&self, path: &Path) -> bool {
+        Table::is_dir(self, path)
+    }
+    /// The files directly in directory `path`.
+    pub(crate) fn list(&self, path: &Path) -> Vec<PathBuf> {
+        Table::list(self, path)
+    }
+    /// The packages it holds.
+    pub(crate) fn packages(&self) -> Vec<String> {
+        Table::package_names(self)
+    }
+}
+
+/// Script files held in memory, as a bundle is in the binary: an app's
+/// scripts as an update brought them (`ScriptHost::from_files`). Under a
+/// root no disk has (`/zgx-memory/<name>`). Shared (`Arc`: a 3D model's
+/// files are read off the main thread) and dropped with the last host
+/// holding them, so swapping them leaks nothing.
+#[doc(hidden)]
+pub struct MemoryFiles {
+    name: String,
+    root: String,
+    /// `(path from the root, contents)`, sorted by path.
+    files: Vec<(String, Vec<u8>)>,
+}
+impl MemoryFiles {
+    /// Files named `name` (for paths in errors), each `(path, contents)`
+    /// with a `/`-separated path from their root.
+    pub fn new(
+        name: impl Into<String>,
+        files: impl IntoIterator<Item = (String, Vec<u8>)>,
+    ) -> Self {
+        let name = name.into();
+        let mut files: Vec<_> = files.into_iter().collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files.dedup_by(|a, b| a.0 == b.0);
+        Self {
+            root: format!("/zgx-memory/{name}"),
+            name,
+            files,
+        }
+    }
+    /// Files as `new` makes them, under `root` in place of
+    /// `/zgx-memory/<name>`: an app whose first scripts came from a bundle
+    /// at `root` keeps that root as it swaps them for these (paths its
+    /// scripts name, errors and keys the same). Named by its last part.
+    pub fn new_at(
+        root: impl Into<String>,
+        files: impl IntoIterator<Item = (String, Vec<u8>)>,
+    ) -> Self {
+        let root = root.into();
+        let root = root.trim_end_matches('/').to_owned();
+        let name = root.rsplit('/').next().unwrap_or_default().to_owned();
+        Self {
+            root,
+            ..Self::new(name, files)
+        }
+    }
+    /// Its name, as given.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Where its files seem to be.
+    pub(crate) fn root_path(&self) -> &str {
+        &self.root
+    }
+    /// The file at `path`, if it has it.
+    pub(crate) fn get(&self, path: &Path) -> Option<&[u8]> {
+        Some(&self.files[self.find(path)?].1)
+    }
+    pub(crate) fn is_dir(&self, path: &Path) -> bool {
+        Table::is_dir(self, path)
+    }
+    pub(crate) fn list(&self, path: &Path) -> Vec<PathBuf> {
+        Table::list(self, path)
+    }
+    /// The packages it holds.
+    pub(crate) fn packages(&self) -> Vec<String> {
+        Table::package_names(self)
+    }
+}
+impl Table for MemoryFiles {
+    fn root(&self) -> &str {
+        &self.root
+    }
+    fn len(&self) -> usize {
+        self.files.len()
+    }
+    fn path(&self, at: usize) -> &str {
+        &self.files[at].0
     }
 }
 

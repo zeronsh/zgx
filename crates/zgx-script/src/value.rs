@@ -2946,9 +2946,13 @@ impl State {
         written
     }
     fn charge(&self, lua: &Lua, bytes: impl FnOnce(usize) -> usize) -> mlua::Result<()> {
-        let meter = lua
-            .app_data_ref::<crate::node::Env>()
-            .and_then(|env| env.meter.clone());
+        let meter = lua.app_data_ref::<crate::node::Env>().and_then(|env| {
+            // A load running: what this held kept, to undo if it fails.
+            if env.journal.active() {
+                env.journal.write(&self.0);
+            }
+            env.meter.clone()
+        });
         match meter {
             Some(meter) => meter.hold(&self.0, bytes(meter.held_by(&self.0))),
             None => Ok(()),
@@ -3482,6 +3486,11 @@ impl Store {
             .entry(key.to_owned())
             .or_insert_with(|| self.runtime.signal(initial))
             .clone()
+    }
+    /// `key` gone: a load that made it failed (`journal`).
+    pub(crate) fn remove(&self, key: &str) {
+        self.signals.borrow_mut().remove(key);
+        self.provisional.borrow_mut().remove(key);
     }
     /// The state for `key`, if there is any.
     pub fn get(&self, key: &str) -> Option<Signal<Value>> {

@@ -755,6 +755,11 @@ thread_local! {
     /// The first stop of the last call stopped on this thread.
     static LAST_STOP: Cell<Option<(u64, BudgetStop)>> = const { Cell::new(None) };
 }
+/// Which call was last stopped for its time on this thread (none yet): a
+/// mark that a load's stop changes.
+pub(crate) fn stop_mark() -> Option<u64> {
+    LAST_STOP.with(|stop| stop.get().map(|(at, _)| at))
+}
 /// The last call stopped for its time on this thread, as it was stopped.
 pub(crate) fn last_stop() -> Option<BudgetStop> {
     LAST_STOP.with(|stop| stop.get().map(|(_, stop)| stop))
