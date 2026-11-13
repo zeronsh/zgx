@@ -467,6 +467,54 @@ extern "C" fn action(
             });
             true
         }
+        // The search (`TerminalState::search`): opened by Ghostty itself
+        // (its own bindings, `search_selection`) or by the app's
+        // `search:` binding, which sets the needle; the counts arrive from
+        // Ghostty's search thread, -1 for none, and only change an open
+        // search, so one ended stays ended.
+        g::GHOSTTY_ACTION_START_SEARCH => {
+            // SAFETY: START_SEARCH's member; a NUL-terminated needle.
+            let needle = unsafe { string(payload.start_search.needle) };
+            deliver(surface, move |term| {
+                term.update_state(|state| {
+                    let search = state.search.get_or_insert_with(Default::default);
+                    if !needle.is_empty() {
+                        search.needle = needle.clone();
+                    }
+                })
+            });
+            true
+        }
+        g::GHOSTTY_ACTION_END_SEARCH => {
+            deliver(surface, |term| {
+                term.update_state(|state| state.search = None)
+            });
+            true
+        }
+        g::GHOSTTY_ACTION_SEARCH_TOTAL => {
+            // SAFETY: SEARCH_TOTAL's member.
+            let total = usize::try_from(unsafe { payload.search_total.total }).ok();
+            deliver(surface, move |term| {
+                term.update_state(|state| {
+                    if let Some(search) = &mut state.search {
+                        search.total = total;
+                    }
+                })
+            });
+            true
+        }
+        g::GHOSTTY_ACTION_SEARCH_SELECTED => {
+            // SAFETY: SEARCH_SELECTED's member.
+            let selected = usize::try_from(unsafe { payload.search_selected.selected }).ok();
+            deliver(surface, move |term| {
+                term.update_state(|state| {
+                    if let Some(search) = &mut state.search {
+                        search.selected = selected;
+                    }
+                })
+            });
+            true
+        }
         g::GHOSTTY_ACTION_CELL_SIZE => true,
         _ => false,
     }
