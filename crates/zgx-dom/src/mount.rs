@@ -493,6 +493,24 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         block.on_click(id, runtime.clone(), click);
     }
     let kind = std::mem::replace(&mut el.kind, ElementKind::Text(String::new()));
+    // A lazy overlay's panel (`View::lazy`) is filled the first time it
+    // opens; made before the overlay's showing, so what's in it is there
+    // to take focus as it shows.
+    if let ElementKind::Overlay(overlay) = &kind
+        && overlay.lazy
+    {
+        let children = std::mem::take(&mut el.children);
+        let conditional = std::mem::take(&mut el.conditional);
+        fill_when_open(
+            overlay.open.clone(),
+            children,
+            conditional,
+            id,
+            scope,
+            &runtime,
+            block,
+        );
+    }
     let root = mount_kind(kind, id, scope, &runtime, block);
     let mut holds_absolute = false;
     for child in std::mem::take(&mut el.children) {
@@ -844,6 +862,50 @@ fn mount_kind(
     None
 }
 
+/// A lazy overlay's panel `panel`: its children and conditional regions
+/// mounted the first time `open` is true, and kept.
+fn fill_when_open(
+    open: Signal<bool>,
+    children: Vec<View>,
+    conditional: Vec<Region>,
+    panel: u32,
+    scope: &Scope,
+    runtime: &Runtime,
+    block: &mut Block,
+) {
+    let filled: Rc<RefCell<Option<Block>>> = Rc::default();
+    let mut pending = Some((children, conditional));
+    let (state, scope, untracked) = (filled.clone(), scope.clone(), runtime.clone());
+    block.effect(runtime, move || {
+        if !open.get() {
+            return;
+        }
+        let Some((children, conditional)) = pending.take() else {
+            return;
+        };
+        untracked.untracked(|| {
+            let mut inner = Block::default();
+            for child in children {
+                let child = mount_view(child, &scope, &mut inner);
+                ops::with(|ops| ops.op(&[ops::APPEND, panel, child]));
+            }
+            for region in conditional {
+                let holder = ops::with(|ops| {
+                    let holder = inner.node(ops);
+                    ops.op(&[ops::CREATE, holder, Tag::Div as u32]);
+                    let class = sheet::plain(ops, "z zc");
+                    ops.op(&[ops::CLASS, holder, class]);
+                    ops.op(&[ops::APPEND, panel, holder]);
+                    holder
+                });
+                mount_region(region, holder, &scope, &mut inner);
+            }
+            *state.borrow_mut() = Some(inner);
+        });
+    });
+    block.regions.push(filled);
+}
+
 /// An overlay: its anchor (in the flow) and its panel `panel` in a box
 /// laid out as its children. The browser shows the panel in its top layer
 /// (a modal `<dialog>`, or a popover placed against the anchor), and its
@@ -863,6 +925,7 @@ fn mount_overlay(overlay: Overlay, panel: u32, runtime: &Runtime, block: &mut Bl
         delay_ms,
         interactive,
         backdrop,
+        lazy: _,
     } = overlay;
     let anchor = anchor.map(|anchor| mount_view(anchor, &outer, block));
     let write = open.clone();

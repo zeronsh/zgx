@@ -299,6 +299,8 @@ pub struct Overlay {
     pub interactive: bool,
     /// A modal's backdrop, as CSS.
     pub backdrop: Option<String>,
+    /// Its panel's children are made the first time it opens (`View::lazy`).
+    pub lazy: bool,
 }
 
 /// A part of the tree that changes shape: one view at a time, keyed rows or
@@ -986,6 +988,7 @@ fn overlay(
         delay_ms: delay.as_millis().min(u32::MAX as u128) as u32,
         interactive,
         backdrop,
+        lazy: options.as_ref().is_some_and(|o| o.lazy),
     };
     let mut el = primitive(
         view,
