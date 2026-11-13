@@ -442,6 +442,10 @@ pub struct Attrs<'a> {
     /// zgx: room added before a span's first glyph and after its last, in
     /// EM (CSS's inline padding: an inline code chip's)
     pub padding_opt: Option<LetterSpacing>,
+    /// zgx: the least width a span takes, padding included, in EM (CSS's
+    /// `min-width` on an inline box): the room it lacks is added half before
+    /// its text and half after.
+    pub min_width_opt: Option<LetterSpacing>,
     /// zgx: the optical size variable fonts shape and draw at (their
     /// `opsz` axis), in pixels: CSS's `font-optical-sizing: auto` sets it to
     /// the font size. 0 leaves the font's default.
@@ -472,6 +476,7 @@ impl<'a> Attrs<'a> {
             metrics_opt: None,
             letter_spacing_opt: None,
             padding_opt: None,
+            min_width_opt: None,
             optical: 0,
             masked: false,
             paragraph_rtl: false,
@@ -554,6 +559,13 @@ impl<'a> Attrs<'a> {
     /// zgx: set the span's inline padding (in EM)
     pub const fn padding(mut self, padding: f32) -> Self {
         self.padding_opt = Some(LetterSpacing(padding));
+        self
+    }
+
+    /// zgx: set the least width the span takes, in EM (CSS's `min-width` on
+    /// an inline box)
+    pub const fn min_width(mut self, width: f32) -> Self {
+        self.min_width_opt = Some(LetterSpacing(width));
         self
     }
 
@@ -714,6 +726,7 @@ pub struct AttrsOwned {
     /// Letter spacing (tracking) in EM
     pub letter_spacing_opt: Option<LetterSpacing>,
     pub padding_opt: Option<LetterSpacing>,
+    pub min_width_opt: Option<LetterSpacing>,
     pub optical: u16,
     pub masked: bool,
     pub paragraph_rtl: bool,
@@ -734,6 +747,7 @@ impl AttrsOwned {
             metrics_opt: attrs.metrics_opt,
             letter_spacing_opt: attrs.letter_spacing_opt,
             padding_opt: attrs.padding_opt,
+            min_width_opt: attrs.min_width_opt,
             optical: attrs.optical,
             masked: attrs.masked,
             paragraph_rtl: attrs.paragraph_rtl,
@@ -754,6 +768,7 @@ impl AttrsOwned {
             metrics_opt: self.metrics_opt,
             letter_spacing_opt: self.letter_spacing_opt,
             padding_opt: self.padding_opt,
+            min_width_opt: self.min_width_opt,
             optical: self.optical,
             masked: self.masked,
             paragraph_rtl: self.paragraph_rtl,
@@ -821,7 +836,10 @@ impl AttrsList {
     /// zgx: whether the defaults or any span set padding.
     pub fn has_padding(&self) -> bool {
         self.defaults.padding_opt.is_some()
-            || self.spans.iter().any(|(_, attrs)| attrs.padding_opt.is_some())
+            || self.defaults.min_width_opt.is_some()
+            || self.spans.iter().any(|(_, attrs)| {
+                attrs.padding_opt.is_some() || attrs.min_width_opt.is_some()
+            })
     }
 
     /// zgx: the defaults, borrowed (`defaults` copies them out).

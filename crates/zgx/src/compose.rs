@@ -5290,6 +5290,8 @@ fn paragraph_effect<const LOCATING: bool>(
                     padding: [0., 0.],
                     radius: 0.,
                     outset: 0.,
+                    border: None,
+                    min_width: 0.,
                     range: at..content.len(),
                     font: base.font_in(Some(&theme)),
                     font_size,
@@ -5311,9 +5313,9 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, mut icon, menu, plain, room_after, outset, on_hover) =
+            let (hover, mut icon, menu, plain, room_after, outset, on_hover, border, min_width) =
                 match span.extras.take() {
-                    None => (None, None, None, false, -1., 0., None),
+                    None => (None, None, None, false, -1., 0., None, None, 0.),
                     Some(extras) => {
                         let extras = *extras;
                         let end = extras.padding_end.unwrap_or(span.padding[0]);
@@ -5332,6 +5334,8 @@ fn paragraph_effect<const LOCATING: bool>(
                             if apart { end } else { -1. },
                             extras.outset,
                             extras.on_hover,
+                            extras.border,
+                            extras.min_width,
                         )
                     }
                 };
@@ -5465,6 +5469,8 @@ fn paragraph_effect<const LOCATING: bool>(
                     padding: [span.padding[0] / 2., span.padding[1]],
                     radius: span.radius,
                     outset: 0.,
+                    border: None,
+                    min_width: 0.,
                     range,
                     font: font.clone(),
                     font_size,
@@ -5486,6 +5492,8 @@ fn paragraph_effect<const LOCATING: bool>(
                         padding: [0., 0.],
                         radius: 0.,
                         outset: 0.,
+                        border: None,
+                        min_width: 0.,
                         range: range.clone(),
                         font: font.clone(),
                         font_size,
@@ -5531,6 +5539,8 @@ fn paragraph_effect<const LOCATING: bool>(
                         ],
                         radius: span.radius,
                         outset: 0.,
+                        border: None,
+                        min_width: 0.,
                         range: range.clone(),
                         font: font.clone(),
                         font_size,
@@ -5596,10 +5606,22 @@ fn paragraph_effect<const LOCATING: bool>(
                 padding: if room_after >= 0. {
                     [0., span.padding[1]]
                 } else {
-                    span.padding
+                    let edge = border.as_ref().map_or(0., |(width, _)| *width);
+                    [span.padding[0] + edge, span.padding[1] + edge]
                 },
                 radius: span.radius,
                 outset,
+                border: border.map(|(width, color)| {
+                    let color = match color {
+                        crate::theme::Themed::Value(color) => color,
+                        crate::theme::Themed::Token(token) => theme
+                            .get(token)
+                            .color()
+                            .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                    };
+                    (width, color)
+                }),
+                min_width,
                 range: start..text_end,
                 font: font.clone(),
                 font_size,
@@ -5615,6 +5637,8 @@ fn paragraph_effect<const LOCATING: bool>(
                     padding: [room_after / 2., span.padding[1]],
                     radius: span.radius,
                     outset: 0.,
+                    border: None,
+                    min_width: 0.,
                     range: text_end..content.len(),
                     font,
                     font_size,

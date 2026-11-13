@@ -8961,6 +8961,12 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     });
                 }
                 if let Some(rare) = rare {
+                    if let Some((width, color)) = rare.border {
+                        out = out.border(width, color);
+                    }
+                    if let Some(width) = rare.min_w {
+                        out = out.min_width(width);
+                    }
                     if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
                         out = out.padding_end(end);
                     }

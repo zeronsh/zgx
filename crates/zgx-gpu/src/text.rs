@@ -2072,10 +2072,15 @@ pub(crate) fn rich_buffer_unshaped(
             // A padded run's room goes around it alone (an inline box is one).
             && run.padding[0] == 0.
             && runs[end].padding[0] == 0.
+            && run.min_width == 0.
+            && runs[end].min_width == 0.
         {
             end += 1;
         }
         let mut attributes = attrs(&run.font, run.font_size.max(1.));
+        if run.min_width > 0. {
+            attributes = attributes.min_width(run.min_width / run.font_size.max(1.));
+        }
         if run.padding[0] > 0. {
             attributes = attributes.padding(run.padding[0] / run.font_size.max(1.));
             if run.font.features.is_inline_box() {
@@ -2686,6 +2691,8 @@ pub struct RichDecoration {
     pub background: bool,
     /// A background's corner radius.
     pub radius: f32,
+    /// A background's outline: its width and colour.
+    pub border: Option<(f32, zgx::scene::Color)>,
     /// The styled run it decorates, to recolour it without re-shaping.
     pub run: usize,
     /// A line decoration: strikethrough rather than underline.
@@ -2756,6 +2763,7 @@ pub fn plain_underlines<'a>(
             color: zgx::scene::Color(255, 255, 255, 255),
             background: false,
             radius: 0.,
+            border: None,
             run: 0,
             strike: false,
         })
@@ -2784,6 +2792,8 @@ fn joined_wash<'o>(
         && (spacer(&runs[index]) || spacer(&runs[index - 1]))
         && before.color == color
         && before.radius == radius
+        && before.border.is_none()
+        && runs[index].border.is_none()
         && (before.bounds.y - bounds.y).abs() < 0.01
         && (before.bounds.height - bounds.height).abs() < 0.01
         && ((bounds.x - (before.bounds.x + before.bounds.width)).abs() < 0.5
@@ -3004,7 +3014,11 @@ pub fn rich_decorations_in<'a>(
     for line in runs {
         let start = starts[line.line_i];
         for (index, run) in rich.runs().iter().enumerate() {
-            if run.background.is_none() && run.underline.is_none() && run.strikethrough.is_none() {
+            if run.background.is_none()
+                && run.border.is_none()
+                && run.underline.is_none()
+                && run.strikethrough.is_none()
+            {
                 continue;
             }
             let mut spans: Vec<_> = line
@@ -3045,7 +3059,11 @@ pub fn rich_decorations_in<'a>(
                 }
             }
             for (left, right) in merged {
-                if let Some(color) = run.background {
+                // (An outline alone is a clear background with a border.)
+                if let Some(color) = run
+                    .background
+                    .or(run.border.map(|_| zgx::scene::Color(0, 0, 0, 0)))
+                {
                     // A padded or rounded background hugs the text (CSS's
                     // content area, about 0.92 em above the baseline and
                     // 0.24 below) plus its padding; a plain one fills the line.
@@ -3072,6 +3090,7 @@ pub fn rich_decorations_in<'a>(
                         color,
                         background: true,
                         radius: run.radius,
+                        border: run.border,
                         run: index,
                         strike: false,
                     });
@@ -3116,6 +3135,7 @@ pub fn rich_decorations_in<'a>(
                                 color: style.color.unwrap_or(run.color),
                                 background: false,
                                 radius: 0.,
+                                border: None,
                                 run: index,
                                 strike,
                             });

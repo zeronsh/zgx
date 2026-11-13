@@ -5801,6 +5801,14 @@ export type SpanProps = {
 	-- room (CSS's negative inline margin under the same padding): a search
 	-- match's mark.
 	outset: number?,
+	-- An outline round its box, as CSS's inline border: `width` points
+	-- (1) in `color`. It takes room all round, inside the padding's outside,
+	-- and follows `radius`: a keycap in a sentence.
+	border: { width: number?, color: Color }?,
+	-- The least width of its box, border and padding included (CSS's
+	-- border-box `min-width` on an inline-block): the text sits centred in
+	-- what room is over.
+	min_w: number?,
 	-- How the underline is drawn, its colour and its thickness; any of them
 	-- underlines the span (unless `underline = false`). `"wavy"` marks a
 	-- mistake or a diagnostic.

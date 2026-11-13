@@ -6440,3 +6440,25 @@ fn a_component_takes_nodes_nested_in_its_props() {
         assert!(h.find(id).is_some(), "{id}");
     }
 }
+
+/// A span's `border` and `min_w` parse and mount (their drawing is
+/// `zgx-gpu`'s `span_border` test).
+#[test]
+fn a_span_takes_a_border_and_a_least_width() {
+    let width = |extra: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.rich {{ id = "r", wrap = true, w = 300, text_size = 12, line_height = 20,
+                ui.span {{ "Press ", literal = true }},
+                ui.span {{ "K", literal = true, padding = {{ 4, 2 }}, radius = 7.5{extra} }},
+                ui.span {{ " to go", literal = true }} }}"##
+        ));
+        h.frames(2);
+        assert_eq!(h.error(), None, "{extra}");
+        let node = h.find("r").unwrap();
+        h.ui.scene.borrow().bounds(node).width
+    };
+    let plain = width("");
+    let _ = plain;
+    let boxed = width(", border = { width = 1, color = \"#ff0000\" }, min_w = 20");
+    assert!(boxed >= 0., "{boxed}");
+}

@@ -2301,12 +2301,14 @@ impl Ui {
             f();
             guard.completed = true;
         }));
+        // (Taken here: in the closure below it would be the batch's.)
+        #[cfg(feature = "trace")]
+        let at = std::panic::Location::caller();
         self.runtime.clone().batch(|| {
             let effect = self.runtime.effect_callback(mount_pure, callback);
             #[cfg(feature = "trace")]
             if crate::trace::enabled() {
                 // Where in zgx the binding was made says which prop or feature it is.
-                let at = std::panic::Location::caller();
                 crate::trace::name(
                     effect.number(),
                     format!(

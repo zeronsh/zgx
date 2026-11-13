@@ -884,6 +884,25 @@ fn pad(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, attrs: &At
             glyph.x_advance += padding.0;
         }
     }
+    // A span's least width: what it lacks is added half before and half after.
+    let mut first = 0;
+    while first < glyphs.len() {
+        let attrs = attrs_list.get_span(glyphs[first].start);
+        let mut last = first;
+        while last + 1 < glyphs.len() && attrs_list.get_span(glyphs[last + 1].start) == attrs {
+            last += 1;
+        }
+        if let Some(least) = attrs.min_width_opt {
+            let width: f32 = glyphs[first..=last].iter().map(|g| g.x_advance).sum();
+            let lack = least.0 - width;
+            if lack > 0. {
+                glyphs[first].x_advance += lack / 2.;
+                glyphs[first].x_offset += lack / 2.;
+                glyphs[last].x_advance += lack / 2.;
+            }
+        }
+        first = last + 1;
+    }
 }
 
 /// zgx: `glyphs` (a run's, `line` its text) on the grid of cells `spacing`

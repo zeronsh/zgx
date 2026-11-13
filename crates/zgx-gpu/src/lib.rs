@@ -1639,8 +1639,17 @@ fn place_text_quads(
         color: color(cached),
         fade,
         options: [edge_fade, cached.paint[1], 0., 0.],
-        shape: [cached.paint[0], 0., 0., cached.paint[3]],
-        border: [0.; 4],
+        shape: [
+            cached.paint[0],
+            cached.uv[0] * f32::from(cached.paint[3] > 0.5),
+            0.,
+            cached.paint[3],
+        ],
+        border: if cached.paint[3] > 0.5 && cached.uv[0] > 0. {
+            [cached.uv[1], cached.uv[2], cached.uv[3], cached.paint[2]]
+        } else {
+            [0.; 4]
+        },
         mask: NO_MASK,
     }));
 }
@@ -10606,9 +10615,11 @@ impl GpuRenderer {
                         let shadows_at = std::cell::Cell::new((usize::MAX, 0));
                         // Rounded span backgrounds (inline code chips): each
                         // piece rounds on its own box (`round_own_boxes`).
-                        let rounded_spans = rich
-                            .as_ref()
-                            .is_some_and(|rich| rich.runs().iter().any(|run| run.radius > 0.));
+                        let rounded_spans = rich.as_ref().is_some_and(|rich| {
+                            rich.runs()
+                                .iter()
+                                .any(|run| run.radius > 0. || run.border.is_some())
+                        });
                         // Holding colour glyphs (`COLOR_GLYPH`): its shadows are
                         // their alphas, as blurred ones are (`place_blurred_shadows`).
                         let colored_at = std::cell::Cell::new(false);
@@ -17916,10 +17927,27 @@ fn rich_decoration_quad(d: &text::RichDecoration) -> TextQuad {
     TextQuad {
         rect,
         color: rgba(d.color, 1.),
-        uv: [0.; 4],
-        // A rounded background (an inline code chip): a rounded rect.
-        paint: if d.radius > 0. {
-            [d.radius, 0., 0., 1.]
+        // A bordered one holds its outline in the texture coordinates an
+        // untextured quad has no use for: width, then colour (its alpha in
+        // `paint.z`).
+        uv: match d.border {
+            Some((width, c)) => [
+                width,
+                f32::from(c.0) / 255.,
+                f32::from(c.1) / 255.,
+                f32::from(c.2) / 255.,
+            ],
+            None => [0.; 4],
+        },
+        // A rounded background (an inline code chip) or an outlined one: a
+        // rounded rect.
+        paint: if d.radius > 0. || d.border.is_some() {
+            [
+                d.radius,
+                0.,
+                d.border.map_or(0., |(_, c)| f32::from(c.3) / 255.),
+                1.,
+            ]
         } else {
             [0.; 4]
         },

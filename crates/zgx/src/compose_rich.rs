@@ -191,6 +191,10 @@ pub(crate) struct SpanExtras {
     pub fade: Option<TextFade>,
     /// Its background reaching past the text across (`TextSpan::outset`).
     pub outset: f32,
+    /// An outline round its box (`TextSpan::border`): width and colour.
+    pub border: Option<(f32, crate::theme::Themed<Color>)>,
+    /// The least width of its box (`TextSpan::min_width`).
+    pub min_width: f32,
     /// A picture in place of its text (`TextSpan::inline_svg`).
     pub inline: Option<InlineSvg>,
     /// Told of the pointer coming and going (`TextSpan::on_hover`).
@@ -329,6 +333,22 @@ impl TextSpan {
     /// inline margin under the same padding: a search match's mark.
     pub fn outset(mut self, x: f32) -> Self {
         self.extras.get_or_insert_default().outset = x.max(0.);
+        self
+    }
+    /// An outline round the span's box, as CSS's inline border: `width`
+    /// points in `color`, taking room as the border does (its box grows by
+    /// it all round).
+    pub fn border(mut self, width: f32, color: impl Into<crate::theme::Themed<Color>>) -> Self {
+        if width > 0. {
+            self.extras.get_or_insert_default().border = Some((width, color.into()));
+        }
+        self
+    }
+    /// The least width of the span's box, padding and border included, as
+    /// CSS's `min-width` on an inline box: its text sits centred in what
+    /// room is over.
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.extras.get_or_insert_default().min_width = width.max(0.);
         self
     }
     /// The span background's corner radius.

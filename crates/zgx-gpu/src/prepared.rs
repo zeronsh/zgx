@@ -98,6 +98,7 @@ impl Key {
                         && *size == run.font_size
                         && *padding == 0.
                         && run.padding[0] == 0.
+                        && run.min_width == 0.
                         && range.end == run.range.start =>
                 {
                     range.end = run.range.end;
@@ -1758,7 +1759,7 @@ impl TextCache {
                     let mut at = 0;
                     while index < runs.len() {
                         let run = &runs[index];
-                        if run.padding[0] != 0. || run.range.start != at {
+                        if run.padding[0] != 0. || run.min_width != 0. || run.range.start != at {
                             return None;
                         }
                         let mut end = index + 1;
@@ -1767,6 +1768,7 @@ impl TextCache {
                             && runs[end].font_size == run.font_size
                             && runs[end].range.start == runs[end - 1].range.end
                             && runs[end].padding[0] == 0.
+                            && runs[end].min_width == 0.
                         {
                             end += 1;
                         }

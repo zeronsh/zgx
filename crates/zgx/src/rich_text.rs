@@ -175,6 +175,12 @@ pub struct TextRun {
     /// How far the background reaches past the text across without taking room (CSS's negative inline
     /// margin under padding): a search match's mark.
     pub outset: f32,
+    /// An outline round the run's box (CSS's inline border): its width and
+    /// colour. Its width is already part of `padding`; this draws it.
+    pub border: Option<(f32, Color)>,
+    /// The least width of the run's box, padding and border included (CSS's
+    /// `min-width` on an inline box): its text is centred in the room.
+    pub min_width: f32,
 }
 impl TextRun {
     /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
@@ -205,6 +211,8 @@ impl Default for TextRun {
             padding: [0.; 2],
             radius: 0.,
             outset: 0.,
+            border: None,
+            min_width: 0.,
         }
     }
 }
@@ -506,6 +514,7 @@ impl RichText {
                 a.range == b.range
                     && a.font_size == b.font_size
                     && a.padding[0] == b.padding[0]
+                    && a.min_width == b.min_width
                     && a.font == b.font
             })
     }
@@ -521,6 +530,7 @@ impl RichText {
                 a.range != b.range
                     || a.font_size != b.font_size
                     || a.padding[0] != b.padding[0]
+                    || a.min_width != b.min_width
                     || a.font != b.font
             })
     }

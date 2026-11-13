@@ -1604,6 +1604,11 @@ pub(crate) struct SpanRare {
     pub padding_end: Option<f32>,
     /// `outset = 2`: its background reaching past the text without taking room.
     pub outset: Option<f32>,
+    /// `border = { width = 1, color = "$metal.border" }`: an outline round
+    /// its box, taking room as CSS's inline border does.
+    pub border: Option<(f32, Themed<Color>)>,
+    /// `min_w = 20`: the least width of its box, border and padding included.
+    pub min_w: Option<f32>,
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
@@ -4867,6 +4872,14 @@ pub(crate) fn specificity(prop: Prop) -> u8 {
     }
 }
 
+/// A span's `border = { width, color }`.
+fn span_border(lua: &Lua, given: mlua::Value) -> mlua::Result<(f32, Themed<Color>)> {
+    let table: Table = lua.unpack(given)?;
+    let width = table.get::<Option<f32>>("width")?.unwrap_or(1.);
+    let color = themed_color(&table.get::<Value>("color")?)
+        .ok_or_else(|| mlua::Error::runtime("a span's `border` takes `{ width, color }`"))?;
+    Ok((width.max(0.), color))
+}
 /// `haspopup`: what a node opens: "dialog", "menu", "listbox", "tree" or
 /// "grid", or `true` (a menu, as ARIA has it); `false` or nil, nothing.
 fn has_popup_of(lua: &Lua, value: mlua::Value) -> mlua::Result<Option<zgx::semantics::PopupKind>> {
@@ -5155,6 +5168,8 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 b"radius" => span.radius = number(given)?.unwrap_or(0.),
                 b"outset" => rare_mut(&mut span).outset = number(given)?,
+                b"border" => rare_mut(&mut span).border = Some(span_border(lua, given)?),
+                b"min_w" => rare_mut(&mut span).min_w = number(given)?,
                 b"underline_offset" => span.underline_offset = number(given)?,
                 b"underline_style" => {
                     span.underline_style = match lua.unpack(given)? {
