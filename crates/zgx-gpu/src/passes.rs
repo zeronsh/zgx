@@ -722,16 +722,14 @@ impl GpuRenderer {
         let Some(inputs) = shader.inputs() else {
             return true;
         };
-        // Direct3D 11 runs passes and reads boxes with its own device (its
-        // wgpu device is the no-op one). Pictures and GPU views it has none
-        // of yet, which would leave the shader reading zeros: such a layer
-        // composites as painted, the kind named once.
+        // Direct3D 11 runs passes, reads boxes and uploads pictures with its
+        // own device (its wgpu device is the no-op one). GPU views it has
+        // none of yet, which would leave the shader reading zeros: such a
+        // layer composites as painted, the kind named once.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
-            if !inputs.images.is_empty() || !inputs.views.is_empty() {
-                crate::d3d11_frame::left_out(
-                    "layer shaders reading pictures or GPU views: drawn as painted",
-                );
+            if !inputs.views.is_empty() {
+                crate::d3d11_frame::left_out("layer shaders reading GPU views: drawn as painted");
                 return false;
             }
             return self.run_passes_d3d11(scene, area, shader, layer);
@@ -886,7 +884,7 @@ impl GpuRenderer {
         true
     }
     /// `run_passes` with Direct3D 11 (`d3d11_frame::Chain`), for a shader
-    /// reading passes and boxes alone: the same textures, steps and
+    /// reading passes, boxes and pictures: the same textures, steps and
     /// uniforms, drawn on its immediate context ahead of the frame.
     #[cfg(d3d11)]
     #[cold]
@@ -910,7 +908,13 @@ impl GpuRenderer {
                     .map(|pass| (pass_source(&pass.source, inputs), pass.format))
                     .collect();
                 let rect_bytes = (1 + 2 * MOST_RECTS) * 16;
-                match crate::d3d11_frame::Chain::new(&device, passes, rect_bytes, wait) {
+                match crate::d3d11_frame::Chain::new(
+                    &device,
+                    passes,
+                    &inputs.images,
+                    rect_bytes,
+                    wait,
+                ) {
                     Ok(chain) => entry.insert(chain),
                     Err(error) => {
                         eprintln!("zgx: {error}");

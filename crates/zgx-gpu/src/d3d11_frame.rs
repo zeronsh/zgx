@@ -21,7 +21,8 @@
 //! fills and layer shaders not reading the backdrop, their pixel stage
 //! compiled off the frame (`Device::start_app_shader`) from the module
 //! Direct3D 12's is, with the passes and tagged boxes a layer shader reads
-//! (`Chain`; one reading pictures or GPU views composites as painted). A
+//! and pictures a layer shader reads (`Chain`; one reading GPU views
+//! composites as painted). A
 //! frame needing more fails, naming what it lacks: there is no Direct3D 12
 //! to fall back to.
 //!
@@ -1161,13 +1162,15 @@ impl Surface {
 /// (`GpuRenderer::run_passes_d3d11`), which binds `bound` at `INPUTS`.
 pub(crate) struct Chain {
     passes: Vec<Pass>,
+    /// The pictures it reads by name, uploaded once as passes.rs's are.
+    pictures: Vec<Surface>,
     /// Bound where a pass reads itself and keeps no last result.
     nothing: Surface,
     rects: (ID3D11Buffer, ID3D11ShaderResourceView),
     /// One step's `ZgxPass`, written before each draw.
     uniforms: ID3D11Buffer,
-    /// What the layer shader binds at `INPUTS`: the boxes and the passes'
-    /// latest.
+    /// What the layer shader binds at `INPUTS`: the boxes, the passes'
+    /// latest and the pictures.
     pub(crate) bound: Option<Vec<Option<ID3D11ShaderResourceView>>>,
     pub(crate) rects_held: Vec<(zgx::scene::Rect, [f32; 4])>,
     /// The shader's time when it last ran, and frames so far.
@@ -1193,14 +1196,24 @@ struct Pass {
 
 impl Chain {
     /// A chain for `passes` (each pass's module, `passes::pass_source`, and
-    /// its format), its stages compiling off the frame unless `here`, with
-    /// `rect_bytes` of boxes, zeroed.
+    /// its format) and `pictures`, its stages compiling off the frame unless
+    /// `here`, with `rect_bytes` of boxes, zeroed.
     pub(crate) fn new(
         device: &Device,
         passes: Vec<(String, zgx::decoration::PassFormat)>,
+        pictures: &[(String, std::sync::Arc<zgx::image::ImageData>)],
         rect_bytes: usize,
         here: bool,
     ) -> Result<Self, GpuError> {
+        let pictures = (pictures.iter())
+            .map(|(_, image)| {
+                let (width, height) = (image.width(), image.height());
+                let surface =
+                    device.surface_as(width, height, false, DXGI_FORMAT_R8G8B8A8_UNORM)?;
+                device.write(&surface, (0, 0, width, height), &image.pixels_now());
+                Ok(surface)
+            })
+            .collect::<Result<_, GpuError>>()?;
         let passes = passes
             .into_iter()
             .map(|(source, format)| {
@@ -1246,6 +1259,7 @@ impl Chain {
             .map_err(failed("pass uniforms"))?;
         Ok(Self {
             passes,
+            pictures,
             nothing: device.surface_as(1, 1, false, DXGI_FORMAT_R8G8B8A8_UNORM)?,
             rects: raw_buffer(&device.device, rect_bytes, Some(&vec![0; rect_bytes]))?,
             uniforms: uniforms
@@ -1352,8 +1366,8 @@ impl Chain {
     }
 
     /// What binds at `INPUTS`: the boxes, then each pass's latest result,
-    /// but `writing`'s own texture where it keeps no last result (passes.rs
-    /// `Chain::bind_inputs`).
+    /// but `writing`'s own texture where it keeps no last result, then the
+    /// pictures (passes.rs `Chain::bind_inputs`).
     fn inputs(&self, writing: Option<usize>) -> Vec<Option<ID3D11ShaderResourceView>> {
         let nothing = || self.nothing.srv.clone();
         let mut bound = vec![Some(self.rects.1.clone())];
@@ -1363,6 +1377,7 @@ impl Chain {
                 false => (pass.surfaces.get(pass.current)).map_or_else(nothing, |s| s.srv.clone()),
             });
         }
+        bound.extend(self.pictures.iter().map(|picture| picture.srv.clone()));
         bound
     }
 
