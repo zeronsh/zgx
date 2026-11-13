@@ -695,8 +695,9 @@ fn measuring(fonts: &Fonts) -> Rc<RefCell<zgx::scene::Scene>> {
 static TEXT: std::sync::Mutex<Option<(Fonts, zgx_gpu::text::CpuTextRaster)>> =
     std::sync::Mutex::new(None);
 
-/// `ui.render_canvas(draw, { width, height, scale, x, y, background })`: a
-/// promise of `draw(c, width, height)`'s drawing as a PNG, in base64. The
+/// `ui.render_canvas(draw, { width, height, scale, x, y, background, format, quality })`: a
+/// promise of `draw(c, width, height)`'s drawing as a PNG (or a JPEG or
+/// WebP, `format`), in base64. The
 /// drawing is what a `ui.canvas` given that `draw` shows: its shapes and
 /// text in the same layers, clips and transforms, `x`, `y` at the
 /// picture's top left. No window shows
@@ -718,6 +719,21 @@ fn render_canvas(
     let scale = match options.get::<Option<f32>>("scale")? {
         None => 1.,
         Some(_) => size("scale")?,
+    };
+    // The file: "png" (the default), "jpeg" (`quality` 1 to 100, 90 unless
+    // said; no transparency, laid over white) or "webp" (lossless).
+    let format = match options.get::<Option<String>>("format")?.as_deref() {
+        None | Some("png") => Format::Png,
+        Some("jpeg" | "jpg") => {
+            let quality = options.get::<Option<f64>>("quality")?.unwrap_or(90.);
+            Format::Jpeg(quality.round().clamp(1., 100.) as u8)
+        }
+        Some("webp") => Format::Webp,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "ui.render_canvas: `format` is \"png\", \"jpeg\" or \"webp\", not \"{other}\""
+            )));
+        }
     };
     let x = options.get::<Option<f32>>("x")?.unwrap_or(0.);
     let y = options.get::<Option<f32>>("y")?.unwrap_or(0.);
@@ -757,8 +773,8 @@ fn render_canvas(
         let text = &mut held.as_mut().expect("made just now").1;
         tell.send(
             zgx_gpu::canvas::picture(&canvas, view, width, height, scale, background, text)
-                .and_then(|image| png(&image))
-                .map(|png| base64(&png))
+                .and_then(|image| encode(&image, format))
+                .map(|file| base64(&file))
                 .map_err(|e| e.0),
         );
     });
@@ -772,6 +788,30 @@ fn render_canvas(
     Ok(crate::calls::PromiseUd(promise))
 }
 
+/// The file `ui.render_canvas` makes.
+#[derive(Clone, Copy)]
+enum Format {
+    Png,
+    Jpeg(u8),
+    Webp,
+}
+fn encode(image: &zgx::image::ImageData, format: Format) -> Result<Vec<u8>, zgx_gpu::GpuError> {
+    #[allow(unused_variables)]
+    let without = |what: &str| -> Result<Vec<u8>, zgx_gpu::GpuError> {
+        Err(zgx_gpu::GpuError(format!("zgx-script is built without `{what}`")))
+    };
+    match format {
+        Format::Png => png(image),
+        #[cfg(feature = "jpeg")]
+        Format::Jpeg(quality) => zgx_gpu::canvas::jpeg(image, quality),
+        #[cfg(not(feature = "jpeg"))]
+        Format::Jpeg(_) => without("jpeg"),
+        #[cfg(feature = "webp")]
+        Format::Webp => zgx_gpu::canvas::webp(image),
+        #[cfg(not(feature = "webp"))]
+        Format::Webp => without("webp"),
+    }
+}
 #[cfg(feature = "png")]
 fn png(image: &zgx::image::ImageData) -> Result<Vec<u8>, zgx_gpu::GpuError> {
     zgx_gpu::canvas::png(image)

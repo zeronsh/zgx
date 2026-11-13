@@ -15,10 +15,13 @@ categories = ["gui", "rendering"]
 # source in a missing format fails to decode, with an error naming the
 # feature. Canvases, gradients and shadows need none of them.
 [features]
-default = ["svg", "png", "jpeg", "gif"]
+default = ["svg", "png", "jpeg", "gif", "webp"]
 svg = ["dep:resvg"]
 png = ["image/png"]
-jpeg = ["dep:zune-jpeg"]
+# (Decoding with zune-jpeg; encoding, as `canvas::jpeg`, with image.)
+jpeg = ["dep:zune-jpeg", "image/jpeg"]
+# Encoding only (`canvas::webp`, lossless).
+webp = ["image/webp"]
 gif = ["dep:gif"]
 # Words break at their hyphenation points where text asks (zgx-text's).
 hyphens = ["zgx/hyphens", "zgx-text/hyphens"]
