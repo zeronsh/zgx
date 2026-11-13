@@ -4397,9 +4397,9 @@ impl ScriptHost {
         lazy.ui(&["web"], move |lua, ui| node::install_web(lua, ui, webs));
         lazy.ui(&["menu_look"], crate::lower::install_menu_look);
         lazy.ui(&["tooltip_look"], crate::lower::install_tooltip_look);
-        let find_vm = Rc::downgrade(&vm);
+        let (find_vm, find_assets) = (Rc::downgrade(&vm), self.0.assets.clone());
         lazy.ui(&["find_look"], move |lua, ui| {
-            crate::lower::install_find_look(lua, ui, find_vm)
+            crate::lower::install_find_look(lua, ui, find_vm, find_assets)
         });
         let commands = self.0.commands.clone();
         lazy.ui(
