@@ -3070,7 +3070,7 @@ pub struct BakedLoop {
     pub frames: Vec<(f32, f32)>,
     pub fps: f32,
     /// When its first frame showed.
-    pub started: std::time::Instant,
+    pub started: crate::time::Instant,
     /// The renderer can't play it (`refuse`).
     refused: std::cell::Cell<bool>,
     wake: Box<dyn Fn()>,
@@ -3082,7 +3082,7 @@ impl BakedLoop {
         Self {
             frames,
             fps,
-            started: std::time::Instant::now(),
+            started: crate::time::Instant::now(),
             refused: std::cell::Cell::new(false),
             wake,
         }
@@ -24277,5 +24277,15 @@ mod leaf_move_tests {
         scene.flush();
         scene.set_transform(leaf, Transform { x: 0., y: 4. });
         assert_eq!(scene.flush().damage, [Rect::new(0., 0., 40., 14.)]);
+    }
+}
+/// An id for a node outside any scene: `zgx-dom`'s, by its DOM node.
+#[cfg(feature = "dom")]
+impl NodeId {
+    pub(crate) fn outside(index: u32) -> NodeId {
+        NodeId {
+            index,
+            generation: u32::MAX,
+        }
     }
 }

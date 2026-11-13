@@ -3217,3 +3217,13 @@ mod tests {
         }
     }
 }
+/// `resolve_color`, for `compose::__dom`.
+#[cfg(feature = "dom")]
+pub(crate) fn resolve_color_in(color: Themed<Color>, scope: Option<&ThemeScope>) -> Color {
+    resolve_color(color, scope)
+}
+/// `resolve_size`, for `compose::__dom`.
+#[cfg(feature = "dom")]
+pub(crate) fn resolve_size_in(size: Themed<f32>, scope: Option<&ThemeScope>) -> f32 {
+    resolve_size(size, scope)
+}

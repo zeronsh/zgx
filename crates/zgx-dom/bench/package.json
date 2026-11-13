@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Times the table benchmark in headless Chrome (run.mjs).",
+  "devDependencies": {
+    "playwright-core": "1.65.0"
+  }
+}

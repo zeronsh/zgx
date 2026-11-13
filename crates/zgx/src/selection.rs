@@ -10,6 +10,7 @@
 //! a press shapes the text it lands on (once: layouts are kept while the
 //! selection is made), and a change of selection repaints only the text
 //! whose highlight changed (`Scene::set_text_highlight`).
+use crate::time::Instant;
 use crate::{
     input::{EventPhase, InputEvent, Key, Modifiers, PointerButton},
     scene::{Color, Direction, NodeId, NodeKind, Rect, Scene, TextHighlight, TextLeaf},
@@ -19,13 +20,7 @@ use crate::{
     widgets::{Ui, WeakUi},
 };
 use std::{
-    any::Any,
-    cmp::Ordering,
-    collections::HashMap,
-    ops::Range,
-    rc::Rc,
-    sync::Arc,
-    time::{Duration, Instant},
+    any::Any, cmp::Ordering, collections::HashMap, ops::Range, rc::Rc, sync::Arc, time::Duration,
 };
 
 /// A place in selectable text: a text node and a UTF-8 byte offset into

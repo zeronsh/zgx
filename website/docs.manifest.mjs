@@ -157,6 +157,8 @@ export const sets = [
       '---Hosts---',
       { slug: 'windows', src: 'docs/windows.md', title: 'Windows' },
       { slug: 'linux', src: 'docs/linux.md', title: 'Linux' },
+      { slug: 'browser', src: 'docs/dom.md', title: 'The browser (zgx-dom)',
+        description: 'Rust-composed views as real DOM from WebAssembly, laid out by the browser.' },
       '---Native surfaces---',
       { slug: 'window-controls', src: 'docs/window-controls.md', title: 'Window controls' },
       { slug: 'native-surfaces', src: 'docs/native-surfaces.md', title: 'CoreVideo surfaces (macOS)',

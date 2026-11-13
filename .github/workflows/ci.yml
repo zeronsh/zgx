@@ -255,6 +255,33 @@ jobs:
       - run: cargo test -p zgx-terminal --locked
       # The optional effects package: every effect drawn, on each job's backend.
       - run: cargo test -p zgx-fx --locked
+      # zgx-dom: views as browser DOM, on wasm32. Its lints (zgx's `dom`
+      # plumbing with them), the table benchmark built, and its tests in
+      # headless Chrome: the image's Chrome and chromedriver, and the
+      # wasm-bindgen-test-runner of the wasm-bindgen Cargo.lock pins, kept
+      # between runs.
+      - id: wasm-bindgen
+        run: |
+          version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/wasm-bindgen-${{ steps.wasm-bindgen.outputs.version }}
+          key: wasm-bindgen-cli-${{ steps.wasm-bindgen.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+      - name: zgx-dom on wasm32
+        env:
+          WASM_BINDGEN: ${{ steps.wasm-bindgen.outputs.version }}
+        run: |
+          rustup target add wasm32-unknown-unknown
+          root="$HOME/.local/wasm-bindgen-$WASM_BINDGEN"
+          if [ ! -x "$root/bin/wasm-bindgen-test-runner" ]; then
+            cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --root "$root"
+          fi
+          cargo clippy -p zgx-dom --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+          cargo build -p zgx-dom --example bench --target wasm32-unknown-unknown --release --locked
+          CHROMEDRIVER="$(command -v chromedriver || echo "$CHROMEWEBDRIVER/chromedriver")" \
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
+            cargo test -p zgx-dom --target wasm32-unknown-unknown --locked
       # zgx-script's tests with all its features, as an app built by zgx-run
       # has them (scene3d, i18n, gltf, inspect): ICU's plural rules change
       # what the i18n lint finds, and each feature may add lazy `ui`
