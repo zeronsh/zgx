@@ -498,7 +498,7 @@ jobs:
       - run: cargo test --workspace --doc --locked
       # The CLI as `cargo install` builds it: zgx-script alone, with the
       # formatters, so its feature set is not the workspace's.
-      - run: cargo install --path crates/zgx-script --locked --features i18n-intl --root "$RUNNER_TEMP/zgx-cli" --debug
+      - run: cargo install --path crates/zgx-script --locked --features "inspect i18n-intl" --root "$RUNNER_TEMP/zgx-cli" --debug
       - run: '"$RUNNER_TEMP/zgx-cli/bin/zgx" --help > /dev/null'
       # Without ffmpeg, the tests of what it encodes pass by skipping: here it
       # must be there.
