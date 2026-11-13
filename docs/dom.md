@@ -73,7 +73,7 @@ Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau** (`zgx-script`): its VM is C++ built with `cc`, and it depends on zgx-gpu; running it in the browser needs Luau built for wasm and that dependency split off.
-- **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
+- **Not yet mapped**: rich text, canvas drawing (its display list maps to Canvas 2D), SVG, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `variable_virtual_list` and `measured_virtual_list`, `on_event` listeners and keymaps, focus groups' roving arrows, `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 
 ## Performance
