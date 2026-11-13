@@ -15,13 +15,35 @@ use alacritty_terminal::{
 };
 use std::collections::VecDeque;
 
-/// A match: its first and last cells, by line number (`Grid::pushed` plus
-/// the line) and column, the last a wide character's second cell when it
-/// ends on one.
+/// A match: its first cell, by line number (`Grid::pushed` plus the line)
+/// and column, and its last, as many lines on, the last a wide character's
+/// second cell when it ends on one. 16 bytes: a needle of one character in
+/// a history full of it keeps fewer bytes of matches than of cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Hit {
-    pub start: (u64, usize),
-    pub end: (u64, usize),
+    line: u64,
+    column: u16,
+    lines: u16,
+    last: u16,
+}
+impl Hit {
+    fn new(start: (u64, usize), end: (u64, usize)) -> Self {
+        let narrow = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
+        Self {
+            line: start.0,
+            column: narrow(start.1),
+            lines: narrow((end.0 - start.0) as usize),
+            last: narrow(end.1),
+        }
+    }
+    /// Its first cell: line number, column.
+    pub(crate) fn start(&self) -> (u64, usize) {
+        (self.line, usize::from(self.column))
+    }
+    /// Its last cell.
+    pub(crate) fn end(&self) -> (u64, usize) {
+        (self.line + u64::from(self.lines), usize::from(self.last))
+    }
 }
 
 /// Columns of a row in view to highlight, first to last.
@@ -93,7 +115,11 @@ impl Search {
             self.scanned = oldest;
         }
         // Lines that fell off the history's top, their matches with them.
-        while self.history.front().is_some_and(|hit| hit.start.0 < oldest) {
+        while self
+            .history
+            .front()
+            .is_some_and(|hit| hit.start().0 < oldest)
+        {
             self.history.pop_front();
         }
         self.scanned = self.scanned.max(oldest);
@@ -161,10 +187,7 @@ impl Search {
                 let start = at + skipped;
                 match self.matches_at(term, number, start, last) {
                     Some(end) => {
-                        found.push(Hit {
-                            start: (number, start),
-                            end,
-                        });
+                        found.push(Hit::new((number, start), end));
                         // Past it: on this row, or on the one it ends on.
                         if end.0 > number {
                             next = end.0;
@@ -248,7 +271,7 @@ impl Search {
 
     /// The selected match's first line, to scroll to.
     pub(crate) fn selected_line(&self) -> Option<u64> {
-        self.selected.map(|hit| hit.start.0)
+        self.selected.map(|hit| hit.start().0)
     }
 
     /// Select the next older match (`older`), or the next newer, around the
@@ -293,20 +316,24 @@ impl Search {
         let top = grid.pushed() - grid.display_offset() as u64;
         let bottom = top + rows;
         let mut highlights = Vec::new();
-        let from = self.history.partition_point(|hit| hit.end.0 < top);
+        let from = self.history.partition_point(|hit| hit.end().0 < top);
         let older = self.history.range(from..);
-        let from = self.screen.partition_point(|hit| hit.end.0 < top);
+        let from = self.screen.partition_point(|hit| hit.end().0 < top);
         for hit in older.chain(&self.screen[from..]) {
-            if hit.start.0 >= bottom {
+            if hit.start().0 >= bottom {
                 break;
             }
             let selected = self.selected == Some(*hit);
-            for line in hit.start.0.max(top)..=hit.end.0.min(bottom - 1) {
+            for line in hit.start().0.max(top)..=hit.end().0.min(bottom - 1) {
                 highlights.push(Highlight {
                     row: (line - top) as usize,
-                    first: if line == hit.start.0 { hit.start.1 } else { 0 },
-                    last: if line == hit.end.0 {
-                        hit.end.1
+                    first: if line == hit.start().0 {
+                        hit.start().1
+                    } else {
+                        0
+                    },
+                    last: if line == hit.end().0 {
+                        hit.end().1
                     } else {
                         columns - 1
                     },
@@ -426,12 +453,12 @@ mod tests {
         let found = search(&session, "needle");
         assert_eq!(found.total(), 1);
         let hit = found.at(0);
-        assert_eq!((hit.start.1, hit.end.1), (17, 2), "{hit:?}");
-        assert_eq!(hit.end.0, hit.start.0 + 1, "on the next line");
+        assert_eq!((hit.start().1, hit.end().1), (17, 2), "{hit:?}");
+        assert_eq!(hit.end().0, hit.start().0 + 1, "on the next line");
         let wide = search(&session, "日本");
         assert_eq!(wide.total(), 2);
         let first = wide.at(0);
-        assert_eq!((first.start.1, first.end.1), (0, 3), "two wide cells");
+        assert_eq!((first.start().1, first.end().1), (0, 3), "two wide cells");
     }
 
     /// Output arriving while a search is open: the history's lines are
@@ -522,6 +549,13 @@ mod tests {
         session.term().scroll_display(Scroll::Delta(1));
         let view = found.in_view(&session.term());
         assert_eq!(view.iter().map(|h| h.row).collect::<Vec<_>>(), [1, 4]);
+    }
+
+    /// A match keeps 16 bytes: a history matched at every cell keeps fewer
+    /// bytes of matches than of cells (24 each).
+    #[test]
+    fn a_match_takes_sixteen_bytes() {
+        assert_eq!(std::mem::size_of::<Hit>(), 16);
     }
 
     /// A screen of another size is searched again.
