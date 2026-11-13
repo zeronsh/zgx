@@ -1258,6 +1258,9 @@ impl EditorHandle {
     /// Refresh it if its size changed; whether it did. `laid_out`: another
     /// was refreshed in this step of the frame, which laid out all but what
     /// its own draw dirtied, which the frame's next pass lays out.
+    // Inlined: both preparations (a frame's, one ahead of it) call it, and
+    // the frame's inlined it while it had the one caller.
+    #[inline(always)]
     fn refresh_if_resized(&self, laid_out: bool) -> bool {
         let scene = self.scene.borrow();
         if !scene.contains(self.node) {
@@ -1451,6 +1454,10 @@ const SIZE_NOISE: f32 = 1. / 1024.;
 /// The passes it takes once layout has failed to settle
 /// (`Ui::contain_layout_feedback`): each change is tried again, cheaply.
 const RETRY_LAYOUT_PASSES: usize = 16;
+/// Marks a geometry revision (`UiStorage::bounds_geometry_revision`) that a
+/// preparation ahead of the frame's settled on but left its observations
+/// of to the frame's. Revisions count from zero by one: none reaches it.
+const SEEN_AHEAD: u64 = 1 << 63;
 /// Layout notifications repeatedly changed their own allocation without settling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayoutFeedbackError {
@@ -1826,6 +1833,9 @@ pub(crate) struct UiStorage {
     paste_hooks: RefCell<crate::scene::NodeMap<PasteHook>>,
     editor_layout: RefCell<Option<EditorLayoutEntry>>,
     editor_layout_revision: Cell<Option<u64>>,
+    /// The geometry revision observed bounds and visibility were last
+    /// gathered at, or (`SEEN_AHEAD`) one a preparation ahead of the frame
+    /// settled on, owed to the frame's; `None`: gather at the next.
     bounds_geometry_revision: Cell<Option<u64>>,
     preparing_frame: Cell<bool>,
     /// A host keeps going past layout that doesn't settle
@@ -3134,7 +3144,10 @@ impl Ui {
         });
         true
     }
-    fn run_layout_listeners(&self) {
+    // One for each preparation (a frame's, one ahead of it), with closures
+    // of its own: the frame's copy keeps the one caller each, inlined as it
+    // was.
+    fn run_layout_listeners<const AHEAD: bool>(&self) {
         let listeners: Vec<(NodeId, LayoutListener)> = {
             let listeners = self.storage.layout_listeners.borrow();
             if listeners.is_empty() {
@@ -3856,6 +3869,20 @@ impl Ui {
     /// and call again. Under [`contain_layout_feedback`](Self::contain_layout_feedback),
     /// as in a window, this is reported and the frame goes on instead.
     pub fn try_prepare_frame(&self) -> Result<(), LayoutFeedbackError> {
+        self.prepare_for::<false>()
+    }
+    /// `try_prepare_frame` ahead of the frame's own (a host's spare-time
+    /// work before it draws): it lays out and settles, and leaves observed
+    /// bounds and visibility for the frame's to deliver. Renderer and host
+    /// plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn try_prepare_frame_ahead(&self) -> Result<(), LayoutFeedbackError> {
+        self.prepare_for::<true>()
+    }
+    /// `try_prepare_frame`, for a frame or (`AHEAD`) ahead of the frame's own
+    /// (dispatching input, spare-time work): that one leaves observed bounds
+    /// and visibility to the frame's.
+    fn prepare_for<const AHEAD: bool>(&self) -> Result<(), LayoutFeedbackError> {
         if self.storage.preparing_frame.get() {
             return Ok(());
         }
@@ -3866,15 +3893,30 @@ impl Ui {
             self.storage.pixel_scale_seen.set(scale);
             self.storage.pixel_scale.set(scale);
         }
-        self.prepare_frame_once()?;
+        self.prepare_frame_once::<AHEAD>()?;
         // Find in page's marks where text mounted or moved, and what its
-        // bar asked for.
+        // bar asked for: ahead of the frame too, as each ask waits in one
+        // slot (a character typed, then Enter, in one turn: the search
+        // first). Ahead, out of line, so the frame's inlines it as it did.
         if self.storage.find.borrow().is_some() {
-            crate::find::sync(self);
+            match AHEAD {
+                false => crate::find::sync(self),
+                true => self.sync_find_ahead(),
+            }
         }
-        // Whether the host draws the caret, now that it is laid out.
-        crate::caret_blink::settle(self);
+        // Whether the host draws the caret, now that it is laid out: the
+        // frame's alone, as nothing reads it before the frame paints.
+        if !AHEAD {
+            crate::caret_blink::settle(self);
+        }
         Ok(())
+    }
+    /// `find::sync` for a preparation ahead of the frame's (see
+    /// `prepare_for`).
+    #[cold]
+    #[inline(never)]
+    fn sync_find_ahead(&self) {
+        crate::find::sync(self);
     }
     /// Keep `padding` clear inside scroll view `viewport` (its root) when
     /// something scrolls into view there (focus, find, `scroll_into_view`),
@@ -4387,7 +4429,14 @@ impl Ui {
             None => Err(list),
         }
     }
-    fn prepare_frame_once(&self) -> Result<(), LayoutFeedbackError> {
+    /// One preparation. `AHEAD` (one made ahead of the frame's: to dispatch
+    /// input, for spare-time work): observed bounds and visibility are left
+    /// for the frame's, which delivers them once, as
+    /// the web delivers resize and intersection observations once a frame
+    /// before paint. Gathered before each dispatch too, a scroll's every
+    /// notch walked each observed node to the root again (232 of them, 30
+    /// levels deep, in a transcript under glass: ~1 ms a frame).
+    fn prepare_frame_once<const AHEAD: bool>(&self) -> Result<(), LayoutFeedbackError> {
         if self.storage.preparing_frame.replace(true) {
             return Ok(());
         }
@@ -4419,8 +4468,14 @@ impl Ui {
                 (scene.layout_revision(), scene.geometry_revision())
             };
             let layout_changed = self.storage.editor_layout_revision.get() != Some(layout_revision);
-            let geometry_changed =
-                self.storage.bounds_geometry_revision.get() != Some(geometry_revision);
+            // Geometry a preparation ahead of the frame's settled on left
+            // unpublished (`SEEN_AHEAD`): not new to the next ahead, and the
+            // frame's to publish, as any geometry it has not.
+            let geometry_changed = self.storage.bounds_geometry_revision.get()
+                != Some(geometry_revision)
+                && (!AHEAD
+                    || self.storage.bounds_geometry_revision.get()
+                        != Some(geometry_revision | SEEN_AHEAD));
             if !layout_changed && !geometry_changed {
                 if !self.run_after_layout() {
                     // Settled: a removed focused node's focus falls to its
@@ -4441,20 +4496,38 @@ impl Ui {
                 }
                 continue;
             }
-            let hidden_focus = self
-                .input
-                .focused()
-                .is_some_and(|id| !self.scene.borrow().layout_visible(id));
-            if hidden_focus {
-                self.input.focus(&self.scene, None);
+            // Unless a preparation ahead did, for this geometry: found again,
+            // what the pointer is over sets off restyling (a hover style) for
+            // nothing.
+            if AHEAD
+                || layout_changed
+                || self.storage.bounds_geometry_revision.get()
+                    != Some(geometry_revision | SEEN_AHEAD)
+            {
+                let hidden_focus = self
+                    .input
+                    .focused()
+                    .is_some_and(|id| !self.scene.borrow().layout_visible(id));
+                if hidden_focus {
+                    self.input.focus(&self.scene, None);
+                }
+                self.input.refresh_hover(&self.scene);
             }
-            self.input.refresh_hover(&self.scene);
             self.storage
                 .editor_layout_revision
                 .set(Some(layout_revision));
-            self.storage
-                .bounds_geometry_revision
-                .set(Some(geometry_revision));
+            match AHEAD {
+                false => self
+                    .storage
+                    .bounds_geometry_revision
+                    .set(Some(geometry_revision)),
+                true if geometry_changed => self
+                    .storage
+                    .bounds_geometry_revision
+                    .set(Some(geometry_revision | SEEN_AHEAD)),
+                true => {}
+            }
+            let gather = geometry_changed && !AHEAD;
             let (sizes, bounds): (Vec<_>, Vec<_>) = {
                 let scene = self.scene.borrow();
                 // Only those resized, as the bounds below: most observed
@@ -4490,7 +4563,7 @@ impl Ui {
                 // were as something else changes (a reply's last paragraph
                 // growing, the others not).
                 let mut bounds = Vec::new();
-                if geometry_changed {
+                if gather {
                     for (node, observed) in self.storage.observed_bounds.borrow().iter() {
                         if scene.contains(*node) {
                             let mut kept = observed.kept.get();
@@ -4506,7 +4579,7 @@ impl Ui {
                 (sizes, bounds)
             };
             let mut visibility = Vec::new();
-            if geometry_changed {
+            if gather {
                 // Margins of nodes no longer observed go here, not as each
                 // node is removed: removal stays as it is for every node.
                 if !self.storage.visibility_margins.borrow().is_empty() {
@@ -4547,21 +4620,25 @@ impl Ui {
                     self.content_sizes_published();
                 }
                 // Changed, as gathered above (what reads them runs after
-                // the batch): set without comparing again.
-                for (node, signal, visible) in visibility {
-                    if self.scene.borrow().contains(node) {
-                        signal.mutate(|told| {
-                            *told = visible;
-                            true
-                        });
+                // the batch): set without comparing again. The frame's alone
+                // (none are gathered ahead of it), which keeps what it calls
+                // the frame's alone, inlined as it was.
+                if !AHEAD {
+                    for (node, signal, visible) in visibility {
+                        if self.scene.borrow().contains(node) {
+                            signal.mutate(|told| {
+                                *told = visible;
+                                true
+                            });
+                        }
                     }
-                }
-                for (node, signal, bounds) in bounds {
-                    if self.scene.borrow().contains(node) {
-                        signal.mutate(|told| {
-                            *told = bounds;
-                            true
-                        });
+                    for (node, signal, bounds) in bounds {
+                        if self.scene.borrow().contains(node) {
+                            signal.mutate(|told| {
+                                *told = bounds;
+                                true
+                            });
+                        }
                     }
                 }
             });
@@ -4573,7 +4650,7 @@ impl Ui {
                 for editor in editors {
                     refreshed |= editor.refresh_if_resized(refreshed);
                 }
-                self.run_layout_listeners();
+                self.run_layout_listeners::<AHEAD>();
             }
             self.run_after_layout();
             // Internal geometry bindings are constrained by their viewport.
@@ -4750,7 +4827,7 @@ impl Ui {
         &mut self,
         event: InputEvent,
     ) -> Result<crate::input::DispatchResult, LayoutFeedbackError> {
-        self.try_prepare_frame()?;
+        self.prepare_for::<true>()?;
         let _span = crate::profile::span(crate::profile::Phase::Input);
         crate::profile::input_event();
         let after = (
@@ -4789,7 +4866,7 @@ impl Ui {
     /// dispatched there). A cell crossed between two moves of a turn is
     /// entered and left.
     pub fn try_pointer_passed(&mut self, x: f32, y: f32) -> Result<(), LayoutFeedbackError> {
-        self.try_prepare_frame()?;
+        self.prepare_for::<true>()?;
         let _span = crate::profile::span(crate::profile::Phase::Input);
         self.storage.dispatching.set(true);
         self.input.pointer_passed(&self.scene, x, y);
@@ -4803,7 +4880,7 @@ impl Ui {
         event: InputEvent,
         modifiers: crate::input::Modifiers,
     ) -> Result<crate::input::DispatchResult, LayoutFeedbackError> {
-        self.try_prepare_frame()?;
+        self.prepare_for::<true>()?;
         let _span = crate::profile::span(crate::profile::Phase::Input);
         crate::profile::input_event();
         let after = (

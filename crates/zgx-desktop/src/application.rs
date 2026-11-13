@@ -2858,7 +2858,7 @@ impl Host {
         else {
             return Ok(());
         };
-        self.context.ui.try_prepare_frame()?;
+        self.context.ui.try_prepare_frame_ahead()?;
         self.context
             .ui
             .run_spare_work(started, self.frame_interval)?;

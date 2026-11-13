@@ -870,6 +870,9 @@ fn status_of(session: &Session) -> FindStatus {
 
 /// After a frame is laid out: what the bar asked for, and the marks again
 /// where text mounted, moved or changed (a list's rows scrolled in).
+/// Inlined: a frame's preparation and one ahead of it both call it, and the
+/// frame's inlined it while it had the one caller.
+#[inline(always)]
 pub(crate) fn sync(ui: &Ui) {
     let Some((asked, marked_at, bar_gone)) = ui.storage.find.borrow_mut().as_mut().map(|s| {
         (

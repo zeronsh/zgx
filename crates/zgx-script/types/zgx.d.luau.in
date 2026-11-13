@@ -2459,7 +2459,10 @@ export type NodeProps = {
 	on_resize: ((size: Size, element: Element) -> ...unknown)?,
 	-- When any of it comes into view or all of it leaves (inside every
 	-- clip and scroll viewport above it), and at its first layout: for
-	-- building what only matters on screen.
+	-- building what only matters on screen. Told once a frame, before
+	-- paint, as an IntersectionObserver: a handler in the same frame reads
+	-- the frame before's; an element's `x`, `y`, `width` and `height` are
+	-- read fresh.
 	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
 	-- With `on_visible`: in view once any of it comes within this many
 	-- points of showing (an IntersectionObserver's `rootMargin`), to build

@@ -8896,7 +8896,11 @@ impl NodeHandle {
             .is_some_and(|ui| ui.scene.borrow().contains(self.node))
     }
     /// The node's world bounds, republished after each frame's layout: for
-    /// animating a container to the size of what it holds.
+    /// animating a container to the size of what it holds. Once a frame,
+    /// before paint, as the web's observers: preparations made ahead of the
+    /// frame's (to dispatch input) leave it be, so a handler between two
+    /// frames reads the frame before's. `window_bounds` reads the node as
+    /// the latest layout and scroll left it.
     pub fn observe_bounds(&self) -> Option<Signal<crate::scene::Rect>> {
         #[cfg(feature = "dom")]
         if let Some(dom) = &self.dom {
@@ -8935,7 +8939,8 @@ impl NodeHandle {
     }
     /// Whether any of the node shows (inside every clip and viewport above
     /// it), republished after each frame's layout: for building what only
-    /// matters on screen.
+    /// matters on screen. Once a frame, before paint, as an
+    /// IntersectionObserver (see `observe_bounds`).
     pub fn observe_visibility(&self) -> Option<Signal<bool>> {
         #[cfg(feature = "dom")]
         if let Some(dom) = &self.dom {
