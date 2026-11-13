@@ -33,7 +33,7 @@ mod passes;
 mod view_host;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
-pub use core_text_glyphs::core_text_glyph;
+pub use core_text_glyphs::{core_text_glyph, core_text_probe};
 #[cfg(target_os = "macos")]
 mod layer_present;
 #[cfg(target_os = "macos")]

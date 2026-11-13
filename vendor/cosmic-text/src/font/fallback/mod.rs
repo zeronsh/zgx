@@ -385,6 +385,23 @@ impl<'a> FontFallbackIter<'a> {
             .is_some_and(|face| face.families.iter().any(|(name, _)| name == family_name))
     }
 
+    /// zgx patch: face `id` for a glyph that fell back: at the named
+    /// weight CSS matching picks (`FontSystem::get_fallback_font_at`), but a
+    /// face of the family the text asked for (the system font reached
+    /// through the common fallbacks) follows the axis.
+    fn fallback_font(&mut self, id: fontdb::ID) -> Option<Arc<Font>> {
+        let asked = self.default_families.iter().any(|family| {
+            let name = self.font_system.db().family_name(family);
+            self.face_contains_family(id, name)
+        });
+        if asked {
+            self.font_system.get_font_at(id, self.ideal_weight, self.optical)
+        } else {
+            self.font_system
+                .get_fallback_font_at(id, self.ideal_weight, self.optical)
+        }
+    }
+
     fn default_font_match_key(&self) -> Option<&FontMatchKey> {
         let default_family = self.default_families[self.default_i - 1];
         let default_family_name = self.font_system.db().family_name(default_family);
@@ -578,7 +595,7 @@ impl<'a> FontFallbackIter<'a> {
                 self.script_i.1 += 1;
                 for m_key in font_match_keys_iter(false) {
                     if self.face_contains_family(m_key.id, script_family) {
-                        if let Some(font) = self.font_system.get_fallback_font_at(m_key.id, self.ideal_weight, self.optical) {
+                        if let Some(font) = self.fallback_font(m_key.id) {
                             return Some(font);
                         }
                     }
@@ -601,7 +618,7 @@ impl<'a> FontFallbackIter<'a> {
             self.common_i += 1;
             for m_key in font_match_keys_iter(false) {
                 if self.face_contains_family(m_key.id, common_family) {
-                    if let Some(font) = self.font_system.get_fallback_font_at(m_key.id, self.ideal_weight, self.optical) {
+                    if let Some(font) = self.fallback_font(m_key.id) {
                         return Some(font);
                     }
                 }
@@ -627,7 +644,7 @@ impl<'a> FontFallbackIter<'a> {
         if self.last >= 2 {
             while let Some(id) = self.known_face((self.last - 2) as usize) {
                 self.last += 1;
-                if let Some(font) = self.font_system.get_fallback_font_at(id, self.ideal_weight, self.optical) {
+                if let Some(font) = self.fallback_font(id) {
                     return Some(font);
                 }
             }
@@ -641,7 +658,7 @@ impl<'a> FontFallbackIter<'a> {
                 .iter()
                 .all(|family_name| !self.face_contains_family(id, family_name))
             {
-                if let Some(font) = self.font_system.get_fallback_font_at(id, self.ideal_weight, self.optical) {
+                if let Some(font) = self.fallback_font(id) {
                     // zgx: the characters it holds are found, for next time.
                     for c in self.word.chars().filter(|c| !c.is_whitespace()) {
                         let mut one = [0; 4];

@@ -103,6 +103,11 @@ unsafe extern "C" {
         bitmap_info: u32,
     ) -> CFTypeRef;
     fn CGContextSetGrayFillColor(context: CFTypeRef, gray: f64, alpha: f64);
+    fn CGColorSpaceCreateDeviceRGB() -> CFTypeRef;
+    fn CGColorSpaceCreateDeviceGray() -> CFTypeRef;
+    fn CGContextFillRect(context: CFTypeRef, rect: CGRect);
+    fn CGContextScaleCTM(context: CFTypeRef, sx: f64, sy: f64);
+    fn CGContextSetRGBFillColor(context: CFTypeRef, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetShouldAntialias(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSmoothFonts(context: CFTypeRef, on: bool);
     fn CGContextSetAllowsFontSubpixelPositioning(context: CFTypeRef, on: bool);
@@ -349,7 +354,7 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
             let context = Owned(context);
             CGContextSetGrayFillColor(context.0, 1., 1.);
             CGContextSetShouldAntialias(context.0, true);
-            CGContextSetShouldSmoothFonts(context.0, false);
+            CGContextSetShouldSmoothFonts(context.0, std::env::var("ZGX_CG_SMOOTH").is_ok());
             CGContextSetAllowsFontSubpixelPositioning(context.0, true);
             CGContextSetShouldSubpixelPositionFonts(context.0, true);
             CGContextSetAllowsFontSubpixelQuantization(context.0, false);
@@ -370,6 +375,88 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
             height,
         };
         image.data = data;
+        Some(image)
+    })
+}
+
+/// Probe: `key`'s glyph drawn the way Skia draws one (a colour context),
+/// `variant`: bit 0 black text on white (else white on black), bit 1 font
+/// smoothing, bit 2 a gray colour space (else RGB); the coverage is the
+/// gray read back, inverted for black text.
+#[doc(hidden)]
+pub fn core_text_probe(fonts: &mut FontSystem, key: CacheKey, variant: u32) -> Option<SwashImage> {
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let ctm2 = variant & 8 != 0;
+        let mut key = key;
+        if ctm2 {
+            key.font_size_bits = (f32::from_bits(key.font_size_bits) / 2.).to_bits();
+        }
+        let k = if ctm2 { 2. } else { 1. };
+        let font = font_for(&mut cache, fonts, key)?;
+        let glyph = key.glyph_id;
+        let (dx, dy) = (f64::from(key.x_bin.as_float()), f64::from(key.y_bin.as_float()));
+        let mut rect = CGRect::default();
+        unsafe { CTFontGetBoundingRectsForGlyphs(font, HORIZONTAL, &glyph, &mut rect, 1) };
+        if rect.size.width <= 0. || rect.size.height <= 0. {
+            return None;
+        }
+        let left = (k * rect.origin.x + dx).floor() as i32 - 2;
+        let right = (k * (rect.origin.x + rect.size.width) + dx).ceil() as i32 + 2;
+        let bottom = (k * rect.origin.y + dy).floor() as i32 - 2;
+        let top = (k * (rect.origin.y + rect.size.height) + dy).ceil() as i32 + 2;
+        let (width, height) = ((right - left) as usize, (top - bottom) as usize);
+        let gray_space = variant & 4 != 0;
+        let black_on_white = variant & 1 != 0;
+        let smooth = variant & 2 != 0;
+        let bytes = if gray_space { 1 } else { 4 };
+        let mut data = vec![0u8; width * height * bytes];
+        unsafe {
+            let space = Owned(if gray_space { CGColorSpaceCreateDeviceGray() } else { CGColorSpaceCreateDeviceRGB() });
+            let info = if gray_space { 0 } else { 2 | (2 << 12) };
+            let context = CGBitmapContextCreate(
+                data.as_mut_ptr().cast(),
+                width,
+                height,
+                8,
+                width * bytes,
+                space.0,
+                info,
+            );
+            if context.is_null() {
+                return None;
+            }
+            let context = Owned(context);
+            let (bg, fg) = if black_on_white { (1., 0.) } else { (0., 1.) };
+            CGContextSetRGBFillColor(context.0, bg, bg, bg, 1.);
+            if gray_space { CGContextSetGrayFillColor(context.0, bg, 1.); }
+            CGContextFillRect(context.0, CGRect { origin: CGPoint { x: 0., y: 0. }, size: CGSize { width: width as f64, height: height as f64 } });
+            if gray_space { CGContextSetGrayFillColor(context.0, fg, 1.); } else { CGContextSetRGBFillColor(context.0, fg, fg, fg, 1.); }
+            CGContextSetShouldAntialias(context.0, true);
+            CGContextSetShouldSmoothFonts(context.0, smooth);
+            CGContextSetAllowsFontSubpixelPositioning(context.0, true);
+            CGContextSetShouldSubpixelPositionFonts(context.0, true);
+            CGContextSetAllowsFontSubpixelQuantization(context.0, false);
+            CGContextSetShouldSubpixelQuantizeFonts(context.0, false);
+            let at = CGPoint { x: (dx - f64::from(left)) / k, y: (dy - f64::from(bottom)) / k };
+            if ctm2 {
+                CGContextScaleCTM(context.0, 2., 2.);
+            }
+            CTFontDrawGlyphs(font, &glyph, &at, 1, context.0);
+        }
+        let mut alpha = vec![0u8; width * height];
+        for (i, a) in alpha.iter_mut().enumerate() {
+            let g = if gray_space {
+                u32::from(data[i])
+            } else {
+                (u32::from(data[i * 4]) + u32::from(data[i * 4 + 1]) + u32::from(data[i * 4 + 2])) / 3
+            };
+            *a = if black_on_white { 255 - g as u8 } else { g as u8 };
+        }
+        let mut image = SwashImage::new();
+        image.content = SwashContent::Mask;
+        image.placement = Placement { left, top, width: width as u32, height: height as u32 };
+        image.data = alpha;
         Some(image)
     })
 }
