@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **`zgx inspect gc` names who holds what survives** (zgx-script): `--retained KIND` (a userdata type such as `State`, `table`, `function`, or part of a function's name or chunk) prints the commonest chains of holders from a root to those objects, `registry → [n] → thread → stack → function on_click @app:4 → upvalue#1 → table → .run → …`, with each function's chunk and line and how many objects share a chain (`--sample N`, default 5); `--mark` remembers the objects there are, and `--since-mark` lists after more actions what survived a full collection that wasn't there then (by kind, counts, bytes), `--retained` then looking only at those. Upvalues are numbered, not named: the heap dump doesn't carry their names, and objects held only from Rust show under the registry.

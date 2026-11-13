@@ -1262,7 +1262,10 @@ fn hebrew_and_arabic_fall_back_to_the_variable_sf_faces_at_their_own_weights() {
     let (latin400, _) = width_and_family(&mut fonts, "Hello world", 400);
     let (latin450, _) = width_and_family(&mut fonts, "Hello world", 450);
     let (latin500, _) = width_and_family(&mut fonts, "Hello world", 500);
-    assert!(latin400 < latin450 && latin450 < latin500, "the text's own face interpolates");
+    assert!(
+        latin400 < latin450 && latin450 < latin500,
+        "the text's own face interpolates"
+    );
 }
 
 /// A set line height takes its baseline from the text's font whatever face a

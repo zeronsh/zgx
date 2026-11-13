@@ -388,7 +388,7 @@ return ui.button { id = "b", on_click = function() local _ = #kept end, "keeps a
 "#;
     let h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
     h.settle();
-    let report = h.host.gc_report();
+    let report = h.host.gc_report(&Default::default());
     assert!(!report.is_empty());
     let vm = &report[0];
     assert!(
@@ -409,11 +409,68 @@ return ui.button { id = "b", on_click = function() local _ = #kept end, "keeps a
         vm.chunks
     );
     // A second collection frees nothing more: what is left is kept.
-    let again = &h.host.gc_report()[0];
+    let again = &h.host.gc_report(&Default::default())[0];
     assert!(
         again.before <= vm.after + 4096,
         "{} vs {}",
         again.before,
         vm.after
     );
+}
+
+/// `zgx inspect gc --mark`, `--since-mark` and `--retained`: what a click
+/// leaves behind after the mark is named, with the chain of holders from a
+/// root, its closures by chunk and line.
+#[test]
+fn gc_names_what_survives_after_a_mark_and_who_holds_it() {
+    use zgx_script::GcQuery;
+    let code = r#"
+local kept = {}
+local function remember(i) kept[#kept + 1] = { label = "row" .. i, run = function() return i end } end
+return ui.button { id = "b", on_click = function() remember(#kept) end, "keeps" }
+"#;
+    let mut h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    let mark = GcQuery {
+        top: 10,
+        mark: true,
+        ..Default::default()
+    };
+    assert!(h.host.gc_report(&mark)[0].found.marked.unwrap() > 0);
+    let b = h.find("b").unwrap();
+    let rect = h.ui.scene.borrow().bounds(b);
+    let (x, y) = (rect.x + rect.width / 2., rect.y + rect.height / 2.);
+    for _ in 0..7 {
+        let button = zgx::input::PointerButton::Primary;
+        h.ui.dispatch(zgx::input::InputEvent::PointerDown { x, y, button });
+        h.ui.dispatch(zgx::input::InputEvent::PointerUp { x, y, button });
+        h.settle();
+    }
+    let query = GcQuery {
+        top: 10,
+        retained: Some("run".into()),
+        sample: 3,
+        since_mark: true,
+        ..Default::default()
+    };
+    let found = &h.host.gc_report(&query)[0].found;
+    assert!(!found.no_mark);
+    assert!(
+        found
+            .since
+            .iter()
+            .any(|(name, count, _)| name.starts_with("function run @") && *count == 7),
+        "{:?}",
+        found.since
+    );
+    assert_eq!(found.matched, 7, "{found:?}");
+    let holder = &found.holders[0];
+    assert_eq!(holder.count, 7);
+    let path = holder.path.join(" | ");
+    assert!(
+        path.starts_with("registry") || path.contains("mainthread"),
+        "{path}"
+    );
+    assert!(path.contains("upvalue") && path.contains(".run"), "{path}");
+    assert!(path.contains("@") && path.contains(":"), "{path}");
 }

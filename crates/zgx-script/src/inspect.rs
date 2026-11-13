@@ -580,7 +580,8 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   reloads                                        each hot reload: files, partial or full, and why
   mark    [name=mark]                            mark now: `frames since=name` reads what follows
   clock   [freeze|thaw|advance <ms>]             freeze every animation, timer and caret at one time (also ZGX_FREEZE_TIME=1 at launch), move it by hand, or let it run
-  gc      [--top N]                              a full Luau collection in each VM: heap before and after, what is left by type, userdata and code chunk
+  gc      [top] [retained] [sample=5] [mark] [since_mark]
+                                                 a full Luau collection in each VM: heap before and after, what is left by type, userdata and code chunk; retained=State: what holds those objects, from a root; mark, then since_mark: what survives after it
   text    <target>                               how a text node was shaped: the family it asks for and what that resolves to, each line's baseline, ascent and descent, and the face each run used
   switch  [name] [on]                            list fast paths, or switch one on or off, to compare
   search  [query] [next] [prev] [all] [n=5] [close]  find in page: the count, the current match, the first n
@@ -742,7 +743,15 @@ impl Session {
             })(),
             "gc" => (|| {
                 let top = number("top").map_or(10, |n| n.max(1.) as usize);
-                let report = self.0.host.gc_report();
+                let flag = |key: &str| field(key).is_some_and(|v| v.truthy());
+                let query = crate::GcQuery {
+                    top,
+                    retained: text("retained"),
+                    sample: number("sample").map_or(5, |n| n.max(1.) as usize),
+                    mark: flag("mark"),
+                    since_mark: flag("since_mark"),
+                };
+                let report = self.0.host.gc_report(&query);
                 let mb = |bytes: usize| format!("{:.2} MB", bytes as f64 / 1_048_576.);
                 let kb = |bytes: u64| format!("{:.1} KB", bytes as f64 / 1024.);
                 let mut lines = Vec::new();
@@ -769,6 +778,28 @@ impl Session {
                     for (name, count, bytes) in vm.chunks.iter().take(top) {
                         lines.push(format!("    {name}: {count} functions, {}", kb(*bytes)));
                     }
+                    let found = &vm.found;
+                    if let Some(count) = found.marked {
+                        lines.push(format!("  marked {count} objects"));
+                    }
+                    if found.no_mark {
+                        lines.push("  no mark: run `gc --mark` first".to_string());
+                    }
+                    if !found.since.is_empty() {
+                        lines.push("  survived since the mark:".to_string());
+                        for (name, count, bytes) in found.since.iter().take(top) {
+                            lines.push(format!("    {name}: {count}, {}", kb(*bytes)));
+                        }
+                    }
+                    if query.retained.is_some() {
+                        lines.push(format!("  {} objects match; held by:", found.matched));
+                        for holder in &found.holders {
+                            lines.push(format!("    {} ×", holder.count));
+                            for step in &holder.path {
+                                lines.push(format!("      {step}"));
+                            }
+                        }
+                    }
                     let list = |items: &[(String, usize, u64)]| {
                         Value::List(
                             items
@@ -792,6 +823,37 @@ impl Session {
                         ("by_type", list(&vm.by_type)),
                         ("userdata", list(&vm.userdata)),
                         ("chunks", list(&vm.chunks)),
+                        (
+                            "marked",
+                            vm.found.marked.map_or(Value::Nil, |n| Value::Num(n as f64)),
+                        ),
+                        ("since", list(&vm.found.since)),
+                        ("matched", Value::Num(vm.found.matched as f64)),
+                        (
+                            "holders",
+                            Value::List(
+                                vm.found
+                                    .holders
+                                    .iter()
+                                    .map(|h| {
+                                        Value::record([
+                                            ("count", Value::Num(h.count as f64)),
+                                            (
+                                                "path",
+                                                Value::List(
+                                                    h.path
+                                                        .iter()
+                                                        .map(|s| Value::from(s.as_str()))
+                                                        .collect::<Vec<_>>()
+                                                        .into(),
+                                                ),
+                                            ),
+                                        ])
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            ),
+                        ),
                     ]));
                 }
                 if report.is_empty() {

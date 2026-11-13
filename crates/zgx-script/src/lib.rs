@@ -25,6 +25,8 @@
 //! The `ui` and `anime` libraries are documented in `docs/scripting.md`.
 #![warn(missing_docs)]
 mod actions;
+mod gc_paths;
+pub use gc_paths::{GcFound, GcHolder, GcQuery};
 mod anim;
 mod anime;
 pub mod app_config;
@@ -450,6 +452,8 @@ pub(crate) struct Vm {
     pub(crate) warnings: SharedWarnings,
     /// Makes a pointer event's table (`point_table`), compiled once.
     pub(crate) point: std::cell::OnceCell<mlua::Function>,
+    /// The objects at the last `zgx inspect gc --mark` (their heap addresses).
+    gc_mark: RefCell<Option<std::collections::HashSet<String>>>,
 }
 impl Vm {
     /// A pointer event's table for a handler: `x`, `y`, `local_x`,
@@ -2958,14 +2962,14 @@ impl ScriptHost {
     /// let go of too), and what each held before and after, with what is left
     /// by object type, userdata type and the chunk each function's code came
     /// from: to tell garbage a collection frees from what scripts keep.
-    pub fn gc_report(&self) -> Vec<GcVm> {
+    pub fn gc_report(&self, query: &GcQuery) -> Vec<GcVm> {
         let loaded = self.0.current.borrow().clone();
         let vms: Vec<Rc<Vm>> = loaded.iter().flat_map(|l| l._vms.iter().cloned()).collect();
         let before: Vec<usize> = vms.iter().map(|vm| vm.lua.used_memory()).collect();
         collect_garbage(&self.0);
         vms.iter()
             .zip(before)
-            .map(|(vm, before)| gc_vm(vm, before))
+            .map(|(vm, before)| gc_vm(vm, before, query))
             .collect()
     }
     /// A full collection in each VM and nothing else: one the scripts'
@@ -4303,6 +4307,7 @@ impl ScriptHost {
             locate: self.0.locate.clone(),
             warnings: self.0.warnings.clone(),
             point: Default::default(),
+            gc_mark: Default::default(),
         });
         let store = self
             .0
@@ -4874,6 +4879,7 @@ mod tests {
             locate: Rc::default(),
             warnings: Rc::default(),
             point: Default::default(),
+            gc_mark: Default::default(),
         };
         let host = vm
             .lua
@@ -4938,9 +4944,11 @@ pub struct GcVm {
     /// Compiled code by the chunk it came from: its name, functions and the
     /// bytes of their code (the largest first).
     pub chunks: Vec<(String, usize, u64)>,
+    /// The mark, the objects since it and the holders asked for.
+    pub found: GcFound,
 }
 
-fn gc_vm(vm: &Vm, before: usize) -> GcVm {
+fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
     let mut report = GcVm {
         name: vm.name.clone(),
         before,
@@ -4964,6 +4972,9 @@ fn gc_vm(vm: &Vm, before: usize) -> GcVm {
         .collect();
     userdata.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
     report.userdata = userdata;
+    if query.mark || query.since_mark || query.retained.is_some() {
+        report.found = gc_paths::find(dump.to_json(), query, &mut vm.gc_mark.borrow_mut());
+    }
     // Code by chunk: each function's proto names its source.
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(dump.to_json())
         && let Some(objects) = json["objects"].as_object()
