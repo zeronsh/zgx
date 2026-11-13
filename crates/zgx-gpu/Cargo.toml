@@ -15,10 +15,12 @@ categories = ["gui", "rendering"]
 # source in a missing format fails to decode, with an error naming the
 # feature. Canvases, gradients and shadows need none of them.
 [features]
-default = ["svg", "png", "jpeg", "gif"]
+default = ["svg", "png", "jpeg", "gif", "webp"]
 svg = ["dep:resvg"]
 png = ["image/png", "dep:png"]
 jpeg = ["dep:zune-jpeg"]
+# WebP (lossy and lossless) through `image`'s pure-Rust decoder; an animated one shows its first frame.
+webp = ["image/webp"]
 gif = ["dep:gif"]
 # Words break at their hyphenation points where text asks (zgx's `hyphens`):
 # typst's `hypher`, all its 48 languages' patterns, about 1.2 MB of a release
@@ -107,7 +109,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 # build these.
 [dev-dependencies]
 # Tests encode JPEGs, and check ours against `image`'s decode of them.
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 # Shaping with and without its kept advances (tests/variable_advances.rs).
 harfrust = { package = "zgx-harfrust", version = "0.5.4", path = "../../vendor/harfrust" }
 # wgpu's own counts of what it holds (textures, samplers, bind groups), for

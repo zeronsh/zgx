@@ -16,7 +16,8 @@ pub fn decode_image_kept(bytes: Arc<[u8]>) -> Result<Arc<ImageData>, GpuError> {
         .map_err(|e| GpuError(e.to_string()))?;
     let format = reader.format();
     let decodable = (cfg!(feature = "png") && format == Some(image::ImageFormat::Png))
-        || (cfg!(feature = "jpeg") && format == Some(image::ImageFormat::Jpeg));
+        || (cfg!(feature = "jpeg") && format == Some(image::ImageFormat::Jpeg))
+        || (cfg!(feature = "webp") && format == Some(image::ImageFormat::WebP));
     // Others (a GIF, a format left out) decode now, as they always did.
     if !decodable {
         return decode_image(&bytes);
@@ -219,6 +220,9 @@ pub fn decode_image(bytes: &[u8]) -> Result<Arc<ImageData>, GpuError> {
         }
         Some(image::ImageFormat::Jpeg) if !cfg!(feature = "jpeg") => {
             return Err(GpuError("JPEG images need zgx-gpu's `jpeg` feature".into()));
+        }
+        Some(image::ImageFormat::WebP) if !cfg!(feature = "webp") => {
+            return Err(GpuError("WebP images need zgx-gpu's `webp` feature".into()));
         }
         #[cfg(feature = "jpeg")]
         Some(image::ImageFormat::Jpeg) => {
