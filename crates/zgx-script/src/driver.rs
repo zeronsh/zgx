@@ -66,6 +66,7 @@ pub fn role_name(role: Role) -> &'static str {
         Role::Image => "img",
         Role::Document => "document",
         Role::Article => "article",
+        Role::Region => "region",
         Role::Heading => "heading",
         Role::List => "list",
         Role::ListBox => "listbox",
@@ -1308,6 +1309,7 @@ pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
                 | Role::ScrollBar
                 | Role::Document
                 | Role::Article
+                | Role::Region
                 | Role::Grid
                 | Role::Row
                 | Role::Cell

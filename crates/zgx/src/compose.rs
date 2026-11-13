@@ -1630,6 +1630,13 @@ impl View {
         self.accessibility_mut().hidden = true;
         self
     }
+    /// While `busy` says so this subtree is still being filled in
+    /// (`aria-busy`): assistive technology waits for it to settle rather than
+    /// announce each change.
+    pub fn busy_when(mut self, busy: impl FnMut() -> bool + 'static) -> Self {
+        self.accessibility_mut().busy_when = Some(Box::new(busy));
+        self
+    }
     /// `accessible_hidden`, following the reactive values it reads
     /// (`aria-hidden` as a state changes it).
     pub fn accessible_hidden_when(mut self, hidden: impl FnMut() -> bool + 'static) -> Self {
@@ -8844,6 +8851,8 @@ pub(crate) struct Accessibility {
     hidden: bool,
     /// `View::accessible_hidden_when`.
     hidden_when: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::busy_when`.
+    busy_when: Option<Box<dyn FnMut() -> bool>>,
     /// `View::accessible_modal`: while it shows, nothing else is read.
     modal: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -8894,6 +8903,9 @@ impl Accessibility {
         }
         if outer.hidden_when.is_some() {
             inner.hidden_when = outer.hidden_when;
+        }
+        if outer.busy_when.is_some() {
+            inner.busy_when = outer.busy_when;
         }
         if outer.error.is_some() {
             inner.error = outer.error;
@@ -8959,6 +8971,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         error,
         hidden,
         hidden_when,
+        busy_when,
         modal,
         focus_group,
         label,
@@ -9034,6 +9047,13 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut busy) = busy_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let busy = busy();
+            tree.borrow_mut().update(root, |node| node.busy = busy);
         });
     }
     if let Some(mut hidden) = hidden_when {
@@ -9589,6 +9609,12 @@ impl NodeHandle {
             return false;
         };
         ui.input.lock_pointer(&ui.scene, self.node)
+    }
+    /// If this is a scroll view or list (or inside one's root), how far it is
+    /// scrolled along its axis and how far it can scroll: `(offset, range)`.
+    pub fn scroll_extent(&self) -> Option<(f32, f32)> {
+        let (offset, range, _) = self.ui.upgrade()?.scroll_report(self.node)?;
+        Some((offset, range))
     }
     /// Let the pointer go, if the node holds its lock.
     pub fn unlock_pointer(&self) {

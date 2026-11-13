@@ -4720,6 +4720,11 @@ fn styled(
                 resolve(&hidden, Ty::Bool, None, &vm) == Some(Lit::Bool(true))
             });
         }
+        if let Some(busy) = &a11y.busy {
+            let (busy, vm) = (resolve_owned(busy), vm.clone());
+            view = view
+                .busy_when(move || resolve(&busy, Ty::Bool, None, &vm) == Some(Lit::Bool(true)));
+        }
         if let Some(inert) = &a11y.inert {
             let (inert, vm) = (resolve_owned(inert), vm.clone());
             view = view

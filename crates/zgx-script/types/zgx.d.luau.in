@@ -1227,6 +1227,10 @@ declare extern type Element with
 	-- list of measured rows measures those around it as it lands, so it
 	-- ends where asked. False for elements that are not lists.
 	function scroll_to_row(self, i: number, options: { align: ("start" | "center" | "end" | "nearest")? }?): boolean
+	-- How far a scroll view or list is scrolled along its axis and how far it
+	-- can go, in points: `at_start` and `at_end` say whether it can still
+	-- scroll up or down (left or right). Nil for anything else.
+	function scroll_info(self): { offset: number, range: number, at_start: boolean, at_end: boolean }?
 	function has_class(self, class: string): boolean
 	-- An input's selection, in characters (Unicode code points from 0, as
 	-- `utf8.len` counts them). Each returns false (or nil) for elements
@@ -2333,6 +2337,7 @@ export type AriaRole =
 	| "img"
 	| "tabpanel"
 	| "article"
+	| "region"
 	| "radiogroup"
 	| "radio"
 	| "slider"
@@ -2407,6 +2412,9 @@ export type NodeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Reactive<boolean>?,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Reactive<boolean>?,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Reactive<boolean>?,

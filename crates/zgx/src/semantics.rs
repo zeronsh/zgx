@@ -105,6 +105,9 @@ pub enum Role {
     /// (`role="article"`): a message, a post, a comment. Screen readers
     /// move between them.
     Article,
+    /// A named section of the page a reader can jump to (`role="region"`, a
+    /// landmark): it needs a label to be one.
+    Region,
 }
 /// How a change to a node's text is announced (ARIA's `aria-live`): only
 /// once the reader is idle, or at once, interrupting it.
@@ -209,6 +212,9 @@ pub struct SemanticNode {
     /// Left out of the accessibility tree with its subtree (`aria-hidden`):
     /// decoration, or a copy of what is said elsewhere.
     pub hidden: bool,
+    /// Still being filled in (`aria-busy`): a reader waits for it to settle
+    /// rather than announce each change.
+    pub busy: bool,
     /// A checkable menu item that is one of a group: a radio item.
     pub radio: bool,
     /// What few nodes have: `None` until one is set.
@@ -314,6 +320,7 @@ impl SemanticNode {
             selected: None,
             live: None,
             hidden: false,
+            busy: false,
             radio: false,
             rare: RareFields::default(),
         }

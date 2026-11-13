@@ -869,6 +869,9 @@ impl AccessibilityTree {
             if let Some(expanded) = semantic.expanded {
                 n.set_expanded(expanded);
             }
+            if semantic.busy {
+                n.set_busy();
+            }
             if semantic.context_menu {
                 n.add_action(Action::ShowContextMenu);
             }
@@ -1845,6 +1848,7 @@ fn role(r: Role) -> accesskit::Role {
         Role::Image => accesskit::Role::Image,
         Role::Document => accesskit::Role::Document,
         Role::Article => accesskit::Role::Article,
+        Role::Region => accesskit::Role::Region,
         Role::Heading => accesskit::Role::Heading,
         Role::List => accesskit::Role::List,
         Role::ListBox => accesskit::Role::ListBox,
@@ -3865,6 +3869,45 @@ mod vocabulary_tests {
             "sr_only stays: {names:?}"
         );
         assert!(!names.iter().any(|n| n == "Gone"), "{names:?}");
+    }
+
+    #[test]
+    fn a_busy_view_is_marked_busy_while_it_is() {
+        let mut ui = Ui::new(400., 300.);
+        let busy = ui.signal(true);
+        let read = busy.clone();
+        ui.mount(
+            column()
+                .role(Role::Region)
+                .accessible_label("Results")
+                .busy_when(move || read.get())
+                .child(text("loading")),
+        );
+        let group = |ui: &mut Ui| {
+            let nodes = project(ui);
+            find(&nodes, accesskit::Role::Region)
+                .iter()
+                .find(|n| n.label() == Some("Results"))
+                .map(|n| n.is_busy())
+        };
+        assert_eq!(group(&mut ui), Some(true));
+        busy.set(false);
+        assert_eq!(group(&mut ui), Some(false));
+    }
+
+    #[test]
+    fn a_region_is_a_named_landmark() {
+        let mut ui = Ui::new(400., 300.);
+        ui.mount(
+            column()
+                .role(Role::Region)
+                .accessible_label("Notices")
+                .child(text("A notice")),
+        );
+        let nodes = project(&mut ui);
+        let regions = find(&nodes, accesskit::Role::Region);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].label(), Some("Notices"));
     }
 
     #[test]

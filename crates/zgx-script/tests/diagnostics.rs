@@ -941,3 +941,49 @@ return ui.column { w = 400, h = 300,
     h.frames(2);
     assert_eq!(h.text("out"), "Heads up something happened|Heads");
 }
+
+#[test]
+fn scroll_info_says_how_far_a_scroll_view_can_go() {
+    let mut h = Harness::inline(
+        r##"
+local out = ui.state("out", "")
+local box = ui.ref()
+local lst = ui.ref()
+ui.command { id = "read", run = function()
+    local info = box:get():scroll_info()
+    local list = lst:get():scroll_info()
+    out:set(`{info.offset}/{info.range}/{tostring(info.at_start)}/{tostring(info.at_end)}|{list.range}/{tostring(list.at_start)}`)
+end }
+return ui.column { w = 200, h = 300,
+    ui.scroll { ref = box, id = "s", w = 200, h = 100,
+        ui.column { h = 400, ui.text { "tall" } } },
+    ui.list { ref = lst, count = 100, height = 20, w = 200, h = 100,
+        row = function(i) return ui.text("row " .. i) end },
+    ui.text { id = "out", function() return out:get() end },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.text("out"), "0/300/true/false|1900/true");
+}
+
+#[test]
+fn busy_follows_its_state() {
+    use zgx_script::Value as V;
+    let mut h = Harness::inline(
+        r##"local on = ui.state("on", true)
+return ui.column { w = 200, h = 100,
+    ui.column { id = "feed", role = "region", label = "Notices", busy = on, ui.text { "loading" } },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    let feed = h.find("feed").unwrap();
+    let state = |h: &Harness| h.ui.semantics.borrow().get(feed).map(|s| (s.role, s.busy));
+    assert_eq!(state(&h), Some((zgx::semantics::Role::Region, true)));
+    h.host.set_state("on", V::Bool(false)).unwrap();
+    h.frames(3);
+    assert_eq!(state(&h), Some((zgx::semantics::Role::Region, false)));
+}

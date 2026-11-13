@@ -1383,6 +1383,10 @@ declare extern type Element with
 	-- list of measured rows measures those around it as it lands, so it
 	-- ends where asked. False for elements that are not lists.
 	function scroll_to_row(self, i: number, options: { align: ("start" | "center" | "end" | "nearest")? }?): boolean
+	-- How far a scroll view or list is scrolled along its axis and how far it
+	-- can go, in points: `at_start` and `at_end` say whether it can still
+	-- scroll up or down (left or right). Nil for anything else.
+	function scroll_info(self): { offset: number, range: number, at_start: boolean, at_end: boolean }?
 	function has_class(self, class: string): boolean
 	-- An input's selection, in characters (Unicode code points from 0, as
 	-- `utf8.len` counts them). Each returns false (or nil) for elements
@@ -2540,6 +2544,7 @@ export type AriaRole =
 	| "img"
 	| "tabpanel"
 	| "article"
+	| "region"
 	| "radiogroup"
 	| "radio"
 	| "slider"
@@ -2614,6 +2619,9 @@ export type NodeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Reactive<boolean>?,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Reactive<boolean>?,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Reactive<boolean>?,
@@ -3061,6 +3069,9 @@ export type Props = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -3443,6 +3454,7 @@ export type Props_description = (string | ReadOnlyState<string> | (() -> string)
 export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = Reactive<boolean>?
+export type Props_busy = Reactive<boolean>?
 export type Props_inert = Reactive<boolean>?
 export type Props_sr_only = boolean?
 export type Props_pressed = Reactive<boolean>?
@@ -3763,6 +3775,9 @@ export type ContainerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -4224,6 +4239,9 @@ export type GlassProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -4694,6 +4712,9 @@ export type ScrollProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -5181,6 +5202,9 @@ export type TextProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -5627,6 +5651,9 @@ export type MarkdownViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -6220,6 +6247,9 @@ export type RichProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -6660,6 +6690,9 @@ export type ImageProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -7117,6 +7150,9 @@ export type SvgProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -7685,6 +7721,9 @@ export type Scene3DProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -8148,6 +8187,9 @@ export type CanvasProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -8620,6 +8662,9 @@ export type CheckboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -9070,6 +9115,9 @@ export type InputProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -9621,6 +9669,9 @@ export type ProgressProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -10059,6 +10110,9 @@ export type SliderProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -10518,6 +10572,9 @@ export type SegmentedProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -10970,6 +11027,9 @@ export type StepperProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -11423,6 +11483,9 @@ export type DisclosureProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -11887,6 +11950,9 @@ export type AccordionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -12325,6 +12391,9 @@ export type SectionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -12788,6 +12857,9 @@ export type SeparatorProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -13234,6 +13306,9 @@ export type TabsProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -13702,6 +13777,9 @@ export type TreeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -14166,6 +14244,9 @@ export type DataGridProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -14626,6 +14707,9 @@ export type CalendarProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -15079,6 +15163,9 @@ export type DatePickerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -15530,6 +15617,9 @@ export type TimeFieldProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -15980,6 +16070,9 @@ export type ComboboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -16438,6 +16531,9 @@ export type CommandPaletteProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -16884,6 +16980,9 @@ export type SelectProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -17337,6 +17436,9 @@ export type SplitProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -17846,6 +17948,9 @@ export type ListProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -18389,6 +18494,9 @@ export type LayerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -18849,6 +18957,9 @@ export type ModalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -19358,6 +19469,9 @@ export type PopoverProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -19855,6 +19969,9 @@ export type MenuItemProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -20304,6 +20421,9 @@ export type SubmenuProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -20773,6 +20893,9 @@ export type WebViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -21239,6 +21362,9 @@ export type TerminalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -21680,6 +21806,9 @@ export type HostViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -22121,6 +22250,9 @@ export type SlotProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -22613,6 +22745,9 @@ export type EachOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,
@@ -23069,6 +23204,9 @@ export type PresenceOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
 	-- Out of the pointer's reach, the focus order and the accessibility tree
 	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
 	inert: Props_inert,

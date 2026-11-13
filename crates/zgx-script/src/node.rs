@@ -3448,6 +3448,8 @@ pub(crate) struct A11y {
     pub hidden: bool,
     /// `aria_hidden` given as a state or function.
     pub hidden_of: Option<Source>,
+    /// `busy`: still being filled in (`aria-busy`), followed.
+    pub busy: Option<Source>,
     /// `inert`: out of focus order, reach and the accessibility tree, followed.
     pub inert: Option<Source>,
     /// `aria_modal = true`: while it shows, nothing else is read.
@@ -3645,6 +3647,7 @@ fn a11y_role(name: &str) -> Option<zgx::semantics::Role> {
         "img" | "image" => Role::Image,
         "tabpanel" => Role::TabPanel,
         "article" => Role::Article,
+        "region" => Role::Region,
         "radiogroup" => Role::RadioGroup,
         "radio" => Role::RadioButton,
         "slider" => Role::Slider,
@@ -4721,7 +4724,7 @@ fn fill_from(
                          dialog, img, radiogroup, radio, slider, switch, checkbox, spinbutton, \
                          combobox, \
                          tree, treeitem, grid, row, gridcell, columnheader, alert, menu, \
-                         menuitem, menuitemcheckbox, menuitemradio"
+                         menuitem, menuitemcheckbox, menuitemradio, article, region"
                     ))
                 })?;
                 // ARIA requires their state; there is no saying "unknown".
@@ -4797,6 +4800,10 @@ fn fill_from(
                         node.props.push((prop, source(lua, prop.ty(), name, value)?));
                     }
                 }
+            }
+            "busy" => {
+                node.a11y.get_or_insert_default().busy =
+                    Some(source(lua, Ty::Bool, "busy", value)?);
             }
             "inert" => {
                 node.a11y.get_or_insert_default().inert =
