@@ -604,6 +604,43 @@ ui.contribute("bar", ui.column {
     );
 }
 
+/// A plugin that holds `mb` strings of 1 MB, saying how many it made.
+fn holding(name: &str, mb: usize) -> PathBuf {
+    plugin(
+        name,
+        &format!(
+            r#"
+local held, made = table.create({mb}), 0
+for i = 1, {mb} do
+    if not pcall(function() held[i] = string.rep("x", 1048576) .. i end) then break end
+    made = i
+end
+ui.contribute("bar", ui.text {{ id = "{name}", tostring(made) }})
+"#
+        ),
+    )
+}
+
+#[test]
+fn a_plugin_given_more_memory_holds_past_the_default() {
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", APP);
+        let plugin = |name: &str| Plugin {
+            name: name.into(),
+            entry: holding(name, 48),
+            grants: vec![],
+        };
+        host.set_plugins(vec![plugin("big"), plugin("small")]);
+        host.plugin_memory("big", 64 << 20);
+        host
+    });
+    assert_eq!(h.error(), None);
+    // 48 MB fits its 64; the other stops short of the default 32.
+    assert_eq!(h.text("big"), "48");
+    let small: usize = h.text("small").parse().unwrap();
+    assert!(small < 32, "{small}");
+}
+
 #[test]
 fn a_plugins_state_counts_against_its_memory_limit() {
     // A state's value lives in Rust, outside the VM: without counting it,
