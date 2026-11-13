@@ -54,6 +54,9 @@ pub struct Raster {
     /// The text services the scene is laid out with (`share_text`): plain
     /// text drawn from their layout, as the GPU renderer draws it.
     shared_text: Option<std::rc::Rc<std::cell::RefCell<SharedText>>>,
+    /// What the last frame changed: what it repainted and the views whose
+    /// pixels it moved (`changed`).
+    changed: Vec<Rect>,
 }
 /// Text services a raster shares with its scene, and the glyph images it
 /// drew from them.
@@ -102,6 +105,7 @@ impl Raster {
             rendered: None,
             scroll_copies: 0,
             shared_text: None,
+            changed: Vec::new(),
         }
     }
     /// Lay out and draw plain text with `fonts` and `cache`, the ones its
@@ -130,6 +134,29 @@ impl Raster {
         self.pixels.resize(width * height, 0x10141c);
         self.rendered = None;
     }
+    /// The fonts its shared text shapes with changed (`share_text`): the
+    /// glyph images it drew from them are let go, and its next frame draws
+    /// whole.
+    #[doc(hidden)]
+    pub fn fonts_replaced(&mut self) {
+        if let Some(shared) = &self.shared_text {
+            let mut shared = shared.borrow_mut();
+            shared.images.clear();
+            shared.image_bytes = 0;
+        }
+        self.rendered = None;
+    }
+    /// The colour damage is cleared to before it repaints, as `0x00RRGGBB`.
+    #[doc(hidden)]
+    pub fn set_background(&mut self, color: u32) {
+        self.background = color & 0x00ff_ffff;
+    }
+    /// What the last `render` changed, for a window to show: what it
+    /// repainted, and each view whose pixels it moved.
+    #[doc(hidden)]
+    pub fn changed(&self) -> &[Rect] {
+        &self.changed
+    }
     /// Scroll moves applied by moving the pixels already drawn (for tests).
     #[doc(hidden)]
     pub fn scroll_copies(&self) -> u64 {
@@ -148,6 +175,7 @@ impl Raster {
             .rendered
             .is_some_and(|drawn| drawn.wrapping_add(1) == serial);
         let mut repaint = damage.to_vec();
+        let mut moved = Vec::new();
         for scroll in scene
             .scroll_moves()
             .iter()
@@ -169,6 +197,7 @@ impl Raster {
                         scroll.dy.round() as i32,
                     );
                     self.scroll_copies += 1;
+                    moved.push(scroll.clip);
                     repaint.extend(rest);
                 }
                 None => repaint.push(scroll.clip),
@@ -191,6 +220,8 @@ impl Raster {
             shared.drawn = drawn;
             shared.drawn.clear();
         }
+        repaint.extend(moved);
+        self.changed = repaint;
     }
     /// Move the pixels within `clip` by `(dx, dy)`, as content that scrolled
     /// by that much: what comes in at the edge the move leaves is left for a
@@ -531,6 +562,7 @@ impl Raster {
             rendered: None,
             scroll_copies: 0,
             shared_text: self.shared_text.clone(),
+            changed: Vec::new(),
         };
         let mut black = make(0);
         let mut white = make(0xffffff);

@@ -38,6 +38,7 @@ SMOKES = [
     ("progress", "python3 scripts/progress_smoke.py {bin}/progress --output {out}", True),
     ("images", "python3 scripts/images_smoke.py {bin}/images --output {out}", True),
     ("scroll", "python3 scripts/scroll_smoke.py {bin}/scroll --output {out}", True),
+    ("raster-window", "python3 scripts/raster_window_smoke.py {bin}/scroll --menus {bin}/menus --output {out}", False),
     ("focus-scroll", "python3 scripts/focus_scroll_smoke.py {bin}/focus_scroll --output {out}", True),
     ("horizontal-scroll", "python3 scripts/horizontal_scroll_smoke.py {bin}/horizontal_scroll --output {out}", True),
     ("scrollbars", "python3 scripts/scrollbars_smoke.py {bin}/scrollbars --output {out}", True),
