@@ -915,3 +915,29 @@ fn an_sr_only_text_is_one_point_square_and_painted_nowhere() {
     assert!(h.ui.semantics.borrow().get(live).is_some());
     assert_eq!(h.bounds("after").y, 0., "it takes no room");
 }
+
+#[test]
+fn text_of_reads_what_a_control_shows() {
+    let mut h = Harness::inline(
+        r##"
+local out = ui.state("out", "")
+ui.command { id = "read", run = function()
+    for _, c in ui.controls() do
+        if c.role == "dialog" then out:set(ui.text_of(c.handle) .. "|" .. ui.text_of(c.handle, 5)) end
+    end
+end }
+return ui.column { w = 400, h = 300,
+    ui.column { role = "dialog", label = "Notice",
+        ui.text { "Heads up" },
+        ui.text { "something happened" },
+        ui.column { aria_hidden = true, ui.text { "decoration" } },
+    },
+    ui.text { id = "out", function() return out:get() end },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.text("out"), "Heads up something happened|Heads");
+}

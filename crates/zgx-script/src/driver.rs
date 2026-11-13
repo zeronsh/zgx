@@ -264,6 +264,39 @@ pub fn own_text(scene: &Scene, node: NodeId) -> Option<String> {
         _ => None,
     }
 }
+/// The text shown inside the control `handle` names (`Control::handle`), a
+/// word apart, at most `cap` characters: what a reader sees of it, not
+/// what is hidden from assistive technology or does not show. None when
+/// the node is gone.
+pub fn subtree_text(ui: &Ui, handle: u64, cap: usize) -> Option<String> {
+    let node = NodeId::from_bits(handle);
+    let scene = ui.scene.borrow();
+    let semantics = ui.semantics.borrow();
+    if !scene.contains(node) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if semantics.get(n).is_some_and(|s| s.hidden) || !shows(&scene, n) {
+            continue;
+        }
+        if let Some(text) = own_text(&scene, n) {
+            let text = text.trim();
+            if !text.is_empty() {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(text);
+                if out.chars().count() >= cap {
+                    break;
+                }
+            }
+        }
+        stack.extend(scene.children(n).iter().rev());
+    }
+    Some(out.chars().take(cap).collect())
+}
 /// The first text inside `node` (itself included), depth first.
 pub fn first_text(scene: &Scene, node: NodeId) -> Option<String> {
     let mut stack = vec![node];

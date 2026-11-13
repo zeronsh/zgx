@@ -23632,6 +23632,9 @@ declare ui: {
 	-- `handle` names, as `zgx inspect click` does. False, doing nothing,
 	-- for a handle whose control is gone, hidden or covered.
 	press: (handle: number) -> boolean,
+	-- The text a control (`ui.controls`' `handle`) shows, a word apart, at most
+	-- `cap` (400) characters; "" once it is gone. A dialog's, for a notice.
+	text_of: (handle: number, cap: number?) -> string,
 	dismiss_toast: (id: number) -> (),
 	-- JSON: `encode(value, { pretty = true })` writes what state could hold
 	-- (lists as arrays, tables as objects, `ui.null` as null); `decode(text)`
