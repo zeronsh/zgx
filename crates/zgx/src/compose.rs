@@ -7191,6 +7191,9 @@ pub(crate) fn focus_movement(
 pub(crate) struct AncestorWindow {
     viewport: NodeId,
     list: Signal<crate::scene::Rect>,
+    /// The innermost scroll view around it, if any: a list it has scrolled
+    /// wholly past shows nothing, told without the list's clips.
+    view: Option<NodeId>,
     /// The innermost scroll view around it (else the window) first, then
     /// the others, the window and the boxes between it and that view.
     around: Vec<Signal<crate::scene::Rect>>,
@@ -7214,11 +7217,13 @@ impl AncestorWindow {
                 .collect();
             (views, clips)
         };
+        let view = views.first().copied();
         views.push(ui.root());
         views.extend(clips);
         Self {
             viewport,
             list: ui.observe_bounds(viewport),
+            view,
             around: views
                 .into_iter()
                 .map(|view| ui.observe_bounds(view))
@@ -7245,7 +7250,17 @@ impl AncestorWindow {
             return (0., 0.);
         }
         let list = scene.world_bounds(self.viewport);
-        match scene.visible_bounds(self.viewport) {
+        // Wholly above or below the view: as `visible_bounds` would tell,
+        // without it (most of a long transcript's lists, every frame).
+        let shown = match self.view {
+            Some(view) if scene.misses_view(self.viewport, list, view) => None,
+            _ => {
+                #[cfg(test)]
+                WINDOW_CLIP_WALKS.with(|walks| walks.set(walks.get() + 1));
+                scene.visible_bounds(self.viewport)
+            }
+        };
+        match shown {
             Some(shown) if shown.height > 0. => {
                 let top = (shown.y - list.y).clamp(0., total);
                 (top, shown.height.min(total - top))
@@ -9239,6 +9254,72 @@ pub mod prelude {
     pub use crate::web_view::{native_view, web_view, web_view_src};
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Lists whose shown part `AncestorWindow::window` worked out from
+    /// their clips (not told past without them).
+    static WINDOW_CLIP_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+mod ancestor_window_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    /// A scroll view 200 points high over five lists of 50 rows of 20: as
+    /// it scrolls, only the lists it shows (at most two) work out their
+    /// clips, the rest told past without, and a list coming into view
+    /// builds its rows on the frame it does.
+    #[test]
+    fn lists_scrolled_wholly_past_skip_their_clips() {
+        let mut ui = Ui::new(400., 300.);
+        let offset = ui.signal(0.);
+        let built = Rc::new(RefCell::new(vec![0_usize; 5]));
+        let mut lists = column().w_full();
+        for list in 0..5 {
+            let built = built.clone();
+            lists = lists.child(
+                virtual_list(
+                    ui.signal(0.),
+                    20.,
+                    0,
+                    || 50,
+                    |n| n,
+                    move |_, _, _| {
+                        built.borrow_mut()[list] += 1;
+                        div().w_full().h(20.)
+                    },
+                )
+                .virtualize_in_ancestor()
+                .w_full(),
+            );
+        }
+        ui.mount(scroll(offset.clone()).w(300.).h(200.).child(lists));
+        ui.prepare_frame();
+        for (at, shown) in [(100., 1), (900., 2), (2500., 1), (3900., 2)] {
+            built.borrow_mut().fill(0);
+            WINDOW_CLIP_WALKS.with(|walks| walks.set(0));
+            offset.set(at);
+            ui.prepare_frame();
+            let walks = WINDOW_CLIP_WALKS.with(|walks| walks.get());
+            // Every list's window runs (each moved); only those shown walk.
+            assert!(
+                walks <= shown * 2,
+                "at {at}: {walks} walks for {shown} lists shown"
+            );
+            assert!(
+                walks >= shown,
+                "at {at}: {walks} walks for {shown} lists shown"
+            );
+        }
+        // Back over the seam of the second and third (both away a frame
+        // before): each builds its rows on the frame it comes into view.
+        built.borrow_mut().fill(0);
+        offset.set(1900.);
+        ui.prepare_frame();
+        let counts = built.borrow().clone();
+        assert!(counts[1] > 0 && counts[2] > 0, "{counts:?}");
+    }
+}
 #[cfg(test)]
 thread_local! {
     /// Ancestors `update_button_labels` has looked at.

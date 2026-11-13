@@ -4422,6 +4422,23 @@ impl Scene {
                 .iter()
                 .any(|child| crate::deep(0, || self.paints(*child)))
     }
+    /// Whether `id`, its box at `bounds` (its `world_bounds`), is wholly
+    /// above or below scroll view `view` around it, which clips it
+    /// vertically: then nothing of it shows (`visible_bounds` is `None`, or
+    /// no taller than nothing), told without working out its clips, and the
+    /// read noted as `visible_bounds` notes it. False where it may show, or
+    /// a transform or popup could place it elsewhere.
+    pub(crate) fn misses_view(&self, id: NodeId, bounds: Rect, view: NodeId) -> bool {
+        if self.transformed > 0 || !self.popups.is_empty() || !self.clips(view).1 {
+            return false;
+        }
+        let shown = self.world_bounds(view);
+        let misses = bounds.y >= shown.y + shown.height || bounds.y + bounds.height <= shown.y;
+        if misses {
+            self.note_geometry_read(id);
+        }
+        misses
+    }
     /// The part of `id`'s box that shows: inside its clips and not fully
     /// transparent; `None` when nothing does. Under a popup root
     /// (`set_popup`) that is where its own window shows it, past this
