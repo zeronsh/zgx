@@ -4728,7 +4728,10 @@ fn fill_from(
                     ))
                 })?;
                 // ARIA requires their state; there is no saying "unknown".
-                if checkable_menu_role(&name) && !table.contains_key("checked")? {
+                // (`ui.menu_item` has already taken its `checked` into its options.)
+                let item_checked =
+                    matches!(&node.kind, Kind::MenuItem(_, options) if options.checked.is_some());
+                if checkable_menu_role(&name) && !item_checked && !table.contains_key("checked")? {
                     return Err(mlua::Error::runtime(format!(
                         "role `{name}` says whether it is checked: give it `checked`"
                     )));

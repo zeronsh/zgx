@@ -1020,3 +1020,22 @@ return ui.column { w = 300, h = 300,
     assert_eq!(h.text("out"), "true/false/true");
     assert_eq!(h.text("pop"), "menu/true/false");
 }
+
+#[test]
+fn a_menu_item_with_a_checkable_role_takes_its_checked() {
+    let mut h = Harness::inline(
+        r##"
+local on = ui.state("on", true)
+return ui.column { w = 300, h = 200,
+    ui.menu { id = "m", open = ui.state("m", true), anchor = ui.button { "Open" },
+        ui.menu_item { id = "sw", role = "menuitemcheckbox", checked = on, "Notifications" } },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    let item = h.find("sw").unwrap();
+    let semantic = h.ui.semantics.borrow().get(item).cloned().unwrap();
+    assert_eq!(semantic.role, zgx::semantics::Role::MenuItem);
+    assert_eq!(semantic.checked, Some(true));
+}
