@@ -760,6 +760,18 @@ jobs:
       - run: "cargo test -p zgx-script --test state --test tooling --locked -- upload:: test_cli:: reference_docs::"
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
+      # Real programs through ConPTY, from the image (zgx-terminal's ignored
+      # `real_programs` tests, built by the step above): PowerShell 7 with
+      # PSReadLine, cmd and Git Bash with less. A missing program fails its
+      # test; the count proves all three ran.
+      - name: Programs through ConPTY
+        shell: bash
+        run: |
+          t=session::real_programs_tests
+          cargo test -p zgx-terminal --lib --locked -- --ignored --exact \
+            $t::powershell_runs_completes_and_recalls $t::cmd_runs_commands $t::git_bash_runs_and_pages \
+            2>&1 | tee programs.txt
+          grep -q "test result: ok. 3 passed" programs.txt
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)
       # and the event loop's wake by an event handle (#478): Windows only.
       - run: cargo test -p zgx-desktop --test opaque_swap_chain --test proxy_wake --test early_context --locked
