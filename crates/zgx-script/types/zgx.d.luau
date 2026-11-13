@@ -22136,7 +22136,9 @@ declare ui: {
 	read_file: (file: File | string, opts: { base64: boolean? }?) -> Promise<string>,
 	-- Write to a file the user picked (beside it, then over it): a string's
 	-- bytes as they are (any byte), or `{ base64 = … }`'s (a PNG).
-	write_file: (file: File | string, data: string | { base64: string }) -> Promise<nil>,
+	-- `append = true` adds them at its end instead, to write a big file in
+	-- parts: await each part before the next.
+	write_file: (file: File | string, data: string | { base64: string }, opts: { append: boolean? }?) -> Promise<nil>,
 	-- A TrueType or OpenType font file (a path from the script's directory,
 	-- a plugin's inside it, or a File the user picked), or a font's bytes in
 	-- base64 (`{ base64 = … }`), added to every window's text: a promise of
