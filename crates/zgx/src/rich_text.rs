@@ -68,6 +68,9 @@ pub struct Decoration {
     /// Its colour; `None`, the run's text colour.
     pub color: Option<Color>,
     thickness: f32,
+    /// Whether the thickness is the font's (a line-through's OS/2
+    /// yStrikeoutSize): the default's, not one asked for.
+    auto: bool,
     line: LineStyle,
     /// How far below the baseline it sits (CSS `text-underline-offset`);
     /// None, a tenth of the font size.
@@ -84,9 +87,15 @@ impl Decoration {
             } else {
                 1.
             },
+            auto: false,
             line: LineStyle::Solid,
             offset: None,
         }
+    }
+    /// Whether its thickness is left to the font (`Decoration::default`), as
+    /// a line-through's is to its OS/2 yStrikeoutSize.
+    pub fn is_auto(self) -> bool {
+        self.auto
     }
     /// Drawn as `line`.
     pub fn line(mut self, line: LineStyle) -> Self {
@@ -119,7 +128,10 @@ impl Decoration {
 }
 impl Default for Decoration {
     fn default() -> Self {
-        Self::new(1.)
+        Self {
+            auto: true,
+            ..Self::new(1.)
+        }
     }
 }
 

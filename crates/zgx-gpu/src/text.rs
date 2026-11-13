@@ -903,7 +903,7 @@ impl CpuTextRaster {
                 }
             }
         }
-        (images, rich_decorations(&buffer, rich))
+        (images, rich_decorations(&self.fonts, &buffer, rich))
     }
     /// Rasterize `text` at `size` in `font`, laid out in `width` by `height`:
     /// each glyph's position and image.
@@ -2138,9 +2138,9 @@ mod rich_tests {
         use zgx::text_layout::{TextOptions, TextOverflow};
         let mut fonts = FontSystem::new();
         let text = "aa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             text,
-            vec![TextRun {
+            vec![zgx::rich_text::TextRun {
                 range: 0..text.len(),
                 font_size: 14.,
                 ..Default::default()
@@ -2167,9 +2167,9 @@ mod rich_tests {
         use zgx::text_layout::{TextOptions, TextOverflow};
         let mut fonts = FontSystem::new();
         let text = "alpha βeta 👩‍💻 words continue across several wrapped lines";
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             text,
-            vec![TextRun {
+            vec![zgx::rich_text::TextRun {
                 range: 0..text.len(),
                 font_size: 20.,
                 ..Default::default()
@@ -2252,7 +2252,7 @@ mod rich_tests {
         for mut fonts in [bundled_test_fonts(), FontSystem::new()] {
             for text in texts {
                 let split = text.char_indices().nth(text.chars().count() / 3).unwrap().0;
-                let one = vec![TextRun {
+                let one = vec![zgx::rich_text::TextRun {
                     range: 0..text.len(),
                     font_size: 16.,
                     ..Default::default()
@@ -2413,9 +2413,9 @@ mod rich_tests {
             style.features,
             FontFeatures::new([(*b"clig", 0), (*b"liga", 1), (*b"liga", 0)])
         );
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             "office ffi",
-            vec![TextRun {
+            vec![zgx::rich_text::TextRun {
                 range: 0..10,
                 font: style,
                 font_size: 24.,
@@ -2436,7 +2436,7 @@ mod rich_tests {
         let mut fonts = FontSystem::new();
         let content = "Hello العربية world e\u{301} end";
         let split = "Hello ".len();
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             content,
             vec![
                 TextRun {
@@ -2717,11 +2717,60 @@ fn joined_wash<'o>(
     }
 }
 /// Derive decoration geometry from shaped visual fragments, including bidi and wrapping.
-pub fn rich_decorations(buffer: &Buffer, rich: &zgx::rich_text::RichText) -> Vec<RichDecoration> {
-    rich_decorations_in(buffer.layout_runs(), &line_starts(buffer), rich)
+pub fn rich_decorations(
+    fonts: &FontSystem,
+    buffer: &Buffer,
+    rich: &zgx::rich_text::RichText,
+) -> Vec<RichDecoration> {
+    rich_decorations_in(fonts, buffer.layout_runs(), &line_starts(buffer), rich)
+}
+/// A face's strikeout stripe from its OS/2 table: its top above the baseline
+/// and its thickness, in ems; none where it has none (`strike_top`).
+fn strikeout_metrics(fonts: &FontSystem, id: cosmic_text::fontdb::ID) -> Option<(f32, f32)> {
+    thread_local! {
+        static KNOWN: std::cell::RefCell<std::collections::HashMap<cosmic_text::fontdb::ID, Option<(f32, f32)>>> =
+            Default::default();
+    }
+    if let Some(known) = KNOWN.with(|known| known.borrow().get(&id).copied()) {
+        return known;
+    }
+    let found = fonts.db().with_face_data(id, |data, index| {
+        let face = ttf_parser::Face::parse(data, index).ok()?;
+        let metrics = face.strikeout_metrics()?;
+        let em = f32::from(face.units_per_em());
+        (em > 0. && metrics.thickness > 0).then(|| {
+            (
+                f32::from(metrics.position) / em,
+                f32::from(metrics.thickness) / em,
+            )
+        })
+    });
+    let found = found.flatten();
+    KNOWN.with(|known| known.borrow_mut().insert(id, found));
+    found
+}
+/// Where the top of a line-through sits above the baseline for text of
+/// `size` in `face`: its OS/2 yStrikeoutPosition, as Chrome places it, else
+/// 0.3 em.
+pub fn strike_top(fonts: &FontSystem, face: Option<cosmic_text::fontdb::ID>, size: f32) -> f32 {
+    strike_stripe(fonts, face, size).0
+}
+/// A line-through's top above the baseline and its thickness for text of
+/// `size`: the face's OS/2 yStrikeoutPosition and yStrikeoutSize, else 0.3 em
+/// and none (the decoration's own).
+fn strike_stripe(
+    fonts: &FontSystem,
+    face: Option<cosmic_text::fontdb::ID>,
+    size: f32,
+) -> (f32, Option<f32>) {
+    match face.and_then(|id| strikeout_metrics(fonts, id)) {
+        Some((position, thickness)) => (position * size, Some(thickness * size)),
+        None => (size * 0.3, None),
+    }
 }
 /// `rich_decorations` over any laid-out runs, given where each line starts.
 pub fn rich_decorations_in<'a>(
+    fonts: &FontSystem,
     runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
     starts: &[usize],
     rich: &zgx::rich_text::RichText,
@@ -2749,6 +2798,17 @@ pub fn rich_decorations_in<'a>(
                 .map(|g| (g.x, g.x + g.w))
                 .collect();
             spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let face = line
+                .glyphs
+                .iter()
+                .find(|g| {
+                    g.metadata != usize::MAX && {
+                        let byte = start + g.start;
+                        byte >= run.range.start && byte < run.range.end
+                    }
+                })
+                .map(|g| g.font_id);
+            let stripe = strike_stripe(fonts, face, run.font_size);
             let mut merged: Vec<(f32, f32)> = Vec::new();
             for (left, right) in spans {
                 if let Some(last) = merged.last_mut()
@@ -2801,11 +2861,19 @@ pub fn rich_decorations_in<'a>(
                                 .unwrap_or(run.font_size * 0.1),
                         false,
                     ),
-                    (run.strikethrough, line.line_y - run.font_size * 0.3, true),
+                    (run.strikethrough, line.line_y - stripe.0, true),
                 ] {
                     if let Some(style) = decoration {
                         output.push(RichDecoration {
-                            bounds: Rect::new(left, y, right - left, style.thickness()),
+                            bounds: Rect::new(
+                                left,
+                                y,
+                                right - left,
+                                match (strike, style.is_auto(), stripe.1) {
+                                    (true, true, Some(size)) => size,
+                                    _ => style.thickness(),
+                                },
+                            ),
                             color: style.color.unwrap_or(run.color),
                             background: false,
                             radius: 0.,
@@ -2818,6 +2886,71 @@ pub fn rich_decorations_in<'a>(
         }
     }
     output
+}
+
+#[cfg(test)]
+mod strikeout_tests {
+    use super::*;
+
+    const GEIST: &[u8] = include_bytes!("../../zgx-desktop/examples/support/fonts/Geist.ttf");
+
+    /// A line-through sits where the face's OS/2 table says (Chrome's), at 13
+    /// and 14 points, and where the face has none, at 0.3 em as before.
+    #[test]
+    fn a_line_through_takes_its_position_from_the_font() {
+        let mut fonts = FontSystem::new_with_fonts([cosmic_text::fontdb::Source::Binary(
+            std::sync::Arc::new(GEIST),
+        )]);
+        let id = fonts
+            .db()
+            .faces()
+            .find(|face| face.families.iter().any(|(name, _)| name == "Geist"))
+            .map(|face| face.id)
+            .expect("Geist loaded");
+        let face = ttf_parser::Face::parse(GEIST, 0).unwrap();
+        let metrics = face.strikeout_metrics().expect("Geist has OS/2 strikeout");
+        let em = f32::from(face.units_per_em());
+        for size in [13., 14.] {
+            let expected = f32::from(metrics.position) / em * size;
+            let got = strike_top(&fonts, Some(id), size);
+            assert!(
+                (got - expected).abs() < 1e-4,
+                "{size}: {got} for {expected}"
+            );
+            eprintln!(
+                "Geist {size}pt: top {got:.3} above the baseline, size {:.3}",
+                f32::from(metrics.thickness) / em * size
+            );
+        }
+        assert_eq!(strike_top(&fonts, None, 13.), 13. * 0.3);
+        // A line of it, drawn.
+        let rich = zgx::rich_text::RichText::new(
+            "struck",
+            vec![zgx::rich_text::TextRun {
+                range: 0..6,
+                font_size: 13.,
+                strikethrough: Some(zgx::rich_text::Decoration::default()),
+                font: zgx::text_layout::FontStyle {
+                    family: zgx::text_layout::FontFamily::Named("Geist".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let buffer = rich_buffer(&mut fonts, &rich, None, None);
+        let line_y = buffer.layout_runs().next().unwrap().line_y;
+        let strike = rich_decorations(&fonts, &buffer, &rich)
+            .into_iter()
+            .find(|d| d.strike)
+            .expect("a line-through");
+        let expected = line_y - f32::from(metrics.position) / em * 13.;
+        assert!(
+            (strike.bounds.y - expected).abs() < 1e-3,
+            "{} for {expected}",
+            strike.bounds.y
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2894,7 +3027,7 @@ mod wash_tests {
     fn washes(rich: &RichText) -> Vec<Rect> {
         let mut fonts = FontSystem::new();
         let buffer = rich_buffer(&mut fonts, rich, Some(600.), None);
-        rich_decorations(&buffer, rich)
+        rich_decorations(&fonts, &buffer, rich)
             .into_iter()
             .filter(|d| d.background)
             .map(|d| d.bounds)
@@ -2922,7 +3055,7 @@ mod wash_tests {
         let red = Color(255, 0, 0, 255);
         let text = "Look at \u{2060}chat.rs\u{2060} please";
         let (icon, name) = (8..11, 11..18);
-        let rich = RichText::new(
+        let rich = zgx::rich_text::RichText::new(
             text,
             vec![
                 run(0..8, None),

@@ -17,7 +17,7 @@ categories = ["gui", "rendering"]
 [features]
 default = ["svg", "png", "jpeg", "gif"]
 svg = ["dep:resvg"]
-png = ["image/png"]
+png = ["image/png", "dep:png"]
 jpeg = ["dep:zune-jpeg"]
 gif = ["dep:gif"]
 # Words break at their hyphenation points where text asks (zgx's `hyphens`):
@@ -49,6 +49,10 @@ cosmic-text = { package = "zgx-cosmic-text", version = "0.19.14", path = "../../
 pollster = "0.4"
 bytemuck = { version = "1.25", features = ["derive"] }
 image = { version = "0.25.10", default-features = false }
+# `image`'s own version of it: a kept PNG is read row by row, shrunk as it comes.
+# A face's OS/2 strikeout position and size, which Chrome places a line-through by (already in the tree via cosmic-text).
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+png = { version = "0.17.16", default-features = false, optional = true }
 # JPEGs, decoded at 1/2, 1/4 or 1/8 of their size where shown that small
 # (vendor/zune-jpeg/ZGX_PATCH.md); `image` reads their format alone.
 zune-jpeg = { package = "zgx-zune-jpeg", version = "0.5.15", path = "../../vendor/zune-jpeg", optional = true }
