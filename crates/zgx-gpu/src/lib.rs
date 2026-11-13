@@ -2,7 +2,7 @@
 //! The output is premultiplied BGRA8 (read back as RGBA8). Text uses cosmic-text shaping and a bounded
 //! GPU glyph atlas; stable text never reshapes on paint or compositor updates.
 #![warn(missing_docs)]
-use cosmic_text::{Buffer, CacheKey, FontSystem, Metrics, SwashCache, SwashContent};
+use cosmic_text::{Buffer, CacheKey, CacheKeyFlags, FontSystem, Metrics, SwashCache, SwashContent};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
@@ -13,6 +13,8 @@ mod compile;
 mod composition;
 #[cfg(target_os = "macos")]
 mod core_text_glyphs;
+#[cfg(target_os = "macos")]
+mod chrome_mask_tables;
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(windows)]
@@ -33,7 +35,7 @@ mod passes;
 mod view_host;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
-pub use core_text_glyphs::{core_text_glyph, core_text_probe};
+pub use core_text_glyphs::core_text_glyph;
 #[cfg(target_os = "macos")]
 mod layer_present;
 #[cfg(target_os = "macos")]
@@ -1360,11 +1362,53 @@ fn glyphs_of<'a>(
         None => styled_glyphs(glyphs, runs, scale, |_, _| 0),
     }
 }
+/// Baselines snap to device pixels where Chrome's do (macOS, 2x and over).
+fn set_baseline_snap(scale: f32) {
+    cosmic_text::set_baseline_scale(if quarter_x_applies(scale) { scale } else { 1. });
+}
 /// The scale below which text is drawn for a low-density screen: glyphs on
 /// whole device pixels (`styled_glyphs`) and their coverage firmed
 /// (`FIRM_COVERAGE`). At 2x and over, where a pixel is too small to see,
 /// glyphs keep their subpixel places and outlines' plain coverage.
 const SHARP_TEXT_BELOW: f32 = 2.;
+/// The coverage table flags for text of `color` at `scale`: on macOS at 2x
+/// and over, Chrome's, by the colour's luminance (`chrome_mask_tables`);
+/// elsewhere none, so glyphs share their atlas entries.
+fn luminance_flags(color: zgx::scene::Color, scale: f32) -> CacheKeyFlags {
+    #[cfg(target_os = "macos")]
+    if scale >= SHARP_TEXT_BELOW {
+        return CacheKeyFlags::luminance(chrome_mask_tables::bucket_of([color.0, color.1, color.2]));
+    }
+    let _ = (color, scale);
+    CacheKeyFlags::empty()
+}
+/// Whether text takes its fractional x position (at 2x and over, where Chrome
+/// does, and where the coverage tables do).
+fn quarter_x_applies(scale: f32) -> bool {
+    cfg!(target_os = "macos") && scale >= SHARP_TEXT_BELOW
+}
+/// The device pixel text at `x` starts in and the quarter pixel into it
+/// (0 to 3): glyph keys keep quarters. Below 2x or off macOS the origin
+/// rounds to a whole pixel, as before.
+fn subpixel_origin(x: f32, scale: f32) -> (f32, u8) {
+    let device = x * scale;
+    if !quarter_x_applies(scale) || !device.is_finite() {
+        return (device.round(), 0);
+    }
+    let whole = device.floor();
+    let quarters = ((device - whole) * 4.).round() as i32;
+    (whole + (quarters / 4) as f32, (quarters % 4) as u8)
+}
+/// `glyph` as it is drawn: its key with the origin's quarter pixel added and
+/// the coverage table of its text's luminance, and the whole pixels the
+/// quarter carried (added to `x`).
+fn drawn_glyph(glyph: &Glyph, quarter_x: u8, lum: CacheKeyFlags) -> (CacheKey, f32) {
+    let mut key = glyph.key;
+    let total = key.x_bin as i32 + i32::from(quarter_x);
+    key.x_bin = cosmic_text::SubpixelBin::from_quarter(total % 4);
+    key.flags |= lum;
+    (key, (total / 4) as f32)
+}
 /// A glyph quad's `options.y` below `SHARP_TEXT_BELOW`: a mask whose coverage
 /// `draw.wgsl` firms by its colour (`firm`).
 const FIRM_GLYPH: f32 = 1.25;
@@ -1734,6 +1778,11 @@ struct Shaped {
     /// Whether `quads` hold colour glyphs (`COLOR_GLYPH`).
     colored: bool,
     atlas_epoch: u64,
+    /// The luminance flags of the plain text's glyphs in `quads`
+    /// (`luminance_flags`): a colour in another bucket draws them again.
+    lum: CacheKeyFlags,
+    /// The quarter pixel its glyphs' origin was placed at (`subpixel_origin`).
+    quarter_x: u8,
     last_used: u64,
     /// The prepared text these glyphs were laid out from, kept while drawn.
     prepared: Option<u64>,
@@ -6079,6 +6128,7 @@ impl GpuRenderer {
         } else {
             1.
         };
+        set_baseline_snap(scale);
         if self.scale != scale {
             self.flush_pending();
             self.recycle_atlas();
@@ -6257,6 +6307,7 @@ impl GpuRenderer {
     /// Draw `scene`'s `damage` (logical rectangles) to the target, and report
     /// what it did.
     pub fn render(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
+        set_baseline_snap(self.scale);
         #[cfg(target_os = "macos")]
         {
             self.loop_watch.set_damage(damage.len());
@@ -7713,6 +7764,7 @@ impl GpuRenderer {
         // Everything inside draws at the layer's raster scale: glyphs,
         // canvases and nested layers rasterize as finely as it shows.
         let device_scale = std::mem::replace(&mut self.scale, scale);
+        set_baseline_snap(scale);
         #[cfg(target_os = "macos")]
         self.refuse_layered_loops(scene, &items);
         zgx::scene::translate_items(&mut items, -bounds.x, -bounds.y);
@@ -7730,6 +7782,7 @@ impl GpuRenderer {
         self.width = old_size.0;
         self.height = old_size.1;
         self.scale = device_scale;
+        set_baseline_snap(device_scale);
         self.background = background;
         self.fresh = was_fresh;
         self.layer_incomplete = self.images_awaited;
@@ -10242,6 +10295,16 @@ impl GpuRenderer {
                             self.warn("text with a font size not finite and positive isn't drawn");
                             continue;
                         }
+                        // Plain text's coverage table, by its colour (Chrome's
+                        // macOS recipe); rich text's, by each run's.
+                        let lum = match kind {
+                            NodeKind::Text { .. } => luminance_flags(color, self.scale),
+                            _ => CacheKeyFlags::empty(),
+                        };
+                        // Where the text's origin falls in its device pixel, in
+                        // quarters (subpixel positioning, as Chrome's at 2x and
+                        // over); the whole pixel is where its glyphs start.
+                        let (whole_x, quarter_x) = subpixel_origin(bounds.x, self.scale);
                         // One lookup for both: a colour-only rich change (fades,
                         // highlights) keeps glyph positions, so the cached shape
                         // is recoloured instead of re-shaped; then whether it is
@@ -10262,6 +10325,10 @@ impl GpuRenderer {
                                 }
                                 shaped.rich = Some(new.clone());
                                 shaped.atlas_epoch = self.atlas_epoch.wrapping_sub(1);
+                            }
+                            if shaped.lum != lum || shaped.quarter_x != quarter_x {
+                                shaped.atlas_epoch = self.atlas_epoch.wrapping_sub(1);
+                                (shaped.lum, shaped.quarter_x) = (lum, quarter_x);
                             }
                             shaped.rich != rich
                                 || shaped.text_options != item.text_options
@@ -10324,7 +10391,9 @@ impl GpuRenderer {
                                 })
                                 .map(|twin| {
                                     spare_glyphs.extend_from_slice(&twin.glyphs);
-                                    let placed = twin.atlas_epoch == self.atlas_epoch;
+                                    let placed = twin.atlas_epoch == self.atlas_epoch
+                                        && twin.lum == lum
+                                        && twin.quarter_x == quarter_x;
                                     if placed {
                                         spare_quads.extend_from_slice(&twin.quads);
                                         twin_colored = twin.colored;
@@ -10448,6 +10517,8 @@ impl GpuRenderer {
                                 quads: spare_quads,
                                 colored: twin_colored,
                                 atlas_epoch: epoch.unwrap_or(0),
+                                lum,
+                                quarter_x,
                                 last_used: self.frame,
                                 prepared,
                             };
@@ -10462,7 +10533,10 @@ impl GpuRenderer {
                         }
                         let snap = |value: f32| (value * self.scale).round() / self.scale;
                         let (x, y) = (snap(bounds.x), snap(bounds.y));
-                        let glyph_x = snap(bounds.x);
+                        let glyph_x = match quarter_x_applies(self.scale) {
+                            true => whole_x / self.scale,
+                            false => snap(bounds.x),
+                        };
                         // Partly outside its clip (a long document scrolled in a
                         // view): its lines that reach the clip, as quads made this
                         // frame (`visible_glyphs`), rather than every glyph's.
@@ -10715,11 +10789,18 @@ impl GpuRenderer {
                                 shaped.quads.reserve(shaped.glyphs.len());
                                 shaped.colored = false;
                                 for glyph in &shaped.glyphs {
-                                    if let Some(a) = self.glyph::<MODE>(glyph.key, &mut stats)? {
+                                    let run_lum = match shaped.rich.as_ref() {
+                                        Some(rich) => {
+                                            luminance_flags(rich.runs()[glyph.run].color, self.scale)
+                                        }
+                                        None => lum,
+                                    };
+                                    let (key, carry) = drawn_glyph(glyph, quarter_x, run_lum);
+                                    if let Some(a) = self.glyph::<MODE>(key, &mut stats)? {
                                         shaped.colored |= a.color;
                                         shaped.quads.push(TextQuad {
                                             rect: [
-                                                (glyph.x + a.left as f32) / self.scale,
+                                                (glyph.x + carry + a.left as f32) / self.scale,
                                                 (glyph.y - a.top as f32) / self.scale,
                                                 a.width as f32 / self.scale,
                                                 a.height as f32 / self.scale,
@@ -10753,6 +10834,8 @@ impl GpuRenderer {
                                     )?;
                                 }
                                 shaped.atlas_epoch = self.atlas_epoch;
+                                shaped.lum = lum;
+                                shaped.quarter_x = quarter_x;
                                 stats.geometry_rebuilds += 1;
                             }
                             let visible = std::mem::take(&mut self.visible_glyphs);
@@ -14735,14 +14818,19 @@ impl GpuRenderer {
         visible.extend(decorations(true));
         for glyph in &glyphs[first..end] {
             // As `glyph`, through another lookup: `glyph` keeps its one caller.
+            let run_lum = match shaped.rich.as_ref() {
+                Some(rich) => luminance_flags(rich.runs()[glyph.run].color, self.scale),
+                None => shaped.lum,
+            };
+            let (drawn_key, carry) = drawn_glyph(glyph, shaped.quarter_x, run_lum);
             let size = f32::from_bits(glyph.key.font_size_bits);
             if !size.is_finite() || size > MAX_ATLAS as f32 {
                 self.glyph_too_large(size);
                 continue;
             }
-            let entry = match self.entries.get_mut(&AtlasKey::from(glyph.key)) {
+            let entry = match self.entries.get_mut(&AtlasKey::from(drawn_key)) {
                 Some(entry) => *entry,
-                None => self.raster_glyph(glyph.key, stats)?,
+                None => self.raster_glyph(drawn_key, stats)?,
             };
             if let Some(entry) = entry {
                 let color = shaped
@@ -14750,7 +14838,9 @@ impl GpuRenderer {
                     .as_ref()
                     .map_or([0.; 4], |rich| rgba(rich.runs()[glyph.run].color, 1.));
                 colored |= entry.color;
-                visible.push(glyph_quad(glyph, entry, self.scale, self.atlas_size, color));
+                let mut placed = glyph.clone();
+                placed.x += carry;
+                visible.push(glyph_quad(&placed, entry, self.scale, self.atlas_size, color));
             }
         }
         let lines_from = visible.len();
@@ -14818,7 +14908,7 @@ impl GpuRenderer {
             self.warn("more than 8192 glyphs in a frame: the rest aren't drawn");
             return Ok(None);
         }
-        let Some(image) = text::glyph_image(&mut self.swash, &mut self.fonts.borrow_mut(), key)
+        let Some(image) = text::glyph_image(&mut self.swash, &mut self.fonts.borrow_mut(), key, self.scale)
         else {
             self.entries.insert(AtlasKey::from(key), None);
             return Ok(None);
@@ -15099,7 +15189,8 @@ impl GpuRenderer {
         if let Some(entry) = self.blurred.as_ref().and_then(|b| b.glyphs.get(&slot)) {
             return Ok(*entry);
         }
-        let image = text::glyph_image(&mut self.swash, &mut self.fonts.borrow_mut(), key);
+        let image =
+            text::glyph_image(&mut self.swash, &mut self.fonts.borrow_mut(), key, self.scale);
         let Some(image) = image.filter(|i| i.placement.width > 0 && i.placement.height > 0) else {
             self.blurred
                 .get_or_insert_default()
@@ -21749,6 +21840,8 @@ mod atlas_glyph_errors_tests {
             quads: Vec::new(),
             colored: false,
             atlas_epoch: 0,
+            lum: CacheKeyFlags::empty(),
+            quarter_x: 0,
             last_used: 0,
             prepared: None,
         };

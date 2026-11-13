@@ -104,7 +104,6 @@ unsafe extern "C" {
     ) -> CFTypeRef;
     fn CGContextSetGrayFillColor(context: CFTypeRef, gray: f64, alpha: f64);
     fn CGColorSpaceCreateDeviceRGB() -> CFTypeRef;
-    fn CGColorSpaceCreateDeviceGray() -> CFTypeRef;
     fn CGContextFillRect(context: CFTypeRef, rect: CGRect);
     fn CGContextScaleCTM(context: CFTypeRef, sx: f64, sy: f64);
     fn CGContextSetRGBFillColor(context: CFTypeRef, r: f64, g: f64, b: f64, a: f64);
@@ -379,24 +378,52 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
     })
 }
 
-/// Probe: `key`'s glyph drawn the way Skia draws one (a colour context),
-/// `variant`: bit 0 black text on white (else white on black), bit 1 font
-/// smoothing, bit 2 a gray colour space (else RGB); the coverage is the
-/// gray read back, inverted for black text.
-#[doc(hidden)]
-pub fn core_text_probe(fonts: &mut FontSystem, key: CacheKey, variant: u32) -> Option<SwashImage> {
+/// Whether Core Text draws glyphs of `face` through Chrome's recipe: any
+/// face but a colour one (emoji draw their own colours through swash).
+fn chrome_weight(fonts: &mut FontSystem, key: CacheKey) -> u16 {
+    // SF's weights between Medium and Semibold: Chrome draws them heavier
+    // than the axis value (measured against Chrome's ink: 510 as about 551,
+    // 550 as 598, 590 as 637, the ends as they are).
+    let weight = key.font_weight.0;
+    let system = fonts
+        .db()
+        .face(key.font_id)
+        .is_some_and(|face| face.post_script_name.starts_with(".SFNS-"));
+    if system && weight > 500 && weight < 600 {
+        (595.4 + 1.067 * (f32::from(weight) - 550.)).round() as u16
+    } else {
+        weight
+    }
+}
+
+/// `key`'s glyph as Chrome draws it on macOS: Skia draws it through Core
+/// Graphics, black on white with font smoothing on, in a colour context at
+/// the point size under the device scale (so the font's optical size and
+/// tracking follow the point size), and blends it through a coverage table
+/// by the text's luminance (`key.flags`, `chrome_mask_tables`). Measured
+/// against Chrome's own pixels, this reproduces them to a level or two
+/// where swash's outlines are 13% lighter. `scale`: device pixels a point;
+/// `key`'s size is in device pixels.
+pub(crate) fn chrome_glyph(
+    fonts: &mut FontSystem,
+    key: CacheKey,
+    scale: f32,
+) -> Option<SwashImage> {
+    let mut key = key;
+    key.font_weight = cosmic_text::fontdb::Weight(chrome_weight(fonts, key));
+    let k = f64::from(scale.max(1.));
+    key.font_size_bits = (f32::from_bits(key.font_size_bits) / scale.max(1.)).to_bits();
+    let table = crate::chrome_mask_tables::for_luminance_bucket(key.flags.luminance_bucket());
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let ctm2 = variant & 8 != 0;
-        let mut key = key;
-        if ctm2 {
-            key.font_size_bits = (f32::from_bits(key.font_size_bits) / 2.).to_bits();
-        }
-        let k = if ctm2 { 2. } else { 1. };
         let font = font_for(&mut cache, fonts, key)?;
         let glyph = key.glyph_id;
-        let (dx, dy) = (f64::from(key.x_bin.as_float()), f64::from(key.y_bin.as_float()));
+        let (dx, dy) = (
+            f64::from(key.x_bin.as_float()),
+            f64::from(key.y_bin.as_float()),
+        );
         let mut rect = CGRect::default();
+        // SAFETY: one glyph, one rect.
         unsafe { CTFontGetBoundingRectsForGlyphs(font, HORIZONTAL, &glyph, &mut rect, 1) };
         if rect.size.width <= 0. || rect.size.height <= 0. {
             return None;
@@ -406,56 +433,67 @@ pub fn core_text_probe(fonts: &mut FontSystem, key: CacheKey, variant: u32) -> O
         let bottom = (k * rect.origin.y + dy).floor() as i32 - 2;
         let top = (k * (rect.origin.y + rect.size.height) + dy).ceil() as i32 + 2;
         let (width, height) = ((right - left) as usize, (top - bottom) as usize);
-        let gray_space = variant & 4 != 0;
-        let black_on_white = variant & 1 != 0;
-        let smooth = variant & 2 != 0;
-        let bytes = if gray_space { 1 } else { 4 };
-        let mut data = vec![0u8; width * height * bytes];
+        let mut data = vec![0u8; width * height * 4];
+        // SAFETY: `data` is the context's `width` by `height` pixels of four
+        // bytes and outlives it; the context is released before it is read.
         unsafe {
-            let space = Owned(if gray_space { CGColorSpaceCreateDeviceGray() } else { CGColorSpaceCreateDeviceRGB() });
-            let info = if gray_space { 0 } else { 2 | (2 << 12) };
+            let space = Owned(CGColorSpaceCreateDeviceRGB());
+            // `kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little`.
             let context = CGBitmapContextCreate(
                 data.as_mut_ptr().cast(),
                 width,
                 height,
                 8,
-                width * bytes,
+                width * 4,
                 space.0,
-                info,
+                2 | (2 << 12),
             );
             if context.is_null() {
                 return None;
             }
             let context = Owned(context);
-            let (bg, fg) = if black_on_white { (1., 0.) } else { (0., 1.) };
-            CGContextSetRGBFillColor(context.0, bg, bg, bg, 1.);
-            if gray_space { CGContextSetGrayFillColor(context.0, bg, 1.); }
-            CGContextFillRect(context.0, CGRect { origin: CGPoint { x: 0., y: 0. }, size: CGSize { width: width as f64, height: height as f64 } });
-            if gray_space { CGContextSetGrayFillColor(context.0, fg, 1.); } else { CGContextSetRGBFillColor(context.0, fg, fg, fg, 1.); }
+            CGContextSetRGBFillColor(context.0, 1., 1., 1., 1.);
+            CGContextFillRect(
+                context.0,
+                CGRect {
+                    origin: CGPoint { x: 0., y: 0. },
+                    size: CGSize {
+                        width: width as f64,
+                        height: height as f64,
+                    },
+                },
+            );
+            CGContextSetRGBFillColor(context.0, 0., 0., 0., 1.);
             CGContextSetShouldAntialias(context.0, true);
-            CGContextSetShouldSmoothFonts(context.0, smooth);
+            CGContextSetShouldSmoothFonts(context.0, true);
             CGContextSetAllowsFontSubpixelPositioning(context.0, true);
             CGContextSetShouldSubpixelPositionFonts(context.0, true);
             CGContextSetAllowsFontSubpixelQuantization(context.0, false);
             CGContextSetShouldSubpixelQuantizeFonts(context.0, false);
-            let at = CGPoint { x: (dx - f64::from(left)) / k, y: (dy - f64::from(bottom)) / k };
-            if ctm2 {
-                CGContextScaleCTM(context.0, 2., 2.);
-            }
+            let at = CGPoint {
+                x: (dx - f64::from(left)) / k,
+                y: (dy - f64::from(bottom)) / k,
+            };
+            CGContextScaleCTM(context.0, k, k);
             CTFontDrawGlyphs(font, &glyph, &at, 1, context.0);
         }
-        let mut alpha = vec![0u8; width * height];
-        for (i, a) in alpha.iter_mut().enumerate() {
-            let g = if gray_space {
-                u32::from(data[i])
-            } else {
-                (u32::from(data[i * 4]) + u32::from(data[i * 4 + 1]) + u32::from(data[i * 4 + 2])) / 3
-            };
-            *a = if black_on_white { 255 - g as u8 } else { g as u8 };
-        }
+        let alpha: Vec<u8> = data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| {
+                let gray = (u32::from(px[0]) + u32::from(px[1]) + u32::from(px[2])) / 3;
+                table[usize::from(255 - gray as u8)]
+            })
+            .collect();
         let mut image = SwashImage::new();
         image.content = SwashContent::Mask;
-        image.placement = Placement { left, top, width: width as u32, height: height as u32 };
+        image.placement = Placement {
+            left,
+            top,
+            width: width as u32,
+            height: height as u32,
+        };
         image.data = alpha;
         Some(image)
     })

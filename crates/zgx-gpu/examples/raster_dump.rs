@@ -13,7 +13,7 @@ fn main() {
     let weight: u16 = std::env::args().nth(3).map_or(400, |w| w.parse().unwrap());
     let size: f32 = std::env::args().nth(4).map_or(14., |w| w.parse().unwrap());
     let text_arg = std::env::args().nth(5);
-    let TEXT = text_arg.as_deref().unwrap_or(DEFAULT_TEXT);
+    let text_line = text_arg.as_deref().unwrap_or(DEFAULT_TEXT);
     let (w, h) = (400u32, 140u32);
     let mut gpu = GpuRenderer::new(w * 2, h * 2).unwrap();
     gpu.set_scale_factor(2.);
@@ -34,7 +34,7 @@ fn main() {
     let mut ui = Ui::new(w as f32, h as f32);
     gpu.install_text(&mut ui.scene.borrow_mut());
     let line = |x: f32, y: f32, fg: Color, bg: Option<Color>| {
-        let t = text(TEXT)
+        let t = text(text_line)
             .font_family(family.as_deref().unwrap_or("Geist"))
             .font_weight(weight)
             .text_size(size)

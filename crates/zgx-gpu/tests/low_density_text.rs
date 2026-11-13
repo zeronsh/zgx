@@ -153,8 +153,14 @@ fn only_light_text_is_firmed_below_2x() {
     let (light, dark) = (ink(1., black, white), ink(1., white, black));
     assert!(light > dark * 1.1, "{light} on black, {dark} on white");
     let (light, dark) = (ink(2., black, white), ink(2., white, black));
-    assert!(
-        (light - dark).abs() < dark * 0.002,
-        "{light} and {dark} at 2x"
-    );
+    // At 2x elsewhere both draw plain coverage; macOS draws Chrome's, which
+    // firms light text far more than dark (`chrome_mask_tables`).
+    if cfg!(target_os = "macos") {
+        assert!(light > dark * 1.1, "{light} and {dark} at 2x");
+    } else {
+        assert!(
+            (light - dark).abs() < dark * 0.002,
+            "{light} and {dark} at 2x"
+        );
+    }
 }

@@ -2,14 +2,26 @@
 pub use cosmic_text::Affinity;
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 
-/// `key`'s glyph image: swash's, or for a face whose shapes swash can't
-/// draw (macOS 26's PingFang, `hvgl` only) Core Text's. Asked only where
-/// swash gave none: a glyph cache miss with nothing to show.
+/// `key`'s glyph image: on macOS at 2x and over, the mask Chrome draws
+/// (`core_text_glyphs::chrome_glyph`: Core Text with font smoothing, through
+/// Skia's coverage table), else swash's, or for a face whose shapes swash
+/// can't draw (macOS 26's PingFang, `hvgl` only) Core Text's. `scale`: device
+/// pixels a point, 0 to leave Chrome's recipe out.
 pub(crate) fn glyph_image(
     swash: &mut cosmic_text::SwashCache,
     fonts: &mut FontSystem,
     key: cosmic_text::CacheKey,
+    scale: f32,
 ) -> Option<cosmic_text::SwashImage> {
+    #[cfg(target_os = "macos")]
+    if scale >= 2.
+        && let Some(font) = fonts.get_font(key.font_id, key.font_weight)
+        && !font.is_color()
+        && let Some(image) = crate::core_text_glyphs::chrome_glyph(fonts, key, scale)
+    {
+        return Some(image);
+    }
+    let _ = scale;
     let image = swash.get_image_uncached(fonts, key);
     #[cfg(target_os = "macos")]
     if image
@@ -960,7 +972,8 @@ impl CpuTextRaster {
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let p = glyph.physical((0., 0.), 1.);
-                if let Some(image) = glyph_image(&mut self.swash, &mut self.fonts, p.cache_key) {
+                if let Some(image) = glyph_image(&mut self.swash, &mut self.fonts, p.cache_key, 0.)
+                {
                     images.push((
                         p.x,
                         p.y + run.line_y as i32,
@@ -992,7 +1005,7 @@ impl CpuTextRaster {
             for glyph in run.glyphs {
                 let physical = glyph.physical((0., 0.), 1.);
                 if let Some(image) =
-                    glyph_image(&mut self.swash, &mut self.fonts, physical.cache_key)
+                    glyph_image(&mut self.swash, &mut self.fonts, physical.cache_key, 0.)
                 {
                     images.push((physical.x, physical.y + run.line_y as i32, image));
                 }
