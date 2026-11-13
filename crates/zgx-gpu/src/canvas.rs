@@ -1758,6 +1758,43 @@ fn rasterize_scaled(
         })
         .collect()
 }
+/// `image` as a JPEG file's bytes at `quality` (1 to 100). JPEG keeps no
+/// transparency: what's see-through is laid over white.
+#[cfg(feature = "jpeg")]
+pub fn jpeg(image: &ImageData, quality: u8) -> Result<Vec<u8>, GpuError> {
+    let mut rgb = Vec::with_capacity(image.pixels().len() / 4 * 3);
+    for px in image.pixels().as_chunks::<4>().0 {
+        let a = u32::from(px[3]);
+        for &c in &px[..3] {
+            rgb.push(((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8);
+        }
+    }
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality.clamp(1, 100))
+        .encode(
+            &rgb,
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| GpuError(e.to_string()))?;
+    Ok(bytes)
+}
+/// `image` as a WebP file's bytes, lossless (8-bit RGBA).
+#[cfg(feature = "webp")]
+pub fn webp(image: &ImageData) -> Result<Vec<u8>, GpuError> {
+    use image::ImageEncoder;
+    let mut bytes = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
+        .write_image(
+            image.pixels(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| GpuError(e.to_string()))?;
+    Ok(bytes)
+}
 /// `image` as a PNG file's bytes (8-bit RGBA).
 #[cfg(feature = "png")]
 pub fn png(image: &ImageData) -> Result<Vec<u8>, GpuError> {

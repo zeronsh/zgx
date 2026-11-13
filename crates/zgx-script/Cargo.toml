@@ -14,7 +14,7 @@ description = "Luau scripts that describe zgx component trees, with hot reload."
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["components", "svg", "png", "jpeg", "gif", "cjk-thai-words"]
+default = ["components", "svg", "png", "jpeg", "gif", "webp", "cjk-thai-words"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # The component library's `ui.*` (zgx-components): the data grid, tree,
@@ -38,6 +38,7 @@ gltf = ["scene3d", "zgx-3d/gltf"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
+webp = ["zgx-gpu/webp"]
 gif = ["zgx-gpu/gif"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]

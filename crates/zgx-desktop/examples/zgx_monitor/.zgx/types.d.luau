@@ -1456,7 +1456,9 @@ declare extern type Canvas with
 	function measure_text(self, text: string, opts: CanvasTextOptions?): (number, number)
 end
 -- `ui.render_canvas`'s picture: its size in points, pixels a point, the
--- drawing's point at its top left, and what is under it (transparent).
+-- drawing's point at its top left, what is under it (transparent), and the
+-- file: "png" (the default), "jpeg" (`quality` 1 to 100, 90 unless said;
+-- no transparency: laid over white) or "webp" (lossless).
 export type RenderCanvasOptions = {
 	width: number,
 	height: number,
@@ -1464,6 +1466,8 @@ export type RenderCanvasOptions = {
 	x: number?,
 	y: number?,
 	background: Color?,
+	format: ("png" | "jpeg" | "webp")?,
+	quality: number?,
 }
 
 -- `ui.web(opts)`: a web page's controller. Its fields are tracked, so a

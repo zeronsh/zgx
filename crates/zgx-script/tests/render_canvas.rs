@@ -372,3 +372,70 @@ fn a_size_must_be_given_and_over_zero() {
         );
     }
 }
+
+const FORMATS: &str = r##"
+local function draw(c, w, h)
+    c:rect(10, 10, 30, 20, "#ff0000", 4)
+end
+ui.task(function()
+    ui.invoke("jpeg", ui.render_canvas(draw, { width = 80, height = 40, scale = 2, format = "jpeg", quality = 80 }):await())
+    ui.invoke("webp", ui.render_canvas(draw, { width = 80, height = 40, format = "webp" }):await())
+    ui.invoke("bad", (pcall(ui.render_canvas, draw, { width = 8, height = 8, format = "tiff" })))
+end)
+return ui.div {}
+"##;
+
+/// Base64 decoded (padded, as `render_canvas` gives).
+fn bytes_of(value: &Value) -> Vec<u8> {
+    let Value::Str(text) = value else {
+        panic!("not a string: {value:?}");
+    };
+    let digit = |c: u8| match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        _ => 63,
+    };
+    let mut out = Vec::new();
+    for chunk in text.as_bytes().chunks(4) {
+        let kept: Vec<u8> = chunk.iter().copied().filter(|&c| c != b'=').collect();
+        let n = kept
+            .iter()
+            .enumerate()
+            .fold(0_u32, |n, (i, &c)| n | u32::from(digit(c)) << (18 - 6 * i));
+        out.extend_from_slice(&n.to_be_bytes()[1..kept.len()]);
+    }
+    out
+}
+
+#[test]
+fn a_drawing_renders_to_a_jpeg_or_a_webp() {
+    let heard: Heard = Rc::default();
+    let h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", FORMATS);
+        for name in ["jpeg", "webp", "bad"] {
+            let heard = heard.clone();
+            host.action(name, move |value| {
+                heard.borrow_mut().push((name.into(), value))
+            });
+        }
+        host
+    });
+    // A JPEG: its start marker, and its frame's size (SOF0/SOF2) at 2x.
+    let jpeg = bytes_of(&wait(&h, &heard, "jpeg"));
+    assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF]);
+    let sof = jpeg
+        .windows(2)
+        .position(|w| w[0] == 0xFF && (w[1] == 0xC0 || w[1] == 0xC2))
+        .expect("a frame header");
+    let size = |i: usize| u16::from_be_bytes([jpeg[i], jpeg[i + 1]]);
+    assert_eq!((size(sof + 7), size(sof + 5)), (160, 80));
+    // A lossless WebP (VP8L): its size, less one, in 14 bits each.
+    let webp = bytes_of(&wait(&h, &heard, "webp"));
+    assert_eq!((&webp[..4], &webp[8..16]), (&b"RIFF"[..], &b"WEBPVP8L"[..]));
+    let bits = u32::from_le_bytes([webp[21], webp[22], webp[23], webp[24]]);
+    assert_eq!(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1), (80, 40));
+    // A format it doesn't make: refused as asked.
+    assert_eq!(wait(&h, &heard, "bad"), Value::Bool(false));
+}
