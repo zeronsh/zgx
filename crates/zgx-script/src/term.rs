@@ -191,8 +191,20 @@ impl Terms {
     }
 }
 
+/// The folder `~` names: the user's profile on Windows, which has no `HOME`
+/// unless a Unix-style shell set one (an app started from Explorer has none,
+/// and a literal `~` was no folder: "The directory name is invalid"), as
+/// zgx-terminal's own default directory is.
+fn home_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    home.map(PathBuf::from)
+}
+
 fn options(opts: &Table) -> mlua::Result<TerminalOptions> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = home_directory();
     let working_directory =
         opts.get::<Option<String>>("cwd")?
             .map(|dir| match (dir.strip_prefix("~"), &home) {
