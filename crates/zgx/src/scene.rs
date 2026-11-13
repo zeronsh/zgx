@@ -2025,6 +2025,8 @@ struct Node {
     /// Scroll content: a translation is reported as a `ScrollMove` the
     /// renderer may apply by copying pixels (see `set_scroll_copy`).
     scroll_copy: bool,
+    /// Its translation rests on whole device pixels (`set_pixel_snap`).
+    pixel_snap: bool,
     /// `CONTENTS`: lays out as its last child (`Scene::set_contents`):
     /// `style` is then derived, its own kept in `Scene::contents_styles`.
     /// `ZOOMED`: has a zoom (`Scene::set_zoom`). One byte, so the branches
@@ -3636,6 +3638,7 @@ impl Scene {
                     shader_uniforms: None,
                     promoted: false,
                     scroll_copy: false,
+                    pixel_snap: false,
                     special: Special::None,
                     replaced: false,
                     rtl: false,
@@ -7817,6 +7820,7 @@ impl Scene {
             shader_uniforms: None,
             promoted: false,
             scroll_copy: false,
+            pixel_snap: false,
             special: Special::None,
             replaced: false,
             rtl,
@@ -9477,7 +9481,7 @@ impl Scene {
             node.effects.opacity <= 0.,
             node.parent,
         );
-        if scroll_copy {
+        if scroll_copy || node.pixel_snap {
             transform = self.on_pixels(transform);
         }
         if from == transform {
@@ -14729,6 +14733,13 @@ impl Scene {
     /// device pixels (`set_pixel_scale`).
     pub fn set_scroll_copy(&mut self, id: NodeId, enabled: bool) {
         self.node_mut(id).scroll_copy = enabled;
+    }
+    /// Mark `id`'s translation as resting on whole device pixels (a box a
+    /// spring moves, whose text and edges would else rest between pixels).
+    pub fn set_pixel_snap(&mut self, id: NodeId, enabled: bool) {
+        self.node_mut(id).pixel_snap = enabled;
+        let transform = self.node(id).transform;
+        self.set_transform(id, transform);
     }
     /// How many device pixels a point is (the window's scale factor).
     /// Scroll content then moves by whole device pixels, as Safari's and

@@ -4119,6 +4119,9 @@ fn styled(
         match source {
             Source::Lit(lit) => statics.push((*prop, lit.clone())),
             Source::Anim(spec) => {
+                if matches!(prop, Prop::X | Prop::Y) {
+                    view = view.pixel_snap();
+                }
                 let scalar = anim::drive(need(&mut cx), spec);
                 dynamic.push((*prop, resolve_owned(source), Some(scalar)));
             }

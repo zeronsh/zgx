@@ -2052,6 +2052,12 @@ impl View {
         self.rare_mut().mount_flags |= WINDOW_DRAG;
         self
     }
+    /// Its translation (a spring's, a tween's) rests on whole device
+    /// pixels, so its edges and text don't land between them.
+    pub fn pixel_snap(mut self) -> Self {
+        self.rare_mut().mount_flags |= PIXEL_SNAP;
+        self
+    }
     /// Let the pointer select the text in this view and everything it holds,
     /// as CSS's `user-select: text` does: drag across any of its text, a
     /// double press selects a word and a triple press a paragraph, Shift
@@ -7570,6 +7576,9 @@ const CONTAINER: u8 = 16;
 /// `Rare::mount_flags`: a press on it leaves focus where it is
 /// (`View::focus_on_press`).
 const KEEPS_FOCUS: u8 = 32;
+/// `Rare::mount_flags`: its translation rests on whole device pixels
+/// (`View::pixel_snap`).
+const PIXEL_SNAP: u8 = 64;
 /// `View::window_drag`, `View::hollow`, `View::focus_on_press`,
 /// `View::container`, and an editor's `autocorrect` and `smart_punctuation`, rare: apart from the element's
 /// common path.
@@ -7616,6 +7625,9 @@ fn mount_flagged(
         ui.input
             .set_options(root, ui.input.options(root).unwrap_or_default());
         ui.input.set_keeps_focus(root);
+    }
+    if flags & PIXEL_SNAP != 0 {
+        ui.scene.borrow_mut().set_pixel_snap(root, true);
     }
 }
 /// `View::window_drag`: a primary press on `region`, or on a descendant
