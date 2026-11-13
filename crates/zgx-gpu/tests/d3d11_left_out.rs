@@ -214,8 +214,7 @@ fn main() {
         [255, 0, 0, 255],
         "its pass wasn't read"
     );
-    // One reading a picture: left out, its layer composited as painted
-    // (Direct3D 11 has no pictures for shaders yet), named once.
+    // One reading a picture: drawn through it, the picture's colour.
     let picture =
         std::sync::Arc::new(zgx::image::ImageData::new(1, 1, vec![10, 200, 30, 255]).unwrap());
     let with_picture = zgx::decoration::FillShader::with_inputs(
@@ -231,8 +230,9 @@ fn main() {
     let pictured = draw(|scene, id| scene.set_layer_shader(id, Some(with_picture)))
         .expect("a frame with a layer shader reading a picture draws");
     assert_eq!(
-        pictured, layered,
-        "a layer shader reading a picture draws its layer as painted"
+        at(&pictured, 120, 120),
+        [10, 200, 30, 255],
+        "its picture wasn't read"
     );
 
     // A GPU view draws (`view_host`): its painter's colour, on the views'
@@ -287,12 +287,7 @@ fn main() {
         !left_out.contains(&"images a GPU view draws"),
         "a GPU view was left out: {left_out:?}"
     );
-    let kind = "layer shaders reading pictures or GPU views: drawn as painted";
-    assert_eq!(
-        left_out,
-        [kind],
-        "only shaders reading pictures or views are left out"
-    );
+    assert!(left_out.is_empty(), "left out: {left_out:?}");
     println!("d3d11_left_out: {left_out:?}");
 }
 
