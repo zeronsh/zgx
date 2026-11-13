@@ -4675,7 +4675,27 @@ fn styled(
             view = view.role(role);
         }
         if let Some(level) = a11y.level {
-            view = view.heading(usize::from(level));
+            view = if a11y.role == Some(zgx::semantics::Role::Heading) {
+                view.heading(usize::from(level))
+            } else {
+                view.level(usize::from(level))
+            };
+        }
+        if let Some(current) = &a11y.current {
+            use zgx::semantics::Current;
+            let (current, vm) = (resolve_owned(current), vm.clone());
+            view = view.current_when(move || match resolve(&current, Ty::Str, None, &vm) {
+                Some(Lit::Str(kind)) => match &*kind {
+                    "true" => Some(Current::True),
+                    "page" => Some(Current::Page),
+                    "step" => Some(Current::Step),
+                    "location" => Some(Current::Location),
+                    "date" => Some(Current::Date),
+                    "time" => Some(Current::Time),
+                    _ => None,
+                },
+                _ => None,
+            });
         }
         if let Some(selected) = &a11y.selected {
             let (selected, vm) = (resolve_owned(selected), vm.clone());

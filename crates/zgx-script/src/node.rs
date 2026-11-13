@@ -3457,6 +3457,8 @@ pub(crate) struct A11y {
     pub hidden_of: Option<Source>,
     /// `busy`: still being filled in (`aria-busy`), followed.
     pub busy: Option<Source>,
+    /// `current`: `aria-current`, a kind as a string, followed.
+    pub current: Option<Source>,
     /// `inert`: out of focus order, reach and the accessibility tree, followed.
     pub inert: Option<Source>,
     /// `aria_modal = true`: while it shows, nothing else is read.
@@ -4813,6 +4815,19 @@ fn fill_from(
                         node.props.push((prop, source(lua, prop.ty(), name, value)?));
                     }
                 }
+            }
+            "level" => {
+                let level: f64 = lua.unpack(value)?;
+                if !(1. ..=255.).contains(&level) || level.fract() != 0. {
+                    return Err(mlua::Error::runtime(format!(
+                        "`level` is a depth from 1 to 255, not {level}"
+                    )));
+                }
+                node.a11y.get_or_insert_default().level = Some(level as u8);
+            }
+            "current" => {
+                node.a11y.get_or_insert_default().current =
+                    Some(source(lua, Ty::Str, "current", value)?);
             }
             "busy" => {
                 node.a11y.get_or_insert_default().busy =

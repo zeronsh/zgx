@@ -909,6 +909,10 @@ pub struct Line {
     pub disabled: bool,
     /// Checked or not, if it can be.
     pub checked: Option<bool>,
+    /// It is the chosen one of its set (a tab, an option).
+    pub selected: Option<bool>,
+    /// It is the current one (`aria-current`).
+    pub current: bool,
 }
 
 /// One node as [`tree_lines`] shows it: a [`Line`], and more that may grow
@@ -980,6 +984,8 @@ pub fn tree_lines(
                         focused: focused == Some(node),
                         disabled: s.is_some_and(|s| s.disabled),
                         checked: s.and_then(|s| s.checked),
+                        selected: s.and_then(|s| s.selected),
+                        current: s.is_some_and(|s| s.current.is_some()),
                     },
                     hidden: !shows(&scene, node),
                 });
@@ -1095,6 +1101,12 @@ fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
             Some(false) => out.push_str(" unchecked"),
             None => {}
         }
+        if line.selected == Some(true) {
+            out.push_str(" selected");
+        }
+        if line.current {
+            out.push_str(" current");
+        }
         out.push('\n');
     }
     if hidden > 0 {
@@ -1143,6 +1155,12 @@ pub fn node(
         }
         if s.read_only {
             flags.push("read-only");
+        }
+        if s.selected == Some(true) {
+            flags.push("selected");
+        }
+        if s.current.is_some() {
+            flags.push("current");
         }
         match s.checked {
             Some(true) => flags.push("checked"),

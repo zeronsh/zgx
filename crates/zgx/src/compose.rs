@@ -1525,6 +1525,21 @@ impl View {
         accessibility.level = Some(level.max(1));
         self
     }
+    /// A tree item's depth, 1 for the top (`aria-level`): virtualised rows
+    /// are flat siblings, so it can't be inferred.
+    pub fn level(mut self, level: usize) -> Self {
+        self.accessibility_mut().level = Some(level.max(1));
+        self
+    }
+    /// What this is the current one of, followed (`aria-current`): none
+    /// while `current` says so.
+    pub fn current_when(
+        mut self,
+        current: impl FnMut() -> Option<crate::semantics::Current> + 'static,
+    ) -> Self {
+        self.accessibility_mut().current_when = Some(Box::new(current));
+        self
+    }
     /// Whether this option, tab or item is the chosen one, followed
     /// (`aria-selected`).
     pub fn selected_when(mut self, selected: impl FnMut() -> bool + 'static) -> Self {
@@ -8899,6 +8914,8 @@ pub(crate) struct Accessibility {
     hidden_when: Option<Box<dyn FnMut() -> bool>>,
     /// `View::busy_when`.
     busy_when: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::current_when`.
+    current_when: Option<Box<dyn FnMut() -> Option<crate::semantics::Current>>>,
     /// `View::accessible_modal`: while it shows, nothing else is read.
     modal: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -8949,6 +8966,9 @@ impl Accessibility {
         }
         if outer.hidden_when.is_some() {
             inner.hidden_when = outer.hidden_when;
+        }
+        if outer.current_when.is_some() {
+            inner.current_when = outer.current_when;
         }
         if outer.busy_when.is_some() {
             inner.busy_when = outer.busy_when;
@@ -9018,6 +9038,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         hidden,
         hidden_when,
         busy_when,
+        current_when,
         modal,
         focus_group,
         label,
@@ -9093,6 +9114,14 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut current) = current_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let current = current();
+            tree.borrow_mut()
+                .update(root, |node| node.current = current);
         });
     }
     if let Some(mut busy) = busy_when {

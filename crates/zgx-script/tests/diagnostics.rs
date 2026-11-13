@@ -1143,3 +1143,38 @@ return ui.column { w = 400, h = 200,
     h.frames(3);
     assert_eq!(editor.atoms().len(), 2);
 }
+
+#[test]
+fn level_and_current_reach_the_tree_and_selected_prints() {
+    use zgx_script::Value as V;
+    let mut h = Harness::inline(
+        r##"local page = ui.state("page", "page")
+return ui.column { w = 300, h = 200,
+    ui.column { id = "row", role = "treeitem", label = "Deep", level = 3, selected = true, current = page, ui.text { "Deep" } },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    let row = h.find("row").unwrap();
+    let read = |h: &Harness| {
+        h.ui.semantics
+            .borrow()
+            .get(row)
+            .map(|s| (s.role, s.level, s.current, s.selected))
+    };
+    assert_eq!(
+        read(&h),
+        Some((
+            zgx::semantics::Role::TreeItem,
+            Some(3),
+            Some(zgx::semantics::Current::Page),
+            Some(true)
+        ))
+    );
+    let tree = h.tree();
+    assert!(tree.contains("selected"), "{tree}");
+    assert!(tree.contains("current"), "{tree}");
+    h.host.set_state("page", V::Str("".into())).unwrap();
+    h.frames(3);
+    assert_eq!(read(&h).unwrap().2, None);
+}

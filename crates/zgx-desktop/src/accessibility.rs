@@ -890,6 +890,17 @@ impl AccessibilityTree {
             if let Some(level) = semantic.level {
                 n.set_level(level);
             }
+            if let Some(current) = semantic.current {
+                use zgx::semantics::Current;
+                n.set_aria_current(match current {
+                    Current::True => accesskit::AriaCurrent::True,
+                    Current::Page => accesskit::AriaCurrent::Page,
+                    Current::Step => accesskit::AriaCurrent::Step,
+                    Current::Location => accesskit::AriaCurrent::Location,
+                    Current::Date => accesskit::AriaCurrent::Date,
+                    Current::Time => accesskit::AriaCurrent::Time,
+                });
+            }
             if let Some(selected) = semantic.selected {
                 n.set_selected(selected);
             }
@@ -3869,6 +3880,23 @@ mod vocabulary_tests {
             "sr_only stays: {names:?}"
         );
         assert!(!names.iter().any(|n| n == "Gone"), "{names:?}");
+    }
+
+    #[test]
+    fn a_tree_item_exposes_its_level_and_what_it_is_current_of() {
+        let mut ui = Ui::new(400., 300.);
+        ui.mount(
+            column()
+                .role(Role::TreeItem)
+                .accessible_label("Deep")
+                .level(3)
+                .current_when(|| Some(zgx::semantics::Current::Page))
+                .child(text("Deep")),
+        );
+        let nodes = project(&mut ui);
+        let item = &find(&nodes, accesskit::Role::TreeItem)[0];
+        assert_eq!(item.level(), Some(3));
+        assert_eq!(item.aria_current(), Some(accesskit::AriaCurrent::Page));
     }
 
     #[test]

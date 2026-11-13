@@ -2476,6 +2476,12 @@ export type NodeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Reactive<boolean>?,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: number?,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Reactive<string>?,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Reactive<boolean>?,
@@ -2926,6 +2932,12 @@ export type Props = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -3311,6 +3323,8 @@ export type Props_description = (string | ReadOnlyState<string> | (() -> string)
 export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = Reactive<boolean>?
+export type Props_level = number?
+export type Props_current = Reactive<string>?
 export type Props_busy = Reactive<boolean>?
 export type Props_inert = Reactive<boolean>?
 export type Props_sr_only = boolean?
@@ -3632,6 +3646,12 @@ export type ContainerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -4096,6 +4116,12 @@ export type GlassProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -4569,6 +4595,12 @@ export type ScrollProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -5059,6 +5091,12 @@ export type TextProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -5508,6 +5546,12 @@ export type MarkdownViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -6104,6 +6148,12 @@ export type RichProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -6547,6 +6597,12 @@ export type ImageProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -7007,6 +7063,12 @@ export type SvgProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -7578,6 +7640,12 @@ export type Scene3DProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -8044,6 +8112,12 @@ export type CanvasProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -8519,6 +8593,12 @@ export type CheckboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -8972,6 +9052,12 @@ export type InputProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -9560,6 +9646,12 @@ export type ProgressProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -10001,6 +10093,12 @@ export type SliderProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -10463,6 +10561,12 @@ export type SegmentedProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -10918,6 +11022,12 @@ export type StepperProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -11374,6 +11484,12 @@ export type DisclosureProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -11841,6 +11957,12 @@ export type AccordionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -12282,6 +12404,12 @@ export type SectionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -12748,6 +12876,12 @@ export type SeparatorProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -13197,6 +13331,12 @@ export type TabsProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -13668,6 +13808,12 @@ export type TreeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -14135,6 +14281,12 @@ export type DataGridProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -14598,6 +14750,12 @@ export type CalendarProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -15054,6 +15212,12 @@ export type DatePickerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -15508,6 +15672,12 @@ export type TimeFieldProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -15961,6 +16131,12 @@ export type ComboboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -16422,6 +16598,12 @@ export type CommandPaletteProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -16871,6 +17053,12 @@ export type SelectProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -17327,6 +17515,12 @@ export type SplitProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -17839,6 +18033,12 @@ export type ListProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -18385,6 +18585,12 @@ export type LayerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -18848,6 +19054,12 @@ export type ModalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -19360,6 +19572,12 @@ export type PopoverProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -19860,6 +20078,12 @@ export type MenuItemProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -20312,6 +20536,12 @@ export type SubmenuProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -20784,6 +21014,12 @@ export type WebViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -21253,6 +21489,12 @@ export type TerminalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -21697,6 +21939,12 @@ export type HostViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -22141,6 +22389,12 @@ export type SlotProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -22634,6 +22888,12 @@ export type EachOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,
@@ -23093,6 +23353,12 @@ export type PresenceOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
 	-- Still being filled in (`aria-busy`): assistive technology waits for it
 	-- to settle instead of announcing each change.
 	busy: Props_busy,

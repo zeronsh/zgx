@@ -153,6 +153,22 @@ pub enum ScrollAxis {
     /// It scrolls down.
     Vertical,
 }
+/// What a node is the current one of (`aria-current`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Current {
+    /// The current item of a set.
+    True,
+    /// The current page of a set of pages.
+    Page,
+    /// The current step of a process.
+    Step,
+    /// The current location in a flow or environment.
+    Location,
+    /// The current date.
+    Date,
+    /// The current time.
+    Time,
+}
 /// Kind of popup exposed by an interactive trigger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopupKind {
@@ -244,8 +260,10 @@ pub struct SemanticRare {
     /// focus, each a label under this node and a UTF-8 offset into that
     /// label's value.
     pub document_selection: Option<((NodeId, usize), (NodeId, usize))>,
-    /// A heading's level, 1 for the top (`h1`).
+    /// A heading's level, 1 for the top (`h1`), or a tree item's depth.
     pub level: Option<usize>,
+    /// What this is the current one of (`aria-current`).
+    pub current: Option<Current>,
     /// Read after the name, as a hint (`aria-description`).
     pub description: Option<String>,
     /// The keys that do what it does, as its menu shows them ("⌘C").
@@ -268,6 +286,7 @@ static NO_RARE: SemanticRare = SemanticRare {
     placeholder: None,
     document_selection: None,
     level: None,
+    current: None,
     description: None,
     shortcut: None,
     active_descendant: None,

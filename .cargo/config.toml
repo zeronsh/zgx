@@ -4,3 +4,6 @@
 # 2 MiB for the deepest example interfaces, so tests run with the main
 # thread's stack.
 RUST_MIN_STACK = "8388608"
+
+[target.'cfg(unix)']
+runner = "scripts/test-runner.sh"
