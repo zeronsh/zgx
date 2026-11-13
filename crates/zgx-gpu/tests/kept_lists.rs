@@ -156,8 +156,25 @@ impl Window {
         let stats = self.draw();
         let full = Rect::new(0., 0., self.size.0, self.size.1);
         self.whole.render(&self.ui.scene.borrow(), &[full]).unwrap();
+        let (got, want) = (self.gpu.readback().unwrap(), self.whole.readback().unwrap());
+        if got != want {
+            let w = (self.size.0 * 2.) as usize;
+            let (mut x0, mut y0, mut x1, mut y1, mut n) = (usize::MAX, usize::MAX, 0, 0, 0);
+            let mut first = None;
+            for (i, (a, b)) in got.chunks(4).zip(want.chunks(4)).enumerate() {
+                if a != b {
+                    let (x, y) = (i % w, i / w);
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                    n += 1;
+                    first.get_or_insert((x, y, a.to_vec(), b.to_vec()));
+                }
+            }
+            println!(
+                "PROBE {what}: {n} px differ in x {x0}..={x1} y {y0}..={y1}; first {first:?} (got, want); stats {stats:?}"
+            );
+        }
         assert!(
-            self.gpu.readback().unwrap() == self.whole.readback().unwrap(),
+            got == want,
             "{what}: differs from the scene drawn afresh (patched {})",
             stats.patched_items
         );

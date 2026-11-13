@@ -767,6 +767,14 @@ jobs:
       # separator bug), in one run.
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-script --lib --test components --test bundle --locked
       # Text in every script, shaped in the system's own fonts.
+      - name: PROBE kept_lists D3D12 WARP
+        continue-on-error: true
+        run: cargo test -p zgx-gpu --test kept_lists --locked -- --nocapture --test-threads=1
+      - name: PROBE kept_lists D3D11 WARP
+        continue-on-error: true
+        run: cargo test -p zgx-gpu --features d3d11 --test kept_lists --locked -- --nocapture --test-threads=1
+        env:
+          ZGX_D3D11: "1"
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       - run: cargo test -p zgx-fx --locked
       # Menus, popovers and tooltips in Windows' shapes there (WinUI's).
