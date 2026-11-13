@@ -5262,6 +5262,96 @@ fn fractional_scrolls_on_the_pixel_grid_copy_and_match_a_fresh_render() {
     assert_eq!(copies, expected);
 }
 
+/// A list whose view sits between device pixels (a zoomed window lays one out
+/// there) copies the whole pixels inside it and repaints its part-pixel
+/// edges: each frame matches a fresh render.
+#[test]
+fn a_list_between_device_pixels_copies_its_interior_and_matches_a_fresh_render() {
+    let _gpu_fixture = gpu_fixture();
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let mut gpu = GpuRenderer::new(160, 120).unwrap();
+    gpu.debug_allow_scroll_copies();
+    let mut ui = Ui::new(160., 120.);
+    ui.scene.borrow_mut().set_pixel_scale(1.);
+    let offset = ui.signal(0_f32);
+    ui.mount(
+        column()
+            .w(160.)
+            .h(120.)
+            .bg(rgb(0x000000))
+            .child(div().w(160.).h(9.4))
+            .child(
+                row().child(div().w(3.6).h(1.)).child(
+                    virtual_list(
+                        offset.clone(),
+                        24.,
+                        2,
+                        || 1000,
+                        |i| i,
+                        |_, key, _| {
+                            div()
+                                .size(150., 24.)
+                                .bg(if key % 2 == 0 {
+                                    rgb(0x223344)
+                                } else {
+                                    rgb(0x334455)
+                                })
+                                .child(div().size(150., 1.).bg(rgb(0xffffff)))
+                        },
+                    )
+                    .w(150.3)
+                    .h(97.7)
+                    .bg(rgb(0x101820)),
+                ),
+            ),
+    );
+    let mut copies = 0;
+    for scroll in [0., 14., 28., 31., 60., 59., 20.] {
+        offset.set(scroll);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        copies += gpu
+            .render(&ui.scene.borrow(), &damage)
+            .unwrap()
+            .scroll_copies;
+        let mut fresh = GpuRenderer::new(160, 120).unwrap();
+        fresh
+            .render(&ui.scene.borrow(), &[Rect::new(0., 0., 160., 120.)])
+            .unwrap();
+        let (got, want) = (gpu.readback().unwrap(), fresh.readback().unwrap());
+        let wrong: Vec<(usize, usize)> = (0..got.len() / 4)
+            .filter(|p| got[p * 4..p * 4 + 4] != want[p * 4..p * 4 + 4])
+            .map(|p| (p % 160, p / 160))
+            .collect();
+        let mut rows: Vec<usize> = wrong.iter().map(|w| w.1).collect();
+        rows.dedup();
+        let mut cols: Vec<usize> = wrong.iter().map(|w| w.0).collect();
+        cols.sort();
+        cols.dedup();
+        let sample: Vec<String> = wrong
+            .iter()
+            .take(6)
+            .map(|&(x, y)| {
+                format!(
+                    "{x},{y} got {:?} want {:?}",
+                    &got[(y * 160 + x) * 4..(y * 160 + x) * 4 + 3],
+                    &want[(y * 160 + x) * 4..(y * 160 + x) * 4 + 3]
+                )
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "scroll {scroll}: {} differ, rows {:?}, cols {:?} {:?}",
+            wrong.len(),
+            rows,
+            cols,
+            sample
+        );
+    }
+    // 0→14→28→31→60→59→20 all copy; before, the part-pixel view repainted each
+    assert_eq!(copies, 6);
+}
+
 /// A clear box over a list (an overlay scrollbar's track away from the
 /// pointer is one) paints nothing: the list's scrolls still copy, and the
 /// frames match a fresh render.
