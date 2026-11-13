@@ -9751,6 +9751,15 @@ impl GpuRenderer {
                                 );
                                 // Three sigmas out (`blur_radius` is the sigma).
                                 let outer = core.expand(shadow.blur_radius.max(0.) * 3.);
+                                // A hard ring (`0 0 0 1`) is cut out of the box, which
+                                // is drawn over it: where the box's edge lies inside a
+                                // pixel both are anti-aliased there, and the pixel
+                                // keeps three quarters of its colour (a seam of what is
+                                // behind). Under an opaque fill the cut-out takes half a
+                                // pixel less, so the ring lies under the fill's edge.
+                                let hard = shadow.blur_radius <= 0. && spread > 0.;
+                                let opaque = style.fill.3 == 255 && style.decoration.is_none();
+                                let tuck = if hard && opaque { 0.5 / self.scale } else { 0. };
                                 quads.push(Quad {
                                     rect: [outer.x, outer.y, outer.width, outer.height],
                                     // the offset and (in `shape.y`) the spread, to cut out the box
@@ -9760,7 +9769,7 @@ impl GpuRenderer {
                                     options: [0., 0., 0., 1.],
                                     shape: [
                                         (style.radius + spread).max(0.),
-                                        1000. + spread,
+                                        1000. + spread + tuck,
                                         shadow.blur_radius.max(0.001),
                                         zgx::style::corner_shape(),
                                     ],
