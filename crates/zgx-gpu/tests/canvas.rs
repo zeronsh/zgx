@@ -945,6 +945,33 @@ fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
     assert_eq!(show(&mut gpu, at(-46., -26., 2.)).canvas_rasterizations, 1);
     assert_eq!(show(&mut gpu, zoomed).canvas_rasterizations, 0);
     assert!(!gpu.take_images_awaited());
+    // Zoomed on before the zoom held still: the first's raster is
+    // superseded, the last's alone made and shown.
+    let (on, last) = (at(-60., -30., 2.4), at(-70., -36., 2.6));
+    let woken = WOKEN.load(Ordering::SeqCst);
+    assert_eq!(show(&mut gpu, on).canvas_rasterizations, 0);
+    assert!(gpu.take_images_awaited());
+    assert_eq!(show(&mut gpu, last).canvas_rasterizations, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while WOKEN.load(Ordering::SeqCst) == woken {
+        assert!(std::time::Instant::now() < deadline, "never woken");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(gpu.images_decoded());
+    let stats = show(&mut gpu, last);
+    assert_eq!(stats.canvas_rasterizations, 1);
+    assert!(!gpu.take_images_awaited(), "the last zoom's raster, landed");
+    let drawn = zgx_gpu::canvas::rasterize_viewed(&board, last, 200., 120., 1.5).unwrap();
+    let shown_last = gpu.readback().unwrap();
+    assert!(
+        (0..300 * 180).all(|i| shown_last[i * 4..i * 4 + 3] == drawn.pixels()[i * 4..i * 4 + 3]),
+        "shown as drawn under the last view"
+    );
+    assert_eq!(
+        WOKEN.load(Ordering::SeqCst),
+        woken + 1,
+        "woken once: the first never landed"
+    );
     // An offscreen renderer waits for it, as it does for shaders.
     let mut waits = GpuRenderer::new(300, 180).unwrap();
     waits.set_scale_factor(1.5);

@@ -165,6 +165,37 @@ struct Zoom {
     size: (f32, f32, f32),
     /// The region and its pixels, once made.
     done: Arc<Mutex<Option<Made>>>,
+    /// Set once a newer view supersedes it (or it is dropped): the job
+    /// stops where it is, and lands nothing.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Started at once (the zoom moved ×2 from the raster shown), not after
+    /// the zoom held still: kept while the zoom stays within ×2 of it.
+    immediate: bool,
+}
+impl Drop for Zoom {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+/// How long a zoom holds still before its exact raster is made (unless it
+/// moved ×2 from the raster shown): a gesture makes one, not one a step.
+const REFINE_AFTER: std::time::Duration = std::time::Duration::from_millis(50);
+/// The error a raster superseded while being made stops with.
+const SUPERSEDED: &str = "canvas raster superseded";
+thread_local! {
+    /// What says the raster this thread is making is superseded.
+    static SUPERSEDED_BY: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// Whether the raster this thread is making is superseded: checked every
+/// few commands and before each text.
+fn superseded() -> bool {
+    SUPERSEDED_BY.with(|by| {
+        by.borrow()
+            .as_ref()
+            .is_some_and(|by| by.load(std::sync::atomic::Ordering::Relaxed))
+    })
 }
 type Made = Result<(Panned, ImageData), GpuError>;
 type Job = Box<dyn FnOnce() + Send>;
@@ -860,7 +891,10 @@ impl CanvasCache {
                 .map(|pixels| (entry.view, panned, pixels, shift));
         }
         // Zoomed: the raster of the zoom before, scaled, while this one's
-        // is made off the frame (unless one is already being made).
+        // is made off the frame. One being made for another view is
+        // superseded (stopped where it is), unless it is of this zoom, or
+        // was started at once for a zoom within ×2 of this; the new one
+        // starts once the zoom holds still, or at once ×2 from what shows.
         if !wait
             && let Some(entry) = self.entries.get_mut(&node)
             && let Some(panned) = entry.panned
@@ -875,9 +909,22 @@ impl CanvasCache {
                 entry.raster(),
                 panned.scaled(entry.view, view, width, height, scale),
             );
-            if let std::collections::hash_map::Entry::Vacant(slot) = self.zooms.entry(node) {
+            let ratio = |a: f32, b: f32| (a / b).max(b / a);
+            let kept = self.zooms.get(&node).is_some_and(|zoom| {
+                zoom.view.scale == view.scale
+                    || (zoom.immediate && ratio(zoom.view.scale, view.scale) < 2.)
+            });
+            if !kept {
+                let immediate = ratio(entry.view.scale, view.scale) >= 2.;
+                let due = std::time::Instant::now()
+                    + if immediate {
+                        Default::default()
+                    } else {
+                        REFINE_AFTER
+                    };
                 let done: Arc<Mutex<Option<Made>>> = Arc::default();
-                let (filled, drawing) = (done.clone(), canvas.clone());
+                let cancel: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+                let (filled, drawing, stop) = (done.clone(), canvas.clone(), cancel.clone());
                 // The thread's own rasterizer, in the same fonts: a frame
                 // drawing text meanwhile never waits on it.
                 let fonts = self
@@ -887,13 +934,27 @@ impl CanvasCache {
                     .fonts
                     .clone();
                 off_frame(Box::new(move || {
+                    let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+                    // Until the zoom has held still, unless superseded.
+                    while !stopped() && std::time::Instant::now() < due {
+                        let left = due.saturating_duration_since(std::time::Instant::now());
+                        std::thread::sleep(left.min(std::time::Duration::from_millis(4)));
+                    }
+                    if stopped() {
+                        return;
+                    }
                     static TEXT: OnceLock<SharedText> = OnceLock::new();
                     let text = TEXT.get_or_init(Default::default);
                     text.lock().unwrap_or_else(|p| p.into_inner()).fonts = fonts;
+                    SUPERSEDED_BY.with(|by| *by.borrow_mut() = Some(stop.clone()));
                     let bounds = text_bounds(&drawing, text);
                     let panned = panned_region(&drawing, view, size, scale, bounds);
                     let made = rasterize_region(&drawing, view, scale, panned.region, None, text)
                         .map(|image| (panned, image));
+                    SUPERSEDED_BY.with(|by| *by.borrow_mut() = None);
+                    if stopped() {
+                        return;
+                    }
                     *filled.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
                     zgx::image::wake_waiting();
                 }));
@@ -902,8 +963,11 @@ impl CanvasCache {
                     view,
                     size: (width, height, scale),
                     done,
+                    cancel,
+                    immediate,
                 };
-                slot.insert(zoom);
+                // The one it replaces, if any, superseded as it goes.
+                self.zooms.insert(node, zoom);
             }
             return Ok(shown);
         }
@@ -1653,6 +1717,9 @@ fn paint_with_text(
             if within(&skip_texts, index) {
                 continue;
             }
+            if superseded() {
+                return Err(GpuError(SUPERSEDED.into()));
+            }
             let label = Label {
                 text: &canvas.texts()[index],
                 at: boxes[index],
@@ -2149,7 +2216,12 @@ fn paint_commands<'a>(
         BUDGET as u64
     };
     let mut masks: Vec<Clipped> = Vec::new();
+    let mut walked = 0u32;
     for command in commands {
+        walked += 1;
+        if walked.is_multiple_of(32) && superseded() {
+            return Err(GpuError(SUPERSEDED.into()));
+        }
         match command {
             Draw::Clip { path: source, rule } => {
                 let Some(outer) = clipped(&masks) else {
