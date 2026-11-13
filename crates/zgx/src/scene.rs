@@ -4535,7 +4535,7 @@ impl Scene {
     /// one's viewport and its ancestors' clips.
     pub fn visible_bounds(&self, id: NodeId) -> Option<Rect> {
         self.note_geometry_read(id);
-        let (bounds, effects, clip) = self.world(id);
+        let (bounds, effects, clip) = self.world_once(id);
         if effects.opacity <= 0. {
             return None;
         }
@@ -4566,7 +4566,7 @@ impl Scene {
     #[inline(never)]
     pub fn shows_within(&self, id: NodeId, margin: f32) -> bool {
         self.note_geometry_read(id);
-        let (bounds, effects, clip) = self.world(id);
+        let (bounds, effects, clip) = self.world_once(id);
         if effects.opacity <= 0. {
             return false;
         }
@@ -11124,6 +11124,67 @@ impl Scene {
             ancestor = self.tree_node(parent);
         }
         clip
+    }
+    /// `world`, in one walk up, for the readers of what shows
+    /// (`visible_bounds`, `shows_within`) where deep observed nodes read it
+    /// every frame: each clipping box met on the way sums its own
+    /// translation from there on, as walking up again from it would (the
+    /// same sums in the same order, so the same floats), and the clips are
+    /// cut from the node up, as ever. Past `CLIPS` clipping boxes (none a
+    /// real tree has),
+    /// `world_clip` walks as it does. `world` itself stays the two walks:
+    /// damage and flush call it, for nodes with no clips around them, where
+    /// those cost less.
+    #[inline(never)]
+    fn world_once(&self, id: NodeId) -> (Rect, Effects, Option<Rect>) {
+        const CLIPS: usize = 6;
+        let node = self.node(id);
+        let mut effects = node.effects;
+        if !own_visible(&node.style) {
+            effects.opacity = 0.;
+        }
+        let mut transform = node.transform;
+        let mut clips = [(node, Transform::default()); CLIPS];
+        let mut count = 0;
+        let mut over = false;
+        let mut boxed = node;
+        loop {
+            if clip_axes(&boxed.style) != (false, false) {
+                match count < CLIPS {
+                    true => {
+                        clips[count] = (boxed, boxed.transform);
+                        count += 1;
+                    }
+                    false => over = true,
+                }
+            }
+            let Some(parent) = boxed.parent else {
+                break;
+            };
+            boxed = self.tree_node(parent);
+            transform.x += boxed.transform.x;
+            transform.y += boxed.transform.y;
+            for (_, offset) in &mut clips[..count] {
+                offset.x += boxed.transform.x;
+                offset.y += boxed.transform.y;
+            }
+            effects.opacity *= if own_visible(&boxed.style) {
+                boxed.effects.opacity
+            } else {
+                0.
+            };
+        }
+        let clip = match over {
+            true => self.world_clip(id),
+            false => {
+                let mut clip = Some(self.viewport);
+                for (boxed, offset) in &clips[..count] {
+                    clip = clipped_bounds(clip, boxed.bounds.translated(*offset), &boxed.style);
+                }
+                clip
+            }
+        };
+        (node.bounds.translated(transform), effects, clip)
     }
     fn damage_subtree(&mut self, id: NodeId) {
         self.damage_subtree_with(id, &mut None);
@@ -19401,6 +19462,119 @@ mod tests {
             },
         );
         assert_eq!(scene.visible_bounds(item), None);
+    }
+    /// `world` and `world_clip` as they walked: up once for translation
+    /// and opacity, and up again from each clipping box for its own.
+    fn world_walked_twice(scene: &Scene, id: NodeId) -> (Rect, f32, Option<Rect>) {
+        let node = scene.node(id);
+        let mut transform = node.transform;
+        let mut opacity = if own_visible(&node.style) {
+            node.effects.opacity
+        } else {
+            0.
+        };
+        let mut parent = node.parent;
+        while let Some(id) = parent {
+            let ancestor = scene.tree_node(id);
+            transform.x += ancestor.transform.x;
+            transform.y += ancestor.transform.y;
+            opacity *= if own_visible(&ancestor.style) {
+                ancestor.effects.opacity
+            } else {
+                0.
+            };
+            parent = ancestor.parent;
+        }
+        let mut clip = Some(scene.viewport);
+        let mut ancestor = node;
+        loop {
+            if clip_axes(&ancestor.style) != (false, false) {
+                let mut offset = ancestor.transform;
+                let mut parent = ancestor.parent;
+                while let Some(parent_id) = parent {
+                    let p = scene.tree_node(parent_id);
+                    offset.x += p.transform.x;
+                    offset.y += p.transform.y;
+                    parent = p.parent;
+                }
+                clip = clipped_bounds(clip, ancestor.bounds.translated(offset), &ancestor.style);
+            }
+            let Some(parent) = ancestor.parent else {
+                break;
+            };
+            ancestor = scene.tree_node(parent);
+        }
+        (node.bounds.translated(transform), opacity, clip)
+    }
+    /// One walk up works out what walking up again from each clip did, to
+    /// the bit: nested boxes, every other one clipping (on one axis, the
+    /// other or both, more than fit inline), moved by tenths (sums that
+    /// round), faded by thirds.
+    #[test]
+    fn world_in_one_walk_is_what_walking_twice_was() {
+        use crate::layout::LayoutOptions;
+        let mut scene = Scene::new(300.0, 200.0);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let mut nodes = vec![scene.root()];
+        for branch in 0..3 {
+            let mut parent = scene.root();
+            for depth in 0..24 {
+                let mut style = Style {
+                    absolute: true,
+                    width: Some(280. - depth as f32 * 9.7),
+                    height: Some(190. - depth as f32 * 6.3),
+                    ..Default::default()
+                };
+                match depth % 6 {
+                    0 => style.clip = true,
+                    2 => {
+                        style.layout_options = Some(Arc::new(LayoutOptions {
+                            clip_x: Some(true),
+                            ..Default::default()
+                        }))
+                    }
+                    4 => {
+                        style.layout_options = Some(Arc::new(LayoutOptions {
+                            clip_y: Some(true),
+                            ..Default::default()
+                        }))
+                    }
+                    _ => {}
+                }
+                let node = scene.append(parent, NodeKind::Container(Layout::Overlay), style);
+                let tenth = 0.1 * (depth as f32 + 1.) * (branch as f32 - 1.3);
+                scene.set_transform(
+                    node,
+                    Transform {
+                        x: tenth + 0.3,
+                        y: -tenth * 1.7,
+                    },
+                );
+                if depth % 5 == 3 {
+                    scene.set_effects(
+                        node,
+                        Effects {
+                            opacity: 1. / 3.,
+                            ..Default::default()
+                        },
+                    );
+                }
+                nodes.push(node);
+                parent = node;
+            }
+        }
+        scene.flush();
+        let mut cut = 0;
+        for &id in &nodes {
+            let (bounds, effects, clip) = scene.world(id);
+            let walked = world_walked_twice(&scene, id);
+            assert_eq!((bounds, effects.opacity, clip), walked, "{id:?}");
+            assert_eq!(scene.world_clip(id), walked.2, "{id:?}");
+            let (bounds, effects, clip) = scene.world_once(id);
+            assert_eq!((bounds, effects.opacity, clip), walked, "once: {id:?}");
+            cut += usize::from(clip.is_some_and(|c| c.width < 280. || c.height < 190.));
+        }
+        assert!(cut > nodes.len() / 2, "the clips cut: {cut}");
     }
     #[test]
     fn what_a_popup_holds_damages_nothing_in_the_window() {
