@@ -5640,7 +5640,27 @@ export type SpanProps = {
 	}?,
 	-- A link (`on_click`) under the pointer: underlined, recoloured. With
 	-- it, the link isn't underlined at rest unless `underline` says so.
-	hover: { underline: boolean?, color: Color? }?,
+	-- `bg` its background, `underline_color` its underline's colour, `icon`
+	-- another icon in place of the span's own (a file pill's download glyph).
+	hover: {
+		underline: boolean?,
+		color: Color?,
+		bg: Color?,
+		underline_color: Color?,
+		icon: {
+			src: string?,
+			code: string?,
+			size: number?,
+			gap: number?,
+			margin: number?,
+			dy: number?,
+			tint: Color?,
+			bg: Color?,
+			radius: number?,
+			pad: number?,
+			align: ("center" | "baseline")?,
+		}?,
+	}?,
 	-- An icon before the text, in the line (a file chip's file type):
 	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
 	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,

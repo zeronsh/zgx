@@ -5276,37 +5276,46 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after, outset, on_hover) = match span.extras.take()
-            {
-                None => (None, None, None, false, -1., 0., None),
-                Some(extras) => {
-                    let extras = *extras;
-                    let end = extras.padding_end.unwrap_or(span.padding[0]);
-                    let apart = extras.icon.is_some() || end != span.padding[0];
-                    // Its text's run comes next, after the room before it
-                    // when that's apart. Noted here, where only spans with
-                    // extras come, so a plain span pays nothing for fades.
-                    if let Some(fade) = extras.fade {
-                        fading.note(runs.len() + usize::from(apart), fade);
+            let (hover, mut icon, menu, plain, room_after, outset, on_hover) =
+                match span.extras.take() {
+                    None => (None, None, None, false, -1., 0., None),
+                    Some(extras) => {
+                        let extras = *extras;
+                        let end = extras.padding_end.unwrap_or(span.padding[0]);
+                        let apart = extras.icon.is_some() || end != span.padding[0];
+                        // Its text's run comes next, after the room before it
+                        // when that's apart. Noted here, where only spans with
+                        // extras come, so a plain span pays nothing for fades.
+                        if let Some(fade) = extras.fade {
+                            fading.note(runs.len() + usize::from(apart), fade);
+                        }
+                        (
+                            extras.hover,
+                            extras.icon,
+                            extras.menu,
+                            extras.plain,
+                            if apart { end } else { -1. },
+                            extras.outset,
+                            extras.on_hover,
+                        )
                     }
-                    (
-                        extras.hover,
-                        extras.icon,
-                        extras.menu,
-                        extras.plain,
-                        if apart { end } else { -1. },
-                        extras.outset,
-                        extras.on_hover,
-                    )
-                }
-            };
-            let hover = hover.as_ref();
+                };
+            let mut hover = hover;
             let styled_hover = hover.is_some();
             if link && !styled_hover && !plain {
                 span.underline.get_or_insert_with(Default::default);
             }
             let mut hover_background = None;
-            if let Some(hover) = hover.filter(|_| link && hovered == Some(links.len())) {
+            if let Some(hover) = hover
+                .as_mut()
+                .filter(|_| link && hovered == Some(links.len()))
+            {
+                if let Some(swap) = hover.icon.take() {
+                    icon = Some(swap);
+                }
+                if let Some(color) = hover.underline_color {
+                    span.underline_color = Some(color);
+                }
                 if let Some(underline) = hover.underline {
                     span.underline = Some(underline);
                 }

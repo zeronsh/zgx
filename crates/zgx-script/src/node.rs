@@ -1526,6 +1526,42 @@ pub(crate) struct Span {
     /// What few spans have (an icon, a menu), apart: most spans carry none.
     pub rare: Option<Rc<SpanRare>>,
 }
+/// A span's `icon = { src | code, size, gap, … }`.
+fn span_icon(icon: &Table) -> mlua::Result<SpanIcon> {
+    let src = match (
+        icon.get::<Option<String>>("src")?,
+        icon.get::<Option<String>>("code")?,
+    ) {
+        (Some(src), _) => src,
+        (None, Some(code)) => format!("code:{code}"),
+        (None, None) => {
+            return Err(mlua::Error::runtime("a span's icon takes `src` or `code`"));
+        }
+    };
+    let tint = icon.get::<Value>("tint")?;
+    let bg = icon.get::<Value>("bg")?;
+    Ok(SpanIcon {
+        src,
+        size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
+        gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
+        margin: icon.get::<Option<f32>>("margin")?.unwrap_or(0.).max(0.),
+        dy: icon.get::<Option<f32>>("dy")?.unwrap_or(0.),
+        tint: (!matches!(tint, Value::Nil)).then_some(tint),
+        bg: (!matches!(bg, Value::Nil)).then_some(bg),
+        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
+        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
+        baseline: match icon.get::<Option<String>>("align")?.as_deref() {
+            None | Some("center") => false,
+            Some("baseline") => true,
+            Some(other) => {
+                return Err(mlua::Error::runtime(format!(
+                    "an icon's `align` is center or baseline, not {other:?}"
+                )));
+            }
+        },
+    })
+}
+
 /// `span`'s rare options, made as the first is set. Out of line: most
 /// spans set none.
 #[cold]
@@ -1534,13 +1570,22 @@ fn rare_mut(span: &mut Span) -> &mut SpanRare {
     let rare = span.rare.get_or_insert_with(Rc::default);
     Rc::get_mut(rare).expect("held by the span being made alone")
 }
-/// A span's hover: whether it shows its own background, then its colours.
-pub(crate) type HoverFill = (bool, Option<Themed<Color>>, Option<Themed<Color>>);
+/// A span's hover: whether it underlines, then its text colour, background
+/// and underline colour (its icon is `SpanRare::hover_icon`).
+pub(crate) type HoverFill = (
+    bool,
+    Option<Themed<Color>>,
+    Option<Themed<Color>>,
+    Option<Themed<Color>>,
+);
 /// A span's options few set (`Span::rare`).
 #[derive(Default)]
 pub(crate) struct SpanRare {
     /// An icon before the text, in the line.
     pub icon: Option<SpanIcon>,
+    /// The icon in its place while the pointer is on a link span
+    /// (`hover = { icon = … }`).
+    pub hover_icon: Option<SpanIcon>,
     /// Room after the text, given apart from the room before it
     /// (`padding = { before, after, down }`).
     pub padding_end: Option<f32>,
@@ -5071,52 +5116,24 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"underline_skip_ink" => {
                     span.underline_skip_ink = lua.unpack::<Value>(given)?.truthy()
                 }
-                // `hover = { underline = true, color = …, bg = … }`: a link's
-                // look under the pointer (CSS's `a:hover`).
+                // `hover = { underline = true, color = …, bg = …, underline_color
+                // = …, icon = {…} }`: a link's look under the pointer (CSS's
+                // `a:hover`).
                 b"hover" => {
                     let hover: Table = lua.unpack(given)?;
                     span.hover = Some((
                         hover.get::<Value>("underline")?.truthy(),
                         themed_color(&hover.get::<Value>("color")?),
                         themed_color(&hover.get::<Value>("bg")?),
+                        themed_color(&hover.get::<Value>("underline_color")?),
                     ));
+                    if let Some(icon) = hover.get::<Option<Table>>("icon")? {
+                        rare_mut(&mut span).hover_icon = Some(span_icon(&icon)?);
+                    }
                 }
                 b"icon" => {
                     let icon: Table = lua.unpack(given)?;
-                    let src = match (
-                        icon.get::<Option<String>>("src")?,
-                        icon.get::<Option<String>>("code")?,
-                    ) {
-                        (Some(src), _) => src,
-                        (None, Some(code)) => format!("code:{code}"),
-                        (None, None) => {
-                            return Err(mlua::Error::runtime(
-                                "a span's icon takes `src` or `code`",
-                            ));
-                        }
-                    };
-                    let tint = icon.get::<Value>("tint")?;
-                    let bg = icon.get::<Value>("bg")?;
-                    rare_mut(&mut span).icon = Some(SpanIcon {
-                        src,
-                        size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
-                        gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
-                        margin: icon.get::<Option<f32>>("margin")?.unwrap_or(0.).max(0.),
-                        dy: icon.get::<Option<f32>>("dy")?.unwrap_or(0.),
-                        tint: (!matches!(tint, Value::Nil)).then_some(tint),
-                        bg: (!matches!(bg, Value::Nil)).then_some(bg),
-                        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
-                        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
-                        baseline: match icon.get::<Option<String>>("align")?.as_deref() {
-                            None | Some("center") => false,
-                            Some("baseline") => true,
-                            Some(other) => {
-                                return Err(mlua::Error::runtime(format!(
-                                    "an icon's `align` is center or baseline, not {other:?}"
-                                )));
-                            }
-                        },
-                    });
+                    rare_mut(&mut span).icon = Some(span_icon(&icon)?);
                 }
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
                 b"on_click" => span.click = Some(handler(given)?),

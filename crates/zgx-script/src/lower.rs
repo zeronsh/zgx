@@ -8854,6 +8854,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         None => d,
                     }
                 };
+                let rare = span.rare.as_deref();
                 let mut out: TextSpan = text_span(render_text(&span.text, &vm));
                 if let Some(c) = color {
                     out = out.text_color(c);
@@ -8879,11 +8880,15 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if let Some(color) = underline_color {
                     out = out.underline_color(color);
                 }
-                if let Some((underlined, color, background)) = hover {
+                if let Some((underlined, color, background, underline_color)) = hover {
                     out = out.hover(zgx::compose::SpanHover {
                         underline: underlined.then(decoration),
                         text_color: color,
                         background,
+                        underline_color,
+                        icon: rare
+                            .and_then(|rare| rare.hover_icon.as_ref())
+                            .map(|icon| span_icon(&vm, &low, icon)),
                     });
                 }
                 if strike {
@@ -8912,7 +8917,6 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         out = out.no_underline();
                     }
                 }
-                let rare = span.rare.as_deref();
                 if let Some((svg, w, h, d)) = rare.and_then(|rare| rare.inline_svg.as_ref())
                     && let Some(svg) = inline_svg_data(svg)
                 {
@@ -8958,32 +8962,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                 }
                 if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
-                    // Tracked: a remote icon shows once it comes.
-                    let data = load_svg(&vm, &low, &icon.src);
-                    // `"currentColor"`: the span's text colour.
-                    let (svg, tint) = match &icon.tint {
-                        Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
-                            (Arc::new(data.current_color()), None)
-                        }
-                        Some(tint) => (data, crate::node::themed_color(tint)),
-                        None => (data, None),
-                    };
-                    out = out.icon(zgx::compose::SpanIcon {
-                        svg,
-                        size: icon.size,
-                        gap: icon.gap,
-                        margin: icon.margin,
-                        dy: icon.dy,
-                        tint,
-                        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
-                        radius: icon.radius,
-                        pad: icon.pad,
-                        align: if icon.baseline {
-                            zgx::compose::IconAlign::Baseline
-                        } else {
-                            zgx::compose::IconAlign::Center
-                        },
-                    });
+                    out = out.icon(span_icon(&vm, &low, icon));
                 }
                 out
             })
@@ -8994,6 +8973,40 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
             spans
         }
     })
+}
+
+/// A span's icon as the paragraph draws it.
+fn span_icon(
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    icon: &crate::node::SpanIcon,
+) -> zgx::compose::SpanIcon {
+    // Tracked: a remote icon shows once it comes.
+    let data = load_svg(vm, low, &icon.src);
+    // `"currentColor"`: the span's text colour.
+    let (svg, tint) = match &icon.tint {
+        Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
+            (Arc::new(data.current_color()), None)
+        }
+        Some(tint) => (data, crate::node::themed_color(tint)),
+        None => (data, None),
+    };
+    zgx::compose::SpanIcon {
+        svg,
+        size: icon.size,
+        gap: icon.gap,
+        margin: icon.margin,
+        dy: icon.dy,
+        tint,
+        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
+        radius: icon.radius,
+        pad: icon.pad,
+        align: if icon.baseline {
+            zgx::compose::IconAlign::Baseline
+        } else {
+            zgx::compose::IconAlign::Center
+        },
+    }
 }
 
 /// The translation and local transform a node's literals set, if any.

@@ -1404,6 +1404,70 @@ fn a_link_span_underlines_under_the_pointer() {
     assert!(!runs(&mut h)[1].1, "back at rest once the pointer leaves");
 }
 
+/// A link span's `hover.icon` replaces its icon under the pointer, and
+/// `hover.underline_color` colours its underline there.
+#[test]
+fn a_link_span_swaps_its_icon_and_darkens_its_underline_under_the_pointer() {
+    use zgx::scene::NodeKind;
+    let mut h = Harness::inline(
+        r##"return ui.column { w = 300, ui.rich { id = "p", wrap = true, text_size = 14, line_height = 20,
+            ui.span { "file", literal = true, on_click = function() end,
+                underline = true, underline_color = "#808080",
+                icon = { code = "<svg viewBox='0 0 24 24'/>", size = 12, gap = 4, align = "baseline" },
+                hover = { underline = true, underline_color = "#000000",
+                    icon = { code = "<svg viewBox='0 0 24 24'/>", size = 56, gap = 4, align = "baseline" } } } } }"##,
+    );
+    h.frames(3);
+    let height = |h: &mut Harness| {
+        let p = h.find("p").unwrap();
+        h.ui.scene.borrow().bounds(p).height
+    };
+    let underline = |h: &mut Harness| {
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![p];
+        while let Some(n) = stack.pop() {
+            if let NodeKind::RichText { text } = scene.kind(n) {
+                return text
+                    .runs()
+                    .iter()
+                    .find_map(|r| r.underline)
+                    .and_then(|d| d.color);
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        None
+    };
+    assert!(height(&mut h) < 30.);
+    assert_eq!(
+        underline(&mut h),
+        Some(zgx::scene::Color(128, 128, 128, 255))
+    );
+    let p = h.find("p").unwrap();
+    let b = h.ui.scene.borrow().bounds(p);
+    let mut over = false;
+    for x in (2..60).step_by(3) {
+        h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+            x: b.x + x as f32,
+            y: b.y + 10.,
+        });
+        h.frames(2);
+        if underline(&mut h) == Some(zgx::scene::Color(0, 0, 0, 255)) {
+            over = true;
+            break;
+        }
+    }
+    assert!(over, "the underline darkens under the pointer");
+    assert!(height(&mut h) > 56., "the 56-point icon stands in");
+    h.ui.dispatch(zgx::input::InputEvent::PointerLeave);
+    h.frames(3);
+    assert!(height(&mut h) < 30.);
+    assert_eq!(
+        underline(&mut h),
+        Some(zgx::scene::Color(128, 128, 128, 255))
+    );
+}
+
 /// `ui.each` in a `scroll_x` lays out across, with the viewport's gap and as
 /// tall as a plain child there.
 #[test]
