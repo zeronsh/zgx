@@ -242,3 +242,35 @@ fn of_two_the_later_is_listed_after() {
     };
     assert!(held_by("one") < held_by("two"), "the later is above");
 }
+
+#[test]
+fn components_in_a_topmost_layer_or_popover_see_the_windows_services() {
+    let mut ui = Ui::new(400., 300.);
+    ui.set_popup_screens(vec![Rect::new(0., 0., 1000., 800.)]);
+    ui.set_topmost_windows(true);
+    let (layer, shown) = (ui.signal(true), ui.signal(true));
+    let seen = Rc::new(Cell::new(0));
+    let (a, b) = (seen.clone(), seen.clone());
+    ui.mount(provide(
+        zgx::frame::FrameClock::new(),
+        column()
+            .child(
+                popover("Card", shown, button().child(text("Open")))
+                    .lazy()
+                    .w(100.)
+                    .h(40.)
+                    .child(component(move |cx| {
+                        let _frames = cx.frames();
+                        a.set(a.get() + 1);
+                        column()
+                    })),
+            )
+            .child(modal("Ghost", layer).topmost().child(component(move |cx| {
+                let _frames = cx.frames();
+                b.set(b.get() + 1);
+                column()
+            }))),
+    ));
+    ui.prepare_frame();
+    assert_eq!(seen.get(), 2, "both asked for the frame clock and got it");
+}

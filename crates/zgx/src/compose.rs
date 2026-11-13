@@ -6540,7 +6540,13 @@ fn open_element(
     // Prepend in reverse so declaration order is preserved even when a primitive
     // constructor (such as an editor) already registered its default handlers.
     if let Some(preview) = rare.as_deref_mut().and_then(|r| r.drag_preview.take()) {
-        crate::compose_drag::mount(ui, root, preview);
+        crate::compose_drag::mount(
+            ui,
+            root,
+            preview,
+            environment.services.clone(),
+            environment.theme.clone(),
+        );
     }
     // A selectable region's own menu (Copy, Select All), or an editor's
     // (Cut, Copy, Paste, Select All), unless it has one.
@@ -9432,8 +9438,20 @@ impl ViewHandle {
 impl Ui {
     /// Mount a declarative tree under the document root. The document owns its lifetime.
     pub fn mount(&mut self, view: View) -> ViewHandle {
+        self.mount_in(view, ServiceScope::new(), None)
+    }
+    /// `mount`, as part of a tree that is mounted: with the services its
+    /// ancestors provide (a frame clock, a task runner) and its theme scope,
+    /// as a drag's preview (a root of its own in the scene) is built with
+    /// what its source's tree gives.
+    pub(crate) fn mount_in(
+        &mut self,
+        view: View,
+        services: ServiceScope,
+        theme: Option<Rc<crate::theme::ThemeScope>>,
+    ) -> ViewHandle {
         let registry = Registry::default();
-        let theme = self.theme().root().clone();
+        let theme = theme.unwrap_or_else(|| self.theme().root().clone());
         // Text shows the theme's body colour, size and family unless a view
         // says otherwise; each text node reads them from its own scope.
         let typography = self.signal(Typography {
@@ -9445,7 +9463,7 @@ impl Ui {
             family: Some(tok::FONT_SANS.into()),
         });
         let environment = Environment {
-            services: ServiceScope::new(),
+            services,
             typography,
             registry: registry.clone(),
             portal: None,
