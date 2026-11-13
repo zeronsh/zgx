@@ -14774,6 +14774,10 @@ impl GpuRenderer {
                 stats.image_uploads += 1;
             }
             let canvas::Placement { rect, uv, .. } = placement;
+            // (Uploaded ahead of being shown: a backdrop's piece.)
+            if rect[2] <= 0. || rect[3] <= 0. {
+                continue;
+            }
             let (image, uv) = match slot {
                 Some(slot) => (TILE_ATLAS, atlas_uv(slot, uv)),
                 None => (raster.id, uv),

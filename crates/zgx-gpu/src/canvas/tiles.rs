@@ -21,7 +21,7 @@ const TILE: i32 = 256;
 pub const TILE_SIZE: (u32, u32) = (TILE as u32, TILE as u32);
 /// What a tile is drawn with beyond its edges, and cut away.
 const MARGIN: i32 = 16;
-const TILE_BYTES: usize = (TILE * TILE * 4) as usize;
+pub(super) const TILE_BYTES: usize = (TILE * TILE * 4) as usize;
 /// The most tiles' textures a frame uploads, whatever the time left.
 const UPLOADS_MOST: usize = 12;
 /// What a canvas's tiles take at most, unless three views' worth is more.
@@ -68,6 +68,8 @@ pub(super) struct Pyramid {
     /// shown where its level's tiles aren't yet, until unshown a while
     /// (`textured`). Nothing is uploaded for it.
     stand_in: Option<StandIn>,
+    /// Its backdrop's pieces uploaded (`pieces`): kept while it is the same.
+    pinned: std::collections::HashSet<u64>,
 }
 /// A promoted raster standing in for its level's tiles: drawn under `view`,
 /// `region` of its device pixels, its texture keyed by `id`.
@@ -220,6 +222,29 @@ fn div_floor(a: i32, b: i32) -> i32 {
 fn div_ceil(a: i32, b: i32) -> i32 {
     -(-a).div_euclid(b)
 }
+/// `image` (a backdrop) cut into tiles, each with the region of it it holds;
+/// those at its edges padded with nothing.
+pub(super) fn pieces(image: &ImageData) -> Vec<([i32; 4], Arc<ImageData>)> {
+    let (w, h) = (image.width() as i32, image.height() as i32);
+    let mut out = Vec::new();
+    for j in 0..div_ceil(h, TILE) {
+        for i in 0..div_ceil(w, TILE) {
+            let at = region((i, j));
+            let both = [at[0], at[1], at[2].min(w), at[3].min(h)];
+            let mut pixels = vec![0u8; TILE_BYTES];
+            let len = (both[2] - both[0]) as usize * 4;
+            for y in both[1]..both[3] {
+                let src = (y as usize * w as usize + both[0] as usize) * 4;
+                let dst = (y - at[1]) as usize * TILE as usize * 4;
+                pixels[dst..dst + len].copy_from_slice(&image.pixels()[src..src + len]);
+            }
+            if let Ok(piece) = ImageData::new(TILE as u32, TILE as u32, pixels) {
+                out.push((at, Arc::new(piece)));
+            }
+        }
+    }
+    out
+}
 /// A tile's region in its level's device pixels.
 fn region((i, j): (i32, i32)) -> [i32; 4] {
     [i * TILE, j * TILE, (i + 1) * TILE, (j + 1) * TILE]
@@ -275,6 +300,7 @@ impl Pyramid {
         (self.levels.iter())
             .flat_map(|level| level.tiles.values().map(|tile| tile.image.id()))
             .chain(self.stand_in.map(|s| s.id))
+            .chain(self.pinned.iter().copied())
     }
     /// Where its stand-in shows under `view` in a box at `scale`, if it
     /// covers all of `cell` (in the box's device pixels).
@@ -476,6 +502,7 @@ impl CanvasCache {
             // (Its texture kept while it is shown, and a while after.)
             textured: stand_in.iter().map(|s| (s.id, 0)).collect(),
             stand_in,
+            pinned: Default::default(),
         };
         self.backdrops.entry(node).or_default();
         self.pyramids.insert(node, pyramid);
@@ -544,6 +571,7 @@ impl CanvasCache {
             if let Some(s) = p.stand_in.take() {
                 p.textured.remove(&s.id);
             }
+            p.pinned.clear();
             p.levels.clear();
             p.bytes = 0;
             p.failed.clear();
@@ -740,13 +768,19 @@ impl CanvasCache {
         // What shows, cell by cell: the level's tile, else another's, else
         // the backdrop.
         let backdrop = (self.backdrops.get(&node))
-            .and_then(|b| b.made.as_ref())
-            .filter(|m| m.3 == scale)
-            .map(|(drawn, panned, image, _)| (*drawn, panned.region, image.clone()));
+            .filter(|b| b.made.as_ref().is_some_and(|m| m.3 == scale))
+            .map(|b| (b.made.as_ref().expect("made").0, b.pieces.clone()));
         if backdrop.is_some()
             && let Some(b) = self.backdrops.get_mut(&node)
         {
             b.used = clock;
+        }
+        // (Pieces of a backdrop before were let go when it was replaced.)
+        if !p.pinned.is_empty() {
+            let current: std::collections::HashSet<u64> = (backdrop.iter())
+                .flat_map(|(_, pieces)| pieces.iter().map(|p| p.1.id()))
+                .collect();
+            p.pinned.retain(|id| current.contains(id));
         }
         let mut others: Vec<usize> = (0..p.levels.len())
             .filter(|at| Some(*at) != current)
@@ -885,18 +919,29 @@ impl CanvasCache {
                 covered = true;
                 break;
             }
-            if !covered
-                && let Some((drawn, region, image)) = &backdrop
-                && let Some(placement) = scaled_part(*region, *drawn, view, scale, c)
-            {
-                p.shown.push(image.id());
-                out.push((
-                    Raster {
-                        id: image.id(),
-                        pixels: Some(image.clone()),
-                    },
-                    placement,
-                ));
+            // Else the backdrop's pieces, if uploaded (or all can be now).
+            if !covered && let Some((drawn, pieces)) = &backdrop {
+                let parts: Vec<(&Arc<ImageData>, Placement)> = (pieces.iter())
+                    .filter_map(|(r, image)| {
+                        scaled_part(*r, *drawn, view, scale, c).map(|placed| (image, placed))
+                    })
+                    .collect();
+                let new = (parts.iter())
+                    .filter(|(image, _)| !p.pinned.contains(&image.id()))
+                    .count();
+                if new == 0 || fresh + new <= most {
+                    for (image, placement) in parts {
+                        fresh += usize::from(p.pinned.insert(image.id()));
+                        p.shown.push(image.id());
+                        out.push((
+                            Raster {
+                                id: image.id(),
+                                pixels: Some(image.clone()),
+                            },
+                            placement,
+                        ));
+                    }
+                }
             }
         }
         // Those used least go past the budget, but none shown now.
@@ -925,14 +970,41 @@ impl CanvasCache {
                 keep
             });
         }
+        // The backdrop's pieces not uploaded yet, with what the frame has
+        // left (not drawn: `rect` empty), so a zoom out finds them there.
+        let mut unloaded = false;
+        if let Some((_, pieces)) = &backdrop {
+            for (_, image) in pieces {
+                if p.pinned.contains(&image.id()) {
+                    continue;
+                }
+                if fresh >= most {
+                    unloaded = true;
+                    break;
+                }
+                fresh += 1;
+                p.pinned.insert(image.id());
+                out.push((
+                    Raster {
+                        id: image.id(),
+                        pixels: Some(image.clone()),
+                    },
+                    Placement {
+                        rect: [0.; 4],
+                        uv: [0.; 4],
+                        scaled: false,
+                    },
+                ));
+            }
+        }
         // Tiles left for the next frame's uploads: it comes at once.
-        if fresh >= most && awaiting {
+        if fresh >= most && (awaiting || unloaded) {
             wake_at(now);
         }
-        // Textures of tiles unshown a while go (their pixels stay).
-        let backdrop_id = backdrop.as_ref().map(|b| b.2.id());
+        // Textures of tiles unshown a while go (their pixels stay; a
+        // backdrop's pieces stay uploaded).
         for id in &p.shown {
-            if Some(*id) != backdrop_id {
+            if !p.pinned.contains(id) {
                 p.textured.insert(*id, 0);
             }
         }

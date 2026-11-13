@@ -212,11 +212,23 @@ struct Backdrop {
     /// The view it was drawn under, where it lies, and its pixels, at the
     /// box's scale.
     made: Option<(zgx::scene::CanvasView, Panned, Arc<ImageData>, f32)>,
+    /// The same pixels cut into tiles (`tiles::pieces`), for a canvas
+    /// drawn in tiles: uploaded a few a frame once made, not at once when
+    /// first shown.
+    pieces: Vec<([i32; 4], Arc<ImageData>)>,
     /// One being made off the frame: of which drawing, and its result.
     job: Option<BackdropJob>,
     used: u64,
 }
-type MadeBackdrop = Result<(zgx::scene::CanvasView, Panned, ImageData), GpuError>;
+type MadeBackdrop = Result<
+    (
+        zgx::scene::CanvasView,
+        Panned,
+        ImageData,
+        Vec<([i32; 4], Arc<ImageData>)>,
+    ),
+    GpuError,
+>;
 struct BackdropJob {
     drawing: Weak<Canvas>,
     scale: f32,
@@ -231,7 +243,11 @@ impl Drop for BackdropJob {
 }
 impl Backdrop {
     fn bytes(&self) -> usize {
-        self.made.as_ref().map_or(0, |m| m.2.pixels().len())
+        self.made.as_ref().map_or(0, |m| m.2.pixels().len()) + self.pieces.len() * tiles::TILE_BYTES
+    }
+    /// Its images' ids, the whole and its pieces.
+    fn ids(&self) -> impl Iterator<Item = u64> + '_ {
+        (self.made.iter().map(|m| m.2.id())).chain(self.pieces.iter().map(|p| p.1.id()))
     }
 }
 /// Whether the raster this thread is making is superseded: checked every
@@ -1128,13 +1144,13 @@ impl CanvasCache {
             .and_then(|job| job.done.lock().unwrap_or_else(|p| p.into_inner()).take());
         if let Some(made) = landed {
             let job = backdrop.job.take().expect("in flight");
-            if let Ok((drawn, panned, image)) = made {
-                let old = backdrop
-                    .made
-                    .replace((drawn, panned, Arc::new(image), job.scale));
-                if let Some(old) = old.filter(|_| self.pyramids.contains_key(&node)) {
-                    self.retired.push(old.2.id());
+            if let Ok((drawn, panned, image, pieces)) = made {
+                // (The renderer lets go of what it holds of the one before.)
+                if self.pyramids.contains_key(&node) {
+                    self.retired.extend(backdrop.ids());
                 }
+                backdrop.made = Some((drawn, panned, Arc::new(image), job.scale));
+                backdrop.pieces = pieces;
                 backdrop.drawing = job.drawing.clone();
                 backdrop.used = self.clock;
                 // Within their budget: the least used others go.
@@ -1149,9 +1165,9 @@ impl CanvasCache {
                         break;
                     };
                     total -= oldest.bytes();
-                    if let Some(old) = oldest.made.take() {
-                        self.retired.push(old.2.id());
-                    }
+                    self.retired.extend(oldest.ids());
+                    oldest.made = None;
+                    oldest.pieces = Vec::new();
                 }
             }
         }
@@ -1227,8 +1243,11 @@ impl CanvasCache {
             };
             SUPERSEDED_BY.with(|by| *by.borrow_mut() = Some(stop.clone()));
             TEXT_LEFT_BELOW.with(|below| below.set(4.));
-            let made = rasterize_region(&drawing, drawn, scale, panned.region, None, text)
-                .map(|image| (drawn, panned, image));
+            let made =
+                rasterize_region(&drawing, drawn, scale, panned.region, None, text).map(|image| {
+                    let pieces = tiles::pieces(&image);
+                    (drawn, panned, image, pieces)
+                });
             TEXT_LEFT_BELOW.with(|below| below.set(0.));
             SUPERSEDED_BY.with(|by| *by.borrow_mut() = None);
             if stopped() {

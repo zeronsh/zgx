@@ -409,3 +409,100 @@ fn a_frame_uploads_what_its_time_allows_and_never_more_than_a_dozen() {
     cache.tile_uploaded(9, Duration::from_millis(3));
     assert!(cache.tile_uploads(9) <= 2);
 }
+#[test]
+fn a_backdrop_cut_into_tiles_is_its_pixels_and_uploads_ahead_of_a_zoom_out() {
+    let canvas = board(160);
+    let text = SharedText::default();
+    let image = rasterize_region(
+        &canvas,
+        view(0., 0., 0.3),
+        1.,
+        [0, 0, 600, 300],
+        None,
+        &text,
+    )
+    .unwrap();
+    let cut = pieces(&image);
+    assert_eq!(cut.len(), 3 * 2);
+    for (at, piece) in &cut {
+        for y in at[1]..at[3] {
+            for x in at[0]..at[2] {
+                let p = ((y - at[1]) * TILE + x - at[0]) as usize * 4;
+                let got = &piece.pixels()[p..p + 4];
+                match x < 600 && y < 300 {
+                    true => {
+                        let i = (y * 600 + x) as usize * 4;
+                        assert_eq!(got, &image.pixels()[i..i + 4]);
+                    }
+                    false => assert_eq!(got, &[0; 4], "nothing past its edge"),
+                }
+            }
+        }
+    }
+    // Zoomed: a backdrop is made; once it lands its pieces upload, a few a
+    // frame, before a zoom out shows them.
+    let node = node();
+    let mut cache = CanvasCache::default();
+    let first = view(-10., -10., 1.);
+    cache
+        .get_panned(node, &canvas, first, W, H, 1., false)
+        .unwrap();
+    let zoomed = view(-300.25, -180.5, 2.);
+    cache
+        .get_panned(node, &canvas, zoomed, W, H, 1., false)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut frame = 1;
+    loop {
+        let mut out = Vec::new();
+        (cache.get_tiles(node, &canvas, zoomed, W, H, 1., false, frame, &mut out)).unwrap();
+        frame += 1;
+        let ahead = out
+            .iter()
+            .filter(|(_, p)| p.rect[2] * p.rect[3] == 0.)
+            .count();
+        assert!(ahead <= UPLOADS_MOST);
+        let pieces = cache.backdrops[&node].pieces.len();
+        if pieces > 0 && cache.pyramids[&node].pinned.len() == pieces {
+            break;
+        }
+        assert!(Instant::now() < deadline, "its backdrop lands and uploads");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // (The raster it was promoted from long unshown: no stand-in.)
+    settled(&mut cache, node, &canvas, zoomed, 1.);
+    for _ in 0..=TEXTURE_FRAMES {
+        (cache.get_tiles(
+            node,
+            &canvas,
+            zoomed,
+            W,
+            H,
+            1.,
+            false,
+            frame,
+            &mut Vec::new(),
+        ))
+        .unwrap();
+        frame += 1;
+    }
+    let pinned = cache.pyramids[&node].pinned.clone();
+    let mut out = Vec::new();
+    (cache.get_tiles(
+        node,
+        &canvas,
+        view(40., 30., 0.3),
+        W,
+        H,
+        1.,
+        false,
+        frame,
+        &mut out,
+    ))
+    .unwrap();
+    let shown: Vec<u64> = out.iter().map(|(r, _)| r.id).collect();
+    assert!(
+        !shown.is_empty() && shown.iter().all(|id| pinned.contains(id)),
+        "the backdrop's pieces, uploaded"
+    );
+}
