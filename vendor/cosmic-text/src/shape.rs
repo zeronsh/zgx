@@ -318,8 +318,11 @@ fn shape_fallback(
             glyph_attrs = attrs_list.get_span(start_glyph);
             &glyph_attrs
         };
-        let x_advance = pos.x_advance as f32 / font_scale
-            + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+        let mut x_advance = pos.x_advance as f32 / font_scale;
+        if cfg!(target_os = "macos") && attrs.optical > 0 && font.is_color() {
+            x_advance *= apple_emoji_advance(attrs.optical) / f32::from(attrs.optical);
+        }
+        x_advance += attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
         let y_advance = pos.y_advance as f32 / font_scale;
         let x_offset = pos.x_offset as f32 / font_scale;
         let y_offset = pos.y_offset as f32 / font_scale;
@@ -1166,6 +1169,18 @@ fn shape_skip(
                 }
             }
         }
+    }
+}
+
+/// zgx: the advance, in pixels, CoreText gives an Apple Color Emoji glyph at
+/// a font size (browsers on macOS lay out with it): about 1.25 em at small
+/// sizes, easing to 1 em from 25 px.
+fn apple_emoji_advance(size: u16) -> f32 {
+    const SMALL: [u8; 19] = [8, 9, 10, 11, 13, 14, 15, 16, 18, 19, 20, 21, 21, 22, 22, 23, 23, 24, 24];
+    match size {
+        0..=5 => (f32::from(size) * 1.25).round(),
+        6..=24 => f32::from(SMALL[usize::from(size) - 6]),
+        _ => f32::from(size),
     }
 }
 

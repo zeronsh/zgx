@@ -1174,6 +1174,7 @@ return ui.column { w = 300, h = 200,
     let tree = h.tree();
     assert!(tree.contains("selected"), "{tree}");
     assert!(tree.contains("current"), "{tree}");
+    assert!(tree.contains("level=3"), "{tree}");
     h.host.set_state("page", V::Str("".into())).unwrap();
     h.frames(3);
     assert_eq!(read(&h).unwrap().2, None);

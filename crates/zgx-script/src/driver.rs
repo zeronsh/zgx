@@ -913,6 +913,8 @@ pub struct Line {
     pub selected: Option<bool>,
     /// It is the current one (`aria-current`).
     pub current: bool,
+    /// Its heading level or tree depth (`aria-level`).
+    pub level: Option<usize>,
 }
 
 /// One node as [`tree_lines`] shows it: a [`Line`], and more that may grow
@@ -986,6 +988,7 @@ pub fn tree_lines(
                         checked: s.and_then(|s| s.checked),
                         selected: s.and_then(|s| s.selected),
                         current: s.is_some_and(|s| s.current.is_some()),
+                        level: s.and_then(|s| s.level),
                     },
                     hidden: !shows(&scene, node),
                 });
@@ -1107,6 +1110,9 @@ fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
         if line.current {
             out.push_str(" current");
         }
+        if let Some(level) = line.level {
+            let _ = write!(out, " level={level}");
+        }
         out.push('\n');
     }
     if hidden > 0 {
@@ -1172,6 +1178,9 @@ pub fn node(
         }
         if !flags.is_empty() {
             out.push(("state".into(), flags.join(" ")));
+        }
+        if let Some(level) = s.level {
+            out.push(("level".into(), level.to_string()));
         }
         if let Some(popup) = s.has_popup {
             out.push(("haspopup".into(), popup_name(popup).into()));
