@@ -11,6 +11,8 @@ use zgx::{
     image::ImageData,
     scene::{NodeId, NodeKind, Scene},
 };
+mod tiles;
+pub use tiles::TILE_SIZE;
 const BUDGET: usize = 32 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1024;
 struct Entry {
@@ -510,8 +512,16 @@ fn panned_region(
         ]),
         (a, b) => a.or(b),
     };
-    // Two pixels more each way, for antialiasing.
-    let painted = bounds.map_or([0; 4], |[x0, y0, x1, y1]| {
+    let painted = device_bounds(bounds, view, scale);
+    Panned {
+        region: intersect([0, 0, size[0], size[1]], painted),
+        painted,
+    }
+}
+/// `bounds` (in a drawing's points) in a box's device pixels under `view`
+/// at `scale`, two pixels more each way for antialiasing.
+fn device_bounds(bounds: Option<[f32; 4]>, view: zgx::scene::CanvasView, scale: f32) -> [i32; 4] {
+    bounds.map_or([0; 4], |[x0, y0, x1, y1]| {
         let at = |v: f32, offset: f32| ((v * view.scale + offset) * scale) as f64;
         let clamp = |v: f64| v.clamp(i32::MIN as f64 / 2., i32::MAX as f64 / 2.) as i32;
         [
@@ -520,11 +530,7 @@ fn panned_region(
             clamp(at(x1, view.x).ceil() + 2.),
             clamp(at(y1, view.y).ceil() + 2.),
         ]
-    });
-    Panned {
-        region: intersect([0, 0, size[0], size[1]], painted),
-        painted,
-    }
+    })
 }
 fn is_empty([x0, y0, x1, y1]: [i32; 4]) -> bool {
     x0 >= x1 || y0 >= y1
@@ -709,6 +715,11 @@ pub struct CanvasCache {
     rasterizations: u64,
     /// What canvases drawing their text into their raster draw it with.
     text: SharedText,
+    /// Canvases drawn in tiles, once panned past their raster or zoomed
+    /// (`get_tiles`), by node.
+    pyramids: HashMap<NodeId, tiles::Pyramid>,
+    /// Images it no longer draws, whose textures go (`take_retired`).
+    retired: Vec<u64>,
 }
 impl CanvasCache {
     /// Draw the text of canvases that draw it into their raster
@@ -725,6 +736,9 @@ impl CanvasCache {
         self.entries.retain(|id, _| draws_raster(scene, *id));
         self.zooms.retain(|id, _| draws_raster(scene, *id));
         self.backdrops.retain(|id, _| draws_raster(scene, *id));
+        if !self.pyramids.is_empty() {
+            self.retain_pyramids(|id| draws_raster(scene, id));
+        }
         self.bytes = self.entries.values().map(|e| e.bytes).sum();
     }
     /// Whether it holds no raster.
@@ -746,11 +760,15 @@ impl CanvasCache {
         self.entries.retain(|id, _| keep(*id));
         self.zooms.retain(|id, _| keep(*id));
         self.backdrops.retain(|id, _| keep(*id));
+        if !self.pyramids.is_empty() {
+            self.retain_pyramids(&keep);
+        }
         self.bytes = self.entries.values().map(|e| e.bytes).sum();
     }
     /// The image ids of the rasters it holds.
     pub fn image_ids(&self) -> impl Iterator<Item = u64> + '_ {
-        self.entries.values().map(|e| e.id)
+        (self.entries.values().map(|e| e.id))
+            .chain(self.pyramids.values().flat_map(tiles::Pyramid::shown))
     }
     /// `node`'s raster is on the GPU: its pixels need not stay in memory.
     pub fn uploaded(&mut self, node: NodeId) {
@@ -767,6 +785,9 @@ impl CanvasCache {
         self.zooms.remove(&node);
         if !self.backdrops.is_empty() {
             self.backdrops.remove(&node);
+        }
+        if !self.pyramids.is_empty() {
+            self.retain_pyramids(|id| id != node);
         }
         if let Some(entry) = self.entries.remove(&node) {
             self.bytes -= entry.bytes;
@@ -939,6 +960,10 @@ impl CanvasCache {
                 entry.used = self.clock;
                 return Ok((entry.raster(), placement));
             }
+            // Panned past it: drawn in tiles from now on, off the frame.
+            if !wait {
+                return Ok(self.promote(node, canvas));
+            }
             kept = entry
                 .pixels
                 .clone()
@@ -958,6 +983,10 @@ impl CanvasCache {
             && entry.scale == scale
             && entry.canvas.upgrade().is_some_and(|old| same(&old))
         {
+            // Zoomed: drawn in tiles from now on, off the frame.
+            if tiles::ENABLED {
+                return Ok(self.promote(node, canvas));
+            }
             entry.used = self.clock;
             let shown = (
                 entry.raster(),
@@ -1097,7 +1126,12 @@ impl CanvasCache {
         if let Some(made) = landed {
             let job = backdrop.job.take().expect("in flight");
             if let Ok((drawn, panned, image)) = made {
-                backdrop.made = Some((drawn, panned, Arc::new(image), job.scale));
+                let old = backdrop
+                    .made
+                    .replace((drawn, panned, Arc::new(image), job.scale));
+                if let Some(old) = old.filter(|_| self.pyramids.contains_key(&node)) {
+                    self.retired.push(old.2.id());
+                }
                 backdrop.drawing = job.drawing.clone();
                 backdrop.used = self.clock;
                 // Within their budget: the least used others go.
@@ -1112,7 +1146,9 @@ impl CanvasCache {
                         break;
                     };
                     total -= oldest.bytes();
-                    oldest.made = None;
+                    if let Some(old) = oldest.made.take() {
+                        self.retired.push(old.2.id());
+                    }
                 }
             }
         }

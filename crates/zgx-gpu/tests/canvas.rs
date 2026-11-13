@@ -874,8 +874,9 @@ fn clips_over_all_or_none_of_the_raster_draw_as_their_masks_do() {
 }
 
 /// Zoomed, a window's canvas shows the raster of the zoom before, scaled,
-/// rasterizing nothing on the frame; the new zoom's raster is made off it,
-/// the window woken, and the next frame shows it, as drawn under the view.
+/// rasterizing nothing on the frame; the new zoom's tiles are made off it,
+/// the window woken as they land, and it then shows the zoom as drawn
+/// under the view.
 #[test]
 fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -908,12 +909,11 @@ fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
     let start = at(-10., -6., 1.5);
     assert_eq!(show(&mut gpu, start).canvas_rasterizations, 1);
     assert!(!gpu.take_images_awaited());
-    // Zoomed by a third about the box's middle: the first raster, scaled.
+    // Zoomed by a third about the box's middle: the first raster, scaled
+    // (cut into tiles), nothing rasterized on the frame.
     let zoomed = at(-40., -20., 2.);
-    let woken = WOKEN.load(Ordering::SeqCst);
     let stats = show(&mut gpu, zoomed);
     assert_eq!(stats.canvas_rasterizations, 0);
-    assert_eq!(stats.image_uploads, 0);
     let scaled = gpu.readback().unwrap();
     let drawn = zgx_gpu::canvas::rasterize_viewed(&board, zoomed, 200., 120., 1.5).unwrap();
     // Close to it, but for what scaling blurs.
@@ -921,74 +921,100 @@ fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
         .filter(|i| (0..3).all(|c| scaled[i * 4 + c].abs_diff(drawn.pixels()[i * 4 + c]) < 48))
         .count();
     assert!(near > 300 * 180 * 9 / 10, "{near} pixels near");
-    // Made off the frame: the window is woken and draws it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while WOKEN.load(Ordering::SeqCst) == woken {
-        assert!(std::time::Instant::now() < deadline, "never woken");
-        std::thread::sleep(std::time::Duration::from_millis(1));
+    // Its tiles made off the frame: the window is woken, and draws again
+    // until none is awaited; then it shows the zoom as drawn under it (but
+    // for antialiasing rounded the other way here and there).
+    // Drawn again, as a host does once woken, while the frame before
+    // waited on tiles: what then shows, and how many frames it took.
+    fn settled(
+        gpu: &mut GpuRenderer,
+        show: &mut impl FnMut(&mut GpuRenderer, CanvasView) -> zgx_gpu::GpuStats,
+        view: CanvasView,
+    ) -> (Vec<u8>, usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut frames = 0;
+        while gpu.images_decoded() {
+            assert!(std::time::Instant::now() < deadline, "never settled");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert_eq!(
+                show(gpu, view).canvas_rasterizations,
+                0,
+                "none on the frame"
+            );
+            frames += 1;
+        }
+        (gpu.readback().unwrap(), frames)
     }
-    assert!(gpu.images_decoded());
-    // The view as it was: the scene damages nothing, the renderer all.
-    let stats = show(&mut gpu, zoomed);
-    assert_eq!(stats.canvas_rasterizations, 1, "the new zoom's, landed");
-    assert_eq!(stats.image_uploads, 1);
-    assert!(!gpu.take_images_awaited());
-    let shown = gpu.readback().unwrap();
-    for i in 0..300 * 180 {
-        assert_eq!(
-            shown[i * 4..i * 4 + 3],
-            drawn.pixels()[i * 4..i * 4 + 3],
-            "pixel {i}"
-        );
-    }
-    // And pans at it as any: what a pan shows anew, then nothing.
-    assert_eq!(show(&mut gpu, at(-46., -26., 2.)).canvas_rasterizations, 1);
+    // Alike but on drawn edges, where antialiasing depends a little on
+    // where a tile starts (and a curve is cut where it leaves one): each
+    // pixel by no more than the drawing changes within two pixels of it.
+    let same = |shown: &[u8], drawn: &[u8]| {
+        let at = |image: &[u8], x: i32, y: i32, c: usize| image[(y * 300 + x) as usize * 4 + c];
+        let mut off = 0;
+        for y in 0..180 {
+            for x in 0..300 {
+                let d = (0..3)
+                    .map(|c| at(shown, x, y, c).abs_diff(at(drawn, x, y, c)))
+                    .max();
+                let d = d.unwrap();
+                if d <= 2 {
+                    continue;
+                }
+                off += 1;
+                let contrast = (y - 2..=y + 2)
+                    .flat_map(|ny| (x - 2..=x + 2).map(move |nx| (nx, ny)))
+                    .filter(|(nx, ny)| (0..300).contains(nx) && (0..180).contains(ny))
+                    .flat_map(|(nx, ny)| (0..3).map(move |c| (nx, ny, c)))
+                    .map(|(nx, ny, c)| at(drawn, nx, ny, c).abs_diff(at(drawn, x, y, c)))
+                    .max()
+                    .unwrap();
+                // (The drawing's own raster is cut at the box's edge too.)
+                let border = x < 2 || y < 2 || x >= 298 || y >= 178;
+                if d > contrast && !border {
+                    return false;
+                }
+            }
+        }
+        off * 20 < 300 * 180
+    };
+    let (shown, frames) = settled(&mut gpu, &mut show, zoomed);
+    assert!(frames > 0, "its tiles awaited");
+    assert!(WOKEN.load(Ordering::SeqCst) > 0, "woken as they land");
+    assert!(
+        same(&shown, drawn.pixels()),
+        "shown as drawn under the zoom"
+    );
+    // And pans at it as any: what a pan shows anew is made off the frame,
+    // and what it showed before shows again at once.
+    let panned = at(-46., -26., 2.);
+    assert_eq!(show(&mut gpu, panned).canvas_rasterizations, 0);
+    let (shown_panned, _) = settled(&mut gpu, &mut show, panned);
+    let drawn_panned = zgx_gpu::canvas::rasterize_viewed(&board, panned, 200., 120., 1.5).unwrap();
+    assert!(
+        same(&shown_panned, drawn_panned.pixels()),
+        "shown as drawn under the pan"
+    );
     assert_eq!(show(&mut gpu, zoomed).canvas_rasterizations, 0);
     assert!(!gpu.take_images_awaited());
-    // Zoomed, it keeps a backdrop (all of the board, fitted), made off the
-    // frame after the zoom's raster.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while WOKEN.load(Ordering::SeqCst) < woken + 2 {
-        assert!(std::time::Instant::now() < deadline, "no backdrop");
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    // Zoomed on before the zoom held still: the first's raster is
-    // superseded, the last's alone made and shown.
+    // Zoomed on before the zoom held still: the last zoom's tiles are made
+    // and shown.
     let (on, last) = (at(-60., -30., 2.4), at(-70., -36., 2.6));
-    let woken = WOKEN.load(Ordering::SeqCst);
     assert_eq!(show(&mut gpu, on).canvas_rasterizations, 0);
     assert!(gpu.take_images_awaited());
     assert_eq!(show(&mut gpu, last).canvas_rasterizations, 0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while WOKEN.load(Ordering::SeqCst) == woken {
-        assert!(std::time::Instant::now() < deadline, "never woken");
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    assert!(gpu.images_decoded());
-    let stats = show(&mut gpu, last);
-    assert_eq!(stats.canvas_rasterizations, 1);
-    assert!(!gpu.take_images_awaited(), "the last zoom's raster, landed");
     let drawn = zgx_gpu::canvas::rasterize_viewed(&board, last, 200., 120., 1.5).unwrap();
-    let shown_last = gpu.readback().unwrap();
+    let (shown_last, frames) = settled(&mut gpu, &mut show, last);
+    assert!(frames > 0, "its tiles awaited");
     assert!(
-        (0..300 * 180).all(|i| shown_last[i * 4..i * 4 + 3] == drawn.pixels()[i * 4..i * 4 + 3]),
+        same(&shown_last, drawn.pixels()),
         "shown as drawn under the last view"
     );
-    assert_eq!(
-        WOKEN.load(Ordering::SeqCst),
-        woken + 1,
-        "woken once: the first never landed"
-    );
-    // Zoomed out far: the raster before, scaled, would show a corner of
-    // the board; its backdrop shows all of it (blurred) until the zoom's
-    // own raster lands.
+    // Zoomed out far: the zoom before, scaled, would show a corner of the
+    // board; its backdrop shows all of it (blurred) until the zoom's own
+    // tiles land.
     let out = at(40., 30., 0.3);
     let stats = show(&mut gpu, out);
-    assert_eq!(
-        (stats.canvas_rasterizations, stats.image_uploads),
-        (0, 1),
-        "the backdrop's"
-    );
+    assert_eq!(stats.canvas_rasterizations, 0);
     assert!(gpu.take_images_awaited());
     let backdrop = gpu.readback().unwrap();
     let drawn = zgx_gpu::canvas::rasterize_viewed(&board, out, 200., 120., 1.5).unwrap();
@@ -1002,7 +1028,7 @@ fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
     assert_eq!(show(&mut waits, start).canvas_rasterizations, 1);
     assert_eq!(show(&mut waits, zoomed).canvas_rasterizations, 1);
     assert!(!waits.take_images_awaited());
-    assert_eq!(waits.readback().unwrap(), shown);
+    assert!(same(&waits.readback().unwrap(), &shown));
 }
 
 /// A filled area under a chart's line, its top chain jagged, in a gradient
