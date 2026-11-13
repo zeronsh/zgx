@@ -1230,6 +1230,12 @@ declare extern type Element with
 	-- How far a scroll view or list is scrolled along its axis and how far it
 	-- can go, in points: `at_start` and `at_end` say whether it can still
 	-- scroll up or down (left or right). Nil for anything else.
+	-- An editor's atoms (see a textarea's `atoms`): `label` made an atom at
+	-- the caret, over the selection, or over `replace`'s characters; one step
+	-- of undo, the caret after it. Its id, or nil for elements that are not
+	-- editors.
+	function insert_atom(self, label: string, options: InsertAtomOptions?): string?
+	function atoms(self): { AtomItem }?
 	function scroll_info(self): { offset: number, range: number, at_start: boolean, at_end: boolean }?
 	function has_class(self, class: string): boolean
 	-- An input's selection, in characters (Unicode code points from 0, as
@@ -9279,6 +9285,40 @@ export type InputProps = {
 	-- The first line in view, from 1, whenever it changes: an outline following
 	-- the text.
 	on_top_line: ((line: number) -> ())?,
+	-- Its atoms (chips): ranges of the text that edit as one unit, `{ id,
+	-- from, to, data?, style? }` each, `from` and `to` in characters from 0
+	-- (half-open), by `from`. Two-way, as `value` is: the editor writes it as
+	-- they are made, lost or moved, and setting it restores them (a draft's;
+	-- set the text first). The label stays in the text.
+	atoms: State<{ AtomItem }>?,
+	-- Told after atoms are made, lost or moved (an edit, an undo): what was
+	-- added and removed (a removed one with its `label` and the range it had),
+	-- all of them, and why: "edit", "undo", "redo" or "set".
+	on_atoms: ((change: AtomChange) -> ())?,
+	-- The wash behind atoms that have none of their own (`style.bg`).
+	atom_style: { bg: Color? }?,
+}
+export type AtomItem = {
+	id: string?,
+	from: number,
+	to: number,
+	data: any?,
+	style: { bg: string? }?,
+	-- Only on a removed atom: the text it had.
+	label: string?,
+}
+export type AtomChange = {
+	reason: "edit" | "undo" | "redo" | "set",
+	atoms: { AtomItem },
+	added: { AtomItem },
+	removed: { AtomItem },
+}
+export type InsertAtomOptions = {
+	id: string?,
+	data: any?,
+	style: { bg: string? }?,
+	-- The characters it takes the place of (the `@que` typed to ask for it).
+	replace: { from: number, to: number }?,
 }
 -- `value` from 0 to 1, or nil: indeterminate (work of unknown size), a
 -- stretch of the bar sweeping across.

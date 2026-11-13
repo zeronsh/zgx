@@ -1707,6 +1707,13 @@ pub(crate) struct CodeProps {
     /// `on_top_line = function(line)`: the first line in view, whenever it
     /// changes.
     pub on_top_line: Option<Function>,
+    /// `atoms = state`: its atoms, `{ id, from, to, data?, style? }` each,
+    /// followed and kept (`atoms.rs`).
+    pub atoms: Option<zgx::reactive::Signal<Value>>,
+    /// `on_atoms = function(change)`: told as atoms are made, lost or moved.
+    pub on_atoms: Option<Function>,
+    /// `atom_style = { bg }`: the wash behind atoms with none of their own.
+    pub atom_style: Option<Source>,
     /// `find = { query, case, current, limit, color, current_color }`: a
     /// search's matches marked behind the text, found where the text is
     /// held (no list of them made in the script).
@@ -3761,6 +3768,9 @@ const WIDGET_FIELDS: &[&str] = &[
     "tab",
     "on_caret",
     "on_top_line",
+    "atoms",
+    "on_atoms",
+    "atom_style",
     "animate",
     "size",
     "vertical",
@@ -5920,6 +5930,20 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         let tab = table.raw_get::<Option<String>>("tab")?;
                         let on_caret = table.raw_get::<Option<Function>>("on_caret")?;
                         let on_top_line = table.raw_get::<Option<Function>>("on_top_line")?;
+                        let atoms = match table.raw_get::<mlua::Value>("atoms")? {
+                            mlua::Value::Nil => None,
+                            v => Some(state_of(&v).ok_or_else(|| {
+                                mlua::Error::runtime("a textarea's `atoms` must be a ui.state")
+                            })?),
+                        };
+                        let on_atoms = table.raw_get::<Option<Function>>("on_atoms")?;
+                        let atom_style = match table.raw_get::<Option<Table>>("atom_style")? {
+                            None => None,
+                            Some(style) => match style.raw_get::<mlua::Value>("bg")? {
+                                mlua::Value::Nil => None,
+                                value => Some(source(lua, Ty::Color, "bg", value)?),
+                            },
+                        };
                         let find = match table.raw_get::<Option<Table>>("find")? {
                             None => None,
                             Some(find) => {
@@ -5950,6 +5974,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             || tab.is_some()
                             || on_caret.is_some()
                             || on_top_line.is_some()
+                            || atoms.is_some()
+                            || on_atoms.is_some()
+                            || atom_style.is_some()
                             || find.is_some())
                         .then(|| {
                             Rc::new(CodeProps {
@@ -5960,6 +5987,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                                 tab,
                                 on_caret,
                                 on_top_line,
+                                atoms,
+                                on_atoms,
+                                atom_style,
                                 find,
                             })
                         })

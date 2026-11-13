@@ -147,6 +147,80 @@ pub enum ClauseStyle {
     /// The clause being converted: a thick underline, the candidates under it.
     Target,
 }
+/// What a host keeps with an atom (`Atom::payload`): anything it can share,
+/// read back by downcasting `as_any`.
+pub trait AtomPayload:
+    std::any::Any + Send + Sync + std::panic::RefUnwindSafe + std::panic::UnwindSafe
+{
+    /// Itself, as `Any`.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+impl<T: std::any::Any + Send + Sync + std::panic::RefUnwindSafe + std::panic::UnwindSafe>
+    AtomPayload for T
+{
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+/// A range of the text the editor treats as one unit (a chip: a mention, a
+/// skill): the caret never goes inside it, one Backspace or Delete removes it
+/// whole, a selection's end inside it moves out, and it moves with the edits
+/// before it. Its label stays in the text, so copy, search and the
+/// accessibility value read plain text. `id` is the editor's own, for
+/// whoever holds its payload.
+#[derive(Clone)]
+pub struct Atom {
+    /// What names it, to whoever keeps its payload.
+    pub id: u64,
+    /// Its bytes of the text.
+    pub range: Range<usize>,
+    /// The wash behind its label, if it has one of its own.
+    pub wash: Option<crate::scene::Color>,
+    /// What the host keeps with it (a mention's file, a skill's body), carried
+    /// through edits and undo with it.
+    pub payload: Option<std::sync::Arc<dyn AtomPayload>>,
+}
+impl Atom {
+    /// An atom named `id` over `range`, with no wash or payload.
+    pub fn new(id: u64, range: Range<usize>) -> Self {
+        Self {
+            id,
+            range,
+            wash: None,
+            payload: None,
+        }
+    }
+}
+impl PartialEq for Atom {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.range == other.range
+            && self.wash == other.wash
+            && match (&self.payload, &other.payload) {
+                (None, None) => true,
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+impl Eq for Atom {}
+impl std::fmt::Debug for Atom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Atom")
+            .field("id", &self.id)
+            .field("range", &self.range)
+            .finish()
+    }
+}
+/// What happened to an editor's atoms (`TextEditor::take_atom_changes`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AtomChange {
+    /// One was made (`insert_atom`, `set_atoms`, an undo that brought it back).
+    Added(Atom),
+    /// One was lost (a deletion, an edit through it, an undo that took it
+    /// away), with the range it had before in characters, and its label.
+    Removed(Atom, Range<usize>, String),
+}
 /// What kind of text an editor takes, as HTML's `inputmode` says it: a
 /// hint to the platform's input (which touch keyboard Windows shows, what
 /// a Wayland input method offers), never a check of what is typed.
@@ -209,6 +283,10 @@ struct Edit {
     inserted: String,
     before: Selection,
     after: Selection,
+    /// The atoms it destroyed (their ranges before it), and made (after it):
+    /// undo brings the first back, redo the second.
+    destroyed: Vec<Atom>,
+    created: Vec<Atom>,
 }
 impl Edit {
     fn bytes(&self) -> usize {
@@ -222,6 +300,8 @@ impl Edit {
             inserted: self.deleted,
             before: self.after,
             after: self.before,
+            destroyed: self.created,
+            created: self.destroyed,
         }
     }
     /// `first` and then `second`, as one step; `text` is what `second`
@@ -249,6 +329,8 @@ impl Edit {
             inserted: swapped(second.start, second_end, &second.inserted),
             before: first.before,
             after: second.after,
+            destroyed: Vec::new(),
+            created: Vec::new(),
         }
     }
 }
@@ -313,6 +395,16 @@ pub struct TextEditor {
     /// For an input method that reaches into the text: one pointer until
     /// one does.
     ime: Option<Box<ImeState>>,
+    /// Its atoms (`Atom`), by start, none overlapping.
+    atoms: Vec<Atom>,
+    /// What happened to them since `take_atom_changes`.
+    atom_changes: Vec<AtomChange>,
+    /// Changes whenever the atoms do: made, lost or moved.
+    atoms_revision: u64,
+    /// The id the next atom it makes takes.
+    next_atom: u64,
+    /// Why the atoms last changed: "edit", "undo", "redo" or "set".
+    atom_reason: &'static str,
 }
 impl Default for TextEditor {
     fn default() -> Self {
@@ -359,12 +451,235 @@ impl TextEditor {
             history_bytes: 4 * 1024 * 1024,
             run: None,
             ime: None,
+            atoms: Vec::new(),
+            atom_changes: Vec::new(),
+            atoms_revision: 0,
+            next_atom: 1,
+            atom_reason: "edit",
         };
         let mut editor = editor;
         if let Some(id) = taken {
             editor.set_taken(id);
         }
         editor
+    }
+    /// An id for an atom made outside the editor (`set_atoms`).
+    pub fn new_atom_id(&mut self) -> u64 {
+        let id = self.next_atom;
+        self.next_atom += 1;
+        id
+    }
+    /// The atoms, by start.
+    pub fn atoms(&self) -> &[Atom] {
+        &self.atoms
+    }
+    /// Changes whenever the atoms do: made, lost or moved.
+    pub fn atoms_revision(&self) -> u64 {
+        self.atoms_revision
+    }
+    /// What happened to the atoms since this was last called, in order.
+    pub fn take_atom_changes(&mut self) -> Vec<AtomChange> {
+        std::mem::take(&mut self.atom_changes)
+    }
+    /// Why the atoms last changed: "edit", "undo", "redo" or "set".
+    pub fn atom_reason(&self) -> &'static str {
+        self.atom_reason
+    }
+    /// Whether changes to the atoms wait to be taken.
+    pub fn atom_changes_pending(&self) -> bool {
+        !self.atom_changes.is_empty()
+    }
+    /// Whether any atom is set: most editors have none.
+    pub fn has_atoms(&self) -> bool {
+        !self.atoms.is_empty()
+    }
+    /// The atom `at` is strictly inside, if any.
+    fn atom_inside(&self, at: usize) -> Option<&Atom> {
+        self.atoms
+            .iter()
+            .find(|atom| atom.range.start < at && at < atom.range.end)
+    }
+    /// `at`, or the start of the atom it is inside: where a step back stops.
+    fn atom_start_of(&self, at: usize) -> usize {
+        self.atom_inside(at).map_or(at, |atom| atom.range.start)
+    }
+    /// `at`, or the end of the atom it is inside: where a step on stops.
+    fn atom_end_of(&self, at: usize) -> usize {
+        self.atom_inside(at).map_or(at, |atom| atom.range.end)
+    }
+    /// `at`, or the nearer edge of the atom it is inside: a click's place.
+    fn out_of_atoms(&self, at: usize) -> usize {
+        match self.atom_inside(at) {
+            Some(atom) if at - atom.range.start < atom.range.end - at => atom.range.start,
+            Some(atom) => atom.range.end,
+            None => at,
+        }
+    }
+    /// `range` widened to take whole any atom it goes through.
+    fn over_atoms(&self, range: Range<usize>) -> Range<usize> {
+        range.start.min(self.atom_start_of(range.start))..range.end.max(self.atom_end_of(range.end))
+    }
+    /// Its atoms after `removed` (the text now replaced, which began at
+    /// `start`) became `inserted` bytes: those before stay, those after move,
+    /// those it touched are gone (returned, with the ranges they had).
+    fn move_atoms(&mut self, start: usize, removed: &str, inserted: usize) -> Vec<Atom> {
+        if self.atoms.is_empty() {
+            return Vec::new();
+        }
+        let end = start + removed.len();
+        let mut destroyed = Vec::new();
+        let mut kept = Vec::with_capacity(self.atoms.len());
+        for atom in std::mem::take(&mut self.atoms) {
+            if atom.range.end <= start {
+                kept.push(atom);
+            } else if atom.range.start >= end {
+                if removed.len() != inserted {
+                    let range = atom.range.start - removed.len() + inserted
+                        ..atom.range.end - removed.len() + inserted;
+                    kept.push(Atom { range, ..atom });
+                } else {
+                    kept.push(atom);
+                }
+            } else {
+                destroyed.push(atom);
+            }
+        }
+        self.atoms = kept;
+        if removed.len() != inserted || !destroyed.is_empty() {
+            self.atoms_revision = self.atoms_revision.wrapping_add(1);
+        }
+        if !destroyed.is_empty() {
+            // Their places in characters, from the text before the edit: what
+            // is before `start` is as it was, the rest was in `removed`.
+            let before = self
+                .text
+                .slice(0..start.min(self.text.len()))
+                .chars()
+                .count();
+            let chars_to = |at: usize| {
+                let inside = at.saturating_sub(start).min(removed.len());
+                before + removed[..floor(removed, inside)].chars().count()
+            };
+            for atom in &destroyed {
+                let chars = chars_to(atom.range.start)..chars_to(atom.range.end);
+                let label = removed
+                    .get(
+                        atom.range.start.saturating_sub(start)
+                            ..atom.range.end.saturating_sub(start),
+                    )
+                    .unwrap_or_default()
+                    .to_owned();
+                self.atom_changes
+                    .push(AtomChange::Removed(atom.clone(), chars, label));
+            }
+        }
+        destroyed
+    }
+    /// Atoms brought back (an undo's, a redo's), kept in order.
+    fn restore_atoms(&mut self, atoms: &[Atom]) {
+        if atoms.is_empty() {
+            return;
+        }
+        for atom in atoms {
+            self.atoms.push(atom.clone());
+            self.atom_changes.push(AtomChange::Added(atom.clone()));
+        }
+        self.atoms.sort_by_key(|atom| atom.range.start);
+        self.atoms_revision = self.atoms_revision.wrapping_add(1);
+    }
+    /// Make `label` an atom: it replaces the selection, or `range` where
+    /// given (the `@que` typed to ask for it), the caret after it, one undo
+    /// step. Its id, or None where the range is not text of it.
+    pub fn insert_atom(
+        &mut self,
+        label: &str,
+        range: Option<Range<usize>>,
+        wash: Option<crate::scene::Color>,
+        payload: Option<std::sync::Arc<dyn AtomPayload>>,
+    ) -> Option<u64> {
+        if label.is_empty() {
+            return None;
+        }
+        let range = match range {
+            Some(range) => {
+                if range.start > range.end || range.end > self.text.len() {
+                    return None;
+                }
+                self.over_atoms(self.clamp(range.start)..self.clamp(range.end))
+            }
+            None => self.over_atoms(self.selection.range()),
+        };
+        self.selection = Selection {
+            anchor: range.start,
+            focus: range.end,
+        };
+        let changed = self.replace(label, None);
+        let start = range.start;
+        let id = self.next_atom;
+        self.next_atom += 1;
+        let atom = Atom {
+            id,
+            range: start..start + label.len(),
+            wash,
+            payload,
+        };
+        // (The text was already there: no step holds it, and any atom on it
+        // goes as an edit would have taken it.)
+        if !changed {
+            let same = self.text.slice(atom.range.clone()).into_owned();
+            self.move_atoms(atom.range.start, &same, atom.range.len());
+        }
+        self.atoms.push(atom.clone());
+        self.atoms.sort_by_key(|atom| atom.range.start);
+        self.atoms_revision = self.atoms_revision.wrapping_add(1);
+        self.atom_changes.push(AtomChange::Added(atom.clone()));
+        if changed && let Some(step) = self.undo.back_mut() {
+            step.created.push(atom);
+        }
+        Some(id)
+    }
+    /// Set its atoms (a draft's): by start, within the text, on grapheme
+    /// boundaries, none empty or overlapping; any that is not goes. Not an
+    /// undo step. What changed is in `take_atom_changes`.
+    pub fn set_atoms(&mut self, atoms: Vec<Atom>) -> bool {
+        let mut valid: Vec<Atom> = Vec::with_capacity(atoms.len());
+        let mut ordered = atoms;
+        ordered.sort_by_key(|atom| atom.range.start);
+        let mut floor = 0;
+        for atom in ordered {
+            let range = &atom.range;
+            if range.start < range.end
+                && range.start >= floor
+                && range.end <= self.text.len()
+                && self.text.is_char_boundary(range.start)
+                && self.text.is_char_boundary(range.end)
+            {
+                floor = range.end;
+                self.next_atom = self.next_atom.max(atom.id + 1);
+                valid.push(atom);
+            }
+        }
+        if valid == self.atoms {
+            return false;
+        }
+        self.atom_reason = "set";
+        for old in &self.atoms {
+            if !valid.iter().any(|atom| atom.id == old.id) {
+                let chars = self.text.slice(0..old.range.start).chars().count()
+                    ..self.text.slice(0..old.range.end).chars().count();
+                let label = self.text.slice(old.range.clone()).into_owned();
+                self.atom_changes
+                    .push(AtomChange::Removed(old.clone(), chars, label));
+            }
+        }
+        for atom in &valid {
+            if !self.atoms.iter().any(|old| old.id == atom.id) {
+                self.atom_changes.push(AtomChange::Added(atom.clone()));
+            }
+        }
+        self.atoms = valid;
+        self.atoms_revision = self.atoms_revision.wrapping_add(1);
+        true
     }
     /// The committed text, without any preedit: borrowed while short, a
     /// copy of a long one (see `slice` and `long_text` for those).
@@ -486,11 +801,12 @@ impl TextEditor {
         let (base, text) = self.text.around(offset);
         let local = offset - base;
         let mut cursor = unicode_segmentation::GraphemeCursor::new(local, text.len(), true);
-        if cursor.is_boundary(&text, 0).unwrap_or(false) {
+        let at = if cursor.is_boundary(&text, 0).unwrap_or(false) {
             offset
         } else {
             base + cursor.prev_boundary(&text, 0).ok().flatten().unwrap_or(0)
-        }
+        };
+        self.out_of_atoms(at)
     }
     /// Select from `anchor` to `focus`, each moved back to a grapheme
     /// boundary. Ends a typing run and cancels any preedit.
@@ -521,19 +837,22 @@ impl TextEditor {
     }
     /// `insert`, as an edit of `run`'s kind (`None`: a step of its own).
     fn replace(&mut self, value: &str, run: Option<Run>) -> bool {
-        let range = self.selection.range();
+        // A range through an atom takes the whole atom.
+        let range = self.over_atoms(self.selection.range());
         if self.text.slice(range.clone()) == value {
             self.cancel_preedit();
             self.set_selection(range.start + value.len(), range.start + value.len());
             return false;
         }
-        let joins = run.is_some() && self.run == run;
         let before = self.selection;
+        self.atom_reason = "edit";
         let deleted = self.text.slice(range.clone()).into_owned();
         self.cancel_preedit();
         self.redo.clear();
         self.redo_bytes = 0;
         self.text.replace_range(range.clone(), value);
+        let destroyed = self.move_atoms(range.start, &deleted, value.len());
+        let joins = run.is_some() && self.run == run && destroyed.is_empty();
         self.revision = self.revision.wrapping_add(1);
         self.sync.get_or_insert_default().last_edit = (range.start, range.len(), value.len());
         // Insertion can join an adjacent combining mark/ZWJ sequence. Keep the caret valid.
@@ -597,6 +916,8 @@ impl TextEditor {
                 inserted: value.to_owned(),
                 before,
                 after: self.selection,
+                destroyed,
+                created: Vec::new(),
             });
         }
         self.run = run;
@@ -825,6 +1146,7 @@ impl TextEditor {
             Some(text) => self.text = TextValue::Long(text),
             None => self.text.replace_range(start..old_end, &inserted),
         }
+        let destroyed = self.move_atoms(start, &deleted, inserted.len());
         self.revision = self.revision.wrapping_add(1);
         self.sync.get_or_insert_default().last_edit = (start, deleted.len(), inserted.len());
         self.selection = match caret {
@@ -862,6 +1184,8 @@ impl TextEditor {
             inserted,
             before,
             after: self.selection,
+            destroyed,
+            created: Vec::new(),
         });
         Self::trim(
             &mut self.undo,
@@ -914,6 +1238,10 @@ impl TextEditor {
         }
     }
     fn previous(&self, word: bool) -> usize {
+        let at = self.previous_raw(word);
+        self.atom_start_of(at)
+    }
+    fn previous_raw(&self, word: bool) -> usize {
         let pos = self.selection.focus;
         let back = |text: &str| {
             if word {
@@ -942,9 +1270,14 @@ impl TextEditor {
     fn backspaced(&self) -> usize {
         let pos = self.selection.focus;
         let start = self.previous(false);
-        pos - backspace_takes(&self.text.slice(start..pos), cfg!(target_os = "macos"))
+        let at = pos - backspace_takes(&self.text.slice(start..pos), cfg!(target_os = "macos"));
+        self.atom_start_of(at)
     }
     fn next(&self, word: bool) -> usize {
+        let at = self.next_raw(word);
+        self.atom_end_of(at)
+    }
+    fn next_raw(&self, word: bool) -> usize {
         if word && cfg!(windows) {
             return self.next_word_start();
         }
@@ -1459,8 +1792,11 @@ impl TextEditor {
             return false;
         };
         self.undone = true;
+        self.atom_reason = "undo";
         self.text
             .replace_range(edit.start..edit.start + edit.inserted.len(), &edit.deleted);
+        self.move_atoms(edit.start, &edit.inserted, edit.deleted.len());
+        self.restore_atoms(&edit.destroyed);
         self.revision = self.revision.wrapping_add(1);
         self.sync.get_or_insert_default().last_edit =
             (edit.start, edit.inserted.len(), edit.deleted.len());
@@ -1486,8 +1822,11 @@ impl TextEditor {
             return false;
         };
         self.undone = false;
+        self.atom_reason = "redo";
         self.text
             .replace_range(edit.start..edit.start + edit.deleted.len(), &edit.inserted);
+        self.move_atoms(edit.start, &edit.deleted, edit.inserted.len());
+        self.restore_atoms(&edit.created);
         self.revision = self.revision.wrapping_add(1);
         self.sync.get_or_insert_default().last_edit =
             (edit.start, edit.deleted.len(), edit.inserted.len());
@@ -2494,5 +2833,135 @@ mod undo_run_tests {
         assert_eq!(e.text(), "one\nfour");
         assert!(e.undo());
         assert_eq!(e.text(), "onethree\nfour");
+    }
+}
+
+#[cfg(test)]
+mod atom_tests {
+    use super::*;
+
+    /// "see @file.pdf now": an editor with the atom on "@file.pdf".
+    fn editor() -> (TextEditor, u64) {
+        let mut e = TextEditor::new("see  now");
+        let id = e.insert_atom("@file.pdf", Some(4..4), None, None).unwrap();
+        (e, id)
+    }
+
+    #[test]
+    fn an_inserted_atom_is_a_range_of_the_text_the_caret_ends_after() {
+        let (e, id) = editor();
+        assert_eq!(e.text(), "see @file.pdf now");
+        assert_eq!(e.atoms(), [Atom::new(id, 4..13)]);
+        assert_eq!(
+            e.selection(),
+            Selection {
+                anchor: 13,
+                focus: 13
+            }
+        );
+    }
+
+    #[test]
+    fn the_caret_steps_over_an_atom_and_never_into_it() {
+        let (mut e, _) = editor();
+        e.set_selection(14, 14);
+        e.move_left(false, false);
+        assert_eq!(e.selection().focus, 13);
+        e.move_left(false, false);
+        assert_eq!(e.selection().focus, 4, "one step back goes over all of it");
+        e.move_right(false, false);
+        assert_eq!(e.selection().focus, 13, "and one step on");
+        // A click inside moves to the nearer edge.
+        e.set_selection(6, 6);
+        assert_eq!(e.selection().focus, 4);
+        e.set_selection(12, 12);
+        assert_eq!(e.selection().focus, 13);
+    }
+
+    #[test]
+    fn backspace_and_delete_take_the_whole_atom() {
+        let (mut e, id) = editor();
+        assert!(e.backspace());
+        assert_eq!(e.text(), "see  now");
+        assert!(e.atoms().is_empty());
+        let removed = e.take_atom_changes();
+        assert!(removed.contains(&AtomChange::Removed(
+            Atom::new(id, 4..13),
+            4..13,
+            "@file.pdf".into()
+        )));
+        // Undo brings it back as it was, with its id.
+        assert!(e.undo());
+        assert_eq!(e.text(), "see @file.pdf now");
+        assert_eq!(e.atoms(), [Atom::new(id, 4..13)]);
+        // Redo takes it away again.
+        assert!(e.redo());
+        assert!(e.atoms().is_empty());
+        // Forward delete from before it.
+        assert!(e.undo());
+        e.set_selection(4, 4);
+        assert!(e.delete_forward());
+        assert_eq!(e.text(), "see  now");
+    }
+
+    #[test]
+    fn edits_before_an_atom_move_it_and_edits_through_it_take_it() {
+        let (mut e, id) = editor();
+        e.set_selection(0, 0);
+        e.insert("hey ");
+        assert_eq!(e.atoms(), [Atom::new(id, 8..17)]);
+        // Typing at its end or start leaves it whole.
+        e.set_selection(17, 17);
+        e.insert("!");
+        assert_eq!(e.atoms(), [Atom::new(id, 8..17)]);
+        // A selection ending inside it takes all of it.
+        e.set_selection(2, 12);
+        assert_eq!(
+            e.selection(),
+            Selection {
+                anchor: 2,
+                focus: 8
+            }
+        );
+        e.set_selection(2, 17);
+        e.insert("X");
+        assert!(e.atoms().is_empty());
+        assert_eq!(e.text(), "heX! now");
+    }
+
+    #[test]
+    fn an_atom_replaces_the_trigger_text_typed_for_it() {
+        let mut e = TextEditor::new("ask @que");
+        let id = e
+            .insert_atom("@quarterly.pdf", Some(4..8), None, None)
+            .unwrap();
+        assert_eq!(e.text(), "ask @quarterly.pdf");
+        assert_eq!(e.atoms(), [Atom::new(id, 4..18)]);
+        // One undo step takes the atom and puts the trigger text back.
+        assert!(e.undo());
+        assert_eq!(e.text(), "ask @que");
+        assert!(e.atoms().is_empty());
+        assert!(e.redo());
+        assert_eq!(e.atoms(), [Atom::new(id, 4..18)]);
+    }
+
+    #[test]
+    fn set_atoms_keeps_the_valid_and_reports_what_changed() {
+        let mut e = TextEditor::new("one two three");
+        e.set_atoms(vec![
+            Atom::new(7, 4..7),
+            Atom::new(8, 6..9),
+            Atom::new(9, 20..30),
+        ]);
+        assert_eq!(e.atoms(), [Atom::new(7, 4..7)]);
+        assert_eq!(
+            e.take_atom_changes(),
+            [AtomChange::Added(Atom::new(7, 4..7))]
+        );
+        e.set_atoms(Vec::new());
+        assert_eq!(
+            e.take_atom_changes(),
+            [AtomChange::Removed(Atom::new(7, 4..7), 4..7, "two".into())]
+        );
     }
 }

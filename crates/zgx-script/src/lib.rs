@@ -58,6 +58,7 @@ mod folder;
 mod form;
 mod handlers;
 mod hook_targets;
+mod atoms;
 mod host_views;
 mod i18n;
 #[cfg(feature = "inspect")]

@@ -6864,6 +6864,83 @@ fn code_editor(
     if let Some(tab) = &code.tab {
         view = view.tab_indent(tab.clone());
     }
+    if let Some(style) = &code.atom_style {
+        let (style, vm, theme) = (resolve_owned(style), vm.clone(), theme.clone());
+        let wash = match resolve(&style, Ty::Color, None, &vm) {
+            Some(Lit::Color(color)) => Some(color),
+            Some(Lit::Token(t)) => theme.get(t).color(),
+            _ => None,
+        };
+        if let Some(color) = wash {
+            view = view.atom_wash(color);
+        }
+    }
+    if let Some(state) = &code.atoms {
+        let (state, color_of) = (state.clone(), color_of.clone());
+        view = view.atoms_when(move |handle| {
+            let list = state.with(Clone::clone);
+            crate::atoms::from_list(&list, handle, &*color_of)
+        });
+    }
+    if code.atoms.is_some() || code.on_atoms.is_some() {
+        let (state, told, vm) = (code.atoms.clone(), code.on_atoms.clone(), vm.clone());
+        view = view.on_atoms(move |event| {
+            let chars = |byte: usize| event.chars(byte);
+            if let Some(state) = &state {
+                let next = crate::atoms::list(event.atoms, chars);
+                if state.with(|now| *now != next) {
+                    state.set(next);
+                }
+            }
+            if let Some(told) = &told {
+                let result = (|| -> mlua::Result<()> {
+                    let change = vm.lua.create_table()?;
+                    change.set("reason", event.reason)?;
+                    let list = |lua: &mlua::Lua, items: Vec<Value>| -> mlua::Result<mlua::Table> {
+                        let table = lua.create_table()?;
+                        for value in items {
+                            table.push(crate::value::to_lua(&value, lua, false)?)?;
+                        }
+                        Ok(table)
+                    };
+                    change.set(
+                        "atoms",
+                        list(
+                            &vm.lua,
+                            match crate::atoms::list(event.atoms, chars) {
+                                Value::List(items) => items.to_vec(),
+                                _ => Vec::new(),
+                            },
+                        )?,
+                    )?;
+                    let mut added = Vec::new();
+                    let mut removed = Vec::new();
+                    for step in event.changes {
+                        match step {
+                            zgx::text_edit::AtomChange::Added(atom) => {
+                                added.push(crate::atoms::item(
+                                    atom,
+                                    (chars(atom.range.start), chars(atom.range.end)),
+                                ))
+                            }
+                            zgx::text_edit::AtomChange::Removed(atom, range, label) => {
+                                removed.push(crate::atoms::with_label(
+                                    crate::atoms::item(atom, (range.start, range.end)),
+                                    label,
+                                ));
+                            }
+                        }
+                    }
+                    change.set("added", list(&vm.lua, added)?)?;
+                    change.set("removed", list(&vm.lua, removed)?)?;
+                    vm.call::<()>(told, change)
+                })();
+                if let Err(error) = result {
+                    vm.report(error);
+                }
+            }
+        });
+    }
     if let Some(told) = &code.on_caret {
         let (told, vm) = (told.clone(), vm.clone());
         view = view.on_caret(move |caret| {

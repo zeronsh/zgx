@@ -1039,3 +1039,107 @@ return ui.column { w = 300, h = 200,
     assert_eq!(semantic.role, zgx::semantics::Role::MenuItem);
     assert_eq!(semantic.checked, Some(true));
 }
+
+#[test]
+fn a_textarea_atom_is_one_unit_and_the_script_hears_it_go() {
+    let mut h = Harness::inline(
+        r##"
+local draft = ui.state("draft", "see  now")
+local atoms = ui.state("atoms", {})
+local heard = ui.state("heard", "")
+local box = ui.ref()
+ui.command { id = "add", run = function()
+    box:get():set_selection(4, 4)
+    box:get():insert_atom("@file.pdf", { id = "file-1", data = { path = "a/b.pdf" } })
+end }
+return ui.column { w = 400, h = 200,
+    ui.textarea { ref = box, id = "ta", value = draft, atoms = atoms, w = 300, h = 80,
+        atom_style = { bg = "#3366ff40" },
+        on_atoms = function(change)
+            local gone = {}
+            for _, a in change.removed do table.insert(gone, `{a.id}:{a.from}-{a.to}:{a.label}`) end
+            heard:set(change.reason .. "|" .. table.concat(gone, ","))
+        end },
+    ui.text { id = "n", function() return tostring(#atoms:get()) end },
+    ui.text { id = "info", function()
+        local a = atoms:get()[1]
+        return a and `{a.id}:{a.from}-{a.to}:{a.data.path}` or "none"
+    end },
+    ui.text { id = "heard", function() return heard:get() end },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    h.host.run_command("add");
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("n"), "1");
+    assert_eq!(h.text("info"), "file-1:4-13:a/b.pdf");
+    assert_eq!(h.text("ta"), "see @file.pdf now");
+    let ta = h.find("ta").unwrap();
+    h.ui.input.focus(&h.ui.scene, Some(ta));
+    h.ui.dispatch(zgx::input::InputEvent::KeyDown {
+        key: zgx::input::Key::Backspace,
+        modifiers: Default::default(),
+        repeat: false,
+    });
+    h.frames(3);
+    assert_eq!(h.text("n"), "0");
+    assert_eq!(h.text("heard"), "edit|file-1:4-13:@file.pdf");
+}
+
+#[test]
+fn a_textarea_restores_atoms_from_a_draft_and_undo_brings_one_back() {
+    use zgx_script::Value as V;
+    let mut h = Harness::inline(
+        r##"
+local draft = ui.state("draft", "ask @a.pdf and /skill now")
+local atoms = ui.state("atoms", {})
+local heard = ui.state("heard", "")
+local box = ui.ref()
+ui.command { id = "read", run = function()
+    local list = box:get():atoms()
+    heard:set(`{#list}:{list[1].id}:{list[1].from}-{list[1].to}:{list[2].id}:{list[2].from}-{list[2].to}`)
+end }
+return ui.column { w = 400, h = 200,
+    ui.textarea { ref = box, id = "ta", value = draft, atoms = atoms, w = 300, h = 80 },
+    ui.text { id = "heard", function() return heard:get() end },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    let atom = |id: &str, from: f64, to: f64| {
+        V::record([
+            ("id", V::from(id)),
+            ("from", V::Num(from)),
+            ("to", V::Num(to)),
+        ])
+    };
+    h.host
+        .set_state(
+            "atoms",
+            V::List(vec![atom("file", 4., 10.), atom("skill", 15., 21.)].into()),
+        )
+        .unwrap();
+    h.frames(3);
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.text("heard"), "2:file:4-10:skill:15-21");
+    // One Backspace takes the skill whole (the caret at its end), undo gives it back.
+    let ta = h.find("ta").unwrap();
+    h.ui.input.focus(&h.ui.scene, Some(ta));
+    let editor = h.ui.editor(ta).unwrap();
+    editor.set_selection(25, 25);
+    assert_eq!(editor.atoms().len(), 2);
+    editor.set_selection(21, 21);
+    h.ui.dispatch(zgx::input::InputEvent::KeyDown {
+        key: zgx::input::Key::Backspace,
+        modifiers: Default::default(),
+        repeat: false,
+    });
+    h.frames(3);
+    assert_eq!(editor.atoms().len(), 1);
+    assert!(editor.undo());
+    h.frames(3);
+    assert_eq!(editor.atoms().len(), 2);
+}
