@@ -103,7 +103,10 @@ impl Clock {
 }
 
 /// Keep `view`'s shader as `make` says, reading it again when what it reads
-/// changes: see `View::shader_drive`.
+/// changes: see `View::shader_drive`. Never inlined: few nodes have a drive,
+/// and its body inlined into a caller styling every node (zgx-script's
+/// `styled`) moved that caller's code for all of them.
+#[inline(never)]
 pub fn attach(
     cx: &mut Context,
     view: View,
