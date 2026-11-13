@@ -4,7 +4,7 @@
 mod common;
 use common::Harness;
 use std::{cell::RefCell, rc::Rc};
-use zgx_script::{Bundle, BundleFile, ScriptHost, build};
+use zgx_script::{Bundle, BundleFile, Code, ScriptHost, build};
 
 /// A bundle of `(path, text)` files, scripts compiled as a build would.
 fn bundle(name: &'static str, files: &[(&'static str, &str)]) -> &'static Bundle {
@@ -125,6 +125,89 @@ fn what_ships_keeps_errors_off_the_interface_and_tells_the_app() {
         "no banner over what ships"
     );
     assert!(h.find("fail").is_some(), "the interface keeps running");
+}
+
+/// A bundle of `(path, bytes)` files stored as given: source text, or
+/// bytecode compiled elsewhere.
+fn raw_bundle(name: &'static str, files: Vec<(&'static str, Vec<u8>)>) -> &'static Bundle {
+    let mut files: Vec<BundleFile> = files
+        .into_iter()
+        .map(|(path, bytes)| BundleFile {
+            path,
+            bytes: Box::leak(bytes.into_boxed_slice()),
+        })
+        .collect();
+    files.sort_by_key(|file| file.path);
+    Box::leak(Box::new(Bundle {
+        name,
+        root: Box::leak(format!("/zgx-bundle/{name}").into_boxed_str()),
+        files: Box::leak(files.into_boxed_slice()),
+    }))
+}
+
+#[test]
+fn under_code_source_a_bundled_script_in_bytecode_form_is_refused() {
+    let compiled = |text: &str| build::compile(text.as_bytes()).unwrap();
+    let runtime = zgx::reactive::Runtime::new();
+    // The entry in bytecode: refused, where the app's own build's loads.
+    let ui = raw_bundle(
+        "bytecode-entry",
+        vec![(
+            "app.luau",
+            compiled(r#"return ui.text { "hi", id = "label" }"#),
+        )],
+    );
+    let error = ScriptHost::bundled(&runtime, ui, "app.luau")
+        .code(Code::Source)
+        .reload()
+        .unwrap_err();
+    assert!(
+        error.contains("app.luau") && error.contains("binary chunk"),
+        "{error}"
+    );
+    assert!(
+        ScriptHost::bundled(&runtime, ui, "app.luau")
+            .reload()
+            .is_ok(),
+        "as the app's own build: it loads"
+    );
+    // A module it requires in bytecode, the entry in source: refused too.
+    let ui = raw_bundle(
+        "bytecode-module",
+        vec![
+            (
+                "app.luau",
+                br#"return ui.text { require("./lib"), id = "label" }"#.to_vec(),
+            ),
+            ("lib.luau", compiled(r#"return "hi""#)),
+        ],
+    );
+    let error = ScriptHost::bundled(&runtime, ui, "app.luau")
+        .code(Code::Source)
+        .reload()
+        .unwrap_err();
+    assert!(error.contains("binary chunk"), "{error}");
+}
+
+#[test]
+fn under_code_source_a_bundle_of_source_text_loads() {
+    let ui = raw_bundle(
+        "source-app",
+        vec![
+            (
+                "app.luau",
+                br#"return ui.text { require("./lib/greet")("source"), id = "label" }"#.to_vec(),
+            ),
+            (
+                "lib/greet.luau",
+                b"return function(name) return `Hello, {name}` end".to_vec(),
+            ),
+        ],
+    );
+    let mut h =
+        Harness::new(|runtime| ScriptHost::bundled(runtime, ui, "app.luau").code(Code::Source));
+    assert_eq!(h.host.error().get(), None);
+    assert_eq!(h.text("label"), "Hello, source");
 }
 
 /// What bytecode saves a launch: preparing every script of the terminal
