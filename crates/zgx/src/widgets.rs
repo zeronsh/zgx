@@ -6040,8 +6040,16 @@ impl Ui {
                 let mut free: Vec<NodeId> = free.into_iter().map(|(_, id)| id).collect();
                 pool.extend(kept);
                 if let (Some(lines), Some(layer)) = (&long_lines, code.line_layer.get()) {
+                    // A hidden line has no node.
+                    pool.retain(|(line, id)| {
+                        let hidden = lines.inset(*line).hidden;
+                        if hidden {
+                            free.push(*id);
+                        }
+                        !hidden
+                    });
                     for i in shown_lines.clone() {
-                        if pool.iter().any(|(line, _)| *line == i) {
+                        if lines.inset(i).hidden || pool.iter().any(|(line, _)| *line == i) {
                             continue;
                         }
                         let id = free.pop().unwrap_or_else(|| {
@@ -6121,6 +6129,9 @@ impl Ui {
                 if let (Some(lines), Some(marks_of)) = (&long_lines, marks_of) {
                     for i in shown_lines.clone() {
                         let inset = lines.inset(i);
+                        if inset.hidden {
+                            continue;
+                        }
                         let top = lines.top(i) + inset.above - scroll.1;
                         let tall = (lines.height(i) - inset.above).max(0.);
                         for mark in marks_of(i) {

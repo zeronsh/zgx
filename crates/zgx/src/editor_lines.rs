@@ -180,6 +180,14 @@ pub struct LineInset {
     pub above: f32,
     /// Points below the line.
     pub below: f32,
+    /// Not shown and no room taken (a closed toggle's lines): the app keeps the caret out of it.
+    pub hidden: bool,
+}
+impl LineInset {
+    /// A line's height with its room: its text's `bare` height, or nothing when hidden.
+    fn height(&self, bare: f32) -> f32 {
+        if self.hidden { 0. } else { bare + self.above + self.below }
+    }
 }
 /// Each line's room, by its index.
 pub type LineInsets = Rc<dyn Fn(usize) -> LineInset>;
@@ -915,12 +923,12 @@ impl LinesLayout {
                 .map(|i| {
                     let line = layout.line_text(i);
                     let inset = layout.inset(i);
-                    known
-                        .get(&*line)
-                        .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width))
-                        + inset.above
-                        + inset.below
+                    inset.height(
+                        known
+                            .get(&*line)
+                            .copied()
+                            .unwrap_or_else(|| layout.estimate(&line, width)),
+                    )
                 })
                 .collect();
             drop(known);
@@ -963,14 +971,12 @@ impl LinesLayout {
             for i in kept - 1..first_moved {
                 let line = layout.line_text(i);
                 let inset = layout.inset(i);
-                each.push(
+                each.push(inset.height(
                     known
                         .get(&*line)
                         .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width))
-                        + inset.above
-                        + inset.below,
-                );
+                        .unwrap_or_else(|| layout.estimate(&line, width)),
+                ));
             }
             each.extend_from_slice(&old_each[moved..]);
             drop(known);
@@ -1087,7 +1093,7 @@ impl LinesLayout {
         if let Some(heights) = &self.heights {
             // cached without its room: the same text elsewhere (or once its block changes) has its own
             let bare = height.max(self.row);
-            let height = bare + inset.above + inset.below;
+            let height = inset.height(bare);
             if heights.borrow().each[i] != height {
                 heights.borrow_mut().set(i, height);
                 self.cache.heights.borrow_mut().insert((*text).into(), bare);
@@ -1306,6 +1312,7 @@ mod tests {
                     left: 36.,
                     above: 8.,
                     below: 4.,
+                    hidden: false,
                 }
             } else {
                 LineInset::default()
