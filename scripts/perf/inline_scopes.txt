@@ -8,7 +8,7 @@ zgx	45	1177	scene::<impl in crates/zgx/src/scene.rs>::arrange
 zgx	41	587	scene::<impl in crates/zgx/src/scene.rs>::store_measurement
 zgx	45	841	scene::<impl in crates/zgx/src/scene.rs>::invalidate_layout_with
 zgx	168	3009	scene::<impl in crates/zgx/src/scene.rs>::column_end
-zgx	520	5724	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
+zgx	539	5874	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
 zgx	273	2269	scene::<impl in crates/zgx/src/scene.rs>::flush
 zgx	117	1213	scene::<impl in crates/zgx/src/scene.rs>::ink
 zgx	90	1502	scene::<impl in crates/zgx/src/scene.rs>::set_kind
