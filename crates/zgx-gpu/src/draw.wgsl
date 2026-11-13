@@ -159,7 +159,18 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
      // A box shadow (`shape.z` its sigma, half the CSS blur): the box
      // blurred covers 0.5·erfc(d/(sigma·√2)) at signed distance d, half at
      // its edge (not full: that read as a hard, dark band).
-     let x=distance/(v.shape.z*1.41421356);
+     // With a spread on a superellipse corner, its distance is the held
+     // box's less the spread (a true offset), not a corner `spread` larger:
+     // that one drifts off the box's own at the diagonals.
+     var reach=distance;
+     if v.shape.y>500. && k>1.01 {
+       let grown=v.shape.y-1000.;
+       let held=vec4(v.fade.xy+vec2(grown),max(v.fade.zw-vec2(2.*grown),vec2(0.)));
+       let held_radius=clamp(radius-grown,0.,min(held.z,held.w)*0.5);
+       let hq=centred(v.position.xy,held)-(held.zw*0.5-vec2(held_radius));
+       reach=corner_sdf(hq,held_radius,k).x-grown;
+     }
+     let x=reach/(v.shape.z*1.41421356);
      let x2=x*x;
      let e=sign(x)*sqrt(1.-exp(-x2*(1.27323954+0.147*x2)/(1.+0.147*x2)));
      color.a*=0.5-0.5*e;
