@@ -1178,3 +1178,19 @@ return ui.column { w = 300, h = 200,
     h.frames(3);
     assert_eq!(read(&h).unwrap().2, None);
 }
+
+#[test]
+fn dim_false_keeps_a_disabled_button_undimmed_but_disabled() {
+    let mut h = Harness::inline(
+        r##"return ui.column { w = 300, h = 200,
+    ui.button { id = "plain", disabled = true, "Plain" },
+    ui.button { id = "kept", disabled = true, dim = false, "Kept" },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    assert!(h.opacity("plain") < 0.9, "{}", h.opacity("plain"));
+    assert_eq!(h.opacity("kept"), 1.);
+    let kept = h.find("kept").unwrap();
+    assert!(h.ui.semantics.borrow().get(kept).unwrap().disabled);
+}

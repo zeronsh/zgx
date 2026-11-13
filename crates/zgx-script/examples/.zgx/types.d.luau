@@ -2578,6 +2578,9 @@ export type NodeProps = {
 	tooltip_group: TooltipGroup?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: boolean?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
@@ -3034,6 +3037,9 @@ export type Props = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -3374,6 +3380,7 @@ export type Props_tooltip_delay = number?
 export type Props_tooltip_close_delay = number?
 export type Props_tooltip_group = TooltipGroup?
 export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | Styles)?
+export type Props_dim = boolean?
 export type Props_hover = Styles?
 export type Props_active = Styles?
 export type Props_focus = Styles?
@@ -3748,6 +3755,9 @@ export type ContainerProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -4218,6 +4228,9 @@ export type GlassProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -4697,6 +4710,9 @@ export type ScrollProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5193,6 +5209,9 @@ export type TextProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5648,6 +5667,9 @@ export type MarkdownViewProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -6250,6 +6272,9 @@ export type RichProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -6699,6 +6724,9 @@ export type ImageProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -7165,6 +7193,9 @@ export type SvgProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -7742,6 +7773,9 @@ export type Scene3DProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8214,6 +8248,9 @@ export type CanvasProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8695,6 +8732,9 @@ export type CheckboxProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -9154,6 +9194,9 @@ export type InputProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -9748,6 +9791,9 @@ export type ProgressProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -10195,6 +10241,9 @@ export type SliderProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -10663,6 +10712,9 @@ export type SegmentedProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11124,6 +11176,9 @@ export type StepperProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11586,6 +11641,9 @@ export type DisclosureProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12059,6 +12117,9 @@ export type AccordionProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12506,6 +12567,9 @@ export type SectionProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12978,6 +13042,9 @@ export type SeparatorProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -13433,6 +13500,9 @@ export type TabsProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -13910,6 +13980,9 @@ export type TreeProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14383,6 +14456,9 @@ export type DataGridProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14852,6 +14928,9 @@ export type CalendarProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15314,6 +15393,9 @@ export type DatePickerProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15774,6 +15856,9 @@ export type TimeFieldProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -16233,6 +16318,9 @@ export type ComboboxProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -16700,6 +16788,9 @@ export type CommandPaletteProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -17155,6 +17246,9 @@ export type SelectProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -17617,6 +17711,9 @@ export type SplitProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -18135,6 +18232,9 @@ export type ListProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -18687,6 +18787,9 @@ export type LayerProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -19156,6 +19259,9 @@ export type ModalProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -19674,6 +19780,9 @@ export type PopoverProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20180,6 +20289,9 @@ export type MenuItemProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20638,6 +20750,9 @@ export type SubmenuProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -21116,6 +21231,9 @@ export type WebViewProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -21591,6 +21709,9 @@ export type TerminalProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22041,6 +22162,9 @@ export type HostViewProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22491,6 +22615,9 @@ export type SlotProps = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22992,6 +23119,9 @@ export type EachOptions = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -23457,6 +23587,9 @@ export type PresenceOptions = {
 	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
+	-- unless it styles itself); it is still disabled for assistive technology.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,

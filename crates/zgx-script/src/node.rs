@@ -4683,6 +4683,15 @@ fn fill_from(
                 lits.sort_by_key(|(prop, _)| specificity(*prop));
                 node.pseudo.push((pseudo, lits.into()));
             }
+            // `dim = false`: stays as it is while disabled (the read-only
+            // look is the app's), still disabled for assistive technology.
+            "dim" => match value {
+                mlua::Value::Boolean(false) => node
+                    .pseudo
+                    .push((Pseudo::Disabled, vec![(Prop::Opacity, Lit::Num(1.))].into())),
+                mlua::Value::Boolean(true) => {}
+                _ => return Err(mlua::Error::runtime("`dim` is a boolean")),
+            },
             "variants" => match value {
                 mlua::Value::UserData(ud) if ud.is::<crate::variants::SelectionUd>() => {
                     variants = Some(ud.borrow::<crate::variants::SelectionUd>()?.0.clone());

@@ -170,9 +170,16 @@ impl Default for WindowOptions {
         }
     }
 }
+/// Some window has an `on_close_requested`: a quit waits for it.
+#[cfg(all(target_os = "macos", zgx_winit_patched))]
+static CLOSE_HANDLERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[derive(Debug)]
 enum Event {
     Quit,
+    /// ⌘Q or the app menu's Quit (macOS): every window's `on_close_requested`
+    /// is asked before the app exits.
+    #[cfg_attr(not(all(target_os = "macos", zgx_winit_patched)), allow(dead_code))]
+    QuitRequested,
     /// An event, with the token of the launch that sent it (Linux).
     Application(crate::ApplicationEvent, Option<String>),
     MenuAction(u64, crate::MenuAction),
@@ -885,7 +892,12 @@ impl WindowContext {
     }
 
     /// Return false to keep the window open, for example while asking about unsaved data.
+    ///
+    /// The app menu's Quit (⌘Q) asks every window's handler too, and quits
+    /// only if all agree.
     pub fn on_close_requested(&mut self, handler: impl FnMut() -> bool + 'static) {
+        #[cfg(all(target_os = "macos", zgx_winit_patched))]
+        CLOSE_HANDLERS.store(true, std::sync::atomic::Ordering::Relaxed);
         self.close_requested = Some(Box::new(handler));
     }
     /// Called once before UI state is disposed. Pending tasks are cancelled
@@ -1083,6 +1095,17 @@ impl Application {
         zgx::profile::mark("event loop");
         zgx::memory::set_hosted();
         let proxy = event_loop.create_proxy();
+        #[cfg(all(target_os = "macos", zgx_winit_patched))]
+        {
+            let quit = proxy.clone();
+            winit::platform::macos::set_terminate_gate(Some(Rc::new(move || {
+                if !CLOSE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed) {
+                    return true;
+                }
+                let _ = quit.send_event(Event::QuitRequested);
+                false
+            })));
+        }
         let native_events = if let Some(id) = &self.application_id {
             let wake = proxy.clone();
             let events = crate::native_events::NativeApplicationEvents::new(
@@ -7867,6 +7890,17 @@ impl WindowManager {
     fn user_event_turn(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         match event {
             Event::Quit => event_loop.exit(),
+            Event::QuitRequested => {
+                let allowed = self.hosts.values_mut().all(|host| {
+                    host.context
+                        .close_requested
+                        .as_mut()
+                        .is_none_or(|callback| callback())
+                });
+                if allowed {
+                    event_loop.exit();
+                }
+            }
             #[cfg(target_os = "macos")]
             Event::FullScreen => self.apply_full_screen(),
             Event::Application(event, token) => {
