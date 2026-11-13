@@ -257,11 +257,17 @@ fn a_file_is_written_in_parts_with_append() {
     let mut h = app(&dir, APP, None);
     h.click("parts");
     wait_for(&mut h, "parts written");
-    assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap(), "head|middle|tail");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+        "head|middle|tail"
+    );
     // Without append, a write replaces it whole again.
     h.click("save");
     wait_for(&mut h, "wrote out.txt");
-    assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap(), "saved text");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+        "saved text"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
