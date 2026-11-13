@@ -325,3 +325,57 @@ fn overlays_in_keyed_rows_each_keep_their_own() {
     mounted.unmount();
     host.remove();
 }
+
+#[wasm_bindgen_test]
+async fn a_popovers_arrow_points_at_its_anchor() {
+    let runtime = Runtime::new();
+    let open = runtime.signal(false);
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().pt(20.).child(
+            popover("Info", open.clone(), button().w(60.).child(text("i")))
+                .arrow(8.)
+                .child(text("Body")),
+        ),
+    );
+    open.set(true);
+    zgx_dom::flush();
+    let (anchor, panel) = (find(&host, "button"), find(&host, "[popover]"));
+    let (a, p) = (
+        anchor.get_bounding_client_rect(),
+        panel.get_bounding_client_rect(),
+    );
+    // Below the anchor, 4 (the offset) and 8 (the arrow's room) off.
+    assert!(
+        (p.top() - (a.bottom() + 12.)).abs() < 1.,
+        "{} {}",
+        p.top(),
+        a.bottom()
+    );
+    // Its arrow: at the top edge, under the anchor's centre, the panel's
+    // own background.
+    let arrow = web_sys::window()
+        .unwrap()
+        .get_computed_style_with_pseudo_elt(&panel, "::before")
+        .unwrap()
+        .unwrap();
+    let px = |v: String| v.trim_end_matches("px").parse::<f64>().unwrap();
+    assert_eq!(px(arrow.get_property_value("top").unwrap()), 0.);
+    let tip = p.left() + px(arrow.get_property_value("left").unwrap());
+    assert!((tip - (a.left() + a.width() / 2.)).abs() < 1., "{tip}");
+    let panel_style = web_sys::window()
+        .unwrap()
+        .get_computed_style(&panel)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        arrow.get_property_value("background-color").unwrap(),
+        panel_style.get_property_value("background-color").unwrap()
+    );
+    open.set(false);
+    zgx_dom::flush();
+    mounted.unmount();
+    host.remove();
+}

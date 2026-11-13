@@ -345,8 +345,9 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         const offset = new Float32Array(new Uint32Array([ops[i++]]).buffer)[0];
         const flags = ops[i++];
         const delay = ops[i++];
+        const arrow = new Float32Array(new Uint32Array([ops[i++]]).buffer)[0];
         const anchor = anchorId === 0xffffffff ? null : nodes[anchorId];
-        setUpOverlay(panel, { kind, anchor, handler, side, align, offset, flags, delay, backdrop });
+        setUpOverlay(panel, { kind, anchor, handler, side, align, offset, flags, delay, backdrop, arrow });
         break;
       }
       case 30: { // SHOW panel on
@@ -400,6 +401,7 @@ function setUpOverlay(panel, o) {
   o.pos = o.backdrop ? "--zbd:" + o.backdrop + ";" : "";
   if (o.kind === TOOLTIP && !(o.flags & 8)) o.pos += "pointer-events:none;";
   panel.$$o = o;
+  if (o.arrow > 0) panel.classList.add("za");
   if (o.pos) panel.style.cssText += o.pos;
   if (o.kind === DIALOG) {
     panel.addEventListener("close", () => {
@@ -526,7 +528,8 @@ function place(panel) {
   const h = panel.offsetHeight;
   const vw = document.documentElement.clientWidth;
   const vh = document.documentElement.clientHeight;
-  const off = o.offset;
+  // An arrow's room: the panel sits that much further off.
+  const off = o.offset + (o.arrow > 0 ? o.arrow : 0);
   let side = o.side;
   const room = [vh - a.bottom, a.top, a.left, vw - a.right];
   const need = side < 2 ? h + off : w + off;
@@ -545,6 +548,23 @@ function place(panel) {
   x = Math.max(m, Math.min(x, vw - w - m));
   y = Math.max(m, Math.min(y, vh - h - m));
   pos += "left:" + x + "px;top:" + y + "px;";
+  if (o.arrow > 0) {
+    // On the side facing the anchor, at its centre, kept off the corners.
+    const s = o.arrow;
+    const keep = (v, size) => Math.max(s * 1.5, Math.min(v, size - s * 1.5));
+    let ax, ay;
+    if (side < 2) {
+      ax = keep(a.left + a.width / 2 - x, w);
+      ay = side === 0 ? 0 : h;
+    } else {
+      ay = keep(a.top + a.height / 2 - y, h);
+      ax = side === 3 ? 0 : w;
+    }
+    pos += "--zx:" + ax + "px;--zy:" + ay + "px;--zs:" + s * Math.SQRT2 + "px;";
+    panel.style.setProperty("--zx", ax + "px");
+    panel.style.setProperty("--zy", ay + "px");
+    panel.style.setProperty("--zs", s * Math.SQRT2 + "px");
+  }
   o.pos = pos;
   panel.style.left = x + "px";
   panel.style.top = y + "px";
