@@ -10372,6 +10372,7 @@ impl GpuRenderer {
                                 );
                                 let decorations = text::rich_decorations_in(
                                     &fonts,
+                                    self.scale,
                                     laid.runs(Some(bounds.height)),
                                     &starts,
                                     rich,
@@ -10421,7 +10422,9 @@ impl GpuRenderer {
                                         self.scale,
                                     ),
                                     match (&rich, item.font.underline) {
-                                        (Some(rich), _) => text::rich_decorations(&fonts, &b, rich),
+                                        (Some(rich), _) => {
+                                            text::rich_decorations(&fonts, self.scale, &b, rich)
+                                        }
                                         (None, Some(line)) => {
                                             text::plain_underlines(b.layout_runs(), font_size, line)
                                         }

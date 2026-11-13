@@ -903,7 +903,7 @@ impl CpuTextRaster {
                 }
             }
         }
-        (images, rich_decorations(&self.fonts, &buffer, rich))
+        (images, rich_decorations(&self.fonts, 1., &buffer, rich))
     }
     /// Rasterize `text` at `size` in `font`, laid out in `width` by `height`:
     /// each glyph's position and image.
@@ -2719,58 +2719,79 @@ fn joined_wash<'o>(
 /// Derive decoration geometry from shaped visual fragments, including bidi and wrapping.
 pub fn rich_decorations(
     fonts: &FontSystem,
+    scale: f32,
     buffer: &Buffer,
     rich: &zgx::rich_text::RichText,
 ) -> Vec<RichDecoration> {
-    rich_decorations_in(fonts, buffer.layout_runs(), &line_starts(buffer), rich)
+    rich_decorations_in(
+        fonts,
+        scale,
+        buffer.layout_runs(),
+        &line_starts(buffer),
+        rich,
+    )
 }
-/// A face's strikeout stripe from its OS/2 table: its top above the baseline
-/// and its thickness, in ems; none where it has none (`strike_top`).
-fn strikeout_metrics(fonts: &FontSystem, id: cosmic_text::fontdb::ID) -> Option<(f32, f32)> {
+/// A face's ascent (its hhea ascender) in ems, as Blink takes it from the
+/// platform font; none where the face can't be read.
+fn ascent_em(fonts: &FontSystem, id: cosmic_text::fontdb::ID) -> Option<f32> {
     thread_local! {
-        static KNOWN: std::cell::RefCell<std::collections::HashMap<cosmic_text::fontdb::ID, Option<(f32, f32)>>> =
+        static KNOWN: std::cell::RefCell<std::collections::HashMap<cosmic_text::fontdb::ID, Option<f32>>> =
             Default::default();
     }
     if let Some(known) = KNOWN.with(|known| known.borrow().get(&id).copied()) {
         return known;
     }
-    let found = fonts.db().with_face_data(id, |data, index| {
-        let face = ttf_parser::Face::parse(data, index).ok()?;
-        let metrics = face.strikeout_metrics()?;
-        let em = f32::from(face.units_per_em());
-        (em > 0. && metrics.thickness > 0).then(|| {
-            (
-                f32::from(metrics.position) / em,
-                f32::from(metrics.thickness) / em,
-            )
+    let found = fonts
+        .db()
+        .with_face_data(id, |data, index| {
+            let face = ttf_parser::Face::parse(data, index).ok()?;
+            let em = f32::from(face.units_per_em());
+            (em > 0. && face.ascender() > 0).then(|| f32::from(face.ascender()) / em)
         })
-    });
-    let found = found.flatten();
+        .flatten();
     KNOWN.with(|known| known.borrow_mut().insert(id, found));
     found
 }
-/// Where the top of a line-through sits above the baseline for text of
-/// `size` in `face`: its OS/2 yStrikeoutPosition, as Chrome places it, else
-/// 0.3 em.
-pub fn strike_top(fonts: &FontSystem, face: Option<cosmic_text::fontdb::ID>, size: f32) -> f32 {
-    strike_stripe(fonts, face, size).0
-}
-/// A line-through's top above the baseline and its thickness for text of
-/// `size`: the face's OS/2 yStrikeoutPosition and yStrikeoutSize, else 0.3 em
-/// and none (the decoration's own).
-fn strike_stripe(
-    fonts: &FontSystem,
-    face: Option<cosmic_text::fontdb::ID>,
+/// A line-through's top and height, in points, as Blink draws it
+/// (`TextDecorationInfo::ComputeLineThroughLineData` and
+/// `DecorationLinePainter::SnapYAxis`), worked in device pixels: with the
+/// font's ascent `A` rounded, its top is `2A/3 - t/2` below the line's top
+/// (`A` above the baseline), `t` the thickness (an auto one a tenth of the
+/// size, at least 1), the top rounded to a pixel and the height floored
+/// (at least 1). A font without an ascent keeps 0.3 em, a point thick.
+fn strike_rect(
+    ascent: Option<f32>,
     size: f32,
-) -> (f32, Option<f32>) {
-    match face.and_then(|id| strikeout_metrics(fonts, id)) {
-        Some((position, thickness)) => (position * size, Some(thickness * size)),
-        None => (size * 0.3, None),
+    scale: f32,
+    baseline: f32,
+    style: zgx::rich_text::Decoration,
+) -> (f32, f32) {
+    let Some(ascent) = ascent else {
+        return (baseline - size * 0.3, style.thickness());
+    };
+    let scale = if scale.is_finite() && scale > 0. {
+        scale
+    } else {
+        1.
+    };
+    let thickness = if style.is_auto() {
+        size * scale / 10.
+    } else {
+        (style.thickness() * scale).round()
     }
+    .max(1.);
+    let ascent = (ascent * size * scale).round();
+    let baseline = (baseline * scale).round();
+    let top = (2. * ascent / 3. - thickness / 2. + 0.5).floor();
+    (
+        (baseline - ascent + top) / scale,
+        thickness.floor().max(1.) / scale,
+    )
 }
 /// `rich_decorations` over any laid-out runs, given where each line starts.
 pub fn rich_decorations_in<'a>(
     fonts: &FontSystem,
+    scale: f32,
     runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
     starts: &[usize],
     rich: &zgx::rich_text::RichText,
@@ -2808,7 +2829,7 @@ pub fn rich_decorations_in<'a>(
                     }
                 })
                 .map(|g| g.font_id);
-            let stripe = strike_stripe(fonts, face, run.font_size);
+            let ascent = face.and_then(|id| ascent_em(fonts, id));
             let mut merged: Vec<(f32, f32)> = Vec::new();
             for (left, right) in spans {
                 if let Some(last) = merged.last_mut()
@@ -2861,19 +2882,16 @@ pub fn rich_decorations_in<'a>(
                                 .unwrap_or(run.font_size * 0.1),
                         false,
                     ),
-                    (run.strikethrough, line.line_y - stripe.0, true),
+                    (run.strikethrough, 0., true),
                 ] {
                     if let Some(style) = decoration {
+                        let (y, height) = if strike {
+                            strike_rect(ascent, run.font_size, scale, line.line_y, style)
+                        } else {
+                            (y, style.thickness())
+                        };
                         output.push(RichDecoration {
-                            bounds: Rect::new(
-                                left,
-                                y,
-                                right - left,
-                                match (strike, style.is_auto(), stripe.1) {
-                                    (true, true, Some(size)) => size,
-                                    _ => style.thickness(),
-                                },
-                            ),
+                            bounds: Rect::new(left, y, right - left, height),
                             color: style.color.unwrap_or(run.color),
                             background: false,
                             radius: 0.,
@@ -2894,41 +2912,15 @@ mod strikeout_tests {
 
     const GEIST: &[u8] = include_bytes!("../../zgx-desktop/examples/support/fonts/Geist.ttf");
 
-    /// A line-through sits where the face's OS/2 table says (Chrome's), at 13
-    /// and 14 points, and where the face has none, at 0.3 em as before.
-    #[test]
-    fn a_line_through_takes_its_position_from_the_font() {
+    fn laid(scale: f32, size: f32) -> (f32, RichDecoration) {
         let mut fonts = FontSystem::new_with_fonts([cosmic_text::fontdb::Source::Binary(
             std::sync::Arc::new(GEIST),
         )]);
-        let id = fonts
-            .db()
-            .faces()
-            .find(|face| face.families.iter().any(|(name, _)| name == "Geist"))
-            .map(|face| face.id)
-            .expect("Geist loaded");
-        let face = ttf_parser::Face::parse(GEIST, 0).unwrap();
-        let metrics = face.strikeout_metrics().expect("Geist has OS/2 strikeout");
-        let em = f32::from(face.units_per_em());
-        for size in [13., 14.] {
-            let expected = f32::from(metrics.position) / em * size;
-            let got = strike_top(&fonts, Some(id), size);
-            assert!(
-                (got - expected).abs() < 1e-4,
-                "{size}: {got} for {expected}"
-            );
-            eprintln!(
-                "Geist {size}pt: top {got:.3} above the baseline, size {:.3}",
-                f32::from(metrics.thickness) / em * size
-            );
-        }
-        assert_eq!(strike_top(&fonts, None, 13.), 13. * 0.3);
-        // A line of it, drawn.
         let rich = zgx::rich_text::RichText::new(
             "struck",
             vec![zgx::rich_text::TextRun {
                 range: 0..6,
-                font_size: 13.,
+                font_size: size,
                 strikethrough: Some(zgx::rich_text::Decoration::default()),
                 font: zgx::text_layout::FontStyle {
                     family: zgx::text_layout::FontFamily::Named("Geist".into()),
@@ -2940,16 +2932,42 @@ mod strikeout_tests {
         .unwrap();
         let buffer = rich_buffer(&mut fonts, &rich, None, None);
         let line_y = buffer.layout_runs().next().unwrap().line_y;
-        let strike = rich_decorations(&fonts, &buffer, &rich)
+        let strike = rich_decorations(&fonts, scale, &buffer, &rich)
             .into_iter()
             .find(|d| d.strike)
             .expect("a line-through");
-        let expected = line_y - f32::from(metrics.position) / em * 13.;
-        assert!(
-            (strike.bounds.y - expected).abs() < 1e-3,
-            "{} for {expected}",
-            strike.bounds.y
+        (line_y, strike)
+    }
+
+    /// Chrome (Geist 13 px at 2x) fills the two device rows from 10 to 8
+    /// above the baseline: an ascent of 26 device pixels, a thickness of
+    /// 2.6 floored to 2, and a top at `2 * 26 / 3 - 1.3` below the line's,
+    /// rounded.
+    #[test]
+    fn a_line_through_lands_on_blinks_device_rows() {
+        let face = ttf_parser::Face::parse(GEIST, 0).unwrap();
+        let ascent = f32::from(face.ascender()) / f32::from(face.units_per_em());
+        eprintln!("Geist ascent {ascent} em");
+        let (line_y, strike) = laid(2., 13.);
+        let baseline = (line_y * 2.).round();
+        let a = (ascent * 26.).round();
+        let top = baseline - a + (2. * a / 3. - 1.3 + 0.5).floor();
+        assert_eq!(strike.bounds.y * 2., top);
+        assert_eq!(strike.bounds.height * 2., 2.);
+        assert_eq!(
+            baseline - strike.bounds.y * 2.,
+            10.,
+            "rows 178 and 179, the baseline at 188"
         );
+    }
+
+    #[test]
+    fn a_line_through_at_one_x_snaps_to_whole_pixels() {
+        for size in [13., 14.] {
+            let (_, strike) = laid(1., size);
+            assert_eq!(strike.bounds.y, strike.bounds.y.round(), "{size}");
+            assert_eq!(strike.bounds.height, (size / 10.).floor().max(1.), "{size}");
+        }
     }
 }
 
@@ -3027,7 +3045,7 @@ mod wash_tests {
     fn washes(rich: &RichText) -> Vec<Rect> {
         let mut fonts = FontSystem::new();
         let buffer = rich_buffer(&mut fonts, rich, Some(600.), None);
-        rich_decorations(&fonts, &buffer, rich)
+        rich_decorations(&fonts, 1., &buffer, rich)
             .into_iter()
             .filter(|d| d.background)
             .map(|d| d.bounds)
