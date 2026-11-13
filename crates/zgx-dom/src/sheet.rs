@@ -33,7 +33,6 @@ pub(crate) const BASE_CSS: &str = "\
 .zp[data-layer]>*{pointer-events:auto;}\
 .zp[role=tooltip]{transition:opacity .14s ease-out;}\
 @starting-style{.zp[role=tooltip]:popover-open{opacity:0;}}\
-.zt a{color:inherit;}\
 @keyframes zf{from{opacity:0;}}\
 ";
 
