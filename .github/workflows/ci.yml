@@ -853,18 +853,17 @@ jobs:
       # Direct3D 11 (the `d3d11` feature, on WARP) draws what Direct3D 12
       # does, byte for byte: the suite's scenes and every ready-made shader
       # fill and layer shader, each compiled cold by FXC in its child
-      # (`d3d11_parity`), optimized as apps ship them; and its ahead-compiled
-      # shaders are what naga writes now.
-      - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --test d3d11_atlas --test d3d11_present --release --locked
-        env:
-          LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
-      # Every zgx-gpu test drawn with Direct3D 11 throughout (`ZGX_D3D11`,
-      # read once a process), so what it can't draw shows here and not
-      # silently. Each skip has its reason beside it; drop the skip with
-      # its reason. The d3d11_* tests, which set it themselves, run only in
-      # the release step above. Unoptimized like the steps above: some
-      # eighty test binaries built with the release profile's LTO took past
-      # the job's hour.
+      # (`d3d11_parity`, with a `LOCALAPPDATA` of its own, run first); and
+      # its ahead-compiled shaders are what naga writes now (next step).
+      # Then every other zgx-gpu test drawn with Direct3D 11 throughout
+      # (`ZGX_D3D11`, read once a process; the d3d11_* tests set it
+      # themselves), so what it can't draw shows here and not silently.
+      # Each skip has its reason beside it; drop the skip with its reason.
+      # Unoptimized, as the steps above, and one build for both: built
+      # with the release profile's LTO, the eighty test binaries took past
+      # the job's hour. (Rust neither reassociates floats nor contracts
+      # them into FMAs when optimizing, and the shaders compile the same,
+      # so parity checks an unoptimized build as strictly.)
       - name: zgx-gpu's tests drawn with Direct3D 11
         shell: bash
         run: |
@@ -887,14 +886,16 @@ jobs:
           )
           args=()
           for skip in "${skips[@]}"; do args+=(--skip "$skip"); done
-          targets=(--lib)
+          d3d11=() targets=(--lib)
           for test in crates/zgx-gpu/tests/*.rs; do
             name=$(basename "$test" .rs)
-            [[ $name == d3d11_* ]] || targets+=(--test "$name")
+            case $name in
+              d3d11_*) d3d11+=(--test "$name") ;;
+              *) targets+=(--test "$name") ;;
+            esac
           done
-          cargo test -p zgx-gpu --features d3d11 --locked "${targets[@]}" -- "${args[@]}"
-        env:
-          ZGX_D3D11: "1"
+          LOCALAPPDATA="$RUNNER_TEMP\\zgx-cold-d3d11" cargo test -p zgx-gpu --features d3d11 --locked "${d3d11[@]}"
+          ZGX_D3D11=1 cargo test -p zgx-gpu --features d3d11 --locked "${targets[@]}" -- "${args[@]}"
       # Its ahead-compiled shaders (dxbc/) are FXC's bytecode of naga's HLSL
       # today; stale ones are kept for a machine without FXC to take (and
       # checked when the parity above failed: stale shaders fail it).
