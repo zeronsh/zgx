@@ -2035,6 +2035,49 @@ fn part_weight(value: &Value) -> usize {
     }
     if large(value) { 1 } else { all(value) }
 }
+thread_local! {
+    /// Lists a host republished (`Shared::set`), by identity, with the value
+    /// each replaced: a script's table for the new one is derived from the
+    /// old one's (`derive`), as after its own `set_key`, rather than every
+    /// row converted again. Few and recent; one the VM has no table for
+    /// converts whole.
+    static REPUBLISHED: RefCell<Vec<(usize, Value)>> = const { RefCell::new(Vec::new()) };
+}
+const REPUBLISHED_KEPT: usize = 16;
+fn host_base(id: usize) -> Option<Value> {
+    REPUBLISHED.with(|kept| {
+        kept.borrow()
+            .iter()
+            .find(|(at, _)| *at == id)
+            .map(|(_, old)| old.clone())
+    })
+}
+/// Notes that `new` replaced `old` (reconciled, so its unchanged rows are
+/// `old`'s own): each large list in it that differs from the one it
+/// replaced, down through maps.
+fn note_republished(old: &Value, new: &Value, depth: u32) {
+    match (old, new) {
+        (Value::List(a), Value::List(b)) if !Rc::ptr_eq(a, b) => {
+            if large(new) {
+                REPUBLISHED.with(|kept| {
+                    let mut kept = kept.borrow_mut();
+                    if kept.len() >= REPUBLISHED_KEPT {
+                        kept.remove(0);
+                    }
+                    kept.push((identity(new), old.clone()));
+                });
+            }
+        }
+        (Value::Map(a), Value::Map(b)) if depth < 4 && !Rc::ptr_eq(a, b) => {
+            for (key, value) in b.iter() {
+                if let Some((_, was)) = a.iter().find(|(k, _)| k == key) {
+                    note_republished(was, value, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
 /// How many first items `list` shares with `from`, if it was grown from it
 /// (`Appended`): each the same value, none compared.
 pub(crate) fn shared_start(list: &Value, from: &Value) -> Option<usize> {
@@ -2126,10 +2169,21 @@ fn shared_part(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
     // Written since a script last read it: its table from the one read.
     let base = cache.bases.borrow_mut().remove(&id);
     drop(cache);
-    if let Some(base) = base {
+    if let Some(base) = base.or_else(|| host_base(id)) {
         derive(lua, &base, value)?;
         if let Some(t) = cached(lua, value)? {
             return Ok(mlua::Value::Table(t));
+        }
+    }
+    // A table holding republished lists: each from its old one's table.
+    if let Value::Map(fields) = value {
+        for (_, field) in fields.iter() {
+            if let Value::List(_) = field
+                && let Some(base) = host_base(identity(field))
+                && cached(lua, field)?.is_none()
+            {
+                derive(lua, &base, field)?;
+            }
         }
     }
     if !has_element(value) {
@@ -2774,7 +2828,11 @@ impl Shared {
     /// Sets the value, keeping the current one's parts where they are
     /// equal; whether anything changed.
     pub fn set(&self, value: Value) -> bool {
-        let next = self.0.with_untracked(|old| value.reconcile(old));
+        let next = self.0.with_untracked(|old| {
+            let next = value.reconcile(old);
+            note_republished(old, &next, 0);
+            next
+        });
         self.0.set(next)
     }
     /// The signal itself (its `set` replaces without reconciling).

@@ -1231,3 +1231,40 @@ fn a_span_takes_a_leading_and_a_trailing_icon() {
         .collect();
     assert!(widths[1] >= widths[0] + 15.9, "{widths:?}");
 }
+
+#[test]
+fn a_republished_list_reuses_the_tables_of_the_rows_it_kept() {
+    use zgx_script::{Value, tables_converted, values_converted};
+    let rows = |changed: usize| {
+        let items: Vec<String> = (0..1200)
+            .map(|i| {
+                let text = if i == changed { "edited" } else { "same" };
+                format!(
+                    r#"{{"id":{i},"kind":"m","text":"{text} {i}","refs":[{{"n":1}},{{"n":2}}]}}"#
+                )
+            })
+            .collect();
+        Value::from_json(&format!("[{}]", items.join(","))).unwrap()
+    };
+    let mut h = Harness::inline(
+        r##"local rows = ui.shared("rows", {})
+local out = ui.state("out", 0)
+ui.command { id = "read", run = function() out:set(#rows:get()) end }
+return ui.column { w = 100, h = 100, ui.text { id = "out", function() return tostring(out:get()) end } }"##,
+    );
+    let shared = h.host.shared("rows", Value::Nil);
+    shared.set(rows(usize::MAX));
+    h.host.run_command("read");
+    h.frames(2);
+    assert_eq!(h.text("out"), "1200");
+    shared.set(rows(600));
+    let before = (tables_converted(), values_converted());
+    h.host.run_command("read");
+    h.frames(2);
+    let (tables, values) = (tables_converted() - before.0, values_converted() - before.1);
+    assert_eq!(h.text("out"), "1200");
+    assert!(
+        tables < 20 && values < 100,
+        "only the changed row converts again: {tables} tables, {values} values"
+    );
+}
