@@ -1056,11 +1056,26 @@ pub(crate) type Exposed = Rc<RefCell<HashMap<String, Option<Capability>>>>;
 pub(crate) type ReadOnly = Rc<RefCell<std::collections::HashSet<String>>>;
 
 /// Where a host's files come from: the disk, or a bundle compiled into the
-/// app (which reads nothing from the disk).
+/// app (which reads nothing from the disk), with what its scripts may be.
 #[derive(Clone, Copy)]
 pub(crate) enum Files {
     Disk,
-    Bundle(&'static Bundle),
+    Bundle(&'static Bundle, Code),
+}
+/// What a bundle's scripts may be (`ScriptHost::code`). Luau checks no
+/// bytecode it loads: bytecode crafted to corrupt the VM steps out of the
+/// sandbox, so only bytecode the app's own build compiled may load.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Code {
+    /// Source text only, as from the disk: a script in bytecode form is
+    /// refused (it fails to load). For scripts that came from elsewhere
+    /// (an update downloaded), compiled where they run.
+    Source,
+    /// Bytecode or source: a bundle the app's build compiled
+    /// (`build::bundle`, `include_bundle!`), part of the app itself.
+    #[default]
+    VerifiedBytecode,
 }
 impl Files {
     /// A chunk read from here, loading as the files allow: an app's bundle
@@ -1071,14 +1086,16 @@ impl Files {
     /// source, it just fails to parse.
     fn chunk(self, chunk: mlua::chunk::Chunk<'_>) -> mlua::chunk::Chunk<'_> {
         match self {
-            Files::Bundle(_) => chunk,
-            Files::Disk => chunk.set_mode(mlua::chunk::ChunkMode::Text),
+            Files::Bundle(_, Code::VerifiedBytecode) => chunk,
+            Files::Bundle(_, Code::Source) | Files::Disk => {
+                chunk.set_mode(mlua::chunk::ChunkMode::Text)
+            }
         }
     }
     pub(crate) fn read(self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         match self {
             Files::Disk => std::fs::read(path),
-            Files::Bundle(bundle) => bundle.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
+            Files::Bundle(bundle, _) => bundle.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's bundle")
             }),
         }
@@ -1089,7 +1106,7 @@ impl Files {
     fn is_dir(self, path: &std::path::Path) -> bool {
         match self {
             Files::Disk => path.is_dir(),
-            Files::Bundle(bundle) => bundle.is_dir(path),
+            Files::Bundle(bundle, _) => bundle.is_dir(path),
         }
     }
     /// The files in directory `dir`.
@@ -1100,7 +1117,7 @@ impl Files {
                 .flatten()
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .collect(),
-            Files::Bundle(bundle) => bundle.list(dir),
+            Files::Bundle(bundle, _) => bundle.list(dir),
         }
     }
 }
@@ -1399,7 +1416,7 @@ fn require_module<const LENDING: bool>(
             .and_then(|h| h.sources.compiled(&path, &code))
             // Compiled ahead while the app's window was made (`compile_ahead`).
             .or_else(|| sources::prefetched(&code)),
-        Files::Bundle(_) => None,
+        Files::Bundle(..) => None,
     };
     let bytecode = match package.as_deref() {
         Some(package) => package.bytecode(),
@@ -1946,7 +1963,7 @@ impl ScriptHost {
     pub fn bundled(runtime: &Runtime, bundle: &'static Bundle, entry: &str) -> Self {
         let root = PathBuf::from(bundle.root);
         let mut host = Self::with(runtime, Script::File(root.join(entry)))
-            .configure(|inner| inner.files = Files::Bundle(bundle));
+            .configure(|inner| inner.files = Files::Bundle(bundle, Code::VerifiedBytecode));
         // Its packages, as `build::bundle` stored them.
         let mut names: Vec<&str> = bundle
             .files
@@ -1961,16 +1978,30 @@ impl ScriptHost {
             let dir = root.join(bundle::build::PACKAGES).join(name);
             host = host.package(name, dir);
         }
-        host.0.assets.set_files(Files::Bundle(bundle));
+        host.0
+            .assets
+            .set_files(Files::Bundle(bundle, Code::VerifiedBytecode));
         // Theme files from the bundle; other hosts' still from the disk.
         zgx::theme::Themes::of(runtime).set_reader(Some(Rc::new(move |path: &std::path::Path| {
             if path.starts_with(&root) {
-                Files::Bundle(bundle).read_to_string(path)
+                Files::Bundle(bundle, Code::VerifiedBytecode).read_to_string(path)
             } else {
                 std::fs::read_to_string(path)
             }
         })));
         host
+    }
+    /// What the scripts of its bundle may be (`Code`): `bundled`'s are the
+    /// app's own build's, bytecode included (`Code::VerifiedBytecode`);
+    /// with `Code::Source`, a script in bytecode form is refused, as from
+    /// the disk. Files from the disk are always read as source.
+    #[doc(hidden)]
+    pub fn code(self, code: Code) -> Self {
+        self.configure(|inner| {
+            if let Files::Bundle(bundle, _) = inner.files {
+                inner.files = Files::Bundle(bundle, code);
+            }
+        })
     }
     /// Whether a script error shows over the interface, with where it
     /// happened (development), or not (what ships: the last good interface
@@ -3198,7 +3229,7 @@ impl ScriptHost {
     /// `ZGX_LINT=0`, skip it.
     fn lint_loaded(&self) {
         if !cfg!(debug_assertions)
-            || matches!(self.0.files, Files::Bundle(_))
+            || matches!(self.0.files, Files::Bundle(..))
             || zgx::env::var_os("ZGX_LINT").is_some_and(|v| v == "0")
         {
             return;
@@ -3610,7 +3641,7 @@ impl ScriptHost {
                     host.poll_check();
                 }
             }
-            if matches!(host.0.files, Files::Bundle(_)) && host.0.managed.borrow().is_empty() {
+            if matches!(host.0.files, Files::Bundle(..)) && host.0.managed.borrow().is_empty() {
                 return;
             }
             loop {
@@ -4217,7 +4248,7 @@ impl ScriptHost {
         let fail = |error: mlua::Error| describe(&name, &error);
         // A plugin outside the app's bundle reads from the disk.
         let files = match (self.0.files, script) {
-            (Files::Bundle(bundle), Script::File(path) | Script::Plugin { path, .. })
+            (Files::Bundle(bundle, _), Script::File(path) | Script::Plugin { path, .. })
                 if plugin && !path.starts_with(bundle.root) =>
             {
                 Files::Disk
