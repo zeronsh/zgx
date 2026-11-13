@@ -773,7 +773,14 @@ mod macos {
         };
         match scene.kind(panel) {
             NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
-                quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
+                // A ring or border is its own edge (a dark theme's popover: no shadow, a 0.5 inset ring)
+                let ring = quad
+                    .decoration
+                    .as_ref()
+                    .and_then(|d| d.inset_shadows.as_deref())
+                    .is_some_and(|rings| rings.iter().any(|ring| ring.color.3 > 0));
+                let border = quad.border_width > 0. && quad.border_color.3 > 0;
+                !ring && !border && quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
             }
             _ => true,
         }
@@ -1996,6 +2003,31 @@ mod macos {
             assert_eq!(radius, -1.);
             assert_eq!((bounds.y, bounds.height), (y - 10., h + 10.));
             assert_eq!(bounds.width, w);
+        }
+
+        #[test]
+        fn a_panel_ringed_or_bordered_takes_no_shadow_from_the_window_server() {
+            use zgx::scene::{BoxShadow, Transform};
+            let shadow = |view: View| {
+                let mut ui = Ui::new(400., 300.);
+                let handle = ui.mount(view);
+                ui.prepare_frame();
+                window_shadow(&ui.scene.borrow(), handle.node())
+            };
+            let ring = BoxShadow {
+                color: rgba(0x262626ff),
+                offset: Transform { x: 0., y: 0. },
+                blur_radius: 0.,
+                spread: 0.5,
+            };
+            assert!(
+                !shadow(div().child(chip().inset_shadows(vec![ring]))),
+                "a dark popover's inset ring"
+            );
+            assert!(
+                !shadow(div().child(chip().border(1.).border_color(rgb(0x303030)))),
+                "a bordered panel"
+            );
         }
 
         #[test]
