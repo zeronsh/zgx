@@ -1296,6 +1296,8 @@ export type Control = {
 	selected: boolean?,
 	checked: boolean?,
 	expanded: boolean?,
+	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
+	haspopup: string?,
 	focused: boolean,
 	-- Names it for `ui.press` while it is there.
 	handle: number,
@@ -2405,6 +2407,9 @@ export type NodeProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: boolean?,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"

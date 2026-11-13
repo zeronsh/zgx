@@ -285,3 +285,42 @@ fn inspect_windows_lists_popups_with_their_owner_and_whether_they_show() {
         "{held}"
     );
 }
+
+/// `haspopup` says what a control opens (`aria-haspopup`): set by hand on a
+/// plain button, by itself on a popover's and a menu's trigger (a dialog, a
+/// menu), and a trigger's own says it unchanged.
+#[test]
+fn controls_say_what_they_open() {
+    let mut h = Harness::inline(
+        r##"local out = ui.state("out", "")
+        local open = ui.state("open", false)
+        local menu = ui.state("menu", false)
+        ui.command { id = "scan", run = function()
+            local seen = {}
+            for _, c in ui.controls() do seen[#seen + 1] = c.name .. "=" .. tostring(c.haspopup) end
+            out:set(table.concat(seen, "|"))
+        end }
+        return ui.column { gap = 4,
+            ui.text { id = "out", function() return out:get() end },
+            ui.button { "Share", haspopup = "dialog" },
+            ui.button { "Plain" },
+            ui.button { "Pick", haspopup = "listbox" },
+            ui.popover { open = open, anchor = ui.button { "Auto dialog" }, ui.text { "p" } },
+            ui.popover { open = open, anchor = ui.button { "Own", haspopup = "tree" }, ui.text { "q" } },
+            ui.menu { open = menu, anchor = ui.button { "Auto menu" }, build = function() return ui.column { ui.menu_item { "x" } } end },
+        }"##,
+    );
+    h.frames(3);
+    run(&mut h, "scan");
+    let out = h.text("out");
+    for want in [
+        "Share=dialog",
+        "Plain=nil",
+        "Pick=listbox",
+        "Auto dialog=dialog",
+        "Own=tree",
+        "Auto menu=menu",
+    ] {
+        assert!(out.contains(want), "{want} in {out}");
+    }
+}

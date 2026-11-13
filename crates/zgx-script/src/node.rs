@@ -3441,6 +3441,8 @@ pub(crate) struct A11y {
     pub hidden: bool,
     /// `aria_modal = true`: while it shows, nothing else is read.
     pub modal: bool,
+    /// `haspopup = "dialog"`: what it opens (`aria-haspopup`).
+    pub has_popup: Option<zgx::semantics::PopupKind>,
     pub focus_group: Option<zgx::input::FocusGroup>,
     /// A `label` given as a state or function.
     pub label: Option<Source>,
@@ -4767,6 +4769,9 @@ fn fill_from(
             "aria_modal" => {
                 node.a11y.get_or_insert_default().modal = lua.unpack(value)?;
             }
+            "haspopup" => {
+                node.a11y.get_or_insert_default().has_popup = has_popup_of(lua, value)?;
+            }
             "focus_group" => {
                 let axis: String = lua.unpack(value)?;
                 node.a11y.get_or_insert_default().focus_group = Some(focus_group(&axis)?);
@@ -4862,6 +4867,27 @@ pub(crate) fn specificity(prop: Prop) -> u8 {
     }
 }
 
+/// `haspopup`: what a node opens: "dialog", "menu", "listbox", "tree" or
+/// "grid", or `true` (a menu, as ARIA has it); `false` or nil, nothing.
+fn has_popup_of(lua: &Lua, value: mlua::Value) -> mlua::Result<Option<zgx::semantics::PopupKind>> {
+    use zgx::semantics::PopupKind;
+    Ok(match value {
+        mlua::Value::Nil | mlua::Value::Boolean(false) => None,
+        mlua::Value::Boolean(true) => Some(PopupKind::Menu),
+        value => match lua.unpack::<String>(value)?.as_str() {
+            "dialog" => Some(PopupKind::Dialog),
+            "menu" => Some(PopupKind::Menu),
+            "listbox" => Some(PopupKind::Listbox),
+            "tree" => Some(PopupKind::Tree),
+            "grid" => Some(PopupKind::Grid),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "`haspopup` is dialog, menu, listbox, tree, grid or true, not {other:?}"
+                )));
+            }
+        },
+    })
+}
 /// A modal's `placement = { x = "end", y = "start", inset = 8 }`: where its
 /// panel sits in the window (`inset`: a number, or `{ top, right, bottom,
 /// left }`).

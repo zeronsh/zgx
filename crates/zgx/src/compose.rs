@@ -1625,6 +1625,12 @@ impl View {
         self.accessibility_mut().hidden = true;
         self
     }
+    /// What this control opens (`aria-haspopup`): a dialog, a menu, a list
+    /// box. A popover's or menu's trigger says so already, unless this does.
+    pub fn accessible_has_popup(mut self, kind: crate::semantics::PopupKind) -> Self {
+        self.accessibility_mut().has_popup = Some(kind);
+        self
+    }
     /// While this shows, assistive technology reads it alone, not what lies
     /// behind it (`aria-modal`): a sheet or dialog an app builds itself.
     /// `modal` views are so already.
@@ -4365,6 +4371,18 @@ fn mount_portal(
     let anchor = anchor.map(|anchor| mount(ui, owner, *anchor, environment.clone()));
     if let Some(anchor) = anchor {
         ui.listen_popup_soon(anchor);
+        // What the trigger opens, from the start (a lazy panel isn't built
+        // until it opens): a tooltip's trigger says nothing.
+        if !view.rare.as_ref().is_some_and(|r| r.panel_hidden) {
+            let kind = if is_menu {
+                crate::semantics::PopupKind::Menu
+            } else {
+                crate::semantics::PopupKind::Dialog
+            };
+            ui.semantics.borrow_mut().update(anchor, |node| {
+                node.has_popup.get_or_insert(kind);
+            });
+        }
     }
     // A bare button opening a menu (no handlers of its own) is a menu
     // button, as WAI-ARIA's: a press, Enter, Space or Down opens it, even
@@ -4986,7 +5004,8 @@ fn mount_portal_panel(
         ui.bind(panel, move || {
             let expanded = popup_open.get();
             semantics.borrow_mut().update(anchor, |node| {
-                node.has_popup = Some(crate::semantics::PopupKind::Dialog);
+                node.has_popup
+                    .get_or_insert(crate::semantics::PopupKind::Dialog);
                 node.expanded = Some(expanded);
             });
         });
@@ -8754,6 +8773,8 @@ pub(crate) struct Accessibility {
     checked: Option<Box<dyn FnMut() -> bool>>,
     radio_item: bool,
     expanded: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::accessible_has_popup` (`aria-haspopup`).
+    has_popup: Option<crate::semantics::PopupKind>,
     value: Option<Box<dyn FnMut() -> String>>,
     numeric: Option<(f64, f64, NumericValue)>,
     live: Option<Live>,
@@ -8790,6 +8811,9 @@ impl Accessibility {
         inner.radio_item |= outer.radio_item;
         if outer.expanded.is_some() {
             inner.expanded = outer.expanded;
+        }
+        if outer.has_popup.is_some() {
+            inner.has_popup = outer.has_popup;
         }
         if outer.value.is_some() {
             inner.value = outer.value;
@@ -8860,6 +8884,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         checked,
         radio_item,
         expanded,
+        has_popup,
         value,
         numeric,
         live,
@@ -8924,6 +8949,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             node.description = description.or(node.description.take());
             node.hidden |= hidden;
             node.modal |= modal;
+            node.has_popup = has_popup.or(node.has_popup);
         });
     }
     // A name or value worked out from state is read by assistive technology

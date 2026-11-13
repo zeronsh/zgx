@@ -873,6 +873,9 @@ impl AccessibilityTree {
                 n.set_has_popup(match popup {
                     zgx::semantics::PopupKind::Menu => accesskit::HasPopup::Menu,
                     zgx::semantics::PopupKind::Dialog => accesskit::HasPopup::Dialog,
+                    zgx::semantics::PopupKind::Listbox => accesskit::HasPopup::Listbox,
+                    zgx::semantics::PopupKind::Tree => accesskit::HasPopup::Tree,
+                    zgx::semantics::PopupKind::Grid => accesskit::HasPopup::Grid,
                 });
             }
             if semantic.modal {

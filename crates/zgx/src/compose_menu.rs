@@ -190,7 +190,7 @@ pub(crate) fn mount(
         let expanded = open.get();
         reset.borrow_mut().reset();
         semantics.borrow_mut().update(anchor, |node| {
-            node.has_popup = Some(PopupKind::Menu);
+            node.has_popup.get_or_insert(PopupKind::Menu);
             node.expanded = Some(expanded);
         });
     });

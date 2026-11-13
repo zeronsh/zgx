@@ -4717,6 +4717,9 @@ fn styled(
         if a11y.modal {
             view = view.accessible_modal();
         }
+        if let Some(kind) = a11y.has_popup {
+            view = view.accessible_has_popup(kind);
+        }
         if let Some(axis) = a11y.focus_group {
             view = view.focus_group(axis);
         }

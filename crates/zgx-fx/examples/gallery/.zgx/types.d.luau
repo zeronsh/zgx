@@ -1301,6 +1301,8 @@ export type Control = {
 	selected: boolean?,
 	checked: boolean?,
 	expanded: boolean?,
+	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
+	haspopup: string?,
 	focused: boolean,
 	-- Names it for `ui.press` while it is there.
 	handle: number,
@@ -2461,6 +2463,9 @@ export type NodeProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: boolean?,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -2896,6 +2901,9 @@ export type Props = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -3264,6 +3272,7 @@ export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = boolean?
 export type Props_aria_modal = boolean?
+export type Props_haspopup = ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?
 export type Props_focus_group = ("vertical" | "horizontal" | "both")?
 export type Props_pointer_events = (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?
 export type Props_hit = ("target" | "shown")?
@@ -3582,6 +3591,9 @@ export type ContainerProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -4031,6 +4043,9 @@ export type GlassProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -4489,6 +4504,9 @@ export type ScrollProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -4964,6 +4982,9 @@ export type TextProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -5398,6 +5419,9 @@ export type MarkdownViewProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -5968,6 +5992,9 @@ export type RichProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -6396,6 +6423,9 @@ export type ImageProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -6841,6 +6871,9 @@ export type SvgProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -7397,6 +7430,9 @@ export type Scene3DProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -7848,6 +7884,9 @@ export type CanvasProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -8308,6 +8347,9 @@ export type CheckboxProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -8746,6 +8788,9 @@ export type InputProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -9285,6 +9330,9 @@ export type ProgressProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -9711,6 +9759,9 @@ export type SliderProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -10158,6 +10209,9 @@ export type SegmentedProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -10598,6 +10652,9 @@ export type StepperProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -11039,6 +11096,9 @@ export type DisclosureProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -11491,6 +11551,9 @@ export type AccordionProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -11917,6 +11980,9 @@ export type SectionProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -12368,6 +12434,9 @@ export type SeparatorProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -12802,6 +12871,9 @@ export type TabsProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -13258,6 +13330,9 @@ export type TreeProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -13710,6 +13785,9 @@ export type DataGridProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -14158,6 +14236,9 @@ export type CalendarProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -14599,6 +14680,9 @@ export type DatePickerProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -15038,6 +15122,9 @@ export type TimeFieldProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -15476,6 +15563,9 @@ export type ComboboxProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -15922,6 +16012,9 @@ export type CommandPaletteProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -16356,6 +16449,9 @@ export type SelectProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -16797,6 +16893,9 @@ export type SplitProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -17294,6 +17393,9 @@ export type ListProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -17825,6 +17927,9 @@ export type LayerProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -18273,6 +18378,9 @@ export type ModalProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -18770,6 +18878,9 @@ export type PopoverProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -19255,6 +19366,9 @@ export type MenuItemProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -19692,6 +19806,9 @@ export type SubmenuProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -20149,6 +20266,9 @@ export type WebViewProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -20603,6 +20723,9 @@ export type TerminalProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -21032,6 +21155,9 @@ export type HostViewProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -21461,6 +21587,9 @@ export type SlotProps = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -21941,6 +22070,9 @@ export type EachOptions = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -22385,6 +22517,9 @@ export type PresenceOptions = {
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"

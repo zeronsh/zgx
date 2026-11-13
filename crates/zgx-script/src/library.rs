@@ -1628,6 +1628,7 @@ fn controls(lua: &Lua, options: Option<Table>) -> mlua::Result<Table> {
         item.set("selected", control.selected)?;
         item.set("checked", control.checked)?;
         item.set("expanded", control.expanded)?;
+        item.set("haspopup", control.has_popup)?;
         item.set("focused", control.focused)?;
         // A number a script can hold exactly (2^53): a slot reused two million times wraps.
         item.set("handle", (control.handle & ((1 << 53) - 1)) as f64)?;

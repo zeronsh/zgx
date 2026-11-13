@@ -157,6 +157,12 @@ pub enum PopupKind {
     Menu,
     /// It opens a dialog.
     Dialog,
+    /// It opens a list box.
+    Listbox,
+    /// It opens a tree.
+    Tree,
+    /// It opens a grid.
+    Grid,
 }
 /// A node's accessibility information: its role, name, value and state,
 /// which the desktop host projects to the platform's accessibility API.
