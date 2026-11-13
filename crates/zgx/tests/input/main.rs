@@ -48,6 +48,8 @@ mod hover_subtree;
 mod key_activation_target;
 #[path = "../native_pointer.rs"]
 mod native_pointer;
+#[path = "../observed_once_a_frame.rs"]
+mod observed_once_a_frame;
 #[path = "../pointer_drag_buttons.rs"]
 mod pointer_drag_buttons;
 #[path = "../pointer_lock.rs"]

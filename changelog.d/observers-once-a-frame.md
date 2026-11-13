@@ -1,0 +1,4 @@
+---
+section: changed
+---
+- **Bounds and visibility observers deliver once per frame, before paint, as the web's observers do** (zgx, zgx-script): `NodeHandle::observe_bounds`, `observe_visibility`, `observe_visibility_within` and Luau's `on_visible` are worked out at the frame's preparation, not again before each input event dispatched between frames. A handler in the same frame (a key's, a wheel's) sees the previous frame's observed values; several scrolls between two frames are heard once, from where the last left the node. Direct reads stay fresh: `NodeHandle::window_bounds`, an element's `x`, `y`, `width` and `height`, and hit-testing read the latest layout and scroll, as `getBoundingClientRect` does. Sizes (`observe_size`, `on_resize`) are unchanged. In a scroll of a transcript with 232 observed rows, a wheel's dispatch went from 0.7–1.3 ms to 0.13 ms.
