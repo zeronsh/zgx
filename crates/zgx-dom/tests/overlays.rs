@@ -374,6 +374,11 @@ async fn a_popovers_arrow_points_at_its_anchor() {
         arrow.get_property_value("background-color").unwrap(),
         panel_style.get_property_value("background-color").unwrap()
     );
+    // Not clipped by the panel: it shows past its edge.
+    assert_eq!(
+        panel_style.get_property_value("overflow").unwrap(),
+        "visible"
+    );
     open.set(false);
     zgx_dom::flush();
     mounted.unmount();

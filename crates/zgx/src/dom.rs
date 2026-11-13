@@ -920,8 +920,16 @@ fn overlay(
             } else {
                 tok::SURFACE_OVERLAY
             })
-            .rounded(radius)
-            .overflow_hidden();
+            .rounded(radius);
+        // Its content clipped to its corners, unless an arrow shows past
+        // its edge.
+        let arrowed = kind == OverlayKind::Popover
+            && options
+                .as_ref()
+                .is_some_and(|o| o.arrow.is_some_and(|a| a > 0.));
+        if !arrowed {
+            defaults = defaults.overflow_hidden();
+        }
         if is_menu {
             defaults = defaults.items_stretch();
         }
