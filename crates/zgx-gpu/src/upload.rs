@@ -456,6 +456,11 @@ impl MappedRing {
     pub(crate) fn bytes(&self) -> usize {
         self.slots.iter().map(|slot| slot.capacity as usize).sum()
     }
+    /// Whether `buffer` is one of its own (not one it has let go): what a
+    /// bind group made for it may still be drawn with.
+    pub(crate) fn holds(&self, buffer: &wgpu::Buffer) -> bool {
+        self.slots.iter().any(|slot| slot.buffer == *buffer)
+    }
     fn ready(&self, len: u64) -> Option<usize> {
         self.slots
             .iter()
