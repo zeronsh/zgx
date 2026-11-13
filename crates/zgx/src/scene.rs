@@ -15130,14 +15130,37 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn removing_subtree(&mut self, id: NodeId) {
-        let mut ids = vec![id];
-        let mut at = 0;
-        while let Some(&id) = ids.get(at) {
-            at += 1;
-            let children = self.children_raw(self.node(id)).clone();
-            ids.extend(children);
+        // Walked into the list it is noted in (`removed`), which keeps its
+        // room from one flush to the next: no list of its own, and no copy
+        // of each node's children.
+        let Some(changes) = self.changes.get_mut() else {
+            return;
+        };
+        if changes.read.replace(false) {
+            changes.noted.clear();
+            changes.read_len.set(0);
+            changes.dropping = false;
         }
-        self.removed(&ids);
+        if changes.dropping {
+            return;
+        }
+        let mut noted = std::mem::take(&mut changes.noted);
+        let mut at = noted.len();
+        noted.push(id);
+        while let Some(&id) = noted.get(at) {
+            at += 1;
+            noted.extend_from_slice(self.children_raw(self.node(id)));
+        }
+        let flushes = self.repaint_flushes;
+        let changes = self.changes.get_mut().expect("noting changes");
+        changes.noted = noted;
+        if changes.noted.len() > REPAINTS_KEPT {
+            changes.noted = Vec::new();
+            changes.read_len.set(0);
+            // These were the next flush's: what is read next starts after.
+            changes.since.set(flushes + 2);
+            changes.dropping = true;
+        }
     }
     /// Note `ids`, a subtree's nodes removed at once, in
     /// [`Scene::resource_changes`]. Those a renderer has read go first. Past the bound, all go, and none are
@@ -23738,6 +23761,38 @@ mod local_transform_tests {
     /// renderer learns of as it draws and checks them. Kept until read,
     /// however many flushes; past its bound, given up, and its range starts
     /// past the gap.
+    /// A removed subtree is named whole to a renderer, its root first,
+    /// walked into the list it is noted in (`removing_subtree`): no list of
+    /// its own, and noted after what was noted before.
+    #[test]
+    fn a_removed_subtree_is_named_whole_after_what_was_noted_before() {
+        let mut scene = Scene::new(400., 400.);
+        let root = scene.root();
+        scene.resource_changes();
+        let row = |scene: &mut Scene| {
+            let row = scene.append(root, NodeKind::Container(Layout::Row), Style::default());
+            let cell = scene.append(row, NodeKind::Container(Layout::Column), Style::default());
+            let leaves: Vec<_> = (0..3)
+                .map(|_| scene.append(cell, NodeKind::Container(Layout::Row), Style::default()))
+                .collect();
+            (row, cell, leaves)
+        };
+        let (first, first_cell, first_leaves) = row(&mut scene);
+        let (second, second_cell, _) = row(&mut scene);
+        scene.flush();
+        scene.resource_changes();
+        scene.remove(first);
+        scene.remove(second);
+        let (_, changed) = scene.resource_changes();
+        assert_eq!(changed.len(), 10, "both subtrees, whole");
+        assert_eq!(
+            &changed[..2],
+            &[first, first_cell],
+            "the first's root, then its child"
+        );
+        assert_eq!(&changed[2..5], &first_leaves[..]);
+        assert_eq!(&changed[5..7], &[second, second_cell], "then the second's");
+    }
     #[test]
     fn resource_changes_name_the_nodes_whose_resources_changed() {
         let image = |n: u8| Arc::new(crate::image::ImageData::new(1, 1, vec![n; 4]).unwrap());
