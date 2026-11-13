@@ -858,16 +858,15 @@ jobs:
       - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --test d3d11_atlas --test d3d11_present --release --locked
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
-      # Tests of the renderer's own, drawn with Direct3D 11 throughout
-      # (`ZGX_D3D11` is read once a process): a popup's glass blurring what
-      # its window drew under it.
-      - run: cargo test -p zgx-gpu --features d3d11 --test popup_backdrop --release --locked
-        env:
-          ZGX_D3D11: "1"
-      # Layer shaders' passes and tagged boxes read on Direct3D 11 as on
-      # Direct3D 12 (`shader_passes`, but its pictures and GPU views, which
-      # Direct3D 11 leaves out: `d3d11_left_out`).
-      - run: cargo test -p zgx-gpu --features d3d11 --test shader_passes --release --locked -- a_feedback_pass_keeps_state_from_frame_to_frame steps_run_a_pass_that_many_times_a_frame a_once_pass_draws_once a_later_pass_reads_an_earlier_ones_result_from_this_frame a_pass_past_one_keeps_float_values a_shader_declared_as_a_script_declares_it_draws_through_its_passes tagged_boxes_are_read_where_they_are_this_frame
+      # Every zgx-gpu test drawn with Direct3D 11 throughout (`ZGX_D3D11`,
+      # read once a process), so what it can't draw shows here and not
+      # silently: each skip below is what Direct3D 11 leaves out or does
+      # otherwise (pictures and GPU views read by layer shaders, backdrop
+      # copies counted, Direct3D 12's FXC child, compile timing on WARP),
+      # or fails on WARP without it too. (The d3d11_* tests set it
+      # themselves, and run again here as they are.)
+      - name: zgx-gpu's tests drawn with Direct3D 11
+        run: cargo test -p zgx-gpu --features d3d11 --release --locked --tests -- --skip a_picture_is_sampled_by_name --skip an_apps_view_is_drawn_with_its_device_and_sampled_by_name --skip backdrop_readers_apart_share_one_copy_and_pass --skip draws_around_a_reader_sharing_a_copy_do_not_draw_over_it --skip a_child_fxc_cannot_survive_fails_that_shader_alone --skip an_apps_shaders_built_through_a_child_draw_as_wgpu_builds_them --skip a_declared_fill_is_compiled_before_it_draws --skip a_window_draws_on_while_a_fill_compiles --skip a_width_within_its_reach_breaks_its_lines_as_it_did --skip a_page_pushed_and_popped_again_and_again_gives_its_image_textures_back --skip a_long_text_draws_only_the_lines_in_its_clip --skip naturally_measured_streaming_rows_reflow_with_damage_and_stable_anchor --skip a_long_column_s_damaged_frames_are_full_frames --skip a_node_mounted_and_gone_while_a_layered_list_moves_leaves_nothing --skip atlas_icons_survive_the_atlas_filling_up
         env:
           ZGX_D3D11: "1"
       # Its ahead-compiled shaders (dxbc/) are FXC's bytecode of naga's HLSL
