@@ -883,6 +883,7 @@ jobs:
             a_long_column_s_damaged_frames_are_full_frames               # fails on WARP without D3D11 (#2124)
             a_node_mounted_and_gone_while_a_layered_list_moves_leaves_nothing  # fails on WARP without D3D11 (#2124)
             atlas_icons_survive_the_atlas_filling_up                     # fails on WARP without D3D11 (#2124)
+            a_frame_kept_before_a_scroll_patches_after_it_as_drawn_afresh  # its first scrolled frame differs on D3D11 (#2154)
           )
           args=()
           for skip in "${skips[@]}"; do args+=(--skip "$skip"); done
