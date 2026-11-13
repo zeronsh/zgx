@@ -974,3 +974,52 @@ fn a_kana_runs_han_takes_the_chinese_list_on_every_platform() {
     assert_eq!(found.len(), 22, "{found:?}");
     assert_eq!(fonts.full_scans(), 0, "every face searched for {found:?}");
 }
+
+/// Latin as the text's font and Chinese from a fallback face of smaller
+/// metrics (0.9 / 0.1 against Geist's 1.005 / 0.295).
+struct HansFallback;
+
+impl cosmic_text::Fallback for HansFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn script_fallback(&self, script: unicode_script::Script, _: &str) -> &[&'static str] {
+        match script {
+            unicode_script::Script::Han => &["ZgxHans"],
+            _ => &[],
+        }
+    }
+}
+
+/// A line of fallback glyphs alone stands on the baseline its Latin lines
+/// do: the text's own font is the line's strut, as in a browser, so a
+/// fallback face of other metrics doesn't move it.
+#[test]
+fn a_line_of_fallback_glyphs_keeps_the_text_fonts_baseline() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_data(include_bytes!("fonts/GeistVariable-subset.ttf").to_vec());
+    db.load_font_data(include_bytes!("fonts/ZgxHans.ttf").to_vec());
+    let mut fonts =
+        cosmic_text::FontSystem::new_with_locale_and_db_and_fallback("zh".into(), db, HansFallback);
+    let baseline = |fonts: &mut cosmic_text::FontSystem, text: &str, size: f32| {
+        let mut buffer = cosmic_text::Buffer::new(fonts, cosmic_text::Metrics::new(size, 20.));
+        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name("Geist"));
+        buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        let run = buffer.layout_runs().next().expect("a line");
+        assert!(run.glyphs.iter().all(|g| g.glyph_id != 0), "{text}: shaped");
+        run.line_y
+    };
+    for size in [12., 13., 14., 16.] {
+        assert_eq!(
+            baseline(&mut fonts, "车见", size),
+            baseline(&mut fonts, "abc", size),
+            "{size}"
+        );
+    }
+}

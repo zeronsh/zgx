@@ -797,6 +797,24 @@ fn shape_run(
     }
     */
 
+    // zgx patch: the line keeps its text's own font as its strut, as a
+    // browser's does: glyphs of a fallback face add to the line's ascent and
+    // descent, never replace the font the text asked for (a line of fallback
+    // glyphs alone would otherwise stand on the fallback face's baseline).
+    if let Some(first) = fonts.first().map(|m| m.id) {
+        if glyphs[glyph_start..].iter().any(|g| g.font_id != first) {
+            if let Some(font) = font_system.get_font(first, attrs.weight) {
+                let metrics = font.as_swash().metrics(&[]);
+                let upem = f32::from(metrics.units_per_em);
+                let (ascent, descent) = (metrics.ascent / upem, metrics.descent / upem);
+                for glyph in glyphs[glyph_start..].iter_mut().filter(|g| g.font_id != first) {
+                    glyph.ascent = glyph.ascent.max(ascent);
+                    glyph.descent = glyph.descent.max(descent);
+                }
+            }
+        }
+    }
+
     // Restore the scripts buffer.
     font_system.shape_buffer.scripts = scripts;
 }
