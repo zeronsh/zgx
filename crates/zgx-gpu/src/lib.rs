@@ -6254,6 +6254,11 @@ impl GpuRenderer {
     pub fn shows_carets(&self) -> bool {
         self.layer_present.is_some()
     }
+    /// How many items its kept frame holds, if it keeps one. For tests.
+    #[doc(hidden)]
+    pub fn debug_kept_items(&self) -> Option<usize> {
+        self.kept.as_ref().map(|kept| kept.items.len())
+    }
     /// Test hook: keep no frame to patch, drawing each afresh (a reference
     /// for frames patched into a kept one).
     #[doc(hidden)]
@@ -8680,7 +8685,12 @@ impl GpuRenderer {
                 continue;
             }
             let Some(first) = first else {
-                entering.push(id);
+                // Not kept: mounted since, or left out by the kept frame's
+                // walk, which records only what can show. One that still
+                // can't paints nothing here; any other comes in a splice.
+                if scene.ink_may_show(id) {
+                    entering.push(id);
+                }
                 continue;
             };
             if flags & (zgx::scene::repaint::COMPOSITE | zgx::scene::repaint::CHILDREN) != 0

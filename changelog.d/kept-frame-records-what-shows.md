@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **A long list paused mid-scroll no longer stalls a frame keeping it** (zgx, zgx-gpu): a frame that moves nothing after a scroll (a pause, a reversal) is kept to patch, and keeping walked and laid out every item in the window, off-screen rows included: 14M instructions at 7,000 rows, a few milliseconds, at every pause. A kept frame now records what can show (its walk cut to its clips, searching long lists by them as a damaged walk does by its damage), and what comes into view later reaches it in a splice of what changed; a repaint of a node it left out that still can't show patches nothing (`Scene::ink_may_show`). The pause frame at 7,000 rows costs 1.9M instructions rather than 15.2M (0.28 ms rather than 1.21 ms on an M5), and a kept frame holds the same items at 1,000 rows as at 7,000. A whole repaint searches long lists by its clip too.
