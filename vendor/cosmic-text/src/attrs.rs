@@ -449,6 +449,9 @@ pub struct Attrs<'a> {
     /// zgx: shown masked, a bullet for each character (a password), each
     /// bullet keeping its character's place in the text.
     pub masked: bool,
+    /// zgx: the line's paragraph runs right to left whatever its first
+    /// strong character is (CSS `direction: rtl`), a line's default's.
+    pub paragraph_rtl: bool,
     pub font_features: FontFeatures,
     pub text_decoration: TextDecoration,
 }
@@ -471,6 +474,7 @@ impl<'a> Attrs<'a> {
             padding_opt: None,
             optical: 0,
             masked: false,
+            paragraph_rtl: false,
             font_features: FontFeatures::new(),
             text_decoration: TextDecoration::new(),
         }
@@ -530,6 +534,11 @@ impl<'a> Attrs<'a> {
         self
     }
 
+    /// zgx: run the paragraph right to left (see `paragraph_rtl`)
+    pub const fn paragraph_rtl(mut self, rtl: bool) -> Self {
+        self.paragraph_rtl = rtl;
+        self
+    }
     /// zgx: show the text masked (see `masked`)
     pub const fn masked(mut self, masked: bool) -> Self {
         self.masked = masked;
@@ -707,6 +716,7 @@ pub struct AttrsOwned {
     pub padding_opt: Option<LetterSpacing>,
     pub optical: u16,
     pub masked: bool,
+    pub paragraph_rtl: bool,
     pub font_features: FontFeatures,
     pub text_decoration: TextDecoration,
 }
@@ -726,6 +736,7 @@ impl AttrsOwned {
             padding_opt: attrs.padding_opt,
             optical: attrs.optical,
             masked: attrs.masked,
+            paragraph_rtl: attrs.paragraph_rtl,
             font_features: attrs.font_features.clone(),
             text_decoration: attrs.text_decoration,
         }
@@ -745,6 +756,7 @@ impl AttrsOwned {
             padding_opt: self.padding_opt,
             optical: self.optical,
             masked: self.masked,
+            paragraph_rtl: self.paragraph_rtl,
             font_features: self.font_features.clone(),
             text_decoration: self.text_decoration,
         }

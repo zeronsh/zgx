@@ -797,17 +797,31 @@ fn shape_run(
     }
     */
 
-    // zgx patch: the line keeps its text's own font as its strut, as a
-    // browser's does: glyphs of a fallback face add to the line's ascent and
-    // descent, never replace the font the text asked for (a line of fallback
-    // glyphs alone would otherwise stand on the fallback face's baseline).
-    if let Some(first) = fonts.first().map(|m| m.id) {
-        if glyphs[glyph_start..].iter().any(|g| g.font_id != first) {
-            if let Some(font) = font_system.get_font(first, attrs.weight) {
-                let metrics = font.as_swash().metrics(&[]);
+    // zgx patch: the line keeps its text's own font (its default family's
+    // face) as its strut, as a browser's does: glyphs of a fallback face add
+    // to the line's ascent and descent, never replace what the font the text
+    // asked for gives (a line of fallback glyphs alone would otherwise stand
+    // on the fallback face's baseline). Only a run that fell back looks.
+    if glyphs[glyph_start..].iter().any(|g| g.font_id != font.id()) {
+        let default_name = font_system.db().family_name(&attrs.family).to_string();
+        let in_family = |id: fontdb::ID| {
+            font_system
+                .db()
+                .face(id)
+                .is_some_and(|face| face.families.iter().any(|(name, _)| *name == default_name))
+        };
+        let strut = fonts
+            .iter()
+            .filter(|key| key.font_weight_diff == 0 || key.variable_weight_match)
+            .find(|key| in_family(key.id))
+            .or_else(|| fonts.first().filter(|key| key.query).filter(|key| in_family(key.id)))
+            .map(|key| key.id);
+        if let Some(strut) = strut {
+            if let Some(face) = font_system.get_font(strut, attrs.weight) {
+                let metrics = face.as_swash().metrics(&[]);
                 let upem = f32::from(metrics.units_per_em);
                 let (ascent, descent) = (metrics.ascent / upem, metrics.descent / upem);
-                for glyph in glyphs[glyph_start..].iter_mut().filter(|g| g.font_id != first) {
+                for glyph in glyphs[glyph_start..].iter_mut().filter(|g| g.font_id != strut) {
                     glyph.ascent = glyph.ascent.max(ascent);
                     glyph.descent = glyph.descent.max(descent);
                 }
@@ -2264,9 +2278,11 @@ impl ShapeLine {
         // paragraph at one level, as the bidi analysis would find: one span.
         // Any other line goes apart (`build_mixed`), so ASCII's path has
         // none of the analysis or what else a line beyond it may need.
-        let simple = line
-            .bytes()
-            .all(|b| b.is_ascii() && !matches!(b, b'\n' | b'\r' | 0x1C..=0x1E));
+        let forced = attrs_list.defaults().paragraph_rtl;
+        let simple = !forced
+            && line
+                .bytes()
+                .all(|b| b.is_ascii() && !matches!(b, b'\n' | b'\r' | 0x1C..=0x1E));
         if simple {
             self.build_spans(font_system, line, attrs_list, shaping, tab_width, None);
         } else {
@@ -2286,8 +2302,15 @@ impl ShapeLine {
         shaping: Shaping,
         tab_width: u16,
     ) {
+        let forced = attrs_list.defaults().paragraph_rtl;
         match line_kind(attrs_list, line) {
             LineKind::Hinted => self.build_hinted(font_system, line, attrs_list, shaping, tab_width),
+            _ if forced => {
+                // zgx: CSS `direction: rtl`: the paragraph's base level is
+                // right to left whatever its first strong character is.
+                let bidi = unicode_bidi::BidiInfo::new(line, Some(unicode_bidi::Level::rtl()));
+                self.build_spans(font_system, line, attrs_list, shaping, tab_width, Some(bidi));
+            }
             LineKind::LeftToRight => {
                 self.build_spans(font_system, line, attrs_list, shaping, tab_width, None);
             }

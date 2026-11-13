@@ -1064,3 +1064,65 @@ fn hiragino_sans_serves_css_weights_a_class_below() {
         assert_eq!(face.weight.0, class, "weight {css}");
     }
 }
+
+/// The macOS system faces themselves (SF Pro, Hiragino Sans W3), at 13 and
+/// 14 px on a 20 px line: Latin, mixed and pure Japanese lines stand on one
+/// baseline, the text font's.
+#[cfg(target_os = "macos")]
+#[test]
+fn latin_mixed_and_japanese_lines_share_a_baseline_with_the_real_system_faces() {
+    let sf = std::path::Path::new("/System/Library/Fonts/SFNS.ttf");
+    let hiragino = std::fs::read_dir("/System/Library/Fonts")
+        .ok()
+        .and_then(|dir| {
+            dir.flatten()
+                .map(|e| e.path())
+                .find(|p| p.to_string_lossy().ends_with("シック W3.ttc"))
+        });
+    let Some(hiragino) = hiragino.filter(|_| sf.exists()) else {
+        eprintln!("the system faces aren't here: nothing checked");
+        return;
+    };
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_file(sf).unwrap();
+    let family = db
+        .faces()
+        .next()
+        .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+        .expect("SF's family");
+    db.load_font_file(&hiragino).unwrap();
+    struct Ja;
+    impl cosmic_text::Fallback for Ja {
+        fn common_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn forbidden_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn script_fallback(&self, script: unicode_script::Script, _: &str) -> &[&'static str] {
+            match script {
+                unicode_script::Script::Hiragana | unicode_script::Script::Katakana => {
+                    &["Hiragino Sans"]
+                }
+                _ => &[],
+            }
+        }
+    }
+    let mut fonts =
+        cosmic_text::FontSystem::new_with_locale_and_db_and_fallback("ja-JP".into(), db, Ja);
+    for size in [13., 14.] {
+        let mut baselines = Vec::new();
+        for text in ["Hello world", "Anaraの使い方", "こんにちは。あなた"] {
+            let mut buffer =
+                cosmic_text::Buffer::new(&mut fonts, cosmic_text::Metrics::new(size, 20.));
+            let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(&family));
+            buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+            buffer.shape_until_scroll(&mut fonts, false);
+            baselines.push(buffer.layout_runs().next().expect("a line").line_y);
+        }
+        assert!(
+            baselines.windows(2).all(|w| w[0] == w[1]),
+            "{size}px: Latin, mixed, Japanese: {baselines:?}"
+        );
+    }
+}

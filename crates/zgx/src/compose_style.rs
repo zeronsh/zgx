@@ -1393,6 +1393,7 @@ pub(crate) fn mount_style_with_intrinsic(
                         .letter_spacing
                         .unwrap_or(parent.font.letter_spacing),
                     masked: false,
+                    paragraph_rtl: false,
                     underline: {
                         let rare = resolved.rare();
                         let offset = rare

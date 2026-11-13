@@ -473,6 +473,12 @@ pub struct FontStyle {
     /// Shown masked, a bullet per character (a password field's text). Set
     /// by an editor on its own text; never inherited.
     pub masked: bool,
+    /// Its paragraphs run right to left whatever their first strong character
+    /// is (CSS `direction: rtl`): set by the scene for text in a right to left
+    /// node, so Latin text in an Arabic answer places its punctuation as
+    /// Chrome's right to left paragraph does. Left to right text keeps the
+    /// first strong character's way.
+    pub paragraph_rtl: bool,
     /// Underlined (CSS `text-decoration: underline`): inherited.
     pub underline: Option<TextUnderline>,
 }
@@ -507,6 +513,7 @@ impl Default for FontStyle {
                 EMPTY.get_or_init(|| std::sync::Arc::from([])).clone()
             },
             masked: false,
+            paragraph_rtl: false,
             underline: None,
         }
     }

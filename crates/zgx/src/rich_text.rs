@@ -347,6 +347,23 @@ impl RichText {
             runs,
         })
     }
+    /// The paragraph running right to left whatever its first strong
+    /// character is (`FontStyle::paragraph_rtl`, on every run).
+    pub fn with_paragraph_rtl(&self) -> Self {
+        let runs: Vec<TextRun> = self
+            .runs
+            .iter()
+            .map(|run| {
+                let mut run = run.clone();
+                run.font.paragraph_rtl = true;
+                run
+            })
+            .collect();
+        Self {
+            runs: runs.into(),
+            ..self.clone()
+        }
+    }
     /// The text with a line feed in place of each space at `spaces` (byte
     /// offsets): the same bytes, so offsets, runs and boxes hold.
     pub fn with_line_feeds(&self, spaces: &[usize]) -> Self {

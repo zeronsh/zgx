@@ -138,6 +138,7 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         // titles get their display cut, tighter and narrower.
         .optical(size.round().clamp(1., 1000.) as u16)
         .masked(font.masked)
+        .paragraph_rtl(font.paragraph_rtl)
         .weight(cosmic_text::Weight(font.weight.clamp(1, 1000)))
         .style(if font.italic {
             cosmic_text::Style::Italic

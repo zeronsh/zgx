@@ -3520,6 +3520,14 @@ pub struct Scene {
     directions: NodeMap<Direction>,
     /// Text whose direction is its first strong character's (`set_direction_auto`).
     auto_directions: NodeMap<()>,
+    /// A right to left paragraph's rich text with its base level set
+    /// (`fit_rich`), for the text it was made from.
+    rtl_rich: std::cell::RefCell<
+        NodeMap<(
+            Arc<crate::rich_text::RichText>,
+            Arc<crate::rich_text::RichText>,
+        )>,
+    >,
     /// Layer shaders and their uniforms, by node (`set_layer_shader`):
     /// usually none.
     layer_shaders: NodeMap<LayerShader>,
@@ -3747,6 +3755,7 @@ impl Scene {
             cold: None,
             directions: Default::default(),
             auto_directions: Default::default(),
+            rtl_rich: Default::default(),
             layer_shaders: Default::default(),
             inert: Vec::new(),
             selectable: Default::default(),
@@ -5956,7 +5965,13 @@ impl Scene {
             let given = self.style(id);
             self.restyle(id, given, true);
         }
-        if turned && let Some(logical) = self.node(id).align_logical {
+        if turned && matches!(self.node(id).kind, NodeKind::Text { .. }) {
+            let mut font = self.node(id).font.clone();
+            if let Some(logical) = self.node(id).align_logical {
+                font.align = logical;
+            }
+            self.set_font(id, font);
+        } else if turned && let Some(logical) = self.node(id).align_logical {
             let mut font = self.node(id).font.clone();
             font.align = logical;
             self.set_font(id, font);
@@ -6962,6 +6977,7 @@ impl Scene {
         use crate::text_layout::TextAlign;
         let logical = matches!(font.align, TextAlign::Start | TextAlign::End).then_some(font.align);
         let rtl = self.node(id).rtl;
+        font.paragraph_rtl = rtl;
         font.align = match font.align {
             TextAlign::Start if rtl => TextAlign::Right,
             TextAlign::End if rtl => TextAlign::Left,
@@ -8506,10 +8522,32 @@ impl Scene {
         width: f32,
         rich: &Arc<crate::rich_text::RichText>,
     ) -> Arc<crate::rich_text::RichText> {
-        match self.fitted_breaks(id, width) {
+        let rich = match self.fitted_breaks(id, width) {
             Some(spaces) => Arc::new(rich.with_line_feeds(&spaces)),
             None => rich.clone(),
+        };
+        // Right to left, its paragraphs take that base level whatever their
+        // first strong character is (kept for as long as the paragraph is).
+        if self.node(id).rtl
+            && !rich
+                .runs()
+                .first()
+                .is_some_and(|run| run.font.paragraph_rtl)
+        {
+            let mut kept = self.rtl_rich.borrow_mut();
+            if let Some((from, directed)) = kept.get(&id)
+                && (Arc::ptr_eq(from, &rich) || **from == *rich)
+            {
+                return directed.clone();
+            }
+            let directed = Arc::new(rich.with_paragraph_rtl());
+            if kept.len() >= 256 {
+                kept.clear();
+            }
+            kept.insert(id, (rich.clone(), directed.clone()));
+            return directed;
         }
+        rich
     }
     /// Plain text `id` as it shows in a box `width` wide (`fit_rich`'s).
     pub fn fit_str(&self, id: NodeId, width: f32, text: &Arc<str>) -> Arc<str> {

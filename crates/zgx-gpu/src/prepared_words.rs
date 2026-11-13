@@ -194,6 +194,7 @@ pub(super) struct WordCache {
 pub(super) fn qualifies(font: &FontStyle) -> bool {
     font.fallbacks.is_empty()
         && !font.masked
+        && !font.paragraph_rtl
         && font.letter_spacing == zgx::text_layout::LetterSpacing::ZERO
         && !font
             .features

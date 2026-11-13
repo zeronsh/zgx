@@ -121,3 +121,42 @@ fn an_auto_container_mirrors_its_row_by_its_text() {
         "and at the left in English"
     );
 }
+
+/// Text in a right to left node shapes at that base level, whatever it
+/// starts with (`FontStyle::paragraph_rtl`): plain text through its font,
+/// rich text through `Scene::fit_rich`; text in a left to right node doesn't.
+#[test]
+fn text_in_a_right_to_left_node_takes_the_right_to_left_base_level() {
+    use std::sync::Arc;
+    let mut ui = Ui::new(600., 400.);
+    let handle = ui.mount(column().w(400.).children(vec![
+        column().rtl().w(300.).id("rtl").child(text("Hello world.").id("plain")),
+        column().w(300.).id("ltr").child(text("Hello world.").id("plain_ltr")),
+    ]));
+    ui.prepare_frame();
+    let plain = text_node(&ui, &handle, "plain");
+    let plain_ltr = text_node(&ui, &handle, "plain_ltr");
+    let scene = ui.scene.borrow();
+    assert!(scene.font(plain).paragraph_rtl);
+    assert!(!scene.font(plain_ltr).paragraph_rtl);
+    let rich = Arc::new(
+        zgx::rich_text::RichText::new(
+            "Hello world.",
+            vec![zgx::rich_text::TextRun {
+                range: 0..12,
+                ..Default::default()
+            }],
+        )
+        .unwrap(),
+    );
+    assert!(
+        scene.fit_rich(plain, 300., &rich).runs()[0]
+            .font
+            .paragraph_rtl
+    );
+    assert!(
+        !scene.fit_rich(plain_ltr, 300., &rich).runs()[0]
+            .font
+            .paragraph_rtl
+    );
+}
