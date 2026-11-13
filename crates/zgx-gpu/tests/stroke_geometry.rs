@@ -424,3 +424,51 @@ fn a_border_over_an_opaque_fill_keeps_the_edges_coverage() {
         }
     }
 }
+
+#[test]
+fn a_fractional_edge_has_the_coverage_it_gives_its_pixel_not_snapped_halfway() {
+    // A box whose edge falls 0.1 to 0.9 into a pixel covers that pixel by what its edge leaves, on every
+    // side: it was drawn only where the pixel's centre was inside (an edge past halfway lost its pixel),
+    // so a box was half snapped, half anti-aliased.
+    let _gpu = gpu_fixture();
+    for scale in [1., 2.] {
+        for step in 0..=10 {
+            let f = step as f32 / 10.;
+            // (A point is `scale` pixels: the fraction of a pixel is `f * scale` mod 1.)
+            let spec = Box {
+                size: (80., 40.),
+                ..Default::default()
+            };
+            let p = draw(spec, scale, 1., (f, f));
+            let pixels = |x: i32, y: i32| p[((y * SIZE as i32 + x) * 4 + 3) as usize] as f32 / 255.;
+            let edge = |position: f32| {
+                // The pixel the edge is in, and how much of it the box covers from the far side.
+                let device = position * scale;
+                (device.floor() as i32, 1. - device.fract())
+            };
+            let (left, from_left) = edge(20. + f);
+            let (top, from_top) = edge(20. + f);
+            let (right, to_right) = edge(100. + f);
+            let (bottom, to_bottom) = edge(60. + f);
+            let (mid_x, mid_y) = (60 * scale as i32, 40 * scale as i32);
+            for (name, got, want) in [
+                ("left", pixels(left, mid_y), from_left),
+                ("top", pixels(mid_x, top), from_top),
+                ("right", pixels(right, mid_y), 1. - to_right),
+                ("bottom", pixels(mid_x, bottom), 1. - to_bottom),
+            ] {
+                // On a pixel boundary the edge pixel is outside (right, bottom) or whole (left, top).
+                let want =
+                    if want >= 0.999 && name.ends_with("ht") || want >= 0.999 && name == "bottom" {
+                        0.
+                    } else {
+                        want
+                    };
+                assert!(
+                    (got - want).abs() <= 0.05,
+                    "{scale}x, edge {f}: the {name} pixel is {got:.2}, its coverage {want:.2}"
+                );
+            }
+        }
+    }
+}

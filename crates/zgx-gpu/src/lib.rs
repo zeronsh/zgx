@@ -8756,12 +8756,13 @@ impl GpuRenderer {
         }
         let at = kept_item.start as usize;
         let mut quad = kept.quads[at];
-        // (Made whole and untransformed: its box is its rectangle and fade.)
-        if quad.rect != quad.fade || quad.options[2] >= 0.5 {
+        // (Made whole and untransformed: its box is its fade, its rectangle
+        // that out to pixel boundaries.)
+        if quad.rect != pixel_outward(quad.fade, self.scale) || quad.options[2] >= 0.5 {
             return false;
         }
         let fade = [bounds.x, bounds.y, bounds.width, bounds.height];
-        (quad.rect, quad.fade) = (fade, fade);
+        (quad.rect, quad.fade) = (pixel_outward(fade, self.scale), fade);
         // (A flat colour's quad isn't split; a box's is, past a size.)
         if quad.shape[3] > 0.5 && !panel_whole(&quad, self.split_shading) {
             return false;
@@ -9713,7 +9714,7 @@ impl GpuRenderer {
                                     quads.push(quad);
                                 } else {
                                     quads.push(outline_quad(
-                                        &outline, style, bounds, opacity, edge_fade,
+                                        &outline, style, bounds, opacity, edge_fade, self.scale,
                                     ));
                                     // And its inner ring, just within it.
                                     if let Some((width, color)) = scene.outline_inner(item.id) {
@@ -9725,6 +9726,7 @@ impl GpuRenderer {
                                         if inner.visible() {
                                             quads.push(outline_quad(
                                                 &inner, style, bounds, opacity, edge_fade,
+                                                self.scale,
                                             ));
                                         }
                                     }
@@ -9751,6 +9753,13 @@ impl GpuRenderer {
                                 );
                                 // Three sigmas out (`blur_radius` is the sigma).
                                 let outer = core.expand(shadow.blur_radius.max(0.) * 3.);
+                                let outer = {
+                                    let [x, y, width, height] = pixel_outward(
+                                        [outer.x, outer.y, outer.width, outer.height],
+                                        self.scale,
+                                    );
+                                    Rect::new(x, y, width, height)
+                                };
                                 // A hard ring (`0 0 0 1`) is cut out of the box, which
                                 // is drawn over it: where the box's edge lies inside a
                                 // pixel both are anti-aliased there, and the pixel
@@ -18304,6 +18313,7 @@ fn outline_quad(
     bounds: Rect,
     opacity: f32,
     edge_fade: f32,
+    scale: f32,
 ) -> Quad {
     let outer = outline.outer(bounds);
     let grown = outline.offset + outline.width;
@@ -18318,7 +18328,7 @@ fn outline_quad(
     let width = (outline.width.max(0.) * 16.).round().min(4095.);
     let fade = [outer.x, outer.y, outer.width, outer.height];
     Quad {
-        rect: fade,
+        rect: pixel_outward(fade, scale),
         uv: [0.; 4],
         color: rgba(outline.color, opacity),
         fade,
@@ -19698,7 +19708,29 @@ fn rounded_damage(rect: Rect, viewport: Rect, scale: f32) -> Option<Rect> {
 /// far edge), so the same pixels are covered and antialiased; the seams
 /// between pieces lie on whole device pixels, where rounding cannot move a
 /// pixel centre across them.
+/// `rect` grown out to device pixel boundaries (none where it is on them).
+/// A quad is shaded only at the pixels whose centres it covers, so an edge in
+/// the outer half of a pixel (a box starting 0.7 into one) lost that pixel's
+/// coverage altogether, and a box with fractional edges was half snapped,
+/// half anti-aliased. A quad reaches the pixel boundaries outside its box (as
+/// the damage that redraws it does); the shader covers them as the box's edge
+/// does, its distance being the box's (`fade`).
+fn pixel_outward(rect: [f32; 4], scale: f32) -> [f32; 4] {
+    let scale = scale.max(0.1);
+    let [x, y, width, height] = rect;
+    let (left, top) = (
+        ((x * scale + 1e-3).floor() / scale).min(x),
+        ((y * scale + 1e-3).floor() / scale).min(y),
+    );
+    let (right, bottom) = (
+        (((x + width) * scale - 1e-3).ceil() / scale).max(x + width),
+        (((y + height) * scale - 1e-3).ceil() / scale).max(y + height),
+    );
+    [left, top, right - left, bottom - top]
+}
 fn push_panel(quads: &mut Vec<Quad>, quad: Quad, scale: f32, split: bool) {
+    let mut quad = quad;
+    quad.rect = pixel_outward(quad.rect, scale);
     if panel_whole(&quad, split) {
         quads.push(quad);
         return;
