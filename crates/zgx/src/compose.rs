@@ -6492,7 +6492,7 @@ fn open_element(
     // Prepend in reverse so declaration order is preserved even when a primitive
     // constructor (such as an editor) already registered its default handlers.
     if let Some(preview) = rare.as_deref_mut().and_then(|r| r.drag_preview.take()) {
-        crate::compose_drag::mount(ui, root, preview);
+        crate::compose_drag::mount(ui, root, preview, environment.services.clone());
     }
     // A selectable region's own menu (Copy, Select All), or an editor's
     // (Cut, Copy, Paste, Select All), unless it has one.
@@ -9373,6 +9373,11 @@ impl ViewHandle {
 impl Ui {
     /// Mount a declarative tree under the document root. The document owns its lifetime.
     pub fn mount(&mut self, view: View) -> ViewHandle {
+        self.mount_scoped(view, ServiceScope::new())
+    }
+    /// [`Ui::mount`] with `services` provided to it: a subtree mounted apart
+    /// from its source (a drag preview) keeps the providers it was built under.
+    pub(crate) fn mount_scoped(&mut self, view: View, services: ServiceScope) -> ViewHandle {
         let registry = Registry::default();
         let theme = self.theme().root().clone();
         // Text shows the theme's body colour, size and family unless a view
@@ -9386,7 +9391,7 @@ impl Ui {
             family: Some(tok::FONT_SANS.into()),
         });
         let environment = Environment {
-            services: ServiceScope::new(),
+            services,
             typography,
             registry: registry.clone(),
             portal: None,
