@@ -907,7 +907,14 @@ fn mount_overlay(overlay: Overlay, panel: u32, runtime: &Runtime, block: &mut Bl
         ]);
         wrapper
     });
-    block.effect(runtime, move || {
+    // What the overlay's ops name, kept by a template's clone.
+    ops::with(|ops| {
+        ops.mark(wrapper);
+        if let Some(anchor) = anchor {
+            ops.mark(anchor);
+        }
+    });
+    block.effect(panel, runtime, move || {
         let on = open.get();
         ops::with(|ops| ops.op(&[ops::SHOW, panel, on as u32]));
     });
