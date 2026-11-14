@@ -30,6 +30,7 @@ pub(crate) const CLASS_NAME: u32 = 24;
 pub(crate) const CLASS_ADD: u32 = 25;
 pub(crate) const VISIBLE: u32 = 26;
 pub(crate) const TRUNCATE: u32 = 27;
+pub(crate) const PAINT: u32 = 32;
 pub(crate) const WALK: u32 = 28;
 pub(crate) const OVERLAY: u32 = 29;
 pub(crate) const SHOW: u32 = 30;

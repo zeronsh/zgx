@@ -34,6 +34,7 @@ pub(crate) const BASE_CSS: &str = "\
 .zp[role=tooltip]{transition:opacity .14s ease-out;}\
 @starting-style{.zp[role=tooltip]:popover-open{opacity:0;}}\
 @keyframes zf{from{opacity:0;}}\
+.zcv{position:absolute;left:0;top:0;width:100%;height:100%;display:block;}\
 ";
 
 /// `base`'s own declarations, folded into a look's rule so its elements
