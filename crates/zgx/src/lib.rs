@@ -15,6 +15,8 @@ pub mod text_edit;
 mod words;
 
 pub mod widgets;
+#[doc(hidden)]
+pub mod probe;
 
 pub mod keyed;
 

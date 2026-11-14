@@ -590,7 +590,7 @@ impl Probe {
     /// Present a cleared (transparent) drawable in the caller's transaction,
     /// its work scheduled first, recording when it showed.
     fn present(&self) {
-        let Some(drawable) = self.layer.nextDrawable() else {
+        let Some(drawable) = crate::probe_counts::timed(crate::probe_counts::Kind::NextDrawable, || self.layer.nextDrawable()) else {
             return;
         };
         let Some(buffer) = self.queue.commandBuffer() else {
@@ -622,9 +622,9 @@ impl Probe {
         // SAFETY: A live block taking the drawable, as the handler's type
         // declares; Metal copies it.
         unsafe { drawable.addPresentedHandler(block2::RcBlock::as_ptr(&handler)) };
-        buffer.commit();
-        buffer.waitUntilScheduled();
-        drawable.present();
+        crate::probe_counts::timed(crate::probe_counts::Kind::Commit, || buffer.commit());
+        crate::probe_counts::timed(crate::probe_counts::Kind::Wait, || buffer.waitUntilScheduled());
+        crate::probe_counts::timed(crate::probe_counts::Kind::Present, || drawable.present());
     }
 }
 /// When the window server showed each drawable (`addPresentedHandler`), as
@@ -1033,7 +1033,7 @@ pub(crate) fn transaction(change: impl FnOnce()) {
     CATransaction::begin();
     CATransaction::setDisableActions(true);
     change();
-    CATransaction::commit();
+    crate::probe_counts::timed(crate::probe_counts::Kind::Transaction, || CATransaction::commit());
 }
 impl Video {
     fn new(host: &CALayer, opaque: bool, hidden: bool) -> Self {
@@ -1199,7 +1199,7 @@ impl Layer {
         let asked = std::time::Instant::now();
         let drawable = match plane.drawables.take() {
             Some(drawable) => drawable,
-            None => plane.layer.nextDrawable()?,
+            None => crate::probe_counts::timed(crate::probe_counts::Kind::NextDrawable, || plane.layer.nextDrawable())?,
         };
         let waited = asked.elapsed();
         if waited > std::time::Duration::from_millis(1) {
@@ -1259,7 +1259,7 @@ impl Layer {
         buffer.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(
             &*frame.drawable,
         ));
-        buffer.commit();
+        crate::probe_counts::timed(crate::probe_counts::Kind::Commit, || buffer.commit());
     }
     /// Whether plane `key`'s next frame waits for a drawable: its thread
     /// then waits for one (`Drawables::want`), the plane showing its last
@@ -1285,8 +1285,8 @@ impl Layer {
     /// commit keeps its time).
     pub fn schedule_plane(queue: &ProtocolObject<dyn MTLCommandQueue>) {
         if let Some(buffer) = queue.commandBuffer() {
-            buffer.commit();
-            buffer.waitUntilScheduled();
+            crate::probe_counts::timed(crate::probe_counts::Kind::Commit, || buffer.commit());
+            crate::probe_counts::timed(crate::probe_counts::Kind::Wait, || buffer.waitUntilScheduled());
         }
     }
     /// In the frame's transaction: `frame`'s box placed and shown, and its
@@ -1315,7 +1315,7 @@ impl Layer {
         if !plane.layer.presentsWithTransaction() {
             plane.layer.setPresentsWithTransaction(true);
         }
-        frame.drawable.present();
+        crate::probe_counts::timed(crate::probe_counts::Kind::Present, || frame.drawable.present());
     }
     /// Hide plane `key` (its view draws into the window again), in the
     /// caller's transaction.
@@ -1329,7 +1329,7 @@ impl Layer {
             // window's newer frame under it) until its next drawable does,
             // never that old frame.
             // SAFETY: `contents` is an id property; nil clears it.
-            unsafe { plane.layer.setContents(None) };
+            crate::probe_counts::timed(crate::probe_counts::Kind::SetContents, || unsafe { plane.layer.setContents(None) });
             crate::present_log::log(|| format!("plane-hide {key:?}"));
         }
     }
@@ -1417,7 +1417,7 @@ impl Layer {
             transaction(|| drawables.layer.setOpaque(opaque));
         }
         let asked = std::time::Instant::now();
-        let drawable = drawables.layer.nextDrawable()?;
+        let drawable = crate::probe_counts::timed(crate::probe_counts::Kind::NextDrawable, || drawables.layer.nextDrawable())?;
         let waited = asked.elapsed();
         if drawables.watch.observe(waited) {
             drawables.rephase = Some(waited);
@@ -1477,10 +1477,10 @@ impl Layer {
             if transactional {
                 // Its work scheduled before the transaction (`schedule_plane`
                 // on the same queue): shown with it, no wait in it.
-                drawable.present();
+                crate::probe_counts::timed(crate::probe_counts::Kind::Present, || drawable.present());
             } else if let Some(buffer) = queue.and_then(|queue| queue.commandBuffer()) {
-                buffer.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
-                buffer.commit();
+                crate::probe_counts::timed(crate::probe_counts::Kind::Present, || buffer.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable)));
+                crate::probe_counts::timed(crate::probe_counts::Kind::Commit, || buffer.commit());
             }
         }
         if !drawables.shown {
@@ -1627,7 +1627,7 @@ impl Layer {
             // SAFETY: `surface` points to the sheet's live IOSurface, an
             // object (bridged to `IOSurface`) and a layer's valid contents,
             // which the layer retains.
-            unsafe { layer.setContents(Some(&*surface)) };
+            crate::probe_counts::timed(crate::probe_counts::Kind::SetContents, || unsafe { layer.setContents(Some(&*surface)) });
             if let Some(animation) = loop_animation(loop_) {
                 let key = objc2_foundation::NSString::from_str("loop");
                 // SAFETY: CALayer's method; it copies the animation.
@@ -1642,7 +1642,7 @@ impl Layer {
             CATransaction::begin();
             CATransaction::setDisableActions(true);
             self.place_loops();
-            CATransaction::commit();
+            crate::probe_counts::timed(crate::probe_counts::Kind::Transaction, || CATransaction::commit());
         }
     }
     pub fn set_caret(&mut self, caret: Option<Caret>) {
@@ -1723,7 +1723,7 @@ impl Layer {
                 // SAFETY: `surface` points to the buffer's live IOSurface, an
                 // object (bridged to `IOSurface`) and a layer's valid contents,
                 // which the layer retains.
-                unsafe { tile.setContents(Some(&*surface)) };
+                crate::probe_counts::timed(crate::probe_counts::Kind::SetContents, || unsafe { tile.setContents(Some(&*surface)) });
                 self.plain.addSublayer(&tile);
                 self.tiles.push((id, tile));
                 &self.tiles[self.tiles.len() - 1].1
@@ -1743,7 +1743,7 @@ impl Layer {
         hide_tiles(&self.plain, Some(tile));
         self.hide_drawables();
         if let Some(probe) = &self.probe {
-            probe.present();
+            crate::probe_counts::timed(crate::probe_counts::Kind::Present, || probe.present());
         }
     }
     /// Drops the tiles of surfaces other than `surfaces` (the renderer's, as

@@ -70,6 +70,22 @@ impl GpuStatsLog {
                     mb(bytes as usize)
                 )),
         );
+        // (flush, local probe) what the frames submitted and presented.
+        let (counts, nanos) = zgx_gpu::probe_counts::take();
+        let parts: Vec<String> = (0..7)
+            .map(|i| format!("{}={}/{:.0}us", zgx_gpu::probe_counts::KINDS[i], counts[i], nanos[i] as f64 / 1e3))
+            .collect();
+        let bytes = zgx_gpu::probe_counts::take_bytes();
+        let bytes: Vec<String> = (0..4)
+            .map(|i| format!("{}={}", zgx_gpu::probe_counts::BYTE_KINDS[i], bytes[i]))
+            .collect();
+        eprintln!("GPU_PROBE frames={} {} bytes {}", self.frames, parts.join(" "), bytes.join(" "));
+        let regions: Vec<String> = zgx_gpu::probe_counts::take_regions()
+            .into_iter()
+            .chain(zgx::probe::take_regions())
+            .map(|(name, calls, ns)| format!("{name}={calls}/{:.0}us", ns as f64 / 1e3))
+            .collect();
+        eprintln!("REGIONS frames={} main_cpu_ms={:.1} {}", self.frames, zgx_gpu::probe_counts::thread_cpu() as f64 / 1e6, regions.join(" "));
         *self = Self {
             since: Instant::now(),
             frames: 0,

@@ -198,6 +198,7 @@ impl MappedRing {
     /// allocation.
     pub(crate) fn write_parts(&mut self, parts: &[&[u8]]) -> (wgpu::Buffer, bool) {
         let len = parts.iter().map(|part| part.len() as u64).sum::<u64>();
+        crate::probe_counts::bytes(0, len as usize);
         let mut index = self.ready(len);
         if index.is_none() {
             // Deliver callbacks for frames the GPU has already finished.
@@ -305,6 +306,7 @@ impl MappedRing {
         let contents = slot.in_place().expect("written in place");
         let since = slot.holds.map_or(0, |(_, version, _)| version);
         let copy = |from: usize, bytes: &[u8]| {
+            crate::probe_counts::bytes(0, bytes.len());
             // SAFETY: As `write_parts`: `contents` is the buffer's memory,
             // `capacity` bytes, at least `len`, and every write lies within
             // the parts' `len` bytes; the slot is ready (no submission

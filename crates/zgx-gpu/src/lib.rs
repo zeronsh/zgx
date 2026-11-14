@@ -7,6 +7,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
 
+pub mod probe_counts;
+/// (flush, local probe) a profile note, also on the present log.
+fn probe_note(f: impl FnOnce() -> String) {
+    let s = f();
+    present_log::log(|| format!("note {s}"));
+    zgx::profile::note(|| s);
+}
 mod bands;
 mod compile;
 #[cfg(all(windows, feature = "composition"))]
@@ -4183,7 +4190,7 @@ fn request_device(
     // that command buffer until the first submission. Finish it now, so
     // it is never alive beside a frame's: Metal keeps memory for as many
     // command buffers as were ever alive at once, for good.
-    queue.submit([]);
+    crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || queue.submit([]));
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     // A lost device (a driver reset, a GPU removed) fails what follows
     // instead of panicking, as wgpu's default handler does: renders
@@ -6176,7 +6183,7 @@ impl GpuRenderer {
                     },
                 );
             }
-            self.queue.submit([encoder.finish()]);
+            crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || self.queue.submit([encoder.finish()]));
         }
         self.atlas_shrunk(atlas, size, cursor, live, glyphs, icons, origins)
     }
@@ -13136,7 +13143,7 @@ impl GpuRenderer {
                         // them, so their corners repaint, where they are and
                         // where the copy took their pixels.
                         Some(corners) => {
-                            zgx::profile::note(|| {
+                            crate::probe_note(|| {
                                 format!("scroll @{} copied its pixels", scroll.node.number())
                             });
                             for corner in corners {
@@ -13160,7 +13167,7 @@ impl GpuRenderer {
                             self.scroll_copied.set(self.scroll_copied.get() + 1);
                         }
                         None => {
-                            zgx::profile::note(|| {
+                            crate::probe_note(|| {
                                 format!(
                                     "scroll @{} repainted its view: a rounded clip around it \
                                      fades or is inset",
@@ -13171,7 +13178,7 @@ impl GpuRenderer {
                         }
                     },
                     Some(blocker) => {
-                        zgx::profile::note(|| {
+                        crate::probe_note(|| {
                             format!(
                                 "scroll @{} repainted its view: {}",
                                 scroll.node.number(),
@@ -13182,7 +13189,7 @@ impl GpuRenderer {
                     }
                 },
                 Err(why) => {
-                    zgx::profile::note(|| {
+                    crate::probe_note(|| {
                         format!(
                             "scroll @{} repainted its view: {}",
                             scroll.node.number(),
@@ -13241,7 +13248,7 @@ impl GpuRenderer {
             };
             self.encode_damage(&mut pass, &deferred, picks, &mut stats);
         }
-        self.queue.submit([pending.finish()]);
+        crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || self.queue.submit([pending.finish()]));
         self.belt.borrow_mut().recall();
         self.submitted();
         if let Some(mapped) = &self.mapped {
@@ -15011,6 +15018,7 @@ impl GpuRenderer {
             for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
+            crate::probe_counts::bytes(3, rgba.len());
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: target,
@@ -15990,7 +15998,7 @@ impl GpuRenderer {
                 .get_mut()
                 .take()
                 .unwrap_or_else(|| self.device.create_command_encoder(&Default::default()));
-            let submission = self.queue.submit([encoder.finish()]);
+            let submission = crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || self.queue.submit([encoder.finish()]));
             self.belt.get_mut().recall();
             self.submitted();
             if let Some(mapped) = self.mapped.as_mut() {
@@ -16446,7 +16454,7 @@ impl GpuRenderer {
                     }),
                 );
             }
-            self.queue.submit([encoder.finish()]);
+            crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || self.queue.submit([encoder.finish()]));
             self.belt.get_mut().recall();
             self.submitted();
             if let Some(mapped) = self.mapped.as_mut() {
@@ -17028,8 +17036,10 @@ impl GpuRenderer {
             pass.set_bind_group(0, self.blit_bind.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue
-            .submit(std::iter::once(encoder.finish()).chain(raw_copy));
+        crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || {
+            self.queue
+                .submit(std::iter::once(encoder.finish()).chain(raw_copy))
+        });
         self.belt.get_mut().recall();
         self.submitted();
         if let Some(mapped) = self.mapped.as_mut() {
@@ -17044,7 +17054,7 @@ impl GpuRenderer {
         #[cfg(target_os = "linux")]
         self.swap_presented(&frame);
         before_present();
-        frame.present();
+        crate::probe_counts::timed(crate::probe_counts::Kind::Present, || frame.present());
         #[cfg(windows)]
         if let Some(surface) = &self.surface {
             self.dxgi_stats.presented(surface);
@@ -17545,7 +17555,7 @@ impl GpuRenderer {
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
+        crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || self.queue.submit([encoder.finish()]));
         self.submitted();
         if let Some(mapped) = self.mapped.as_mut() {
             mapped.get_mut().submitted();
@@ -17572,7 +17582,7 @@ impl GpuRenderer {
             staging.texture(&self.device, &buffer, (size.width, size.height))?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_texture(self.target.as_image_copy(), texture.as_image_copy(), size);
-        self.queue.submit([encoder.finish()]);
+        crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || self.queue.submit([encoder.finish()]));
         // Finished before it's handed over: the window reads it as it is.
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
@@ -17730,7 +17740,7 @@ impl GpuRenderer {
             },
             texture.size(),
         );
-        self.queue.submit([encoder.finish()]);
+        crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || self.queue.submit([encoder.finish()]));
         let (tx, rx) = std::sync::mpsc::channel();
         buffer.map_async(wgpu::MapMode::Read, .., move |r| {
             let _ = tx.send(r);
@@ -18162,7 +18172,7 @@ fn written(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView)
         })],
         ..Default::default()
     });
-    queue.submit([encoder.finish()]);
+    crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || queue.submit([encoder.finish()]));
 }
 /// A backdrop blur atlas: half floats, so averaging down and blurring in
 /// steps adds no 8-bit banding to smooth frost.
@@ -21445,7 +21455,7 @@ mod single_use_module_tests {
             },
             size,
         );
-        queue.submit([encoder.finish()]);
+        crate::probe_counts::timed(crate::probe_counts::Kind::WgpuSubmit, || queue.submit([encoder.finish()]));
         out.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let mapped = out.slice(..).get_mapped_range();

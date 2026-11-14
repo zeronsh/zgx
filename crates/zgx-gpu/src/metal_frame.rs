@@ -244,7 +244,7 @@ impl MetalFrame {
             return;
         };
         encoder.endEncoding();
-        buffer.commit();
+        crate::probe_counts::timed(crate::probe_counts::Kind::Commit, || buffer.commit());
     }
 
     /// Whether polyline strokes can be drawn here: their pipeline, compiled
@@ -460,6 +460,7 @@ impl MetalFrame {
                 // SAFETY: `len` bytes of `regions`, read by Metal during the
                 // call (it copies them into the new buffer).
                 unsafe {
+                    { crate::probe_counts::bytes(1, len); }
                     self.device.newBufferWithBytes_length_options(
                         std::ptr::NonNull::from(regions).cast(),
                         len,
@@ -691,9 +692,11 @@ impl Frame {
             // buffer made from them is retained by the encoder.
             unsafe {
                 if bytes.len() <= 4096 {
+                    crate::probe_counts::bytes(2, bytes.len());
                     self.encoder
                         .setFragmentBytes_length_atIndex(pointer, bytes.len(), slot);
                 } else {
+                    crate::probe_counts::bytes(1, bytes.len());
                     let buffer = frame
                         .device
                         .newBufferWithBytes_length_options(
@@ -796,7 +799,7 @@ impl Frame {
     fn split(&mut self, frame: &MetalFrame, ran: &'static str) {
         let next = frame.command_buffer().expect("a command buffer");
         let done = std::mem::replace(&mut self.buffer, next);
-        done.commit();
+        crate::probe_counts::timed(crate::probe_counts::Kind::Commit, || done.commit());
         TIMED.with(|timed| timed.borrow_mut().push((ran, done)));
     }
     /// End this pass and open one into `target` (cleared if `clear`) at
@@ -968,9 +971,9 @@ impl Frame {
     ) -> CommandBuffer {
         self.encoder.endEncoding();
         if let Some(drawable) = drawable {
-            self.buffer.presentDrawable(drawable);
+            crate::probe_counts::timed(crate::probe_counts::Kind::Present, || self.buffer.presentDrawable(drawable));
         }
-        self.buffer.commit();
+        crate::probe_counts::timed(crate::probe_counts::Kind::Commit, || self.buffer.commit());
         if TIME_PASSES.load(std::sync::atomic::Ordering::Relaxed) {
             TIMED.with(|timed| {
                 timed

@@ -2807,8 +2807,8 @@ impl Host {
         {
             self.recover_renderer();
         }
-        self.spend_spare_time()?;
-        match self.draw_frame() {
+        zgx_gpu::probe_counts::region("spare", || self.spend_spare_time())?;
+        match zgx_gpu::probe_counts::region("draw_frame", || self.draw_frame()) {
             Err(error)
                 if error
                     .downcast_ref::<zgx_gpu::GpuError>()
@@ -2929,7 +2929,7 @@ impl Host {
         self.context
             .ui
             .advance_interactions(std::time::Instant::now())?;
-        self.context.ui.try_prepare_frame()?;
+        zgx_gpu::probe_counts::region("prepare", || self.context.ui.try_prepare_frame())?;
         // What preparing it held back from the window (`Ui::contain_layout_feedback`).
         for message in crate::contain::take_reported() {
             self.show_error(&message);
@@ -2971,7 +2971,7 @@ impl Host {
         }
         let scene = self.context.ui.scene.clone();
         let mut scene = scene.borrow_mut();
-        let report = scene.flush();
+        let report = zgx_gpu::probe_counts::region("flush", || scene.flush());
         // Reading it is a list a client's update needs and no other update:
         // not with none reading the tree.
         if self.context.ui.assistive_technology() {
@@ -3064,7 +3064,7 @@ impl Host {
                         std::time::Instant::now(),
                         "the window's frame",
                         |message| faults.push(message.to_string()),
-                        || renderer.render(&scene, damage),
+                        || zgx_gpu::probe_counts::region("render", || renderer.render(&scene, damage)),
                     );
                     for issue in renderer.take_issues() {
                         crate::contain::queue_issue(issue);
@@ -3323,6 +3323,7 @@ impl Host {
                         .shown_frame()
                         .map(|frame| (frame, self.scale_factor));
                     if let Some(gpu) = renderer.take_gpu_time() {
+                        zgx_gpu::present_log::log(|| format!("gpu_us={}", gpu.as_micros()));
                         zgx::profile::gpu_time(gpu);
                         if grid.is_some() {
                             self.latch.ran(gpu);
@@ -6426,10 +6427,12 @@ impl Host {
             match due {
                 crate::wheel_tape::Due::Wheel(delta, phase) => {
                     self.cursor = at;
-                    self.window_event(WindowEvent::MouseWheel {
-                        device_id: winit::event::DeviceId::dummy(),
-                        delta,
-                        phase,
+                    zgx_gpu::probe_counts::region("wheel", || {
+                        self.window_event(WindowEvent::MouseWheel {
+                            device_id: winit::event::DeviceId::dummy(),
+                            delta,
+                            phase,
+                        })
                     })?;
                 }
                 // A scripted pointer: moved there, then pressed or released,
@@ -6649,7 +6652,7 @@ impl Host {
             self.tasks.spawn(task);
         }
         if self.tasks.has_ready() {
-            self.tick_tasks();
+            zgx_gpu::probe_counts::region("tasks", || self.tick_tasks());
         }
         #[cfg(any(windows, target_os = "linux"))]
         if let Some(caption) = &mut self.caption {
@@ -8656,8 +8659,10 @@ impl ApplicationHandler<Event> for WindowManager {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
-        self.contain(event_loop, None, |this| {
-            this.user_event_turn(event_loop, event)
+        zgx_gpu::probe_counts::region("user_event", || {
+            self.contain(event_loop, None, |this| {
+                this.user_event_turn(event_loop, event)
+            })
         });
     }
     /// The mouse's raw motion, while a window holds a locked pointer (the
@@ -8703,12 +8708,14 @@ impl ApplicationHandler<Event> for WindowManager {
             }
             self.flush_move(event_loop);
         }
-        self.window_event_now(event_loop, id, event);
+        zgx_gpu::probe_counts::region("window_event", || self.window_event_now(event_loop, id, event));
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.flush_move(event_loop);
-        self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop));
+        zgx_gpu::probe_counts::region("about_to_wait", || {
+            self.contain(event_loop, None, |this| this.about_to_wait_turn(event_loop))
+        });
     }
     /// The windows still open (`Application::quit`, a failure) close while
     /// the event loop is still there, not after `run_app` returns. On Linux
