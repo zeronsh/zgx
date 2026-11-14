@@ -5073,6 +5073,10 @@ fn paragraph_effect<const LOCATING: bool>(
         let base = typography.get();
         let spans = compute();
         let hovered = hovered.get();
+        // Runs raised off the baseline (`TextSpan::baseline_shift`,
+        // `superscript`), noted where only spans with extras come and
+        // raised after: a plain span pays nothing for them.
+        let mut raised: Vec<Raised> = Vec::new();
         // Room for what it holds, made once: most spans add one run.
         let mut content = String::with_capacity(spans.iter().map(|span| span.text.len()).sum());
         let mut runs = Vec::with_capacity(spans.len());
@@ -5099,6 +5103,14 @@ fn paragraph_effect<const LOCATING: bool>(
                     // extras come, so a plain span pays nothing for fades.
                     if let Some(fade) = extras.fade {
                         fading.note(runs.len() + usize::from(apart), fade);
+                    }
+                    if extras.superscript || extras.baseline_shift != 0. {
+                        raised.push(Raised {
+                            run: runs.len() + usize::from(apart),
+                            superscript: extras.superscript,
+                            shift: extras.baseline_shift,
+                            size: span.styles.text_size.get(),
+                        });
                     }
                     (
                         extras.hover,
@@ -5317,9 +5329,14 @@ fn paragraph_effect<const LOCATING: bool>(
         if LOCATING && let Some(kept) = &locating {
             *kept.borrow_mut() = spanned;
         }
+        let raise = !raised.is_empty();
+        if raise {
+            raise_runs(&mut runs, &raised, base.size_in(Some(&theme)));
+        }
         let rich = crate::rich_text::RichText::new(content.as_str(), runs)
             .expect("normalized inline spans")
             .with_options(base.display);
+        let rich = if raise { rich.with_raised() } else { rich };
         // Recomputed but unchanged (its inputs animate for a sibling):
         // nothing to lay out, paint, describe or relabel.
         if content_state.with_untracked(|current| {
@@ -5365,6 +5382,34 @@ fn paragraph_effect<const LOCATING: bool>(
     }
 }
 
+/// A span's run raised off the baseline (`TextSpan::baseline_shift`,
+/// `superscript`): its place among the runs, and what raises it.
+struct Raised {
+    run: usize,
+    superscript: bool,
+    shift: f32,
+    /// Its own text size, if it sets one.
+    size: Option<f32>,
+}
+/// `raised`'s runs raised, the text's size `size`: a superscript three
+/// quarters of it (unless it sets its own) and raised a third of it, on top
+/// of any shift; the raise in its run's features (`FontFeatures::RAISE`).
+#[cold]
+#[inline(never)]
+fn raise_runs(runs: &mut [crate::rich_text::TextRun], raised: &[Raised], size: f32) {
+    for raise in raised {
+        let Some(run) = runs.get_mut(raise.run) else {
+            continue;
+        };
+        let (font_size, shift) = if raise.superscript {
+            (raise.size.unwrap_or(size * 0.75), raise.shift + size * 0.33)
+        } else {
+            (run.font_size, raise.shift)
+        };
+        run.font_size = font_size;
+        run.font.features = run.font.features.raised(shift / font_size.max(1.));
+    }
+}
 /// A paragraph's runs fading in (`TextSpan::fade_in`): which, the paragraph as
 /// drawn without them, and the frame loop that recolours them. Each frame while
 /// they fade, the loop writes the paragraph again with its runs' colours as they

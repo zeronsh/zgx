@@ -4642,7 +4642,12 @@ impl ScriptHost {
         let lazy = lazy::Lazy::default();
         lazy.ui(&["path", "linear"], canvas::install);
         lazy.ui(&["glass"], node::install_glass);
-        lazy.ui(&["map"], node::install_map);
+        // `sup` with `map`: no module of its own, so the list of them stays
+        // within the room it had (a 33rd made every VM's grow and copy).
+        lazy.ui(&["map", "sup"], |lua, ui| {
+            node::install_map(lua, ui)?;
+            node::install_sup(lua, ui)
+        });
         #[cfg(feature = "scene3d")]
         lazy.ui(
             &["scene3d", "mesh", "light", "group", "model"],

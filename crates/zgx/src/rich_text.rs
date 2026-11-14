@@ -180,6 +180,11 @@ impl Default for TextRun {
     }
 }
 
+/// `RichText::marks`: a run holds an inline box.
+const BOXED: u8 = 1;
+/// `RichText::marks`: a run is raised off the baseline.
+const RAISED: u8 = 2;
+
 /// What holds an inline box's place in a paragraph's text: the object
 /// replacement character, a run of its own (`RichText::with_inline_boxes`).
 pub const INLINE_BOX_CHAR: char = '\u{FFFC}';
@@ -286,12 +291,13 @@ impl InlineBox {
 /// native shaper still shapes the paragraph continuously.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RichText {
-    /// Its options (`options`), apart, leaving room for `boxed`.
+    /// Its options (`options`), apart, leaving room for `marks`.
     overflow: crate::text_layout::TextOverflow,
     line_clamp: Option<std::num::NonZeroU32>,
-    /// Whether a run holds an inline box: what reads them asks this, not
-    /// each run.
-    boxed: bool,
+    /// Whether a run holds an inline box (`BOXED`), or is raised off the
+    /// baseline (`RAISED`): what reads them asks this, not each run. One
+    /// byte, as one flag was.
+    marks: u8,
     text: Arc<str>,
     runs: Arc<[TextRun]>,
 }
@@ -326,7 +332,7 @@ impl RichText {
         Ok(Self {
             overflow: Default::default(),
             line_clamp: None,
-            boxed: false,
+            marks: 0,
             text,
             runs,
         })
@@ -361,7 +367,7 @@ impl RichText {
             last = Some(b.at);
         }
         self.runs = runs.into();
-        self.boxed = true;
+        self.marks |= BOXED;
         Ok(self)
     }
     /// Its inline boxes, in order: none for most text. Read from its runs,
@@ -382,13 +388,27 @@ impl RichText {
         runs: impl Into<Arc<[TextRun]>>,
     ) -> Result<Self, &'static str> {
         let mut remade = Self::new(text, runs)?;
-        remade.boxed = self.boxed;
+        remade.marks = self.marks;
         Ok(remade)
     }
     /// Whether it has inline boxes.
     #[inline]
     pub fn has_inline_boxes(&self) -> bool {
-        self.boxed
+        self.marks & BOXED != 0
+    }
+    /// Whether a run is raised off the baseline (`FontFeatures::RAISE`):
+    /// what lays it out asks this, not each run.
+    #[doc(hidden)]
+    #[inline]
+    pub fn has_raised(&self) -> bool {
+        self.marks & RAISED != 0
+    }
+    /// Said to have a run raised off the baseline (`has_raised`): who
+    /// raised it says so (`compose`'s raised spans, an editor's line).
+    #[doc(hidden)]
+    pub fn with_raised(mut self) -> Self {
+        self.marks |= RAISED;
+        self
     }
     /// The same text with its boxes' sizes changed to `sized`'s (width,
     /// height, baseline), in order (where its layout measured what they

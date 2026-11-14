@@ -1532,6 +1532,9 @@ pub(crate) struct SpanRare {
     /// `fade_in = { start = ui.now(), ms = 200, power = 1.6 }`: its text
     /// fading in, drawn in Rust a frame at a time (`TextSpan::fade_in`).
     pub fade: Option<zgx::compose::TextFade>,
+    /// `ui.sup`: a superscript, and points raised (`TextSpan::superscript`,
+    /// `baseline_shift`).
+    pub raise: Option<(bool, f32)>,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -4896,6 +4899,39 @@ const SPAN_FOLLOWS: &[(&str, Ty)] = &[
     ("strike", Ty::Bool),
     ("font", Ty::Str),
 ];
+
+/// `ui.sup { "2" }`: a span (as `ui.span` makes it, its options the same)
+/// raised off the baseline as a superscript, `<sup>`; `baseline_shift = 4`
+/// raises it 4 points more, and with `superscript = false` raises a span of
+/// the text's size by that alone. Apart from `ui.span`, whose options most
+/// spans give: made as a script names it.
+pub(crate) fn install_sup(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    let ui_span: mlua::Function = ui.get("span")?;
+    ui.set(
+        "sup",
+        lua.create_function(move |_, arg: mlua::Value| {
+            let raise = match &arg {
+                mlua::Value::Table(t) => (
+                    t.get::<Option<bool>>("superscript")?.unwrap_or(true),
+                    t.get::<Option<f32>>("baseline_shift")?.unwrap_or(0.),
+                ),
+                _ => (true, 0.),
+            };
+            // Made by `ui.span` itself, then raised: no other code makes a
+            // span or hands one to Luau, so `ui.span`'s is as it was.
+            let made: mlua::AnyUserData = ui_span.call(arg)?;
+            if raise.0 || raise.1 != 0. {
+                // Mutably: `borrow` is `ui.rich`'s, inlined there as the
+                // one caller; this one leaves it so.
+                let mut ud = made.borrow_mut::<SpanUd>()?;
+                if let Some(built) = ud.0.get_mut().as_mut() {
+                    rare_mut(built).raise = Some(raise);
+                }
+            }
+            Ok(made)
+        })?,
+    )
+}
 
 /// `ui.span { "text", bold = true, color = "#f80", on_click = fn }`;
 /// `href = "https://…"` makes it a link that opens it.

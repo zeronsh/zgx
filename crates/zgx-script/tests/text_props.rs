@@ -370,3 +370,53 @@ fn a_texts_lang_is_inherited_follows_state_and_a_span_says_its_own() {
     h.frames(1);
     assert_eq!(han(&mut h, "followed"), 6);
 }
+
+/// `ui.sup` makes a span raised off the baseline as a superscript, its
+/// other options a span's: three quarters of the text's size, raised a
+/// third of it (in its run's features), and `baseline_shift` more; with
+/// `superscript = false`, the shift alone at the text's size.
+#[test]
+fn sup_raises_a_span_off_the_baseline() {
+    use zgx::scene::NodeKind;
+    let mut h = Harness::inline(
+        r#"return ui.rich { id = "para", text_size = 20,
+            "x", ui.sup { "2", bold = true }, ui.sup { "y", baseline_shift = 3, superscript = false } }"#,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.error(), None);
+    let node = h.find("para").unwrap();
+    let scene = h.ui.scene.borrow();
+    let mut pending = vec![node];
+    let mut found = None;
+    while let Some(next) = pending.pop() {
+        if let NodeKind::RichText { text } = scene.kind(next) {
+            found = Some(text.clone());
+        }
+        pending.extend(scene.children(next).iter().copied());
+    }
+    let text = found.expect("a rich text");
+    let raised: Vec<(String, f32, f32, u16)> = (text.runs().iter())
+        .map(|run| {
+            (
+                text.text()[run.range.clone()].to_string(),
+                run.font_size,
+                run.font.features.raise() * run.font_size,
+                run.font.weight,
+            )
+        })
+        .collect();
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert_eq!(raised.len(), 3, "{raised:?}");
+    assert!(
+        near(raised[0].1, 20.) && near(raised[0].2, 0.),
+        "{raised:?}"
+    );
+    assert!(
+        near(raised[1].1, 15.) && near(raised[1].2, 6.6) && raised[1].3 == 700,
+        "{raised:?}"
+    );
+    assert!(
+        near(raised[2].1, 20.) && near(raised[2].2, 3.),
+        "{raised:?}"
+    );
+}

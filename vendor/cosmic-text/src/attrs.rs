@@ -189,6 +189,11 @@ impl FontFeatures {
     /// have it, as `HYPHENS`.
     pub const HAN: FeatureTag = FeatureTag::new(b"_han");
 
+    /// zgx: how far a span is raised off the baseline, in EM (`f32` bits;
+    /// `Attrs::baseline_shift`), with `CacheKeyFlags::BASELINE_SHIFT`. No
+    /// font can have it, as `HYPHENS`.
+    pub const BASELINE_SHIFT: FeatureTag = FeatureTag::new(b"_bsh");
+
     pub const fn new() -> Self {
         Self {
             features: Vec::new(),
@@ -542,6 +547,31 @@ impl<'a> Attrs<'a> {
         self
     }
 
+    /// zgx: raise the span `shift` EM off the baseline (lower it if
+    /// negative), as CSS's `vertical-align: <length>`: its glyphs drawn so
+    /// (`ShapeWord::build`), and its lines taking CSS's line box once
+    /// marked (`Buffer::find_inline_boxes`), which grows only if the span
+    /// reaches past it. Kept as `inline_box`'s size is, in its features (a
+    /// private tag, `FontFeatures::BASELINE_SHIFT`) and a flag: no attribute
+    /// is bigger, and text without one reads nothing more. 0 is none.
+    pub fn baseline_shift(mut self, shift: f32) -> Self {
+        if shift != 0.0 && shift.is_finite() {
+            self.font_features
+                .set(FontFeatures::BASELINE_SHIFT, shift.to_bits());
+            self.cache_key_flags.insert(CacheKeyFlags::BASELINE_SHIFT);
+        }
+        self
+    }
+
+    /// zgx: how far the span is raised (`baseline_shift`), in EM.
+    #[cold]
+    #[inline(never)]
+    pub fn baseline_shift_of(&self) -> f32 {
+        (self.font_features.features.iter())
+            .rfind(|feature| feature.tag == FontFeatures::BASELINE_SHIFT)
+            .map_or(0.0, |feature| f32::from_bits(feature.value))
+    }
+
     /// zgx: set the span's inline padding (in EM)
     pub const fn padding(mut self, padding: f32) -> Self {
         self.padding_opt = Some(LetterSpacing(padding));
@@ -768,12 +798,18 @@ impl AttrsList {
         }
     }
 
-    /// zgx: whether a span is an inline box (`Attrs::inline_box`).
+    /// zgx: whether a span is an inline box (`Attrs::inline_box`) or is
+    /// raised off the baseline (`Attrs::baseline_shift`): its lines take
+    /// CSS's line box.
     #[cold]
     #[inline(never)]
     pub fn holds_inline_boxes(&self) -> bool {
-        self.spans_iter()
-            .any(|(_, attrs)| attrs.padding_opt.is_some_and(LetterSpacing::is_inline_box))
+        let raised = |flags: CacheKeyFlags| flags.contains(CacheKeyFlags::BASELINE_SHIFT);
+        raised(self.defaults.cache_key_flags)
+            || self.spans_iter().any(|(_, attrs)| {
+                attrs.padding_opt.is_some_and(LetterSpacing::is_inline_box)
+                    || raised(attrs.cache_key_flags)
+            })
     }
 
     /// Get the default [Attrs]

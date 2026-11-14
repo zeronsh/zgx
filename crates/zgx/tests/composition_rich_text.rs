@@ -427,3 +427,38 @@ fn a_clicked_span_is_underlined_unless_it_says_not() {
     ));
     assert!(!underlined(text_span("chat.rs")));
 }
+
+/// A span raised off the baseline keeps its size and is raised by what it
+/// asks; a superscript is three quarters of the text's size, raised a
+/// third of it, unless it sets its own size; the rest are on the baseline.
+#[test]
+fn raised_spans_and_superscripts_make_raised_runs() {
+    let mut ui = Ui::new(300., 100.);
+    let handle = ui.mount(
+        rich_text()
+            .text_size(20.)
+            .child(text_span("x"))
+            .child(text_span("2").superscript())
+            .child(text_span("y").baseline_shift(3.))
+            .child(text_span("n").superscript().text_size(10.))
+            .into(),
+    );
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    let NodeKind::RichText { text } = scene.kind(scene.children(handle.node())[0]) else {
+        panic!()
+    };
+    let runs: Vec<(f32, f32)> = text
+        .runs()
+        .iter()
+        .map(|run| (run.font_size, run.font.features.raise() * run.font_size))
+        .collect();
+    let want = [(20., 0.), (15., 6.6), (20., 3.), (10., 6.6)];
+    assert_eq!(runs.len(), want.len(), "{runs:?}");
+    for ((size, shift), (want_size, want_shift)) in runs.iter().zip(want) {
+        assert!(
+            (size - want_size).abs() < 0.01 && (shift - want_shift).abs() < 0.01,
+            "{runs:?}"
+        );
+    }
+}
