@@ -1036,7 +1036,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 }
                 // Measured, anchor on the first row in view measured at this
                 // width: rows coming into view above it, estimates until
-                // measured, grow above it rather than push it down.
+                // measured, grow above it rather than push it down. Resting
+                // at the top, nothing anchors: a row come in above (a feed's
+                // newest) shows from the top as it is measured.
                 let next_anchor = next_anchor.map(|mut anchor| {
                     let measured_row = |key: &K| {
                         entries
@@ -1049,6 +1051,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             })
                     };
                     if measured
+                        && anchor.position > 0.
                         && let Some((_, index, top, _)) =
                             keys.iter().find(|(key, _, top, row_height)| {
                                 top + row_height > anchor.position && measured_row(key)
