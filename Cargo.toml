@@ -13,6 +13,8 @@ exclude = [
     "vendor/harfrust",
     "vendor/swash",
     "vendor/mlua",
+    "vendor/mlua-sys",
+    "vendor/luau0-src",
     "vendor/taffy",
     "vendor/vte",
     "vendor/winit",
