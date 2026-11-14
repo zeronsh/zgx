@@ -215,7 +215,7 @@ fn history_keeps_as_many_as_asked() {
 
 /// Unlimited history keeps each place in its own bytes: 1,200 moves among
 /// 40 places, each made amid the tables a move makes and drops (a chat
-/// switch's), hold under 1 MB once collected, and under 256 KB more than the
+/// switch's), hold under 1 MB once collected, and under 512 KB more than the
 /// same moves keeping one place, where a place kept as the route's tables
 /// held a heap page each (1.1 MB more); back still returns through every
 /// one to the first, each with its params.
@@ -250,17 +250,28 @@ fn unlimited_history_keeps_each_place_in_its_own_bytes() {
                 end }},
             }}"##
         ));
+        // Each reading after the host's full collection, as it goes idle
+        // (`script_memory` collects Luau's heap; what the conversion cache
+        // holds goes only then).
+        let settled = |h: &Harness| {
+            h.host.collect_garbage();
+            h.host.script_memory()
+        };
         h.settle();
-        let before = h.host.script_memory();
+        let before = settled(&h);
         h.click("go");
-        let held = h.host.script_memory().saturating_sub(before);
+        let held = settled(&h).saturating_sub(before);
         (h, held)
     };
     let (_, one) = moves("1");
     let (mut h, all) = moves("math.huge");
     assert!(all < 1_000_000, "1,200 places held {} KB", all / 1024);
+    // What the moves leave differs by the 16 KB pages their churn lands in,
+    // collected or not: over 50 runs (macOS) one place held 572 to 700 KB
+    // and every place 16 to 176 KB more than it, and a Linux run 255 KB
+    // more. Half the bug's 1.1 MB keeps clear of that and still catches it.
     assert!(
-        all < one + 256_000,
+        all < one + 512_000,
         "unlimited history held {} KB more than one place",
         all.saturating_sub(one) / 1024
     );
