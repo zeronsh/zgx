@@ -3856,6 +3856,48 @@ impl Ui {
             editor.paste(text);
         }
     }
+    /// What a desktop window does with ⌘C, ⌘X and ⌘V (Ctrl elsewhere) that
+    /// nothing in the view took: copy, cut or paste in the focused editor
+    /// through `platform` (its `View::on_paste` hearing a paste first), or
+    /// copy the selected display text, with its HTML. For what sends keys
+    /// straight to the view (`zgx inspect key`, tests) to reach the paths a
+    /// window's keys do. Whether it took the key.
+    #[doc(hidden)]
+    pub fn clipboard_shortcut(
+        &self,
+        key: &Key,
+        modifiers: crate::input::Modifiers,
+        platform: &dyn crate::platform::Platform,
+    ) -> bool {
+        let Key::Character(k) = key else {
+            return false;
+        };
+        if !modifiers.primary_shortcut() || modifiers.alt {
+            return false;
+        }
+        let k = k.to_ascii_lowercase();
+        let Some(editor) = self.focused_editor() else {
+            if k != "c" || !self.has_text_selection() {
+                return false;
+            }
+            platform.set_clipboard_rich_text(self.selected_text(), self.selected_html());
+            return true;
+        };
+        match k.as_str() {
+            "v" => {
+                let text = platform.clipboard_text();
+                self.paste_into(&editor, text.as_deref());
+            }
+            "c" | "x" => {
+                let text = editor.copy();
+                if !text.is_empty() && platform.set_clipboard_text(text) && k == "x" {
+                    editor.cut();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
     /// Prepare allocated control geometry before rendering a frame or dispatching input.
     /// Native hosts call this automatically. Headless hosts should call it before `Scene::flush`.
     pub fn prepare_frame(&self) {
