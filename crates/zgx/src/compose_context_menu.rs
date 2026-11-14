@@ -61,6 +61,11 @@ impl View {
         build: impl FnMut(&ContextMenuEvent) -> Vec<View> + 'static,
     ) -> Self {
         let mut build = build;
+        #[cfg(feature = "dom")]
+        if crate::compose::__dom::DOM_ONLY {
+            self.rare_mut().dom_menu = Some(Box::new(move |event, _| build(event)));
+            return self;
+        }
         let rare = self.rare_mut();
         rare.context_menu = Some(Box::new(move |event, _| build(event)));
         rare.context_menu_spans = false;
@@ -75,6 +80,13 @@ impl View {
         mut self,
         mut build: impl FnMut(&ContextMenuEvent, Option<&ContextMenuSpan>) -> Vec<View> + 'static,
     ) -> Self {
+        #[cfg(feature = "dom")]
+        if crate::compose::__dom::DOM_ONLY {
+            // The run is the DOM's (`__dom::DomMenu`); a link with nothing
+            // of the app's for it shows the browser's own menu.
+            self.rare_mut().dom_menu = Some(Box::new(move |event, span| build(event, span)));
+            return self;
+        }
         let rare = self.rare_mut();
         // The run, found as it is asked (`compose_rich::locate_for`): its
         // paragraph keeps what finds it, and nothing else pays for it.

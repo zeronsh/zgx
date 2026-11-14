@@ -44,6 +44,7 @@ export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   addEventListener("resize", placeAll);
   document.addEventListener("scroll", placeAll, true);
   document.addEventListener("keydown", onKeymaps, true);
+  document.addEventListener("contextmenu", onContextMenu);
   document.addEventListener("keydown", onGroupKey);
   document.addEventListener("focusin", onGroupFocus);
   document.addEventListener("keydown", onLinkKey);
@@ -275,6 +276,8 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         else if (kind === 5) listen(node, handler);
         else if (kind === 6) node.$$k = handler;
         else if (kind === 7) group(node, handler);
+        else if (kind === 9) node.$$m = handler;
+        else if (kind === 10) node.$$si = handler;
         break;
       }
       case 15: { // VALUE id str: an editor's text, unless it holds it
@@ -393,6 +396,17 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
       case 30: { // SHOW panel on
         const panel = nodes[ops[i++]];
         show(panel, ops[i++] === 1);
+        break;
+      }
+      case 33: { // MENU_AT holder x y: a context menu's panel at the pointer
+        const holder = nodes[ops[i++]];
+        const x = new Float32Array(new Uint32Array([ops[i++]]).buffer)[0];
+        const y = new Float32Array(new Uint32Array([ops[i++]]).buffer)[0];
+        const panel = holder.querySelector(".zp");
+        if (panel && panel.$$o) {
+          panel.$$o.at = { x, y };
+          if (panel.matches(":popover-open")) place(panel);
+        }
         break;
       }
       case 31: // PREVENT: the click being handled doesn't do its default
@@ -579,8 +593,12 @@ function placeAll() {
 // in the viewport.
 function place(panel) {
   const o = panel.$$o;
-  if (!o || !o.anchor || o.kind === LAYER || !o.anchor.isConnected) return;
-  const a = o.anchor.getBoundingClientRect();
+  if (!o || o.kind === LAYER) return;
+  if (!o.at && (!o.anchor || !o.anchor.isConnected)) return;
+  // At a point (a context menu), else against its anchor.
+  const a = o.at
+    ? { left: o.at.x, right: o.at.x, top: o.at.y, bottom: o.at.y, width: 0, height: 0 }
+    : o.anchor.getBoundingClientRect();
   let pos = o.kind === TOOLTIP && !(o.flags & 8) ? "pointer-events:none;" : "";
   if (o.flags & 2) {
     pos += "min-width:" + a.width + "px;";
@@ -1227,4 +1245,26 @@ export function zgx_measure(font, text) {
   measurer.font = font;
   const m = measurer.measureText(text);
   return new Float64Array([m.width, m.fontBoundingBoxAscent + m.fontBoundingBoxDescent]);
+}
+
+// A secondary click: the nearest element with a context menu (a span's own
+// before its paragraph's) builds its entries, told where and the span it
+// was on; one that opens a menu prevents the browser's.
+function onContextMenu(event) {
+  let span = null;
+  for (let n = event.target; n && n !== document; n = n.parentNode) {
+    if (n.$$si !== undefined && !span) span = n;
+    if (n.$$m === undefined) continue;
+    const r = n.getBoundingClientRect();
+    const index = span ? span.$$si : -1;
+    const href = span && span.getAttribute ? span.getAttribute("href") || "" : "";
+    const text = span ? span.textContent : "";
+    prevented = false;
+    dispatch(n.$$m, 8, 0, [event.clientX, event.clientY, event.clientX - r.left, event.clientY - r.top, index, href, text].join("\n"));
+    if (prevented) {
+      prevented = false;
+      event.preventDefault();
+    }
+    return;
+  }
 }
