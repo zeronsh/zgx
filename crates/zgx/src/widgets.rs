@@ -6354,6 +6354,14 @@ impl Ui {
                     }
                     for (i, id) in pool.iter() {
                         let line = lines.line_text(*i);
+                        // An aligned line paints where its carets and hits are: in the font it was shaped in.
+                        let font = match lines.align(*i) {
+                            Some(align) => crate::text_layout::FontStyle {
+                                align,
+                                ..font.clone()
+                            },
+                            None => font.clone(),
+                        };
                         let colored = draw_hint.line_cache().spans(lines, *i).and_then(|spans| {
                             crate::editor_lines::styled_line(&line, &spans, color, size, &font)
                         });
@@ -6382,7 +6390,7 @@ impl Ui {
                                 }
                             }
                         }
-                        s.set_font(*id, font.clone());
+                        s.set_font(*id, font);
                         let shaped = lines.line(*i).size();
                         let width = lines.draw_width(*i, wrap_width).unwrap_or(shaped.0 + 2.);
                         let inset = lines.inset(*i);
