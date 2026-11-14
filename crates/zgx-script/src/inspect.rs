@@ -27,7 +27,7 @@ use std::{
     task::{Poll, Waker},
     time::{Duration, Instant},
 };
-use zgx::{compose::ViewHandle, inspect::Inspector, widgets::Ui};
+use zgx::{compose::ViewHandle, inspect::Inspector, platform::PlatformService, widgets::Ui};
 
 /// What a session answers with: at once, or once a wait is over.
 pub enum Reply {
@@ -58,6 +58,72 @@ fn ok(text: String, data: Value) -> String {
     ])
     .to_json()
 }
+/// `clipboard`: what the window's clipboard holds (its text, HTML and
+/// image), or with `action` `set`, put `text` and `html` there (either
+/// alone; both as a rich copy) or the picture at `image` (a file). An
+/// off-screen session's is its own (`ZGX_CLIPBOARD=memory`), so a QA script
+/// sets it and then presses ⌘V (`key`), the app pasting it as a person's
+/// paste: through the editor's `on_paste`.
+async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String {
+    let Some(platform) = platform else {
+        return failed("no clipboard here: it needs a desktop window");
+    };
+    let field = |name: &str| request.field(name).map(|v| v.to_string());
+    if field("action").as_deref() == Some("set") {
+        let (text, html) = (field("text"), field("html"));
+        if let Some(path) = field("image") {
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) => return failed(format!("{path}: {e}")),
+            };
+            let image = match zgx_gpu::assets::decode_image(&bytes) {
+                Ok(image) => image,
+                Err(e) => return failed(format!("{path}: {e}")),
+            };
+            let (width, height) = (image.width(), image.height());
+            return match platform.0.set_clipboard_image(image).await {
+                true => ok(
+                    format!("the clipboard holds a {width}x{height} image"),
+                    Value::Nil,
+                ),
+                false => failed("the clipboard didn't take the image"),
+            };
+        }
+        let written = match (text, html) {
+            (Some(text), Some(html)) => platform.0.set_clipboard_rich_text(text, html),
+            (None, Some(html)) => platform.0.set_clipboard_rich_text(String::new(), html),
+            (Some(text), None) => platform.0.set_clipboard_text(text),
+            (None, None) => return failed("clipboard set takes `text`, `html` or `image`"),
+        };
+        return match written {
+            true => ok("set the clipboard".into(), Value::Nil),
+            false => failed("the clipboard didn't take it"),
+        };
+    }
+    let (text, html) = (platform.0.clipboard_text(), platform.0.clipboard_html());
+    let image = platform.0.clipboard_image().await;
+    let size = image
+        .as_ref()
+        .map(|i| format!("{}x{}", i.width(), i.height()));
+    let line = |name: &str, value: &Option<String>| match value {
+        Some(value) => format!("{name}: {value:?}"),
+        None => format!("{name}: none"),
+    };
+    ok(
+        [
+            line("text", &text),
+            line("html", &html),
+            line("image", &size),
+        ]
+        .join("\n"),
+        Value::record([
+            ("text", text.as_deref().map_or(Value::Nil, Value::from)),
+            ("html", html.as_deref().map_or(Value::Nil, Value::from)),
+            ("image", size.as_deref().map_or(Value::Nil, Value::from)),
+        ]),
+    )
+}
+
 fn failed(error: impl Into<String>) -> String {
     let error: String = error.into();
     Value::record([
@@ -1062,7 +1128,20 @@ impl Session {
                     return Ok((format!("pressed {keys} alone"), Value::Nil));
                 }
                 let (key, modifiers) = driver::parse_keys(&keys)?;
-                driver::press(&mut ui, key, modifiers);
+                // ⌘C, ⌘X, ⌘V nothing in the view took go to the clipboard
+                // as a window's do (`Ui::clipboard_shortcut`): an editor's
+                // `on_paste` hears a paste driven from here too.
+                let taken = ui.dispatch(zgx::input::InputEvent::KeyDown {
+                    key: key.clone(),
+                    modifiers,
+                    repeat: false,
+                });
+                if !taken.default_prevented
+                    && let Some(platform) = self.0.host.0.platform.borrow().clone()
+                {
+                    ui.clipboard_shortcut(&key, modifiers, &*platform.0);
+                }
+                ui.dispatch(zgx::input::InputEvent::KeyUp { key, modifiers });
                 Ok((format!("pressed {keys}"), Value::Nil))
             })(),
             "snapshot" => (|| {
@@ -1492,6 +1571,11 @@ impl Session {
                 let session = self.clone();
                 let request = request.clone();
                 return Reply::Later(Box::pin(async move { session.wait(&request).await }));
+            }
+            "clipboard" => {
+                let platform = self.0.host.0.platform.borrow().clone();
+                let request = request.clone();
+                return Reply::Later(Box::pin(async move { clipboard(platform, &request).await }));
             }
             "record" => {
                 let stop = field("stop").is_some_and(|v| v.truthy());
