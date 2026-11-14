@@ -7,6 +7,9 @@
 //! break opportunity in order, the last at its end. `no_break` is where the
 //! line is if it doesn't break there (past any spaces), `if_break` where it
 //! ends if it does (before them).
+//!
+//! A fit is applied at spaces only (`fitted_spaces`): one that needs a break
+//! after a hyphen falls back to greedy breaking, where Chrome would break.
 
 /// Which of the two Chromium asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -238,6 +241,12 @@ fn joined_after_spaces(text: &str) -> impl Iterator<Item = usize> + '_ {
 /// paragraph whose fitted breaks aren't all at a space (a break after an
 /// inline icon or between ideographs can't be a line feed of the text's own
 /// length) is left as it is.
+///
+/// So pretty and balance fit at spaces only: a fit that needs a break after
+/// a hyphen (Chrome's "working-" / "memory accuracy.") falls back to greedy
+/// breaking, as one between ideographs does. Breaking there too needs the
+/// text backends to take forced break offsets with the text, its offsets
+/// unchanged (then `line_feeds` can go): planned, not yet done.
 pub fn fitted_spaces(
     text: &str,
     layout: &dyn crate::text_layout::TextLayout,
