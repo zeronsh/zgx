@@ -8895,6 +8895,87 @@ mod bounds_anchor_tests {
         checked
     }
 
+    /// A row's observed bounds and its node, kept as it mounts.
+    type ObservedRow = (Signal<Rect>, NodeId);
+    /// Rows a list builds in spare time are laid out ahead of the frame,
+    /// and observed by the frame's preparation, as every other observer:
+    /// spare time gathers no bounds or visibility (its preparations are
+    /// ahead of the frame's), and the next frame publishes each built row's
+    /// bounds as the walk gives them, before and after they scroll in.
+    #[test]
+    fn rows_built_in_spare_time_are_observed_by_the_frame_not_ahead_of_it() {
+        let mut ui = Ui::new(400., 100.);
+        ui.host_spare_time();
+        let offset = ui.signal(0_f32);
+        let observed: Rc<RefCell<Vec<ObservedRow>>> = Rc::default();
+        let keep = observed.clone();
+        ui.mount(
+            virtual_list(
+                offset.clone(),
+                20.,
+                0,
+                || 1000,
+                |i| i,
+                move |_, _, _| {
+                    let keep = keep.clone();
+                    div().w_full().h(20.).on_mount(move |handle| {
+                        let bounds = handle.observe_bounds().expect("mounted");
+                        keep.borrow_mut().push((bounds, handle.node()));
+                    })
+                },
+            )
+            .w(400.)
+            .h(100.),
+        );
+        ui.prepare_frame();
+        // A list builds ahead once its view has moved.
+        for to in [1., 0.] {
+            offset.set(to);
+            ui.prepare_frame();
+        }
+        let shown = observed.borrow().len();
+        let mut turns = 0;
+        while ui.spare_work_wanted() {
+            ui.run_spare_work(
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+            turns += 1;
+            assert!(turns < 10_000, "spare work never ends");
+        }
+        assert!(observed.borrow().len() > shown, "rows built ahead");
+        let told = ui.storage.bounds_geometry_revision.get();
+        assert!(
+            told.is_some_and(|rev| rev & SEEN_AHEAD != 0),
+            "settled ahead of the frame, nothing gathered: {told:?}"
+        );
+        let as_walked = |ui: &Ui| {
+            let scene = ui.scene.borrow();
+            let mut checked = 0;
+            for (bounds, node) in observed.borrow().iter() {
+                if scene.contains(*node) {
+                    let walked = scene.world_bounds(*node);
+                    let told = bounds.with_untracked(|told| *told);
+                    assert!(
+                        !moved(told, walked),
+                        "{node:?}: told {told:?}, walked {walked:?}"
+                    );
+                    checked += 1;
+                }
+            }
+            checked
+        };
+        // The frame's preparation gathers and publishes them.
+        ui.prepare_frame();
+        let told = ui.storage.bounds_geometry_revision.get();
+        assert!(told.is_some_and(|rev| rev & SEEN_AHEAD == 0), "{told:?}");
+        assert!(as_walked(&ui) > shown);
+        // Scrolled to, built ahead rows are where the walk puts them.
+        offset.set(150.);
+        ui.prepare_frame();
+        assert!(as_walked(&ui) > shown);
+    }
     /// A row moved from one scroll view to another, a scroll view moved
     /// under a translated parent, and a row laid out again, each in the
     /// frame a scroll moves them, with scroll views nested: what observers
