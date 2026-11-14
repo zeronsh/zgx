@@ -7615,6 +7615,16 @@ fn mount_scroll(
     // end. Only growth moves a pinned view; a new offset (a wheel, a script)
     // is taken as it is and decides whether the view stays pinned.
     let (applied, pinned) = (std::cell::Cell::new(0_f32), std::cell::Cell::new(true));
+    // Where it rested before its content (or it) changed so that it could no
+    // longer reach that far, and the position that change clamped it to: it
+    // goes back as the content grows to hold the place again, unless
+    // something else moved it meanwhile. The offset says where it shows, as
+    // ever; the place is kept here. A position asked for past the end (an
+    // offset set beyond it) is clamped as before and never kept.
+    let (rested, held) = (
+        std::cell::Cell::new(f32::NAN),
+        std::cell::Cell::new(None::<(f32, f32)>),
+    );
     let sized_by_content = std::cell::Cell::new(false);
     let pixel_scale = ui.pixel_scale();
     ui.bind(root, move || {
@@ -7623,13 +7633,30 @@ fn mount_scroll(
         let (width, height) = size.get();
         let limit = (main_size(extent.get()) - main_size((width, height))).max(0.);
         let requested = offset.get();
+        // Moved since it was clamped (a wheel, a key, a script): the place
+        // is where it was moved to.
+        if let Some((_, clamped)) = held.get()
+            && requested != clamped
+        {
+            held.set(None);
+        }
         let position = if requested.is_nan() {
             0.
         } else if follow_end && pinned.get() && requested == applied.get() {
             limit
+        } else if let Some((place, _)) = held.get() {
+            place.min(limit)
         } else {
             requested.clamp(0., limit)
         };
+        if !requested.is_nan() && !(follow_end && pinned.get()) {
+            // Resting where it was (the content or the view changed, not the
+            // offset) and clamped short of it: the place is kept.
+            let place = held.get().map_or(requested, |(place, _)| place);
+            let resting = held.get().is_some() || requested == rested.get();
+            held.set((resting && position < place).then_some((place, position)));
+        }
+        rested.set(position);
         if follow_end {
             applied.set(position);
             pinned.set(position >= limit - 0.5);
