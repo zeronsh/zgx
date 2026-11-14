@@ -2608,6 +2608,10 @@ impl Constraints {
     }
 }
 type ChildPlacement = (NodeId, Rect, Constraints);
+/// Child placements kept from freed nodes, at most.
+const RECYCLED: usize = 64;
+/// The most room placements kept from a freed node may have.
+const RECYCLED_CAPACITY: usize = 16;
 /// `Scene::hit_test_all`'s last answer: its point's bits and the revisions
 /// it was found at (`geometry_revision`, `content_revision`), and its hits.
 struct HitMemo {
@@ -3473,6 +3477,10 @@ pub struct Scene {
     measure_depth: u32,
     /// Measures' working sets, one per level deep (`Scratch`).
     scratch: Vec<Scratch>,
+    /// Child placements of nodes freed, cleared, for nodes measured after
+    /// them: a scrolled list's rows mount as others go, and take theirs
+    /// rather than allocate (`recycle`, at most `RECYCLED`).
+    recycled_placements: Vec<Vec<ChildPlacement>>,
     content_revision: u64,
     /// The deepest stack and the item count of the last paint walk
     /// (`layer_items_within`), a whole one's and a damaged one's apart: the
@@ -3816,6 +3824,7 @@ impl Scene {
             layout_pass: 0,
             measure_depth: 0,
             scratch: Vec::new(),
+            recycled_placements: Vec::new(),
             content_revision: 0,
             walk_hints: Default::default(),
             layout_roots: Vec::new(),
@@ -8374,10 +8383,11 @@ impl Scene {
     pub(crate) fn free_dead(&mut self, id: NodeId) {
         let slot = &mut self.slots[id.index as usize];
         assert!(slot.dead, "freeing a node that was not removed");
-        let node = slot.node.take().unwrap();
+        let mut node = slot.node.take().unwrap();
         slot.dead = false;
         self.dead -= 1;
         self.forget(id, &node);
+        self.recycle(&mut node);
         self.free.push(id.index);
     }
     /// What the scene keeps about `node`, gone, but in the lists `kill`
@@ -8442,13 +8452,35 @@ impl Scene {
             .set(self.filtered.get() - usize::from(node.filtered()));
         self.promoted_count -= usize::from(node.promoted);
     }
+    /// Keep a freed node's child placements, cleared, for a node measured
+    /// next (`recycled_placements`): small ones only, a few dozen.
+    #[inline(never)]
+    fn recycle(&mut self, node: &mut Node) {
+        if let Some(measurement) = &mut node.measurement {
+            let placements = std::mem::take(&mut measurement.children);
+            if (1..=RECYCLED_CAPACITY).contains(&placements.capacity())
+                && self.recycled_placements.len() < RECYCLED
+            {
+                let mut placements = placements;
+                placements.clear();
+                self.recycled_placements.push(placements);
+            }
+        }
+    }
+    /// Child placements for a node measured for the first time: a freed
+    /// node's (`recycle`), if one is kept, its room grown as before.
+    #[cold]
+    #[inline(never)]
+    fn take_recycled_placements(&mut self) -> Vec<ChildPlacement> {
+        self.recycled_placements.pop().unwrap_or_default()
+    }
     fn free_subtree(&mut self, id: NodeId) {
         // Only remove_as enters this walk. It either materialized first or
         // left tombstones in id's parent, outside the freed subtree.
         debug_assert!(
             self.pending_children.get() == u32::MAX || self.pending_children.get() != id.index
         );
-        let node = self.slots[id.index as usize].node.take().unwrap();
+        let mut node = self.slots[id.index as usize].node.take().unwrap();
         self.forget(id, &node);
         if node.effects.blur_radius > 0.0 {
             self.blur_nodes.retain(|entry| *entry != id);
@@ -8462,9 +8494,12 @@ impl Scene {
         if node.style.fade_overflow {
             self.overflow_fades.retain(|(entry, _)| *entry != id);
         }
-        for child in node.head.children.into_inner() {
+        let children = std::mem::take(node.head.children.get_mut());
+        for &child in &children {
             crate::deep(0, || self.free_subtree(child));
         }
+        *node.head.children.get_mut() = children;
+        self.recycle(&mut node);
         self.slots[id.index as usize].generation = self.slots[id.index as usize]
             .generation
             .checked_add(1)
@@ -13182,6 +13217,9 @@ impl Scene {
                 // Those whose containing block is further up are placed by it.
                 if self.relative_count != 0 {
                     absolute.retain(|child| !self.escapes(*child));
+                }
+                if children.capacity() == 0 && !self.recycled_placements.is_empty() {
+                    children = self.take_recycled_placements();
                 }
                 let horizontal = layout == Layout::Row;
                 // The axes a child fills (stretch), unless it sizes itself
