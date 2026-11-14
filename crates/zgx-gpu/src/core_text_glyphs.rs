@@ -108,9 +108,6 @@ unsafe extern "C" {
     fn CGContextScaleCTM(context: CFTypeRef, sx: f64, sy: f64);
     fn CGContextSetRGBFillColor(context: CFTypeRef, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetShouldAntialias(context: CFTypeRef, on: bool);
-    fn CGContextSetTextDrawingMode(context: CFTypeRef, mode: i32);
-    fn CGContextSetLineWidth(context: CFTypeRef, width: f64);
-    fn CGContextSetRGBStrokeColor(context: CFTypeRef, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetShouldSmoothFonts(context: CFTypeRef, on: bool);
     fn CGContextSetAllowsFontSubpixelPositioning(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSubpixelPositionFonts(context: CFTypeRef, on: bool);
@@ -514,7 +511,15 @@ mod tests {
     use cosmic_text::{CacheKeyFlags, fontdb};
 
     fn ink(fonts: &mut FontSystem, id: fontdb::ID, glyph: u16, weight: u16) -> u64 {
-        let (key, _, _) = CacheKey::new(id, glyph, 32., (0., 0.), fontdb::Weight(weight), 0, CacheKeyFlags::empty());
+        let (key, _, _) = CacheKey::new(
+            id,
+            glyph,
+            32.,
+            (0., 0.),
+            fontdb::Weight(weight),
+            0,
+            CacheKeyFlags::empty(),
+        );
         let image = chrome_glyph(fonts, key, 2.).expect("Core Text draws the system font");
         image.data.iter().map(|&a| u64::from(a)).sum()
     }
@@ -523,13 +528,29 @@ mod tests {
     #[test]
     fn the_system_font_between_medium_and_semibold_is_drawn_on_its_axis_alone() {
         let mut fonts = FontSystem::new();
-        let Some(id) = fonts.db().faces().find(|f| f.post_script_name == ".SFNS-Regular").map(|f| f.id) else {
+        let Some(id) = fonts
+            .db()
+            .faces()
+            .find(|f| f.post_script_name == ".SFNS-Regular")
+            .map(|f| f.id)
+        else {
             return;
         };
-        let glyph = fonts.get_font(id, fontdb::Weight(400)).unwrap().as_swash().charmap().map('N');
+        let glyph = fonts
+            .get_font(id, fontdb::Weight(400))
+            .unwrap()
+            .as_swash()
+            .charmap()
+            .map('N');
         let [w500, w550, w600] = [500, 550, 600].map(|w| ink(&mut fonts, id, glyph, w));
-        assert!(w500 < w550 && w550 < w600, "ink 500 {w500}, 550 {w550}, 600 {w600}");
+        assert!(
+            w500 < w550 && w550 < w600,
+            "ink 500 {w500}, 550 {w550}, 600 {w600}"
+        );
         let midpoint = (w500 + w600) / 2;
-        assert!(w550.abs_diff(midpoint) * 20 < midpoint, "550 is {w550}, halfway is {midpoint}");
+        assert!(
+            w550.abs_diff(midpoint) * 20 < midpoint,
+            "550 is {w550}, halfway is {midpoint}"
+        );
     }
 }
