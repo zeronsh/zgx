@@ -108,6 +108,10 @@ enum Command {
     LoadFiles {
         reply: mpsc::Sender<Result<Loaded, String>>,
     },
+    /// The clipboard's `text/html`: a browser's or word processor's copy.
+    LoadHtml {
+        reply: mpsc::Sender<Result<Loaded, String>>,
+    },
     /// Raise `window` with an activation token; held here until done, so
     /// its surface lives as long.
     Activate {
@@ -231,6 +235,15 @@ impl WaylandClipboard {
             .send(Command::LoadImage { reply })
             .map_err(|_| "Wayland data worker stopped".to_string())?;
         Ok(read_loaded(answer)?.0)
+    }
+    /// The clipboard's HTML (`text/html`), as offered: a browser's or a
+    /// word processor's copy.
+    pub fn load_html(&self) -> Result<String, String> {
+        let (reply, answer) = mpsc::channel();
+        self.0
+            .send(Command::LoadHtml { reply })
+            .map_err(|_| "Wayland data worker stopped".to_string())?;
+        Ok(String::from_utf8_lossy(&read_loaded(answer)?.0).into_owned())
     }
     pub fn load_files(&self) -> Result<Vec<std::path::PathBuf>, String> {
         let (reply, answer) = mpsc::channel();
@@ -368,6 +381,9 @@ impl NativeData {
                             Command::LoadFiles { reply } => {
                                 let _ = reply.send(state.load_files());
                             }
+                            Command::LoadHtml { reply } => {
+                                let _ = reply.send(state.load_html());
+                            }
                             Command::Activate { token, window } => state.activate(&token, &window),
                             Command::Drag {
                                 window,
@@ -463,6 +479,8 @@ struct Offer {
     text: Option<usize>,
     /// Whether it offers `image/png`.
     png: bool,
+    /// Whether it offers `text/html`.
+    html: bool,
     /// The compositor's action for it, as last said. Hyprland says it once,
     /// as it makes the offer: before the enter that names it.
     action: Option<DndAction>,
@@ -900,6 +918,16 @@ impl State {
             return Err("the clipboard holds no files".into());
         }
         offer.proxy.receive("text/uri-list".into(), write.as_fd());
+        drop(write);
+        Ok(Loaded(read, false))
+    }
+    fn load_html(&mut self) -> Result<Loaded, String> {
+        let (read, write) = UnixStream::pair().map_err(|e| e.to_string())?;
+        let offer = self.selection.as_ref().ok_or("the clipboard is empty")?;
+        if !offer.html {
+            return Err("the clipboard holds no HTML".into());
+        }
+        offer.proxy.receive("text/html".into(), write.as_fd());
         drop(write);
         Ok(Loaded(read, false))
     }
@@ -1511,6 +1539,7 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
                 if let Some(saved) = state.offers.get_mut(&offer.id().protocol_id()) {
                     saved.uris |= mime_type == "text/uri-list";
                     saved.png |= mime_type == "image/png";
+                    saved.html |= mime_type == "text/html";
                     saved.text = preferred(saved.text, &mime_type);
                 }
             }
@@ -1553,6 +1582,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                         uris: false,
                         text: None,
                         png: false,
+                        html: false,
                         action: None,
                     },
                 );

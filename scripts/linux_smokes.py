@@ -131,6 +131,8 @@ SMOKES = [
     ("selection-copy", "python3 scripts/selection_copy_smoke.py {bin}/selectable_text --output {out}", False),
     ("selection-copy-wayland", "python3 scripts/selection_copy_smoke.py {bin}/selectable_text --wayland --output {out}", False),
     ("clipboard-image", "python3 scripts/clipboard_image_smoke.py {bin}/clipboard_image --output {out}", False),
+    ("clipboard-html", "python3 scripts/clipboard_html_smoke.py {bin}/clipboard_html --output {out}", False),
+    ("clipboard-html-x11", "cargo test -p zgx-desktop --lib clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard --locked -- --ignored --exact --test-threads=1", True),
     ("selectable-text", "python3 scripts/selectable_text_smoke.py {bin}/selectable_text --output {out}", False),
     ("find-in-page", "python3 scripts/find_in_page_smoke.py {bin}/selectable_text --output {out}", False),
     ("zoom", "python3 scripts/zoom_smoke.py {bin}/zoom_probe --output {out}", False),
