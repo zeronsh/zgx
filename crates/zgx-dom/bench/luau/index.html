@@ -4,16 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>zgx-dom Luau app</title>
-<style>html,body{margin:0;background:#16181d;}</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<script type="module">
-const t0 = performance.now();
-import init from "./out/luau.js";
-const wasm = await init();
-window.wasmMemory = wasm.memory;
-window.loadMs = performance.now() - t0;
-window.ready = true;
-</script>
+<script type="module" src="main.js"></script>
 </body>
 </html>
