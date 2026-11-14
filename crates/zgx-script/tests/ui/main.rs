@@ -13,6 +13,8 @@ mod container_queries;
 mod decision;
 #[path = "../display_contents.rs"]
 mod display_contents;
+#[path = "../drag_declined.rs"]
+mod drag_declined;
 #[path = "../driver.rs"]
 mod driver;
 #[path = "../each_reorder.rs"]

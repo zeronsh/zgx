@@ -31,6 +31,18 @@ impl View {
     /// this node doesn't stop it: moved, the press drags instead of clicking.
     /// A smaller one keeps its press, as a tab's close button does.
     pub fn on_drag<T: 'static>(self, mut payload: impl FnMut() -> T + 'static) -> Self {
+        self.on_drag_when(move || Some(payload()))
+    }
+    /// `on_drag`, whose payload may say no drag starts from this press
+    /// (`None`), asked as the pointer passes the drag threshold: a row that
+    /// drags only some of what it shows, recycled for another. Declined, the
+    /// press stays a press: no preview, no drag events, and let go on the
+    /// node it clicks.
+    #[doc(hidden)]
+    pub fn on_drag_when<T: 'static>(
+        self,
+        mut payload: impl FnMut() -> Option<T> + 'static,
+    ) -> Self {
         let mut origin = None;
         self.on_event(move |cx| {
             if cx.phase == EventPhase::Capture {
@@ -50,8 +62,9 @@ impl View {
                     if let Some((px, py)) = origin.filter(|(px, py)| (x - px).hypot(y - py) > far) {
                         origin = None;
                         let source = cx.current_target;
-                        let payload = crate::input::starting_drag(source, &mut payload);
-                        cx.start_drag_from(payload, px, py);
+                        if let Some(payload) = crate::input::starting_drag(source, &mut payload) {
+                            cx.start_drag_from(payload, px, py);
+                        }
                     }
                 }
                 InputEvent::PointerUp { .. } | InputEvent::PointerCancel | InputEvent::Blur => {

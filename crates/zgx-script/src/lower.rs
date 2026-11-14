@@ -6260,10 +6260,12 @@ fn with_drag(
     }
     if let Some(drag) = events.drag.clone() {
         let vm = vm.clone();
-        view = view.on_drag(move || -> Value {
+        // Nil (or an error) starts no drag from this press: a row that drags
+        // only some of what it shows.
+        view = view.on_drag_when(move || -> Option<Value> {
             call(&vm, &drag, ())
                 .and_then(|v| Value::from_lua(v, &vm.lua).ok())
-                .unwrap_or(Value::Nil)
+                .filter(|v| !matches!(v, Value::Nil))
         });
     }
     if let Some(preview) = events.drag_preview.clone() {
