@@ -4449,7 +4449,8 @@ impl GpuContext {
                 wgpu::Dx12SwapchainKind::DxgiFromVisual;
             descriptor.backend_options.dx12.shader_compiler = compiler.clone();
             descriptor.backend_options.noop.enable = noop;
-            descriptor.flags = instance_flags(descriptor.flags, !cfg!(debug_assertions));
+            descriptor.flags =
+                without_racing_debug(instance_flags(descriptor.flags, !cfg!(debug_assertions)));
             // Which compiler an app's shaders meet on Direct3D 12, and its
             // flags (`app_fragment`).
             #[cfg(windows)]
@@ -21591,6 +21592,91 @@ mod texel_upload_tests {
 /// it makes otherwise, several a frame (Direct3D 12's `SetName`: 16 K cycles
 /// a frame of `animation_workload` on Windows). `WGPU_DISCARD_HAL_LABELS=0`
 /// brings them back for a capture (`with_env`, applied after).
+/// The flags with wgpu's debug layer (`DEBUG`: the debug-utils extension,
+/// which names the driver's objects and carries validation's messages) left
+/// out where the Vulkan loader races it (`loader_races_debug`), saying so
+/// once. `ZGX_VULKAN_DEBUG=1` keeps it anyway.
+pub(crate) fn without_racing_debug(flags: wgpu::InstanceFlags) -> wgpu::InstanceFlags {
+    if !flags.contains(wgpu::InstanceFlags::DEBUG) || !loader_races_debug() {
+        return flags;
+    }
+    if std::env::var_os("ZGX_VULKAN_DEBUG").is_some_and(|value| value == "1") {
+        return flags;
+    }
+    flags - wgpu::InstanceFlags::DEBUG
+}
+/// Whether the Vulkan loader crashes in its debug-utils entry points (an
+/// object named on one thread while another makes a device or lists
+/// adapters): loaders before 1.4.345 (Vulkan-Loader#1866) do, as Ubuntu
+/// 26.04's (1.4.341) did with `raster_text_parity`'s tests at once (wgpu
+/// names each frame's command buffer whenever the extension is on, labels
+/// or not). Release builds never turn it on. Linux, where Vulkan is the
+/// backend and distributions' loaders lag; a loader that can't say its
+/// patch level (no `vkEnumerateInstanceVersion`, before Vulkan 1.1) counts
+/// as racing, since nothing tells it from one that does. Asked once, and
+/// said once on stderr, so a developer missing validation's messages knows
+/// why. Drop it once the loaders people run are 1.4.345 or later.
+#[cfg(target_os = "linux")]
+fn loader_races_debug() -> bool {
+    static RACES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RACES.get_or_init(|| {
+        let Some(version) = loader_version() else {
+            return false;
+        };
+        let races = version.is_none_or(version_races_debug);
+        if races && std::env::var_os("ZGX_VULKAN_DEBUG").is_none_or(|value| value != "1") {
+            let said = version.map_or("one that can't say its version".into(), |v| {
+                format!("{}.{}.{}", (v >> 22) & 0x7f, (v >> 12) & 0x3ff, v & 0xfff)
+            });
+            eprintln!(
+                "zgx-gpu: Vulkan debug layer off: the loader ({said}) is before 1.4.345, whose \
+                 debug-utils calls race across threads (Vulkan-Loader#1866); \
+                 ZGX_VULKAN_DEBUG=1 turns it on"
+            );
+        }
+        races
+    })
+}
+#[cfg(not(target_os = "linux"))]
+fn loader_races_debug() -> bool {
+    false
+}
+/// The Vulkan loader's version (`vkEnumerateInstanceVersion`), as Vulkan
+/// packs it: none where there is no loader (no Vulkan to race), `Some(None)`
+/// where it can't say.
+#[cfg(target_os = "linux")]
+fn loader_version() -> Option<Option<u32>> {
+    // SAFETY: opens the loader (wgpu opens it too), finds the global entry
+    // point and calls it with a place for the answer; the library stays
+    // open, as wgpu's handle keeps it.
+    unsafe {
+        let library = libc::dlopen(
+            c"libvulkan.so.1".as_ptr(),
+            libc::RTLD_NOW | libc::RTLD_LOCAL,
+        );
+        if library.is_null() {
+            return None;
+        }
+        let entry = libc::dlsym(library, c"vkEnumerateInstanceVersion".as_ptr());
+        if entry.is_null() {
+            return Some(None);
+        }
+        let enumerate: unsafe extern "system" fn(*mut u32) -> i32 = std::mem::transmute(entry);
+        let mut version = 0;
+        Some((enumerate(&mut version) == 0).then_some(version))
+    }
+}
+/// Whether a loader of `version` (Vulkan's packing) has the debug-utils
+/// race: any before 1.4.345.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn version_races_debug(version: u32) -> bool {
+    let (major, minor, patch) = (
+        (version >> 22) & 0x7f,
+        (version >> 12) & 0x3ff,
+        version & 0xfff,
+    );
+    (major, minor, patch) < (1, 4, 345)
+}
 fn instance_flags(build: wgpu::InstanceFlags, release: bool) -> wgpu::InstanceFlags {
     let mut flags = build - wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL;
     flags.set(wgpu::InstanceFlags::DISCARD_HAL_LABELS, release);
@@ -21599,7 +21685,21 @@ fn instance_flags(build: wgpu::InstanceFlags, release: bool) -> wgpu::InstanceFl
 
 #[cfg(test)]
 mod instance_flags_tests {
-    use super::instance_flags;
+    use super::{instance_flags, version_races_debug};
+    /// Vulkan's packing of a version: major, minor, patch.
+    fn vk(major: u32, minor: u32, patch: u32) -> u32 {
+        (major << 22) | (minor << 12) | patch
+    }
+
+    #[test]
+    fn loaders_before_1_4_345_race_debug_utils() {
+        assert!(version_races_debug(vk(1, 3, 275)), "Ubuntu 24.04's");
+        assert!(version_races_debug(vk(1, 4, 341)), "Ubuntu 26.04's");
+        assert!(version_races_debug(vk(1, 4, 344)));
+        assert!(!version_races_debug(vk(1, 4, 345)), "Vulkan-Loader#1866's");
+        assert!(!version_races_debug(vk(1, 4, 350)));
+        assert!(!version_races_debug(vk(1, 5, 0)));
+    }
     use wgpu::InstanceFlags as F;
 
     #[test]
