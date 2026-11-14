@@ -458,7 +458,7 @@ def main():
             shown = re.search(r"popup show .* buffer (\d+)x(\d+)", said)
             destination = re.findall(r"set_destination\((\d+), (\d+)\)", said)
             # After the window's own (its surface comes first).
-            sized = re.findall(r"create_buffer\(new id wl_buffer@\d+, 0, (\d+), (\d+), \d+, \d+\)", said)
+            sized = re.findall(r"create_buffer\(new id wl_buffer[@#]\d+, 0, (\d+), (\d+), \d+, \d+\)", said)
             between = {"shown": shown and shown.groups(), "viewport": destination[-1:], "buffer": sized[-1:]}
             checks["weston: between pixels"] = between
             checks["weston: a menu between pixels has a buffer the size of its surface"] = (
