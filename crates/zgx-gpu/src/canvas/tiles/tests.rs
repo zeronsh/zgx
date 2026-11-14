@@ -214,6 +214,20 @@ fn a_changed_drawing_shows_at_once_and_tiles_keep_to_their_budget() {
     // Each cell its new tile, or its old one until that lands: never none.
     assert_eq!(out.len(), before.len(), "every cell shows at once");
     composed(&out, 2.);
+    // All landed, more than a frame uploads: the rest show their old tiles.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !(cache.pyramids[&node].tasks.values()).all(|t| t.done.load(Ordering::Acquire)) {
+        assert!(Instant::now() < deadline, "tiles land");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut out = Vec::new();
+    (cache.get_tiles(node, &changed, at, W, H, 2., false, 0, &mut out)).unwrap();
+    assert_eq!(
+        out.len(),
+        before.len(),
+        "every cell shows while its new tile waits"
+    );
+    composed(&out, 2.);
     let out = settled(&mut cache, node, &changed, at, 2.);
     assert!(same(
         &composed(&out, 2.),

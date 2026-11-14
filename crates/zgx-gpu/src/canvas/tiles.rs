@@ -98,6 +98,10 @@ struct Tile {
     /// Of a drawing before, where it changed since: shown until its
     /// cell's tile of this drawing lands.
     stale: bool,
+    /// The tile it replaced, uploaded: shown in its place until the frame
+    /// has the upload budget for it (a change lands more than one frame
+    /// uploads).
+    before: Option<Arc<ImageData>>,
 }
 type MadeTile = Result<ImageData, GpuError>;
 /// Tiles made off the frame, for the frame to take.
@@ -370,7 +374,13 @@ impl Pyramid {
     }
     fn ids(&self) -> impl Iterator<Item = u64> + '_ {
         (self.levels.iter())
-            .flat_map(|level| level.tiles.values().map(|tile| tile.image.id()))
+            .flat_map(|level| level.tiles.values())
+            .flat_map(|tile| {
+                [Some(&tile.image), tile.before.as_ref()]
+                    .into_iter()
+                    .flatten()
+            })
+            .map(|image| image.id())
             .chain(self.stand_in.map(|s| s.id))
             .chain(self.pinned.iter().copied())
     }
@@ -425,11 +435,20 @@ impl Pyramid {
                         image: Arc::new(image),
                         used: clock,
                         stale: false,
+                        before: None,
                     };
                     self.bytes += TILE_BYTES;
                     if let Some(old) = level.tiles.insert((task.key.1, task.key.2), tile) {
                         self.bytes -= TILE_BYTES;
-                        drop(old);
+                        let before = match self.textured.contains_key(&old.image.id()) {
+                            true => Some(old.image),
+                            false => old.before,
+                        };
+                        level
+                            .tiles
+                            .get_mut(&(task.key.1, task.key.2))
+                            .expect("inserted")
+                            .before = before;
                     }
                 }
                 Err(e) if e.0 == SUPERSEDED => {}
@@ -932,22 +951,35 @@ impl CanvasCache {
             if is_empty(c) {
                 continue;
             }
-            if let Some(cur) = current
-                && let Some(tile) = p.levels[cur].tiles.get_mut(cell)
-                && ready(&p.textured, fresh, tile.image.id())
-            {
-                fresh += usize::from(!p.textured.contains_key(&tile.image.id()));
-                tile.used = clock;
-                awaiting |= tile.stale;
+            // Its tile, or the one it replaced while the frame can't upload it.
+            let tile = match current.and_then(|cur| p.levels[cur].tiles.get_mut(cell)) {
+                Some(tile) if ready(&p.textured, fresh, tile.image.id()) => {
+                    fresh += usize::from(!p.textured.contains_key(&tile.image.id()));
+                    tile.before = None;
+                    tile.used = clock;
+                    awaiting |= tile.stale;
+                    Some(tile.image.clone())
+                }
+                Some(tile) => {
+                    let before = (tile.before.clone()).filter(|b| p.textured.contains_key(&b.id()));
+                    if before.is_some() {
+                        tile.used = clock;
+                        awaiting = true;
+                    }
+                    before
+                }
+                None => None,
+            };
+            if let Some(image) = tile {
                 let (x, y) = (c[0] as f32 / scale, c[1] as f32 / scale);
                 let w = ((c[2] - c[0]) as f32 / scale).min(width - x);
                 let h = ((c[3] - c[1]) as f32 / scale).min(height - y);
                 if w > 0. && h > 0. {
-                    p.shown.push(tile.image.id());
+                    p.shown.push(image.id());
                     out.push((
                         Raster {
-                            id: tile.image.id(),
-                            pixels: Some(tile.image.clone()),
+                            id: image.id(),
+                            pixels: Some(image),
                         },
                         Placement {
                             rect: [x, y, w, h],
