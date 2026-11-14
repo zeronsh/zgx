@@ -443,18 +443,23 @@ fn lazygit_stages_and_commits() {
     run.shows("Commit summary");
     run.type_text("from lazygit");
     run.key(Key::Enter);
-    run.until("the commit", |run| run.screen().contains("from lazygit"));
+    // In the repository, not on the screen: the summary shows in the prompt
+    // as it's typed, and lazygit runs `git commit` in the background, so a
+    // `q` sent on what the screen shows can quit before the commit lands.
+    let log = || {
+        let log = std::process::Command::new("git")
+            .args(["log", "--format=%s"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&log.stdout).into_owned()
+    };
+    run.until("the commit in the repository", |_| {
+        log() == "from lazygit\nfirst\n"
+    });
     run.type_text("q");
     assert_eq!(run.exits(), 0, "{}", run.screen());
-    let log = std::process::Command::new("git")
-        .args(["log", "--format=%s"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&log.stdout),
-        "from lazygit\nfirst\n"
-    );
+    assert_eq!(log(), "from lazygit\nfirst\n");
 }
 
 /// `git add -p`: a hunk shown in colour and staged with `y`.
