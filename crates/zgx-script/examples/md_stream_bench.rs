@@ -55,11 +55,21 @@ fn main() {
     host.reload().expect("the bench script loads");
     let _handle = ui.mount(host.view());
     ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     for _ in 0..sections * 3 {
         assert!(host.run_command("append"));
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
     }
     println!(
         "{} chunks, scene nodes {}",

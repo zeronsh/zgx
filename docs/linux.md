@@ -77,6 +77,18 @@ bounds a new window's size (`xdg_toplevel.configure_bounds`) and winit keeps
 to it: a 1200 by 800 window opens at 1024 by 640 on a 1024 by 640 sway output.
 `work_area_smoke.py` checks X11 below a panel.
 
+A window covering its display (`WindowOptions::covers_display`) is the
+display's size: on X11 its mode's pixels, on Wayland the compositor's logical
+pixels, which xdg-output says (`wayland_output.rs`). winit gives a Wayland
+output's mode and its scale as a whole number (2 for an output scaled 1.5),
+and takes a window's physical size at the scale the window has at its first
+configure, which Hyprland says only after the window's first frame: over a
+3840 by 2160 output scaled 1.5 such a window opened 3840 by 2160 logical
+pixels, half as large again as the output, and now opens 2560 by 1440. Where
+it shows is the compositor's to choose; sway and Hyprland float a window of
+a fixed size and centre it, over the whole output. `covers_display_smoke.py`
+checks it under sway at 1, 2 and 1.5.
+
 ## Launching
 
 A launcher hands a new app a token: `XDG_ACTIVATION_TOKEN` on Wayland,
@@ -210,6 +222,22 @@ asking only for what older GPUs give (wgpu's downlevel limits); before, such
 an app did not start ("Failed to create surface for any enabled backend").
 The GL instance is made only once Vulkan finds no driver, so a Vulkan system
 loads no EGL. `gl_fallback_smoke.py` draws the gallery both ways.
+
+Windows draw on the GPU their display server composites with
+(`display_gpu.rs`): the device a Wayland compositor names as its main one in
+linux-dmabuf's default feedback (version 4 on), or the one an X server opens
+for a client over DRI3 (Xwayland opens its compositor's), taken as the Vulkan
+adapter at that device's PCI address in sysfs. Elsewhere zgx takes the
+low-power adapter, which keeps a laptop's discrete GPU asleep; on Linux that
+took an integrated GPU wherever there was one, and on a desktop whose
+displays are on a card beside it each frame was drawn on the integrated GPU
+and handed across: Hyprland on an RTX 3080 showed a window drawn on a
+Ryzen's integrated Radeon (RADV) black, as it shows `vkcube --gpu_number` on
+that GPU, and under Xwayland the window's surface failed to configure. Where
+the server names no device (no linux-dmabuf version 4, no DRI3, a device not
+on PCI) or no adapter is at its address, the low-power adapter is taken, as
+on a laptop whose integrated GPU drives its displays. Asking takes about
+0.15 ms, once per GPU context.
 
 Where no font is installed, or none fontconfig finds (a minimal system, a
 container), text shapes to nothing and everything else draws; the first text

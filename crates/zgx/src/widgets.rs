@@ -1678,6 +1678,24 @@ pub enum WheelTape {
     /// Play `tape` back, its events at their times, at `at` (in points).
     Play { tape: String, at: (f32, f32) },
 }
+/// An observed node's bounds (`observe_bounds`), and what of its sum of
+/// translations holds while only scroll content moves
+/// (`Scene::world_bounds_kept`): kept from one scroll's frame to the next,
+/// in the entry itself (a box of its own made every observed node mounted
+/// allocate), going with the observation.
+struct ObservedBounds {
+    signal: Signal<Rect>,
+    kept: Cell<Option<crate::scene::ScrollAnchor>>,
+}
+impl ObservedBounds {
+    fn new(signal: Signal<Rect>) -> Self {
+        Self {
+            signal,
+            kept: Cell::new(None),
+        }
+    }
+}
+
 pub(crate) struct UiStorage {
     runtime: Runtime,
     pub(crate) themes: Rc<Themes>,
@@ -1771,7 +1789,7 @@ pub(crate) struct UiStorage {
     content_revision: RefCell<Option<Signal<u64>>>,
     /// Nodes' laid-out sizes (`observe_size`): read only when layout runs.
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
-    observed_bounds: RefCell<crate::scene::NodeMap<Signal<Rect>>>,
+    observed_bounds: RefCell<crate::scene::NodeMap<ObservedBounds>>,
     observed_visibility: RefCell<crate::scene::NodeMap<Signal<bool>>>,
     /// Of those, the ones that count as shown within a margin of the view
     /// (`observe_visibility_within`): only nodes asked so are here.
@@ -3013,8 +3031,8 @@ impl Ui {
     /// Observe world bounds, including ancestor translations without layout work.
     /// Like content-size observations, registrations are owned by their nodes.
     pub(crate) fn observe_bounds(&self, node: NodeId) -> Signal<Rect> {
-        if let Some(signal) = self.storage.observed_bounds.borrow().get(&node) {
-            return signal.clone();
+        if let Some(observed) = self.storage.observed_bounds.borrow().get(&node) {
+            return observed.signal.clone();
         }
         // Current bounds, possibly before this frame's layout: the frame's
         // layout publishes them. Laying out here, mid-mount, would measure
@@ -3023,7 +3041,7 @@ impl Ui {
         self.storage
             .observed_bounds
             .borrow_mut()
-            .insert(node, signal.clone());
+            .insert(node, ObservedBounds::new(signal.clone()));
         self.storage.bounds_geometry_revision.set(None);
         signal
     }
@@ -4412,9 +4430,12 @@ impl Ui {
                 // growing, the others not).
                 let mut bounds = Vec::new();
                 if geometry_changed {
-                    for (node, signal) in self.storage.observed_bounds.borrow().iter() {
+                    for (node, observed) in self.storage.observed_bounds.borrow().iter() {
                         if scene.contains(*node) {
-                            let now = scene.world_bounds(*node);
+                            let mut kept = observed.kept.get();
+                            let now = scene.world_bounds_kept(*node, &mut kept);
+                            observed.kept.set(kept);
+                            let signal = &observed.signal;
                             if signal.with_untracked(|told| moved(*told, now)) {
                                 bounds.push((*node, signal.clone(), now));
                             }
@@ -4569,9 +4590,11 @@ impl Ui {
                 .collect::<Vec<_>>()
         };
         let bounds = self.storage.observed_bounds.borrow();
-        let bounds = bounds.iter().filter(|(node, signal)| {
+        let bounds = bounds.iter().filter(|(node, observed)| {
             scene.contains(**node)
-                && signal.with_untracked(|told| moved(*told, scene.world_bounds(**node)))
+                && observed
+                    .signal
+                    .with_untracked(|told| moved(*told, scene.world_bounds(**node)))
         });
         let mut moving = sizes;
         moving.extend(bounds.map(|(node, _)| *node));
@@ -8642,6 +8665,215 @@ fn slider_content_bounds(scene: &Scene, root: NodeId) -> (f32, f32) {
         bounds.x + padding.left,
         (bounds.width - padding.left - padding.right).max(0.),
     )
+}
+
+#[cfg(test)]
+mod bounds_anchor_tests {
+    use super::*;
+    use crate::compose::prelude::*;
+
+    /// After each frame, every observed node's bounds are what the whole
+    /// walk gives (`world_bounds`), and every kept anchor gives them to the
+    /// bit.
+    fn published_as_walked(ui: &Ui) -> usize {
+        let scene = ui.scene.borrow();
+        let mut checked = 0;
+        for (node, observed) in ui.storage.observed_bounds.borrow().iter() {
+            if scene.contains(*node) {
+                let walked = scene.world_bounds(*node);
+                let told = observed.signal.with_untracked(|told| *told);
+                assert!(
+                    !moved(told, walked),
+                    "{node:?}: told {told:?}, walked {walked:?}"
+                );
+                checked += 1;
+            }
+        }
+        let bits = |r: Rect| [r.x, r.y, r.width, r.height].map(f32::to_bits);
+        for (node, observed) in ui.storage.observed_bounds.borrow().iter() {
+            let mut kept = observed.kept.get();
+            if kept.is_some() {
+                assert!(scene.contains(*node), "an anchor kept for {node:?}, gone");
+                let walked = scene.world_bounds(*node);
+                assert_eq!(
+                    bits(scene.world_bounds_kept(*node, &mut kept)),
+                    bits(walked)
+                );
+            }
+            observed.kept.set(kept);
+        }
+        checked
+    }
+
+    /// A row moved from one scroll view to another, a scroll view moved
+    /// under a translated parent, and a row laid out again, each in the
+    /// frame a scroll moves them, with scroll views nested: what observers
+    /// hear is what the whole walk gives, every frame.
+    #[test]
+    fn observed_bounds_hold_across_moves_reparenting_and_layout_mid_scroll() {
+        let mut ui = Ui::new(300., 400.);
+        let (a, b, c) = (ui.signal(0_f32), ui.signal(0_f32), ui.signal(0_f32));
+        let side = ui.signal(0_u8);
+        let moved_b = ui.signal(false);
+        let tall = ui.signal(20_f32);
+        fn observed(view: View) -> View {
+            view.on_mount(|handle| {
+                handle.observe_bounds();
+            })
+        }
+        // A row nested a few boxes deep, as a transcript's are.
+        fn row(name: &'static str, tall: &Signal<f32>) -> View {
+            let tall = tall.clone();
+            let mut view = observed(
+                div()
+                    .w(80.)
+                    .reactive_style(move || Styles::new().h(tall.get()))
+                    .child(observed(text(name).text_size(12.))),
+            );
+            for level in 0..4 {
+                view = div().w_full().pl(level as f32 * 0.5).child(view);
+            }
+            view
+        }
+        fn held(at: u8, side: &Signal<u8>, tall: &Signal<f32>) -> View {
+            let (side, tall) = (side.clone(), tall.clone());
+            switch_or_none(
+                move || side.get() == at,
+                move |here, _| here.then(|| row("moved", &tall)),
+            )
+        }
+        fn view_b(b: &Signal<f32>, c: &Signal<f32>, side: &Signal<u8>, tall: &Signal<f32>) -> View {
+            let inner = scroll(c.clone()).w(200.).h(60.).child(
+                column()
+                    .child(div().h(37.))
+                    .child(row("inner", tall))
+                    .child(div().h(400.)),
+            );
+            observed(
+                scroll(b.clone()).w(240.).h(120.).child(
+                    column()
+                        .child(div().h(45.5))
+                        .child(held(1, side, tall))
+                        .child(inner)
+                        .child(div().h(500.)),
+                ),
+            )
+        }
+        let b_where = |want: bool| {
+            let (moved_b, b, c, side, tall) = (
+                moved_b.clone(),
+                b.clone(),
+                c.clone(),
+                side.clone(),
+                tall.clone(),
+            );
+            switch_or_none(
+                move || moved_b.get() == want,
+                move |here, _| here.then(|| view_b(&b, &c, &side, &tall)),
+            )
+        };
+        let translated = ui.signal(None::<NodeId>);
+        let keep = translated.clone();
+        let mounted = ui.mount(
+            column()
+                .child(
+                    scroll(a.clone()).w(260.).h(150.).child(
+                        column()
+                            .child(div().h(70.25))
+                            .child(held(0, &side, &tall))
+                            .child(row("stays", &tall))
+                            .child(div().h(600.)),
+                    ),
+                )
+                .child(div().h(130.).child(b_where(false)))
+                .child(
+                    div()
+                        .h(130.)
+                        .on_mount(move |handle| {
+                            keep.set(Some(handle.node()));
+                        })
+                        .child(b_where(true)),
+                ),
+        );
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        let parent = translated.with_untracked(|at| *at).expect("mounted");
+        ui.scene
+            .borrow_mut()
+            .set_transform(parent, Transform { x: 7.5, y: 13.25 });
+        let frame = |ui: &mut Ui| {
+            ui.prepare_frame();
+            assert!(published_as_walked(ui) >= 6);
+            ui.scene.borrow_mut().flush();
+        };
+        frame(&mut ui);
+        for step in 0..60 {
+            let n = step as f32;
+            // Scrolls by whole and by fractional points, in all three.
+            a.set(n * 3.7 % 300.);
+            b.set(n * 2.25 % 250.);
+            if step % 3 == 0 {
+                c.set(n * 1.4 % 200.);
+            }
+            match step % 10 {
+                // In the frame of that scroll: the row goes to the other
+                // scroll view, a scroll view goes under the translated
+                // parent and back, a row's box is laid out again.
+                2 => {
+                    side.set(1 - side.with_untracked(|at| *at));
+                }
+                5 => {
+                    moved_b.set(!moved_b.with_untracked(|at| *at));
+                }
+                7 => {
+                    tall.set(20. + n % 13.);
+                }
+                // The parent of a scroll view moves.
+                8 => ui.scene.borrow_mut().set_transform(
+                    parent,
+                    Transform {
+                        x: 7.5 - n / 9.,
+                        y: 13.25,
+                    },
+                ),
+                // An observed leaf (a row's text) moves by itself, which
+                // drops no other node's kept sum: by a fraction, to -0.,
+                // and back.
+                3 | 6 | 9 => {
+                    let leaves: Vec<NodeId> = {
+                        let scene = ui.scene.borrow();
+                        let observed = ui.storage.observed_bounds.borrow();
+                        observed
+                            .keys()
+                            .filter(|&&id| scene.contains(id) && scene.children(id).is_empty())
+                            .copied()
+                            .collect()
+                    };
+                    assert!(!leaves.is_empty(), "observed leaves");
+                    let to = match step % 10 {
+                        3 => Transform {
+                            x: n / 7.,
+                            y: -n / 3.,
+                        },
+                        6 => Transform { x: -0., y: 0.25 },
+                        _ => Transform::default(),
+                    };
+                    let translated = ui.scene.borrow().translated();
+                    for leaf in leaves {
+                        ui.scene.borrow_mut().set_transform(leaf, to);
+                    }
+                    assert_eq!(ui.scene.borrow().translated(), translated, "a leaf's move");
+                }
+                _ => {}
+            }
+            frame(&mut ui);
+        }
+        let kept = ui.storage.observed_bounds.borrow();
+        assert!(kept.values().any(|o| o.kept.get().is_some()));
+        drop(kept);
+        mounted.unmount();
+        assert!(ui.storage.observed_bounds.borrow().is_empty());
+    }
 }
 
 #[cfg(test)]

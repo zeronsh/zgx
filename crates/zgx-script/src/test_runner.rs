@@ -12,6 +12,7 @@
 //! Their types are `types/zgx-test.d.luau`, which `zgx check` gives test
 //! files alone. A headless app has no fetcher (`ui.fetch` fails as offline
 //! does) and no storage (`ui.persist` keeps its state in memory).
+use crate::time::Instant;
 use crate::{
     ScriptHost, Value,
     testing::{FakeDesktop, TestApp},
@@ -25,7 +26,7 @@ use std::{
         Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use zgx::{reactive::Signal, scene::Rect};
 

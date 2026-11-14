@@ -30,6 +30,7 @@ SMOKES = [
     ("window-controls", "timeout 30s {bin}/window_controls --smoke-test", True),
     ("standard-menu-items", "timeout 30s {bin}/standard_menu_items --smoke-test", True),
     ("form", "python3 scripts/form_smoke.py {bin}/form", True),
+    ("form-raster", "env ZGX_RENDERER=raster ZGX_PRESENT_LOG=1 python3 scripts/form_smoke.py {bin}/form --log {out}/form.log", True),
     ("terminal", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --output {out}", True),
     ("terminal-2x", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --scale 2 --output {out}", True),
     ("terminal-orca", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --orca --output {out}", True),
@@ -38,6 +39,8 @@ SMOKES = [
     ("progress", "python3 scripts/progress_smoke.py {bin}/progress --output {out}", True),
     ("images", "python3 scripts/images_smoke.py {bin}/images --output {out}", True),
     ("scroll", "python3 scripts/scroll_smoke.py {bin}/scroll --output {out}", True),
+    ("scroll-raster", "env ZGX_RENDERER=raster ZGX_PRESENT_LOG=1 python3 scripts/scroll_smoke.py {bin}/scroll --output {out}", True),
+    ("raster-window", "python3 scripts/raster_window_smoke.py {bin}/scroll --viewport {bin}/viewport --menus {bin}/menus --output {out}", False),
     ("focus-scroll", "python3 scripts/focus_scroll_smoke.py {bin}/focus_scroll --output {out}", True),
     ("horizontal-scroll", "python3 scripts/horizontal_scroll_smoke.py {bin}/horizontal_scroll --output {out}", True),
     ("scrollbars", "python3 scripts/scrollbars_smoke.py {bin}/scrollbars --output {out}", True),
@@ -138,6 +141,7 @@ SMOKES = [
     ("editor-autoscroll", "python3 scripts/editor_autoscroll_smoke.py {bin}/editor_autoscroll --output {out}", False),
     ("transparency", "python3 scripts/transparency_smoke.py {bin}/transparency --output {out}", False),
     ("wayland-transparency", "python3 scripts/wayland_transparency_smoke.py {bin}/transparency --output {out}", False),
+    ("covers-display-wayland", "python3 scripts/covers_display_smoke.py {bin}/agents_intro --output {out}", False),
     ("native-ime", "python3 scripts/native_ime_smoke.py {bin}/native_ime --output {out}", False),
     ("ime-server-gone", "python3 scripts/native_ime_smoke.py {bin}/native_ime --server-gone --output {out}", False),
     ("ime-server-stopped", "python3 scripts/native_ime_smoke.py {bin}/native_ime --server-stopped --output {out}", False),
@@ -262,10 +266,28 @@ def run(smoke, args):
                     helper.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     helper.kill()
+    if status == 0 and "ZGX_RENDERER=raster" in command:
+        status = drew_on_raster(output, probe_log)
     return name, status, time.monotonic() - started, probe_log
 
 
+def drew_on_raster(output, probe_log):
+    """A probe run on the raster (`ZGX_RENDERER=raster`, with its present
+    log on) proves it: its logs show raster presents and no GPU render,
+    else it passed on the GPU. 0, or a status saying why."""
+    logs = [probe_log, *(p for p in output.rglob("*.log") if p.is_file())] if output.exists() else [probe_log]
+    text = "\n".join(p.read_text(errors="replace") for p in logs)
+    raster, gpu = text.count("raster present"), text.count("render forced=")
+    with probe_log.open("a") as log:
+        print(f"raster check: {raster} raster presents, {gpu} GPU renders", file=log)
+    return 0 if raster and not gpu else "not on the raster"
+
+
 def main():
+    # The GPU renderer, as on a machine with one, unless a probe's command
+    # asks for the raster (`env ZGX_RENDERER=raster ...`): runners have no
+    # GPU, where windows would draw on the raster by default.
+    os.environ.setdefault("ZGX_RENDERER", "gpu")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binaries", type=pathlib.Path, default=pathlib.Path("target/debug/examples"))
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("/tmp"))

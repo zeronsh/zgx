@@ -207,7 +207,7 @@ fn token_tree(lua: &Lua, names: &[std::sync::Arc<str>]) -> mlua::Result<Table> {
     let root = lua.create_table()?;
     let mut groups: Vec<Table> = Vec::new();
     let key_of = |part: &str| -> mlua::Result<mlua::Value> {
-        Ok(match part.parse::<i64>() {
+        Ok(match part.parse::<mlua::Integer>() {
             Ok(n) if !part.starts_with('0') || part == "0" => mlua::Value::Integer(n),
             _ => mlua::Value::String(lua.create_string(part)?),
         })

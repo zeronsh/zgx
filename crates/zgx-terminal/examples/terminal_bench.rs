@@ -144,7 +144,12 @@ fn main() {
         ),
     ));
     ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     let output = output(lines);
     // A frame's worth each: 4 KB reads, or so many lines. Taken as they go,
     // nothing allocated for them: the 4 KB reads cost what they did before
@@ -163,7 +168,12 @@ fn main() {
     } {
         replay.feed(read);
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
         frames += 1;
     }
     let state = term.state().get();

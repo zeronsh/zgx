@@ -24,13 +24,13 @@ pub(crate) fn set_still_skips(skip: bool) {
 pub(crate) fn still_skipped() -> u64 {
     STILL_SKIPPED.with(Cell::get)
 }
+use crate::time::Instant;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     future::{Future, poll_fn},
     rc::{Rc, Weak},
     task::{Poll, Waker},
-    time::Instant,
 };
 use zgx::{frame::FrameClock, reactive::Runtime};
 
@@ -363,7 +363,7 @@ enum Baking {
     /// Not looked at yet.
     Unknown,
     /// A loop that can bake, from this moment.
-    From(std::time::Instant),
+    From(crate::time::Instant),
     Never,
 }
 
@@ -477,14 +477,16 @@ impl Clip {
     fn consider_baking(self: &Rc<Self>) {
         if self.baking.get() == Baking::Unknown {
             self.baking.set(match self.can_bake() {
-                true => Baking::From(std::time::Instant::now()),
+                true => Baking::From(crate::time::Instant::now()),
                 false => Baking::Never,
             });
         }
         let Baking::From(from) = self.baking.get() else {
             return;
         };
-        if std::time::Instant::now() < from || !zgx::switches::BAKED_LOOPS.on() || !self.can_bake()
+        if crate::time::Instant::now() < from
+            || !zgx::switches::BAKED_LOOPS.on()
+            || !self.can_bake()
         {
             return;
         }
@@ -604,7 +606,7 @@ impl Clip {
             return;
         };
         self.baking.set(match again {
-            Some(after) => Baking::From(std::time::Instant::now() + after),
+            Some(after) => Baking::From(crate::time::Instant::now() + after),
             None => Baking::Never,
         });
         {

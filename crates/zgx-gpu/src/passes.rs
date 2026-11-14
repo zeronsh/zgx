@@ -722,15 +722,16 @@ impl GpuRenderer {
         let Some(inputs) = shader.inputs() else {
             return true;
         };
-        // Direct3D 11 runs passes and reads boxes with its own device (its
-        // wgpu device is the no-op one). Pictures and GPU views it has none
-        // of yet, which would leave the shader reading zeros: such a layer
-        // composites as painted, the kind named once.
+        // Direct3D 11 runs passes, reads boxes and uploads pictures with its
+        // own device (its wgpu device is the no-op one), and GPU views draw
+        // on the views' device (`view_host`). Where that couldn't be made,
+        // a shader reading views would read zeros: its layer composites as
+        // painted, the kind named once.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
-            if !inputs.images.is_empty() || !inputs.views.is_empty() {
+            if !inputs.views.is_empty() && self.d3d11_view_host().is_none() {
                 crate::d3d11_frame::left_out(
-                    "layer shaders reading pictures or GPU views: drawn as painted",
+                    "layer shaders reading GPU views, without the views' device: drawn as painted",
                 );
                 return false;
             }
@@ -885,9 +886,11 @@ impl GpuRenderer {
         }
         true
     }
-    /// `run_passes` with Direct3D 11 (`d3d11_frame::Chain`), for a shader
-    /// reading passes and boxes alone: the same textures, steps and
-    /// uniforms, drawn on its immediate context ahead of the frame.
+    /// `run_passes` with Direct3D 11 (`d3d11_frame::Chain`): the same
+    /// textures, steps and uniforms, drawn on its immediate context ahead of
+    /// the frame; and its GPU views' frames, at the box's size, painted
+    /// after the passes on the views' device (`view_host`), which Direct3D
+    /// 11 waits for before the frame samples them.
     #[cfg(d3d11)]
     #[cold]
     #[inline(never)]
@@ -910,7 +913,14 @@ impl GpuRenderer {
                     .map(|pass| (pass_source(&pass.source, inputs), pass.format))
                     .collect();
                 let rect_bytes = (1 + 2 * MOST_RECTS) * 16;
-                match crate::d3d11_frame::Chain::new(&device, passes, rect_bytes, wait) {
+                match crate::d3d11_frame::Chain::new(
+                    &device,
+                    passes,
+                    &inputs.images,
+                    &inputs.views,
+                    rect_bytes,
+                    wait,
+                ) {
                     Ok(chain) => entry.insert(chain),
                     Err(error) => {
                         eprintln!("zgx: {error}");
@@ -931,6 +941,38 @@ impl GpuRenderer {
             return true;
         }
         chain.last_frame = frame;
+        // Views' textures, at the box's size (made on the views' device).
+        let box_size = (
+            ((area.width * scale).ceil() as u32).max(1),
+            ((area.height * scale).ceil() as u32).max(1),
+        );
+        let stale: Vec<usize> = (chain.views.iter().enumerate())
+            .filter(|(_, view)| view.size != box_size || view.made.is_none())
+            .map(|(at, _)| at)
+            .collect();
+        if !stale.is_empty() {
+            let Some(host) = self.d3d11_view_host() else {
+                return false;
+            };
+            let made = (stale.iter())
+                .map(|&at| Ok((at, host.texture(box_size)?)))
+                .collect::<Result<Vec<_>, crate::GpuError>>();
+            let made = match made {
+                Ok(made) => made,
+                Err(error) => {
+                    eprintln!("zgx: {}", error.0);
+                    return false;
+                }
+            };
+            let state = self.d3d11.as_mut().expect("checked by the caller");
+            let chain = state.chains.get_mut(&shader.id()).expect("made above");
+            for (at, texture) in made {
+                chain.views[at].size = box_size;
+                chain.views[at].made = Some(texture);
+            }
+        }
+        let state = self.d3d11.as_mut().expect("checked by the caller");
+        let chain = state.chains.get_mut(&shader.id()).expect("made above");
         let mut bytes = 0u64;
         for (at, declared) in inputs.passes.iter().enumerate() {
             let size = pass_size(declared, area, scale, crate::d3d11_frame::MOST_TEXELS);
@@ -968,6 +1010,20 @@ impl GpuRenderer {
         }
         chain.frames = chain.frames.wrapping_add(1);
         chain.end(&device);
+        let painting: Vec<_> = (chain.views.iter())
+            .filter_map(|view| {
+                let (texture, _) = view.made.as_ref()?;
+                Some((view.view, texture.create_view(&Default::default())))
+            })
+            .collect();
+        for (view, target) in painting {
+            if self
+                .paint((view, shader.id()), box_size, &target, None, crate::FORMAT)
+                .is_err()
+            {
+                return false;
+            }
+        }
         true
     }
 }

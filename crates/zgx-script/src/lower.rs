@@ -27,7 +27,7 @@ use zgx::{
 };
 
 /// A remote source's failures in a row: when the last was, how many, why.
-type Failure = (std::time::Instant, u32, Rc<str>);
+type Failure = (crate::time::Instant, u32, Rc<str>);
 
 /// Decoded images and SVGs by source. What a mounted node shows stays;
 /// of the rest, the most recently shown stay while they fit `budget`, so a
@@ -1646,7 +1646,7 @@ fn bound_text(cx: &mut Context, value: &Signal<Value>, editor: &LoadedEditor) ->
     }
     let typed = cx.state(value.with_untracked(text_of));
     let runtime = cx.runtime();
-    let edited: Rc<std::cell::Cell<Option<std::time::Instant>>> = Rc::default();
+    let edited: Rc<std::cell::Cell<Option<crate::time::Instant>>> = Rc::default();
     let (v, t, e, loaded) = (value.clone(), typed.clone(), edited.clone(), editor.clone());
     cx.retain(runtime.effect(move || {
         let next = v.with(text_of);
@@ -1668,7 +1668,7 @@ fn bound_text(cx: &mut Context, value: &Signal<Value>, editor: &LoadedEditor) ->
     cx.retain(runtime.effect(move || {
         let next = t.get();
         if !std::mem::take(&mut first) && v.with_untracked(text_of) != next {
-            edited.set(Some(std::time::Instant::now()));
+            edited.set(Some(crate::time::Instant::now()));
             v.set(match next {
                 TextValue::Flat(s) => Value::Str(s.into()),
                 TextValue::Long(t) => Value::Text(t),
@@ -5300,6 +5300,19 @@ fn remote_status_in(
             Ok(bytes) => {
                 // Decoding a large image takes long enough to drop frames.
                 let (tell, mut heard) = zgx::task::latest::<Result<Decoded, String>>();
+                // No threads in the browser (wasm32): decoded here (there,
+                // only SVGs decode; images show their labels).
+                #[cfg(target_arch = "wasm32")]
+                tell.send(if svg {
+                    SvgData::new(bytes)
+                        .map(|svg| Decoded::Svg(Arc::new(svg)))
+                        .map_err(|e| e.to_string())
+                } else {
+                    crate::gpu::decode_image_kept(Arc::from(bytes))
+                        .map(Decoded::Image)
+                        .map_err(|e| e.to_string())
+                });
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::spawn(move || {
                     tell.send(if svg {
                         SvgData::new(bytes)
@@ -5307,7 +5320,7 @@ fn remote_status_in(
                             .map_err(|e| e.to_string())
                     } else {
                         // Its file kept, its pixels decoded as it is drawn.
-                        zgx_gpu::assets::decode_image_kept(Arc::from(bytes))
+                        crate::gpu::decode_image_kept(Arc::from(bytes))
                             .map(Decoded::Image)
                             .map_err(|e| e.to_string())
                     });
@@ -5333,7 +5346,7 @@ fn remote_status_in(
                 // the script's: logged, and `fallback` shows in its place.
                 let _ = vm;
                 eprintln!("zgx: {src} didn't load: {error}");
-                let now = std::time::Instant::now();
+                let now = crate::time::Instant::now();
                 let why: Rc<str> = Rc::from(error.as_str());
                 let times = assets
                     .failed
@@ -5432,7 +5445,7 @@ pub(crate) fn try_load_image_in(
     let decoded = (assets.read(src, &path))
         .map_err(|e| e.to_string())
         .and_then(|bytes| {
-            zgx_gpu::assets::decode_image_kept(Arc::from(bytes)).map_err(|e| e.to_string())
+            crate::gpu::decode_image_kept(Arc::from(bytes)).map_err(|e| e.to_string())
         })
         .map_err(|e| format!("{}: {e}", path.display()));
     match decoded {
@@ -6350,7 +6363,11 @@ impl LineStates {
             mlua::Value::Number(n) if (0. ..KEPT as f64).contains(n) && *n as u32 as f64 == *n => {
                 Some(*n as u32)
             }
+            #[cfg(not(target_arch = "wasm32"))]
             mlua::Value::Integer(n) if (0..KEPT as i64).contains(n) => Some(*n as u32),
+            // Luau's integer is an `i32` in the browser (wasm32).
+            #[cfg(target_arch = "wasm32")]
+            mlua::Value::Integer(n) if (0..KEPT as i64).contains(&i64::from(*n)) => Some(*n as u32),
             _ => None,
         }
     }
@@ -6382,7 +6399,7 @@ impl LineStates {
     }
     fn value(&self, number: u32) -> mlua::Value {
         if number & KEPT == 0 {
-            return mlua::Value::Integer(number as i64);
+            return mlua::Value::Integer(number as mlua::Integer);
         }
         (self.values.get((number & !KEPT) as usize).cloned()).unwrap_or(mlua::Value::Nil)
     }

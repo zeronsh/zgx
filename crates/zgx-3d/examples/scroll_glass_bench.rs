@@ -248,6 +248,9 @@ fn main() {
         }
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+        }
         let stats = gpu
             .render(&ui.scene.borrow(), &report.damage)
             .expect("a frame");

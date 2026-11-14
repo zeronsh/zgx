@@ -111,6 +111,8 @@ mod url;
 mod wayland_blur;
 #[cfg(target_os = "linux")]
 mod wayland_data;
+#[cfg(target_os = "linux")]
+mod wayland_output;
 mod window_chrome;
 mod window_info;
 mod window_place;
@@ -171,6 +173,9 @@ mod native_ime;
 // Windows' Text Services Framework: the document its input methods read.
 pub mod presentation;
 pub mod raster;
+mod raster_window;
+#[doc(hidden)]
+pub use raster_window::RendererChoice;
 pub mod terminal_process;
 #[cfg(any(windows, test))]
 mod text_store;

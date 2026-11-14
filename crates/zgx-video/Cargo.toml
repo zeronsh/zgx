@@ -30,6 +30,8 @@ png = "0.18"
 gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant"] }
 
 [dev-dependencies]
+# The perf gate's output check, called by the gate benches each frame.
+zgx-fingerprint = { path = "../../scripts/perf/fingerprint" }
 # The instruction gate's `video` cell draws with wgpu's no-op backend
 # (`ZGX_GPU_NOOP`): the gate builds zgx-video's bench apart from the others.
 wgpu = { version = "29.0.4", default-features = false, features = ["noop"] }

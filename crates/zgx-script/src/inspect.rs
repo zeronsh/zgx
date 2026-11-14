@@ -15,6 +15,7 @@
 //! An answer is `{"ok":true,"text":…,"data":…}`: `text` is what the CLI
 //! prints (compact, a node a line), `data` the same as JSON. A failure is
 //! `{"ok":false,"error":…}`. See `docs/agents/inspect.md`.
+use crate::time::Instant;
 use crate::{ScriptHost, Value, driver};
 use std::{
     collections::VecDeque,
@@ -25,7 +26,7 @@ use std::{
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
     task::{Poll, Waker},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use zgx::{compose::ViewHandle, inspect::Inspector, widgets::Ui};
 

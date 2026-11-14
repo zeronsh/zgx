@@ -1357,7 +1357,7 @@ pub(crate) fn lower(
             // Where it is now, as the camera's effect last set it (a target
             // the script moves included).
             controls.orbit = orbit.with_untracked(|o| *o);
-            let answer = controls.handle(&event.event, modifiers, std::time::Instant::now());
+            let answer = controls.handle(&event.event, modifiers, crate::time::Instant::now());
             if answer.moved {
                 orbit.set(controls.orbit);
             }
@@ -1636,7 +1636,7 @@ fn shows_a_model(objects: &[Rc<ObjectSpec>]) -> bool {
 /// changed (as models are).
 type EnvironmentCache = std::collections::HashMap<
     std::path::PathBuf,
-    (Option<std::time::SystemTime>, zgx_3d::Environment),
+    (Option<crate::time::SystemTime>, zgx_3d::Environment),
 >;
 thread_local! {
     static ENVIRONMENTS: std::cell::RefCell<EnvironmentCache> = Default::default();
@@ -1755,7 +1755,7 @@ fn light_around(
 /// (or another scene showing it) takes it from here unless it changed.
 #[cfg(feature = "gltf")]
 type ModelCache =
-    std::collections::HashMap<std::path::PathBuf, (Option<std::time::SystemTime>, zgx_3d::Model)>;
+    std::collections::HashMap<std::path::PathBuf, (Option<crate::time::SystemTime>, zgx_3d::Model)>;
 #[cfg(feature = "gltf")]
 thread_local! {
     static MODELS: std::cell::RefCell<ModelCache> = Default::default();

@@ -342,7 +342,7 @@ fn index(lua: &Lua, this: &ClipUd, key: &str) -> mlua::Result<mlua::Value> {
                 clip.label
                     .borrow()
                     .clone()
-                    .map_or(mlua::Value::Integer(clip.id as i64), |l| {
+                    .map_or(mlua::Value::Integer(clip.id as mlua::Integer), |l| {
                         mlua::Value::String(lua.create_string(l).unwrap())
                     }),
             );

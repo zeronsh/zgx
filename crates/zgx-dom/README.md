@@ -7,4 +7,4 @@ let runtime = zgx::reactive::Runtime::new();
 let mounted = zgx_dom::mount_in_body(&runtime, view);
 ```
 
-It builds for `wasm32-unknown-unknown` only (elsewhere the crate is empty). Luau scripts and GPU content (shaders, 3D, GPU views) don't run in it yet. [docs/dom.md](../../docs/dom.md) has the design, what maps to what, what doesn't, and the benchmark against Solid.
+It builds for `wasm32-unknown-unknown` only (elsewhere the crate is empty). With the `luau` feature, Luau apps (`zgx-script`) run in it too, Luau built with wasi-sdk (`luau-env.sh`). GPU content (shaders, 3D, GPU views) doesn't run in it yet. [docs/dom.md](../../docs/dom.md) has the design, what maps to what, what doesn't, and the benchmark against Solid.

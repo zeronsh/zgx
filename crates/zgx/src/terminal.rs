@@ -91,6 +91,28 @@ pub struct TerminalState {
     pub columns: u16,
     /// Grid height in cells.
     pub rows: u16,
+    /// The search open in it, if one is ([`TerminalSearch`]).
+    #[doc(hidden)]
+    pub search: Option<TerminalSearch>,
+}
+
+/// A search through what a terminal holds, its scrollback too, while one is
+/// open: what it looks for, how many matches it found and which one is
+/// selected. Opened and steered by Ghostty's bindings on every backend
+/// ([`Terminal::binding`]): `search:<text>` (a new search; empty ends it),
+/// `navigate_search:next` (to the next older match) and
+/// `navigate_search:previous`, `end_search`. Hidden while its shape is
+/// settled.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalSearch {
+    /// What it looks for (empty while it is open without one).
+    pub needle: String,
+    /// The matches it found, once counted.
+    pub total: Option<usize>,
+    /// The selected match, counted from the newest (0: the one nearest the
+    /// bottom), as Ghostty counts it.
+    pub selected: Option<usize>,
 }
 
 /// A program's own report of its state (the Program Status Protocol, OSC
@@ -524,9 +546,28 @@ impl Terminal {
     pub fn paste(&self, text: impl Into<String>) {
         self.run(TerminalCommand::Paste(text.into()));
     }
-    /// Run a Ghostty binding action, e.g. `copy_to_clipboard`.
+    /// Run a Ghostty binding action, e.g. `copy_to_clipboard`. A search
+    /// binding (`search:<text>`, `start_search`, `end_search`) also opens,
+    /// replaces or ends [`TerminalState::search`]; the platform reports its
+    /// matches.
     pub fn binding(&self, action: impl Into<String>) {
-        self.run(TerminalCommand::Binding(action.into()));
+        let action = action.into();
+        let (name, needle) = action.split_once(':').unwrap_or((&action, ""));
+        match name {
+            "search" if needle.is_empty() => self.update_state(|state| state.search = None),
+            "search" => self.update_state(|state| {
+                state.search = Some(TerminalSearch {
+                    needle: needle.to_owned(),
+                    ..TerminalSearch::default()
+                })
+            }),
+            "start_search" => self.update_state(|state| {
+                state.search.get_or_insert_with(TerminalSearch::default);
+            }),
+            "end_search" => self.update_state(|state| state.search = None),
+            _ => {}
+        }
+        self.run(TerminalCommand::Binding(action));
     }
     /// End the session now (no confirmation; see
     /// [`Terminal::needs_confirm_close`]).
@@ -669,4 +710,72 @@ pub fn terminal(term: &Terminal) -> View {
             crate::web_view::native_view(NativeContent::Terminal(term))
         }
     })
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    /// The search bindings open, replace and end the state's search, as
+    /// Ghostty's do, and still reach the platform terminal.
+    #[test]
+    fn search_bindings_open_replace_and_end_the_search() {
+        let runtime = Runtime::new();
+        let term = Terminal::new(&runtime, TerminalOptions::default());
+        let search = || term.state().get().search;
+        assert_eq!(search(), None, "none at first");
+        term.binding("start_search");
+        assert_eq!(search(), Some(TerminalSearch::default()), "open, no needle");
+        term.binding("search:error");
+        assert_eq!(search().map(|search| search.needle), Some("error".into()));
+        term.update_state(|state| {
+            if let Some(search) = &mut state.search {
+                search.total = Some(3);
+                search.selected = Some(0);
+            }
+        });
+        term.binding("start_search");
+        assert_eq!(search().and_then(|search| search.total), Some(3), "kept");
+        term.binding("search:warning");
+        assert_eq!(
+            search(),
+            Some(TerminalSearch {
+                needle: "warning".into(),
+                total: None,
+                selected: None,
+            }),
+            "a new search counts again"
+        );
+        term.binding("navigate_search:next");
+        assert!(search().is_some(), "navigating keeps it");
+        term.binding("search:");
+        assert_eq!(search(), None, "an empty needle ends it");
+        term.binding("search:a");
+        term.binding("end_search");
+        assert_eq!(search(), None, "ended");
+        let queued: Vec<String> = term
+            .0
+            .queued
+            .borrow()
+            .iter()
+            .filter_map(|command| match command {
+                TerminalCommand::Binding(action) => Some(action.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            queued,
+            [
+                "start_search",
+                "search:error",
+                "start_search",
+                "search:warning",
+                "navigate_search:next",
+                "search:",
+                "search:a",
+                "end_search"
+            ],
+            "every binding reaches the platform"
+        );
+    }
 }

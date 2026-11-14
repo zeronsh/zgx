@@ -305,7 +305,12 @@ fn run(scenario: &Scenario, luau: bool, ticks: usize) -> (f64, f64) {
     let (mut step, mounted) = step;
     let frame = |ui: &Ui| {
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
     };
     frame(&ui);
     let button = mounted.find("button");

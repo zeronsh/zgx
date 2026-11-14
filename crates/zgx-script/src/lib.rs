@@ -54,6 +54,7 @@ mod file_events;
 mod file_events;
 mod folder;
 mod form;
+mod gpu;
 mod handlers;
 mod hook_targets;
 mod i18n;
@@ -90,11 +91,14 @@ mod term;
 pub mod test_runner;
 pub mod testing;
 mod theme;
+mod time;
 mod timers;
 mod token_lint;
 mod transform;
 mod value;
 mod variants;
+#[cfg(target_arch = "wasm32")]
+mod web;
 mod windows;
 
 pub use bundle::{Bundle, BundleFile, build};
@@ -116,13 +120,14 @@ pub use value::{
 };
 pub use windows::{Window, WindowExtras};
 
+use crate::time::Instant;
 use mlua::Lua;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
-    time::{Duration, Instant, SystemTime},
+    time::Duration,
 };
 use zgx::{
     compose::{View, prelude::*, switch},
@@ -417,7 +422,7 @@ fn on_virtual_clock(lua: &Lua) -> mlua::Result<()> {
             Some(date) => time.call::<mlua::Value>(date),
             None => Ok(mlua::Value::Number(
                 zgx::clock::system_now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                    .duration_since(crate::time::SystemTime::UNIX_EPOCH)
                     .map_or(0., |date| date.as_secs() as f64),
             )),
         })?,
@@ -1055,12 +1060,42 @@ pub(crate) type Exposed = Rc<RefCell<HashMap<String, Option<Capability>>>>;
 /// Shared keys plugins read but may not write (`expose_shared_read`).
 pub(crate) type ReadOnly = Rc<RefCell<std::collections::HashSet<String>>>;
 
+/// What a host offers its scripts, by name (`ScriptHost::registry`), each
+/// list sorted.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Registry {
+    /// Its actions (`ScriptHost::action`).
+    pub actions: Vec<String>,
+    /// Its functions (`ScriptHost::function`).
+    pub functions: Vec<String>,
+    /// Its async actions (`ScriptHost::async_action`).
+    pub async_actions: Vec<String>,
+    /// Its shared keys: the host's (`ScriptHost::shared`) and those its
+    /// scripts made (`ui.shared`).
+    pub shared: Vec<String>,
+}
 /// Where a host's files come from: the disk, or a bundle compiled into the
-/// app (which reads nothing from the disk).
+/// app (which reads nothing from the disk), with what its scripts may be.
 #[derive(Clone, Copy)]
 pub(crate) enum Files {
     Disk,
-    Bundle(&'static Bundle),
+    Bundle(&'static Bundle, Code),
+}
+/// What a bundle's scripts may be (`ScriptHost::code`). Luau checks no
+/// bytecode it loads: bytecode crafted to corrupt the VM steps out of the
+/// sandbox, so only bytecode the app's own build compiled may load.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Code {
+    /// Source text only, as from the disk: a script in bytecode form is
+    /// refused (it fails to load). For scripts that came from elsewhere
+    /// (an update downloaded), compiled where they run.
+    Source,
+    /// Bytecode or source: a bundle the app's build compiled
+    /// (`build::bundle`, `include_bundle!`), part of the app itself.
+    #[default]
+    VerifiedBytecode,
 }
 impl Files {
     /// A chunk read from here, loading as the files allow: an app's bundle
@@ -1071,14 +1106,16 @@ impl Files {
     /// source, it just fails to parse.
     fn chunk(self, chunk: mlua::chunk::Chunk<'_>) -> mlua::chunk::Chunk<'_> {
         match self {
-            Files::Bundle(_) => chunk,
-            Files::Disk => chunk.set_mode(mlua::chunk::ChunkMode::Text),
+            Files::Bundle(_, Code::VerifiedBytecode) => chunk,
+            Files::Bundle(_, Code::Source) | Files::Disk => {
+                chunk.set_mode(mlua::chunk::ChunkMode::Text)
+            }
         }
     }
     pub(crate) fn read(self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         match self {
             Files::Disk => std::fs::read(path),
-            Files::Bundle(bundle) => bundle.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
+            Files::Bundle(bundle, _) => bundle.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's bundle")
             }),
         }
@@ -1089,7 +1126,7 @@ impl Files {
     fn is_dir(self, path: &std::path::Path) -> bool {
         match self {
             Files::Disk => path.is_dir(),
-            Files::Bundle(bundle) => bundle.is_dir(path),
+            Files::Bundle(bundle, _) => bundle.is_dir(path),
         }
     }
     /// The files in directory `dir`.
@@ -1100,7 +1137,7 @@ impl Files {
                 .flatten()
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .collect(),
-            Files::Bundle(bundle) => bundle.list(dir),
+            Files::Bundle(bundle, _) => bundle.list(dir),
         }
     }
 }
@@ -1399,7 +1436,7 @@ fn require_module<const LENDING: bool>(
             .and_then(|h| h.sources.compiled(&path, &code))
             // Compiled ahead while the app's window was made (`compile_ahead`).
             .or_else(|| sources::prefetched(&code)),
-        Files::Bundle(_) => None,
+        Files::Bundle(..) => None,
     };
     let bytecode = match package.as_deref() {
         Some(package) => package.bytecode(),
@@ -1697,7 +1734,7 @@ struct Inner {
     /// Where focus was as a reload began, before its scripts ran.
     focus: zgx::compose::FocusHold,
     error: Signal<Option<String>>,
-    stamps: RefCell<Vec<(PathBuf, Option<SystemTime>)>>,
+    stamps: RefCell<Vec<(PathBuf, Option<std::time::SystemTime>)>>,
     /// Files scripts `require`d in the last load: watched with the scripts.
     required: RefCell<Vec<PathBuf>>,
     /// The packages lent to each plugin, and how many of their modules it
@@ -1822,6 +1859,8 @@ impl ScriptHost {
         )
     }
     fn with(runtime: &Runtime, app: Script) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        web::start();
         let elements = Rc::new(element::Elements::default());
         let warnings = SharedWarnings::default();
         if let Some(mode) = DesignLint::from_env() {
@@ -1946,7 +1985,7 @@ impl ScriptHost {
     pub fn bundled(runtime: &Runtime, bundle: &'static Bundle, entry: &str) -> Self {
         let root = PathBuf::from(bundle.root);
         let mut host = Self::with(runtime, Script::File(root.join(entry)))
-            .configure(|inner| inner.files = Files::Bundle(bundle));
+            .configure(|inner| inner.files = Files::Bundle(bundle, Code::VerifiedBytecode));
         // Its packages, as `build::bundle` stored them.
         let mut names: Vec<&str> = bundle
             .files
@@ -1961,16 +2000,30 @@ impl ScriptHost {
             let dir = root.join(bundle::build::PACKAGES).join(name);
             host = host.package(name, dir);
         }
-        host.0.assets.set_files(Files::Bundle(bundle));
+        host.0
+            .assets
+            .set_files(Files::Bundle(bundle, Code::VerifiedBytecode));
         // Theme files from the bundle; other hosts' still from the disk.
         zgx::theme::Themes::of(runtime).set_reader(Some(Rc::new(move |path: &std::path::Path| {
             if path.starts_with(&root) {
-                Files::Bundle(bundle).read_to_string(path)
+                Files::Bundle(bundle, Code::VerifiedBytecode).read_to_string(path)
             } else {
                 std::fs::read_to_string(path)
             }
         })));
         host
+    }
+    /// What the scripts of its bundle may be (`Code`): `bundled`'s are the
+    /// app's own build's, bytecode included (`Code::VerifiedBytecode`);
+    /// with `Code::Source`, a script in bytecode form is refused, as from
+    /// the disk. Files from the disk are always read as source.
+    #[doc(hidden)]
+    pub fn code(self, code: Code) -> Self {
+        self.configure(|inner| {
+            if let Files::Bundle(bundle, _) = inner.files {
+                inner.files = Files::Bundle(bundle, code);
+            }
+        })
     }
     /// Whether a script error shows over the interface, with where it
     /// happened (development), or not (what ships: the last good interface
@@ -2331,6 +2384,31 @@ impl ScriptHost {
         self.0.persist.save();
     }
 
+    /// What the host offers its scripts, by name, each list sorted: its
+    /// actions (`action`), functions (`function`), async actions
+    /// (`async_action`) and shared keys (`shared`), those scripts made as
+    /// they ran included. For an app to keep a record of what its scripts
+    /// can reach (a checked-in list that a change shows in review).
+    #[doc(hidden)]
+    pub fn registry(&self) -> Registry {
+        fn sorted<V>(map: &HashMap<String, V>) -> Vec<String> {
+            let mut names: Vec<String> = map.keys().cloned().collect();
+            names.sort();
+            names
+        }
+        Registry {
+            actions: sorted(&self.0.actions.borrow()),
+            functions: sorted(&self.0.functions.borrow()),
+            async_actions: sorted(&self.0.async_actions.borrow()),
+            shared: self
+                .0
+                .shared
+                .entries()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect(),
+        }
+    }
     /// Registers a Rust function scripts can bind with `ui.action(name, arg)`.
     pub fn action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
         self.0
@@ -3198,7 +3276,7 @@ impl ScriptHost {
     /// `ZGX_LINT=0`, skip it.
     fn lint_loaded(&self) {
         if !cfg!(debug_assertions)
-            || matches!(self.0.files, Files::Bundle(_))
+            || matches!(self.0.files, Files::Bundle(..))
             || zgx::env::var_os("ZGX_LINT").is_some_and(|v| v == "0")
         {
             return;
@@ -3610,7 +3688,7 @@ impl ScriptHost {
                     host.poll_check();
                 }
             }
-            if matches!(host.0.files, Files::Bundle(_)) && host.0.managed.borrow().is_empty() {
+            if matches!(host.0.files, Files::Bundle(..)) && host.0.managed.borrow().is_empty() {
                 return;
             }
             loop {
@@ -3828,9 +3906,9 @@ impl ScriptHost {
     /// The script files whose bytes differ from what the last load read,
     /// once each: those whose times moved and whose bytes aren't what is
     /// loaded, those new to `stamps`, and those it no longer finds.
-    fn changed(&self, stamps: &[(PathBuf, Option<SystemTime>)]) -> Vec<PathBuf> {
+    fn changed(&self, stamps: &[(PathBuf, Option<std::time::SystemTime>)]) -> Vec<PathBuf> {
         let loaded = self.0.stamps.borrow();
-        let before: HashMap<&std::path::Path, Option<SystemTime>> =
+        let before: HashMap<&std::path::Path, Option<std::time::SystemTime>> =
             loaded.iter().map(|(p, t)| (p.as_path(), *t)).collect();
         let now: HashSet<&std::path::Path> = stamps.iter().map(|(p, _)| p.as_path()).collect();
         let mut seen = HashSet::new();
@@ -3851,7 +3929,7 @@ impl ScriptHost {
             .map(std::path::Path::to_path_buf)
             .collect()
     }
-    fn stamps(&self) -> Vec<(PathBuf, Option<SystemTime>)> {
+    fn stamps(&self) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
         let mut paths: Vec<_> = self
             .scripts()
             .into_iter()
@@ -4217,7 +4295,7 @@ impl ScriptHost {
         let fail = |error: mlua::Error| describe(&name, &error);
         // A plugin outside the app's bundle reads from the disk.
         let files = match (self.0.files, script) {
-            (Files::Bundle(bundle), Script::File(path) | Script::Plugin { path, .. })
+            (Files::Bundle(bundle, _), Script::File(path) | Script::Plugin { path, .. })
                 if plugin && !path.starts_with(bundle.root) =>
             {
                 Files::Disk

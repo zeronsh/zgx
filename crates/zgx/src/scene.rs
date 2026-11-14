@@ -565,6 +565,23 @@ impl Rect {
 /// A colour: red, green, blue and alpha, each 0 to 255.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
+/// What `Scene::world_bounds_kept` keeps of a node's sum of translations:
+/// its nearest scroll content strictly above it (`anchor`), the sum from the
+/// node up to just below that (`below`), and what it holds while: the
+/// node's own translation (`own`) and the scene's count of other moves
+/// (`translated`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScrollAnchor {
+    anchor: Option<NodeId>,
+    below: Transform,
+    own: Transform,
+    translated: u64,
+}
+/// Whether two translations are the same to the bit (a zero's sign too:
+/// `-0. + -0.` is `-0.`, `0. + -0.` is `0.`).
+fn same_bits(a: Transform, b: Transform) -> bool {
+    a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
+}
 /// A translation, in logical points.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Transform {
@@ -3407,7 +3424,17 @@ pub struct Scene {
     /// layout moves them (`changed_geometry_readers`).
     geometry_reader: std::cell::Cell<Option<u64>>,
     geometry_reads: std::cell::RefCell<Vec<(u64, NodeId, Rect)>>,
+    /// Changes to geometry other than those `unmoved` counts: every
+    /// translation but a scroll's and a leaf's, clips, nodes shown or
+    /// hidden, which nodes are scroll content (`translated`). With
+    /// `unmoved`, all of them (`geometry_revision()`).
     geometry_revision: u64,
+    /// Changes to geometry that move no node under scroll content against
+    /// it, counted here instead: a scroll (`scroll_copy`'s move), a leaf's
+    /// move (which moves only itself) and layout (which moves boxes, read
+    /// as they are). Each site counts one change, as before, in one field
+    /// or the other.
+    unmoved: u64,
     /// The last moved node's parent and its context (`shown_context`: its
     /// translation and clip, or hidden): a reorder animation moves every row
     /// of one parent each frame, and moving a child leaves its parent's
@@ -3706,6 +3733,7 @@ impl Scene {
             geometry_reader: Default::default(),
             geometry_reads: Default::default(),
             geometry_revision: 0,
+            unmoved: 0,
             move_context: None,
             #[cfg(test)]
             no_move_context: false,
@@ -4139,6 +4167,68 @@ impl Scene {
         }
         node.bounds.translated(transform)
     }
+    /// Changes to geometry that drop every kept sum: all but a scroll, a
+    /// leaf's move and layout (`unmoved`). While it holds, a node's
+    /// ancestors' translations up to its nearest scroll content hold.
+    #[inline(always)]
+    pub(crate) fn translated(&self) -> u64 {
+        self.geometry_revision
+    }
+    /// `world_bounds(id)`, to the bit, keeping in `kept` what of its sum
+    /// holds while only scroll content moves: the translations from `id` up
+    /// to just below its nearest scroll content (`ScrollAnchor`). A scroll
+    /// then walks only from there up, not through the rows and boxes a
+    /// transcript nests below it. Any translation set but scroll content's
+    /// on a node with children, or a node made scroll content or not, drops
+    /// what every node kept (`translated`); `id`'s own is checked each time.
+    /// A node's ancestors stay its ancestors as long as it lives (a move
+    /// mounts it again), and layout's boxes are read as they are now.
+    pub(crate) fn world_bounds_kept(&self, id: NodeId, kept: &mut Option<ScrollAnchor>) -> Rect {
+        let node = self.node(id);
+        let own = node.transform;
+        let anchor = match kept {
+            Some(anchor)
+                if anchor.translated == self.translated() && same_bits(anchor.own, own) =>
+            {
+                *anchor
+            }
+            _ => *kept.insert(self.scroll_anchor(id)),
+        };
+        // The same additions as `world_bounds`, in the same order: the sum
+        // below the anchor, then the anchor's and each of its ancestors'.
+        let mut transform = anchor.below;
+        let mut at = anchor.anchor;
+        while let Some(id) = at {
+            let ancestor = self.tree_node(id);
+            transform.x += ancestor.transform.x;
+            transform.y += ancestor.transform.y;
+            at = ancestor.parent;
+        }
+        node.bounds.translated(transform)
+    }
+    /// `id`'s nearest scroll content strictly above it, and its translations
+    /// summed from it upwards to just below that (`world_bounds`'s sum, cut
+    /// there; no anchor and the whole sum where none is).
+    fn scroll_anchor(&self, id: NodeId) -> ScrollAnchor {
+        let node = self.node(id);
+        let mut below = node.transform;
+        let mut parent = node.parent;
+        while let Some(at) = parent {
+            let ancestor = self.tree_node(at);
+            if ancestor.scroll_copy {
+                break;
+            }
+            below.x += ancestor.transform.x;
+            below.y += ancestor.transform.y;
+            parent = ancestor.parent;
+        }
+        ScrollAnchor {
+            anchor: parent,
+            below,
+            own: node.transform,
+            translated: self.translated(),
+        }
+    }
     /// Where layout put `id`, in window coordinates, before any translation
     /// (its own or its ancestors', scrolling included): what moves only when
     /// layout moves it.
@@ -4445,7 +4535,7 @@ impl Scene {
     /// one's viewport and its ancestors' clips.
     pub fn visible_bounds(&self, id: NodeId) -> Option<Rect> {
         self.note_geometry_read(id);
-        let (bounds, effects, clip) = self.world(id);
+        let (bounds, effects, clip) = self.world_once(id);
         if effects.opacity <= 0. {
             return None;
         }
@@ -4476,7 +4566,7 @@ impl Scene {
     #[inline(never)]
     pub fn shows_within(&self, id: NodeId, margin: f32) -> bool {
         self.note_geometry_read(id);
-        let (bounds, effects, clip) = self.world(id);
+        let (bounds, effects, clip) = self.world_once(id);
         if effects.opacity <= 0. {
             return false;
         }
@@ -4817,6 +4907,11 @@ impl Scene {
             self.promoted_count += 1;
         }
         self.invalidate(id, COMPOSITE);
+    }
+    /// Whether any node composites through a layer shader: a renderer that
+    /// draws none (the software raster) hands such a window to the GPU's.
+    pub fn has_layer_shaders(&self) -> bool {
+        !self.layer_shaders.is_empty()
     }
     /// `id`'s layer shader and its uniforms, if either is set.
     pub fn layer_shader(&self, id: NodeId) -> Option<&LayerShader> {
@@ -5505,7 +5600,7 @@ impl Scene {
     /// Counts changes that affect what is under the pointer (geometry,
     /// cursors): unchanged, a host needn't hit test again.
     pub fn interaction_revision(&self) -> u64 {
-        self.geometry_revision
+        self.geometry_revision()
     }
     /// The cursor at `x`, `y`: a selectable text's, or the topmost node's.
     pub fn cursor_at(&self, x: f32, y: f32) -> Option<crate::cursor::Cursor> {
@@ -6013,7 +6108,7 @@ impl Scene {
         let key = (
             x.to_bits(),
             y.to_bits(),
-            self.geometry_revision,
+            self.geometry_revision(),
             self.content_revision,
         );
         // Asked again inside `f` (no caller does now): walked, not kept.
@@ -9426,7 +9521,7 @@ impl Scene {
             }
             self.move_context = None;
             self.node_mut(id).transform = transform;
-            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+            self.unmoved = self.unmoved.wrapping_add(1);
             self.invalidate(id, COMPOSITE);
             return;
         }
@@ -9468,8 +9563,12 @@ impl Scene {
         }
         self.move_context = None;
         self.node_mut(id).transform = to;
-        self.geometry_revision = self.geometry_revision.wrapping_add(1);
-        if !leaf {
+        if leaf {
+            // A leaf moves no node but itself, which its observer checks
+            // (`world_bounds_kept`): a scrollbar thumb leaves the rest kept.
+            self.unmoved = self.unmoved.wrapping_add(1);
+        } else {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
             self.damage_subtree_with(id, &mut context);
         }
         self.invalidate(id, COMPOSITE);
@@ -11025,6 +11124,67 @@ impl Scene {
             ancestor = self.tree_node(parent);
         }
         clip
+    }
+    /// `world`, in one walk up, for the readers of what shows
+    /// (`visible_bounds`, `shows_within`) where deep observed nodes read it
+    /// every frame: each clipping box met on the way sums its own
+    /// translation from there on, as walking up again from it would (the
+    /// same sums in the same order, so the same floats), and the clips are
+    /// cut from the node up, as ever. Past `CLIPS` clipping boxes (none a
+    /// real tree has),
+    /// `world_clip` walks as it does. `world` itself stays the two walks:
+    /// damage and flush call it, for nodes with no clips around them, where
+    /// those cost less.
+    #[inline(never)]
+    fn world_once(&self, id: NodeId) -> (Rect, Effects, Option<Rect>) {
+        const CLIPS: usize = 6;
+        let node = self.node(id);
+        let mut effects = node.effects;
+        if !own_visible(&node.style) {
+            effects.opacity = 0.;
+        }
+        let mut transform = node.transform;
+        let mut clips = [(node, Transform::default()); CLIPS];
+        let mut count = 0;
+        let mut over = false;
+        let mut boxed = node;
+        loop {
+            if clip_axes(&boxed.style) != (false, false) {
+                match count < CLIPS {
+                    true => {
+                        clips[count] = (boxed, boxed.transform);
+                        count += 1;
+                    }
+                    false => over = true,
+                }
+            }
+            let Some(parent) = boxed.parent else {
+                break;
+            };
+            boxed = self.tree_node(parent);
+            transform.x += boxed.transform.x;
+            transform.y += boxed.transform.y;
+            for (_, offset) in &mut clips[..count] {
+                offset.x += boxed.transform.x;
+                offset.y += boxed.transform.y;
+            }
+            effects.opacity *= if own_visible(&boxed.style) {
+                boxed.effects.opacity
+            } else {
+                0.
+            };
+        }
+        let clip = match over {
+            true => self.world_clip(id),
+            false => {
+                let mut clip = Some(self.viewport);
+                for (boxed, offset) in &clips[..count] {
+                    clip = clipped_bounds(clip, boxed.bounds.translated(*offset), &boxed.style);
+                }
+                clip
+            }
+        };
+        (node.bounds.translated(transform), effects, clip)
     }
     fn damage_subtree(&mut self, id: NodeId) {
         self.damage_subtree_with(id, &mut None);
@@ -14630,7 +14790,7 @@ impl Scene {
         self.move_context = None;
     }
     pub(crate) fn geometry_revision(&self) -> u64 {
-        self.geometry_revision
+        self.geometry_revision.wrapping_add(self.unmoved)
     }
     pub(crate) fn layout_revision(&self) -> u64 {
         self.layout_revision
@@ -14757,7 +14917,7 @@ impl Scene {
         }
         self.pending_layout_nodes += report.layout_nodes;
         self.layout_revision = self.layout_revision.wrapping_add(1);
-        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        self.unmoved = self.unmoved.wrapping_add(1);
     }
     /// Lay out, paint and composite what changed since the last flush, and
     /// report the damage.
@@ -14953,6 +15113,7 @@ impl Scene {
     /// device pixels (`set_pixel_scale`).
     pub fn set_scroll_copy(&mut self, id: NodeId, enabled: bool) {
         self.node_mut(id).scroll_copy = enabled;
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
     }
     /// How many device pixels a point is (the window's scale factor).
     /// Scroll content then moves by whole device pixels, as Safari's and
@@ -15676,7 +15837,7 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         match self.plain_walks() {
             true => match damage {
-                Some(_) => self.layer_items_walk::<false, false, false, false>(
+                Some(_) => self.layer_items_walk::<false, false, false, false, false>(
                     root,
                     damage,
                     &mut Vec::new(),
@@ -15685,7 +15846,7 @@ impl Scene {
                 ),
                 None => self.layer_items_whole(root),
             },
-            false => self.layer_items_walk::<true, false, false, false>(
+            false => self.layer_items_walk::<true, false, false, false, false>(
                 root,
                 damage,
                 &mut Vec::new(),
@@ -15707,7 +15868,7 @@ impl Scene {
         if !self.plain_walks() || !self.paints_plainly(node, clip) {
             return None;
         }
-        Some(self.layer_items_walk::<false, false, false, true>(
+        Some(self.layer_items_walk::<false, false, false, true, false>(
             None,
             Some(&[clip]),
             &mut Vec::new(),
@@ -15839,19 +16000,41 @@ impl Scene {
     /// its damage already, and pays nothing for it.
     #[inline(never)]
     fn layer_items_whole(&self, root: Option<NodeId>) -> Vec<PaintItem<'_>> {
-        self.layer_items_walk::<false, false, true, false>(root, None, &mut Vec::new(), None, None)
+        match self.long_lists {
+            true => self.layer_items_walk::<false, false, true, false, true>(
+                root,
+                None,
+                &mut Vec::new(),
+                None,
+                None,
+            ),
+            false => self.layer_items_walk::<false, false, true, false, false>(
+                root,
+                None,
+                &mut Vec::new(),
+                None,
+                None,
+            ),
+        }
     }
     /// The window's paint items (as [`Scene::layer_items`] with `None`), and
     /// into `inherited` what each took from its ancestors, for
     /// [`Scene::item_in`] to work it out again alone.
     pub fn layer_items_recorded(&self, inherited: &mut Vec<Inherited>) -> Vec<PaintItem<'_>> {
         inherited.clear();
-        match self.plain_walks() {
-            true => self
-                .layer_items_walk::<false, true, false, false>(None, None, inherited, None, None),
-            false => {
-                self.layer_items_walk::<true, true, false, false>(None, None, inherited, None, None)
-            }
+        match (self.plain_walks(), self.long_lists) {
+            (true, false) => self.layer_items_walk::<false, true, false, false, false>(
+                None, None, inherited, None, None,
+            ),
+            (true, true) => self.layer_items_walk::<false, true, false, false, true>(
+                None, None, inherited, None, None,
+            ),
+            (false, false) => self.layer_items_walk::<true, true, false, false, false>(
+                None, None, inherited, None, None,
+            ),
+            (false, true) => self.layer_items_walk::<true, true, false, false, true>(
+                None, None, inherited, None, None,
+            ),
         }
     }
     /// The paint items of `id`'s subtree as the window's walk makes them,
@@ -15867,22 +16050,75 @@ impl Scene {
         out: &mut Vec<Inherited>,
     ) -> Vec<PaintItem<'_>> {
         out.clear();
-        match self.plain_walks() {
-            true => self.layer_items_walk::<false, true, false, false>(
-                None,
-                None,
-                out,
-                Some((id, inherited)),
-                None,
-            ),
-            false => self.layer_items_walk::<true, true, false, false>(
-                None,
-                None,
-                out,
-                Some((id, inherited)),
-                None,
-            ),
+        let from = Some((id, inherited));
+        match (self.plain_walks(), self.long_lists) {
+            (true, false) => self
+                .layer_items_walk::<false, true, false, false, false>(None, None, out, from, None),
+            (true, true) => self
+                .layer_items_walk::<false, true, false, false, true>(None, None, out, from, None),
+            (false, false) => self
+                .layer_items_walk::<true, true, false, false, false>(None, None, out, from, None),
+            (false, true) => {
+                self.layer_items_walk::<true, true, false, false, true>(None, None, out, from, None)
+            }
         }
+    }
+    /// What a kept frame rests on: every child its walk's search of a long
+    /// list left out, `ink_may_show` says can't show (but where a clip
+    /// inset narrows the walk's clip past what `ink_may_show` applies).
+    #[cfg(debug_assertions)]
+    #[cold]
+    fn left_out_cant_show(&self, all: &[NodeId], found: &[NodeId]) {
+        if found.len() == all.len() {
+            return;
+        }
+        let inset_above = |id: NodeId| {
+            let mut at = self.node(id).parent;
+            while let Some(a) = at {
+                if self.node(a).clip_inset.is_some() {
+                    return true;
+                }
+                at = self.node(a).parent;
+            }
+            false
+        };
+        for child in all {
+            if !found.contains(child) {
+                debug_assert!(
+                    !self.ink_may_show(*child) || inset_above(*child),
+                    "left {child:?} out of a kept frame (its long list searched by its clip), \
+                     yet ink_may_show says it can show, with no ancestor's clip inset narrowing \
+                     the walk's clip past ink_may_show's (the one mismatch that is safe)"
+                );
+            }
+        }
+    }
+    /// Whether `id`'s ink can show in the window: the test a walk cut to its
+    /// clips puts to it (`layer_items_walk`'s `within`), at its parent's
+    /// world translation and the clip it paints within. A kept frame's walk
+    /// leaves out only nodes for which this is false (a long list's rows
+    /// out of view), so one changing that still can't show paints nothing
+    /// a patch must draw. Never false where the walk would keep something
+    /// that paints (its clip insets aren't applied, which only widens the
+    /// clip); false where an ancestor is hidden. Unlike `within`, false
+    /// within a clip for a node with no ink or an empty one: the walk keeps
+    /// it, but nothing in it paints, and once something does its ink is
+    /// worked out afresh.
+    /// Renderer plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn ink_may_show(&self, id: NodeId) -> bool {
+        let Some(parent) = self.node(id).parent else {
+            return true;
+        };
+        let Some((transform, clip)) = self.shown_context(parent) else {
+            return false;
+        };
+        let Some(clip) = clip else {
+            return true;
+        };
+        self.ink(id).is_some_and(|ink| {
+            ink.width > 0. && ink.height > 0. && ink.translated(transform).intersects(clip)
+        })
     }
     /// Plain node `id`'s box as [`Scene::item_in`] places it, from what it
     /// `inherited`, and what it paints: for a renderer patching a node
@@ -15948,6 +16184,9 @@ impl Scene {
     }
     /// `POPUPS`: popup roots exist, which this walk leaves out below `root`.
     /// `RECORD`: what each item inherits goes into `inherited`.
+    /// `LONG`: some list grew long (`long_lists`): without damage, a whole
+    /// repaint's or a kept frame's walk searches long lists by its clip;
+    /// without one, the walk compiles as it did.
     /// `from`: a subtree alone, from what its root inherited (`root` and
     /// `damage` are then `None`).
     /// `AROUND`: what `around` holds is left out, its own items kept.
@@ -15956,6 +16195,7 @@ impl Scene {
         const RECORD: bool,
         const CLIPS: bool,
         const AROUND: bool,
+        const LONG: bool,
     >(
         &self,
         root: Option<NodeId>,
@@ -16237,6 +16477,28 @@ impl Scene {
                         (Some(reach), all) if all.len() >= SEARCHED_CHILDREN => {
                             self.searched(id, node, all, transform, reach)
                         }
+                        // A walk cut to its clips (a whole repaint) or a kept
+                        // frame's (`RECORD`) searches long lists by their
+                        // clip, as a damaged one does by its damage: the
+                        // rows that can show, not every row. (A kept
+                        // frame's leaves its other children as they are:
+                        // testing each against its clip costs more than
+                        // the few it would leave out.)
+                        (None, all)
+                            if LONG && (CLIPS || RECORD) && all.len() >= SEARCHED_CHILDREN =>
+                        {
+                            match clip {
+                                Some(clip) => {
+                                    let found = self.searched(id, node, all, transform, clip);
+                                    #[cfg(debug_assertions)]
+                                    if RECORD {
+                                        self.left_out_cant_show(all, found);
+                                    }
+                                    found
+                                }
+                                None => all,
+                            }
+                        }
                         (_, all) => all,
                     },
                 };
@@ -16247,9 +16509,11 @@ impl Scene {
                         // What it holds is cut to `clip`: a child whose ink
                         // misses it paints nothing here (a scroll view's
                         // rows out of view), on a whole repaint (`CLIPS`; a
-                        // damaged walk prunes by its damage). A recorded
-                        // walk keeps them: a kept frame patches what comes
-                        // into view from its list.
+                        // damaged walk prunes by its damage). A kept
+                        // frame's walk leaves out only a long list's rows
+                        // out of view (above); what comes into view later
+                        // reaches it through a splice of an ancestor that
+                        // changed (`Scene::ink_may_show`).
                         .filter(|child| {
                             let ink = self.ink(**child);
                             touches(ink, transform) && (!CLIPS || within(ink, transform, clip))
@@ -16681,6 +16945,149 @@ mod tests {
         assert!(relayered.has_inline_boxes());
     }
     use super::*;
+
+    /// What `world_bounds_kept` keeps gives `world_bounds` to the bit after
+    /// every change a scene takes, in any order: scroll content and the
+    /// nodes in it moving (by pixel-rounded and fractional amounts, to
+    /// zero, transparent, with effects), nested scroll content, scroll
+    /// content inside a translated parent, nodes made scroll content and
+    /// not, boxes laid out again, nodes mounted and removed, a row moved
+    /// from one scroll view to another and a scroll view moved (both mount
+    /// again, as `Ui` moves them), and frames between some of those.
+    #[test]
+    fn kept_world_bounds_are_the_full_walks_to_the_bit() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        let boxed = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            clip: true,
+            ..Style::default()
+        };
+        for _ in 0..12 {
+            let mut scene = Scene::new(400., 300.);
+            scene.set_pixel_scale(2.);
+            scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+            let mut nodes = vec![scene.root()];
+            let mut kept: NodeMap<Option<ScrollAnchor>> = NodeMap::default();
+            for step in 0..1500 {
+                nodes.retain(|id| scene.contains(*id));
+                let pick = |n: u64| nodes[n as usize % nodes.len()];
+                let at = pick(next(1 << 20));
+                let amount = |n: u64| match n % 6 {
+                    0 => 0.,
+                    1 => -0.,
+                    2 => (n % 400) as f32 / 3. - 60.,
+                    3 => -((n % 97) as f32) * 0.1,
+                    4 => (n % 1000) as f32 * 1.375,
+                    _ => 1e-3 * (n % 7) as f32,
+                };
+                let to = Transform {
+                    x: amount(next(1 << 20)),
+                    y: amount(next(1 << 20)),
+                };
+                match next(14) {
+                    // Mostly moves: of scroll content (a scroll) and not.
+                    0..=4 if at != scene.root() => scene.set_transform(at, to),
+                    5 if at != scene.root() => {
+                        let opacity = [0., 0.5, 1.][next(3) as usize];
+                        scene.set_transform_and_effects(
+                            at,
+                            to,
+                            Effects {
+                                opacity,
+                                ..Effects::default()
+                            },
+                        );
+                    }
+                    6 if at != scene.root() => {
+                        let opacity = [0., 1.][next(2) as usize];
+                        scene.set_effects(
+                            at,
+                            Effects {
+                                opacity,
+                                ..Effects::default()
+                            },
+                        );
+                    }
+                    7 => scene.set_scroll_copy(at, next(3) != 0),
+                    8 => {
+                        let w = 20. + next(300) as f32;
+                        let h = 10. + next(200) as f32;
+                        scene.set_style(at, boxed(w, h));
+                    }
+                    // Mounted: under any node, a box or a leaf.
+                    9 | 10 if nodes.len() < 160 => {
+                        let kind = match next(3) {
+                            0 => NodeKind::Rect(Color(9, 9, 9, 255)),
+                            1 => NodeKind::Container(Layout::Overlay),
+                            _ => NodeKind::Container(Layout::Column),
+                        };
+                        let w = 10. + next(200) as f32;
+                        let h = 5. + next(80) as f32;
+                        nodes.push(scene.append(at, kind, boxed(w, h)));
+                    }
+                    // Removed, or moved under another node: mounted again
+                    // there with what it held (a row between scroll views,
+                    // a scroll view under another parent).
+                    11 if at != scene.root() => {
+                        let to = pick(next(1 << 20));
+                        let inside = |mut id: NodeId| loop {
+                            if id == at {
+                                break true;
+                            }
+                            match scene.parent(id) {
+                                Some(parent) => id = parent,
+                                None => break false,
+                            }
+                        };
+                        if next(2) == 0 && !inside(to) {
+                            let scroll = scene.node(at).scroll_copy;
+                            let from = scene.transform(at);
+                            let again = scene.append(
+                                to,
+                                NodeKind::Container(Layout::Column),
+                                boxed(90., 40.),
+                            );
+                            scene.set_scroll_copy(again, scroll);
+                            scene.set_transform(again, from);
+                            let row = scene.append(
+                                again,
+                                NodeKind::Rect(Color(1, 1, 1, 255)),
+                                boxed(30., 9.),
+                            );
+                            nodes.extend([again, row]);
+                        }
+                        scene.remove(at);
+                    }
+                    12 => {
+                        scene.flush();
+                    }
+                    _ => {}
+                }
+                // Layout runs at times, as a frame does, between steps that
+                // move.
+                if step % 5 == 0 {
+                    scene.prepare_layout();
+                }
+                for &id in &nodes {
+                    if !scene.contains(id) {
+                        kept.remove(&id);
+                        continue;
+                    }
+                    let fresh = scene.world_bounds(id);
+                    let got = scene.world_bounds_kept(id, kept.entry(id).or_insert(None));
+                    let bits = |r: Rect| [r.x, r.y, r.width, r.height].map(f32::to_bits);
+                    assert_eq!(bits(got), bits(fresh), "node {id:?} at step {step}");
+                }
+            }
+        }
+    }
     /// A node painted outside its parent's fade, removed, leaves its entry
     /// (let go only as the map grows): asking what paints plainly passes
     /// it by rather than looking it up.
@@ -19055,6 +19462,119 @@ mod tests {
             },
         );
         assert_eq!(scene.visible_bounds(item), None);
+    }
+    /// `world` and `world_clip` as they walked: up once for translation
+    /// and opacity, and up again from each clipping box for its own.
+    fn world_walked_twice(scene: &Scene, id: NodeId) -> (Rect, f32, Option<Rect>) {
+        let node = scene.node(id);
+        let mut transform = node.transform;
+        let mut opacity = if own_visible(&node.style) {
+            node.effects.opacity
+        } else {
+            0.
+        };
+        let mut parent = node.parent;
+        while let Some(id) = parent {
+            let ancestor = scene.tree_node(id);
+            transform.x += ancestor.transform.x;
+            transform.y += ancestor.transform.y;
+            opacity *= if own_visible(&ancestor.style) {
+                ancestor.effects.opacity
+            } else {
+                0.
+            };
+            parent = ancestor.parent;
+        }
+        let mut clip = Some(scene.viewport);
+        let mut ancestor = node;
+        loop {
+            if clip_axes(&ancestor.style) != (false, false) {
+                let mut offset = ancestor.transform;
+                let mut parent = ancestor.parent;
+                while let Some(parent_id) = parent {
+                    let p = scene.tree_node(parent_id);
+                    offset.x += p.transform.x;
+                    offset.y += p.transform.y;
+                    parent = p.parent;
+                }
+                clip = clipped_bounds(clip, ancestor.bounds.translated(offset), &ancestor.style);
+            }
+            let Some(parent) = ancestor.parent else {
+                break;
+            };
+            ancestor = scene.tree_node(parent);
+        }
+        (node.bounds.translated(transform), opacity, clip)
+    }
+    /// One walk up works out what walking up again from each clip did, to
+    /// the bit: nested boxes, every other one clipping (on one axis, the
+    /// other or both, more than fit inline), moved by tenths (sums that
+    /// round), faded by thirds.
+    #[test]
+    fn world_in_one_walk_is_what_walking_twice_was() {
+        use crate::layout::LayoutOptions;
+        let mut scene = Scene::new(300.0, 200.0);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let mut nodes = vec![scene.root()];
+        for branch in 0..3 {
+            let mut parent = scene.root();
+            for depth in 0..24 {
+                let mut style = Style {
+                    absolute: true,
+                    width: Some(280. - depth as f32 * 9.7),
+                    height: Some(190. - depth as f32 * 6.3),
+                    ..Default::default()
+                };
+                match depth % 6 {
+                    0 => style.clip = true,
+                    2 => {
+                        style.layout_options = Some(Arc::new(LayoutOptions {
+                            clip_x: Some(true),
+                            ..Default::default()
+                        }))
+                    }
+                    4 => {
+                        style.layout_options = Some(Arc::new(LayoutOptions {
+                            clip_y: Some(true),
+                            ..Default::default()
+                        }))
+                    }
+                    _ => {}
+                }
+                let node = scene.append(parent, NodeKind::Container(Layout::Overlay), style);
+                let tenth = 0.1 * (depth as f32 + 1.) * (branch as f32 - 1.3);
+                scene.set_transform(
+                    node,
+                    Transform {
+                        x: tenth + 0.3,
+                        y: -tenth * 1.7,
+                    },
+                );
+                if depth % 5 == 3 {
+                    scene.set_effects(
+                        node,
+                        Effects {
+                            opacity: 1. / 3.,
+                            ..Default::default()
+                        },
+                    );
+                }
+                nodes.push(node);
+                parent = node;
+            }
+        }
+        scene.flush();
+        let mut cut = 0;
+        for &id in &nodes {
+            let (bounds, effects, clip) = scene.world(id);
+            let walked = world_walked_twice(&scene, id);
+            assert_eq!((bounds, effects.opacity, clip), walked, "{id:?}");
+            assert_eq!(scene.world_clip(id), walked.2, "{id:?}");
+            let (bounds, effects, clip) = scene.world_once(id);
+            assert_eq!((bounds, effects.opacity, clip), walked, "once: {id:?}");
+            cut += usize::from(clip.is_some_and(|c| c.width < 280. || c.height < 190.));
+        }
+        assert!(cut > nodes.len() / 2, "the clips cut: {cut}");
     }
     #[test]
     fn what_a_popup_holds_damages_nothing_in_the_window() {
@@ -21453,12 +21973,12 @@ mod nonfinite_transform_tests {
             && r.height.is_finite()));
         assert_eq!(scene.hit_test(5., 30.), Some(node));
         assert_ne!(scene.hit_test(45., 30.), Some(node));
-        let revision = scene.geometry_revision;
+        let revision = scene.geometry_revision();
         for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0., 0.] {
             scene.set_transform(node, Transform { x, y: 25. });
             assert_eq!(scene.transform(node).x.to_bits(), 0);
             assert!(scene.flush().is_idle());
-            assert_eq!(scene.geometry_revision, revision);
+            assert_eq!(scene.geometry_revision(), revision);
         }
         scene.set_transform(
             node,
@@ -23435,8 +23955,9 @@ mod local_transform_tests {
     /// A full paint walk (no damage, as a resize repaints) passes by what
     /// its clip cuts away: a scroll view's rows out of view give no items,
     /// while one partly in view, and one out of view whose shadow reaches
-    /// into it, do. A recorded walk (a kept frame's list, patched as rows
-    /// come into view) keeps every row.
+    /// into it, do. A recorded walk (a kept frame's list) keeps a short
+    /// list's rows, out of view or not: it leaves out a long list's alone,
+    /// those its search finds can't show (`kept_lists`).
     #[test]
     fn a_full_walk_passes_by_what_its_clip_cuts_away() {
         let mut scene = Scene::new(400., 300.);
@@ -23492,6 +24013,109 @@ mod local_transform_tests {
         for id in [inside, partly, below, reaching] {
             assert!(recorded.contains(&id), "recorded: {id:?}");
         }
+        assert!(scene.ink_may_show(reaching) && !scene.ink_may_show(below));
+    }
+    /// A kept frame's walk and a splice's re-walk of a long list's parent
+    /// cut the list alike: with nothing changed, the splice walks again the
+    /// very rows the keep recorded (those its clip shows), each with what
+    /// it inherited.
+    #[test]
+    fn a_splice_of_a_long_list_walks_the_rows_its_keep_recorded() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let view = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(200., 100.)
+            },
+        );
+        let list = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        for i in 0..400u32 {
+            scene.append(
+                list,
+                NodeKind::Quad(QuadStyle {
+                    fill: Color((i % 251) as u8, 9, 9, 255),
+                    ..QuadStyle::default()
+                }),
+                fixed(200., 20.),
+            );
+        }
+        scene.set_transform(list, Transform { x: 0., y: -2000. });
+        scene.flush();
+        let mut inherited = Vec::new();
+        let recorded = scene.layer_items_recorded(&mut inherited);
+        let ids: Vec<NodeId> = recorded.iter().map(|item| item.id).collect();
+        let at = ids
+            .iter()
+            .position(|id| *id == list)
+            .expect("the list recorded");
+        let rows: Vec<NodeId> = ids[at..].to_vec();
+        assert!(
+            rows.len() < 20,
+            "the rows its clip shows, not the list: {}",
+            rows.len()
+        );
+        let mut out = Vec::new();
+        let spliced: Vec<NodeId> = scene
+            .layer_items_from(list, &inherited[at], &mut out)
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(spliced, rows, "the splice walks the rows the keep did");
+        assert_eq!(out.len(), spliced.len(), "each with what it inherited");
+    }
+    #[test]
+    fn a_long_list_leaves_out_a_row_that_paints_nothing_out_of_view() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let view = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(200., 100.)
+            },
+        );
+        let list = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        let mut empty = None;
+        for i in 0..400u32 {
+            let kind = match i {
+                300 => NodeKind::Container(Layout::Overlay),
+                _ => NodeKind::Quad(QuadStyle {
+                    fill: Color((i % 251) as u8, 9, 9, 255),
+                    ..QuadStyle::default()
+                }),
+            };
+            let row = scene.append(list, kind, fixed(200., 20.));
+            if i == 300 {
+                empty = Some(row);
+            }
+        }
+        let empty = empty.unwrap();
+        scene.flush();
+        // A debug build checks each row left out can't show.
+        let mut inherited = Vec::new();
+        let ids: Vec<NodeId> = scene
+            .layer_items_recorded(&mut inherited)
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(!ids.contains(&empty));
+        assert!(!scene.ink_may_show(empty), "it paints nothing");
+        // Given something to paint, in view, it can show.
+        scene.append(
+            empty,
+            NodeKind::Quad(QuadStyle {
+                fill: Color(9, 9, 9, 255),
+                ..QuadStyle::default()
+            }),
+            fixed(200., 20.),
+        );
+        scene.set_transform(list, Transform { x: 0., y: -6000. });
+        scene.flush();
+        assert!(scene.ink_may_show(empty));
     }
     #[test]
     fn colour_filters_compose_down_the_tree_without_layers() {

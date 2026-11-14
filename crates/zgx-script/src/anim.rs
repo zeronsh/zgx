@@ -1,6 +1,7 @@
 //! Runs script-declared animations in Rust. Each animation is one task that
 //! awaits display frames only while it moves; at rest it waits on its source
 //! state and requests nothing.
+use crate::time::Instant;
 use crate::{
     node::{Anim, Curve},
     value::Value,
@@ -10,7 +11,6 @@ use std::{
     future::poll_fn,
     rc::Rc,
     task::{Poll, Waker},
-    time::Instant,
 };
 use zgx::{compose::Context, reactive::Signal};
 
