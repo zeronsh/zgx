@@ -76,7 +76,7 @@ local tabs = ui.state("tabs", {} :: { Tab })
 
 | Method | | |
 | --- | --- | --- |
-| `get(): T` | the value; inside a computed, effect, function property or text function it subscribes to the state | |
+| `get(): T` | the value; inside a computed, effect, function property or text function it subscribes to the state | a long string (past 64 KiB, a document) is made a script string once for each text, every read of it handed the same until it changes |
 | `peek(): T` | the value, without subscribing | for handlers and for reading what an effect should not follow |
 | `set(value: T)` | replaces the value | |
 | `update(f: (value: T) -> ...T)` | `f` gets a mutable copy: change it and return nothing, or return the new value | copies the whole value into Luau and back |
@@ -88,7 +88,8 @@ local tabs = ui.state("tabs", {} :: { Tab })
 | `push(item)` | appends to a list (`nil` is an empty list) | |
 | `insert(index: number, item)` | inserts at 1 to `len + 1` | |
 | `remove(index: number): item?` | removes and returns the item; nil, and nothing changes, outside the list | |
-| `len(): number` | the list's length (0 for anything else); tracked as `get` is | |
+| `len(): number` | the list's length, a string's in bytes (`#`), 0 for anything else; tracked as `get` is | read where the value is held: a long document isn't copied into the script for it |
+| `sub(i: number, j: number?): string` | `string.sub` of the string held (bytes from 1, negative from the end, `j` its end by default), `""` for anything else; tracked as `get` is | copies only those bytes: a draft's line at its caret, without the rest of a long draft |
 | `index_of(field: string, value): number?` | where the first item whose `field` is `value` is, from 1, or nil (`messages:index_of("id", 42)`); tracked as `get` is | found in Rust, without making the list a table |
 
 `set_key`, `patch`, `insert`, `push` and `remove` copy only the path they change, sharing the rest with the old value; prefer them to `update` for large state. `set_key` writes a list in place while nothing else holds it (no script has read it since the last write): a batch writing 300 rows of a 100,000-row list copies the list once, not 300 times. Scripts reading a long list after `set_key` on one row (or a `push`) get its table back with only that row converted, and a computed that returns rows of a state (a filter) hands its readers the table it built: a write to one message of thousands costs the scripts reading them only their own loops. A write of an equal value notifies nobody.

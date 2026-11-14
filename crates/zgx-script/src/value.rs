@@ -1980,6 +1980,7 @@ pub(crate) fn install_cache(lua: &Lua) {
             swept: std::cell::Cell::new(0),
             recent: Default::default(),
             next_recent: std::cell::Cell::new(0),
+            strings: Default::default(),
         });
     }
 }
@@ -2028,6 +2029,8 @@ struct Converted {
     recent: std::cell::RefCell<Vec<(usize, Value, Table)>>,
     /// Where the next one goes once `recent` is full.
     next_recent: std::cell::Cell<usize>,
+    /// The long strings scripts last read (`long_string`), the oldest first.
+    strings: RefCell<Vec<(zgx::text::Text, mlua::LuaString)>>,
 }
 /// Sweeps wait until the cache holds this much (`weight`) at least.
 const SWEPT_FROM: usize = 1 << 12;
@@ -2442,6 +2445,7 @@ pub(crate) fn sweep_idle(lua: &Lua) {
         return;
     };
     cache.bases.borrow_mut().clear();
+    cache.strings.borrow_mut().clear();
     drop(cache);
     let _ = sweep_when(lua, true);
     let _ = rebuild_cache(lua);
@@ -3183,6 +3187,9 @@ const OFF_THE_CLOCK_FROM: usize = 256;
 /// transcript took more than the 50 ms a call has, so the script's next
 /// instruction, whatever it was, stopped with its budget spent.
 fn read(value: Value, lua: &Lua) -> mlua::Result<mlua::Value> {
+    if let Value::Text(text) = &value {
+        return script_string(lua, text).map(mlua::Value::String);
+    }
     if value.list().len() < OFF_THE_CLOCK_FROM {
         return value.into_lua(lua);
     }
@@ -3193,6 +3200,71 @@ fn read(value: Value, lua: &Lua) -> mlua::Result<mlua::Value> {
     match vm {
         Some(vm) => vm.off_clock(|| value.into_lua(lua)),
         None => value.into_lua(lua),
+    }
+}
+/// How many long strings a VM keeps as scripts last read them.
+const KEPT_STRINGS: usize = 2;
+/// A long string (`Value::Text`, a document) as a script reads it: made once
+/// for each text and handed to every read of it until it changes. Each
+/// read made it again, copying and hashing the whole of it: a composer whose
+/// draft a dozen bindings read paid a dozen copies of the draft at every
+/// keystroke (5 ms at 30,000 lines). Let go as the host goes idle
+/// (`sweep_idle`), and as other texts are read.
+fn script_string(lua: &Lua, text: &zgx::text::Text) -> mlua::Result<mlua::LuaString> {
+    let Some(cache) = lua.app_data_ref::<Converted>() else {
+        return push_long(lua, text);
+    };
+    if let Some((_, kept)) = cache.strings.borrow().iter().find(|(t, _)| t.ptr_eq(text)) {
+        return Ok(kept.clone());
+    }
+    drop(cache);
+    let made = push_long(lua, text)?;
+    if let Some(cache) = lua.app_data_ref::<Converted>() {
+        let mut strings = cache.strings.borrow_mut();
+        if strings.len() >= KEPT_STRINGS {
+            strings.remove(0);
+        }
+        strings.push((text.clone(), made.clone()));
+    }
+    Ok(made)
+}
+fn push_long(lua: &Lua, text: &zgx::text::Text) -> mlua::Result<mlua::LuaString> {
+    // SAFETY: `push_text` leaves one string, `exec_raw`'s result.
+    unsafe { lua.exec_raw::<mlua::LuaString>((), |state| push_text(state, text)) }
+}
+/// Bytes `from` to `to` (0-based, end excluded, within its length) of the
+/// string `value` holds, read where it is held: a long text's chunks are
+/// copied only where they overlap. Nothing for anything not a string.
+fn byte_range(value: &Value, from: usize, to: usize) -> Vec<u8> {
+    match value {
+        Value::Str(s) => s.as_bytes()[from..to].to_vec(),
+        Value::Text(t) => {
+            let mut out = Vec::with_capacity(to - from);
+            let mut at = 0;
+            for chunk in t.chunks() {
+                let end = at + chunk.len();
+                if end > from && at < to {
+                    let bytes = chunk.as_bytes();
+                    out.extend_from_slice(
+                        &bytes[from.saturating_sub(at)..(to - at).min(bytes.len())],
+                    );
+                }
+                if end >= to {
+                    break;
+                }
+                at = end;
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+/// The byte length of the string `value` holds, else its items' count.
+fn length(value: &Value) -> usize {
+    match value {
+        Value::Str(s) => s.len(),
+        Value::Text(t) => t.len(),
+        v => v.items().len(),
     }
 }
 /// What a state's script handle reads: the same for a state and for a
@@ -3209,8 +3281,23 @@ fn add_reads<T: 'static, M: UserDataMethods<T>>(
     });
     // Of a derived list (a sorted view) as it is now: brought up to date
     // first, as `at` is, inside a batch that wrote what it derives from.
-    methods.add_method("len", move |_, s: &T, ()| {
-        Ok(state(s).fresh().with(|v| v.items().len()))
+    // Of a string, its length in bytes (`#`), tracked as `get` is: a long
+    // document is not copied into the script for it.
+    methods.add_method("len", move |_, s: &T, ()| Ok(state(s).fresh().with(length)));
+    // Of a string, `string.sub`'s bytes (from 1, negative from the end,
+    // `j` the end by default), tracked as `get` is: a long document's
+    // part (a draft's line at the caret) without the rest of it copied.
+    methods.add_method("sub", move |lua, s: &T, (i, j): (i64, Option<i64>)| {
+        let bytes = state(s).fresh().with(|v| {
+            let len = length(v) as i64;
+            let at = |n: i64| if n < 0 { (len + n + 1).max(0) } else { n };
+            let (start, end) = (at(i).max(1), at(j.unwrap_or(-1)).min(len));
+            match start <= end {
+                true => byte_range(v, start as usize - 1, end as usize),
+                false => Vec::new(),
+            }
+        });
+        lua.create_string(bytes)
     });
     // Where the first item whose `field` is `value` is (from 1), or nil,
     // tracked as `get` is: `messages:index_of("id", 42)`, found without
