@@ -253,6 +253,7 @@ class OutputTests(unittest.TestCase):
         with patch.dict(gate.UNPRINTED, {'unhooked': 'not hooked: drawn some other way'}):
             self.assertEqual(gate.output_of('unhooked', [], []), 'not hooked: drawn some other way')
         self.assertIn('not hooked', gate.output_of('some-scene', [], []))
+        self.assertIn('no adapter draws', gate.output_of('3d-textured', [], []))
         self.assertEqual(gate.output_of('x', 'failed', [('a', 'd')]), 'the run failed')
         self.assertEqual(gate.output_of('x', [('a', 'd')], None), 'the run failed')
         self.assertEqual(gate.output_of('x', None, [('a', 'd')]), '(new) 1 flushes')

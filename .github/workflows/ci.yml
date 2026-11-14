@@ -521,9 +521,13 @@ jobs:
           path: ~/apt-archives
           key: apt-perf-${{ runner.arch }}-${{ steps.apt-key.outputs.month }}
           restore-keys: apt-perf-${{ runner.arch }}-
+      # mesa-vulkan-drivers and libvulkan1: lavapipe, a software Vulkan, so
+      # the gate's output check draws the 3D cells' frames and reads them back
+      # (world_bench, ZGX_FINGERPRINT alone; its counted runs draw on wgpu's
+      # no-op backend and load no Vulkan).
       - name: Packages
         timeout-minutes: 10
-        run: sh .github/apt-install.sh valgrind cmake pkg-config fonts-dejavu-core libdbus-1-dev libfontconfig1-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxrandr-dev
+        run: sh .github/apt-install.sh valgrind cmake pkg-config fonts-dejavu-core libdbus-1-dev libfontconfig1-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxrandr-dev mesa-vulkan-drivers libvulkan1
       - uses: actions/cache/save@v4
         if: steps.apt-cache.outputs.cache-hit != 'true'
         with:
