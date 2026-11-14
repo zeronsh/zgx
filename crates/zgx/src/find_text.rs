@@ -77,6 +77,24 @@ pub(crate) fn matches(text: &str, query: &str) -> Vec<Range<usize>> {
     if query.is_empty() || text.is_empty() {
         return Vec::new();
     }
+    if text.is_ascii() {
+        // ASCII folding preserves byte offsets, so these matches can use
+        // the original ranges directly.
+        if !query.is_ascii() {
+            return Vec::new();
+        }
+        let lowercase;
+        let text = if text.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            lowercase = text.to_ascii_lowercase();
+            lowercase.as_str()
+        } else {
+            text
+        };
+        return text
+            .match_indices(query)
+            .map(|(start, matched)| start..start + matched.len())
+            .collect();
+    }
     let folded = fold(text);
     let mut found = Vec::new();
     let mut from = 0;
@@ -123,5 +141,17 @@ mod tests {
         assert!(find("abc", "").is_empty());
         assert!(find("", "a").is_empty());
         assert!(find("abc", "d").is_empty());
+    }
+
+    #[test]
+    fn ascii_matches_keep_original_offsets_and_do_not_overlap() {
+        let text = "x\r\nABaba abABA";
+        assert_eq!(matches(text, &fold_query("ába")), [3..6, 9..12]);
+        assert_eq!(matches("x\r\nababa ababa", "aba"), [3..6, 9..12]);
+        assert_eq!(
+            matches(text, "\r\n").as_slice(),
+            std::slice::from_ref(&(1..3))
+        );
+        assert!(matches(text, &fold_query("日本語")).is_empty());
     }
 }
