@@ -16,8 +16,8 @@ use wasm_bindgen::prelude::*;
 use zgx::{
     compose::{
         __dom::{
-            self, Element, ElementKind, Inline, Inlines, KeyedRegion, Overlay, OverlayKind,
-            Region, Scope, SwitchRegion, VirtualRegion,
+            self, Element, ElementKind, Inline, Inlines, KeyedRegion, Overlay, OverlayKind, Region,
+            Scope, SwitchRegion, VirtualRegion,
         },
         View,
     },
@@ -983,7 +983,7 @@ fn mount_rich(mut inlines: Inlines, paragraph: u32, runtime: &Runtime, block: &m
     let state: Rc<RefCell<RichSpans>> = Rc::default();
     let spans = state.clone();
     let clicks = runtime.clone();
-    block.effect(runtime, move || {
+    block.effect(paragraph, runtime, move || {
         let mut next = inlines();
         let mut spans = spans.borrow_mut();
         let spans = &mut spans.0;

@@ -258,3 +258,49 @@ fn hover_styles_icons_and_fades_are_css() {
     mounted.unmount();
     host.remove();
 }
+
+#[wasm_bindgen_test]
+fn rich_paragraphs_in_keyed_rows_each_keep_their_own() {
+    let runtime = Runtime::new();
+    let rows = runtime.signal(vec![1_u32, 2, 3]);
+    let bold = runtime.signal(String::from("bold"));
+    let read = bold.clone();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(zgx::compose::keyed(
+            move || rows.get(),
+            move |n: u32, _| {
+                let read = read.clone();
+                rich_text_signal(move || {
+                    vec![
+                        text_span(format!("Row {n} ")),
+                        text_span(read.get()).font_bold(),
+                    ]
+                })
+            },
+        )),
+    );
+    let list = host
+        .first_element_child()
+        .unwrap()
+        .first_element_child()
+        .unwrap()
+        .first_element_child()
+        .unwrap();
+    let texts = |list: &web_sys::Element| -> Vec<String> {
+        let rows = list.children();
+        (0..rows.length())
+            .map(|i| rows.item(i).unwrap().text_content().unwrap())
+            .collect()
+    };
+    assert_eq!(texts(&list), ["Row 1 bold", "Row 2 bold", "Row 3 bold"]);
+    // Each row's paragraph still follows what it reads (stamped rows keep
+    // the nodes their effects write).
+    bold.set("heavy".into());
+    zgx_dom::flush();
+    assert_eq!(texts(&list), ["Row 1 heavy", "Row 2 heavy", "Row 3 heavy"]);
+    mounted.unmount();
+    host.remove();
+}

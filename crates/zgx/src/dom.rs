@@ -687,7 +687,6 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
                             None => ElementKind::Unsupported("region"),
                         }
                     }
-                    Kind::RichText(_) => ElementKind::Unsupported("rich text"),
                     Kind::MenuItem(label) => {
                         return menu_item(view, label, parent, scope, resources);
                     }
@@ -714,12 +713,10 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
                         };
                         let anchor = anchor.map(|anchor| *anchor);
                         return overlay(view, kind, label, open, anchor, parent, scope, resources);
+                    }
                     Kind::RichText(compute) => {
                         let theme = scope.as_ref().unwrap_or(parent).environment.theme.clone();
                         ElementKind::Rich(inlines(compute, theme))
-                    }
-                    Kind::MenuItem(_) | Kind::Submenu { .. } | Kind::Menu { .. } => {
-                        ElementKind::Unsupported("menu")
                     }
                     Kind::Canvas(_) => ElementKind::Unsupported("canvas"),
                     Kind::Svg { .. } => ElementKind::Unsupported("svg"),
@@ -1061,6 +1058,8 @@ fn overlay(
         el.attrs.push(("aria-hidden", "true".into()));
     }
     el
+}
+
 /// A paragraph's spans lowered for the DOM, as the desktop lowers them
 /// into runs (`paragraph_effect`): a link underlined unless it has a hover
 /// style or `no_underline`, tokens resolved from `theme`.
