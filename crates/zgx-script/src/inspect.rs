@@ -1197,6 +1197,10 @@ impl Session {
                     Value::record([
                         ("name", Value::from(name.as_str())),
                         ("frame", Value::Num(after as f64)),
+                        // Now, on the frames' clock (their `ended_ms`): a
+                        // tool timing input it sends lines its own clock up
+                        // with theirs by this.
+                        ("ms", Value::Num(zgx::trace::now_ms())),
                     ]),
                 ))
             }
