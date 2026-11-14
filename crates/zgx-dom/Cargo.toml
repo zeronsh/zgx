@@ -34,7 +34,7 @@ zgx-script = { path = "../zgx-script", version = "0.1.10", default-features = fa
 zgx = { path = "../zgx", default-features = false, features = ["dom", "trace"] }
 wasm-bindgen-test = "=0.3.77"
 wasm-bindgen-futures = "0.4.77"
-web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlElement", "HtmlInputElement", "HtmlCollection", "KeyboardEvent", "KeyboardEventInit", "MouseEvent", "MouseEventInit", "Node", "NodeList", "PointerEvent", "PointerEventInit", "Window", "CssStyleDeclaration"] }
+web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlElement", "HtmlInputElement", "HtmlCollection", "CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData", "KeyboardEvent", "KeyboardEventInit", "MouseEvent", "MouseEventInit", "Node", "NodeList", "PointerEvent", "PointerEventInit", "Window", "CssStyleDeclaration"] }
 
 # The table benchmark (`bench/`): a page's module, built for wasm32.
 [[test]]

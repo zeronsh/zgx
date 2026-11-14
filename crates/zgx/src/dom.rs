@@ -252,6 +252,9 @@ pub enum ElementKind {
     /// A paragraph of spans (`rich_text`), read again as what it reads
     /// changes.
     Rich(Inlines),
+    /// A drawing (`canvas`): its commands for a size, drawn again as what
+    /// they read changes.
+    Canvas(Box<dyn FnMut((f32, f32)) -> crate::canvas::Canvas>),
     /// What only a GPU or native host draws: a labelled box.
     Unsupported(&'static str),
 }
@@ -718,7 +721,7 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
                         let theme = scope.as_ref().unwrap_or(parent).environment.theme.clone();
                         ElementKind::Rich(inlines(compute, theme))
                     }
-                    Kind::Canvas(_) => ElementKind::Unsupported("canvas"),
+                    Kind::Canvas(draw) => ElementKind::Canvas(draw),
                     Kind::Svg { .. } => ElementKind::Unsupported("svg"),
                     #[cfg(target_os = "macos")]
                     Kind::NativeSurface { .. } => ElementKind::Unsupported("native surface"),
@@ -2119,6 +2122,17 @@ fn cursor_css(cursor: crate::cursor::Cursor) -> String {
         "i-beam" | "ibeam" => "text".into(),
         _ => out,
     }
+}
+
+/// A canvas text's font, as the CSS `font` shorthand Canvas 2D takes.
+pub fn font_css(font: &crate::text_layout::FontStyle, size: f32) -> String {
+    format!(
+        "{}{} {}px {}",
+        if font.italic { "italic " } else { "" },
+        font.weight,
+        num(size),
+        family_css(&font.family)
+    )
 }
 
 fn family_css(family: &crate::text_layout::FontFamily) -> String {

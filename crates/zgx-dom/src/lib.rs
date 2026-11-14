@@ -21,6 +21,7 @@
 //! See the crate's README for what maps, what doesn't, and the benchmark.
 #![cfg(target_arch = "wasm32")]
 
+mod canvas;
 mod js;
 mod keyed;
 mod mount;
