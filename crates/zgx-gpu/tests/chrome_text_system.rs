@@ -1,8 +1,14 @@
-//! The system font past Medium and before Semibold draws emboldened under 17.5
-//! points, as Chrome's font synthesis does (headless Chrome 157, 2x,
-//! `-webkit-font-smoothing: antialiased`, "Accuracy drops more than speed":
-//! ink per inked column, 500 2358, 501 3071, 550 3183, 599 3290, 600 2588 at
-//! 16 px; none at 18 px): the ratios to 500 within 3%.
+//! The system font past Medium and before Semibold draws on its weight axis
+//! alone, with no fake-bold stroke, as Anara's Electron app draws it (pin
+//! only: the pin's reference is that app). Two measurements of Chrome
+//! disagree, and what differs between them is not yet known:
+//!
+//! - Headless Chrome 157, 2x, `-webkit-font-smoothing: antialiased`,
+//!   "Accuracy drops more than speed": ink per inked column 500 2358, 501
+//!   3071, 550 3183, 599 3290, 600 2588 at 16 px, none at 18 px: 30-40% more
+//!   ink at 501 to 599 under 17.5 points, font synthesis' stroke.
+//! - Anara's Electron app: 550's ink equal to the unstroked draw (3088 and
+//!   3088), where the stroke drew about 35% heavier.
 #![cfg(target_os = "macos")]
 use zgx::{compose::prelude::*, scene::Color, widgets::Ui};
 use zgx_gpu::GpuRenderer;
@@ -47,23 +53,29 @@ fn column_ink(size: f32, weight: u16) -> Option<f64> {
 }
 
 #[test]
-fn system_font_weights_501_to_599_are_emboldened_under_17_points() {
-    let Some(plain) = column_ink(16., 500) else {
+fn system_font_weights_501_to_599_draw_on_the_axis_alone() {
+    let Some(w500) = column_ink(16., 500) else {
         eprintln!("SF isn't here: nothing checked");
         return;
     };
-    // Chrome, against 500: 501 1.302, 550 1.350, 599 1.395, 600 1.098.
-    let ratio = |got: f64, want: f64, what: &str| {
+    let w600 = column_ink(16., 600).unwrap();
+    // Between Medium and Semibold, as the axis goes: never past Semibold,
+    // as the stroke drew them (501 1.302 of 500's ink, 600 1.098).
+    let mut last = w500;
+    for weight in [501, 550, 599] {
+        let ink = column_ink(16., weight).unwrap();
         assert!(
-            (got / plain / want - 1.).abs() < 0.03,
-            "{what}: {:.3} against Chrome's {want:.3}",
-            got / plain
+            ink >= last * 0.99 && ink <= w600 * 1.01,
+            "{weight} at 16 px: {ink:.0}, between {last:.0} and 600's {w600:.0}"
         );
-    };
-    ratio(column_ink(16., 501).unwrap(), 1.302, "501 at 16 px");
-    ratio(column_ink(16., 550).unwrap(), 1.350, "550 at 16 px");
-    ratio(column_ink(16., 599).unwrap(), 1.395, "599 at 16 px");
-    ratio(column_ink(16., 600).unwrap(), 1.098, "600 at 16 px");
-    // Not at 18 px: 550 is lighter than 600 there.
+        last = ink;
+    }
+    let w501 = column_ink(16., 501).unwrap();
+    assert!(
+        w501 / w500 < 1.03,
+        "501 at 16 px is 500's weight, not stroked: {:.3} of 500's ink",
+        w501 / w500
+    );
+    // And at 18 px, past where the stroke ever was, 550 lighter than 600.
     assert!(column_ink(18., 550).unwrap() < column_ink(18., 600).unwrap());
 }
