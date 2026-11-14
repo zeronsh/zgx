@@ -54,6 +54,57 @@ fn device() -> (wgpu::Device, wgpu::Queue) {
     now(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("the no-op device")
 }
 
+/// For the gate's output check alone (`ZGX_FINGERPRINT`): a device that
+/// draws (a driver's, or a software one), so what the frames show can be
+/// read back and compared. None where no adapter draws; the counted runs
+/// never ask.
+fn drawing_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = block(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+    block(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+}
+/// A native backend's future: ready at once, or soon.
+fn block<T>(future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+        std::thread::yield_now();
+    }
+}
+/// The frame `target` holds, its pixels read back.
+fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::Texture) -> Vec<u8> {
+    let bytes = u64::from(SIZE * SIZE * 4);
+    let out = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("A frame read back"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &out,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(SIZE * 4),
+                rows_per_image: None,
+            },
+        },
+        target.size(),
+    );
+    queue.submit([encoder.finish()]);
+    out.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("the frame read back");
+    let pixels = out.slice(..).get_mapped_range().to_vec();
+    out.unmap();
+    pixels
+}
 /// A texture of `index`, its colour its own, clear in a corner.
 fn texture(index: usize) -> Texture {
     let shade = (index * 16) as u8;
@@ -160,7 +211,11 @@ fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId
 fn main() {
     let mixed = std::env::var("SCENE").is_ok_and(|scene| scene == "mixed");
     let (meshes, frames) = (setting("MESHES", 2000), setting("FRAMES", 30));
-    let (device, queue) = device();
+    // The gate's output check draws for real and reads each frame back; its
+    // counted runs draw on the no-op backend, as ever.
+    let drawing = zgx_fingerprint::on().then(drawing_device).flatten();
+    let reads = drawing.is_some();
+    let (device, queue) = drawing.unwrap_or_else(device);
     let (world, root, joint, morphs) = world(mixed, meshes);
     let mut painter = world.viewport();
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -174,7 +229,11 @@ fn main() {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: if reads {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        },
         view_formats: &[FORMAT.add_srgb_suffix()],
     });
     let view = target.create_view(&Default::default());
@@ -214,6 +273,10 @@ fn main() {
         drawing.target_srgb = Some(&srgb);
         painter.render(&mut drawing);
         queue.submit([encoder.finish()]);
-        device.poll(wgpu::PollType::Poll).expect("the no-op device");
+        if reads {
+            zgx_fingerprint::pixels(&read_back(&device, &queue, &target));
+        } else {
+            device.poll(wgpu::PollType::Poll).expect("the no-op device");
+        }
     }
 }
