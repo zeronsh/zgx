@@ -362,7 +362,20 @@ impl EventContext {
             Some(None) => bits |= 32,
             None => {}
         }
+        if self.drag_request.is_some() {
+            bits |= 64;
+        }
+        if self.drag_accepted.is_some() {
+            bits |= 128;
+        }
         bits
+    }
+    /// A drag a listener started (`start_drag`): what it carries, and the
+    /// press it started from, if given.
+    pub(crate) fn take_dom_drag(&mut self) -> Option<(crate::actions::Action, Option<(f32, f32)>)> {
+        self.drag_request
+            .take()
+            .map(|(_, payload, pressed)| (payload, pressed))
     }
 }
 /// Which part of its route an event is in, as the DOM's.
