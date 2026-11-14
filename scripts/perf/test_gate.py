@@ -250,7 +250,7 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(gate.output_of('x', before, list(before)), 'same output: paint (2 flushes)')
 
     def test_unhooked_failed_and_new_scenes_say_so(self):
-        self.assertEqual(gate.output_of('video', [], []), gate.UNPRINTED['video'])
+        self.assertEqual(gate.output_of('3d-textured', [], []), gate.UNPRINTED['3d-textured'])
         self.assertIn('not hooked', gate.output_of('some-scene', [], []))
         self.assertEqual(gate.output_of('x', 'failed', [('a', 'd')]), 'the run failed')
         self.assertEqual(gate.output_of('x', [('a', 'd')], None), 'the run failed')
