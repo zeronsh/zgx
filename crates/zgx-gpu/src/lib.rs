@@ -12802,6 +12802,10 @@ impl GpuRenderer {
         // region. A blur comes first where both start at a draw (frosted
         // glass reads what its blur drew). A layer shader reading the backdrop
         // (glass) may read past its own region.
+        // Backdrop readers that needn't see each other share a copy, as
+        // Direct3D 12's do: each still draws at its own cut, those sharing
+        // with none of their own.
+        let sharing = share_backdrops(&draws, reads);
         let mut cuts: Vec<(usize, Option<usize>)> = (batches.iter().enumerate())
             .map(|(batch, (start, _))| (*start, Some(batch)))
             .chain(blended.iter().map(|&at| (at, None)))
@@ -12870,24 +12874,32 @@ impl GpuRenderer {
             let Some(draw) = draws.get(at) else {
                 continue;
             };
-            // What it reads (`backdrop_read`), or what lies under it.
-            let under = reads
-                .iter()
-                .filter(|(reader, _)| *reader == at)
-                .map(|(_, read)| *read)
-                .reduce(Rect::union)
-                .or_else(|| draw.bounds.intersection(draw.clip));
-            let copied = regions
-                .iter()
-                .filter_map(|(region, _)| region.intersection(under?))
-                .reduce(Rect::union)
-                .and_then(|area| scissor(area, self.scale, self.width, self.height));
-            let Some(copied) = copied else {
-                continue;
-            };
             let backdrop = state.backdrop.as_ref().expect("made above");
-            frame.copy_backdrop(target, backdrop, copied);
-            stats.backdrop_copies += 1;
+            // A reader sharing an earlier one's copy (`share_backdrops`)
+            // reads it as made: nothing drawn since paints where it reads.
+            if !(sharing.iter()).any(|(_, shared)| shared.contains(&at)) {
+                // What it reads (`backdrop_read`) and what those sharing its
+                // copy read, or what lies under it.
+                let under = (reads.iter())
+                    .filter(|(reader, _)| {
+                        *reader == at
+                            || (sharing.iter())
+                                .any(|(first, shared)| *first == at && shared.contains(reader))
+                    })
+                    .map(|(_, read)| *read)
+                    .reduce(Rect::union)
+                    .or_else(|| draw.bounds.intersection(draw.clip));
+                let copied = regions
+                    .iter()
+                    .filter_map(|(region, _)| region.intersection(under?))
+                    .reduce(Rect::union)
+                    .and_then(|area| scissor(area, self.scale, self.width, self.height));
+                let Some(copied) = copied else {
+                    continue;
+                };
+                frame.copy_backdrop(target, backdrop, copied);
+                stats.backdrop_copies += 1;
+            }
             if draw.source != sampled {
                 let Some(view) = self.d3d11_texture(draw.source) else {
                     unpainted = true;
