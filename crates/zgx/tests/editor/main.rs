@@ -56,6 +56,8 @@ mod editor_rows;
 mod editor_wrap_width;
 #[path = "../editor_copy_hook.rs"]
 mod editor_copy_hook;
+#[path = "../editor_drag_source.rs"]
+mod editor_drag_source;
 #[path = "../editor_scrollbar.rs"]
 mod editor_scrollbar;
 #[path = "../editor_selection_theme.rs"]

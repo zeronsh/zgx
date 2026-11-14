@@ -263,6 +263,9 @@ pub struct EditorHandle {
     preferred_x: Rc<Cell<Option<f32>>>,
     text: NodeId,
     scene: Rc<RefCell<Scene>>,
+    /// Its scene's `identity`: a node id is each window's own
+    /// (`DraggedText::source_range`).
+    pub(crate) scene_identity: u64,
     /// What the last refresh laid the text out for: the box's size, its
     /// style, the shaper revision and its content insets (which a border
     /// in its kind changes too).
@@ -7385,6 +7388,7 @@ impl Ui {
             preferred_x: preferred_x.clone(),
             text,
             scene: self.scene.clone(),
+            scene_identity: self.scene.borrow().identity(),
             geometry,
             position: position.clone(),
             hint: hint.clone(),
@@ -8036,12 +8040,7 @@ impl Ui {
                             if let Some(was) = gesture.drop_restore.take() {
                                 edit.set_selection(was.anchor, was.focus);
                             }
-                            let modifiers = cx.pointer_modifiers();
-                            let copy = if cfg!(target_os = "macos") {
-                                modifiers.alt
-                            } else {
-                                modifiers.control
-                            };
+                            let copy = cx.pointer_modifiers().drag_copies();
                             // From this very editor (this window's), its text
                             // still there: moved within it.
                             let here = text

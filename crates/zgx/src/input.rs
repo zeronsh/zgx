@@ -30,6 +30,17 @@ impl Modifiers {
             self.control
         }
     }
+    /// Whether a drag dropped with these copies instead of moving: Option
+    /// on macOS, Control elsewhere, as an editor's text drops decide.
+    /// (Pin line.)
+    #[doc(hidden)]
+    pub fn drag_copies(self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.alt
+        } else {
+            self.control
+        }
+    }
     /// Option moves by words on macOS; Control does so on Linux.
     pub fn word_navigation(self) -> bool {
         if cfg!(target_os = "macos") {
