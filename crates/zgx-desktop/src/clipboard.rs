@@ -65,9 +65,9 @@ impl Clipboard {
         })
     }
 
-    /// Put `text` on the clipboard with `html`, its rich form, beside it
-    /// where the platform takes HTML (macOS, Windows, X11); text alone on
-    /// Wayland.
+    /// Put `text` on the clipboard with `html`, its rich form, beside it:
+    /// `public.html` on macOS, `HTML Format` on Windows, `text/html` on X11
+    /// and Wayland.
     pub(crate) fn set_rich_text(&mut self, text: String, html: String) -> Result<()> {
         match &mut self.backend {
             Backend::Native(clipboard) => clipboard.set_html(html, Some(platform_text(text)))?,
@@ -82,6 +82,17 @@ impl Clipboard {
             Backend::Native(clipboard) => Ok(clipboard.get_text()?),
             #[cfg(target_os = "linux")]
             Backend::Wayland(clipboard) => Ok(clipboard.load(false)?),
+        }
+    }
+
+    /// The clipboard's HTML: a browser's or word processor's copy, as it
+    /// offers it (on Windows the fragment its `HTML Format` header marks).
+    /// An error where it holds none.
+    pub(crate) fn get_html(&mut self) -> Result<String> {
+        match &mut self.backend {
+            Backend::Native(clipboard) => Ok(clipboard.get().html()?),
+            #[cfg(target_os = "linux")]
+            Backend::Wayland(clipboard) => Ok(clipboard.load_html()?),
         }
     }
 
@@ -377,6 +388,34 @@ mod dib {
 
 #[cfg(test)]
 mod tests {
+    /// HTML and its text through the system clipboard (macOS, Windows,
+    /// X11): what `set_rich_text` writes, `get_html` and `get_text` read
+    /// back. Ignored: it replaces the clipboard of whoever runs it. CI runs
+    /// it on each (`--ignored --exact`; Linux as `clipboard-html-x11`).
+    #[test]
+    #[ignore]
+    fn html_and_its_text_round_trip_through_the_system_clipboard() {
+        let mut clipboard = super::Clipboard {
+            backend: super::Backend::Native(arboard::Clipboard::new().expect("the clipboard")),
+        };
+        let html =
+            "<p>Rich <b>bold</b>, <i>italic</i> &amp; <a href=\"https://zgx.dev\">a link</a> é</p>";
+        clipboard
+            .set_rich_text("Rich bold, italic & a link é".into(), html.into())
+            .expect("HTML written");
+        // macOS wraps it in a document (with a UTF-8 charset); the fragment
+        // itself comes back whole.
+        let read = clipboard.get_html().expect("HTML read back");
+        assert!(read.contains(html), "{read:?}");
+        assert_eq!(
+            clipboard.get_text().expect("its text"),
+            "Rich bold, italic & a link é"
+        );
+        // Plain text written over it: no HTML is left to read.
+        clipboard.set_text("plain".into()).expect("text written");
+        assert!(clipboard.get_html().is_err(), "HTML left behind plain text");
+    }
+
     #[test]
     fn lines_copied_end_in_cr_lf_once() {
         assert_eq!(

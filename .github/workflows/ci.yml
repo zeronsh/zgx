@@ -487,6 +487,9 @@ jobs:
       - run: cargo test -p zgx-fx --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
+      # HTML and its text through the system pasteboard (ignored locally:
+      # it replaces the clipboard of whoever runs it).
+      - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard -- --ignored --exact
       # The soak (an app used for a while holds what it did), on Metal.
       - run: cargo test -p zgx-script --test soak --locked
       - run: cargo test -p zgx-run --test audit --locked
@@ -596,6 +599,9 @@ jobs:
       # file and line the CLI names, and the reference's examples written
       # out with their plugins (`-- file: … (granted …)`).
       - run: "cargo test -p zgx-script --test state --test tooling --locked -- upload:: test_cli:: reference_docs::"
+      # HTML (CF_HTML's fragment) and its text through the system clipboard
+      # (ignored locally: it replaces the clipboard of whoever runs it).
+      - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard -- --ignored --exact
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)

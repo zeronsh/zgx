@@ -187,6 +187,14 @@ pub trait Platform {
     fn clipboard_files(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
+    /// The clipboard's HTML, its rich form (a browser's or a word
+    /// processor's copy: `text/html`, macOS's `public.html`, Windows'
+    /// `HTML Format` fragment), if it holds some; its text is
+    /// `clipboard_text`'s. None reads none.
+    #[doc(hidden)]
+    fn clipboard_html(&self) -> Option<String> {
+        None
+    }
     /// Put `text` on the clipboard with `html`, its rich form, where the
     /// platform takes both; plain text alone otherwise.
     fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
