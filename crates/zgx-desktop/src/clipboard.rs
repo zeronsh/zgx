@@ -78,9 +78,22 @@ impl Memory {
         });
     }
 }
-/// Whether this process's clipboard is held in memory (`ZGX_CLIPBOARD=memory`).
+/// Whether this process's clipboard is held in memory (`ZGX_CLIPBOARD=memory`):
+/// an off-screen session's is, unless it names another (`memory_wanted`).
 fn in_memory() -> bool {
-    zgx::env::var_os("ZGX_CLIPBOARD").is_some_and(|value| value == "memory")
+    memory_wanted(
+        zgx::env::var_os("ZGX_CLIPBOARD").as_deref(),
+        *crate::window_chrome::OFFSCREEN,
+    )
+}
+/// `ZGX_CLIPBOARD`'s word where it says one (`memory`, or another such as
+/// `system` for the person's), else whether the session is off-screen
+/// (`ZGX_OFFSCREEN`): one nobody sees copies and pastes through its own.
+fn memory_wanted(clipboard: Option<&std::ffi::OsStr>, offscreen: bool) -> bool {
+    match clipboard {
+        Some(word) if !word.is_empty() => word == "memory",
+        _ => offscreen,
+    }
 }
 
 pub(crate) struct Clipboard {
@@ -479,6 +492,19 @@ mod dib {
 
 #[cfg(test)]
 mod tests {
+    /// An off-screen session's clipboard is its own unless `ZGX_CLIPBOARD`
+    /// names another; `memory` makes any session's its own.
+    #[test]
+    fn an_off_screen_session_holds_its_clipboard_in_memory() {
+        use std::ffi::OsStr;
+        assert!(super::memory_wanted(None, true));
+        assert!(super::memory_wanted(Some(OsStr::new("")), true));
+        assert!(super::memory_wanted(Some(OsStr::new("memory")), true));
+        assert!(super::memory_wanted(Some(OsStr::new("memory")), false));
+        assert!(!super::memory_wanted(Some(OsStr::new("system")), true));
+        assert!(!super::memory_wanted(None, false));
+        assert!(!super::memory_wanted(Some(OsStr::new("")), false));
+    }
     /// HTML and its text through the system clipboard (macOS, Windows,
     /// X11): what `set_rich_text` writes, `get_html` and `get_text` read
     /// back. Ignored: it replaces the clipboard of whoever runs it. CI runs
