@@ -1259,6 +1259,30 @@ const STEADY_GAP: std::time::Duration = std::time::Duration::from_millis(50);
 fn hands_over_live(live: bool, notched: bool) -> bool {
     live && !notched
 }
+/// How a frame keeps to the refresh grid (`Latch::decide_for`).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pace {
+    /// Made by the app's own timing: it keeps the last frame's cadence, and
+    /// waits for its point.
+    Steady,
+    /// A whole wheel notch's (`hands_over_live`): it answers input, so it
+    /// keeps no later cadence, but ready past its point it waits for the
+    /// next, never beside the frame already handed over.
+    Notch,
+    /// A live scroll's or input's: no later cadence, and ready past its
+    /// point it hands over at once.
+    Live,
+}
+/// The pace of a frame made now: `live` input, `notched` (`hands_over_live`).
+#[cfg(target_os = "macos")]
+fn pace_of(live: bool, notched: bool) -> Pace {
+    match (live, hands_over_live(live, notched)) {
+        (false, _) => Pace::Steady,
+        (true, true) => Pace::Live,
+        (true, false) => Pace::Notch,
+    }
+}
 /// Frames this soon after input that acts (`Ui::acted_at`) answer it, and
 /// show as soon as each is ready (`Host::input_live`).
 #[cfg(target_os = "macos")]
@@ -1507,7 +1531,9 @@ impl Latch {
     /// point instead held the main thread a refresh, and the next frame,
     /// starting after, missed its own start: at 120 Hz, frames ready near
     /// their point (5 ms of work) kept to every other refresh for the rest
-    /// of the gesture, as no 8 in a row came ready 1.5 ms early.
+    /// of the gesture, as no 8 in a row came ready 1.5 ms early. (Tests'
+    /// shorthand: the host decides at a frame's `Pace`, `decide_for`.)
+    #[cfg(test)]
     fn decide(
         &mut self,
         now: std::time::Instant,
@@ -1515,6 +1541,26 @@ impl Latch {
         period: std::time::Duration,
         live: bool,
     ) -> std::time::Instant {
+        let pace = match live {
+            true => Pace::Live,
+            false => Pace::Steady,
+        };
+        self.decide_for(now, origin, period, pace)
+    }
+    /// `decide` at a frame's `pace`. A wheel notch's frame (`Pace::Notch`)
+    /// keeps no later cadence, as it answers input: keeping one, a scroll's
+    /// frame ready on time waited a refresh more (a frame finished in 2 ms
+    /// held 11-16), until eight in a row came 1.5 ms early. Ready past its
+    /// point, it still waits for the next (#2068), so each point takes one
+    /// frame.
+    fn decide_for(
+        &mut self,
+        now: std::time::Instant,
+        origin: std::time::Instant,
+        period: std::time::Duration,
+        pace: Pace,
+    ) -> std::time::Instant {
+        let live = pace == Pace::Live;
         if let Some(started) = self.started.take() {
             self.work = now
                 .saturating_duration_since(started)
@@ -1527,7 +1573,7 @@ impl Latch {
         let ready = now
             .checked_sub(std::mem::take(&mut self.held))
             .unwrap_or(now);
-        let (mut at, early, kept) = self.choose(ready, origin, period, live);
+        let (mut at, early, kept) = self.choose(ready, origin, period, pace != Pace::Steady);
         let chosen = at;
         while at < now {
             at += period;
@@ -3194,7 +3240,7 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 let grid = self.refresh_grid();
                 #[cfg(target_os = "macos")]
-                let live = hands_over_live(
+                let pace = pace_of(
                     self.input_live(std::time::Instant::now()),
                     self.scroll.notched(),
                 );
@@ -3269,7 +3315,7 @@ impl Host {
                     #[cfg(target_os = "macos")]
                     if let Some((origin, period)) = grid {
                         ready_at.set(Some(std::time::Instant::now()));
-                        let at = latch.decide(std::time::Instant::now(), origin, period, live);
+                        let at = latch.decide_for(std::time::Instant::now(), origin, period, pace);
                         let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                         sleep_until(at);
                     }
@@ -3314,7 +3360,9 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
-                    zgx_gpu::present_log::log(|| format!("handed over live={live}"));
+                    zgx_gpu::present_log::log(|| {
+                        format!("handed over live={}", pace == Pace::Live)
+                    });
                     self.late_sample
                         .handed_over(ready_at.get().unwrap_or_else(std::time::Instant::now));
                     // What it shows now, for `Ui::snapshot` (the last frame's
@@ -10045,6 +10093,52 @@ mod tests {
         let ready = origin + period * 40 + ms(7.);
         let at = latch.decide(ready, origin, period, false);
         assert!(at >= ready && at - ready < period);
+    }
+    /// A wheel notch's frame answers input: on time for its point, it
+    /// presents there, where a steady frame on a later cadence waits a
+    /// refresh more. Ready past its point, it takes the next, never the one
+    /// the frame before it took (#2068).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_notch_frame_keeps_no_later_cadence_and_takes_one_point_each() {
+        use std::time::{Duration, Instant};
+        let period = Duration::from_nanos(8_333_333);
+        let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
+        let origin = Instant::now();
+        let point = (period - Latch::LEAD).as_secs_f64() * 1e3;
+        assert_eq!(pace_of(false, true), Pace::Steady);
+        assert_eq!(pace_of(true, true), Pace::Notch);
+        assert_eq!(pace_of(true, false), Pace::Live);
+        // A frame ready just after its point sets a later cadence.
+        let late = || {
+            let mut latch = Latch::default();
+            latch.decide(
+                origin + period * 10 + ms(point + 0.1),
+                origin,
+                period,
+                false,
+            );
+            latch
+        };
+        let ready = origin + period * 11 + ms(point - 0.1);
+        let its_point = origin + period * 11 + ms(point);
+        // Steady: the cadence keeps it a refresh more.
+        let steady = late().decide_for(ready, origin, period, Pace::Steady);
+        assert!(steady > its_point + period / 2, "kept a refresh more");
+        // A notch's: on its own point.
+        let notch = late().decide_for(ready, origin, period, Pace::Notch);
+        assert!((notch.duration_since(its_point).as_secs_f64() * 1e3).abs() < 0.01);
+        // Ready past the point the last frame took: the next point, not that
+        // one, and not at once.
+        let mut latch = late();
+        let first = latch.decide_for(ready, origin, period, Pace::Notch);
+        let after = first + ms(0.5);
+        let second = latch.decide_for(after, origin, period, Pace::Notch);
+        assert!(
+            second > first && second - first > period / 2,
+            "one point each"
+        );
+        assert!(second > after, "not at once");
     }
     #[cfg(target_os = "macos")]
     #[test]
