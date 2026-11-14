@@ -505,6 +505,16 @@ function setUpOverlay(panel, o) {
   }
 }
 
+// What the page opens itself (a tooltip as the pointer rests, a submenu
+// from the pointer or a key): a lazy panel (flag 16) is told to open, so it
+// is filled before it shows; others show at once.
+function open(panel) {
+  const o = panel && panel.$$o;
+  if (!o) return;
+  if (o.flags & 16) report(panel, true);
+  else show(panel, true);
+}
+
 function isShown(panel) {
   const o = panel.$$o;
   return o.kind === DIALOG ? panel.open : panel.matches(":popover-open");
@@ -672,7 +682,7 @@ function onKeyDown(event) {
     case "ArrowRight": {
       const sub = item.$$p;
       if (sub && sub.$$o && sub.$$o.kind === SUBMENU) {
-        show(sub, true);
+        open(sub);
         event.preventDefault();
       }
       return;
@@ -718,7 +728,7 @@ function showTip(anchor) {
   clearTimeout(tipTimer);
   if (tip && tip !== anchor.$$tip) hideTip();
   tip = anchor.$$tip;
-  show(tip, true);
+  open(tip);
 }
 
 function hideTip() {
@@ -754,7 +764,7 @@ function onPointerOver(event) {
   }
   const sub = item.$$p;
   if (sub && sub.$$o && sub.$$o.kind === SUBMENU && !isShown(sub)) {
-    show(sub, true);
+    open(sub);
     item.focus({ preventScroll: true });
   }
 }
