@@ -188,7 +188,10 @@ impl GpuRenderer {
     /// inside its bands, and in the bands it reaches through a texture
     /// composited after the run, drawn by the phases returned (the module's
     /// comment). In this target's points, drawing `damage`. Unchanged where
-    /// nothing fades.
+    /// nothing fades. Out of line: called once a frame, its body inlined
+    /// into `render_flat_taking` moved that frame's code for every scene,
+    /// faded or not (fx-layer +0.12%).
+    #[inline(never)]
     pub(crate) fn band<'a>(
         &mut self,
         scene: &Scene,
@@ -214,29 +217,38 @@ impl GpuRenderer {
         }
         let mut out: Vec<PaintItem<'a>> = Vec::with_capacity(items.len() + 4);
         let mut phases = Vec::new();
-        let mut items = items.into_iter().peekable();
+        let mut items = items.into_iter();
         while let Some(item) = items.next() {
             let Some(mask) = item.mask() else {
                 out.push(item);
                 continue;
             };
-            let mut run = vec![item];
-            while let Some(item) = items.next_if(|item| item.mask() == Some(mask)) {
-                run.push(item);
-            }
+            // The run made once at its length: a list's rows under one fade
+            // are hundreds, and pushing them one by one grew it ten times.
+            let len = (items.as_slice().iter())
+                .position(|item| item.mask() != Some(mask))
+                .unwrap_or(items.len());
+            let mut run = Vec::with_capacity(len + 1);
+            run.push(item);
+            run.extend(items.by_ref().take(len));
+            let found = self.band_strips(scene, &run, mask, reach, target);
             // Ids to key its textures: items of it that no layer, cached or
-            // not, has (nor another band).
-            let keys: Vec<NodeId> = run
-                .iter()
-                .filter(|item| {
-                    !item.isolated && item.id != scene.root() && !self.layers.contains_key(&item.id)
-                })
-                .map(|item| item.id)
-                .collect();
-            match (
-                self.band_strips(scene, &run, mask, reach, target),
-                keys.first(),
-            ) {
+            // not, has (nor another band). Only for a run with bands to
+            // draw, made once at the run's length.
+            let mut keys: Vec<NodeId> = Vec::new();
+            if found.is_some() {
+                keys.reserve(run.len());
+                keys.extend(
+                    run.iter()
+                        .filter(|item| {
+                            !item.isolated
+                                && item.id != scene.root()
+                                && !self.layers.contains_key(&item.id)
+                        })
+                        .map(|item| item.id),
+                );
+            }
+            match (found, keys.first()) {
                 (
                     Some(BandStrips {
                         inner,
@@ -598,17 +610,15 @@ impl GpuRenderer {
         let (kind, font, text_options) = (run[0].kind, run[0].font, run[0].text_options);
         // A fade around the run's (one mask, one ancestor: one outer).
         let outer_mask = run[0].outer_mask();
-        let mut items: Vec<PaintItem<'a>> = run
-            .iter()
-            .filter(|item| crossing(item))
-            .filter_map(|item| {
-                let clip = item.clip.unwrap_or(within).intersection(within)?;
-                let mut item = item.clone();
-                item.clip = Some(clip);
-                item.extras = unmasked(&item.extras, &mut last);
-                Some(item)
-            })
-            .collect();
+        // At most the run's: made once, not grown item by item.
+        let mut items: Vec<PaintItem<'a>> = Vec::with_capacity(run.len());
+        items.extend(run.iter().filter(|item| crossing(item)).filter_map(|item| {
+            let clip = item.clip.unwrap_or(within).intersection(within)?;
+            let mut item = item.clone();
+            item.clip = Some(clip);
+            item.extras = unmasked(&item.extras, &mut last);
+            Some(item)
+        }));
         zgx::scene::translate_items(&mut items, -bounds.x, -bounds.y);
         // The interior: drawn as it is, its mask (1 there) dropped, so it
         // takes the plainer shaders (which pay for its bands' pass, GPU).
