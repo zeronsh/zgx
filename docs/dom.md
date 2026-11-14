@@ -69,6 +69,7 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 | `checkbox`, `slider`, `progress` | `<input type=checkbox>` in a `<label>`, `<input type=range>`, `<progress>` (NaN: indeterminate) |
 | `scroll`, `scroll_x` | `overflow: auto`, its offset signal both ways |
 | `virtual_list`, `variable_virtual_list`, `measured_virtual_list`, `measured_rows` | a scroller holding only the rows that show, positioned in a spacer as tall as all of them, each at its own height. A measured list's rows are as tall as they lay out, reported by ResizeObserver into its heights (at least a pixel). As heights above the view change, the row first in view stays where it shows, or the end for heights anchored there (`anchor_end`); resting at the top, nothing anchors |
+| `canvas` | a `<canvas>` filling the element, drawn with Canvas 2D at the element's size (ResizeObserver) and the screen's pixel ratio: fills and strokes (caps, joins, miter limit, dashes) of rectangles, rounded rectangles, ellipses, lines and paths, solid, linear-gradient and striped brushes, nonzero and even-odd rules, clips, and text over the shapes. `canvas::measure_text` measures with Canvas 2D while it draws. It draws again as the size or what the drawing reads changes, and only when the commands differ |
 | `image` | a `<canvas>` with the image's pixels, `role=img` and its label |
 | `switch`, `keyed`, `child_when` | a region (`display: contents` unless styled) |
 | roles, labels, levels, live regions, checked, selected, expanded, values, descriptions, hidden, modal | ARIA: `role`, `aria-label`, `aria-level`, `aria-live`, `aria-checked`… |
@@ -76,9 +77,12 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 | `selectable` | `user-select` |
 | `modal` | a `<dialog>` shown with `showModal()`: the browser traps focus, makes the page behind inert, closes it on Escape and gives focus back; a click on its backdrop closes it unless `dismiss_backdrop(false)`; its backdrop is the theme's |
 | `popover`, `menu`, `submenu` | an auto popover in the browser's top layer, placed against its anchor on its `placement` side (the other side when it doesn't fit there), kept in the viewport and placed again as the page scrolls or resizes. Escape and a click outside close it as the browser closes popovers; a press on its anchor closes it without reopening it. A menu (`role=menu`) opens from a bare button, focuses its first item and moves among its items with the arrows, Home and End; Right opens a submenu and Left closes it, the pointer opens a submenu's trigger's submenu, and Tab leaves a menu, closing it |
+| `lazy` | an overlay's panel is filled the first time it opens, and kept: until then its children aren't built (tooltips are lazy) |
+| `arrow` | a popover's arrow: a square turned 45° in the panel's own background, on the side facing the anchor (flipping with it) under the anchor's centre and kept off the corners; the panel sits its size further off |
 | `menu_item` | a `<button role=menuitem>` (`menuitemcheckbox`, `menuitemradio` when checkable) that closes its menu and the menus it opened from, then runs its click; focus goes back to the menu's button |
 | `View::tooltip` | a manual popover (`role=tooltip`) shown as the pointer rests on the view for its delay (at once within a second of another) or keyboard focus reaches it, gone as the pointer leaves or presses or a key is pressed; a text tip is the view's `aria-description` |
 | `on_event`, `on_action` | the browser's events at the element, each phase a call (capture, at it, bubbling): pointer down, up, move, enter, leave and cancel, the wheel (lines and pages as points), keys (`key` and `code`), focus and blur (`focusin`, `focusout`) and activation (`click`). A listener's `prevent_default`, `stop_propagation`, `stop_immediate_propagation`, `focus` and pointer capture apply to the event at once. An event for something inside the element has a `target` of its own, not the element's |
+| `on_drag`, `start_drag`, `on_drop`, `on_drag_end` | a drag a listener starts: a copy of its source follows the pointer; what's under it, from the innermost element with listeners out, hears `Over` until one takes it (`accept_drag`), then `Leave` and, as the button comes up there, `Drop`; the source hears `Start`, `Move` and `End` (accepted or not), and the press ends in no click. A `drag_preview` isn't built yet: the copy stands for it |
 | `keymap` | zgx's keymap resolution (bindings by context, sequences of up to four keys, `NoAction`): a key goes to the keymaps from the focused element out before anything hears it; a sequence's first keys are taken, and a match's actions go out in turn from the focused element until a listener handles one (`prevent_default`) |
 | `focus_group`, and list boxes, tab lists, toolbars and radio groups | one Tab stop (roving `tabindex`, on the checked or selected member first); the arrows of its axis, Home and End move among its own members (right to left, Left and Right swap); a radio group's wrap and choose |
 | `on_mount` handles | `observe_size`, `observe_bounds` (ResizeObserver), `observe_visibility`, `observe_visibility_within` (IntersectionObserver with that `rootMargin`), `is_mounted`, `retain` |
@@ -89,7 +93,12 @@ Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau apps' host services**: `ui.fetch`, sockets, files, plugins from the disk, hot reload and `zgx check` need hosts zgx-dom doesn't have yet; images in Luau apps show their labels (zgx-script decodes them with zgx-gpu, which isn't linked in the browser).
-- **Not yet mapped**: a span's own context menu, canvas drawing (its display list maps to Canvas 2D), SVG, a popover's arrow, `at_caret` and `hoist` placement, `lazy` panels (built as they mount), `reactive_interaction`, and a `NodeHandle`'s layout, editor and scene methods.
+- **Overlays**: `at_caret`, `hoist` and `modal_placement` placement; menus have no typeahead; an arrow has no border on its outer edges.
+- **Rich text**: a span's own context menu, and a link's middle click.
+- **Input**: `drag_preview` builders (a copy of the source stands for them), file drops, `drag_export` and pinch; text and IME stay the browser's own in `<input>` and `<textarea>`. `reactive_interaction` isn't applied.
+- **Lists**: the `_watched` variants' watchers aren't called.
+- **Canvas**: a canvas view's pan and zoom (`canvas_view`) isn't applied.
+- **Also not yet mapped**: SVG, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 
 ## Performance
