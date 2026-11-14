@@ -15,15 +15,16 @@ categories = ["gui", "rendering"]
 # source in a missing format fails to decode, with an error naming the
 # feature. Canvases, gradients and shadows need none of them.
 [features]
-default = ["svg", "png", "jpeg", "gif"]
+default = ["svg", "png", "jpeg", "gif", "webp"]
 svg = ["dep:resvg"]
 png = ["image/png"]
-jpeg = ["dep:zune-jpeg"]
+# (Decoding with zune-jpeg; encoding, as `canvas::jpeg`, with image.)
+jpeg = ["dep:zune-jpeg", "image/jpeg"]
+# Encoding only (`canvas::webp`, lossless).
+webp = ["image/webp"]
 gif = ["dep:gif"]
-# Words break at their hyphenation points where text asks (zgx's `hyphens`):
-# typst's `hypher`, all its 48 languages' patterns, about 1.2 MB of a release
-# binary, read in place (no heap). The system's language picks them.
-hyphens = ["zgx/hyphens", "dep:hypher"]
+# Words break at their hyphenation points where text asks (zgx-text's).
+hyphens = ["zgx/hyphens", "zgx-text/hyphens"]
 # Windows: presentation into DirectComposition visuals of the caller's
 # (composition.rs), with native views composited between the planes.
 composition = ["windows/Win32_Graphics_DirectComposition"]
@@ -38,9 +39,10 @@ vulkan = ["wgpu/vulkan"]
 d3d11 = ["wgpu/noop", "windows/Win32_Graphics_Direct3D", "windows/Win32_Graphics_Direct3D11", "windows/Win32_Security"]
 
 [dependencies]
-hypher = { version = "0.1.8", optional = true }
-smallvec = "1.16"
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
+# Text shaping and measuring (text.rs, prepared.rs, the font cache), apart
+# so a host with no renderer can link them alone.
+zgx-text = { path = "../zgx-text", version = "0.1.10" }
 # wgpu's defaults less WebGPU (the browser's), and Vulkan and GL, which only
 # Linux and its kind always build (below).
 wgpu = { version = "29.0.4", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "wgsl"] }
@@ -79,11 +81,6 @@ libc = "0.2"
 
 [target.'cfg(not(any(windows, target_vendor = "apple")))'.dependencies]
 wgpu = { version = "29.0.4", default-features = false, features = ["vulkan"] }
-
-# fontconfig's configuration, read as fontdb reads it, for what the system
-# font cache watches (font_cache.rs); fontdb's own, already in the tree.
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
-fontconfig-parser = { version = "0.5.8", default-features = false }
 
 # DXGI frame statistics for ZGX_PRESENT_LOG (dxgi.rs); the version wgpu-hal uses.
 [target.'cfg(windows)'.dependencies]
@@ -165,6 +162,11 @@ required-features = ["png", "jpeg"]
 [[test]]
 name = "svg"
 required-features = ["svg"]
+
+# `canvas::png`'s encoder.
+[[test]]
+name = "canvas_picture"
+required-features = ["png"]
 
 # Runs itself again with `ZGX_D3D11=1` (read once a process) and compares.
 [[test]]

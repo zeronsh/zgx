@@ -29,7 +29,7 @@ zgx-gpu	0	40	<impl in crates/zgx-gpu/src/lib.rs>::encode_draws
 zgx-gpu	0	47	<impl in crates/zgx-gpu/src/lib.rs>::batches
 zgx-gpu	57	1469	<impl in crates/zgx-gpu/src/lib.rs>::batches_of
 zgx-gpu	108	1006	<impl in crates/zgx-gpu/src/lib.rs>::flush_pending
-zgx-gpu	447	4730	effects::<impl in crates/zgx-gpu/src/effects.rs>::prepare_effects
+zgx-gpu	380	4467	effects::<impl in crates/zgx-gpu/src/effects.rs>::prepare_effects
 zgx-gpu	159	1785	effects::<impl in crates/zgx-gpu/src/effects.rs>::encode_effects
 zgx-gpu	166	1237	upload::<impl in crates/zgx-gpu/src/upload.rs>::encode
 zgx-gpu	132	1133	passes::<impl in crates/zgx-gpu/src/passes.rs>::prepare_inputs
@@ -37,10 +37,10 @@ zgx-script	1533	13054	kind_view
 zgx-script	310	2303	kind_view::{closure#27}::{closure#0}
 zgx-script	553	8910	lower::apply
 zgx-script	352	3238	lower_list
-zgx-script	467	4011	lower_item_list
+zgx-script	467	4017	lower_item_list
 zgx-script	339	3739	lower_rich::{closure#1}::{closure#0}
 zgx-script	261	3001	to_lua
 zgx-script	171	1428	value::<impl in crates/zgx-script/src/value.rs>::reconcile
 zgx-script	166	1211	<impl in crates/zgx-script/src/lib.rs>::set_state
 zgx-script	105	1230	element::<impl in crates/zgx-script/src/element.rs>::flush
-zgx-script	325	2141	engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush
+zgx-script	325	2141	anime::engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush

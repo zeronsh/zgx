@@ -6,13 +6,15 @@ use cosmic_text::{Buffer, CacheKey, FontSystem, Metrics, SwashCache, SwashConten
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 use zgx::scene::{Color, NodeId, NodeKind, Rect, Scene};
+// Text shaping and measuring, in a crate of their own (zgx-text) that a host
+// with no renderer links alone; here as they always were.
+pub use zgx_text::{TextServices, measure_text, prepared, text};
+use zgx_text::{default_text_services, font_cache, install_text};
 
 mod bands;
 mod compile;
 #[cfg(all(windows, feature = "composition"))]
 mod composition;
-#[cfg(target_os = "macos")]
-mod core_text_glyphs;
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(target_os = "linux")]
@@ -24,7 +26,6 @@ mod dxgi;
 #[cfg(windows)]
 mod dxgi_present;
 mod effects;
-mod font_cache;
 #[cfg(windows)]
 mod fxc_child;
 #[cfg(target_os = "macos")]
@@ -36,7 +37,7 @@ mod view_host;
 mod warm;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
-pub use core_text_glyphs::core_text_glyph;
+pub use zgx_text::core_text_glyph;
 #[cfg(target_os = "macos")]
 mod layer_present;
 #[cfg(target_os = "macos")]
@@ -92,12 +93,12 @@ mod upload;
 pub use passes::check as check_layer_inputs;
 pub mod viewport;
 pub use compile::warm_fill_shader;
-pub use font_cache::set_desktop_sans_serif;
 pub use surface::PresentationStatus;
 /// The wgpu this renderer draws with, for GPU views (`viewport`): an app
 /// drawing one uses it, not a wgpu of its own, whose types would not be
 /// these. A new major version of wgpu is a new major version of zgx-gpu.
 pub use wgpu;
+pub use zgx_text::set_desktop_sans_serif;
 
 /// The corner radius of find's marks behind text.
 const MARK_RADIUS: f32 = 2.;
@@ -261,6 +262,57 @@ const VERTEX_BUDGET: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 16_384;
 /// The bytes images' own textures may hold (`upload_image`).
 const IMAGE_TEXTURES: usize = 64 * 1024 * 1024;
+/// The canvas tile atlas's entry in `GpuRenderer::images` (`TileAtlas`).
+const TILE_ATLAS: u64 = u64::MAX - 1;
+/// The tile atlas's slots a side.
+const ATLAS_SLOTS: u32 = 14;
+/// A slot's side: a tile and a texel of its edge about it, so a tile
+/// sampled at its edge takes nothing of its neighbour's.
+const ATLAS_SLOT: u32 = canvas::TILE_SIZE.0 + 2;
+/// Canvas tiles' textures as slots of one texture: a frame's new tiles are
+/// one upload (a pass, on unified memory) and its tiles one bind group, where
+/// a texture a tile costs an upload pass and a bind group each.
+struct TileAtlas {
+    texture: wgpu::Texture,
+    /// Each tile's slot, by image.
+    slots: FxHashMap<u64, u16>,
+    /// Slots free, each with the frame it was let go: written again once no
+    /// frame in flight may still sample it.
+    free: std::collections::VecDeque<(u64, u16)>,
+}
+/// `image`'s pixels in an atlas slot: its edge texels repeated about it,
+/// premultiplied.
+fn atlas_texels(image: &zgx::image::ImageData) -> Vec<u8> {
+    let (tile, slot) = (canvas::TILE_SIZE.0 as usize, ATLAS_SLOT as usize);
+    let pixels = image.pixels();
+    let mut out = vec![0u8; slot * slot * 4];
+    for (y, line) in out.chunks_exact_mut(slot * 4).enumerate() {
+        let from = y.saturating_sub(1).min(tile - 1);
+        let row = &pixels[from * tile * 4..(from + 1) * tile * 4];
+        line[4..4 + tile * 4].copy_from_slice(row);
+        line[..4].copy_from_slice(&row[..4]);
+        line[(slot - 1) * 4..].copy_from_slice(&row[(tile - 1) * 4..]);
+    }
+    if !image.is_premultiplied() {
+        premultiply(&mut out);
+    }
+    out
+}
+/// Where `uv` (of a tile, 0 to 1) lies in the tile atlas, in `slot`.
+fn atlas_uv(slot: u16, uv: [f32; 4]) -> [f32; 4] {
+    let side = (ATLAS_SLOT * ATLAS_SLOTS) as f32;
+    let tile = canvas::TILE_SIZE.0 as f32;
+    let (x, y) = (
+        (slot as u32 % ATLAS_SLOTS * ATLAS_SLOT + 1) as f32,
+        (slot as u32 / ATLAS_SLOTS * ATLAS_SLOT + 1) as f32,
+    );
+    [
+        (x + uv[0] * tile) / side,
+        (y + uv[1] * tile) / side,
+        uv[2] * tile / side,
+        uv[3] * tile / side,
+    ]
+}
 /// What textures of images no node shows may hold until the window goes idle:
 /// a few windows' worth of pictures to scroll back to.
 const IMAGES_GONE_BYTES: usize = 32 * 1024 * 1024;
@@ -3983,15 +4035,6 @@ fn quad_rect(quad: &Quad) -> Rect {
     let [tx, ty, ..] = quad.border;
     zgx::affine::Affine { a, b, c, d, tx, ty }.bounds(rect)
 }
-/// Shapes using exactly the same font selection and line metrics as the renderer.
-pub fn measure_text(
-    fonts: &mut FontSystem,
-    text: &str,
-    size: f32,
-    width: Option<f32>,
-) -> (f32, f32) {
-    text::ShapedText::new(fonts, text, size, width).size()
-}
 /// The GPU an interface draws on: the integrated one of a machine with two,
 /// which keeps a laptop's discrete GPU asleep. On Linux, where the display
 /// server says which GPU it composites with, that one (display_gpu.rs).
@@ -4325,6 +4368,9 @@ struct GpuContextInner {
     queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
     fonts: Rc<RefCell<FontSystem>>,
+    /// The fonts given it (`add_font`, `replace_font`), for canvases that
+    /// draw their text into their raster on the CPU (`Canvas::raster_text`).
+    canvas_fonts: canvas::CanvasFonts,
     /// Shaped text shared by layout measurement and every renderer.
     text_cache: Rc<RefCell<prepared::TextCache>>,
     /// `fonts` and `text_cache` as text services a scene with none takes
@@ -4709,6 +4755,7 @@ impl GpuContext {
                     queue,
                     info,
                     fonts,
+                    canvas_fonts: Default::default(),
                     text_cache,
                     quads,
                     texture_layout,
@@ -4764,6 +4811,17 @@ impl GpuContext {
     /// `Scene::fonts_replaced`.
     pub fn replace_font(&self, font: &crate::text::FontData) {
         font.replace_in(&mut self.inner.fonts.borrow_mut());
+        self.inner.canvas_fonts.add(font, true);
+        self.inner.text_cache.borrow_mut().clear();
+    }
+    /// Shape text with `font` too, beside the faces its families have
+    /// (`FontData::install`), and forget the text shaped before: a family
+    /// that fell back shapes in it now. Then as after `replace_font`.
+    pub fn add_font(&self, font: &crate::text::FontData) {
+        let mut fonts = self.inner.fonts.borrow_mut();
+        font.install(&mut fonts);
+        fonts.shape_run_cache.clear();
+        self.inner.canvas_fonts.add(font, false);
         self.inner.text_cache.borrow_mut().clear();
     }
     /// Shape text as in `language` from now on (`None`: the system's), its
@@ -5053,6 +5111,11 @@ pub struct GpuRenderer {
     /// Image textures: each bound for the quads, its size in bytes, and,
     /// where the CPU wrote its texels, the texture (see `render_direct`).
     images: FxHashMap<u64, ImageTexture>,
+    /// Canvas tiles' textures, made at the first (`atlas_tile`).
+    tile_atlas: Option<TileAtlas>,
+    /// The tiles of the canvas being drawn: each's image, and where its
+    /// quads end (`canvas_tiles`).
+    tile_runs: Vec<(u64, u32)>,
     /// A frame went without a kept file's pixels, decoding, or a shader
     /// fill's pipeline, compiling (`take_images_awaited`).
     images_awaited: bool,
@@ -5861,6 +5924,8 @@ impl GpuRenderer {
             blurred: None,
             background: Color(0, 0, 0, 0),
             images: FxHashMap::default(),
+            tile_atlas: None,
+            tile_runs: Vec::new(),
             images_awaited: false,
             layer_incomplete: false,
             layer_glyph_too_large: (0., false),
@@ -7247,6 +7312,7 @@ impl GpuRenderer {
         let images = &self.images;
         self.ramps
             .retain(|key, ramp| shown.contains(key) || images.contains_key(&ramp.id()));
+        self.retire_canvas_images();
         // Pixelated images' bind groups go with their textures; with the last, all.
         if let Some(nearest) = &mut self.nearest {
             nearest.binds.retain(|id, _| self.images.contains_key(id));
@@ -7303,6 +7369,7 @@ impl GpuRenderer {
         );
         others.extend(self.svgs.image_ids());
         others.insert(effects::EFFECT_ATLAS);
+        others.insert(TILE_ATLAS);
         others.extend(
             self.layers
                 .keys()
@@ -8315,6 +8382,13 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn debug_wait_for_shaders(&mut self) {
         self.debug_waits_for_shaders = true;
+    }
+    /// Have this offscreen renderer's frames go on without what is made off
+    /// them (a shader compiling, a new zoom's canvas raster), as a window's
+    /// do: a test of what they show meanwhile.
+    #[doc(hidden)]
+    pub fn debug_go_without(&mut self) {
+        self.offscreen_waits = false;
     }
     /// Whether `shader`'s fill can draw: its pipeline compiled, else started
     /// compiling if new (`start_fill`). A window's frame goes on without
@@ -10038,6 +10112,9 @@ impl GpuRenderer {
                 // A gradient text in its own layer: its gradient's image, where
                 // its glyphs start and its selected glyphs (`gradient_text_quads`).
                 let mut gradient_text: Option<(u64, usize, Vec<Quad>)> = None;
+                // A canvas drawn in tiles: each tile's image and where its
+                // quads end (`canvas_tiles`, in `tile_runs`).
+                let mut canvas_tiled = false;
                 match item.kind {
                     NodeKind::Canvas(canvas) => {
                         if bounds.width <= 0. || bounds.height <= 0. {
@@ -10082,25 +10159,54 @@ impl GpuRenderer {
                             }
                             canvas_clip = Some(bounds);
                             stats.canvas_quads += quads.len() - start as usize;
+                        } else if self.canvases.tiled(item.id) {
+                            self.canvas_tiles(&item, canvas, view, &mut quads, &mut stats)?;
+                            canvas_tiled = true;
                         } else {
                             let before = self.canvases.rasterizations();
                             let (width, height, scale) = (bounds.width, bounds.height, self.scale);
+                            // Drawn to be panned: where the view puts it. A
+                            // new zoom's raster is made off a window's frame
+                            // (the zoom before's scaled meanwhile).
+                            let wait = self.waits_for_shaders();
+                            let mut placed = None;
+                            let fonts = self.context.inner.canvas_fonts.clone();
                             let id = self.canvas_texture(item.id, &mut stats, |cache| {
-                                cache.get_viewed(item.id, canvas, view, width, height, scale)
+                                cache.set_fonts(&fonts);
+                                let (raster, placement) = cache.get_panned(
+                                    item.id, canvas, view, width, height, scale, wait,
+                                )?;
+                                placed = Some(placement);
+                                Ok(raster)
                             })?;
                             stats.canvas_rasterizations +=
                                 (self.canvases.rasterizations() - before) as usize;
-                            canvas_image = Some(id);
-                            quads.push(Quad {
-                                rect: fade,
-                                uv: [0., 0., 1., 1.],
-                                color: [1., 1., 1., item.effects.opacity],
-                                fade,
-                                options: [item.effects.edge_fade, 2., 0., 0.],
-                                shape: [0.; 4],
-                                border: [0.; 4],
-                                mask: NO_MASK,
-                            });
+                            let canvas::Placement { rect, uv, scaled } = placed.expect("placed");
+                            // Drawn again once that raster is made.
+                            self.images_awaited |= scaled;
+                            if rect[2] > 0. && rect[3] > 0. {
+                                canvas_image = Some(id);
+                                quads.push(Quad {
+                                    rect: [
+                                        bounds.x + rect[0],
+                                        bounds.y + rect[1],
+                                        rect[2],
+                                        rect[3],
+                                    ],
+                                    uv,
+                                    color: [1., 1., 1., item.effects.opacity],
+                                    fade,
+                                    options: [item.effects.edge_fade, 2., 0., 0.],
+                                    shape: [0.; 4],
+                                    border: [0.; 4],
+                                    mask: NO_MASK,
+                                });
+                            }
+                            // Panned past its raster or zoomed: in tiles now.
+                            if self.canvases.tiled(item.id) {
+                                self.canvas_tiles(&item, canvas, view, &mut quads, &mut stats)?;
+                                canvas_tiled = true;
+                            }
                         }
                     }
                     NodeKind::Rect(color) => quads.push(rect_quad(*color, fade, item.effects)),
@@ -11319,6 +11425,10 @@ impl GpuRenderer {
                     };
                     if let Some((image, runs)) = filled_runs {
                         push_gradient_text(&mut draws, &quads, &draw, runs, image);
+                        continue;
+                    }
+                    if canvas_tiled && !self.tile_runs.is_empty() {
+                        self.push_tile_draws(&mut draws, &quads, &draw, scene, item.id);
                         continue;
                     }
                     let split = self.split_shading;
@@ -14563,6 +14673,195 @@ impl GpuRenderer {
         self.retire_node_image(node, image.id());
         Ok(self.ensure_image(image, None, stats)?.then(|| image.id()))
     }
+    /// A canvas drawn in tiles (`canvas_tiles`): a draw a tile, each of its
+    /// own image, as `draw` would be. Out of line, as `canvas_tiles`.
+    #[cold]
+    #[inline(never)]
+    fn push_tile_draws(
+        &mut self,
+        draws: &mut Vec<Draw>,
+        quads: &[Quad],
+        draw: &Draw,
+        scene: &Scene,
+        node: NodeId,
+    ) {
+        let runs = std::mem::take(&mut self.tile_runs);
+        let mut at = draw.start;
+        for (i, &(image, end)) in runs.iter().enumerate() {
+            // Tiles in the atlas, one after another: one draw.
+            if runs.get(i + 1).is_some_and(|next| next.0 == image) {
+                continue;
+            }
+            let source = self.image_source(scene, node, image);
+            let tile = Draw {
+                start: at,
+                end,
+                bounds: quad_bounds(&quads[at as usize..end as usize]),
+                source,
+                ..draw.clone()
+            };
+            let (split, scale) = (self.split_shading, self.scale);
+            push_draw(draws, quads, tile, split, false, scale, None);
+            at = end;
+        }
+        self.tile_runs = runs;
+    }
+    /// `item`'s canvas drawn in tiles (`CanvasCache::get_tiles`): their
+    /// quads pushed, each tile's texture uploaded if new; each tile's image
+    /// and where its quads end into `tile_runs`. Out of line: canvases not
+    /// panned or zoomed never come here.
+    #[cold]
+    #[inline(never)]
+    fn canvas_tiles(
+        &mut self,
+        item: &zgx::scene::PaintItem<'_>,
+        canvas: &Arc<zgx::canvas::Canvas>,
+        view: zgx::scene::CanvasView,
+        quads: &mut Vec<Quad>,
+        stats: &mut GpuStats,
+    ) -> Result<(), GpuError> {
+        // Its raster's texture, if it had one, is not drawn now (but as its
+        // tiles' stand-in, which the cache retires).
+        if let Some(old) = self.node_images.remove(&item.id)
+            && !self.canvases.stands_in(item.id, old)
+        {
+            self.images.remove(&old);
+        }
+        let fonts = self.context.inner.canvas_fonts.clone();
+        self.canvases.set_fonts(&fonts);
+        let wait = self.waits_for_shaders();
+        let bounds = item.bounds;
+        let before = self.canvases.rasterizations();
+        let mut shown = Vec::new();
+        let awaiting = self.canvases.get_tiles(
+            item.id,
+            canvas,
+            view,
+            bounds.width,
+            bounds.height,
+            self.scale,
+            wait,
+            self.image_frame,
+            &mut shown,
+        )?;
+        stats.canvas_rasterizations += (self.canvases.rasterizations() - before) as usize;
+        // Drawn again as tiles land.
+        self.images_awaited |= awaiting;
+        self.retire_canvas_images();
+        let mut runs = std::mem::take(&mut self.tile_runs);
+        runs.clear();
+        // The atlas, if anything else let it go: its tiles upload again.
+        if self.tile_atlas.is_some() && !self.images.contains_key(&TILE_ATLAS) {
+            self.tile_atlas = None;
+        }
+        for (raster, placement) in shown {
+            let mut slot =
+                (self.tile_atlas.as_ref()).and_then(|a| a.slots.get(&raster.id).copied());
+            if slot.is_none() && !self.images.contains_key(&raster.id) {
+                // A stand-in whose texture went (past the images' budget).
+                let Some(pixels) = raster.pixels else {
+                    self.canvases.stand_in_lost(item.id);
+                    continue;
+                };
+                let began = std::time::Instant::now();
+                slot = self.atlas_tile(&pixels);
+                // (The atlas full: a texture of its own.)
+                if slot.is_none() {
+                    self.upload_image(&pixels)?;
+                }
+                self.canvases
+                    .tile_uploaded(self.image_frame, began.elapsed());
+                stats.image_uploads += 1;
+            }
+            let canvas::Placement { rect, uv, .. } = placement;
+            // (Uploaded ahead of being shown: a backdrop's piece.)
+            if rect[2] <= 0. || rect[3] <= 0. {
+                continue;
+            }
+            let (image, uv) = match slot {
+                Some(slot) => (TILE_ATLAS, atlas_uv(slot, uv)),
+                None => (raster.id, uv),
+            };
+            quads.push(Quad {
+                rect: [bounds.x + rect[0], bounds.y + rect[1], rect[2], rect[3]],
+                uv,
+                color: [1., 1., 1., item.effects.opacity],
+                fade: [bounds.x, bounds.y, bounds.width, bounds.height],
+                options: [item.effects.edge_fade, 2., 0., 0.],
+                shape: [0.; 4],
+                border: [0.; 4],
+                mask: NO_MASK,
+            });
+            runs.push((image, quads.len() as u32));
+        }
+        self.tile_runs = runs;
+        Ok(())
+    }
+    /// `image`, a tile, written into a free slot of the tile atlas (made at
+    /// the first): its slot, or `None` if none is free now.
+    fn atlas_tile(&mut self, image: &zgx::image::ImageData) -> Option<u16> {
+        if (image.width(), image.height()) != canvas::TILE_SIZE
+            || image.gpu_frame().is_some()
+            || image.keeps_file()
+        {
+            return None;
+        }
+        let frame = self.image_frame;
+        if self.tile_atlas.is_none() {
+            let side = ATLAS_SLOT * ATLAS_SLOTS;
+            if side > self.device.limits().max_texture_dimension_2d {
+                return None;
+            }
+            let texture = sampled_texture(&self.device, self.unified, side, side, "canvas tiles");
+            let bind = self.texture_bind(&texture.create_view(&Default::default()), "canvas tiles");
+            self.images
+                .insert(TILE_ATLAS, (bind, 0, Some(texture.clone()), (0, 0)));
+            self.tile_atlas = Some(TileAtlas {
+                texture,
+                slots: FxHashMap::default(),
+                free: (0..ATLAS_SLOTS * ATLAS_SLOTS)
+                    .map(|slot| (0, slot as u16))
+                    .collect(),
+            });
+        }
+        let atlas = self.tile_atlas.as_mut().expect("made");
+        let &(at, slot) = atlas.free.front()?;
+        if at > 0 && frame < at + 3 {
+            return None;
+        }
+        atlas.free.pop_front();
+        atlas.slots.insert(image.id(), slot);
+        let texture = atlas.texture.clone();
+        let mut texels = atlas_texels(image);
+        let (x, y) = (
+            slot as u32 % ATLAS_SLOTS * ATLAS_SLOT,
+            slot as u32 / ATLAS_SLOTS * ATLAS_SLOT,
+        );
+        self.write_texels(&texture, (x, y, ATLAS_SLOT, ATLAS_SLOT), &mut texels);
+        Some(slot)
+    }
+    /// The textures of images the canvas cache no longer draws go: a tile's
+    /// slot of the atlas is free again.
+    fn retire_canvas_images(&mut self) {
+        for id in self.canvases.take_retired() {
+            if let Some(atlas) = &mut self.tile_atlas
+                && let Some(slot) = atlas.slots.remove(&id)
+            {
+                atlas.free.push_back((self.image_frame, slot));
+                continue;
+            }
+            if self.images.remove(&id).is_some() {
+                self.image_drawn.remove(&id);
+                self.image_holders.remove(&id);
+            }
+        }
+        // (Kept while tiles are in it, the window at rest too: a texture of
+        // tiles shown again, not uploaded again past the frame's budget.)
+        if self.tile_atlas.as_ref().is_some_and(|a| a.slots.is_empty()) {
+            self.tile_atlas = None;
+            self.images.remove(&TILE_ATLAS);
+        }
+    }
     /// The texture of `node`'s canvas raster, uploaded if it is new; the
     /// cache then keeps no pixels. A lost texture rasterizes again.
     fn canvas_texture(
@@ -14857,6 +15156,7 @@ impl GpuRenderer {
                 .map(|ramp| ramp.id()),
         );
         showing.insert(effects::EFFECT_ATLAS);
+        showing.insert(TILE_ATLAS);
         showing.extend(
             self.layers
                 .keys()
@@ -19283,7 +19583,7 @@ fn area_quad(
                 Some(stops),
             )
         }
-        Brush::Slash { .. } => return None,
+        Brush::Radial { .. } | Brush::Conic { .. } | Brush::Slash { .. } => return None,
     };
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for [x, y] in top.iter().chain(&bottom) {
@@ -19344,6 +19644,10 @@ fn canvas_quads(
     areas: bool,
     points: &mut Vec<[f32; 2]>,
 ) -> Option<Vec<CanvasQuad>> {
+    // Its text drawn into its raster: rasterized, words and all.
+    if canvas.rasters_text() && !canvas.texts().is_empty() {
+        return None;
+    }
     let mark = points.len();
     let quads = canvas_quads_of(canvas, origin, view, areas, points);
     if quads.is_none() {
@@ -20620,51 +20924,6 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
     regions
 }
 
-/// Text shaping and measurement without a GPU: what a renderer installs on
-/// a scene (`GpuRenderer::install_text`), for laying out what is never drawn
-/// (measuring a scene's update, layout and damage work on its own).
-pub struct TextServices {
-    fonts: Rc<RefCell<FontSystem>>,
-    cache: Rc<RefCell<prepared::TextCache>>,
-}
-impl Default for TextServices {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl TextServices {
-    /// The system's fonts (from the font cache) and an empty text cache.
-    pub fn new() -> Self {
-        Self {
-            fonts: Rc::new(RefCell::new(font_cache::system_fonts())),
-            cache: Default::default(),
-        }
-    }
-    /// The font system it shapes and measures text with (a renderer's
-    /// `text_system`): register bundled fonts here.
-    pub fn text_system(&self) -> Rc<RefCell<FontSystem>> {
-        self.fonts.clone()
-    }
-    /// The text it has prepared (a renderer's `text_cache`).
-    pub fn text_cache(&self) -> Rc<RefCell<prepared::TextCache>> {
-        self.cache.clone()
-    }
-    /// Shape and measure `scene`'s text with these, as a renderer would.
-    /// With no renderer to trim the words it shapes as it draws, the text
-    /// cache sweeps them as they grow (`TextCache`); what it holds prepared
-    /// stays until [`TextServices::release_unused`] or its budget.
-    pub fn install(&self, scene: &mut Scene) {
-        install_text(scene, &self.fonts, &self.cache);
-    }
-    /// Let go of all the text it holds prepared and every word it shaped:
-    /// a headless host returns to its baseline at once (after a batch).
-    /// Text still shown is shaped again when it is next laid out.
-    pub fn release_unused(&self) {
-        self.cache.borrow_mut().clear();
-        self.fonts.borrow_mut().shape_run_cache.clear();
-    }
-}
-
 /// `plain_glyph_places`: each glyph's key and pen position, the
 /// underlines' boxes, and the prepared text's key (for `trim_text`).
 #[doc(hidden)]
@@ -20742,117 +21001,7 @@ pub fn glyph_coverage(a: f32, color: Color, scale: f32) -> f32 {
     a + k * 0.67 * a * (1. - a)
 }
 
-/// `fonts` and `cache` as text services a scene whose host installed none
-/// takes (`Scene::set_default_text_services`): a renderer's, so a scene it
-/// draws without `install_text` is measured as it is drawn, not by zgx's
-/// estimate (a row's label narrower than its glyphs, its last one cut).
-/// Held weakly: once they go, scenes keep what they have.
-fn default_text_services(
-    fonts: &Rc<RefCell<FontSystem>>,
-    cache: &Rc<RefCell<prepared::TextCache>>,
-) -> Rc<zgx::scene::DefaultTextServices> {
-    let (fonts, cache) = (Rc::downgrade(fonts), Rc::downgrade(cache));
-    Rc::new(move |scene: &mut Scene| {
-        let (Some(fonts), Some(cache)) = (fonts.upgrade(), cache.upgrade()) else {
-            return false;
-        };
-        install_text(scene, &fonts, &cache);
-        true
-    })
-}
-/// Install text services sharing `shared_fonts` and `shared_cache` on `scene`.
-fn install_text(
-    scene: &mut Scene,
-    shared_fonts: &Rc<RefCell<FontSystem>>,
-    shared_cache: &Rc<RefCell<prepared::TextCache>>,
-) {
-    let fonts = shared_fonts.clone();
-    scene.set_text_measurer(move |text: &str, size: f32, max: Option<f32>| {
-        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-        crate::measure_text(&mut fonts.borrow_mut(), text, size, max)
-    });
-    let fonts = shared_fonts.clone();
-    scene.set_font_text_shaper(
-        move |text: &str,
-              size: f32,
-              width: Option<f32>,
-              font: &zgx::text_layout::FontStyle|
-              -> Box<dyn zgx::text_layout::TextLayout> {
-            let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-            Box::new(crate::text::ShapedText::with_font(
-                &mut fonts.borrow_mut(),
-                text,
-                size,
-                width,
-                font,
-            ))
-        },
-    );
-    let fonts = shared_fonts.clone();
-    scene.set_rich_text_shaper(move |rich, width| {
-        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-        Box::new(crate::text::ShapedText::with_runs(
-            &mut fonts.borrow_mut(),
-            rich,
-            width,
-        ))
-    });
-    // Prepared text: shaped once, then measured at any width by line
-    // breaking alone; the renderer draws from the same lines.
-    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
-    scene.set_rich_text_measurer(move |rich, width| {
-        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-        cache
-            .borrow_mut()
-            .measure(&mut fonts.borrow_mut(), rich, width)
-    });
-    // Plain text nodes, from the same prepared text.
-    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
-    scene.set_font_text_measurer(move |text, size, width, font| {
-        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-        cache
-            .borrow_mut()
-            .measure_plain(&mut fonts.borrow_mut(), text, size, font, width)
-    });
-    // Wrapping plain text, with the widths its lines break the same at: a
-    // window resized a few points serves them without breaking them again.
-    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
-    scene.set_font_text_reach_measurer(move |text, size, width, font| {
-        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-        cache
-            .borrow_mut()
-            .measure_plain_reach(&mut fonts.borrow_mut(), text, size, font, width)
-    });
-    // Plain text's min-content size, from the words it was shaped into.
-    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
-    scene.set_font_min_content_measurer(move |text, size, font| {
-        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-        cache
-            .borrow_mut()
-            .min_content_plain(&mut fonts.borrow_mut(), text, size, font)
-    });
-    // Rich text's, likewise.
-    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
-    scene.set_rich_min_content_measurer(move |rich| {
-        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-        cache
-            .borrow_mut()
-            .min_content(&mut fonts.borrow_mut(), rich)
-    });
-    // Apps measuring what they have not mounted keep no glyphs for it.
-    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
-    scene.set_detached_rich_text_measurer(move |rich, width| {
-        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
-        cache
-            .borrow_mut()
-            .measure_detached(&mut fonts.borrow_mut(), rich, width)
-    });
-}
-
 pub mod assets;
-
-pub mod prepared;
-pub mod text;
 
 fn create_quad_pipelines(
     device: &wgpu::Device,
@@ -21146,6 +21295,55 @@ mod raster_step_tests {
     }
 }
 
+#[cfg(test)]
+mod tile_atlas_tests {
+    use super::{ATLAS_SLOT, ATLAS_SLOTS, atlas_texels, atlas_uv, canvas};
+    #[test]
+    fn a_tile_in_its_slot_has_its_edge_texels_about_it() {
+        let side = canvas::TILE_SIZE.0 as usize;
+        let mut pixels = vec![0u8; side * side * 4];
+        for y in 0..side {
+            for x in 0..side {
+                let i = (y * side + x) * 4;
+                pixels[i..i + 4].copy_from_slice(&[x as u8, y as u8, 7, 255]);
+            }
+        }
+        let image = zgx::image::ImageData::new(side as u32, side as u32, pixels).unwrap();
+        let texels = atlas_texels(&image);
+        let slot = ATLAS_SLOT as usize;
+        assert_eq!(texels.len(), slot * slot * 4);
+        let at = |x: usize, y: usize| &texels[(y * slot + x) * 4..(y * slot + x) * 4 + 4];
+        // Inside: the tile, a texel in.
+        assert_eq!(at(1, 1), &[0, 0, 7, 255]);
+        assert_eq!(at(slot - 2, slot - 2), &[255, 255, 7, 255]);
+        assert_eq!(at(100, 50), &[99, 49, 7, 255]);
+        // About it: its edge again (sampled at its edge, nothing of another's).
+        assert_eq!(at(0, 0), &[0, 0, 7, 255]);
+        assert_eq!(at(slot - 1, 30), &[255, 29, 7, 255]);
+        assert_eq!(at(40, slot - 1), &[39, 255, 7, 255]);
+    }
+    #[test]
+    fn a_tiles_uv_is_its_slots_part_of_the_atlas() {
+        let side = (ATLAS_SLOT * ATLAS_SLOTS) as f32;
+        let tile = canvas::TILE_SIZE.0 as f32;
+        // The first slot, whole: a texel in from the corner.
+        let uv = atlas_uv(0, [0., 0., 1., 1.]);
+        assert_eq!(uv, [1. / side, 1. / side, tile / side, tile / side]);
+        // The next row's second, its right half.
+        let slot = ATLAS_SLOTS as u16 + 1;
+        let uv = atlas_uv(slot, [0.5, 0., 0.5, 1.]);
+        let (x, y) = ((ATLAS_SLOT + 1) as f32, (ATLAS_SLOT + 1) as f32);
+        assert_eq!(
+            uv,
+            [
+                (x + tile / 2.) / side,
+                y / side,
+                tile / 2. / side,
+                tile / side
+            ]
+        );
+    }
+}
 #[cfg(test)]
 mod dx12_fill_pin {
     /// A wgpu update fails this until `dx12_fill::options`' register map is

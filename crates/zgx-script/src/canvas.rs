@@ -7,13 +7,15 @@ use crate::node::parse_color;
 use mlua::{Lua, Table, UserData, UserDataMethods};
 use std::{cell::RefCell, rc::Rc};
 use zgx::canvas::{CanvasText, TextAnchor, TextBaseline};
-use zgx::text_layout::{FontFamily, FontFeatures, FontStyle};
+use zgx::text_layout::{FontFamily, FontFeatures, FontStyle, LetterSpacing, LineHeight, TextAlign};
 use zgx::theme::ThemeScope;
 use zgx::{
+    affine::Affine,
     canvas::{
         Brush, Canvas, FillRule, GradientStop, LineCap, LineJoin, Path, PathBuilder, Point, Stroke,
     },
     scene::Color,
+    style::ObjectFit,
 };
 
 /// The canvas a draw function records into.
@@ -117,7 +119,7 @@ impl UserData for PathUd {
     }
 }
 
-/// `ui.linear(x1, y1, x2, y2, stops)`: a gradient brush for canvases.
+/// `ui.linear`, `ui.radial` or `ui.conic`: a gradient brush for canvases.
 #[derive(Clone)]
 pub(crate) struct BrushUd(pub Brush);
 impl UserData for BrushUd {}
@@ -245,6 +247,13 @@ fn text_style(options: Option<&Table>) -> mlua::Result<(f32, FontStyle)> {
     let Some(o) = options else {
         return Ok((TEXT_SIZE, font));
     };
+    // Points, as a text node's.
+    if let Some(line_height) = o.get::<Option<f32>>("line_height")? {
+        font.line_height = LineHeight::px(line_height);
+    }
+    if let Some(spacing) = o.get::<Option<f32>>("letter_spacing")? {
+        font.letter_spacing = LetterSpacing::px(spacing);
+    }
     if let Some(weight) = o.get::<Option<u16>>("weight")? {
         font.weight = weight;
     }
@@ -262,15 +271,55 @@ fn text_style(options: Option<&Table>) -> mlua::Result<(f32, FontStyle)> {
     let size = o.get::<Option<f32>>("size")?.unwrap_or(TEXT_SIZE);
     Ok((size.max(1.), font))
 }
+/// A canvas text's `transform` option, `{ a, b, c, d, e, f }` as SVG's
+/// `matrix` (x' is a x + c y + e, y' is b x + d y + f), mapping the text
+/// once placed: identity without one.
+fn text_transform(options: Option<&Table>) -> mlua::Result<zgx::affine::Affine> {
+    let Some(matrix) = options
+        .map(|o| o.get::<Option<Vec<f32>>>("transform"))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(zgx::affine::Affine::IDENTITY);
+    };
+    let [a, b, c, d, tx, ty] = matrix[..] else {
+        return Err(mlua::Error::runtime(
+            "a canvas text's `transform` is six numbers, { a, b, c, d, e, f }",
+        ));
+    };
+    let transform = zgx::affine::Affine { a, b, c, d, tx, ty };
+    if !transform.is_finite() {
+        return Err(mlua::Error::runtime(
+            "a canvas text's `transform` must be finite",
+        ));
+    }
+    Ok(transform)
+}
 /// A canvas text's size where its options give none: a chart's labels.
 const TEXT_SIZE: f32 = 12.;
+/// The width a canvas text wraps to (`width`), if its options give one.
+fn wrap_width(options: Option<&Table>) -> mlua::Result<Option<f32>> {
+    let Some(width) = options.map_or(Ok(None), |o| o.get::<Option<f32>>("width"))? else {
+        return Ok(None);
+    };
+    if !width.is_finite() || width <= 0. {
+        return Err(mlua::Error::runtime(format!(
+            "a canvas text's `width` is a number of points above 0, not {width}"
+        )));
+    }
+    Ok(Some(width))
+}
+/// A canvas shadow's colour where its options give none: a `shadow`
+/// property's.
+const SHADOW: Color = Color(0, 0, 0, 90);
 
 impl UserData for Recorder {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method(
             "text",
             |_, c, (text, x, y, options): (String, f32, f32, Option<Table>)| {
-                let (size, font) = text_style(options.as_ref())?;
+                let (size, mut font) = text_style(options.as_ref())?;
+                let width = wrap_width(options.as_ref())?;
                 let color = match options
                     .as_ref()
                     .map(|o| o.get::<mlua::Value>("color"))
@@ -302,16 +351,27 @@ impl UserData for Recorder {
                         )));
                     }
                 };
-                c.0.borrow_mut().text(CanvasText {
-                    text: text.into(),
-                    x,
-                    y,
-                    size,
-                    color,
-                    font,
-                    anchor,
-                    baseline,
-                });
+                // Lines of a paragraph align as its box does on `x`.
+                font.align = match anchor {
+                    TextAnchor::Start => TextAlign::Start,
+                    TextAnchor::Center => TextAlign::Center,
+                    TextAnchor::End => TextAlign::End,
+                };
+                let transform = text_transform(options.as_ref())?;
+                c.0.borrow_mut().text_transformed(
+                    CanvasText {
+                        text: text.into(),
+                        x,
+                        y,
+                        size,
+                        color,
+                        font,
+                        anchor,
+                        baseline,
+                        width: width.unwrap_or(f32::INFINITY),
+                    },
+                    transform,
+                );
                 Ok(())
             },
         );
@@ -320,8 +380,9 @@ impl UserData for Recorder {
             "measure_text",
             |_, _, (text, options): (String, Option<Table>)| {
                 let (size, font) = text_style(options.as_ref())?;
+                let wrap = wrap_width(options.as_ref())?;
                 let (width, height) =
-                    zgx::canvas::measure_text(&text, size, &font).unwrap_or((0., 0.));
+                    zgx::canvas::measure_text_in(&text, size, wrap, &font).unwrap_or((0., 0.));
                 Ok((width, height))
             },
         );
@@ -414,6 +475,111 @@ impl UserData for Recorder {
                 Ok(())
             },
         );
+        // A picture from a file, a URL, the host (`host:`) or a `Bitmap`,
+        // fitted to its box as `ui.image` fits one. One not there yet (a
+        // remote one loading) draws nothing, and the drawing follows it.
+        methods.add_method(
+            "image",
+            |lua, c, (src, x, y, w, h, options): (mlua::Value, f32, f32, f32, f32, Option<Table>)| {
+                let image = match &src {
+                    mlua::Value::UserData(ud) if ud.is::<crate::node::BitmapUd>() => {
+                        Some(ud.borrow::<crate::node::BitmapUd>()?.0.clone())
+                    }
+                    mlua::Value::String(src) => {
+                        let env = crate::node::env(lua)?;
+                        match env.vm.upgrade() {
+                            Some(vm) => crate::lower::load_image_in(
+                                &vm,
+                                &env.assets,
+                                &env.runtime,
+                                &src.to_str()?,
+                            ),
+                            None => None,
+                        }
+                    }
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "c:image draws a path or a Bitmap, not {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let Some(image) = image else {
+                    return Ok(());
+                };
+                let get = |key: &str| -> mlua::Result<Option<mlua::Value>> {
+                    options.as_ref().map_or(Ok(None), |o| o.get(key))
+                };
+                let fit = match get("fit")? {
+                    None | Some(mlua::Value::Nil) => ObjectFit::Fill,
+                    Some(mlua::Value::String(fit)) => match &*fit.to_str()? {
+                        "fill" => ObjectFit::Fill,
+                        "contain" => ObjectFit::Contain,
+                        "cover" => ObjectFit::Cover,
+                        "none" => ObjectFit::None,
+                        "scale_down" => ObjectFit::ScaleDown,
+                        other => {
+                            return Err(mlua::Error::runtime(format!(
+                                "a canvas image's `fit` is \"fill\", \"contain\", \"cover\", \"none\" or \"scale_down\", not `{other}`"
+                            )));
+                        }
+                    },
+                    Some(other) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "a canvas image's `fit` is a string, not {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let number = |key: &str, default: f32| -> mlua::Result<f32> {
+                    Ok(options
+                        .as_ref()
+                        .map_or(Ok(None), |o| o.get::<Option<f32>>(key))?
+                        .unwrap_or(default))
+                };
+                let (radius, opacity) = (number("radius", 0.)?, number("opacity", 1.)?);
+                c.0.borrow_mut().image(
+                    image,
+                    zgx::scene::Rect::new(x, y, w, h),
+                    fit,
+                    radius.max(0.),
+                    opacity.clamp(0., 1.),
+                );
+                Ok(())
+            },
+        );
+        // The shadow a path casts, written as a `shadow` property is
+        // (`{ x, y, blur, spread, color }`, CSS's blur): drawn first, under
+        // the shape drawn after it.
+        methods.add_method(
+            "shadow",
+            |_, c, (path, options): (mlua::AnyUserData, Option<Table>)| {
+                let path = path_arg(&path)?;
+                let number = |key: &str| -> mlua::Result<f32> {
+                    Ok(options
+                        .as_ref()
+                        .map_or(Ok(None), |o| o.get::<Option<f32>>(key))?
+                        .unwrap_or(0.))
+                };
+                let color = match options
+                    .as_ref()
+                    .map(|o| o.get::<mlua::Value>("color"))
+                    .transpose()?
+                {
+                    None | Some(mlua::Value::Nil) => SHADOW,
+                    Some(color) => self::color(&color)?,
+                };
+                // CSS's blur is twice the Gaussian's sigma zgx takes.
+                c.0.borrow_mut().shadow(
+                    path,
+                    color,
+                    Point::new(number("x")?, number("y")?),
+                    number("blur")?.max(0.) / 2.,
+                    number("spread")?,
+                );
+                Ok(())
+            },
+        );
         methods.add_method("clip", |_, c, path: mlua::AnyUserData| {
             c.0.borrow_mut().clip(path_arg(&path)?, FillRule::Winding);
             Ok(())
@@ -438,22 +604,440 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.set(
         "linear",
         lua.create_function(|_, (x1, y1, x2, y2, stops): (f32, f32, f32, f32, Table)| {
-            let colors: Vec<mlua::Value> = stops.sequence_values().collect::<mlua::Result<_>>()?;
-            let n = colors.len().max(2) - 1;
-            let stops: Vec<GradientStop> = colors
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    Ok(GradientStop {
-                        offset: i as f32 / n as f32,
-                        color: color(c)?,
-                    })
-                })
-                .collect::<mlua::Result<_>>()?;
-            Brush::linear(Point::new(x1, y1), Point::new(x2, y2), stops)
+            Brush::linear(Point::new(x1, y1), Point::new(x2, y2), even_stops(&stops)?)
                 .map(BrushUd)
                 .map_err(mlua::Error::runtime)
         })?,
     )?;
+    ui.set(
+        "radial",
+        lua.create_function(
+            |_, (cx, cy, r, stops, options): (f32, f32, f32, Table, Option<Table>)| {
+                let ry = match &options {
+                    Some(o) => o.get::<Option<f32>>("ry")?.unwrap_or(r),
+                    None => r,
+                };
+                let placed = Affine::scale(r, ry)
+                    .then(Affine::translation(cx, cy))
+                    .then(gradient_transform(options.as_ref())?);
+                Brush::radial(placed, even_stops(&stops)?)
+                    .map(BrushUd)
+                    .map_err(mlua::Error::runtime)
+            },
+        )?,
+    )?;
+    ui.set(
+        "conic",
+        lua.create_function(
+            |_, (cx, cy, stops, options): (f32, f32, Table, Option<Table>)| {
+                let angle = match &options {
+                    Some(o) => o.get::<Option<f32>>("angle")?.unwrap_or(0.),
+                    None => 0.,
+                };
+                let placed = Affine::rotation(angle.to_radians())
+                    .then(Affine::translation(cx, cy))
+                    .then(gradient_transform(options.as_ref())?);
+                Brush::conic(placed, even_stops(&stops)?)
+                    .map(BrushUd)
+                    .map_err(mlua::Error::runtime)
+            },
+        )?,
+    )?;
+    ui.set("render_canvas", lua.create_function(render_canvas)?)?;
     Ok(())
+}
+
+/// The fonts a render shapes with beside the system's: the app's windows'
+/// (`Platform::fonts`), in their order.
+type Fonts = Vec<std::sync::Arc<[u8]>>;
+/// Whether two font lists are the same files.
+#[cfg(not(target_arch = "wasm32"))]
+fn same_fonts(a: &Fonts, b: &Fonts) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| std::sync::Arc::ptr_eq(a, b))
+}
+/// Each of `fonts` that is a font, installed by `install`.
+#[cfg(not(target_arch = "wasm32"))]
+fn each_font(fonts: &Fonts, mut install: impl FnMut(&zgx_gpu::text::FontData)) {
+    for bytes in fonts {
+        if let Ok(font) = zgx_gpu::text::FontData::new(bytes.clone()) {
+            install(&font);
+        }
+    }
+}
+
+thread_local! {
+    /// What `c:measure_text` measures in while `ui.render_canvas` draws:
+    /// a scene with text services and nothing in it, made again when the
+    /// app's fonts change.
+    #[cfg(not(target_arch = "wasm32"))]
+    static MEASURING: RefCell<Option<(Fonts, Rc<RefCell<zgx::scene::Scene>>)>> =
+        const { RefCell::new(None) };
+}
+/// The scene `ui.render_canvas` measures in with `fonts`.
+#[cfg(not(target_arch = "wasm32"))]
+fn measuring(fonts: &Fonts) -> Rc<RefCell<zgx::scene::Scene>> {
+    MEASURING.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some((had, scene)) = &*slot
+            && same_fonts(had, fonts)
+        {
+            return scene.clone();
+        }
+        let services = zgx_gpu::TextServices::new();
+        each_font(fonts, |font| {
+            font.install(&mut services.text_system().borrow_mut())
+        });
+        let mut scene = zgx::scene::Scene::new(1., 1.);
+        services.install(&mut scene);
+        let scene = Rc::new(RefCell::new(scene));
+        *slot = Some((fonts.clone(), scene.clone()));
+        scene
+    })
+}
+/// No renderer in the browser (wasm32), so no picture is made there: an
+/// empty scene.
+#[cfg(target_arch = "wasm32")]
+fn measuring(_: &Fonts) -> Rc<RefCell<zgx::scene::Scene>> {
+    Rc::new(RefCell::new(zgx::scene::Scene::new(1., 1.)))
+}
+/// The text rasterizer `ui.render_canvas`'s threads share: the system's
+/// fonts and the app's, loaded again when the app's change.
+#[cfg(not(target_arch = "wasm32"))]
+static TEXT: std::sync::Mutex<Option<(Fonts, zgx_gpu::text::CpuTextRaster)>> =
+    std::sync::Mutex::new(None);
+
+/// A drawing recorded on the script's thread, made into a picture file off
+/// it (`ui.render_canvas`, `zip:add_canvas`): no pixels pass through the
+/// script. (In the browser, no picture: its parts go unread.)
+#[cfg_attr(target_arch = "wasm32", expect(dead_code))]
+pub(crate) struct Render {
+    canvas: Canvas,
+    view: zgx::scene::CanvasView,
+    width: f32,
+    height: f32,
+    scale: f32,
+    background: Option<Color>,
+    fonts: Fonts,
+    format: Format,
+}
+
+/// A picture file `Render::make` made: its bytes, and its size in pixels.
+pub(crate) struct Made {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+impl Render {
+    /// `draw(c, width, height)` recorded now, with `options`' `width`,
+    /// `height`, `scale`, `x`, `y`, `background`, `format` and `quality`
+    /// (`ui.render_canvas`'s); `what` names the call in its errors.
+    pub(crate) fn record(
+        lua: &Lua,
+        draw: &mlua::Function,
+        options: &Table,
+        what: &str,
+    ) -> mlua::Result<Self> {
+        let size = |key: &str| -> mlua::Result<f32> {
+            match options.get::<Option<f32>>(key)? {
+                Some(v) if v.is_finite() && v > 0. => Ok(v),
+                _ => Err(mlua::Error::runtime(format!(
+                    "{what}: `{key}` is a size in points, over 0"
+                ))),
+            }
+        };
+        let (width, height) = (size("width")?, size("height")?);
+        let scale = match options.get::<Option<f32>>("scale")? {
+            None => 1.,
+            Some(_) => size("scale")?,
+        };
+        // The file: "png" (the default), "jpeg" (`quality` 1 to 100, 90 unless
+        // said; no transparency, laid over white) or "webp" (lossless).
+        let format = match options.get::<Option<String>>("format")?.as_deref() {
+            None | Some("png") => Format::Png,
+            Some("jpeg" | "jpg") => {
+                let quality = options.get::<Option<f64>>("quality")?.unwrap_or(90.);
+                Format::Jpeg(quality.round().clamp(1., 100.) as u8)
+            }
+            Some("webp") => Format::Webp,
+            Some(other) => {
+                return Err(mlua::Error::runtime(format!(
+                    "{what}: `format` is \"png\", \"jpeg\" or \"webp\", not \"{other}\""
+                )));
+            }
+        };
+        let x = options.get::<Option<f32>>("x")?.unwrap_or(0.);
+        let y = options.get::<Option<f32>>("y")?.unwrap_or(0.);
+        let env = crate::node::env(lua)?;
+        let theme = zgx::theme::Themes::of(&env.runtime).root().clone();
+        // The app's own fonts (bundled, loaded), as its windows shape with.
+        let fonts: Fonts = (env.platform.borrow().as_ref()).map_or_else(Vec::new, |p| p.0.fonts());
+        let recorder = lua.create_userdata(Recorder(Default::default()))?;
+        let background = draw_in(theme, || {
+            let background = match options.get::<mlua::Value>("background")? {
+                mlua::Value::Nil => None,
+                v => Some(self::color(&v)?),
+            };
+            zgx::canvas::drawing_for(&measuring(&fonts), || {
+                draw.call::<()>((&recorder, width, height))
+            })?;
+            mlua::Result::Ok(background)
+        })?;
+        let canvas = recorder.take::<Recorder>()?.0.into_inner();
+        let view = zgx::scene::CanvasView {
+            scale: 1.,
+            x: -x,
+            y: -y,
+        };
+        Ok(Self {
+            canvas,
+            view,
+            width,
+            height,
+            scale,
+            background,
+            fonts,
+            format,
+        })
+    }
+
+    /// The picture made and encoded, here (a thread other than the
+    /// script's): up to `FILE_BUDGET` of pixels for a file (`for_file`),
+    /// the 32 MiB a picture given back to the script may take otherwise.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn make(self, for_file: bool) -> Result<Made, String> {
+        let image = {
+            let mut held = TEXT.lock().unwrap_or_else(|e| e.into_inner());
+            if !held
+                .as_ref()
+                .is_some_and(|(had, _)| same_fonts(had, &self.fonts))
+            {
+                let mut text = zgx_gpu::text::CpuTextRaster::default();
+                each_font(&self.fonts, |font| text.register_font(font));
+                *held = Some((self.fonts, text));
+            }
+            let text = &mut held.as_mut().expect("made just now").1;
+            let (canvas, view, background) = (&self.canvas, self.view, self.background);
+            let (width, height, scale) = (self.width, self.height, self.scale);
+            match for_file {
+                true => zgx_gpu::canvas::picture_up_to(
+                    canvas,
+                    view,
+                    width,
+                    height,
+                    scale,
+                    background,
+                    text,
+                    zgx_gpu::canvas::FILE_BUDGET,
+                ),
+                false => {
+                    zgx_gpu::canvas::picture(canvas, view, width, height, scale, background, text)
+                }
+            }
+            .map_err(|e| e.0)?
+        };
+        let bytes = encode(&image, self.format).map_err(|e| e.0)?;
+        Ok(Made {
+            bytes,
+            width: image.width(),
+            height: image.height(),
+        })
+    }
+    /// No renderer in the browser (wasm32): no picture.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn make(self, _: bool) -> Result<Made, String> {
+        Err("pictures aren't made in the browser yet".into())
+    }
+}
+
+/// What `ui.render_canvas` gives back once its picture is made.
+enum Rendered {
+    /// The file in base64 (no `file`).
+    Given(String),
+    /// Written over `file`.
+    Written,
+    /// Added at the end of `file` (`append`): its bytes and pixels.
+    Appended(u64, u32, u32),
+}
+
+/// `ui.render_canvas(draw, { width, height, scale, x, y, background, format, quality, file, append })`:
+/// a promise of `draw(c, width, height)`'s drawing as a PNG (or a JPEG or
+/// WebP, `format`), in base64. The
+/// drawing is what a `ui.canvas` given that `draw` shows: its shapes and
+/// text in the same layers, clips and transforms, `x`, `y` at the
+/// picture's top left. No window shows
+/// it, so it works with none showing (a plugin's tool, an export). It draws
+/// now; the pixels and the PNG are made on a thread of their own.
+fn render_canvas(
+    lua: &Lua,
+    (draw, options): (mlua::Function, Table),
+) -> mlua::Result<crate::calls::PromiseUd> {
+    let env = crate::node::env(lua)?;
+    // `file`: one the user picked (`ui.save_file`), written with the
+    // picture, made and encoded off the main thread with no pixels through
+    // the script, up to `FILE_BUDGET` (256 MiB of pixels, not the 32 a
+    // picture given back may take). The promise is nil then.
+    let target = match options.get::<mlua::Value>("file")? {
+        mlua::Value::Nil => None,
+        file => {
+            if !env.grants.allows(&crate::Capability::Files) {
+                return Err(crate::io::denied("ui.render_canvas { file }", "Files"));
+            }
+            let path = crate::io::chosen(&env.picked, &file, "ui.render_canvas")?;
+            crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
+            Some(path)
+        }
+    };
+    // `append = true`: the picture's file added at the end of `file`
+    // instead of over it (a PDF's page, written in parts: await each, as
+    // `ui.write_file`'s appends); the promise gives `{ bytes, width,
+    // height }`, what was added and its pixels.
+    let append = options.get::<Option<bool>>("append")?.unwrap_or(false);
+    if append && target.is_none() {
+        return Err(mlua::Error::runtime(
+            "ui.render_canvas: `append` adds the picture to a `file`; give one",
+        ));
+    }
+    let render = Render::record(lua, &draw, &options, "ui.render_canvas")?;
+    let (tell, mut heard) = zgx::task::latest::<Result<Rendered, String>>();
+    let promise = crate::calls::pending(lua, "ui.render_canvas".into())?;
+    let work = move || {
+        let made = render.make(target.is_some());
+        tell.send(made.and_then(|made| match &target {
+            Some(path) if append => {
+                use std::io::Write as _;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut f| f.write_all(&made.bytes))
+                    .map(|()| Rendered::Appended(made.bytes.len() as u64, made.width, made.height))
+                    .map_err(|e| format!("{}: {e}", path.display()))
+            }
+            // Beside it, then over it: never half a file.
+            Some(path) => {
+                let temp = path.with_extension("zgx-write");
+                std::fs::write(&temp, &made.bytes)
+                    .and_then(|()| std::fs::rename(&temp, path))
+                    .map(|()| Rendered::Written)
+                    .map_err(|e| format!("{}: {e}", path.display()))
+            }
+            None => Ok(Rendered::Given(base64(&made.bytes))),
+        }));
+    };
+    // No threads in the browser (wasm32): it runs here, and fails there as
+    // no picture is made.
+    #[cfg(target_arch = "wasm32")]
+    work();
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(work);
+    crate::calls::settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+        match heard.recv().await {
+            Some(Ok(Rendered::Given(file))) => Ok(crate::Value::Str(file.into())),
+            Some(Ok(Rendered::Written)) => Ok(crate::Value::Nil),
+            Some(Ok(Rendered::Appended(bytes, width, height))) => Ok(crate::Value::Map(
+                vec![
+                    (Rc::from("bytes"), crate::Value::Num(bytes as f64)),
+                    (Rc::from("width"), crate::Value::Num(f64::from(width))),
+                    (Rc::from("height"), crate::Value::Num(f64::from(height))),
+                ]
+                .into(),
+            )),
+            Some(Err(error)) => Err(format!("ui.render_canvas: {error}")),
+            None => Err("ui.render_canvas: the drawing thread stopped".into()),
+        }
+    })?;
+    Ok(crate::calls::PromiseUd(promise))
+}
+
+/// The file `ui.render_canvas` makes.
+#[derive(Clone, Copy)]
+enum Format {
+    Png,
+    /// Its quality, 1 to 100: the encoder's, which a build without
+    /// `jpeg` leaves out.
+    Jpeg(#[cfg_attr(any(not(feature = "jpeg"), target_arch = "wasm32"), expect(dead_code))] u8),
+    Webp,
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn encode(image: &zgx::image::ImageData, format: Format) -> Result<Vec<u8>, zgx_gpu::GpuError> {
+    #[allow(unused_variables)]
+    let without = |what: &str| -> Result<Vec<u8>, zgx_gpu::GpuError> {
+        Err(zgx_gpu::GpuError(format!(
+            "zgx-script is built without `{what}`"
+        )))
+    };
+    match format {
+        Format::Png => png(image),
+        #[cfg(feature = "jpeg")]
+        Format::Jpeg(quality) => zgx_gpu::canvas::jpeg(image, quality),
+        #[cfg(not(feature = "jpeg"))]
+        Format::Jpeg(_) => without("jpeg"),
+        #[cfg(feature = "webp")]
+        Format::Webp => zgx_gpu::canvas::webp(image),
+        #[cfg(not(feature = "webp"))]
+        Format::Webp => without("webp"),
+    }
+}
+#[cfg(all(feature = "png", not(target_arch = "wasm32")))]
+fn png(image: &zgx::image::ImageData) -> Result<Vec<u8>, zgx_gpu::GpuError> {
+    zgx_gpu::canvas::png(image)
+}
+#[cfg(all(not(feature = "png"), not(target_arch = "wasm32")))]
+fn png(_: &zgx::image::ImageData) -> Result<Vec<u8>, zgx_gpu::GpuError> {
+    Err(zgx_gpu::GpuError(
+        "zgx-script is built without `png`".into(),
+    ))
+}
+/// `bytes` in base64 (RFC 4648, padded): what an MCP image's data is.
+fn base64(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = u32::from(chunk[0]) << 16
+            | u32::from(*chunk.get(1).unwrap_or(&0)) << 8
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(DIGITS[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+/// A gradient's colours, spread evenly from offset 0 to 1.
+fn even_stops(stops: &Table) -> mlua::Result<Vec<GradientStop>> {
+    let colors: Vec<mlua::Value> = stops.sequence_values().collect::<mlua::Result<_>>()?;
+    let n = colors.len().max(2) - 1;
+    colors
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            Ok(GradientStop {
+                offset: i as f32 / n as f32,
+                color: color(c)?,
+            })
+        })
+        .collect()
+}
+/// A gradient's `transform` option, `{ a, b, c, d, e, f }` as SVG's
+/// `matrix` (x' is a x + c y + e, y' is b x + d y + f): what it maps the
+/// gradient by once placed, as a drawing's own transform. Identity without
+/// one.
+fn gradient_transform(options: Option<&Table>) -> mlua::Result<Affine> {
+    let Some(matrix) = options
+        .map(|o| o.get::<Option<Vec<f32>>>("transform"))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(Affine::IDENTITY);
+    };
+    let [a, b, c, d, tx, ty] = matrix[..] else {
+        return Err(mlua::Error::runtime(
+            "a gradient's `transform` is six numbers, { a, b, c, d, e, f }",
+        ));
+    };
+    Ok(Affine { a, b, c, d, tx, ty })
 }

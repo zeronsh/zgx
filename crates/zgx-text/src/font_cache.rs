@@ -37,7 +37,8 @@ const FILE: &str = "system-fonts-v4";
 /// again at that app's next launch.
 const UNUSED: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-pub(crate) fn system_fonts() -> FontSystem {
+#[doc(hidden)]
+pub fn system_fonts() -> FontSystem {
     let mut fonts = cached_system_fonts();
     platform_families(&mut fonts);
     #[cfg(feature = "hyphens")]
@@ -232,7 +233,8 @@ static PENDING: std::sync::Mutex<Option<(PathBuf, Stamps)>> = std::sync::Mutex::
 /// Checks the cache read at launch, once, as the app has started: on a
 /// renderer's first trim (its host gone idle, no wake of its own) or after
 /// its first frames (`LAUNCH_FRAMES`) for an app that never goes idle.
-pub(crate) fn check_pending() {
+#[doc(hidden)]
+pub fn check_pending() {
     let Some((cache, files)) = PENDING.lock().ok().and_then(|mut pending| pending.take()) else {
         return;
     };

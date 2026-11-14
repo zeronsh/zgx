@@ -77,7 +77,7 @@ MACOS_ONLY = [
     "vendor/wgpu-hal/src/metal/**",
     "crates/zgx-desktop/src/native_host/macos.rs",
     "crates/zgx-gpu/src/metal_frame.rs",
-    "crates/zgx-gpu/src/core_text_glyphs.rs",
+    "crates/zgx-text/src/core_text_glyphs.rs",
     "crates/zgx-gpu/src/*.metal",
     "crates/zgx-script/src/file_events.rs",
     "scripts/macos_*",

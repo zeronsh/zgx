@@ -1689,12 +1689,23 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png 0.18.1",
  "tiff",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -5312,9 +5323,7 @@ dependencies = [
  "block2 0.6.2",
  "bytemuck",
  "dispatch2",
- "fontconfig-parser",
  "gif",
- "hypher",
  "image",
  "libc",
  "objc2 0.6.4",
@@ -5328,7 +5337,6 @@ dependencies = [
  "pollster",
  "resvg",
  "rustc-hash 2.1.3",
- "smallvec",
  "tiny-skia",
  "unicode-script",
  "unicode-segmentation",
@@ -5344,6 +5352,7 @@ dependencies = [
  "zgx-cosmic-text",
  "zgx-fx",
  "zgx-harfrust",
+ "zgx-text",
  "zgx-zune-jpeg",
 ]
 
@@ -5392,6 +5401,8 @@ dependencies = [
 name = "zgx-script"
 version = "0.1.10"
 dependencies = [
+ "base64 0.22.1",
+ "crc32fast",
  "icu_locale_core",
  "icu_plurals",
  "libc",
@@ -5453,6 +5464,19 @@ dependencies = [
  "zgx-fingerprint",
  "zgx-gpu",
  "zgx-workload",
+]
+
+[[package]]
+name = "zgx-text"
+version = "0.1.10"
+dependencies = [
+ "fontconfig-parser",
+ "hypher",
+ "rustc-hash 2.1.3",
+ "smallvec",
+ "unicode-segmentation",
+ "zgx",
+ "zgx-cosmic-text",
 ]
 
 [[package]]

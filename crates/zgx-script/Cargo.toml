@@ -14,7 +14,7 @@ description = "Luau scripts that describe zgx component trees, with hot reload."
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["components", "svg", "png", "jpeg", "gif", "cjk-thai-words"]
+default = ["components", "svg", "png", "jpeg", "gif", "webp", "cjk-thai-words"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # The component library's `ui.*` (zgx-components): the data grid, tree,
@@ -38,6 +38,7 @@ gltf = ["scene3d", "zgx-3d/gltf"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
+webp = ["zgx-gpu/webp"]
 gif = ["zgx-gpu/gif"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]
@@ -54,6 +55,11 @@ zgx-3d = { path = "../zgx-3d", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
 mlua = { package = "zgx-mlua", version = "0.12.9", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
+# `ui.zip`: entries' checksums.
+crc32fast = "1"
+# A font's or a picture's bytes a script hands over as base64 (`b64.rs`),
+# and `ui.zip`'s bytes given as base64.
+base64 = "0.22"
 # `.luaurc` aliases for `require("@alias/...")`.
 serde = "1"
 serde_json = "1"
@@ -112,6 +118,8 @@ required-features = ["scene3d"]
 # The perf gate's output check, called by the gate benches each frame.
 zgx-fingerprint = { path = "../../scripts/perf/fingerprint" }
 zgx-desktop = { path = "../zgx-desktop" }
+# Decodes `ui.render_canvas`'s pictures (tests/render_canvas.rs).
+png = "0.18"
 # The benchmark workload of the vlist_luau example.
 zgx-workload = { path = "../../comparisons/workload" }
 

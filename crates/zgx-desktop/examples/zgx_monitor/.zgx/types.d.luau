@@ -873,6 +873,10 @@ declare extern type LayerShader with
 end
 declare extern type Brush with
 end
+-- `ui.radial`'s and `ui.conic`'s options: `ry` an ellipse's vertical
+-- radius, `angle` where a conic one starts, `transform` a matrix
+-- { a, b, c, d, e, f } (x' = a x + c y + e, y' = b x + d y + f) mapping it.
+export type GradientOptions = { ry: number?, angle: number?, transform: { number }? }
 
 -- What failed (`ui.try`'s error, a promise's `error`, `:after`'s
 -- `on_error`): the same from every source. Still text where text goes:
@@ -947,6 +951,17 @@ export type Response = {
 -- A file a dialog, a drop or the system gives (the web's `File`): `size` in
 -- bytes, `type` its media type by its extension ("image/png"; "" unknown).
 export type File = { path: string, name: string, size: number, type: string }
+-- `ui.zip(file)`: a .zip written into a file the user picked, an entry at a
+-- time (stored as given; names are relative paths). `close` comes after
+-- every `add`, in order, and only then is the file replaced.
+-- `add_canvas` adds `draw`'s picture as `ui.render_canvas` would make it
+-- (the same options), made on the zip's thread with no pixels through the
+-- script and up to 256 MiB of them: a promise of its bytes and pixels.
+export type Zip = {
+	add: (self: Zip, name: string, data: string | { base64: string }) -> Promise<nil>,
+	add_canvas: (self: Zip, name: string, draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<RenderedFile>,
+	close: (self: Zip) -> Promise<nil>,
+}
 export type FilePickerOptions = {
 	title: string?,
 	-- Where the dialog opens.
@@ -1412,6 +1427,20 @@ export type CanvasTextOptions = {
 	font: string?,
 	align: ("start" | "center" | "end")?,
 	baseline: ("top" | "middle" | "bottom")?,
+	-- Points between lines, and added after each character.
+	line_height: number?,
+	letter_spacing: number?,
+	-- Wrapped to lines this many points wide, in a box that wide.
+	width: number?,
+	-- `c:text`: a matrix { a, b, c, d, e, f } (x' = a x + c y + e,
+	-- y' = b x + d y + f) mapping the placed text, as a turned shape's.
+	transform: { number }?,
+}
+-- How `c:image` fills its box, cuts its corners and fades it.
+export type CanvasImageOptions = {
+	fit: Fit?,
+	radius: number?,
+	opacity: number?,
 }
 declare extern type Canvas with
 	function rect(self, x: number, y: number, w: number, h: number, paint: Paint, radius: number?): ()
@@ -1419,14 +1448,45 @@ declare extern type Canvas with
 	function line(self, x1: number, y1: number, x2: number, y2: number, paint: Paint, width: number?, opts: LineOptions?): ()
 	function fill(self, path: Path, paint: Paint, rule: ("nonzero" | "evenodd")?): ()
 	function stroke(self, path: Path, paint: Paint, width: number?, opts: StrokeOptions?): ()
+	-- A picture (a path, a URL, `host:<name>` or a Bitmap) in a box, as
+	-- `ui.image` fits one; nothing while one isn't there yet.
+	function image(self, src: string | Bitmap, x: number, y: number, w: number, h: number, opts: CanvasImageOptions?): ()
+	-- The shadow the path casts, written as a `shadow` property is, under
+	-- what is drawn after it.
+	function shadow(self, path: Path, shadow: ShadowSpec?): ()
 	-- Clips what follows to the path, until `restore`.
 	function clip(self, path: Path): ()
 	function restore(self): ()
-	-- A line of text at (x, y), over the shapes whatever their order.
+	-- A line of text at (x, y), or a paragraph wrapped to `opts.width`, in
+	-- the drawing's order, cut by the open clips' box.
 	function text(self, text: string, x: number, y: number, opts: CanvasTextOptions?): ()
 	-- Its width and height, for placing what goes around it.
 	function measure_text(self, text: string, opts: CanvasTextOptions?): (number, number)
 end
+-- `ui.render_canvas`'s picture: its size in points, pixels a point, the
+-- drawing's point at its top left, what is under it (transparent), and the
+-- file: "png" (the default), "jpeg" (`quality` 1 to 100, 90 unless said;
+-- no transparency: laid over white) or "webp" (lossless).
+export type RenderCanvasOptions = {
+	width: number,
+	height: number,
+	scale: number?,
+	x: number?,
+	y: number?,
+	background: Color?,
+	format: ("png" | "jpeg" | "webp")?,
+	quality: number?,
+	-- A file the user picked (`ui.save_file`): the picture is written there,
+	-- with no pixels through the script and up to 256 MiB of them (not 32),
+	-- and the promise gives nil.
+	file: (File | string)?,
+	-- With `file`: the picture added at the file's end instead of over it
+	-- (a PDF's page; await each), and the promise gives a `RenderedFile`.
+	append: boolean?,
+}
+-- A picture file zgx made and wrote itself: its size in bytes, and its
+-- pixels.
+export type RenderedFile = { bytes: number, width: number, height: number }
 
 -- `ui.web(opts)`: a web page's controller. Its fields are tracked, so a
 -- text or computed reading `web.title` follows the page.
@@ -22232,10 +22292,23 @@ declare ui: {
 	-- A count on the app's icon (the Dock's, the taskbar's, a dock's);
 	-- 0 or nil takes it off. Whether the system shows one.
 	badge: (count: number | string | nil) -> boolean,
-	-- A file the user picked, read as text off the main thread: a promise.
-	read_file: (file: File | string) -> Promise<string>,
-	-- Write `text` to a file the user picked (beside it, then over it).
-	write_file: (file: File | string, text: string) -> Promise<nil>,
+	-- A file the user picked, read off the main thread: a promise of its
+	-- text, or with `base64 = true` of every byte in base64 (a picture).
+	read_file: (file: File | string, opts: { base64: boolean? }?) -> Promise<string>,
+	-- Write to a file the user picked (beside it, then over it): a string's
+	-- bytes as they are (any byte), or `{ base64 = … }`'s (a PNG).
+	-- `append = true` adds them at its end instead, to write a big file in
+	-- parts: await each part before the next.
+	write_file: (file: File | string, data: string | { base64: string }, opts: { append: boolean? }?) -> Promise<nil>,
+	-- A TrueType or OpenType font file (a path from the script's directory,
+	-- a plugin's inside it, or a File the user picked), or a font's bytes in
+	-- base64 (`{ base64 = … }`), added to every window's text: a promise of
+	-- the family names it holds, which `font` then names. Text in those
+	-- families lays out and draws again in it.
+	load_font: (src: File | string | { base64: string }) -> Promise<{ string }>,
+	-- A .zip into a file the user picked (`ui.save_file`), one entry at a
+	-- time, so the whole archive is never held: see `Zip`.
+	zip: (file: File | string) -> Zip,
 	-- What the app was launched with after its script (`zgx-run app/
 	-- notes.txt` gives `{ "notes.txt" }`).
 	args: { string },
@@ -22264,6 +22337,10 @@ declare ui: {
 	spring_to: (state: State<number>, target: number, opts: SpringToOptions?) -> () -> number,
 	-- White pixels with the alpha `alpha(x, y)` gives (0 to 1), for masks.
 	bitmap: (w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap,
+	-- A picture's bytes in base64 (a PNG, JPEG or GIF a server or the host
+	-- handed over), decoded off the main thread: a promise of a `Bitmap` for
+	-- `ui.image`'s `src`.
+	decode_image: (base64: string) -> Promise<Bitmap>,
 	-- A WGSL fill: `fn fill(input: FillInput) -> vec4<f32>`, with input.p,
 	-- input.size, input.time, input.scale and input.params (four vec4s).
 	shader: (source: string, opts: { fps: number? }?) -> Shader,
@@ -22304,6 +22381,15 @@ declare ui: {
 	number: (n: number, opts: NumberOptions?) -> string,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
+	-- `draw` as a canvas would show it, as a PNG in base64, with no window:
+	-- `width * scale` by `height * scale` pixels, `x`, `y` at its top left.
+	-- (nil with `file`; a `RenderedFile` with `file` and `append`.)
+	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<any>,
+	-- Out from (`cx`, `cy`) to radius `r` (`ry` down, for an ellipse), the
+	-- last colour past it; `transform` ({ a, b, c, d, e, f }) maps it after.
+	radial: (cx: number, cy: number, r: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush,
+	-- Round (`cx`, `cy`) clockwise, starting `angle` degrees clockwise from +x.
+	conic: (cx: number, cy: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush,
 }
 
 ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ mod anim;
 mod anime;
 pub mod app_config;
 pub mod app_types;
+mod b64;
 mod bundle;
 mod calls;
 mod canvas;
@@ -101,6 +102,7 @@ mod variants;
 #[cfg(target_arch = "wasm32")]
 mod web;
 mod windows;
+mod zip;
 
 pub use bundle::{Bundle, BundleFile, MemoryFiles, build};
 pub use calls::{Body, Request, Response};
@@ -989,6 +991,9 @@ pub enum Capability {
     /// `ui.open_folder`: a folder the user picks, with everything inside
     /// it to list, read and write.
     Folders,
+    /// `ui.load_font`: a font file from its directory (or one the user
+    /// picked) added to every window's text, the app's too.
+    Fonts,
     /// `ui.term`: terminal sessions, to read and to type into.
     Terminals,
     /// `ui.web` and `ui.webview`: web pages.
@@ -1739,6 +1744,9 @@ struct Inner {
     fetch_policy: fetch_policy::SharedPolicy,
     /// What each plugin may do beyond its sandbox (`grant`), by name.
     grants: RefCell<HashMap<String, Vec<Capability>>>,
+    /// Each plugin's heap where the app set its own (`plugin_memory`), by
+    /// name; the rest have `Limits::plugin_memory`.
+    plugin_memory: RefCell<HashMap<String, usize>>,
     /// What every plugin may do (`grant_all_plugins`), those loaded later
     /// too.
     all_plugins: RefCell<Vec<Capability>>,
@@ -1956,6 +1964,7 @@ impl ScriptHost {
             connector: Rc::default(),
             fetch_policy: Rc::default(),
             grants: RefCell::default(),
+            plugin_memory: RefCell::default(),
             all_plugins: RefCell::default(),
             managed: RefCell::default(),
             exposed_actions: Rc::default(),
@@ -2755,6 +2764,7 @@ impl ScriptHost {
         for old in managed.drain(..) {
             if let Script::Plugin { name, .. } = old {
                 grants.remove(&name);
+                self.0.plugin_memory.borrow_mut().remove(&name);
             }
         }
         for plugin in plugins {
@@ -2764,6 +2774,12 @@ impl ScriptHost {
                 path: plugin.entry,
             });
         }
+    }
+    /// Plugin `name`'s heap, in bytes, in place of `Limits::plugin_memory`
+    /// (a plugin whose manifest asks for more), from its next load. Set
+    /// after `set_plugins`, which forgets those of the plugins it replaces.
+    pub fn plugin_memory(&self, name: impl Into<String>, bytes: usize) {
+        self.0.plugin_memory.borrow_mut().insert(name.into(), bytes);
     }
     /// Let plugins bind, invoke and call host action `name` (`action`,
     /// `async_action`): all of them, or (`Some`) those granted
@@ -4552,7 +4568,8 @@ impl ScriptHost {
         let lua = Lua::new().clone();
         let limits = self.0.limits;
         let memory = if plugin {
-            limits.plugin_memory
+            let own = self.0.plugin_memory.borrow().get(&name).copied();
+            own.unwrap_or(limits.plugin_memory)
         } else {
             limits.memory
         };
@@ -4640,7 +4657,10 @@ impl ScriptHost {
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
-        lazy.ui(&["path", "linear"], canvas::install);
+        lazy.ui(
+            &["path", "linear", "radial", "conic", "render_canvas"],
+            canvas::install,
+        );
         lazy.ui(&["glass"], node::install_glass);
         lazy.ui(&["map"], node::install_map);
         #[cfg(feature = "scene3d")]
@@ -4684,10 +4704,12 @@ impl ScriptHost {
         let (platform, picked) = (self.0.platform.clone(), self.0.picked.clone());
         let (clipboard, files_allowed) = (may(Capability::Clipboard), may(Capability::Files));
         let (folders, access) = (may(Capability::Folders), self.0.folders.clone());
+        let fonts = may(Capability::Fonts);
         lazy.ui(
             &[
                 "badge",
                 "clipboard",
+                "load_font",
                 "notify",
                 "open_files",
                 "open_folder",
@@ -4695,10 +4717,11 @@ impl ScriptHost {
                 "remembered_folder",
                 "save_file",
                 "write_file",
+                "zip",
             ],
             move |lua, ui| {
                 folder::install(lua, ui, platform.clone(), folders, access)?;
-                io::install(lua, ui, platform, picked, clipboard, files_allowed)
+                io::install(lua, ui, platform, picked, clipboard, files_allowed, fonts)
             },
         );
         // A plugin's lent packages' tokens too: a lent design system themes it.

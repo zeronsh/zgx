@@ -201,6 +201,151 @@ fn rich_text_svg_and_canvas_render() {
 }
 
 #[test]
+fn radial_and_conic_brushes_place_their_gradients() {
+    use zgx::{affine::Affine, canvas::Brush};
+    let mut h = Harness::inline(
+        r##"return ui.canvas { id = "canvas", w = 40, h = 40, draw = function(c, w, h)
+            c:rect(0, 0, w, h, ui.radial(20, 10, 8, { "#f00", "#0f0", "#00f" }))
+            c:rect(0, 0, w, h, ui.radial(20, 10, 8, { "#f00", "#00f" }, { ry = 4, transform = { 1, 0, 0, 1, 5, 0 } }))
+            c:rect(0, 0, w, h, ui.conic(20, 10, { "#f00", "#00f" }, { angle = 90 }))
+        end }"##,
+    );
+    assert_eq!(h.host.error().get(), None);
+    let board = h.find("canvas").unwrap();
+    let scene = h.ui.scene.borrow();
+    let id = *scene
+        .children(board)
+        .iter()
+        .find(|id| matches!(scene.kind(**id), zgx::scene::NodeKind::Canvas(_)))
+        .unwrap();
+    let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(id) else {
+        unreachable!()
+    };
+    let brushes: Vec<_> = canvas
+        .commands()
+        .iter()
+        .map(|draw| match draw {
+            zgx::canvas::Draw::Fill { brush, .. } => brush.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let near = |a: Affine, b: Affine| {
+        [
+            a.a - b.a,
+            a.b - b.b,
+            a.c - b.c,
+            a.d - b.d,
+            a.tx - b.tx,
+            a.ty - b.ty,
+        ]
+        .iter()
+        .all(|d| d.abs() < 1e-5)
+    };
+    let Brush::Radial { transform, stops } = &brushes[0] else {
+        panic!("{:?}", brushes[0])
+    };
+    assert!(near(
+        *transform,
+        Affine::scale(8., 8.).then(Affine::translation(20., 10.))
+    ));
+    let offsets: Vec<f32> = stops.iter().map(|s| s.offset).collect();
+    assert_eq!(offsets, [0., 0.5, 1.], "colours spread evenly");
+    let Brush::Radial { transform, .. } = &brushes[1] else {
+        panic!("{:?}", brushes[1])
+    };
+    assert!(
+        near(
+            *transform,
+            Affine::scale(8., 4.).then(Affine::translation(25., 10.))
+        ),
+        "an ellipse, moved by its transform: {transform:?}"
+    );
+    let Brush::Conic { transform, .. } = &brushes[2] else {
+        panic!("{:?}", brushes[2])
+    };
+    assert!(
+        near(
+            *transform,
+            Affine::rotation(std::f32::consts::FRAC_PI_2).then(Affine::translation(20., 10.))
+        ),
+        "turned to start straight down: {transform:?}"
+    );
+    drop(scene);
+    for (script, error) in [
+        (
+            r##"ui.radial(0, 0, 0, { "#f00", "#00f" })"##,
+            "invalid radial gradient",
+        ),
+        (
+            r##"ui.conic(0, 0, { "#f00", "#00f" }, { transform = { 1, 0, 0 } })"##,
+            "six numbers",
+        ),
+        (r##"ui.conic(0, 0, { "#f00" })"##, "invalid conic gradient"),
+    ] {
+        let h = Harness::inline(&format!(
+            r##"return ui.canvas {{ w = 10, h = 10, draw = function(c) c:rect(0, 0, 1, 1, {script}) end }}"##
+        ));
+        let shown = h.host.error().get();
+        assert!(
+            shown
+                .as_ref()
+                .is_some_and(|e| e.to_string().contains(error)),
+            "{script}: {shown:?}"
+        );
+    }
+}
+
+#[test]
+fn a_canvas_texts_transform_maps_it() {
+    use zgx::affine::Affine;
+    let mut h = Harness::inline(
+        r##"return ui.canvas { id = "canvas", w = 40, h = 40, draw = function(c)
+            c:text("upright", 0, 0)
+            c:text("turned", 10, 20, { transform = { 0, 1, -1, 0, 30, 10 } })
+        end }"##,
+    );
+    assert_eq!(h.host.error().get(), None);
+    let board = h.find("canvas").unwrap();
+    let scene = h.ui.scene.borrow();
+    let id = *scene
+        .children(board)
+        .iter()
+        .find(|id| matches!(scene.kind(**id), zgx::scene::NodeKind::Canvas(_)))
+        .unwrap();
+    let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(id) else {
+        unreachable!()
+    };
+    assert_eq!(canvas.text_transform(0), Affine::IDENTITY);
+    assert_eq!(
+        canvas.text_transform(1),
+        Affine {
+            a: 0.,
+            b: 1.,
+            c: -1.,
+            d: 0.,
+            tx: 30.,
+            ty: 10.
+        }
+    );
+    drop(scene);
+    for (matrix, error) in [
+        ("{ 1, 0, 0 }", "six numbers"),
+        ("{ 1, 0, 0, 1, 0 / 0, 0 }", "finite"),
+    ] {
+        let h = Harness::inline(&format!(
+            r##"return ui.canvas {{ w = 10, h = 10, draw = function(c) c:text("a", 0, 0, {{ transform = {matrix} }}) end }}"##
+        ));
+        let shown = h.host.error().get();
+        assert!(
+            shown
+                .as_ref()
+                .is_some_and(|e| e.to_string().contains(error)),
+            "{matrix}: {shown:?}"
+        );
+    }
+}
+
+#[test]
 fn virtual_lists_mount_only_visible_rows() {
     let mut h = Harness::inline(
         r##"return ui.list { id = "list", count = 100000, height = 20, w = 200, h = 200,
@@ -5431,10 +5576,10 @@ fn a_canvas_draws_text_where_it_says() {
     assert_eq!(h.host.error().get(), None);
 }
 
-/// A canvas without text makes no nodes for it, and text takes a canvas's
-/// pan and zoom.
+/// A canvas without text makes no nodes for it, and a canvas that pans and
+/// zooms draws its text into its raster, with its drawing.
 #[test]
-fn canvas_text_costs_nothing_unused_and_follows_a_view() {
+fn canvas_text_costs_nothing_unused_and_a_view_draws_it_in_its_raster() {
     let mut h = Harness::inline(
         r##"local view = ui.state("view", { x = 0, y = 0, zoom = 1 })
         return ui.column { w = 400, h = 300,
@@ -5450,30 +5595,27 @@ fn canvas_text_costs_nothing_unused_and_follows_a_view() {
         1,
         "the drawing alone"
     );
+    // A canvas that pans and zooms draws its text into its raster: no node
+    // for it, the drawing holds it, and the drawing follows the view.
     let canvas = h.find("c").unwrap();
-    let mark = |h: &mut Harness| {
+    let drawing = |h: &Harness| {
         let scene = h.ui.scene.borrow();
-        let group = *scene.children(canvas).last().unwrap();
-        let text = scene.children(group)[0];
-        let (b, top) = (scene.transformed_bounds(text), scene.bounds(canvas));
-        (b.x - top.x, b.y - top.y, b.height)
+        let kids = scene.children(canvas).to_vec();
+        assert_eq!(kids.len(), 1, "the drawing alone, its text in it");
+        let zgx::scene::NodeKind::Canvas(drawn) = scene.kind(kids[0]) else {
+            panic!("not a canvas");
+        };
+        assert!(drawn.rasters_text());
+        assert_eq!(drawn.texts().len(), 1);
+        assert_eq!((drawn.texts()[0].x, drawn.texts()[0].y), (10., 5.));
+        scene.canvas_view(kids[0])
     };
-    let before = mark(&mut h);
-    assert_eq!((before.0, before.1), (10., 5.));
-    // Read by the canvas's `label`, not line by line.
-    let text = {
-        let scene = h.ui.scene.borrow();
-        scene.children(*scene.children(canvas).last().unwrap())[0]
-    };
-    assert!(h.ui.semantics.borrow().get(text).is_none());
+    let before = drawing(&h);
+    assert_eq!((before.x, before.y, before.scale), (0., 0., 1.));
     h.click("zoom");
     h.ui.prepare_frame();
-    let zoomed = mark(&mut h);
-    assert_eq!((zoomed.0, zoomed.1), (40., 20.));
-    assert!(
-        (zoomed.2 - before.2 * 2.).abs() < 0.5,
-        "{zoomed:?} {before:?}"
-    );
+    let zoomed = drawing(&h);
+    assert_eq!((zoomed.x, zoomed.y, zoomed.scale), (20., 10., 2.));
 }
 
 /// A canvas redrawn keeps its text nodes: a line's node is reused by place,
@@ -5508,6 +5650,314 @@ fn a_redrawn_canvas_reuses_its_text_nodes() {
         assert_eq!(nodes(&h), first, "the same nodes");
     }
     assert_eq!(h.host.error().get(), None);
+}
+
+/// A canvas image as drawn: its size in pixels, box, fit, radius and
+/// opacity.
+type CanvasImage = (
+    (u32, u32),
+    zgx::scene::Rect,
+    zgx::style::ObjectFit,
+    f32,
+    f32,
+);
+/// The images a canvas under `id` draws.
+fn canvas_images(h: &mut Harness, id: &str) -> Vec<CanvasImage> {
+    let root = h.find(id).unwrap();
+    let scene = h.ui.scene.borrow();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(n) {
+            return canvas
+                .commands()
+                .iter()
+                .filter_map(|draw| match draw {
+                    zgx::canvas::Draw::Image {
+                        image,
+                        rect,
+                        fit,
+                        radius,
+                        opacity,
+                    } => Some((
+                        (image.width(), image.height()),
+                        *rect,
+                        *fit,
+                        *radius,
+                        *opacity,
+                    )),
+                    _ => None,
+                })
+                .collect();
+        }
+        stack.extend(scene.children(n).iter().copied());
+    }
+    panic!("no canvas under {id}")
+}
+
+/// `c:image` draws a `Bitmap` in its box, as its options fit, round and
+/// fade it, and follows state as the rest of the drawing does.
+#[test]
+fn a_canvas_draws_a_bitmap_as_its_options_say() {
+    let mut h = Harness::inline(
+        r##"local faded = ui.state("faded", false)
+        local dots = ui.bitmap(3, 2, function() return 1 end)
+        return ui.column { w = 400, h = 300,
+            ui.button { id = "fade", on_click = function() faded:set(true) end, "fade" },
+            ui.canvas { id = "c", w = 200, h = 100,
+                draw = function(c)
+                    c:image(dots, 10, 20, 30, 40)
+                    c:image(dots, 50, 0, 60, 60, {
+                        fit = "cover", radius = 8, opacity = if faded:get() then 0.5 else 1 })
+                end } }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    use zgx::scene::Rect;
+    use zgx::style::ObjectFit;
+    assert_eq!(
+        canvas_images(&mut h, "c"),
+        [
+            (
+                (3, 2),
+                Rect::new(10., 20., 30., 40.),
+                ObjectFit::Fill,
+                0.,
+                1.
+            ),
+            (
+                (3, 2),
+                Rect::new(50., 0., 60., 60.),
+                ObjectFit::Cover,
+                8.,
+                1.
+            ),
+        ]
+    );
+    h.click("fade");
+    h.ui.prepare_frame();
+    assert_eq!(canvas_images(&mut h, "c")[1].4, 0.5);
+}
+
+/// `c:image` draws a file from the script's directory, decoded once; a
+/// file that isn't there draws nothing and is a warning, not an error.
+#[test]
+fn a_canvas_draws_a_picture_file_and_skips_a_missing_one() {
+    // A 2×2 PNG.
+    const PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6,
+        0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
+        31, 132, 25, 96, 12, 0, 71, 202, 7, 249, 103, 89, 110, 183, 0, 0, 0, 0, 73, 69, 78, 68,
+        174, 66, 96, 130,
+    ];
+    let dir = common::temp_dir("canvas-image");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("photo.png"), PNG).unwrap();
+    let app = dir.join("app.luau");
+    std::fs::write(
+        &app,
+        r##"return ui.canvas { id = "c", w = 100, h = 100,
+            draw = function(c)
+                c:image("photo.png", 0, 0, 40, 40, { fit = "contain" })
+                c:image("gone.png", 50, 0, 40, 40)
+            end }"##,
+    )
+    .unwrap();
+    let mut h = Harness::new(move |runtime| zgx_script::ScriptHost::new(runtime, app));
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert_eq!(
+        canvas_images(&mut h, "c"),
+        [(
+            (2, 2),
+            zgx::scene::Rect::new(0., 0., 40., 40.),
+            zgx::style::ObjectFit::Contain,
+            0.,
+            1.
+        )]
+    );
+    let warnings = h.host.warnings();
+    assert!(
+        warnings.iter().any(|w| w.contains("gone.png")),
+        "{warnings:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A canvas drawing a picture the app hasn't made yet (`host:`) draws
+/// nothing for it, and draws it once the app makes it, and each that
+/// replaces it.
+#[test]
+fn a_canvas_draws_a_hosted_picture_as_it_comes() {
+    let mut h = Harness::inline(
+        r##"return ui.canvas { id = "c", w = 100, h = 100,
+            draw = function(c) c:image("host:art", 0, 0, 50, 50) end }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    assert!(canvas_images(&mut h, "c").is_empty(), "nothing yet");
+    let image = |w| {
+        std::sync::Arc::new(zgx::image::ImageData::new(w, 1, vec![255; w as usize * 4]).unwrap())
+    };
+    for w in [3, 5] {
+        h.host.image("art", Some(image(w)));
+        h.ui.prepare_frame();
+        assert_eq!(canvas_images(&mut h, "c")[0].0, (w, 1));
+    }
+}
+
+/// A canvas image's `fit` is one `ui.image` takes, or the script's error.
+#[test]
+fn a_canvas_images_fit_is_one_an_image_takes() {
+    let h = Harness::inline(
+        r##"local dots = ui.bitmap(1, 1, function() return 1 end)
+        return ui.canvas { w = 100, h = 100,
+            draw = function(c) c:image(dots, 0, 0, 10, 10, { fit = "stretch" }) end }"##,
+    );
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("`fit` is \"fill\""), "{error}");
+}
+
+/// `c:text` with a `width` wraps to it in a box that wide, its lines a
+/// `line_height` apart and aligned as the box is on `x`; `letter_spacing`
+/// spaces its characters; `c:measure_text` measures each as drawn.
+#[test]
+fn canvas_text_wraps_to_a_width_with_its_spacing() {
+    let mut h = Harness::inline(
+        r##"local measured = ui.state("measured", "")
+        local seen = ""
+        local para = "one two three four five six"
+        return ui.column { w = 400, h = 300,
+            ui.button { id = "read", on_click = function() measured:set(seen) end, "read" },
+            ui.text { id = "measured", function() return measured:get() end },
+            ui.canvas { id = "c", w = 300, h = 200,
+                draw = function(c)
+                    local o = { size = 10, width = 60, line_height = 20 }
+                    c:text(para, 10, 0, o)
+                    c:text(para, 200, 0, { size = 10, width = 60, align = "center" })
+                    c:text("spaced", 10, 150, { size = 10 })
+                    c:text("spaced", 10, 170, { size = 10, letter_spacing = 5 })
+                    local _, tall = c:measure_text(para, o)
+                    local plain = c:measure_text("spaced", { size = 10 })
+                    local wide = c:measure_text("spaced", { size = 10, letter_spacing = 5 })
+                    seen = `{tall} {wide - plain}`
+                end } }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    let canvas = h.find("c").unwrap();
+    let shown = |h: &Harness| {
+        let scene = h.ui.scene.borrow();
+        let top = scene.bounds(canvas);
+        let group = *scene.children(canvas).last().unwrap();
+        scene
+            .children(group)
+            .iter()
+            .map(|&n| {
+                let b = scene.transformed_bounds(n);
+                (
+                    (b.x - top.x, b.y - top.y, b.width, b.height),
+                    scene.font(n).align,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let shown = shown(&h);
+    let (wrapped, align) = shown[0];
+    assert_eq!(
+        (wrapped.0, wrapped.1, wrapped.2),
+        (10., 0., 60.),
+        "{shown:?}"
+    );
+    assert!(
+        wrapped.3 >= 40. && wrapped.3 % 20. == 0.,
+        "lines 20 apart, more than one: {shown:?}"
+    );
+    assert_eq!(align, zgx::text_layout::TextAlign::Start);
+    let (centred, align) = shown[1];
+    assert_eq!((centred.0, centred.2), (170., 60.), "centred on x");
+    assert_eq!(align, zgx::text_layout::TextAlign::Center, "and its lines");
+    // Five points after each of its six characters (or between them).
+    let (plain, spaced) = (shown[2].0, shown[3].0);
+    assert!(spaced.2 - plain.2 >= 24.5, "{shown:?}");
+    h.click("read");
+    h.ui.prepare_frame();
+    let measured = h.text("measured");
+    let mut measured = measured.split(' ').map(|v| v.parse::<f32>().unwrap());
+    let (tall, extra) = (measured.next().unwrap(), measured.next().unwrap());
+    assert_eq!(tall, wrapped.3, "measured as drawn");
+    assert!(
+        (extra - (spaced.2 - plain.2)).abs() < 0.5,
+        "{extra} {shown:?}"
+    );
+    assert_eq!(h.host.error().get(), None);
+}
+
+/// A canvas text's `width` is a size: none or a negative one is the
+/// script's error, at its line.
+#[test]
+fn a_canvas_texts_width_must_be_a_size() {
+    let h = Harness::inline(
+        r##"return ui.canvas { w = 100, h = 100,
+            draw = function(c) c:text("x", 0, 0, { width = -1 }) end }"##,
+    );
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(
+        error.contains("`width` is a number of points above 0"),
+        "{error}"
+    );
+}
+
+/// `c:shadow` records the shadow a path casts, in the drawing's order,
+/// written as a `shadow` property is: CSS's blur, half as the sigma drawn,
+/// and its colour by default.
+#[test]
+fn a_canvas_shadow_is_written_as_a_shadow_property_is() {
+    let mut h = Harness::inline(
+        r##"local card = ui.path():rect(10, 10, 80, 40, 8)
+        return ui.canvas { id = "c", w = 200, h = 100,
+            draw = function(c)
+                c:shadow(card, { y = 4, blur = 12, spread = -2, color = "#ff000080" })
+                c:shadow(card)
+                c:fill(card, "#ffffff")
+            end }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    let root = h.find("c").unwrap();
+    let scene = h.ui.scene.borrow();
+    let mut stack = vec![root];
+    let canvas = loop {
+        let n = stack.pop().expect("a canvas");
+        if let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(n) {
+            break canvas.clone();
+        }
+        stack.extend(scene.children(n).iter().copied());
+    };
+    use zgx::canvas::{Draw, Point};
+    use zgx::scene::Color;
+    let drawn: Vec<_> = canvas
+        .commands()
+        .iter()
+        .map(|draw| match draw {
+            Draw::Shadow {
+                color,
+                offset,
+                blur,
+                spread,
+                ..
+            } => format!("{color:?} {offset:?} {blur} {spread}"),
+            Draw::Fill { .. } => "fill".into(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        drawn,
+        [
+            format!("{:?} {:?} 6 -2", Color(255, 0, 0, 128), Point::new(0., 4.)),
+            format!("{:?} {:?} 0 0", Color(0, 0, 0, 90), Point::new(0., 0.)),
+            "fill".into(),
+        ]
+    );
 }
 
 /// A pointer's place in a node's box is the same however it is zoomed, in

@@ -99,6 +99,28 @@ return ui.column {
     ui.button { id = "sneak", w = 40, h = 20, "x", on_click = function()
         ui.read_file("/etc/hosts")
     end },
+    ui.button { id = "zip", w = 40, h = 20, "z", on_click = function()
+        ui.task(function()
+            local file = ui.save_file({ name = "out.zip" }):await()
+            local z = ui.zip(file)
+            -- (Not awaited one by one: they're written in order anyway.)
+            z:add("01-trang-chủ.png", { base64 = "iVBORw0KGgo=" })
+            z:add("code/index.html", "<p>hi</p>")
+            local fine, why = pcall(function() z:add("../up.txt", "x") end)
+            z:close():await()
+            local after = pcall(function() z:add("late.txt", "x"):await() end)
+            shown:set(`zipped {fine} {string.find(tostring(why), "no `..`", 1, true) ~= nil} {after}`)
+        end)
+    end },
+    ui.button { id = "parts", w = 40, h = 20, "p", on_click = function()
+        ui.task(function()
+            local file = ui.save_file({ name = "out.txt" }):await()
+            ui.write_file(file, "head|"):await()
+            ui.write_file(file, "middle|", { append = true }):await()
+            ui.write_file(file, { base64 = "dGFpbA==" }, { append = true }):await()
+            shown:set("parts written")
+        end)
+    end },
 }
 "#;
 
@@ -176,6 +198,159 @@ fn a_picked_file_reads_and_a_saved_one_is_written() {
     let mut h = app(&dir, APP, None);
     h.click("open");
     wait_for(&mut h, "in.txt: hello from disk");
+    h.click("save");
+    wait_for(&mut h, "wrote out.txt");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+        "saved text"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Writes `BYTES` (every byte value, then a NUL) as a string, or in base64
+/// from the test, to the file the user saves to.
+const BYTES: &str = r#"
+local shown = ui.state("shown", "")
+local function save(data)
+    ui.task(function()
+        local file = ui.save_file({ name = "out.png" }):await()
+        local ok, why = pcall(function()
+            ui.write_file(file, data):await()
+        end)
+        shown:set(if ok then "wrote" else tostring(why))
+    end)
+end
+return ui.column {
+    ui.text { id = "label", function() return shown:get() end },
+    ui.button { id = "raw", w = 40, h = 20, "r", on_click = function()
+        local bytes = {}
+        for i = 0, 255 do
+            bytes[#bytes + 1] = string.char(i)
+        end
+        save(table.concat(bytes) .. string.char(0))
+    end },
+    ui.button { id = "encoded", w = 40, h = 20, "e", on_click = function()
+        save({ base64 = BASE64 })
+    end },
+    ui.button { id = "broken", w = 40, h = 20, "b", on_click = function()
+        save({ base64 = "not base64!" })
+    end },
+    ui.button { id = "read", w = 40, h = 20, "rd", on_click = function()
+        ui.task(function()
+            local files = ui.open_files():await()
+            local encoded = ui.read_file(files[1], { base64 = true }):await()
+            shown:set(if encoded == BASE64 then "read whole" else encoded)
+        end)
+    end },
+}
+"#;
+
+/// A PNG or any other file: a string's bytes, or bytes in base64, reach
+/// the file as they are, NUL and bytes that aren't UTF-8 too, and read
+/// back whole in base64.
+#[test]
+fn a_saved_file_takes_any_bytes() {
+    use base64::Engine as _;
+    let expected: Vec<u8> = (0..=255u8).chain([0]).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&expected);
+    let code: &'static str = BYTES.replace("BASE64", &format!("{encoded:?}")).leak();
+    for button in ["raw", "encoded"] {
+        let dir = dir(&format!("bytes-{button}"));
+        let mut h = app(&dir, code, None);
+        h.click(button);
+        wait_for(&mut h, "wrote");
+        assert_eq!(
+            std::fs::read(dir.join("out.txt")).unwrap(),
+            expected,
+            "{button}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    // Read back whole: the file the raw string wrote, as base64.
+    let read = dir("bytes-read");
+    let mut h = app(&read, code, None);
+    h.click("raw");
+    wait_for(&mut h, "wrote");
+    std::fs::rename(read.join("out.txt"), read.join("in.txt")).unwrap();
+    h.click("read");
+    wait_for(&mut h, "read whole");
+    std::fs::remove_dir_all(read).unwrap();
+    let dir = dir("bytes-broken");
+    let mut h = app(&dir, code, None);
+    h.click("broken");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !h.text("label").contains("isn't base64") && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        h.text("label").contains("isn't base64"),
+        "{}",
+        h.text("label")
+    );
+    assert!(!dir.join("out.txt").exists());
+}
+
+#[test]
+fn a_zip_goes_into_a_saved_file_an_entry_at_a_time() {
+    let dir = dir("zip");
+    let mut h = app(&dir, APP, None);
+    h.click("zip");
+    wait_for(&mut h, "zipped false true false");
+    // (The fake dialog saves to out.txt.) Read back as unzip would.
+    let bytes = std::fs::read(dir.join("out.txt")).unwrap();
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]) as usize;
+    let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+    let end = bytes.len() - 22;
+    assert_eq!(u32_at(end), 0x0605_4b50);
+    assert_eq!(u16_at(end + 10), 2);
+    let mut at = u32_at(end + 16);
+    let mut entries = Vec::new();
+    for _ in 0..2 {
+        let (size, name_len, offset) = (u32_at(at + 20), u16_at(at + 28), u32_at(at + 42));
+        let name = String::from_utf8(bytes[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        let data_at = offset + 30 + u16_at(offset + 26);
+        entries.push((name, bytes[data_at..data_at + size].to_vec()));
+        at += 46 + name_len;
+    }
+    assert_eq!(
+        entries,
+        vec![
+            (
+                "01-trang-chủ.png".to_string(),
+                b"\x89PNG\r\n\x1a\n".to_vec()
+            ),
+            ("code/index.html".to_string(), b"<p>hi</p>".to_vec()),
+        ]
+    );
+    assert!(!dir.join("out.zgx-zip").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_plugin_zips_only_with_files() {
+    let dir = dir("zip-plugin");
+    let h = app(
+        &dir,
+        r#"return ui.text { "app", id = "label" }"#,
+        Some(r#"ui.zip("x.zip")"#),
+    );
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("Capability::Files"), "{error}");
+}
+
+#[test]
+fn a_file_is_written_in_parts_with_append() {
+    let dir = dir("append");
+    let mut h = app(&dir, APP, None);
+    h.click("parts");
+    wait_for(&mut h, "parts written");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+        "head|middle|tail"
+    );
+    // Without append, a write replaces it whole again.
     h.click("save");
     wait_for(&mut h, "wrote out.txt");
     assert_eq!(

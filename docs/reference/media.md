@@ -1,6 +1,6 @@
 # Images and canvas: image, svg, canvas
 
-Pixels from files, vector icons, and drawing in script. Paths in `src` are relative to the script's directory. The same section covers what makes paint for these and other nodes: `ui.path` and `ui.linear` for canvases, `ui.bitmap` for masks, and `ui.shader` for shader fills.
+Pixels from files, vector icons, and drawing in script. Paths in `src` are relative to the script's directory. The same section covers what makes paint for these and other nodes: `ui.path`, `ui.linear`, `ui.radial` and `ui.conic` for canvases, `ui.bitmap` for masks, and `ui.shader` for shader fills.
 
 ```luau
 ui.image(props: ImageProps) -> Node
@@ -8,7 +8,11 @@ ui.svg(props: SvgProps) -> Node
 ui.canvas(props: CanvasProps) -> Node
 ui.path() -> Path
 ui.linear(x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush
+ui.render_canvas(draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string>
+ui.radial(cx: number, cy: number, r: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush
+ui.conic(cx: number, cy: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush
 ui.bitmap(w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap
+ui.decode_image(base64: string) -> Promise<Bitmap>
 ui.shader(source: string, opts: { fps: number? }?) -> Shader
 ```
 
@@ -18,17 +22,17 @@ A PNG, JPEG or GIF (with zgx-gpu's `gif` feature, on by default), decoded once p
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
-| `src` | `Reactive<string>`, or a `Bitmap` | required | a path (from the script's directory) or an absolute one; `"host:<name>"`, an image the app made (`ScriptHost::image`), following each one it replaces it with, or on macOS a frame it shows as it is (`ScriptHost::surface`, a video's: drawn from its own storage, no bytes read, its image shown once it's let go or where pixels are read, as `dither` and `characters` do); a `Bitmap` shown as it is (`ui.bitmap`, a pasted image from `ui.clipboard.read_image()`); a state or function (of a path or a `Bitmap`) swaps the image |
+| `src` | `Reactive<string>`, or a `Bitmap` | required | a path (from the script's directory) or an absolute one; `"host:<name>"`, an image the app made (`ScriptHost::image`), following each one it replaces it with, or on macOS a frame it shows as it is (`ScriptHost::surface`, a video's: drawn from its own storage, no bytes read, its image shown once it's let go or where pixels are read, as `dither` and `characters` do); a `Bitmap` shown as it is (`ui.bitmap`, a pasted image from `ui.clipboard.read_image()`, a picture's bytes from `ui.decode_image`); a state or function (of a path or a `Bitmap`) swaps the image |
 | `fallback` | `Node` | none | shown in the image's place while a remote one (`https://…`) loads, and if it can't be shown (a remote one failed, a file gone or not a picture: never a script error): an avatar's initials |
 | `on_load` | `function(size: { w, h })` | none | its picture's size in pixels, once known: a file's from its header, before it draws (nothing decoded); a remote one's once it has arrived. Once per `src` |
 | `on_error` | `function(why: string)` | none | why its picture can't be shown: a file gone (a sent picture deleted, a kept copy pruned) or not a picture, a remote one that failed (`"… didn't load: HTTP 503"`). Without it, a warning (`ScriptHost::warnings`), with the script line naming the file |
 
-A remote picture that fails (a dropped connection, a 5xx) is asked for again by itself while a node shows it: 5 seconds after, then doubling each time it fails in a row, up to 5 minutes. Its `fallback` shows meanwhile, and the picture replaces it once it comes. A plugin's request is its own, to the app's `fetch_policy` too: its failures and backoff hold up no one else showing the URL, and what comes is shared.
+A remote picture that fails (a dropped connection, a 5xx) is asked for again by itself while a node shows it: 5 seconds after, then doubling each time it fails in a row, up to 5 minutes. Its `fallback` shows meanwhile, and the picture replaces it once it comes. A plugin's request is its own, to the app's `fetch_policy` too: its failures and backoff hold up no one else showing the URL, and what comes is shared. An image whose remote `src` changes (a tile a program redraws, under a new URL each version) shows the picture it had until the new one arrives, never nothing between; with a `fallback`, the fallback shows meanwhile, as it did first.
 | `fit` | `"fill" \| "contain" \| "cover" \| "none" \| "scale_down"` | `"fill"` | how the pixels fill the box (CSS `object-fit`) |
 | `image_rendering` | `"auto" \| "pixelated"` | `"auto"` | how its pixels are sampled drawn larger or smaller (CSS's `image-rendering`): `"pixelated"`, each point the nearest pixel, its edges hard: pixel art, a magnified screenshot, a QR code. Inherited, as CSS's is: said on a box, the pictures in it take it |
 | `slice` | `{ top, right, bottom, left }` | none | the image drawn in nine pieces (a nine-patch, CSS's `border-image` with `fill`): insets into its pixels cut corners, edges and a middle, drawn as many points in from the box's edges; corners keep their size, edges stretch along their side, the middle both ways: a button's or a bubble's frame at any size. Edges wider than the box shrink together |
 | `object_position` | `{ x, y }` | `{ 0.5, 0.5 }` | where the pixels lie in the box where they don't fill it (CSS `object-position`): fractions of the room to spare, so `{ 0.5, 0 }` keeps a portrait's top under `fit = "cover"` |
-| `decode` | `"auto" \| "sync" \| "async"` | `"auto"` | when a PNG or JPEG file decodes, as HTML's `decoding`: with `"auto"` a picture up to 256 by 256 pixels decodes as it is first drawn, so an icon is in its first frame, and a larger one off the main thread, showing a frame or so later; `"sync"` decodes it as drawn whatever its size (that frame waits); `"async"` always off the main thread. It is the file's: images showing one file share its decoded picture, so the last to say wins |
+| `decode` | `"auto" \| "sync" \| "async"` | `"auto"` | when a PNG or JPEG file decodes, as HTML's `decoding`: with `"auto"` a picture up to 256 by 256 pixels decodes as it is first drawn, so an icon is in its first frame, and a larger one off the main thread, showing a frame or so later; `"sync"` decodes it as drawn whatever its size (that frame waits); `"async"` always off the main thread. It is the file's: images showing one file share its decoded picture, so the last to say wins. A remote picture up to 1024 by 1024 pixels arrives decoded (off the main thread, as it came), so it shows in the frame it arrives in, at any size it is drawn; `decode` is for larger ones |
 | `dither` | `number` | none | drawn dithered as Zeron dithers its wallpapers, in dots this many points square on the screen's grid: each dot takes the colour at its centre, lit to that colour's full value where its brightest channel passes a 4x4 Bayer threshold, else dimmed to 8%. A vivid two-level dot picture of the image's own hues, worked out on the GPU as the image draws (one sample and a compare a pixel), so it follows the image as it moves, scales or crossfades, with nothing precomputed |
 | `characters` | `number` | none | drawn as characters, as an ASCII art generator draws a photo: the screen in cells of a 5 by 7 pixel font (each font pixel this many points, a cell 6 by 8 of them), each cell a glyph of ` .-+xXS80#@` picked by the brightness at its centre and lit in that colour at full value, over the image a little dimmed. On the GPU as it draws, with no texture of glyphs |
 | `label` | `string` | `""` | its accessible name |
@@ -58,7 +62,7 @@ An SVG, from a file or from markup, drawn as vectors at every scale; `tint` reco
 | `each` | a list state | none | items drawn one by one by `draw_item`, after `draw`, in the list's order. Each item's drawing is kept by the item: one not written since (`set_key`, `patch`, `push` and `remove` leave the others as they were) is not drawn again, so dragging one shape of thousands draws that one |
 | `draw_item` | `(c: Canvas, item, w: number, h: number) -> ()` | with `each` | one item's drawing, from the item alone. It reads no state: what it read would show until its item is next written (`zgx lint` reports it). A size change draws every item again |
 | `label` | `string \| state \| function` | none | what it shows, read by assistive technology as an image's name: a chart's summary (`"Price, now 143.9, high 150.1, low 128.2"`), followed as state. Without one, the canvas is decoration, out of the accessibility tree |
-| `view` | state or function of `{ x, y, zoom }` | none | its drawing's pan and zoom: drawn at `zoom` times its size, then moved by `x`, `y`. Followed without calling `draw`: a pan or zoom places what it drew (a board, a map), so `draw` draws in its own coordinates and reads no view |
+| `view` | state or function of `{ x, y, zoom }` | none | its drawing's pan and zoom: drawn at `zoom` times its size, then moved by `x`, `y`. Followed without calling `draw`: a pan or zoom places what it drew (a board, a map), so `draw` draws in its own coordinates and reads no view. A drawing that rasterizes pans as its pixels moved, in whole device pixels: a pan rasterizes only what it shows for the first time (kept, up to 32 MiB). A zoom shows the zoom before's raster scaled while its own is made off the frame, then that |
 | `bg_grid` | `{ step, min_step, dot, lines, color }` | none | a grid under the drawing that follows `view`: a mark every `step` points (16), the step doubled while marks would show closer than `min_step` (0); each a square `dot` that many points across (1) or `lines` that wide; `color` (`"$border"`). Drawn in Rust with no call per mark, and marks keep their size as the view zooms |
 
 | Method of `c` | |
@@ -68,18 +72,35 @@ An SVG, from a file or from markup, drawn as vectors at every scale; `tint` reco
 | `c:line(x1, y1, x2, y2, paint, width?, opts?)` | a stroked line, `width` 1; `opts`: `cap` (`"butt"`, `"round"`, `"square"`), `join` (`"miter"`, `"round"`, `"bevel"`), `dash` (`{ on, off, … }`), `dash_offset` |
 | `c:fill(path, paint, rule?)` | fills a path; `rule` `"nonzero"` (the default) or `"evenodd"` |
 | `c:stroke(path, paint, width?, opts?)` | strokes a path; `opts` as `line`'s, and `draw = t` (or `{ start, end }`) strokes only that fraction of it, as anime.js draws lines |
+| `c:image(src, x, y, w, h, opts?)` | a picture in the box, among the shapes in the order drawn: `src` a path, a URL, `"host:<name>"` or a `Bitmap`, as `ui.image` takes, drawn still. `opts`: `fit` (`"fill"`, `"contain"`, `"cover"`, `"none"`, `"scale_down"`, as `ui.image`'s, centred), `radius` (its box's corners, which cut it: 0), `opacity` (1). One not there yet (a remote one loading, a `host:` one not made) draws nothing until it is, and the drawing follows it; a file that isn't there draws nothing and is a warning |
+| `c:shadow(path, shadow?)` | the shadow the path casts, under what is drawn after it: the shape grown by `spread` (or shrunk, below 0), moved by `x`, `y` and blurred by `blur`, in `color`, written as a [`shadow`](properties.md) property is (CSS's blur; `"#0000005a"` by default). All of it is drawn, under the shape too, so draw the shape next: `c:shadow(card, { y = 4, blur = 12, color = "#00000033" })` then `c:fill(card, "$surface.raised")` |
 | `c:clip(path)` | clips what follows to the path, until `c:restore()` |
 | `c:restore()` | ends the last clip |
-| `c:text(text, x, y, opts?)` | a line of text at (`x`, `y`). `opts`: `size` (12), `color` (`"$text.primary"`), `weight`, `italic`, `tabular`, `font`, `align` (`"start"`, `"center"`, `"end"`: where `x` falls across it), `baseline` (`"top"`, `"middle"`, `"bottom"`: where `y` falls down it) |
-| `c:measure_text(text, opts?)` | its width and height, for placing what goes around it: `local w = c:measure_text(label, { size = 11 })` |
+| `c:text(text, x, y, opts?)` | a line of text at (`x`, `y`), or a line per `
+`. `opts`: `size` (12), `color` (`"$text.primary"`), `weight`, `italic`, `tabular`, `font`, `align` (`"start"`, `"center"`, `"end"`: where `x` falls across it, and how its lines align), `baseline` (`"top"`, `"middle"`, `"bottom"`: where `y` falls down it), `line_height` and `letter_spacing` (points, as a text node's), `width` (wrapped to lines this many points wide, in a box that wide: a paragraph), `transform` (`{ a, b, c, d, e, f }`, as SVG's `matrix`: x' = a x + c y + e, y' = b x + d y + f), which maps the text once placed: a drawing that turns, mirrors or scales its shapes by a matrix turns their labels by the same one |
+| `c:measure_text(text, opts?)` | its width and height as `c:text` draws it with the same `opts`, for placing what goes around it: `local w = c:measure_text(label, { size = 11 })`, or a paragraph's height, `local _, h = c:measure_text(body, { width = 240 })` |
 
-Text on a canvas is shaped and drawn as any text is: sharp at any zoom, in the theme's fonts with their fallbacks, and following `view`. It sits over the canvas's shapes whatever order they were drawn in, so a shape drawn after it doesn't cover it, and `c:clip` doesn't cut it. Assistive technology doesn't read it: give the canvas a `label` that says what it shows (`label = "Requests, now 5,400, up 1.4%"`), and offer a chart's numbers as text or a table where they matter.
+Text on a canvas is shaped and drawn as any text is: sharp at any zoom, in the theme's fonts with their fallbacks, and following `view`. It goes in the drawing's order: over what was drawn before it, under a shape drawn after it. A canvas whose later shapes keep clear of its text draws as before; each later shape that covers text starts a layer drawn over that text (another raster where the canvas rasterizes), up to 8, past which the rest of the text goes over what follows. `c:clip` cuts it to the clip's box: a rectangle's, rounded or not, or a circle's; any other path's bounds (so text in a rotated or curved clip is cut by the box around it). Assistive technology doesn't read it: give the canvas a `label` that says what it shows (`label = "Requests, now 5,400, up 1.4%"`), and offer a chart's numbers as text or a table where they matter.
 
 `paint` is a [color](properties.md) or a brush from `ui.linear(x1, y1, x2, y2, { colors })`, its colors spread evenly from (`x1`, `y1`) to (`x2`, `y2`). A color may name a theme token (`"$accent"`, `"$surface.raised"`), resolved in the canvas's theme while `draw` runs: the drawing follows it as it follows state, so a theme change draws it again. `ui.linear` called inside `draw` takes tokens too.
 
+`ui.radial(cx, cy, r, { colors }, opts?)` spreads its colors out from (`cx`, `cy`) to `r` away, the last one past it; `ui.conic(cx, cy, { colors }, opts?)` spreads them clockwise round (`cx`, `cy`), a full turn from `angle`. `opts`: `ry` (a radial one's radius down, for an ellipse; `r`), `angle` (where a conic one starts, degrees clockwise from +x as `arc`'s; 0), `transform` (`{ a, b, c, d, e, f }`, as SVG's `matrix`: x' = a x + c y + e, y' = b x + d y + f), which maps the gradient once placed, so a drawing that turns or mirrors its shapes by a matrix turns their gradients by the same one:
+
+```lua
+return ui.canvas {
+	w = 200,
+	h = 120,
+	draw = function(c, w, h)
+		c:rect(0, 0, w, h, ui.radial(w / 2, 0, w / 2, { "#5ea5ff", "#5ea5ff00" }, { ry = h }))
+		local wheel = { "#f00", "#ff0", "#0f0", "#0ff", "#00f", "#f0f", "#f00" }
+		c:circle(w / 2, h / 2, 40, ui.conic(w / 2, h / 2, wheel, { angle = -90 }))
+	end,
+}
+```
+
 A path is built by chaining: `ui.path():move(x, y):line(x, y):quad(cx, cy, x, y):cubic(c1x, c1y, c2x, c2y, x, y):arc(cx, cy, r, start, sweep):close()`. `arc` angles are degrees, clockwise from +x. Once drawn, a path is fixed: it can be drawn again (make it once, outside `draw`), not extended. `:rect(x, y, w, h, r?)` and `:ellipse(x, y, w, h)` add a rounded rectangle or an ellipse as a closed subpath.
 
-A canvas whose drawing is only solid fills and strokes of rectangles (rounded or not), circles and lines along an axis (`c:rect`, `c:circle`, `c:line`, or a path that is just one `:rect` or `:ellipse`), and solid strokes of straight lines running one way across (`:move` then `:line`s whose x never turns back, as a sparkline's or a chart's, any joins and caps), is drawn by the GPU as those shapes: nothing is rasterized or uploaded, so redrawing it as a view pans or zooms, or as a sparkline's data ticks, costs its shapes alone. Anything else in it (curves, other ellipses, lines that turn back or crowd more than 32 points into a few widths, gradients, patterns, dashes, clips), or the canvas faded as a whole (`opacity` below 1, an edge fade), rasterizes it as before.
+A canvas whose drawing is only solid fills and strokes of rectangles (rounded or not), circles and lines along an axis (`c:rect`, `c:circle`, `c:line`, or a path that is just one `:rect` or `:ellipse`), and solid strokes of straight lines running one way across (`:move` then `:line`s whose x never turns back, as a sparkline's or a chart's, any joins and caps), is drawn by the GPU as those shapes: nothing is rasterized or uploaded, so redrawing it as a view pans or zooms, or as a sparkline's data ticks, costs its shapes alone. Anything else in it (curves, other ellipses, lines that turn back or crowd more than 32 points into a few widths, gradients, patterns, dashes, clips, images, shadows), or the canvas faded as a whole (`opacity` below 1, an edge fade), rasterizes it as before.
 
 A board that pans and zooms draws its content once, in its own coordinates, and gives the view: moving it draws nothing again. What keeps its size on screen as the view zooms (selection outlines, handles) goes in a canvas of its own over it, drawn in screen coordinates:
 
@@ -109,6 +130,32 @@ return ui.overlay {
 }
 ```
 
+### A drawing as a PNG: `ui.render_canvas`
+
+`ui.render_canvas(draw, { width, height, scale?, x?, y?, background? })` draws `draw(c, width, height)` as a canvas would, with the same `c`, and gives a promise of the picture as a PNG in base64: what an MCP image's `data` takes, or an export. It needs no canvas or window, so it works when no window shows (a plugin's window paused while the app is hidden, answering a tool). `c:measure_text` measures as on screen, in the system's fonts and the app's own (bundled with `Application::font`, or replaced since: `Platform::fonts`), and theme tokens resolve in the app's theme.
+
+- **Size.** The picture is `width * scale` by `height * scale` pixels (`scale` is 1 if not given), up to 32 MiB of pixels. `x`, `y` (0) is the point of the drawing at its top left, so one frame of a board can be pictured alone.
+- **Background.** `background` is a color, transparent if not given.
+- **Layering.** As on a canvas, the text goes over the shapes and isn't clipped.
+- **Threading.** `draw` runs at once, in the caller's time. The pixels and the PNG are made on a thread of their own.
+
+```lua
+local size = ui.state("size", "")
+return ui.button {
+	"Picture it",
+	on_click = function()
+		ui.task(function()
+			local png = ui.render_canvas(function(c, w, h)
+				c:rect(0, 0, w, h, "$surface.raised", 12)
+				c:text("Welcome", w / 2, 40, { size = 24, align = "center" })
+			end, { width = 390, height = 844, scale = 2, background = "#ffffff" }):await()
+			-- 780 by 1688 pixels, in base64
+			size:set(`{#png} characters`)
+		end)
+	end,
+}
+```
+
 ## Masks and shaders
 
 
@@ -117,6 +164,7 @@ Any node can show its content through a bitmap's alpha, have its box filled by a
 | | |
 | --- | --- |
 | `ui.bitmap(w, h, fn)` | `w` by `h` pixels (1 to 4096 a side), white, each with the alpha `fn(x, y)` returns (0 to 1). A `Bitmap` can also be a full-colour image (`ui.clipboard.read_image`'s); a mask reads only its alpha |
+| `ui.decode_image(base64)` | a promise of the `Bitmap` in a PNG, JPEG or GIF's bytes, given in base64 (one a server or the host handed over: a picture kept in a database, a picture fetched as bytes), up to 64 MiB, decoded off the main thread as `ui.image` decodes a file (a PNG or JPEG keeps its bytes and decodes its pixels when shown, at the size shown). Show it with `ui.image { src = bitmap }`; keep it (in state, or a table) rather than decoding it again. Text that isn't base64, or bytes that aren't a picture, reject the promise (`kind` `"io"`) |
 | `mask = bitmap` or `mask = { bitmap, w = …, h = …, x = …, y = …, sweep = … }` | the content shows through the bitmap's alpha, drawn `w` by `h` (the bitmap's size) from (`x`, `y`), unsmoothed; `maskX` and `maskY` animate its place, and `sweep = { x, y, duration, frame_rate }` moves it by (`x`, `y`) every `duration` ms, over and over, on the engine's own clock (a text shimmer: no script, style pass or layout per step, only the masked node composites again; 4 steps a second while it doesn't show) |
 | `ui.shader(wgsl, { fps })` | a fill: the source defines `fn fill(input: FillInput) -> vec4<f32>` (straight alpha), reading `input.p` (points from the box's top left), `input.size`, `input.time` (seconds), `input.scale` (pixels per point) and `input.params` (four `vec4`s); `fps` caps how often time repaints it |
 | `bg_shader = shader`, `shader_params = { … }` | fill the box with it, over `bg` and under the border and children; parameters are colors (0 to 1) or lists of four numbers; `shaderTime` and `shaderParam0` to `shaderParam15` animate |
@@ -176,7 +224,7 @@ return ui.column {
 
 - `ui.image` needs `src`; `code` is the SVG's (an image with only `code` fails to load). A missing or undecodable file is the file's doing, not the script's: it draws nothing (or the image's `fallback`), is told to `on_error`, and is otherwise a warning at the script line naming it, never an error, which would stop the window's reloads. So for SVGs and `bg_image`. An empty `src` (`""`, a picture not chosen yet) shows nothing and is no error, as the web's is, for images, SVGs and `bg_image`.
 - `ui.image_size(src)` gives a picture's size in pixels from its file's header, without decoding it, to hold its place at its final size before it draws: `local w, h = ui.image_size("shot.png")`. Nothing for a file gone or not a picture, or a remote one not yet arrived (asked for then: a function reading it again answers once it has).
-- Images and SVGs are decoded once per `src` and shared by every node showing it. Ones no node shows stay only while they fit the image cache's budget, the most recently shown first. A host that watches its scripts (`ScriptHost::watch`) also watches these files: saving an edited image reloads the scripts, state kept, and they show the new one.
+- Images and SVGs are decoded once per `src` and shared by every node showing it. Ones no node shows stay only while they fit the image cache's budget, the most recently shown first. Past twice the budget (an image shown under a new URL each version, which never unmounts), those no node shows go as the next picture arrives, not when the window next idles. A host that watches its scripts (`ScriptHost::watch`) also watches these files: saving an edited image reloads the scripts, state kept, and they show the new one.
 - An image is as large as its pixels in points unless sized; give it a `w` and `h` (or `aspect` and one of them).
 - `draw` runs again only for its size and the state it read; reading state through `peek` (or outside `draw`) does not redraw it. Keep it cheap: it runs in the script for every change it follows.
 - A drawn path cannot grow (`a drawn path cannot be extended`): build paths whole, then draw them.
