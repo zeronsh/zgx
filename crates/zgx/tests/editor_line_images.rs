@@ -5,9 +5,9 @@ use zgx::{
     compose::prelude::*,
     image::ImageData,
     input::InputEvent,
-    scene::{NodeKind, Rect},
-    text_layout::TextAlign,
-    widgets::{EditorHandle, LineInset, LineMark, MarkImage, Ui},
+    scene::{Color, NodeKind, Rect},
+    text_layout::{FallbackTextLayout, TextAlign, TextLayout},
+    widgets::{EditorHandle, LineInset, LineMark, LineSpans, MarkImage, SpanStyle, Ui},
 };
 
 const TEXT: &str = "intro\ncaption\nafter";
@@ -15,17 +15,32 @@ const TEXT: &str = "intro\ncaption\nafter";
 const CAPTION: usize = 1;
 
 fn note(picture: Arc<ImageData>) -> (Ui, EditorHandle) {
+    note_with(picture, false)
+}
+/// The caption's word in a colour: a highlighter's span that colours, as a note's link does.
+fn colour_caption(line: &str, _: u32) -> (LineSpans, u32) {
+    let spans = match line.find("caption") {
+        Some(at) => vec![(at..at + 7, SpanStyle::from(Color(0, 90, 200, 255)))],
+        None => Vec::new(),
+    };
+    (spans, 0)
+}
+/// `note`, its caption coloured by a highlighter if `coloured`.
+fn note_with(picture: Arc<ImageData>, coloured: bool) -> (Ui, EditorHandle) {
     let mut ui = Ui::new(500., 400.);
     let value = ui.signal(TEXT.to_string());
-    let view = ui.mount(
-        text_area("Note", value)
-            .w(400.)
-            .h(300.)
-            .p(0.)
-            .text_size(10.)
-            .line_height(20.)
-            .text_wrap(true),
-    );
+    let area = text_area("Note", value)
+        .w(400.)
+        .h(300.)
+        .p(0.)
+        .text_size(10.)
+        .line_height(20.)
+        .text_wrap(true);
+    let view = ui.mount(if coloured {
+        area.span_highlighter(colour_caption)
+    } else {
+        area
+    });
     ui.prepare_frame();
     let editor = ui.editor(view.node()).unwrap();
     editor.set_line_insets(Some(Rc::new(|i| match i {
@@ -122,4 +137,51 @@ fn a_picture_fills_its_box_in_the_lines_room_above_a_centred_editable_caption() 
     );
     let (_, frame, ..) = picture(&ui, &editor);
     assert_eq!(frame.y, top + 30., "the picture where it was");
+}
+
+/// Where the line holding `text` paints its first glyph, as a renderer lays out its paint item: the item's text
+/// in its box, in its font (a styled line's runs carry theirs).
+fn painted_x(ui: &Ui, text: &str) -> f32 {
+    let scene = ui.scene.borrow();
+    for item in scene.paint_items() {
+        let width = Some(item.bounds.width);
+        let laid: Box<dyn TextLayout> = match item.kind {
+            NodeKind::Text {
+                text: shown,
+                font_size,
+                ..
+            } if shown.contains(text) => Box::new(FallbackTextLayout::with_font(
+                shown, *font_size, width, item.font,
+            )),
+            NodeKind::RichText { text: shown } if shown.text().contains(text) => {
+                Box::new(FallbackTextLayout::with_rich(shown, width))
+            }
+            _ => continue,
+        };
+        return item.bounds.x + laid.caret(0).x;
+    }
+    panic!("no line holding {text:?} paints")
+}
+
+#[test]
+fn a_centred_caption_paints_where_its_caret_is_plain_and_coloured() {
+    for coloured in [false, true] {
+        let pixels = vec![200_u8; 4 * 4 * 4];
+        let (ui, editor) = note_with(Arc::new(ImageData::new(4, 4, pixels).unwrap()), coloured);
+        let origin = caret_x(&ui, &editor, 0);
+        let caption = TEXT.find("caption").unwrap();
+        let caret = caret_x(&ui, &editor, caption);
+        assert_eq!(
+            caret - origin,
+            179.,
+            "the caret centred (coloured: {coloured})"
+        );
+        assert_eq!(
+            painted_x(&ui, "caption"),
+            caret,
+            "its glyphs there too (coloured: {coloured})"
+        );
+        // An unaligned line paints at its left, as before.
+        assert_eq!(painted_x(&ui, "intro"), origin);
+    }
 }

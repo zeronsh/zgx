@@ -1328,6 +1328,13 @@ impl LinesLayout {
             .map(|w| w.max(1.))
             .or(wrap.map(|w| (w - inset.left).max(1.)))
     }
+    /// How line `i`'s rows align, where it has a width to align in (`LineInset::align`): shaped so for its carets
+    /// and hits (`line`), and drawn so.
+    pub(crate) fn align(&self, i: usize) -> Option<crate::text_layout::TextAlign> {
+        let inset = self.inset(i);
+        let align = inset.align?;
+        (inset.wrap(self.wrap).is_some() && !self.line_text(i).is_empty()).then_some(align)
+    }
     /// Line `i`'s room (`LineCache::set_insets`).
     pub(crate) fn inset(&self, i: usize) -> LineInset {
         self.cache
@@ -1349,10 +1356,7 @@ impl LinesLayout {
             std::borrow::Cow::Borrowed(&*text)
         };
         // aligned in a width: its rows placed there as the text layout aligns them, carets and hits with them
-        let aligned = match (inset.align, wrap) {
-            (Some(align), Some(_)) if !text.is_empty() => Some(align),
-            _ => None,
-        };
+        let aligned = self.align(i);
         let layout = match aligned {
             Some(align) => self.cache.aligned(self, i, &text, wrap, &key, align),
             None => match self.cache.styled(self, i, &text, wrap, &key) {
