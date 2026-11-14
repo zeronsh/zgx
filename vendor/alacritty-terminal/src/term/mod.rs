@@ -1623,6 +1623,23 @@ impl<T: EventListener> Term<T> {
     }
 }
 
+/// zgx: `run` written over `cells` (as long), each byte's cell made by
+/// `cell`, up to the first cell holding part of a wide character: how many
+/// were written. One pass over them.
+#[inline(always)]
+fn write_run(cells: &mut [Cell], run: &[u8], cell: impl Fn(u8) -> Cell) -> usize {
+    for (at, (old, &byte)) in cells.iter_mut().zip(run).enumerate() {
+        if old
+            .flags
+            .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+        {
+            return at;
+        }
+        *old = cell(byte);
+    }
+    run.len()
+}
+
 impl<T: EventListener> Handler for Term<T> {
     /// A character to be displayed.
     #[inline(always)]
@@ -1650,6 +1667,13 @@ impl<T: EventListener> Handler for Term<T> {
     /// holds no wide character (otherwise as `write_at_cursor` writes it).
     #[inline]
     fn input_str(&mut self, text: &str) {
+        #[cfg(test)]
+        if tests::BY_CHARACTER.get() {
+            for c in text.chars() {
+                self.input(c);
+            }
+            return;
+        }
         let mut bytes = text.as_bytes();
         let columns = self.columns();
         while let Some(&first) = bytes.first() {
@@ -1668,21 +1692,26 @@ impl<T: EventListener> Handler for Term<T> {
             while at < count {
                 let (start, end) = (point.column + at, point.column + count);
                 let cells = &mut self.grid[point.line][start..end];
-                // Up to a cell holding a wide character, written straight.
-                let plain = cells
-                    .iter()
-                    .position(|cell| {
-                        cell.flags
-                            .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
-                    })
-                    .unwrap_or(cells.len());
-                for (cell, &byte) in cells[..plain].iter_mut().zip(&bytes[at..]) {
-                    cell.c = charset.map(byte as char);
-                    cell.fg = fg;
-                    cell.bg = bg;
-                    cell.flags = flags;
-                    cell.extra = extra.clone();
-                }
+                let run = &bytes[at..count];
+                // Up to a cell holding a wide character, written straight; in
+                // ASCII with nothing extra (the usual), nothing mapped or
+                // cloned.
+                let plain = match (charset, &extra) {
+                    (StandardCharset::Ascii, None) => write_run(cells, run, |byte| Cell {
+                        c: byte as char,
+                        fg,
+                        bg,
+                        flags,
+                        extra: None,
+                    }),
+                    _ => write_run(cells, run, |byte| Cell {
+                        c: charset.map(byte as char),
+                        fg,
+                        bg,
+                        flags,
+                        extra: extra.clone(),
+                    }),
+                };
                 at += plain;
                 if at < count {
                     self.grid.cursor.point.column = point.column + at;
@@ -3358,6 +3387,121 @@ mod tests {
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+
+    thread_local! {
+        /// zgx: `input_str` as `input` for each character, to check the run
+        /// against.
+        pub(super) static BY_CHARACTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// zgx: random output, through the parser in reads of any length, leaves
+    /// the cells (the history's too) and the cursor as it leaves them when
+    /// each character of a run is written alone: plain text of every length,
+    /// wide characters and combining marks under and over it, wraps with
+    /// autowrap on and off, insert mode, the line drawing charset, colours,
+    /// and what keeps a cell's `extra` (hyperlinks, underline colours).
+    #[test]
+    fn random_output_writes_as_characters_one_at_a_time_do() {
+        const PIECES: &[&[u8]] = &[
+            b"a",
+            b"short ",
+            b"a line of a log, longer than the line is",
+            b"xxxxxxxx",
+            b"0123456789abcdefghijklm",
+            b"\r\n",
+            b"\n",
+            b"\r",
+            b"\x08",
+            b"\t",
+            "日本".as_bytes(),
+            "e\u{301}".as_bytes(),
+            "\u{1f600}".as_bytes(),
+            b"\x1b[31m",
+            b"\x1b[0m",
+            b"\x1b[1;4m",
+            b"\x1b[48;5;21m",
+            b"\x1b[58;2;1;2;3m",
+            // With an id: one made up counts across terminals.
+            b"\x1b]8;id=a;https://example.com\x1b\\",
+            b"\x1b]8;;\x1b\\",
+            b"\x1b(0",
+            b"\x1b(B",
+            b"\x1b[4h",
+            b"\x1b[4l",
+            b"\x1b[?7l",
+            b"\x1b[?7h",
+            b"\x1b[2;7H",
+            b"\x1b[9G",
+            b"\x1b[K",
+            b"\x1b[3b",
+        ];
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % below as u64) as usize
+        };
+        let size = TermSize::new(13, 5);
+        // What the cases came to: cells with extras, wide characters, and
+        // the line drawing charset's.
+        let (mut extra, mut wide, mut drawn) = (0, 0, 0);
+        for case in 0..300 {
+            let mut bytes = Vec::new();
+            for _ in 0..next(120) {
+                bytes.extend_from_slice(PIECES[next(PIECES.len())]);
+            }
+            let mut runs = Term::new(Config::default(), &size, VoidListener);
+            let mut one = Term::new(Config::default(), &size, VoidListener);
+            let (mut parser, mut by_one) = (
+                ansi::Processor::<ansi::StdSyncHandler>::new(),
+                ansi::Processor::<ansi::StdSyncHandler>::new(),
+            );
+            let mut at = 0;
+            while at < bytes.len() {
+                let end = (at + 1 + next(64)).min(bytes.len());
+                parser.advance(&mut runs, &bytes[at..end]);
+                BY_CHARACTER.set(true);
+                by_one.advance(&mut one, &bytes[at..end]);
+                BY_CHARACTER.set(false);
+                at = end;
+            }
+            let cursor = |term: &Term<VoidListener>| {
+                (term.grid.cursor.point, term.grid.cursor.input_needs_wrap)
+            };
+            let cells = |term: &Term<VoidListener>| {
+                let grid = term.grid();
+                let lines = grid.topmost_line().0..=grid.bottommost_line().0;
+                lines
+                    .flat_map(|line| {
+                        (0..grid.columns())
+                            .map(move |column| grid[Line(line)][Column(column)].clone())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let shown = String::from_utf8_lossy(&bytes);
+            assert_eq!(cursor(&runs), cursor(&one), "case {case}: {shown:?}");
+            let (written, expected) = (cells(&runs), cells(&one));
+            assert_eq!(written.len(), expected.len(), "case {case}: {shown:?}");
+            if let Some(at) = (0..written.len()).find(|&at| written[at] != expected[at]) {
+                let (line, column) = (at / size.columns, at % size.columns);
+                panic!(
+                    "case {case}: {shown:?}: line {line} of the history and screen, column \
+                     {column}: {:?}, not {:?}",
+                    written[at], expected[at]
+                );
+            }
+            extra += written.iter().any(|cell| cell.extra.is_some()) as usize;
+            wide += written
+                .iter()
+                .any(|cell| cell.flags.contains(Flags::WIDE_CHAR)) as usize;
+            drawn += written.iter().any(|cell| cell.c == '▒') as usize;
+        }
+        assert!(
+            extra > 30 && wide > 30 && drawn > 30,
+            "{extra} {wide} {drawn}"
+        );
+    }
 
     #[test]
     fn scroll_display_page_up() {
