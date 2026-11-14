@@ -907,8 +907,6 @@ jobs:
           skips=(
             a_child_fxc_cannot_survive_fails_that_shader_alone           # Direct3D 12's FXC child process
             an_apps_shaders_built_through_a_child_draw_as_wgpu_builds_them  # Direct3D 12's FXC child process
-            a_declared_fill_is_compiled_before_it_draws                  # compile timing on WARP under D3D11
-            a_window_draws_on_while_a_fill_compiles                      # compile timing on WARP under D3D11
             a_width_within_its_reach_breaks_its_lines_as_it_did          # fails without D3D11 too (#2124, #1813)
             a_page_pushed_and_popped_again_and_again_gives_its_image_textures_back  # fails on WARP without D3D11 (#2124)
             a_long_text_draws_only_the_lines_in_its_clip                 # fails on WARP without D3D11 (#2124)
