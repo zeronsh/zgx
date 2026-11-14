@@ -77,6 +77,18 @@ bounds a new window's size (`xdg_toplevel.configure_bounds`) and winit keeps
 to it: a 1200 by 800 window opens at 1024 by 640 on a 1024 by 640 sway output.
 `work_area_smoke.py` checks X11 below a panel.
 
+A window covering its display (`WindowOptions::covers_display`) is the
+display's size: on X11 its mode's pixels, on Wayland the compositor's logical
+pixels, which xdg-output says (`wayland_output.rs`). winit gives a Wayland
+output's mode and its scale as a whole number (2 for an output scaled 1.5),
+and takes a window's physical size at the scale the window has at its first
+configure, which Hyprland says only after the window's first frame: over a
+3840 by 2160 output scaled 1.5 such a window opened 3840 by 2160 logical
+pixels, half as large again as the output, and now opens 2560 by 1440. Where
+it shows is the compositor's to choose; sway and Hyprland float a window of
+a fixed size and centre it, over the whole output. `covers_display_smoke.py`
+checks it under sway at 1, 2 and 1.5.
+
 ## Launching
 
 A launcher hands a new app a token: `XDG_ACTIVATION_TOKEN` on Wayland,

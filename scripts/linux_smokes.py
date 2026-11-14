@@ -141,6 +141,7 @@ SMOKES = [
     ("editor-autoscroll", "python3 scripts/editor_autoscroll_smoke.py {bin}/editor_autoscroll --output {out}", False),
     ("transparency", "python3 scripts/transparency_smoke.py {bin}/transparency --output {out}", False),
     ("wayland-transparency", "python3 scripts/wayland_transparency_smoke.py {bin}/transparency --output {out}", False),
+    ("covers-display-wayland", "python3 scripts/covers_display_smoke.py {bin}/agents_intro --output {out}", False),
     ("native-ime", "python3 scripts/native_ime_smoke.py {bin}/native_ime --output {out}", False),
     ("ime-server-gone", "python3 scripts/native_ime_smoke.py {bin}/native_ime --server-gone --output {out}", False),
     ("ime-server-stopped", "python3 scripts/native_ime_smoke.py {bin}/native_ime --server-stopped --output {out}", False),

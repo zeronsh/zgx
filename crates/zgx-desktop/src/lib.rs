@@ -111,6 +111,8 @@ mod url;
 mod wayland_blur;
 #[cfg(target_os = "linux")]
 mod wayland_data;
+#[cfg(target_os = "linux")]
+mod wayland_output;
 mod window_chrome;
 mod window_info;
 mod window_place;

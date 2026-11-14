@@ -146,6 +146,7 @@ Further native Linux probes, each on a private Xvfb/Openbox desktop or a nested 
 - Shortcuts on a Russian layout on X11: Ctrl and the A key (ф) select an editor's text, Ctrl and the C key (с) copy it, and the same keys without Ctrl type Russian (`keyboard_layout_smoke.py`).
 - An application ID's D-Bus service (`org.freedesktop.Application`): a later launch's `Open` URLs and `Activate` reach the running app, which reopens a window after its last one closed, besides fullscreen, minimum size and a custom title bar's drag (`native_platform_smoke.py`). Its thread and the portal settings' sleep until a message arrives (`linux_dbus.rs`).
 - Live Wayland scaling through 1×, 2×, 1.5× (fractional, `preferred_scale(180)`) and back: viewport, viewporter destination, editor geometry, typed input and pixel extents (`dpi_transition_smoke.py`).
+- A window covering its display on Wayland, under sway with its output (1200 by 800) scaled 1, 2 and 1.5: agents_intro asks for the output's logical size as xdg-output says it (1200 by 800, 600 by 400, 800 by 533) as the first size it asks for, before its first commit, draws at it, and shows over the whole output; before, it first asked for the output's mode at every scale (`covers_display_smoke.py`). Under Hyprland 0.57, on a 3840 by 2160 output scaled 1.5, by hand: 2560 by 1440 at (0, 0), where it was 3840 by 2160 at (−1280, −720), its centre off the output's.
 
 Every probe is listed in `scripts/linux_smokes.py`, which runs them side by side (each owns its display or compositor) and reports each one:
 
