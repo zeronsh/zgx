@@ -619,11 +619,19 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
     if let Some(listeners) = el.listeners.take() {
         let handler = register(Handler::Listeners(runtime.clone(), listeners, id));
         block.handlers.push(handler);
-        ops::with(|ops| ops.op(&[ops::HANDLER, id, ops::ON_EVENT, handler]));
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::ON_EVENT, handler]);
+        });
     }
     if let Some(keymap) = el.keymap.take() {
         block.resources.push(__dom::bind_keymap(id, *keymap));
-        ops::with(|ops| ops.op(&[ops::HANDLER, id, ops::KEYMAP, id]));
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::KEYMAP, id]);
+        });
     }
     if let Some((axis, chooses)) = el.focus_group {
         let axis = match axis {
@@ -631,7 +639,11 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
             zgx::input::FocusGroup::Horizontal => 2,
             zgx::input::FocusGroup::Both => 3,
         };
-        ops::with(|ops| ops.op(&[ops::HANDLER, id, ops::GROUP, axis | (chooses as u32) << 2]));
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::GROUP, axis | (chooses as u32) << 2]);
+        });
     }
     let kind = std::mem::replace(&mut el.kind, ElementKind::Text(String::new()));
     let root = mount_kind(kind, id, scope, &runtime, block);

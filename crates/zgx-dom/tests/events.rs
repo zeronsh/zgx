@@ -244,3 +244,39 @@ async fn a_radio_groups_arrows_wrap_and_choose() {
     mounted.unmount();
     host.remove();
 }
+
+#[wasm_bindgen_test]
+fn rows_stamped_from_a_template_keep_their_listeners() {
+    let runtime = Runtime::new();
+    let rows = runtime.signal(vec![1_u32, 2, 3, 4]);
+    let heard: Rc<RefCell<Vec<u32>>> = Rc::default();
+    let log = heard.clone();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(zgx::compose::keyed(
+            move || rows.get(),
+            move |n: u32, _| {
+                let log = log.clone();
+                row()
+                    .id(format!("row{n}"))
+                    .h(20.)
+                    .on_event(move |cx| {
+                        if matches!(cx.event, InputEvent::PointerDown { .. })
+                            && cx.phase != EventPhase::Capture
+                        {
+                            log.borrow_mut().push(n);
+                        }
+                    })
+                    .child(text(format!("Row {n}")))
+            },
+        )),
+    );
+    // Rows after the first two are stamped from a template.
+    pointer(&find(&host, "[data-id=row4]"), "pointerdown");
+    pointer(&find(&host, "[data-id=row1]"), "pointerdown");
+    assert_eq!(*heard.borrow(), [4, 1]);
+    mounted.unmount();
+    host.remove();
+}
