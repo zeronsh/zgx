@@ -267,6 +267,10 @@ struct NaturalMetricsKey {
     spans: u64,
 }
 struct NaturalMetrics {
+    /// Something has asked for metrics: until then an edit tracks nothing
+    /// (most editors are never measured, and their refreshes stay as cheap
+    /// as before).
+    wanted: Cell<bool>,
     key: RefCell<Option<NaturalMetricsKey>>,
     revision: Cell<u64>,
     published: Signal<u64>,
@@ -279,6 +283,7 @@ struct NaturalMetrics {
 impl NaturalMetrics {
     fn new(runtime: &Runtime) -> Self {
         Self {
+            wanted: Cell::new(false),
             key: RefCell::new(None),
             revision: Cell::new(0),
             published: runtime.signal(0),
@@ -292,6 +297,45 @@ impl NaturalMetrics {
     fn invalidate_spans(&self) {
         self.spans.set(self.spans.get().wrapping_add(1));
         self.sample.set(None);
+    }
+    /// What the metrics depend on, as the editor shows it now; `None` while
+    /// `root` isn't in the scene. Selection counts only while an IME
+    /// composition replaces it.
+    fn key_of(
+        &self,
+        editor: &TextEditor,
+        scene: &Scene,
+        root: NodeId,
+        typography: &(Color, f32, FontStyle),
+        secure: bool,
+    ) -> Option<NaturalMetricsKey> {
+        if !scene.contains(root) {
+            return None;
+        }
+        let (_, size, font) = typography;
+        let mut font = editor_font(scene, root, font).into_owned();
+        font.masked = secure;
+        Some(NaturalMetricsKey {
+            text: editor.revision(),
+            composition: editor
+                .preedit()
+                .map(|p| (p.text.clone(), editor.selection().range())),
+            size: *size,
+            font,
+            shaper: scene.text_shaper_revision(),
+            spans: self.spans.get(),
+        })
+    }
+    /// Takes `key` as the current one: a change starts a new revision.
+    /// Whether it changed.
+    fn take_key(&self, key: NaturalMetricsKey) -> bool {
+        if self.key.borrow().as_ref() == Some(&key) {
+            return false;
+        }
+        *self.key.borrow_mut() = Some(key);
+        self.revision.set(self.revision.get().wrapping_add(1));
+        self.sample.set(None);
+        true
     }
 }
 impl Drop for NaturalMetrics {
@@ -731,7 +775,23 @@ impl EditorHandle {
         if !width.is_finite() || width <= 0. || self.hint.secure.get() {
             return None;
         }
-        if !self.scene.borrow().contains(self.node) || self.natural.key.borrow().is_none() {
+        // The first query starts tracking: its key is taken here, and from
+        // now on every refresh keeps it current.
+        if !self.natural.wanted.replace(true) || self.natural.key.borrow().is_none() {
+            let key = {
+                let e = self.editor.borrow();
+                let scene = self.scene.borrow();
+                self.natural.key_of(
+                    &e,
+                    &scene,
+                    self.node,
+                    &self.typography.borrow(),
+                    self.hint.secure.get(),
+                )
+            };
+            self.natural.take_key(key?);
+        }
+        if !self.scene.borrow().contains(self.node) {
             return None;
         }
         let revision = self.natural.revision.get();
@@ -6568,41 +6628,37 @@ impl Ui {
                     refresh();
                 }
                 EditorHint::watch_theme(&told, &storage, root, &watched_theme);
-                // Publish only after layout, with no scene/model borrow held.
-                // Selection affects metrics only while replacing text in IME.
-                let key = {
+                // Publish only after layout, with no scene/model borrow held,
+                // and only for an editor something has measured.
+                let key = if metrics.wanted.get() {
                     let e = metric_editor.borrow();
                     let scene = metric_scene.borrow();
-                    if !scene.contains(root) {
+                    let key = metrics.key_of(
+                        &e,
+                        &scene,
+                        root,
+                        &metric_typography.borrow(),
+                        told.secure.get(),
+                    );
+                    if key.is_none() {
                         return;
                     }
-                    let (_, size, font) = metric_typography.borrow().clone();
-                    let mut font = editor_font(&scene, root, &font).into_owned();
-                    font.masked = told.secure.get();
-                    NaturalMetricsKey {
-                        text: e.revision(),
-                        composition: e.preedit().map(|p| (p.text.clone(), e.selection().range())),
-                        size,
-                        font,
-                        shaper: scene.text_shaper_revision(),
-                        spans: metrics.spans.get(),
-                    }
+                    key
+                } else {
+                    None
                 };
-                if metrics.key.borrow().as_ref() != Some(&key) {
-                    *metrics.key.borrow_mut() = Some(key);
-                    metrics.revision.set(metrics.revision.get().wrapping_add(1));
-                    metrics.sample.set(None);
-                    if !metrics.queued.replace(true)
-                        && let Some(storage) = storage.upgrade()
-                    {
-                        let weak = Rc::downgrade(&metrics);
-                        storage.after_layout.borrow_mut().push(Box::new(move || {
-                            if let Some(metrics) = weak.upgrade() {
-                                metrics.queued.set(false);
-                                metrics.published.set(metrics.revision.get());
-                            }
-                        }));
-                    }
+                if let Some(key) = key
+                    && metrics.take_key(key)
+                    && !metrics.queued.replace(true)
+                    && let Some(storage) = storage.upgrade()
+                {
+                    let weak = Rc::downgrade(&metrics);
+                    storage.after_layout.borrow_mut().push(Box::new(move || {
+                        if let Some(metrics) = weak.upgrade() {
+                            metrics.queued.set(false);
+                            metrics.published.set(metrics.revision.get());
+                        }
+                    }));
                 }
 
                 // Where the caret is, told once drawn (nothing borrowed),
