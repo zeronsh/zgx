@@ -24,8 +24,8 @@ caret is, after IBus's candidates showed (they still go under it).
 its box's yellow through it. `--orca` (X11): over a private AT-SPI bus, the
 page's own accessible tree is a child of its box (an internal frame) and
 has the box for its parent, and Orca reads the page's heading from browse
-mode and names its first field as Tab moves focus there from the app's own
-button.
+mode, names its first field as Tab moves focus there from the app's own
+button, and follows the next Tab, within the page, to its select.
 `--media` (X11): a page served from localhost plays a VP8 WebM (GStreamer
 made it), and after a click an `AudioContext` runs. `--inspector`: on a
 page large enough for WebKit to dock Web Inspector in, Ctrl+I opens it in a
@@ -949,6 +949,12 @@ def read_page(session, output, buttons, checks):
     session.key("Tab")
     session.wait(lambda: said(session, output, "Probe field entry.", before), "Orca never named the field Tab reached", 15)
     checks["tabbed into the field"] = "Probe field entry."
+    # Tab again, within the page: from the field to its `<select>`, focus
+    # that moves only in the web process's tree, which Orca follows too.
+    before = len(spoken(output))
+    session.key("Tab")
+    session.wait(lambda: said(session, output, "combo box", before), "Orca never followed Tab from the field to the select", 15)
+    checks["tabbed within the page"] = [line for line in spoken(output)[before:] if "combo box" in line][0]
     return checks
 
 

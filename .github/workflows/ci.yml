@@ -229,6 +229,9 @@ jobs:
           fi
           "$dir/stylua" --check .
       - run: cargo clippy --workspace --all-targets --features zgx-desktop/webkitgtk --locked -- -D warnings
+      # Web views' own unit tests (the webkitgtk feature, off by default), on
+      # a display of their own: one makes GTK windows.
+      - run: xvfb-run -a cargo test -p zgx-desktop --features webkitgtk --lib --locked -- 'native_host::webkitgtk::'
       # Feature gating stays honest: the crates build without their defaults,
       # on the oldest Rust they claim (`rust-version`): a check this job
       # makes anyway, so the minimum costs only the toolchain's download.

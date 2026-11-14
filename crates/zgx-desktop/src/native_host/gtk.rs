@@ -41,6 +41,11 @@ macro_rules! api {
             /// same.
             pub gdk_x11_window_foreign_new_for_display:
                 Option<unsafe extern "C" fn(Ptr, std::ffi::c_ulong) -> Ptr>,
+            /// `atk_bridge_adaptor_init(argc, argv)` and its cleanup: the
+            /// AT-SPI bridge GTK links (`libatk-bridge-2.0`), where it does.
+            pub atk_bridge_adaptor_init:
+                Option<unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char) -> c_int>,
+            pub atk_bridge_adaptor_cleanup: Option<unsafe extern "C" fn()>,
             _libraries: Vec<Library>,
         }
         impl Api {
@@ -70,6 +75,8 @@ macro_rules! api {
                         "gdk_x11_window_foreign_new_for_display",
                     )
                     .ok(),
+                    atk_bridge_adaptor_init: find(&libraries, "atk_bridge_adaptor_init").ok(),
+                    atk_bridge_adaptor_cleanup: find(&libraries, "atk_bridge_adaptor_cleanup").ok(),
                     _libraries: libraries,
                 })
             }
@@ -93,6 +100,7 @@ api! {
     fn g_quark_from_static_string(*const c_char) -> u32;
     fn g_object_ref(Ptr) -> Ptr;
     fn g_object_unref(Ptr);
+    fn g_object_weak_ref(Ptr, unsafe extern "C" fn(Ptr, Ptr), Ptr);
     fn g_signal_connect_data(Ptr, *const c_char, GCallback, Ptr, Option<unsafe extern "C" fn(Ptr, Ptr)>, c_int) -> u64;
     fn g_signal_handlers_disconnect_matched(Ptr, c_int, c_uint, u32, Ptr, Ptr, Ptr) -> c_uint;
     fn g_type_query(GType, *mut GTypeQuery);
@@ -136,6 +144,7 @@ api! {
     fn atk_object_get_type() -> GType;
     fn g_type_class_ref(GType) -> Ptr;
     fn atk_object_set_role(Ptr, c_int);
+    fn atk_state_set_remove_state(Ptr, c_int) -> gboolean;
     fn gtk_widget_get_type() -> GType;
     fn g_signal_lookup(*const c_char, GType) -> c_uint;
     fn atk_util_get_type() -> GType;
