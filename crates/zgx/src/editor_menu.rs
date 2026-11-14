@@ -24,8 +24,8 @@ pub(crate) fn context_menu(
         // An editor hearing pastes may want one with no text in it (an image).
         let takes = ui.upgrade().is_some_and(|ui| ui.takes_paste(editor.node));
         let (cut, copy, paste, all) = (
-            (editor.clone(), platform.clone()),
-            (editor.clone(), platform.clone()),
+            (editor.clone(), platform.clone(), ui.clone()),
+            (editor.clone(), platform.clone(), ui.clone()),
             (editor.clone(), ui.clone()),
             editor.clone(),
         );
@@ -55,20 +55,18 @@ pub(crate) fn context_menu(
                 .id("editor-cut")
                 .disabled(!(copyable && editable && platform.is_some()))
                 .on_click(move || {
-                    let (editor, platform) = &cut;
-                    if let Some(platform) = platform
-                        && platform.0.set_clipboard_text(editor.copy())
-                    {
-                        editor.cut();
+                    let (editor, platform, ui) = &cut;
+                    if let (Some(platform), Some(ui)) = (platform, ui.upgrade()) {
+                        editor.cut_to_clipboard(&ui, platform);
                     }
                 }),
             menu_item("Copy")
                 .id("editor-copy")
                 .disabled(!(copyable && platform.is_some()))
                 .on_click(move || {
-                    let (editor, platform) = &copy;
-                    if let Some(platform) = platform {
-                        platform.0.set_clipboard_text(editor.copy());
+                    let (editor, platform, ui) = &copy;
+                    if let (Some(platform), Some(ui)) = (platform, ui.upgrade()) {
+                        editor.copy_to_clipboard(&ui, platform);
                     }
                 }),
             menu_item("Paste")

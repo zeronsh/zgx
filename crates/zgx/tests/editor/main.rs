@@ -24,6 +24,8 @@ mod editor_caret_width;
 mod editor_code;
 #[path = "../editor_context_menu.rs"]
 mod editor_context_menu;
+#[path = "../editor_copy_hook.rs"]
+mod editor_copy_hook;
 #[path = "../editor_external_edits.rs"]
 mod editor_external_edits;
 #[path = "../editor_hints.rs"]
