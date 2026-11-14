@@ -510,11 +510,11 @@ mod tests {
     use super::*;
     use cosmic_text::{CacheKeyFlags, fontdb};
 
-    fn ink(fonts: &mut FontSystem, id: fontdb::ID, glyph: u16, weight: u16) -> u64 {
+    fn ink(fonts: &mut FontSystem, id: fontdb::ID, glyph: u16, size: f32, weight: u16) -> u64 {
         let (key, _, _) = CacheKey::new(
             id,
             glyph,
-            32.,
+            size,
             (0., 0.),
             fontdb::Weight(weight),
             0,
@@ -542,15 +542,18 @@ mod tests {
             .as_swash()
             .charmap()
             .map('N');
-        let [w500, w550, w600] = [500, 550, 600].map(|w| ink(&mut fonts, id, glyph, w));
-        assert!(
-            w500 < w550 && w550 < w600,
-            "ink 500 {w500}, 550 {w550}, 600 {w600}"
-        );
-        let midpoint = (w500 + w600) / 2;
-        assert!(
-            w550.abs_diff(midpoint) * 20 < midpoint,
-            "550 is {w550}, halfway is {midpoint}"
-        );
+        // 13 points, where the stroke was drawn (under 17.5), and 32.
+        for size in [13., 32.] {
+            let [w500, w550, w600] = [500, 550, 600].map(|w| ink(&mut fonts, id, glyph, size, w));
+            assert!(
+                w500 < w550 && w550 < w600,
+                "{size} pt: ink 500 {w500}, 550 {w550}, 600 {w600}"
+            );
+            let midpoint = (w500 + w600) / 2;
+            assert!(
+                w550.abs_diff(midpoint) * 20 < midpoint,
+                "{size} pt: 550 is {w550}, halfway is {midpoint}"
+            );
+        }
     }
 }
