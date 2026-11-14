@@ -45,6 +45,9 @@ export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   document.addEventListener("scroll", placeAll, true);
   document.addEventListener("keydown", onKeymaps, true);
   document.addEventListener("contextmenu", onContextMenu);
+  document.addEventListener("copy", onCopy, true);
+  document.addEventListener("cut", onCopy, true);
+  document.addEventListener("paste", onPaste, true);
   document.addEventListener("keydown", onGroupKey);
   document.addEventListener("focusin", onGroupFocus);
   document.addEventListener("keydown", onLinkKey);
@@ -988,21 +991,34 @@ function onKeymaps(event) {
   const path = [];
   for (let n = event.target; n && n !== document; n = n.parentNode) if (n.$$k !== undefined) path.push(n.$$k);
   if (!path.length) return;
+  // Paste (⌘V, Ctrl+V): resolved as the paste event comes, so an action
+  // bound to it reads what is pasted (the page reads the clipboard only
+  // then). The key itself goes on to make that event.
+  pastePending = null;
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "v") {
+    pastePending = { event, path };
+    return;
+  }
+  if (resolveFor(event, event.target, path)) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
+
+// A key's keymaps (`path`) resolved and their actions routed from `target`:
+// whether something took it (a sequence's first keys, or an action handled).
+function resolveFor(event, target, path) {
   const mods =
     (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);
   const found = resolveKeys(path.join(","), event.key, event.code, mods | (event.repeat ? 16 : 0));
-  if (found === 0) return;
-  if (found > 1) {
-    let handled = false;
-    for (let c = 0; c < found - 2 && !handled; c++) {
-      const action = new CustomEvent("zgxaction", { bubbles: true, cancelable: true, detail: c });
-      event.target.dispatchEvent(action);
-      handled = action.defaultPrevented;
-    }
-    if (!handled) return;
+  if (found === 0) return false;
+  if (found === 1) return true;
+  for (let c = 0; c < found - 2; c++) {
+    const action = new CustomEvent("zgxaction", { bubbles: true, cancelable: true, detail: c });
+    target.dispatchEvent(action);
+    if (action.defaultPrevented) return true;
   }
-  event.preventDefault();
-  event.stopPropagation();
+  return false;
 }
 
 // Focus groups (`View::focus_group`, list boxes, tab lists, toolbars, radio
@@ -1266,5 +1282,63 @@ function onContextMenu(event) {
       event.preventDefault();
     }
     return;
+  }
+}
+
+// The clipboard (`src/platform.rs`). A page reads it only inside a paste
+// event: reads give that paste's, else what the page last copied, cut,
+// pasted or wrote.
+let clipboard = { text: null, html: null };
+let pastePending = null;
+
+export function zgx_clipboard_text() {
+  return clipboard.text;
+}
+
+export function zgx_clipboard_html() {
+  return clipboard.html;
+}
+
+export function zgx_clipboard_write(text, html) {
+  clipboard = { text, html: html === undefined ? null : html };
+  const c = navigator.clipboard;
+  if (!c) return false;
+  const done = html != null && typeof ClipboardItem !== "undefined"
+    ? c.write([
+        new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        }),
+      ])
+    : c.writeText(text);
+  // Refused (no permission, the page not focused): what was asked stays
+  // what this page reads.
+  done.catch(() => {});
+  return true;
+}
+
+export function zgx_open_url(url) {
+  return window.open(url, "_blank", "noopener,noreferrer") !== null || true;
+}
+
+function onCopy() {
+  const selection = document.getSelection();
+  const text = selection ? selection.toString() : "";
+  if (text) clipboard = { text, html: null };
+}
+
+function onPaste(event) {
+  const data = event.clipboardData;
+  if (data) {
+    const text = data.getData("text/plain");
+    const html = data.getData("text/html");
+    clipboard = { text: text || null, html: html || null };
+  }
+  // A paste a keymap waited for (`onKeymaps`): its actions run now.
+  const pending = pastePending;
+  pastePending = null;
+  if (pending && resolveFor(pending.event, pending.event.target, pending.path)) {
+    event.preventDefault();
+    event.stopPropagation();
   }
 }

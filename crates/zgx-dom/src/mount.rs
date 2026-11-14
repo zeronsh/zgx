@@ -470,6 +470,12 @@ impl Mounted {
 /// size and family, and apply its DOM at once.
 pub fn mount(runtime: &Runtime, parent: &web_sys::Element, view: View) -> Mounted {
     start();
+    // The browser's clipboard and links, as a desktop window provides its
+    // own (a view may provide another inside).
+    let view = zgx::compose::provide(
+        zgx::platform::PlatformService(Rc::new(crate::platform::Browser)),
+        view,
+    );
     let scope = Scope::root(runtime);
     // Adopting writes the table at once, so what is pending (a free of the
     // id it reuses, say) goes first.

@@ -15,5 +15,9 @@ extern "C" {
     pub(crate) fn zgx_adopt(id: u32, element: &web_sys::Element);
     pub(crate) fn zgx_apply(memory: &JsValue, ops: u32, ops_len: u32, text: u32, text_len: u32);
     pub(crate) fn zgx_live_nodes() -> u32;
+    pub(crate) fn zgx_clipboard_text() -> Option<String>;
+    pub(crate) fn zgx_clipboard_html() -> Option<String>;
+    pub(crate) fn zgx_clipboard_write(text: &str, html: Option<String>) -> bool;
+    pub(crate) fn zgx_open_url(url: &str) -> bool;
     pub(crate) fn zgx_measure(font: &str, text: &str) -> Box<[f64]>;
 }
