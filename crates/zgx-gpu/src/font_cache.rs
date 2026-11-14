@@ -40,6 +40,10 @@ const UNUSED: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 pub(crate) fn system_fonts() -> FontSystem {
     let mut fonts = cached_system_fonts();
     platform_families(&mut fonts);
+    // The face a character falls back to is Core Text's, as Chrome asks it
+    // (`core_text_fallback`).
+    #[cfg(target_os = "macos")]
+    crate::core_text_fallback::install_core_text_fallback(&mut fonts);
     #[cfg(feature = "hyphens")]
     fonts.set_hyphenator(Some(std::sync::Arc::new(hyphenation_points)));
     fonts

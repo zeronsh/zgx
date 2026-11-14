@@ -524,3 +524,34 @@ it reuses) and the font searches' caches (matches, first fonts and
 fallbacks, `scanned`, codepoint support, weight axes, monospace ids, the
 parsed-font table). Walked when asked; nothing is counted as text shapes.
 zgx-gpu's `shaping_counts_the_buffers_and_caches_it_keeps` checks it.
+
+## The platform's fallback, tracked
+
+`FontSystem::set_platform_fallback` installs a platform's own choice of face
+for a character a run's face lacks; `FontFallbackIter` asks it after the
+run's family and before the fallback lists (`platform_face`), for the word's
+non-ASCII characters, once a character, weight and size
+(`FontSystem::platform_faces`, forgotten with the database). It gives a face
+by PostScript name and file: the file is loaded if the database lacks it,
+and a variable face's named instance (Core Text's
+`.CJKSymbolsFallbackSC-Medium`) is found as the face it instances, in the
+same file, named alike up to the style, at the weight it gives. zgx-gpu
+installs Core Text's on macOS (`core_text_fallback`). A run whose family has
+no face of its own takes its scripts' fallback from `first_fallback` only
+when the platform has no face for its characters, which go by characters,
+not scripts.
+
+A face the platform's fallback gave is tracked: its `trak` table applies at
+the optical size (pixels) as harfrust's point size (`Font::new_at`'s
+`track`), as Chrome's advances in those faces include it, and it is an
+instance a size (`Font::sized`). Other faces with a `trak` table (SF) are
+not tracked yet, though Chrome tracks them as HarfBuzz does: SF's tracking
+is a change of its own, which moves Latin text. Instances a size, tracked or
+with an optical size axis,
+are kept at most `SIZES` a face and weight, the size farthest from the one
+made going (`load_font_at`, out of line: a hit is the lookup it was, and
+the font system is one pointer larger than it was, the platform's state
+boxed).
+zgx-gpu's `cjk_cascade` checks each glyph class at 12 to 28 px and three
+weights against Core Text's own advance.
+
