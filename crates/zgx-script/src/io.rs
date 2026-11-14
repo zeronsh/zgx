@@ -261,6 +261,36 @@ pub(crate) fn install(
     {
         let shared = shared.clone();
         board.set(
+            "read_html",
+            lua.create_function(move |lua, ()| {
+                if !clipboard {
+                    return Err(denied("ui.clipboard.read_html", "Clipboard"));
+                }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read")?;
+                Ok(platform(&shared, "ui.clipboard.read_html")?
+                    .0
+                    .clipboard_html())
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        board.set(
+            "write_html",
+            lua.create_function(move |lua, (text, html): (String, String)| {
+                if !clipboard {
+                    return Err(denied("ui.clipboard.write_html", "Clipboard"));
+                }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "write")?;
+                Ok(platform(&shared, "ui.clipboard.write_html")?
+                    .0
+                    .set_clipboard_rich_text(text, html))
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        board.set(
             "read_image",
             // A promise: a large image is decoded off the main thread.
             lua.create_function(move |lua, ()| {

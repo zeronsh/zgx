@@ -24329,12 +24329,15 @@ declare ui: {
 	-- a promise of a `Response`. A plugin needs the host's grant.
 	fetch: (url: string, opts: FetchOptions?) -> Promise<Response>,
 	-- The clipboard's text (nil if it holds none), and putting text on it;
-	-- its image as a `Bitmap` (nil if it holds none), and putting one on
-	-- it: promises, as a large image is decoded and encoded off the main
-	-- thread.
+	-- its HTML (a browser's or word processor's copy; nil if it holds
+	-- none), and putting HTML on it with its text; its image as a `Bitmap`
+	-- (nil if it holds none), and putting one on it: promises, as a large
+	-- image is decoded and encoded off the main thread.
 	clipboard: {
 		read: () -> string?,
 		write: (text: string) -> boolean,
+		read_html: () -> string?,
+		write_html: (text: string, html: string) -> boolean,
 		read_image: () -> Promise<Bitmap?>,
 		write_image: (image: Bitmap) -> Promise<boolean>,
 	},

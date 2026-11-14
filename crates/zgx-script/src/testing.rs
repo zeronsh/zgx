@@ -52,6 +52,7 @@ use zgx::{
 #[derive(Default)]
 pub struct FakeDesktop {
     clipboard: RefCell<String>,
+    html: RefCell<Option<String>>,
     image: RefCell<Option<std::sync::Arc<zgx::image::ImageData>>>,
     files: RefCell<Vec<std::path::PathBuf>>,
     opens: RefCell<std::collections::VecDeque<Vec<std::path::PathBuf>>>,
@@ -127,6 +128,17 @@ impl FakeDesktop {
     /// Put `text` on the clipboard, as another app copies it.
     pub fn copy(&self, text: impl Into<String>) {
         *self.clipboard.borrow_mut() = text.into();
+        *self.html.borrow_mut() = None;
+    }
+    /// The clipboard's HTML, if it holds some.
+    pub fn clipboard_html(&self) -> Option<String> {
+        self.html.borrow().clone()
+    }
+    /// Put `html` on the clipboard with `text` beside it, as a browser or
+    /// word processor copies rich text.
+    pub fn copy_html(&self, text: impl Into<String>, html: impl Into<String>) {
+        *self.clipboard.borrow_mut() = text.into();
+        *self.html.borrow_mut() = Some(html.into());
     }
     /// The clipboard's image: its width, height and RGBA pixels.
     pub fn clipboard_image(&self) -> Option<(u32, u32, Vec<u8>)> {
@@ -158,6 +170,15 @@ impl zgx::platform::Platform for FakeDesktop {
     }
     fn set_clipboard_text(&self, text: String) -> bool {
         *self.clipboard.borrow_mut() = text;
+        *self.html.borrow_mut() = None;
+        true
+    }
+    fn clipboard_html(&self) -> Option<String> {
+        self.html.borrow().clone()
+    }
+    fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
+        *self.clipboard.borrow_mut() = text;
+        *self.html.borrow_mut() = Some(html);
         true
     }
     fn clipboard_image(&self) -> zgx::platform::Pending<Option<zgx::image::ImageData>> {
