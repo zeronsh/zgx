@@ -14,6 +14,11 @@ mod compile;
 #[cfg(all(windows, feature = "composition"))]
 mod composition;
 #[cfg(target_os = "macos")]
+mod core_text_fallback;
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use core_text_fallback::{core_text_advance, install_core_text_fallback};
+#[cfg(target_os = "macos")]
 mod core_text_glyphs;
 #[cfg(d3d11)]
 mod d3d11_frame;

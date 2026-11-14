@@ -124,3 +124,62 @@ fn mixed_latin_and_han_fits_where_chrome_fits_it() {
     let lines: Vec<f32> = buffer.layout_runs().map(|run| run.line_w).collect();
     assert_eq!(lines.len(), 1, "wrapped: {lines:?}");
 }
+
+/// A font system of `locale` with the system's fonts and Core Text's
+/// fallback, as zgx's own has it.
+fn fonts_of(locale: &str) -> FontSystem {
+    let (_, db) = FontSystem::new().into_locale_and_db();
+    let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
+    zgx_gpu::install_core_text_fallback(&mut fonts);
+    fonts.set_language(Some(locale));
+    fonts
+}
+
+/// Chrome's own measure (157, DPR 2, `400 13px system-ui`) of a Japanese
+/// line in each of two pages: one with no language, whose kana fall to Core
+/// Text's `.CJK Symbols Fallback SC` and Han to `.PingFang UI Text SC`
+/// (153.50), and one with `lang="ja"`, whose script's standard font,
+/// Hiragino Kaku Gothic ProN, takes them all before Core Text. zgx's
+/// language (`FontSystem::set_language`, an app's i18n locale) stands for
+/// the page's. Chrome's Japanese line is 154.84: its kana pairs kern across
+/// the line's break opportunities (ォ before ル), which zgx shapes word by
+/// word here, so this line is Hiragino's full width, 13 a glyph.
+#[test]
+fn a_japanese_line_falls_back_as_chrome_with_and_without_a_language() {
+    let line = "フォルダにファイルを追加";
+    for (locale, kana, han, width) in [
+        (
+            "en-US",
+            ".CJKSymbolsFallbackSC",
+            ".PingFangUITextSC",
+            153.50,
+        ),
+        ("ja-JP", "HiraKakuProN-W3", "HiraKakuProN-W3", 12. * 13.),
+    ] {
+        let mut fonts = fonts_of(locale);
+        let glyphs = shaped(&mut fonts, line, 400, 13);
+        let total: f32 = glyphs.iter().map(|glyph| glyph.1).sum();
+        for (c, _, face) in &glyphs {
+            let want = if *c == '追' || *c == '加' {
+                han
+            } else {
+                kana
+            };
+            assert_eq!(
+                stem(face),
+                stem(want),
+                "{locale}: {c} in {face}, Chrome's {want}"
+            );
+        }
+        assert!(
+            (total - width).abs() < 0.1,
+            "{locale}: {total}, want {width}"
+        );
+    }
+    // At 450 the standard font matches its family's weight as CSS does:
+    // W3 (300), as nothing lies between 450 and 500 (Chrome: 14.00 at 14 px).
+    let mut fonts = fonts_of("ja-JP");
+    let glyphs = shaped(&mut fonts, "こ", 450, 14);
+    assert_eq!(glyphs[0].2, "HiraKakuProN-W3", "{glyphs:?}");
+    assert!((glyphs[0].1 - 14.00).abs() < 0.01, "{glyphs:?}");
+}
