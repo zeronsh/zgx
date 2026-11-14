@@ -1624,18 +1624,40 @@ impl<T: EventListener> Term<T> {
 }
 
 /// zgx: `run` written over `cells` (as long), each byte's cell made by
-/// `cell`, up to the first cell holding part of a wide character: how many
-/// were written. One pass over them.
+/// `cell`, up to the first cell holding part of a wide character or an
+/// extra (`write_at_cursor` writes those, dropping what they hold): how many
+/// were written. Cells from `clean` on are past the row's `occ`, which
+/// `Row::reset` already counts on holding neither: written straight, no
+/// check and nothing to drop (a line a flood writes into a row just reset
+/// is all of them).
 #[inline(always)]
-fn write_run(cells: &mut [Cell], run: &[u8], cell: impl Fn(u8) -> Cell) -> usize {
-    for (at, (old, &byte)) in cells.iter_mut().zip(run).enumerate() {
+fn write_run(cells: &mut [Cell], run: &[u8], clean: usize, cell: impl Fn(u8) -> Cell) -> usize {
+    let cells = &mut cells[..run.len()];
+    let clean = clean.min(run.len());
+    for at in 0..clean {
+        let old = &mut cells[at];
         if old
             .flags
             .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+            || old.extra.is_some()
         {
             return at;
         }
-        *old = cell(byte);
+        let replaced = mem::replace(old, cell(run[at]));
+        // Nothing to drop: a cell with an extra stopped the loop above.
+        debug_assert!(replaced.extra.is_none());
+        mem::forget(replaced);
+    }
+    for (old, &byte) in cells[clean..].iter_mut().zip(&run[clean..]) {
+        let replaced = mem::replace(old, cell(byte));
+        debug_assert!(
+            replaced.extra.is_none()
+                && !replaced
+                    .flags
+                    .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER),
+            "a cell past the row's occupied ones holds something: {replaced:?}"
+        );
+        mem::forget(replaced);
     }
     run.len()
 }
@@ -1691,20 +1713,23 @@ impl<T: EventListener> Handler for Term<T> {
             let mut at = 0;
             while at < count {
                 let (start, end) = (point.column + at, point.column + count);
-                let cells = &mut self.grid[point.line][start..end];
+                let row = &mut self.grid[point.line];
+                // The cells from the row's `occ` on hold nothing yet.
+                let clean = row.occ.saturating_sub(start.0);
+                let cells = &mut row[start..end];
                 let run = &bytes[at..count];
                 // Up to a cell holding a wide character, written straight; in
                 // ASCII with nothing extra (the usual), nothing mapped or
                 // cloned.
                 let plain = match (charset, &extra) {
-                    (StandardCharset::Ascii, None) => write_run(cells, run, |byte| Cell {
+                    (StandardCharset::Ascii, None) => write_run(cells, run, clean, |byte| Cell {
                         c: byte as char,
                         fg,
                         bg,
                         flags,
                         extra: None,
                     }),
-                    _ => write_run(cells, run, |byte| Cell {
+                    _ => write_run(cells, run, clean, |byte| Cell {
                         c: charset.map(byte as char),
                         fg,
                         bg,
@@ -3399,7 +3424,11 @@ mod tests {
     /// each character of a run is written alone: plain text of every length,
     /// wide characters and combining marks under and over it, wraps with
     /// autowrap on and off, insert mode, the line drawing charset, colours,
-    /// and what keeps a cell's `extra` (hyperlinks, underline colours).
+    /// and what keeps a cell's `extra` (hyperlinks, underline colours); among
+    /// them what moves, inserts, deletes or erases cells (scroll regions,
+    /// IL/DL, ICH/DCH/ECH, ED/EL, the alternate screen, DECALN) and resizes
+    /// with reflow. After every read, no cell past its row's `occ` holds an
+    /// extra or a wide character's flag, as runs written there count on.
     #[test]
     fn random_output_writes_as_characters_one_at_a_time_do() {
         const PIECES: &[&[u8]] = &[
@@ -3434,7 +3463,27 @@ mod tests {
             b"\x1b[9G",
             b"\x1b[K",
             b"\x1b[3b",
+            b"\x1b[2;4r",
+            b"\x1b[r",
+            b"\x1b[2S",
+            b"\x1b[T",
+            b"\x1bM",
+            b"\x1b[L",
+            b"\x1b[2M",
+            b"\x1b[2@",
+            b"\x1b[2P",
+            b"\x1b[3X",
+            b"\x1b[J",
+            b"\x1b[1J",
+            b"\x1b[2J",
+            b"\x1b[1K",
+            b"\x1b[2K",
+            b"\x1b[?1049h",
+            b"\x1b[?1049l",
+            b"\x1b#8",
+            b"\x1b[5;12H",
         ];
+        const SIZES: [(usize, usize); 4] = [(13, 5), (9, 4), (17, 6), (6, 3)];
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut next = move |below: usize| {
             state ^= state << 13;
@@ -3445,7 +3494,25 @@ mod tests {
         let size = TermSize::new(13, 5);
         // What the cases came to: cells with extras, wide characters, and
         // the line drawing charset's.
-        let (mut extra, mut wide, mut drawn) = (0, 0, 0);
+        let (mut extra, mut wide, mut drawn, mut resized) = (0, 0, 0, 0);
+        // No cell past its row's `occ` holds an extra or a wide flag.
+        let clean_past_occ = |term: &Term<VoidListener>, case: usize| {
+            let grid = term.grid();
+            for line in grid.topmost_line().0..=grid.bottommost_line().0 {
+                let row = &grid[Line(line)];
+                for column in row.occ..grid.columns() {
+                    let cell = &row[Column(column)];
+                    assert!(
+                        cell.extra.is_none()
+                            && !cell
+                                .flags
+                                .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER),
+                        "case {case}: line {line}, column {column} past occ {}: {cell:?}",
+                        row.occ
+                    );
+                }
+            }
+        };
         for case in 0..300 {
             let mut bytes = Vec::new();
             for _ in 0..next(120) {
@@ -3465,6 +3532,14 @@ mod tests {
                 by_one.advance(&mut one, &bytes[at..end]);
                 BY_CHARACTER.set(false);
                 at = end;
+                clean_past_occ(&runs, case);
+                if next(6) == 0 {
+                    let (columns, lines) = SIZES[next(SIZES.len())];
+                    runs.resize(TermSize::new(columns, lines));
+                    one.resize(TermSize::new(columns, lines));
+                    clean_past_occ(&runs, case);
+                    resized += 1;
+                }
             }
             let cursor = |term: &Term<VoidListener>| {
                 (term.grid.cursor.point, term.grid.cursor.input_needs_wrap)
@@ -3484,7 +3559,8 @@ mod tests {
             let (written, expected) = (cells(&runs), cells(&one));
             assert_eq!(written.len(), expected.len(), "case {case}: {shown:?}");
             if let Some(at) = (0..written.len()).find(|&at| written[at] != expected[at]) {
-                let (line, column) = (at / size.columns, at % size.columns);
+                let columns = runs.columns();
+                let (line, column) = (at / columns, at % columns);
                 panic!(
                     "case {case}: {shown:?}: line {line} of the history and screen, column \
                      {column}: {:?}, not {:?}",
@@ -3498,8 +3574,8 @@ mod tests {
             drawn += written.iter().any(|cell| cell.c == '▒') as usize;
         }
         assert!(
-            extra > 30 && wide > 30 && drawn > 30,
-            "{extra} {wide} {drawn}"
+            extra > 30 && wide > 30 && drawn > 30 && resized > 100,
+            "{extra} {wide} {drawn} {resized}"
         );
     }
 
@@ -3889,6 +3965,52 @@ mod tests {
                 assert!(cells(&runs) == cells(&one), "setup {at}, {text:?}");
             }
         }
+    }
+
+    /// zgx: plain text written over cells holding extras (combining marks,
+    /// a hyperlink, an underline colour) leaves none of them, and frees
+    /// every one; so does erasing a line of more of them.
+    #[test]
+    fn plain_text_over_extras_frees_them() {
+        let size = TermSize::new(20, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        let extras: &[u8] = "e\u{301}e\u{301}e\u{301}\x1b]8;id=a;https://example.com\x1b\\abc\
+                              \x1b]8;;\x1b\\\x1b[58;2;1;2;3mdef\x1b[0m"
+            .as_bytes();
+        // Every extra the first line's cells hold, held weakly: dead once
+        // its allocation is freed.
+        let held = |term: &Term<VoidListener>, line: i32| {
+            (0..term.columns())
+                .filter_map(|column| term.grid()[Line(line)][Column(column)].extra.as_ref())
+                .map(Arc::downgrade)
+                .collect::<Vec<_>>()
+        };
+        parser.advance(&mut term, extras);
+        let overwritten = held(&term, 0);
+        assert_eq!(overwritten.len(), 9);
+        parser.advance(&mut term, b"\x1b[1;1Hplain text over it");
+        let line: String = (0..20)
+            .map(|column| term.grid()[Line(0)][Column(column)].c)
+            .collect();
+        assert_eq!(line, "plain text over it  ");
+        assert!((0..20).all(|column| term.grid()[Line(0)][Column(column)].extra.is_none()));
+        assert!(
+            overwritten.iter().all(|extra| extra.upgrade().is_none()),
+            "an extra kept"
+        );
+
+        parser.advance(&mut term, b"\x1b[2;1H");
+        parser.advance(&mut term, extras);
+        let cleared = held(&term, 1);
+        assert_eq!(cleared.len(), 9);
+        // The line erased (all of the screen, ED 2, would keep it in the
+        // history).
+        parser.advance(&mut term, b"\x1b[2K");
+        assert!(
+            cleared.iter().all(|extra| extra.upgrade().is_none()),
+            "an extra kept"
+        );
     }
 
     /// zgx: REP repeats a run's last character, as it repeats a character's.
