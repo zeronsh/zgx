@@ -24,6 +24,8 @@ mod keyboard_scrolling;
 mod list_build_ahead;
 #[path = "../list_wheel_lines.rs"]
 mod list_wheel_lines;
+#[path = "../measured_list_prepend.rs"]
+mod measured_list_prepend;
 #[path = "../navigation_swipes.rs"]
 mod navigation_swipes;
 #[path = "../overlay_scrollbars.rs"]
