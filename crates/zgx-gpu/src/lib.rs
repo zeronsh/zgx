@@ -22793,13 +22793,25 @@ mod shader_compile_tests {
         let at = (20 * 64 + 20) * 4;
         (pixels[at..at + 4].try_into().unwrap(), gpu.images_awaited)
     }
+    /// Whether `shader`'s fill compiled, within a while: wgpu's pipeline,
+    /// and under Direct3D 11 its own pixel stage (wgpu's then is the no-op
+    /// device's, ready at once).
     fn compiled(gpu: &GpuRenderer, shader: &FillShader) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let d3d11 = || {
+            #[cfg(d3d11)]
+            if let Some(state) = &gpu.d3d11 {
+                let fill = d3d11_frame::AppShader::Fill;
+                return state.device.app_shader(shader, fill, false).is_some();
+            }
+            true
+        };
         while std::time::Instant::now() < deadline {
             if gpu
                 .fill_pipelines
                 .get(&shader.id())
                 .is_some_and(|c| c.get().is_some())
+                && d3d11()
             {
                 return true;
             }
