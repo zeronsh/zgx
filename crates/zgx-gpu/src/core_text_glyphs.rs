@@ -400,27 +400,6 @@ pub(crate) fn font_smoothing() -> bool {
 
 /// Whether Core Text draws glyphs of `face` through Chrome's recipe: any
 /// face but a colour one (emoji draw their own colours through swash).
-/// The stroke Chrome adds to the system font at a weight past Medium and
-/// before Semibold (501 to 599) under 17.5 points: font synthesis' fake bold,
-/// Skia's `extra = size * lerp(size, 9..36, 1/24..1/32)` in points, on top of
-/// the interpolated outlines (measured at 12 to 17 px: ink within 1%). `key`'s
-/// size is in points.
-fn synthetic_bold_width(fonts: &mut FontSystem, key: CacheKey) -> Option<f64> {
-    let weight = key.font_weight.0;
-    let size = f64::from(f32::from_bits(key.font_size_bits));
-    if !(501..=599).contains(&weight) || size >= 17.5 {
-        return None;
-    }
-    let system = fonts
-        .db()
-        .face(key.font_id)
-        .is_some_and(|face| face.post_script_name.starts_with(".SFNS-"));
-    system.then(|| {
-        let t = ((size - 9.) / 27.).clamp(0., 1.);
-        size * (1. / 24. + (1. / 32. - 1. / 24.) * t)
-    })
-}
-
 /// `key`'s glyph as Chrome draws it on macOS: Skia draws it through Core
 /// Graphics, black on white with font smoothing on, in a colour context at
 /// the point size under the device scale (so the font's optical size and
@@ -501,11 +480,6 @@ pub(crate) fn chrome_glyph(
                 y: (dy - f64::from(bottom)) / k,
             };
             CGContextScaleCTM(context.0, k, k);
-            if let Some(width) = synthetic_bold_width(fonts, key) {
-                CGContextSetRGBStrokeColor(context.0, 0., 0., 0., 1.);
-                CGContextSetLineWidth(context.0, width);
-                CGContextSetTextDrawingMode(context.0, 2);
-            }
             CTFontDrawGlyphs(font, &glyph, &at, 1, context.0);
         }
         let alpha: Vec<u8> = data
@@ -532,4 +506,30 @@ pub(crate) fn chrome_glyph(
         image.data = alpha;
         Some(image)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmic_text::{CacheKeyFlags, fontdb};
+
+    fn ink(fonts: &mut FontSystem, id: fontdb::ID, glyph: u16, weight: u16) -> u64 {
+        let (key, _, _) = CacheKey::new(id, glyph, 32., (0., 0.), fontdb::Weight(weight), 0, CacheKeyFlags::empty());
+        let image = chrome_glyph(fonts, key, 2.).expect("Core Text draws the system font");
+        image.data.iter().map(|&a| u64::from(a)).sum()
+    }
+
+    // Chrome draws system-ui between Medium and Semibold on the weight axis alone: no fake-bold stroke.
+    #[test]
+    fn the_system_font_between_medium_and_semibold_is_drawn_on_its_axis_alone() {
+        let mut fonts = FontSystem::new();
+        let Some(id) = fonts.db().faces().find(|f| f.post_script_name == ".SFNS-Regular").map(|f| f.id) else {
+            return;
+        };
+        let glyph = fonts.get_font(id, fontdb::Weight(400)).unwrap().as_swash().charmap().map('N');
+        let [w500, w550, w600] = [500, 550, 600].map(|w| ink(&mut fonts, id, glyph, w));
+        assert!(w500 < w550 && w550 < w600, "ink 500 {w500}, 550 {w550}, 600 {w600}");
+        let midpoint = (w500 + w600) / 2;
+        assert!(w550.abs_diff(midpoint) * 20 < midpoint, "550 is {w550}, halfway is {midpoint}");
+    }
 }
