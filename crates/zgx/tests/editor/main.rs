@@ -26,6 +26,10 @@ mod editor_caret_width;
 mod editor_code;
 #[path = "../editor_context_menu.rs"]
 mod editor_context_menu;
+#[path = "../editor_copy_hook.rs"]
+mod editor_copy_hook;
+#[path = "../editor_drag_source.rs"]
+mod editor_drag_source;
 #[path = "../editor_external_edits.rs"]
 mod editor_external_edits;
 #[path = "../editor_hints.rs"]
@@ -52,12 +56,6 @@ mod editor_primary_paste;
 mod editor_read_only;
 #[path = "../editor_rows.rs"]
 mod editor_rows;
-#[path = "../editor_wrap_width.rs"]
-mod editor_wrap_width;
-#[path = "../editor_copy_hook.rs"]
-mod editor_copy_hook;
-#[path = "../editor_drag_source.rs"]
-mod editor_drag_source;
 #[path = "../editor_scrollbar.rs"]
 mod editor_scrollbar;
 #[path = "../editor_selection_theme.rs"]
@@ -80,5 +78,7 @@ mod editor_theme_marks;
 mod editor_undo_keys;
 #[path = "../editor_wrap_navigation.rs"]
 mod editor_wrap_navigation;
+#[path = "../editor_wrap_width.rs"]
+mod editor_wrap_width;
 #[path = "../ime_clauses.rs"]
 mod ime_clauses;
