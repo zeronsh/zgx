@@ -187,6 +187,9 @@ pub struct LineInset {
     /// This line and the next share a row (a table's cells, side by side): both start at the row's top, each at its
     /// own `left`, and the lines after the row start below its tallest line.
     pub joins_next: bool,
+    /// How its rows align in the width it wraps in (a centred caption); none: as the editor's text. Carets, hits and
+    /// selection follow where its text shows. An unwrapped line without its own `width` has no width to align in.
+    pub align: Option<crate::text_layout::TextAlign>,
 }
 impl LineInset {
     /// The width the line wraps in when the text wraps at `wrap`: its own, or what its indent leaves.
@@ -238,6 +241,29 @@ pub struct LineMark {
     pub mono: bool,
     /// Text drawn from its top left (an ordinal), its colour and size; a finite height is its line pitch.
     pub label: Option<(std::sync::Arc<str>, crate::scene::Color, f32)>,
+    /// A picture filling it (a note's image above its caption), its corners rounded by `radius`.
+    pub image: Option<MarkImage>,
+    /// Where it sits across the line's width (left, centre or right; `x` then offsets it); none: at `x` (or from the
+    /// right edge with `from_right`).
+    pub align: Option<crate::text_layout::TextAlign>,
+}
+/// A line mark's picture (`LineMark::image`): decoded pixels and how they fit the mark's box. A file is decoded by
+/// the app, as an image view's is (`zgx_gpu::assets::decode_image_kept`), and kept in its `ImageCache`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkImage {
+    /// The pixels.
+    pub image: std::sync::Arc<crate::image::ImageData>,
+    /// How they fit the mark's box ([`ObjectFit::Cover`](crate::style::ObjectFit::Cover): filling it, cropped).
+    pub fit: crate::style::ObjectFit,
+}
+impl MarkImage {
+    /// `image` filling the mark, cropped to its box.
+    pub fn cover(image: std::sync::Arc<crate::image::ImageData>) -> Self {
+        Self {
+            image,
+            fit: crate::style::ObjectFit::Cover,
+        }
+    }
 }
 impl Default for LineMark {
     fn default() -> Self {
@@ -254,6 +280,8 @@ impl Default for LineMark {
             border_color: crate::scene::Color(0, 0, 0, 0),
             border_width: 0.,
             label: None,
+            image: None,
+            align: None,
         }
     }
 }
@@ -776,6 +804,64 @@ impl LineCache {
         styled.insert(key, (shaped.clone(), tick));
         Some(shaped)
     }
+    /// Line `i` shaped with its rows aligned `align` in `wrap` (`LineInset::align`): its spans' runs if they shape it,
+    /// else its text as one run, in the editor's font aligned so (kept apart from the same text unaligned).
+    fn aligned(
+        &self,
+        layout: &LinesLayout,
+        i: usize,
+        text: &str,
+        wrap: Option<f32>,
+        key_text: &str,
+        align: crate::text_layout::TextAlign,
+    ) -> Rc<dyn TextLayout> {
+        let spans = if self.shapes.get() {
+            self.spans(layout, i)
+        } else {
+            None
+        };
+        let key: Box<str> = format!(
+            "{align:?}\u{2}{:?}\u{2}{key_text}",
+            spans.as_deref().and_then(shape_key)
+        )
+        .into();
+        let tick = self.clock.get() + 1;
+        self.clock.set(tick);
+        if let Some((shaped, used)) = self.shaped.borrow_mut().get_mut(&key) {
+            *used = tick;
+            return shaped.clone();
+        }
+        let (size, mut font) = {
+            let shaping = self.shaping.borrow();
+            let shaping = shaping.as_ref().expect("a layout's shaping");
+            (f32::from_bits(shaping.size), shaping.font.clone())
+        };
+        font.align = align;
+        let color = crate::scene::Color(0, 0, 0, 255);
+        let rich = spans
+            .as_deref()
+            .filter(|spans| spans.iter().any(|(_, style)| style.shapes()))
+            .and_then(|spans| styled_line(text, spans, color, size, &font))
+            .or_else(|| {
+                crate::rich_text::RichText::new(
+                    text,
+                    vec![crate::rich_text::TextRun {
+                        range: 0..text.len(),
+                        font: font.clone(),
+                        font_size: size,
+                        color,
+                        ..Default::default()
+                    }],
+                )
+                .ok()
+            })
+            .expect("a line's text as one run");
+        let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, wrap).into();
+        let mut cache = self.shaped.borrow_mut();
+        evict(&mut cache);
+        cache.insert(key, (shaped.clone(), tick));
+        shaped
+    }
     /// Line `text`, shaped (from the cache if it is there).
     fn line(
         &self,
@@ -1262,9 +1348,17 @@ impl LinesLayout {
         } else {
             std::borrow::Cow::Borrowed(&*text)
         };
-        let layout = match self.cache.styled(self, i, &text, wrap, &key) {
-            Some(layout) => layout,
-            None => self.cache.line(&text, &self.shape, wrap, &key),
+        // aligned in a width: its rows placed there as the text layout aligns them, carets and hits with them
+        let aligned = match (inset.align, wrap) {
+            (Some(align), Some(_)) if !text.is_empty() => Some(align),
+            _ => None,
+        };
+        let layout = match aligned {
+            Some(align) => self.cache.aligned(self, i, &text, wrap, &key, align),
+            None => match self.cache.styled(self, i, &text, wrap, &key) {
+                Some(layout) => layout,
+                None => self.cache.line(&text, &self.shape, wrap, &key),
+            },
         };
         let (width, height) = layout.size();
         if width > self.widest.get() {

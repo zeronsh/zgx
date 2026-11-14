@@ -34,6 +34,8 @@ mod editor_hints;
 mod editor_ingress_normalization;
 #[path = "../editor_input_mode.rs"]
 mod editor_input_mode;
+#[path = "../editor_line_images.rs"]
+mod editor_line_images;
 #[path = "../editor_long_documents.rs"]
 mod editor_long_documents;
 #[path = "../editor_model_normalization.rs"]
