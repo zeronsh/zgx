@@ -642,7 +642,7 @@ fn shape_run(
         None => {
             // zgx patch: its family has no face of its own: what its search
             // found for runs of these scripts.
-            if let Some((font, place)) = font_iter.font_system().first_fallback(&attrs, &scripts) {
+            if let Some((font, place)) = font_iter.first_fallback(&attrs, &scripts) {
                 font_iter.pass_to(place);
                 font
             } else {
@@ -661,9 +661,7 @@ fn shape_run(
                     font_iter.font_system().keep_first_font(&attrs, &fonts, &font);
                 } else if attrs.family != Family::Monospace && font_iter.past_default() {
                     let place = font_iter.place();
-                    font_iter
-                        .font_system()
-                        .keep_first_fallback(&attrs, &scripts, &font, place);
+                    font_iter.keep_first_fallback(&attrs, &scripts, &font, place);
                 }
                 font
             }

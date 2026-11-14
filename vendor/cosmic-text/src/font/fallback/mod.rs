@@ -242,6 +242,13 @@ impl<'a> FontFallbackIter<'a> {
             .fallbacks
             .extend(font_system.dyn_fallback.as_ref(), scripts);
         font_system.monospace_fallbacks_buffer.clear();
+        // zgx: the platform's stage starts again (`next_platform`); its
+        // place is kept with it, so a search without one (every platform
+        // but macOS) is the iterator it was.
+        #[cfg(feature = "std")]
+        if let Some(platform) = &mut font_system.platform {
+            platform.next = 0;
+        }
         Self {
             font_system,
             font_match_keys,
@@ -264,6 +271,7 @@ impl<'a> FontFallbackIter<'a> {
     /// family's face (no monospace, script or other fallback looked at).
     pub(crate) fn gave_default(&self) -> bool {
         self.default_i == 1
+            && self.platform_next() == 0
             && self.script_i == (0, 0)
             && self.common_i == 0
             && self.other_i == 0
@@ -311,6 +319,110 @@ impl<'a> FontFallbackIter<'a> {
     /// passed and none left to look at: one `pass_to` can come back to.
     pub(crate) fn past_default(&self) -> bool {
         self.default_i == 1 && !self.end
+    }
+
+    /// zgx patch: `FontSystem::first_fallback` for the run's scripts, which
+    /// stands for this word unless the platform's fallback has faces for its
+    /// characters (those go by the characters, not the scripts).
+    pub(crate) fn first_fallback(
+        &mut self,
+        attrs: &crate::Attrs<'_>,
+        scripts: &[Script],
+    ) -> Option<(Arc<Font>, SearchPlace)> {
+        if self.has_platform() && self.platform_has_faces() {
+            return None;
+        }
+        self.font_system.first_fallback(attrs, scripts)
+    }
+
+    /// zgx patch: `FontSystem::keep_first_fallback`, unless the platform's
+    /// fallback has faces for this word's characters (`first_fallback`).
+    pub(crate) fn keep_first_fallback(
+        &mut self,
+        attrs: &crate::Attrs<'_>,
+        scripts: &[Script],
+        font: &Arc<Font>,
+        place: SearchPlace,
+    ) {
+        if self.has_platform() && self.platform_has_faces() {
+            return;
+        }
+        self.font_system.keep_first_fallback(attrs, scripts, font, place);
+    }
+
+    /// zgx: whether a platform fallback is installed: only then its stage
+    /// runs (`next_platform`).
+    #[inline]
+    fn has_platform(&self) -> bool {
+        #[cfg(feature = "std")]
+        return self.font_system.platform.is_some();
+        #[cfg(not(feature = "std"))]
+        return false;
+    }
+
+    /// zgx: how many of the platform's faces for this word's characters
+    /// the search has given (`Platform::next`).
+    #[inline]
+    fn platform_next(&self) -> usize {
+        #[cfg(feature = "std")]
+        return self.font_system.platform.as_ref().map_or(0, |platform| platform.next);
+        #[cfg(not(feature = "std"))]
+        return 0;
+    }
+
+    /// zgx: whether the platform's fallback has a face for any of this
+    /// word's characters. Out of line: only with a platform fallback.
+    #[cold]
+    #[inline(never)]
+    fn platform_has_faces(&mut self) -> bool {
+        self.platform_face(0).is_some()
+    }
+
+    /// zgx: the platform's next face for this word's characters, past the
+    /// ones given. Out of line: only with a platform fallback (`platform`).
+    #[cold]
+    #[inline(never)]
+    fn next_platform(&mut self) -> Option<Arc<Font>> {
+        while let Some((id, wght)) = self.platform_face(self.platform_next()) {
+            #[cfg(feature = "std")]
+            if let Some(platform) = &mut self.font_system.platform {
+                platform.next += 1;
+            }
+            let weight = fontdb::Weight(wght);
+            if let Some(font) = self.font_system.get_font_at(id, weight, self.optical) {
+                return Some(font);
+            }
+        }
+        None
+    }
+
+    /// zgx: the `n`th distinct face the platform's fallback gives this
+    /// word's characters, in their order, and the weight to instance it at
+    /// (`FontSystem::platform_face`).
+    #[cfg(feature = "std")]
+    fn platform_face(&mut self, n: usize) -> Option<(fontdb::ID, u16)> {
+        self.font_system.platform.as_ref()?;
+        let (weight, size) = (self.ideal_weight.0, self.optical);
+        let mut seen: Vec<fontdb::ID> = Vec::new();
+        // (ASCII the run's face holds: it is asked only for what the faces
+        // before it lack, as Chrome asks it.)
+        for c in self.word.chars().filter(|c| !c.is_whitespace() && !c.is_ascii()) {
+            let Some((id, wght)) = self.font_system.platform_face(c, weight, size) else {
+                continue;
+            };
+            if seen.contains(&id) {
+                continue;
+            }
+            if seen.len() == n {
+                return Some((id, wght));
+            }
+            seen.push(id);
+        }
+        None
+    }
+    #[cfg(not(feature = "std"))]
+    fn platform_face(&mut self, _n: usize) -> Option<(fontdb::ID, u16)> {
+        None
     }
 
     /// zgx: the `n`th distinct face the last stage found for this word's
@@ -543,6 +655,15 @@ impl<'a> FontFallbackIter<'a> {
                 {
                     return Some(font);
                 }
+            }
+        }
+
+        // zgx: the platform's own choice for the characters the faces
+        // above lack (macOS: Core Text's, as Chrome asks it), before the
+        // lists, which can't name the faces it takes.
+        if self.has_platform() {
+            if let Some(font) = self.next_platform() {
+                return Some(font);
             }
         }
 
