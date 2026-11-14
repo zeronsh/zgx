@@ -51,10 +51,19 @@ def main():
                 xdo("windowactivate", "--sync", window)
                 time.sleep(.3)
                 def snapshot():
+                    # Rows the app prints (every 100 ms, from a task) after
+                    # the last action has settled: the first may come late on
+                    # a loaded runner, so they are waited for, not read once.
                     time.sleep(.25)
-                    rows = {}
-                    for label, model, display_text, retained, caret_y, caret_h in re.findall(r'MODEL_TEXT (single|multi) model=("(?:[^"\\]|\\.)*") display=("(?:[^"\\]|\\.)*") retained=(true|false) caret_y=([\d.-]+) caret_h=([\d.]+)', output.read_text()):
-                        rows[label] = dict(model=json.loads(model), display=json.loads(display_text), retained=retained == "true", caret_y=float(caret_y), caret_h=float(caret_h))
+                    settled = len(output.read_bytes())
+                    deadline = time.monotonic() + 10
+                    while True:
+                        rows = {}
+                        for label, model, display_text, retained, caret_y, caret_h in re.findall(r'MODEL_TEXT (single|multi) model=("(?:[^"\\]|\\.)*") display=("(?:[^"\\]|\\.)*") retained=(true|false) caret_y=([\d.-]+) caret_h=([\d.]+)\n', output.read_bytes()[settled:].decode()):
+                            rows[label] = dict(model=json.loads(model), display=json.loads(display_text), retained=retained == "true", caret_y=float(caret_y), caret_h=float(caret_h))
+                        if set(rows) == {"single", "multi"} or time.monotonic() > deadline or app.poll() is not None:
+                            break
+                        time.sleep(.05)
                     assert set(rows) == {"single", "multi"}, output.read_text()
                     for row in rows.values():
                         assert row["retained"] and row["model"] == row["display"], row
