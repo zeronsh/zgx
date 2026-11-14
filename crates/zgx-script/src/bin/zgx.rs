@@ -483,6 +483,9 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   search [query] [--next] [--prev] [--all] [--close]
                        find in page: count, current, the first matches
   zoom [in|out|reset|150%]               the window's zoom and its viewport
+  clipboard [set --text T | --html H | --image file.png]
+                       the window's clipboard (its own under ZGX_CLIPBOARD=memory);
+                       set it, then `key cmd+v` pastes it
   memory [--human]                       what the app holds, a line each, as JSON
   sleep <ms>           raw <json>
   help                 what the app answers
@@ -537,7 +540,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 }
             },
             "--depth" | "--budget" | "--text" | "--timeout" | "--width" | "--runs" | "--since"
-            | "--until" | "--keep" | "--repeat" | "--every" => {
+            | "--until" | "--keep" | "--repeat" | "--every" | "--html" | "--image" => {
                 flags.push((arg[2..].to_string(), args.next()));
             }
             _ => words.push(arg),
@@ -632,6 +635,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
             put("dy", arg(2));
         }
         "key" => put("keys", arg(1)),
+        "clipboard" => put("action", arg(1)),
         "command" => put("id", arg(1)),
         "state" => put("name", arg(1)),
         "sleep" => put("ms", arg(1)),
@@ -960,6 +964,17 @@ const TOOLS: &[Tool] = &[
         "snapshot",
         &[("target", "string", true), ("width", "number", false)],
         "A picture of a node as the window last drew it (a PNG, at most width pixels wide): to see what it looks like.",
+    ),
+    (
+        "zgx_clipboard",
+        "clipboard",
+        &[
+            ("action", "string", false),
+            ("text", "string", false),
+            ("html", "string", false),
+            ("image", "string", false),
+        ],
+        "The window's clipboard: what it holds (its text, HTML and image's size), or with action `set` put text, html (both: a rich copy) or the picture at image (a file) there. Then a key (cmd+v / ctrl+v) pastes it as a person's paste. An off-screen session (ZGX_CLIPBOARD=memory) has a clipboard of its own, so this never touches the person's.",
     ),
     (
         "zgx_record",

@@ -142,6 +142,17 @@ zgx inspect sleep 500                                  # let the app run
 
 `cmd` is Command on macOS and Control elsewhere, as commands' keys are. A key goes where focus is: `type` or `click` an input first. After an action the interface is laid out again before the next command reads it, so `click` then `tree` shows the result; for what takes time (a fetch, a streamed reply, an animation), `wait` on what it will show rather than sleeping.
 
+## Clipboard
+
+```sh
+zgx inspect clipboard                                  # its text, HTML and image's size
+zgx inspect clipboard set --text "hello"               # or --html "<p>hi</p>" (with --text: a rich copy)
+zgx inspect clipboard set --image shot.png
+zgx inspect key cmd+v                                  # pastes it into the focused editor (ctrl+v off macOS)
+```
+
+`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA and off-screen sessions.
+
 ## Popovers, menus and other popups
 
 A popover's, menu's, select's, date picker's, tooltip's, context menu's or modal's panel is in `tree` under the node that opens it, and targets reach inside it like anywhere else. A closed panel's content is kept, unseen: `find` lists it, marked `hidden`, and an action at it (`click`, `hover`, `scroll`, `snapshot`) fails with `doesn't show`, rather than landing on whatever is under it.
