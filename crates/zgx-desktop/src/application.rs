@@ -2169,7 +2169,8 @@ impl Host {
                     zgx::widgets::WheelTape::Play { tape: text, at } => {
                         let entries = crate::wheel_tape::parse(&text)?;
                         let (count, last) = (entries.len(), entries.last().map(|e| e.after));
-                        tape.play(std::time::Instant::now(), entries, at);
+                        let as_timed = crate::wheel_tape::notches_as_timed(&text);
+                        tape.play(std::time::Instant::now(), entries, at, as_timed);
                         // The loop wakes for the first event, and paints what it
                         // changes: `request_redraw` would repaint the whole
                         // window, which a wheel does not (a measured gesture's
@@ -6413,7 +6414,18 @@ impl Host {
             .ui
             .next_interaction_deadline()
             .is_some_and(|at| at <= std::time::Instant::now());
-        // A tape playing back: its events due, as the platform's.
+        // A tape playing back: its events due, as the platform's (a wheel's
+        // notches at the start of their refresh, `wheel_tape`).
+        #[cfg(target_os = "macos")]
+        if self.wheel_tape.borrow().deadline().is_some()
+            && let Some((phase, period)) = self
+                .display_link
+                .as_ref()
+                .and_then(|link| link.refresh_phase(crate::frame_source::VSYNC_RESYNC * 3))
+        {
+            let start = std::time::Instant::now() - phase;
+            self.wheel_tape.borrow_mut().set_refresh(start, period);
+        }
         loop {
             let due = {
                 let mut tape = self.wheel_tape.borrow_mut();

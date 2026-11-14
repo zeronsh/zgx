@@ -15,6 +15,16 @@
 //! 8.312 pixel 0 -6.75 moved
 //! ```
 //!
+//! A wheel's notches (`lines`) play back at the start of the refresh they
+//! fall due in, as macOS hands an app a wheel's notches (about once a
+//! refresh, near its start): timed to the tape alone, a tape's notches land
+//! anywhere in a refresh, mostly where a real wheel's don't, and its frames
+//! measured pacing real wheels never see. A tape with the line
+//! `# notches as timed` plays them at their own times instead. Events play
+//! in order, so a trackpad's motion or a pointer event after a notch waits
+//! with it for that refresh's start (by up to a refresh): a tape mixing them
+//! keeps its order, not their times.
+//!
 //! A tape may also move the pointer, for an interaction a script plays
 //! across frames (a drag's moves, each in a frame of its own): `pointer`,
 //! where it is from the target's centre in points, across and down, and
@@ -33,6 +43,9 @@ use std::{
 use winit::event::{MouseScrollDelta, TouchPhase};
 
 const HEADER: &str = "# zgx wheel tape 1";
+/// A tape's line asking for its notches at their own times, not each at the
+/// start of its refresh.
+const AS_TIMED: &str = "# notches as timed";
 
 /// One event of a tape.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -104,6 +117,11 @@ pub(crate) fn format(entries: &[Entry]) -> String {
     }
     out.push('\n');
     out
+}
+
+/// Whether a tape's notches play at their own times (`AS_TIMED`).
+pub(crate) fn notches_as_timed(text: &str) -> bool {
+    text.lines().any(|line| line.trim() == AS_TIMED)
 }
 
 /// A tape's events, in order; what is wrong with it, at its line.
@@ -179,6 +197,11 @@ pub(crate) struct Tape {
     /// To deliver, each at its time, at a point in the window.
     playing: VecDeque<(Instant, Entry)>,
     pub at: (f32, f32),
+    /// Notches at their own times (`notches_as_timed`), not each at the
+    /// start of its refresh.
+    as_timed: bool,
+    /// The display's refreshes: one's start and the period (`set_refresh`).
+    refresh: Option<(Instant, Duration)>,
 }
 
 impl Tape {
@@ -222,17 +245,47 @@ impl Tape {
         });
     }
     /// Play `entries` from `now`, at `at`; whatever was playing stops.
-    pub fn play(&mut self, now: Instant, entries: Vec<Entry>, at: (f32, f32)) {
+    /// `as_timed`: notches at their own times (`notches_as_timed`).
+    pub fn play(&mut self, now: Instant, entries: Vec<Entry>, at: (f32, f32), as_timed: bool) {
         self.at = at;
+        self.as_timed = as_timed;
         self.playing = entries.into_iter().map(|e| (now + e.after, e)).collect();
+    }
+    /// The display's refreshes, one starting at `start`, `period` apart: a
+    /// notch plays at the start of the refresh it falls due in. Unknown
+    /// (no display link yet), at its own time.
+    // Set from macOS's display link alone; elsewhere notches keep their times.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn set_refresh(&mut self, start: Instant, period: Duration) {
+        self.refresh = (!period.is_zero()).then_some((start, period));
+    }
+    /// When an event timed `at` plays: a notch at the start of the refresh
+    /// it falls due in (the first at or after `at`), else at `at`.
+    fn plays_at(&self, at: Instant, e: &Entry) -> Instant {
+        let notch = !e.pixels && e.pointer.is_none();
+        match self.refresh {
+            Some((start, period)) if notch && !self.as_timed => {
+                let since = at.saturating_duration_since(start);
+                let refreshes = since.as_nanos().div_ceil(period.as_nanos());
+                match u32::try_from(refreshes) {
+                    Ok(n) if at > start => start + period * n,
+                    _ => at,
+                }
+            }
+            _ => at,
+        }
     }
     /// When the next event is due.
     pub fn deadline(&self) -> Option<Instant> {
-        self.playing.front().map(|(at, _)| *at)
+        self.playing.front().map(|(at, e)| self.plays_at(*at, e))
     }
     /// The next event due by `now`, as the platform would report it.
     pub fn due(&mut self, now: Instant, scale: f64) -> Option<Due> {
-        if self.playing.front().is_none_or(|(at, _)| *at > now) {
+        if self
+            .playing
+            .front()
+            .is_none_or(|(at, e)| self.plays_at(*at, e) > now)
+        {
             return None;
         }
         let (_, mut e) = self.playing.pop_front()?;
@@ -298,7 +351,7 @@ mod tests {
             "# zgx wheel tape 1\n0.000 pixel 0 -2.5 started\n8.000 pixel 0.5 -6.75 moved\n25.000 lines 0 -1 moved\n"
         );
         let entries = parse(&text).unwrap();
-        tape.play(start, entries, (10., 20.));
+        tape.play(start, entries, (10., 20.), false);
         assert_eq!(tape.deadline(), Some(start));
         // At another scale: the same points.
         assert_eq!(
@@ -355,7 +408,7 @@ mod tests {
             "# zgx wheel tape 1\n0.000 pointer 0 0 down\n8.000 pointer 4.5 -1 moved\n16.000 pointer 9 -2 up\n"
         );
         let mut tape = Tape::default();
-        tape.play(start, entries, (100., 50.));
+        tape.play(start, entries, (100., 50.), false);
         let ms = |n: u64| start + Duration::from_millis(n);
         assert_eq!(
             tape.due(start, 2.),
@@ -373,13 +426,63 @@ mod tests {
         assert_eq!(tape.deadline(), None, "played");
     }
 
+    /// A wheel's notches play at the start of the refresh they fall due in,
+    /// as macOS hands them over (one due a third of the way into a refresh
+    /// waits for the next to start); `# notches as timed` keeps the tape's
+    /// times, and a trackpad's motion is never moved.
+    #[test]
+    fn notches_play_at_the_start_of_their_refresh() {
+        let refresh = Duration::from_nanos(8_333_333);
+        let start = Instant::now();
+        let ms = |n: f64| start + Duration::from_secs_f64(n / 1e3);
+        let text = "# zgx wheel tape 1\n2.8 lines 0 -1 moved\n4.0 lines 0 -1 moved\n\
+                    9.1 pixel 0 -3 moved\n";
+        let mut tape = Tape::default();
+        tape.play(
+            start,
+            parse(text).unwrap(),
+            (0., 0.),
+            notches_as_timed(text),
+        );
+        tape.set_refresh(start, refresh);
+        let next = start + refresh;
+        assert_eq!(tape.deadline(), Some(next), "at the next refresh's start");
+        assert_eq!(tape.due(ms(2.8), 2.), None, "not at its own time");
+        assert_eq!(tape.due(ms(8.0), 2.), None, "nor before the refresh");
+        // Both notches due in that refresh come at its start.
+        let notch = Some(Due::Wheel(
+            MouseScrollDelta::LineDelta(0., -1.),
+            TouchPhase::Moved,
+        ));
+        assert_eq!(tape.due(next, 2.), notch);
+        assert_eq!(tape.due(next, 2.), notch);
+        // Where in a refresh it lands: at its start, every time.
+        assert_eq!(
+            next.duration_since(start).as_nanos() % refresh.as_nanos(),
+            0
+        );
+        assert_eq!(tape.deadline(), Some(ms(9.1)), "pixels keep their time");
+
+        let timed = format!("{text}# notches as timed\n");
+        let mut tape = Tape::default();
+        tape.play(
+            start,
+            parse(&timed).unwrap(),
+            (0., 0.),
+            notches_as_timed(&timed),
+        );
+        tape.set_refresh(start, refresh);
+        assert_eq!(tape.deadline(), Some(ms(2.8)), "as timed");
+        assert_eq!(tape.due(ms(2.8), 2.), notch);
+    }
+
     #[test]
     fn moves_due_at_once_come_as_the_last_and_presses_stay() {
         let start = Instant::now();
         let text = "0 pointer 0 0 down\n8 pointer 1 0 moved\n16 pointer 2 0 moved\n\
                     24 pointer 3 0 moved\n32 pointer 4 0 up\n40 pointer 5 0 moved\n";
         let mut tape = Tape::default();
-        tape.play(start, parse(text).unwrap(), (0., 0.));
+        tape.play(start, parse(text).unwrap(), (0., 0.), false);
         let ms = |n: u64| start + Duration::from_millis(n);
         // A window behind by three moves and a release: the press first, the
         // last move for the three, the release in its place, and a move not
