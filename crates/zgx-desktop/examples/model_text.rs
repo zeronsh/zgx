@@ -74,8 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let scene = cx.ui.scene.clone();
                 let semantics = cx.ui.semantics.clone();
                 let window = cx.window.clone();
+                // Reported every 100 ms until the probe closes the window
+                // (`scripts/model_text_smoke.py`), or a minute has passed.
                 cx.tasks.spawn(async move {
-                    for _ in 0..100 {
+                    for _ in 0..600 {
                         for (label, editor) in [("single", &single), ("multi", &multi)] {
                             let scene = scene.borrow();
                             let retained = scene.contains(editor.node);
