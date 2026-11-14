@@ -185,6 +185,8 @@ export const sets = [
         description: 'zgx inspect memory: what a running app holds, a line for each holder.' },
       { slug: 'acting', src: 'docs/agents/inspect.md', title: 'Acting', sections: ['Acting'], unwrap: true,
         description: 'click, type, key, scroll, command, set, wait and sleep.' },
+      { slug: 'clipboard', src: 'docs/agents/inspect.md', title: 'Clipboard', sections: ['Clipboard'], unwrap: true,
+        description: 'Read and set the window’s clipboard (its own under ZGX_CLIPBOARD=memory), then paste or copy with key.' },
       { slug: 'popups', src: 'docs/agents/inspect.md', title: 'Popovers and menus', sections: ['Popovers, menus and other popups'], unwrap: true,
         description: 'Open a popover, menu or select, wait for it, and act inside; popups past the window included.' },
       { slug: 'windows', src: 'docs/agents/inspect.md', title: 'Other windows', sections: ["The app's other windows"], unwrap: true,
