@@ -4147,7 +4147,8 @@ impl Ui {
         }
     }
     /// The person copied (or, with `cut`, cut) out of `editor` (a key, the
-    /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`): its
+    /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`,
+    /// `clipboard_shortcut`): its
     /// `View::on_copy` says what goes on the clipboard, else its selection's
     /// text, and `write` puts it there (text, and HTML beside it). A
     /// password field gives nothing and asks no hook; nor does an empty
@@ -4224,11 +4225,12 @@ impl Ui {
                 let text = platform.clipboard_text();
                 self.paste_into(&editor, text.as_deref());
             }
+            // As a window's keys: through `copy_from`, its `View::on_copy` saying what goes.
             "c" | "x" => {
-                let text = editor.copy();
-                if !text.is_empty() && platform.set_clipboard_text(text) && k == "x" {
-                    editor.cut();
-                }
+                self.copy_from(&editor, k == "x", |text, html| match html {
+                    Some(html) => platform.set_clipboard_rich_text(text, html),
+                    None => platform.set_clipboard_text(text),
+                });
             }
             _ => return false,
         }
