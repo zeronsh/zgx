@@ -685,6 +685,9 @@ FINGERPRINT = os.environ.get('ZGX_GATE_FINGERPRINT', '1') != '0'
 # Scenes whose bench gives no fingerprint yet, and why: said so in the table.
 UNPRINTED = {
 }
+# Scenes whose frames are drawn and read back for their fingerprint (no
+# scene to hash): with no adapter that draws, they write none.
+READ_BACK = {'3d-textured', '3d-mixed'}
 
 
 def fingerprint(binary, env, checkout):
@@ -714,6 +717,8 @@ def output_of(name, before, after):
     if after is None or before == 'failed':
         return 'the run failed'
     if not after:
+        if name in READ_BACK:
+            return 'no fingerprint: no adapter draws here to read its frames back'
         return UNPRINTED.get(name, 'no fingerprint: the bench is not hooked')
     if before is None:
         return f'(new) {len(after)} flushes'
