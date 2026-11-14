@@ -3967,6 +3967,8 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 row_height,
             );
             let mut handled_reveal = 0;
+            // `recycle`: rows no key holds, hidden, for the next to come in.
+            let mut pool: Vec<(NodeId, Signal<usize>)> = Vec::new();
             ui.bind(root, move || {
                 let length = count();
                 let (width, mut height) = size.get();
@@ -4069,8 +4071,8 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 runtime.untracked(|| {
                     let _theme = ui.enter_theme(&environment.theme);
                     let mut transaction = MountTransaction::new(&ui, content);
-                    if recycle && fresh != 0 && entries.len() + fresh > keys.len() {
-                        fresh -= recycle_rows(&ui, &mut entries, &keys, run);
+                    if recycle && fresh != 0 {
+                        fresh -= recycle_rows(&ui, &mut entries, &mut pool, &keys, run);
                     }
                     // Construct first: a failed row constructor leaves old rows intact.
                     if fresh != 0 {
@@ -4096,9 +4098,14 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                     let mut removed_focus = false;
                     if entries.len() > keys.len() {
-                        entries.retain(|_, (node, _, placed)| {
+                        let keep = if recycle { keys.len().max(16) } else { 0 };
+                        entries.retain(|_, (node, index, placed)| {
                             if placed.run == run {
                                 true
+                            } else if pool.len() < keep && !holds_focus(&ui, *node) {
+                                ui.scene.borrow_mut().set_style(*node, pooled_style());
+                                pool.push((*node, index.clone()));
+                                false
                             } else {
                                 if navigation.is_some()
                                     && let Some(focused) = ui.input.focused()
@@ -4162,6 +4169,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             }
                             order.push(*node);
                         }
+                        order.extend(pool.iter().map(|(node, _)| *node));
                         assert!(scene.reorder_children(content, &order));
                     }
                     transaction.commit();
@@ -4199,24 +4207,36 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     )))
     .list_rows(source)
 }
+/// Whether `node` holds the keyboard's focus or what is open from it: a row
+/// that does goes as it leaves, never written with another item.
+fn holds_focus(ui: &Ui, node: NodeId) -> bool {
+    ui.input.focused().is_some_and(|focused| ui.opened_from(focused, node))
+        || ui.input.focus_scope().is_some_and(|scope| ui.opened_from(scope, node))
+}
+/// A pooled row's style: out of layout, paint, hit testing and assistive
+/// technology until a key takes it and places it again.
+fn pooled_style() -> crate::scene::Style {
+    crate::scene::Style {
+        layout_options: Some(std::sync::Arc::new(crate::layout::LayoutOptions {
+            display: Some(crate::layout::Display::None),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
 /// `View::list_recycle`: each key in `keys` without a row takes a row this
-/// pass leaves (`run` unstamped), one not holding the keyboard's focus or
-/// what is open from it, placed afresh; its index is set with the rest.
-/// The rows it handed on.
+/// pass leaves (`run` unstamped) not holding focus, else one from `pool`,
+/// placed afresh; its index is set with the rest. The rows it handed on.
 fn recycle_rows<K: Eq + std::hash::Hash + Clone>(
     ui: &Ui,
     entries: &mut HashMap<K, (NodeId, Signal<usize>, Placed), rustc_hash::FxBuildHasher>,
+    pool: &mut Vec<(NodeId, Signal<usize>)>,
     keys: &[(K, usize)],
     run: u64,
 ) -> usize {
-    let (focused, scope) = (ui.input.focused(), ui.input.focus_scope());
     let mut leaving: Vec<K> = entries
         .iter()
-        .filter(|(_, (node, _, placed))| {
-            placed.run != run
-                && focused.is_none_or(|focused| !ui.opened_from(focused, *node))
-                && scope.is_none_or(|scope| !ui.opened_from(scope, *node))
-        })
+        .filter(|(_, (node, _, placed))| placed.run != run && !holds_focus(ui, *node))
         .map(|(key, _)| key.clone())
         .collect();
     let mut handed = 0;
@@ -4224,11 +4244,17 @@ fn recycle_rows<K: Eq + std::hash::Hash + Clone>(
         if entries.contains_key(key) {
             continue;
         }
-        let Some(from) = leaving.pop() else {
-            break;
+        let row = match leaving.pop() {
+            Some(from) => {
+                let (node, index, _) = entries.remove(&from).expect("a row leaving");
+                (node, index)
+            }
+            None => match pool.pop() {
+                Some(row) => row,
+                None => break,
+            },
         };
-        let (node, index, _) = entries.remove(&from).expect("a row leaving");
-        entries.insert(key.clone(), (node, index, Placed { run, at: None }));
+        entries.insert(key.clone(), (row.0, row.1, Placed { run, at: None }));
         handed += 1;
     }
     handed

@@ -88,12 +88,23 @@ fn a_recycling_list_with_spare_time_shows_the_right_items() {
         zgx_script::ScriptHost::inline(runtime, "app", &app(true))
     }));
     h.frames(2);
-    for _ in 0..30 {
+    // Warm: what it builds ahead and keeps, once.
+    for _ in 0..3 {
         assert!(h.host.run_command("jump"));
         h.frames(1);
         h.spend_spare_time();
         h.frames(1);
     }
+    let warm = builds(&mut h);
+    for _ in 0..27 {
+        assert!(h.host.run_command("jump"));
+        h.frames(1);
+        h.spend_spare_time();
+        h.frames(1);
+    }
+    // Rows scrolled away wait hidden for the next: no more are built.
+    let after = builds(&mut h);
+    assert!(after <= warm + 2, "built {after} after {warm}");
     let tree = h.tree();
     for i in 601..=605 {
         assert!(tree.contains(&format!("\"item {i}\"")), "{i}: {tree}");
