@@ -85,7 +85,7 @@ fn a_list_without_recycle_builds_the_rows_it_scrolls_to() {
 #[test]
 fn a_recycling_list_with_spare_time_shows_the_right_items() {
     let mut h = Harness(zgx_script::testing::TestApp::with_spare_time(|runtime| {
-        zgx_script::ScriptHost::inline(runtime, "app", &app(true))
+        zgx_script::ScriptHost::inline(runtime, "app", app(true))
     }));
     h.frames(2);
     // Warm: what it builds ahead and keeps, once.
