@@ -14,6 +14,25 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// `zgx test` started as a terminal starts it, Ctrl-C (SIGINT) at its
+/// default: a parent that ignores it (a shell's background job, `nohup`)
+/// passes that on through exec, and an ignored signal is discarded, so the
+/// interrupt the test sends would never arrive and the run would end as if
+/// none came (exit 0 after its whole test).
+#[cfg(unix)]
+fn interruptible() -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zgx"));
+    // SAFETY: `signal` is async-signal-safe, as `pre_exec` requires.
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    command
+}
+
 fn entries(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
@@ -123,7 +142,7 @@ end)
 "##,
     )
     .unwrap();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_zgx"))
+    let mut child = interruptible()
         .arg("test")
         .arg(&app)
         .env("TMPDIR", &temp)
@@ -184,7 +203,7 @@ end)
 "##,
     )
     .unwrap();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_zgx"))
+    let mut child = interruptible()
         .arg("test")
         .arg(&app)
         .env("TMPDIR", &temp)
