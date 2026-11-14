@@ -492,7 +492,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
                        find in page: count, current, the first matches
   zoom [in|out|reset|150%]               the window's zoom and its viewport
   clipboard [set --text T | --html H | --image file.png | --files PATH…]
-                       the window's clipboard (its own under ZGX_CLIPBOARD=memory);
+                       the window's clipboard (its own under ZGX_CLIPBOARD=memory or ZGX_OFFSCREEN);
                        set it, then `key cmd+v` pastes it
   memory [--human]                       what the app holds, a line each, as JSON
   sleep <ms>           raw <json>

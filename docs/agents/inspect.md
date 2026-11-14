@@ -163,7 +163,7 @@ zgx inspect clipboard set --files notes.pdf shot.png   # as a file manager copie
 zgx inspect key cmd+v                                  # pastes it into the focused editor (ctrl+v off macOS)
 ```
 
-`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA and off-screen sessions. `--files` needs it: the system's clipboard takes no files from here, and the readback's `files:` line lists what a paste would hear.
+`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA sessions; an off-screen session (`ZGX_OFFSCREEN=1`) has one of its own anyway, unless `ZGX_CLIPBOARD` names another (`system`, the person's). `--files` needs it: the system's clipboard takes no files from here, and the readback's `files:` line lists what a paste would hear.
 
 ## Popovers, menus and other popups
 
