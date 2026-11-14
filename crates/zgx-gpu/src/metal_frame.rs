@@ -150,6 +150,30 @@ struct Blur {
     mix: Pipeline,
 }
 
+impl Blur {
+    /// blur.wgsl's passes, mixed by dual-source blending; `None` if Metal
+    /// refuses any of them.
+    fn make(device: &ProtocolObject<dyn MTLDevice>) -> Option<Self> {
+        let source = format!(
+            "enable dual_source_blending;\n{}\n{}",
+            include_str!("blur.wgsl"),
+            crate::BLUR_MIX
+        );
+        let library = Library::new(device, &source, Kind::Blur).ok()?;
+        let pipeline = |fragment: &str, format, blend| {
+            library.pipeline(device, "vs", fragment, format, blend).ok()
+        };
+        let half = MTLPixelFormat::RGBA16Float;
+        Some(Self {
+            reduce: pipeline("fs_reduce", half, Blend::Replace)?,
+            halves: pipeline("fs_reduce4", half, Blend::Replace)?,
+            across: pipeline("fs_across", half, Blend::Replace)?,
+            down: pipeline("fs_down", half, Blend::Replace)?,
+            mix: pipeline("fs_mix", MTLPixelFormat::BGRA8Unorm, Blend::Mix)?,
+        })
+    }
+}
+
 /// The blur's slots: its source in texture 1 (2 holds the area's original
 /// pixels where copied), its filters and slots in buffers 2 and 3, and those
 /// two records' lengths in buffer 4 (naga reads runtime-sized arrays'
@@ -164,24 +188,31 @@ pub(crate) struct BlurRecords<'a> {
     pub(crate) slots: &'a [u8],
 }
 
-impl MetalFrame {
-    /// A command buffer on wgpu's queue as it is now. Command buffers committed
-    /// to it (`Frame::commit`) retain what they reference (`commandBuffer`, not
-    /// the unretained kind), so a wgpu resource dropped meanwhile stays alive
-    /// for them.
-    fn command_buffer(&self) -> Option<CommandBuffer> {
-        // SAFETY: The raw queue is only retained; the guard is dropped at once.
-        let hal = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() }?;
-        hal.as_raw().commandBuffer()
-    }
-    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, GpuError> {
+/// What a frame draws with that any thread can make (warm.rs): the quads'
+/// and copies' pipelines, and the backdrop blur's.
+pub(crate) struct Parts {
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
+    full: Pipeline,
+    full_clear: Pipeline,
+    basic: Pipeline,
+    opaque: Pipeline,
+    copy_offset: Pipeline,
+    blur: Option<Blur>,
+}
+// SAFETY: A device and render pipeline states only: Metal's devices are
+// thread-safe, and a pipeline state is immutable once made.
+unsafe impl Send for Parts {}
+
+impl Parts {
+    /// Made on this thread: what `MetalFrame::new` made itself, and its blur
+    /// (a launch's window has one on Zeron's glass).
+    pub(crate) fn make(device: &wgpu::Device) -> Result<Self, GpuError> {
         // SAFETY: The raw device is retained, never destroyed; the guard is
         // dropped at once.
         let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
             .ok_or_else(|| GpuError("not a Metal device".into()))?;
         let raw = hal.raw_device().clone();
         drop(hal);
-        let queue = queue.clone();
         #[cfg(zgx_metallib)]
         let (draw, copy) = (
             BUILT_FRESH[0].then_some(built::DRAW),
@@ -200,9 +231,59 @@ impl MetalFrame {
             basic: pipeline(&draw, "vs_basic", "fs_basic", Blend::Over)?,
             opaque: pipeline(&draw, "vs_basic", "fs_basic", Blend::Replace)?,
             copy_offset: pipeline(&copy, "vs", "fs", Blend::Replace)?,
+            blur: None,
             device: raw,
-            queue,
-            blur: std::cell::OnceCell::new(),
+        })
+    }
+
+    /// `make`, with the backdrop blur's pipelines too.
+    pub(crate) fn make_with_blur(device: &wgpu::Device) -> Result<Self, GpuError> {
+        let mut parts = Self::make(device)?;
+        parts.blur = Blur::make(&parts.device);
+        Ok(parts)
+    }
+}
+
+impl MetalFrame {
+    /// A command buffer on wgpu's queue as it is now. Command buffers committed
+    /// to it (`Frame::commit`) retain what they reference (`commandBuffer`, not
+    /// the unretained kind), so a wgpu resource dropped meanwhile stays alive
+    /// for them.
+    fn command_buffer(&self) -> Option<CommandBuffer> {
+        // SAFETY: The raw queue is only retained; the guard is dropped at once.
+        let hal = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() }?;
+        hal.as_raw().commandBuffer()
+    }
+    /// Its pipelines `parts`, made ahead (warm.rs), or made now.
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        parts: Option<Parts>,
+    ) -> Result<Self, GpuError> {
+        let parts = match parts {
+            Some(parts) => parts,
+            None => Parts::make(device)?,
+        };
+        let Parts {
+            device: raw,
+            full,
+            full_clear,
+            basic,
+            opaque,
+            copy_offset,
+            blur,
+        } = parts;
+        Ok(Self {
+            full,
+            full_clear,
+            basic,
+            opaque,
+            copy_offset,
+            device: raw,
+            queue: queue.clone(),
+            blur: blur.map_or_else(std::cell::OnceCell::new, |blur| {
+                std::cell::OnceCell::from(Some(blur))
+            }),
             effects: std::cell::OnceCell::new(),
             fills: Default::default(),
             image_effects: std::cell::OnceCell::new(),
@@ -372,29 +453,7 @@ impl MetalFrame {
     }
 
     fn blur(&self) -> Option<&Blur> {
-        self.blur
-            .get_or_init(|| {
-                let source = format!(
-                    "enable dual_source_blending;\n{}\n{}",
-                    include_str!("blur.wgsl"),
-                    crate::BLUR_MIX
-                );
-                let library = Library::new(&self.device, &source, Kind::Blur).ok()?;
-                let pipeline = |fragment: &str, format, blend| {
-                    library
-                        .pipeline(&self.device, "vs", fragment, format, blend)
-                        .ok()
-                };
-                let half = MTLPixelFormat::RGBA16Float;
-                Some(Blur {
-                    reduce: pipeline("fs_reduce", half, Blend::Replace)?,
-                    halves: pipeline("fs_reduce4", half, Blend::Replace)?,
-                    across: pipeline("fs_across", half, Blend::Replace)?,
-                    down: pipeline("fs_down", half, Blend::Replace)?,
-                    mix: pipeline("fs_mix", MTLPixelFormat::BGRA8Unorm, Blend::Mix)?,
-                })
-            })
-            .as_ref()
+        self.blur.get_or_init(|| Blur::make(&self.device)).as_ref()
     }
 
     /// Open a frame drawing into `target`, its pixels kept (loaded), after
