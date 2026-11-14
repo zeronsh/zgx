@@ -222,6 +222,16 @@ fn paragraph_candidates(
     candidates
 }
 
+/// Where a run of spaces ends before a word joiner (U+2060, or U+FEFF as
+/// one): UAX #14 forbids a break before the joiner, so its rules give none
+/// there, but Chrome, and wrapped text here, break after the spaces.
+fn joined_after_spaces(text: &str) -> impl Iterator<Item = usize> + '_ {
+    let bytes = text.as_bytes();
+    text.char_indices().filter_map(move |(at, c)| {
+        (matches!(c, '\u{2060}' | '\u{feff}') && at > 0 && bytes[at - 1] == b' ').then_some(at)
+    })
+}
+
 /// The spaces of `text` that Chrome breaks its lines at, in a box `width`
 /// wide, as `wrap` asks: their byte offsets, `layout` being the text laid
 /// out on its lines unwrapped. `None` where greedy breaking stands: a
@@ -240,7 +250,18 @@ pub fn fitted_spaces(
     }
     let mut spaces = Vec::new();
     let (mut start, mut opportunities) = (0, Vec::new());
+    let mut joined = joined_after_spaces(text).peekable();
     for (offset, kind) in unicode_linebreak::linebreaks(text) {
+        // Spaces before a run a word joiner holds together break as any
+        // spaces do (Chrome's breakable space); the run itself stays whole.
+        while let Some(&at) = joined.peek()
+            && at < offset
+        {
+            joined.next();
+            if at > start {
+                opportunities.push(at);
+            }
+        }
         opportunities.push(offset);
         if kind == unicode_linebreak::BreakOpportunity::Mandatory || offset == text.len() {
             let candidates = paragraph_candidates(text, layout, start, &opportunities);
@@ -294,6 +315,42 @@ mod tests {
     // Scores by line end: S1 7600, S2 4100, S3 min(S1 + 400, S2 + 4900) =
     // 8000 + 4000 = 12000, S4 4500 + 10000 + 4000 = 18500; the last line from
     // 3 costs 0, from 4 (20 wide) 4 x 10000 more: S5 = 12000 + 4000.
+    /// `text` laid out unwrapped in the fallback shaper, and the width that
+    /// holds it up to `fits` (exclusive) on its first line.
+    fn laid(text: &str, fits: &str) -> (crate::text_layout::FallbackTextLayout, f32) {
+        use crate::text_layout::TextLayout as _;
+        let layout = crate::text_layout::FallbackTextLayout::new(text, 10., None);
+        let width = layout.caret(text.find(fits).unwrap() + fits.len()).x + 1.;
+        (layout, width)
+    }
+
+    // Anara's case, in zgx's own words: the last line is a word and a run a
+    // word joiner holds to it (a citation chip), short of the width. The
+    // space before the joiner breaks, so the last line is two pieces, not
+    // an orphan: pretty leaves the lines as plain wrapping does (Chrome).
+    #[test]
+    fn pretty_counts_the_space_before_a_joined_run_as_a_break() {
+        let first = "one two three four five six seven eight nine ten eleven";
+        let text = format!("{first} ones \u{2060}\u{200a}\u{2060}(Ex,\u{a0}22).");
+        let (layout, width) = laid(&text, first);
+        assert_eq!(
+            fitted_spaces(&text, &layout, width, 10., TextWrap::Pretty),
+            None
+        );
+        // Its candidates break after "ones " too.
+        let offsets: Vec<usize> = joined_after_spaces(&text).collect();
+        assert_eq!(offsets, [text.find('\u{2060}').unwrap()]);
+    }
+
+    // And a last line that is one piece is still fitted back.
+    #[test]
+    fn pretty_still_fits_a_last_line_of_one_joined_run() {
+        let first = "one two three four five six seven eight nine ten eleven";
+        let text = format!("{first} ones\u{2060}\u{200a}\u{2060}(Ex,\u{a0}22).");
+        let (layout, width) = laid(&text, first);
+        assert!(fitted_spaces(&text, &layout, width, 10., TextWrap::Pretty).is_some());
+    }
+
     #[test]
     fn pretty_fits_a_short_last_word_back_into_the_lines() {
         let c = words("aaaa bbbb ccc dddd ee");
