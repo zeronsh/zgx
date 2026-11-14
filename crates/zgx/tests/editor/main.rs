@@ -52,6 +52,8 @@ mod editor_primary_paste;
 mod editor_read_only;
 #[path = "../editor_rows.rs"]
 mod editor_rows;
+#[path = "../editor_wrap_width.rs"]
+mod editor_wrap_width;
 #[path = "../editor_scrollbar.rs"]
 mod editor_scrollbar;
 #[path = "../editor_selection_theme.rs"]

@@ -565,6 +565,12 @@ struct CodeHint {
     top_line_listened: Cell<bool>,
     top_line_drawn: Cell<Option<usize>>,
     top_line_told: Cell<Option<usize>>,
+    /// Told the width its text wraps in when it changes
+    /// (`EditorHandle::on_wrap_width`), as `on_caret`: the width its last
+    /// draw wrapped in (none unwrapped or not yet laid out), and the last told.
+    on_wrap_width: RefCell<Option<WrapWidthListener>>,
+    wrap_drawn: Cell<Option<f32>>,
+    wrap_told: Cell<Option<f32>>,
 }
 impl Drop for CodeHint {
     /// A long text's last layout and its line cache hold each other.
@@ -750,6 +756,8 @@ fn context_menu_holds(storage: &std::rc::Weak<UiStorage>, editor: NodeId, tracke
 }
 /// What an editor tells its first line in view (`EditorHandle::on_top_line`).
 type TopLineListener = Box<dyn FnMut(usize)>;
+/// What a text area tells the width its text wraps in (`EditorHandle::on_wrap_width`).
+type WrapWidthListener = Box<dyn FnMut(f32)>;
 /// What an editor tells where its caret is (`EditorHandle::on_caret`).
 type CaretListener = Box<dyn FnMut(Caret)>;
 /// Where an editor's caret is (`EditorHandle::on_caret`): its line and
@@ -1178,6 +1186,23 @@ impl EditorHandle {
         code.top_line_listened.set(true);
         code.top_line_told.set(None);
         self.refresh();
+    }
+    /// The width a text area's text wraps in, before any line's `left`: its
+    /// box less its padding, its line numbers and its scrollbar. `None`
+    /// where it doesn't wrap or hasn't been laid out. (Pin line.)
+    #[doc(hidden)]
+    pub fn wrap_width(&self) -> Option<f32> {
+        self.hint.code().and_then(|code| code.wrap_drawn.get())
+    }
+    /// Call `told` with the width its text wraps in (`wrap_width`) when it
+    /// changes, after layout and before the frame is drawn: line insets set
+    /// again there (`set_line_insets`) are laid out in the same frame. The
+    /// width it has now isn't told; a first layout's is. (Pin line.)
+    #[doc(hidden)]
+    pub fn on_wrap_width(&self, told: impl FnMut(f32) + 'static) {
+        let code = self.hint.code_made();
+        *code.on_wrap_width.borrow_mut() = Some(Box::new(told));
+        code.wrap_told.set(code.wrap_drawn.get());
     }
     /// Scroll line `line` (from 0) to `align` of the view, its caret and
     /// selection left as they are; past the last line, the end.
@@ -5989,6 +6014,10 @@ impl Ui {
             let caret_color = draw_hint.caret.get().0.unwrap_or(color);
             s.set_kind(caret, NodeKind::Rect(caret_color));
             let wrap_width = draw_wrap.get().then_some(inner_width.max(1.));
+            if let Some(code) = draw_hint.code() {
+                code.wrap_drawn
+                    .set(wrap_width.filter(|_| bounds.width > 0.));
+            }
             // The committed text's revision tells its layout it is the same
             // (a scroll), without comparing a long document.
             let revision = e.preedit().is_none().then(|| e.revision());
@@ -7072,6 +7101,28 @@ impl Ui {
                 // which tells again where that left the caret (a few times
                 // at most, should callbacks keep moving it).
                 if let Some(code) = told.code() {
+                    // The width it wraps in, told first (lines' room the app
+                    // sets for it moves the caret): what the app sets again
+                    // there draws at once, in this frame. A change that
+                    // brings or takes away the scrollbar is told once more,
+                    // and no more.
+                    for _ in 0..2 {
+                        let Some(width) = code.wrap_drawn.get() else {
+                            break;
+                        };
+                        if Some(width) == code.wrap_told.get() {
+                            break;
+                        }
+                        let Some(mut callback) = code.on_wrap_width.borrow_mut().take() else {
+                            break;
+                        };
+                        code.wrap_told.set(Some(width));
+                        callback(width);
+                        let mut slot = code.on_wrap_width.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some(callback);
+                        }
+                    }
                     for _ in 0..4 {
                         let Some(caret) = code.caret_drawn.get() else {
                             break;
