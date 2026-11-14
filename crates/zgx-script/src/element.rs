@@ -1360,6 +1360,25 @@ impl UserData for ElementUd {
         fields.add_field_method_get("y", |_, e| Ok(e.0.read(|s, id| s.bounds(id).y)));
     }
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // On the script's clock, as `offset_at` is: a query, not an update,
+        // and each new width lays out every line, so a loop of widths off it
+        // would hold the thread past any budget.
+        methods.add_method("text_metrics", |lua, e, width: f32| {
+            let Some(editor) = e.0.handle.get().and_then(NodeHandle::editor) else {
+                return Ok(None);
+            };
+            let Some(metrics) = editor.text_metrics(width) else {
+                return Ok(None);
+            };
+            let table = lua.create_table()?;
+            table.set("width", metrics.width)?;
+            table.set("unwrapped_width", metrics.unwrapped_width)?;
+            table.set("wrapped_height", metrics.wrapped_height)?;
+            table.set("line_height", metrics.line_height)?;
+            table.set("revision", metrics.revision)?;
+            table.set("exact", true)?;
+            Ok(Some(table))
+        });
         // Keyboard focus to the node or its first focusable descendant,
         // scrolled into view; `{ scroll = false }` leaves it where it is.
         methods.add_method("focus", |_, e, options: Option<mlua::Table>| {

@@ -15,6 +15,8 @@ mod display_contents;
 mod driver;
 #[path = "../each_reorder.rs"]
 mod each_reorder;
+#[path = "../editor_metrics.rs"]
+mod editor_metrics;
 #[path = "../editor_props.rs"]
 mod editor_props;
 #[path = "../exiting_rows.rs"]

@@ -1203,6 +1203,20 @@ declare extern type Element with
 	-- The selection replaced by `text`, as typing it would (one step of
 	-- undo): a search's Replace.
 	function replace_selection(self, text: string): boolean
+	-- An editor's text measured at `width` points, whatever its own size,
+	-- without insets or placeholder: its widest hard line, its height
+	-- wrapped at `width`. Read in an effect, it follows the text, an IME
+	-- composition and typography (`revision`), not focus, selection,
+	-- scrolling or size. Nil for other elements, a password field, one
+	-- not mounted and a width that is not positive and finite.
+	function text_metrics(self, width: number): {
+		width: number,
+		unwrapped_width: number,
+		wrapped_height: number,
+		line_height: number,
+		revision: number,
+		exact: boolean,
+	}?
 	-- A picture of it as the window last showed it, at most `max_width`
 	-- pixels wide (480 if not given): the `src` of an image showing it,
 	-- replaced on each call. Nil if it is not laid out or the host takes
