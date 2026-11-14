@@ -148,7 +148,11 @@ fn a_tooltip_s_own_close_delay_holds_it_after_the_pointer_leaves() {
         column().p(60.).child(
             div()
                 .size(60., 24.)
-                .tooltip(Tooltip::from("Held").close_delay(Duration::from_millis(250))),
+                // its own open delay too: Linux's default is GTK's 500
+                .tooltip(
+                    Tooltip::from("Held")
+                        .hover_delay(Duration::from_millis(300), Duration::from_millis(250)),
+                ),
         ),
     );
     tips.at(70., 70.);

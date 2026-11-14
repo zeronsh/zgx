@@ -31,17 +31,22 @@ pub(crate) fn select(
     if cancel.is_cancelled() {
         return Err(FileDialogError::WindowClosed);
     }
-    // No session bus, or no portal on it: zenity's chooser, if it is there.
+    // No session bus, or no portal on it: zenity's chooser or kdialog's, KDE's first on a KDE session.
     let fallback = options.clone();
-    let zenity = |error: FileDialogError| {
-        if crate::linux_zenity::available() {
+    let chooser = |error: FileDialogError| {
+        let kde = crate::linux_kdialog::preferred();
+        if kde && crate::linux_kdialog::available() {
+            crate::linux_kdialog::select(kind, &fallback, &parent, &cancel)
+        } else if crate::linux_zenity::available() {
             crate::linux_zenity::select(kind, &fallback, &parent, &cancel)
+        } else if crate::linux_kdialog::available() {
+            crate::linux_kdialog::select(kind, &fallback, &parent, &cancel)
         } else {
             Err(error)
         }
     };
     let Ok(connection) = crate::linux_dbus::session() else {
-        return zenity(FileDialogError::BackendUnavailable);
+        return chooser(FileDialogError::BackendUnavailable);
     };
     // This guard must be destroyed BEFORE the Arc parent, including every error return.
     let exported = display
@@ -159,7 +164,7 @@ pub(crate) fn select(
             ) =>
         {
             drop(exported);
-            return zenity(FileDialogError::BackendUnavailable);
+            return chooser(FileDialogError::BackendUnavailable);
         }
         Err(error) => return Err(unavailable(error)),
     };

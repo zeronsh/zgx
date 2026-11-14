@@ -21,8 +21,22 @@ const SEPARATOR: char = '\u{1f}';
 
 /// Whether zenity is on the `PATH`.
 pub(crate) fn available() -> bool {
+    on_path("zenity")
+}
+
+/// Whether `program` is on the `PATH`.
+pub(crate) fn on_path(program: &str) -> bool {
     std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("zenity").is_file()))
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
+}
+
+/// `parent`'s X11 window, for a chooser to attach to.
+pub(crate) fn xid(parent: &Window) -> Option<u64> {
+    parent.window_handle().ok().and_then(|h| match h.as_raw() {
+        RawWindowHandle::Xlib(handle) => Some(handle.window),
+        RawWindowHandle::Xcb(handle) => Some(handle.window.get() as u64),
+        _ => None,
+    })
 }
 
 /// zenity's arguments for a `kind` request with `options`, attached to the
@@ -95,13 +109,19 @@ pub(crate) fn select(
     parent: &Window,
     cancel: &crate::file_dialog::Cancel,
 ) -> FileDialogResult<Vec<PathBuf>> {
-    let xid = parent.window_handle().ok().and_then(|h| match h.as_raw() {
-        RawWindowHandle::Xlib(handle) => Some(handle.window),
-        RawWindowHandle::Xcb(handle) => Some(handle.window.get() as u64),
-        _ => None,
-    });
-    let mut child = Command::new("zenity")
-        .args(arguments(kind, options, xid))
+    Ok(run("zenity", arguments(kind, options, xid(parent)), cancel)?.map(|output| paths(&output)))
+}
+
+/// Run a chooser process (zenity, kdialog) and wait for it, or for `cancel`,
+/// which ends it: what it printed if it exited 0, `None` if it exited 1
+/// (cancelled, or its window closed).
+pub(crate) fn run(
+    program: &str,
+    args: Vec<String>,
+    cancel: &crate::file_dialog::Cancel,
+) -> FileDialogResult<String> {
+    let mut child = Command::new(program)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -167,7 +187,7 @@ pub(crate) fn select(
         .map_err(|_| FileDialogError::BackendUnavailable)?;
     let output = reader.join().unwrap_or_default();
     match status.code() {
-        Some(0) => Ok(Some(paths(&output))),
+        Some(0) => Ok(Some(output)),
         // Cancel, or the window closed.
         Some(1) => Ok(None),
         _ => Err(FileDialogError::BackendUnavailable),
