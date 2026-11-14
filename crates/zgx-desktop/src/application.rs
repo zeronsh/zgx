@@ -1239,6 +1239,32 @@ const TRIM_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
 /// (`GpuRenderer::rest_queue`): idle that long, a queue starts as slowly as a
 /// new one, so the next frame pays no more for it than it would anyway.
 const QUEUE_REST_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+/// A wake whose first frame came to a queue given back at least
+/// `QUEUE_REST_DELAY` before (`rested`, when), with no input since: a lone
+/// wake (a clock's tick, an update from elsewhere). Its queue goes back at its
+/// trim, not `QUEUE_REST_DELAY` later: the next lone wake finds it cold
+/// either way, and Metal's driver holds ~200 MB for a queue while it's kept.
+/// A wake soon after another keeps the queue as before (its first frame comes
+/// to a queue given back less than `QUEUE_REST_DELAY` before).
+fn lone_wake(
+    rested: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    rested.filter(|rested| now.saturating_duration_since(*rested) >= QUEUE_REST_DELAY)
+}
+/// Whether a lone wake (`lone_wake`'s `rested`) gives its queue back at its
+/// trim: not if input has acted since the queue rested (someone is here, and
+/// the next frame may follow soon).
+/// `ZGX_QUEUE_REST_LONE=0` keeps a lone wake's queue for `QUEUE_REST_DELAY`,
+/// as before (to compare).
+static QUEUE_REST_LONE: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_QUEUE_REST_LONE").is_none_or(|v| v != "0"));
+fn queue_rests_at_trim(
+    lone: Option<std::time::Instant>,
+    acted_at: Option<std::time::Instant>,
+) -> bool {
+    lone.is_some_and(|rested| !acted_since(acted_at, Some(rested)))
+}
 /// A window idle this long past that gives back a glyph atlas it grew: what
 /// it costs is a slow first frame, for someone who has been away a while.
 const ATLAS_TRIM_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1916,6 +1942,11 @@ struct Host {
     trim_stage: TrimStage,
     /// What's owed at rest after the trim (`TrimStage::Rest`).
     rest: Rest,
+    /// When this window last gave its GPU queue back, while no frame has used
+    /// it since (`lone_wake`).
+    queue_rested: Option<std::time::Instant>,
+    /// This wake is a lone one: when its queue had rested (`lone_wake`).
+    lone_wake: Option<std::time::Instant>,
     /// When to save the window's frame (`frame_autosave`, Linux): once its
     /// moves and resizes settle.
     frame_save_at: Option<std::time::Instant>,
@@ -2344,6 +2375,8 @@ impl Host {
             trim_at: None,
             trim_stage: TrimStage::Trim,
             rest: Rest::none(),
+            queue_rested: None,
+            lone_wake: None,
             release_images_at: None,
             release_rows_at: None,
             frame_save_at: None,
@@ -3339,6 +3372,11 @@ impl Host {
                     }
                     self.trim_stage = TrimStage::Trim;
                     self.rest = Rest::none();
+                    // The wake's first frame: a lone wake if the queue had
+                    // rested long (the rest of the wake's frames keep it).
+                    if let Some(rested) = self.queue_rested.take() {
+                        self.lone_wake = lone_wake(Some(rested), now);
+                    }
                     // Startup's garbage (shader compilation, first layout)
                     // is freed once, even if the window never goes idle.
                     if self.startup_trim == StartupTrim::Pending {
@@ -6616,6 +6654,17 @@ impl Host {
                     self.renderer.as_ref().is_some_and(|r| r.atlas_grown()),
                     self.renderer.is_some() && cfg!(target_os = "macos"),
                 );
+                // A lone wake gives the queue back now (`lone_wake`).
+                if queue_rests_at_trim(self.lone_wake.take(), self.context.ui.acted_at())
+                    && *QUEUE_REST_LONE
+                    && self.rest.queue
+                {
+                    self.rest.queue = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.rest_queue();
+                    }
+                    self.queue_rested = Some(std::time::Instant::now());
+                }
                 self.trim_stage = TrimStage::Rest;
                 self.native.trim();
                 self.context.ui.scene.borrow_mut().rest();
@@ -6636,6 +6685,7 @@ impl Host {
                     if let Some(renderer) = &mut self.renderer {
                         renderer.rest_queue();
                     }
+                    self.queue_rested = Some(now);
                 }
             }
             // The next of what's still owed.
@@ -9526,6 +9576,35 @@ mod tests {
 
     /// A window at rest gives back Metal's queue, then its glyph atlas, each
     /// at its own delay past the trim, and nothing once both have gone.
+    /// A wake after a long rest with no input gives its queue back at its
+    /// trim; one soon after another, or one someone acted in, keeps it.
+    #[test]
+    fn a_lone_wake_gives_its_queue_back_at_its_trim() {
+        use super::{QUEUE_REST_DELAY, lone_wake, queue_rests_at_trim};
+        let rested = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        // A clock's tick 30 s into a rest: lone.
+        let tick = rested + std::time::Duration::from_secs(30);
+        assert_eq!(lone_wake(Some(rested), tick), Some(rested));
+        assert!(queue_rests_at_trim(lone_wake(Some(rested), tick), None));
+        // Input before the queue rested doesn't count; input since does,
+        // even the click that woke it (it acts before the first frame).
+        assert!(queue_rests_at_trim(Some(rested), Some(rested - ms(5))));
+        assert!(!queue_rests_at_trim(Some(rested), Some(tick - ms(10))));
+        // A wake soon after the queue rested (updates coming every few
+        // seconds) keeps it warm, as before.
+        assert_eq!(lone_wake(Some(rested), rested + ms(3000)), None);
+        assert!(!queue_rests_at_trim(
+            lone_wake(Some(rested), rested + ms(3000)),
+            None
+        ));
+        assert_eq!(
+            lone_wake(Some(rested), rested + QUEUE_REST_DELAY),
+            Some(rested)
+        );
+        // A queue that never rested (a window's first frames): not lone.
+        assert_eq!(lone_wake(None, tick), None);
+    }
     #[test]
     fn rest_gives_back_the_atlas_then_the_queue() {
         use super::{ATLAS_TRIM_DELAY, QUEUE_REST_DELAY, Rest};
