@@ -37,6 +37,7 @@ and two dots far apart that it turns green upload as two small parts.
 import argparse
 import functools
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -95,7 +96,16 @@ class Session:
         time.sleep(.5)
 
     def grab(self):
-        from PIL import ImageGrab
+        from PIL import Image, ImageGrab
+        if self.wayland:
+            # What Sway composed (wlr-screencopy), the window at its output's
+            # top left: its X11 host window is no record of it (all black
+            # under Sway 1.11's X11 backend on Xvfb, the frames reaching Sway
+            # all the same).
+            shot = subprocess.run(["grim", "-t", "ppm", "-"], env=self.wayland, capture_output=True, check=True, timeout=10)
+            image = Image.open(io.BytesIO(shot.stdout)).convert("RGB")
+            image.save(self.output / "window.png")
+            return lambda x, y: image.getpixel((x, y))
         image = ImageGrab.grab(xdisplay=self.env["DISPLAY"]).convert("RGB")
         image.save(self.output / "window.png")
         # Where the window is now: its window manager may have placed it
@@ -806,7 +816,9 @@ def start_orca(env, output, owned):
         bus("org.freedesktop.DBus.Properties.Set", "org.a11y.Status", name, "<true>")
     env["AT_SPI_BUS_ADDRESS"] = re.search(r"'([^']+)'", address.stdout).group(1)
     with (output / "orca.log").open("w") as log:
-        orca = subprocess.Popen(["orca", "--replace", "--debug-file=" + str(output / "orca-debug.log")], env=env, stdout=log, stderr=log)
+        # Its debug file written a line at a time (`orca_line_buffered.py`).
+        orca = subprocess.Popen([sys.executable, str(pathlib.Path(__file__).with_name("orca_line_buffered.py")), "--replace",
+                                 "--debug-file=" + str(output / "orca-debug.log")], env=env, stdout=log, stderr=log)
     owned.append(orca)
     deadline = time.monotonic() + 20
     while "Screen reader on." not in spoken(output):
@@ -823,15 +835,8 @@ def spoken(output):
 
 
 def said(session, output, text, after=0):
-    """Whether Orca said `text` (after its first `after` utterances). Its
-    debug log reaches the file in blocks: a Shift, which it echoes, now and
-    then fills one."""
-    found = any(text in line for line in spoken(output)[after:])
-    if not found and time.monotonic() - said.nudged > 2:
-        said.nudged = time.monotonic()
-        session.xdo("key", "shift")
-    return found
-said.nudged = 0.
+    """Whether Orca said `text` (after its first `after` utterances)."""
+    return any(text in line for line in spoken(output)[after:])
 
 
 def heard(session, output, pattern, after=0):
@@ -839,12 +844,7 @@ def heard(session, output, pattern, after=0):
     matches `pattern`: Orca 50 speaks a name and its role apart ("Before
     page", "button.") where Orca 46 spoke them as one ("Before page push
     button."), and names some roles differently."""
-    found = re.search(pattern, " ".join(spoken(output)[after:]))
-    # As `said`: a Shift now and then fills Orca's debug log's block.
-    if not found and time.monotonic() - said.nudged > 2:
-        said.nudged = time.monotonic()
-        session.xdo("key", "shift")
-    return found
+    return re.search(pattern, " ".join(spoken(output)[after:]))
 
 
 class Buttons:

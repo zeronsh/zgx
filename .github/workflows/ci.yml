@@ -79,8 +79,8 @@ env:
 jobs:
   # Named `plan`: admission (admit.py) leaves a job of that name out of reservations.
   plan:
-    # ubuntu-24.04, not -latest, as every job here: -latest moved to 26.04
-    # (Mesa 26) on Nov 14, where lavapipe's tests and probes fail (see linux).
+    # ubuntu-24.04, not -latest: -latest moves with GitHub's images (to 26.04
+    # on Nov 14); only linux, whose tests and probes run there, follows it.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -107,8 +107,8 @@ jobs:
     name: "admit [${{ needs.plan.outputs.reservation }}]${{ needs.plan.outputs.pr != '' && format(' #{0}', needs.plan.outputs.pr) || '' }}"
     needs: plan
     if: needs.plan.outputs.any == 'true'
-    # ubuntu-24.04, not -latest, as every job here: -latest moved to 26.04
-    # (Mesa 26) on Nov 14, where lavapipe's tests and probes fail (see linux).
+    # ubuntu-24.04, not -latest: -latest moves with GitHub's images (to 26.04
+    # on Nov 14); only linux, whose tests and probes run there, follows it.
     runs-on: ubuntu-24.04
     # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
     timeout-minutes: 330
@@ -146,12 +146,15 @@ jobs:
   linux:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.jobs).linux
-    # ubuntu-24.04, not -latest: on 26.04 (Mesa 26) the GPU tests and
-    # native probes on lavapipe fail (zink, a SIGSEGV); moved by GitHub on Nov 14.
-    runs-on: ubuntu-24.04
-    # A cold cache (a release's version bump changes Cargo.lock) takes about
-    # twice a warm one's 21 minutes.
-    timeout-minutes: 60
+    # The image users' Linux desktops have (Mesa 26, libwayland 1.24, Sway
+    # 1.11, Orca 50), named, not -latest: a move is a change of its own. The
+    # perf job stays on 24.04, its gate's base binaries built there.
+    runs-on: ubuntu-26.04
+    # A cold cache (a release's version bump changes Cargo.lock, a new image
+    # its keys) takes about three times a warm one's 21 minutes: on 26.04's
+    # first run, 57 before the native probes. Pull requests never save the
+    # cache, so a change to its keys runs cold until it merges.
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
       # Room on the disk: this job's target/ reaches about 40 GB, more than
@@ -174,9 +177,10 @@ jobs:
         id: apt-cache
         with:
           path: ~/apt-archives
-          key: apt-${{ runner.arch }}-${{ steps.apt-key.outputs.month }}-${{ hashFiles('.github/linux-packages.txt') }}
-          # A changed package list still starts from the last month's .debs.
-          restore-keys: apt-${{ runner.arch }}-
+          key: apt-u26-${{ runner.arch }}-${{ steps.apt-key.outputs.month }}-${{ hashFiles('.github/linux-packages.txt') }}
+          # A changed package list still starts from the last month's .debs
+          # of the same image.
+          restore-keys: apt-u26-${{ runner.arch }}-
       # Three tries, off the Azure mirror when it stops resolving
       # (.github/apt-install.sh).
       - name: Linux packages
@@ -190,6 +194,8 @@ jobs:
           key: ${{ steps.apt-cache.outputs.cache-primary-key }}
       - uses: Swatinem/rust-cache@v2
         with:
+          # Built against 26.04's system libraries (WebKitGTK, GTK).
+          key: u26
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Benchmark sampler failure evidence
@@ -261,6 +267,24 @@ jobs:
           fi
           echo "LUAU_LSP=$dir/luau-lsp" >> "$GITHUB_ENV"
           LUAU_LSP="$dir/luau-lsp" cargo run -q -p zgx-script --bin zgx --locked -- check crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
+      # Every Linux test runs on a loader with Vulkan-Loader#1866's fix:
+      # older ones (26.04's is 1.4.341) crash in vkSetDebugUtilsObjectNameEXT
+      # when devices are made on several threads at once, and zgx-gpu leaves
+      # its debug layer off on them; on this one the tests keep it.
+      # The loader is built from pinned revisions, so it is kept between
+      # runs until the script changes.
+      - uses: actions/cache@v4
+        id: vulkan-loader
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
+        with:
+          path: ~/zgx-vulkan-loader/build/loader
+          key: vulkan-loader-u26-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build_vulkan_loader.sh') }}
+      - name: Build private patched Vulkan loader
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' && steps.vulkan-loader.outputs.cache-hit != 'true' }}
+        run: scripts/build_vulkan_loader.sh ~/zgx-vulkan-loader
+      - name: Use the private Vulkan loader
+        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
+        run: printf 'LD_LIBRARY_PATH=%s/zgx-vulkan-loader/build/loader\n' "$HOME" >> "$GITHUB_ENV"
       # With 3D scenes (zgx-script's `scene3d`, off by default; the Windows
       # and macOS jobs test without it).
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script --all-targets --features zgx-script/scene3d --locked
@@ -384,22 +408,6 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
-      # Concurrent device tests need Vulkan-Loader#1866; older distro loaders
-      # can crash inside vkSetDebugUtilsObjectNameEXT. Keep debug/validation on.
-      # The loader is built from pinned revisions, so it is kept between
-      # runs until the script changes.
-      - uses: actions/cache@v4
-        id: vulkan-loader
-        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
-        with:
-          path: ~/zgx-vulkan-loader/build/loader
-          key: vulkan-loader-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build_vulkan_loader.sh') }}
-      - name: Build private patched Vulkan loader
-        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' && steps.vulkan-loader.outputs.cache-hit != 'true' }}
-        run: scripts/build_vulkan_loader.sh ~/zgx-vulkan-loader
-      - name: Use the private Vulkan loader
-        if: ${{ !cancelled() && steps.linux-packages.outcome == 'success' }}
-        run: printf 'LD_LIBRARY_PATH=%s/zgx-vulkan-loader/build/loader\n' "$HOME" >> "$GITHUB_ENV"
       # The GPU tests below draw on lavapipe, Mesa's software Vulkan. Without
       # it every one of them panics ("No suitable graphics adapter found"),
       # which hides the cause: say it once, here. They run after an earlier
@@ -504,7 +512,7 @@ jobs:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.jobs).perf
     # ubuntu-24.04, as perf-base.yml's: the gate compares counts made on one
-    # image, and the linux job's is pinned (-latest moved to 26.04 on Nov 14).
+    # image, and its base binaries were built there (gate-bin-u24).
     runs-on: ubuntu-24.04
     # With the base's binaries not cached, both sides build: the head's took
     # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew); the
@@ -1009,8 +1017,8 @@ jobs:
     name: CI result
     needs: [plan, admit, linux, perf, macos, windows]
     if: always()
-    # ubuntu-24.04, not -latest, as every job here: -latest moved to 26.04
-    # (Mesa 26) on Nov 14, where lavapipe's tests and probes fail (see linux).
+    # ubuntu-24.04, not -latest: -latest moves with GitHub's images (to 26.04
+    # on Nov 14); only linux, whose tests and probes run there, follows it.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
