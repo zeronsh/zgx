@@ -725,8 +725,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         let bytes = text.as_bytes();
         let mut at = 0;
         while at < bytes.len() {
-            let run = bytes[at..].iter().position(|byte| !matches!(byte, 0x20..=0x7E));
-            let end = run.map_or(bytes.len(), |run| at + run);
+            let end = at + printable_run(&bytes[at..]);
             if end > at {
                 // SAFETY: ASCII, so on character boundaries.
                 performer.print_str(unsafe { text.get_unchecked(at..end) });
@@ -744,6 +743,31 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             at += c.len_utf8();
         }
     }
+}
+
+/// How many bytes at the start of `bytes` are printable ASCII
+/// (`0x20..=0x7E`): eight at a time, the word holding the first other byte
+/// (and the last few bytes) one at a time.
+// zgx: a log's lines are long runs, and a byte at a time cost them most.
+#[inline]
+fn printable_run(bytes: &[u8]) -> usize {
+    const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
+    const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
+    let mut at = 0;
+    while let Some(word) = bytes.get(at..at + 8) {
+        let word = u64::from_ne_bytes(word.try_into().unwrap());
+        // A byte below 0x20 sets its high bit in the first, one of 0x7F or
+        // above in the second (carries only ever add bits after such a
+        // byte); a word of printable bytes sets none.
+        let below = word.wrapping_sub(ONES * 0x20) & !word;
+        let above = word.wrapping_add(ONES) | word;
+        if (below | above) & HIGH != 0 {
+            break;
+        }
+        at += 8;
+    }
+    let rest = &bytes[at..];
+    at + rest.iter().position(|byte| !matches!(byte, 0x20..=0x7E)).unwrap_or(rest.len())
 }
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
@@ -1638,6 +1662,9 @@ mod tests {
         const PIECES: &[&[u8]] = &[
             b"a",
             b"word ",
+            b"a line of a log, longer than a word or two",
+            b"1234567",
+            b"12345678",
             b"~",
             b" ",
             b"\t",
@@ -1674,7 +1701,7 @@ mod tests {
             // In chunks of any length, as reads end anywhere.
             let mut at = 0;
             while at < bytes.len() {
-                let end = (at + 1 + next(16)).min(bytes.len());
+                let end = (at + 1 + next(80)).min(bytes.len());
                 parser.advance(&mut runs, &bytes[at..end]);
                 by_one.advance(&mut one, &bytes[at..end]);
                 at = end;
@@ -1682,6 +1709,62 @@ mod tests {
             assert_eq!(runs.dispatched.dispatched, one.dispatched, "{bytes:?}");
             longest = runs.runs.iter().map(|run| run.len()).max().unwrap_or(0).max(longest);
         }
-        assert!(longest > 4, "{longest}");
+        assert!(longest > 16, "{longest}");
+    }
+
+    #[test]
+    fn a_printable_run_ends_at_the_first_other_byte_wherever_it_is() {
+        // Every other byte value at every place in up to four words, from
+        // every alignment.
+        let mut bytes = [b'x'; 32];
+        for len in 0..=bytes.len() {
+            for offset in 0..=8.min(bytes.len() - len) {
+                assert_eq!(printable_run(&bytes[offset..offset + len]), len);
+            }
+        }
+        for other in (0..=255u8).filter(|byte| !(0x20..=0x7E).contains(byte)) {
+            for at in 0..bytes.len() {
+                bytes[at] = other;
+                for offset in 0..=at {
+                    assert_eq!(printable_run(&bytes[offset..]), at - offset, "{other:#x} at {at}");
+                }
+                bytes[at] = b'x';
+            }
+        }
+        // Every printable byte, and two others in one word.
+        for printable in 0x20..=0x7Eu8 {
+            assert_eq!(printable_run(&[printable; 19]), 19);
+        }
+        assert_eq!(printable_run(b"ab\xff\x00cdefgh"), 2);
+        assert_eq!(printable_run(b"ab\x1f\x7fcdefgh"), 2);
+
+        // Random streams, mostly printable, against a byte at a time, from
+        // every place in them.
+        let by_one = |bytes: &[u8]| {
+            bytes.iter().position(|byte| !(0x20..=0x7E).contains(byte)).unwrap_or(bytes.len())
+        };
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..2000 {
+            let len = (next() % 70) as usize;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| match next() % 40 {
+                    0 => next() as u8,
+                    _ => 0x20 + (next() % 0x5F) as u8,
+                })
+                .collect();
+            for at in 0..=bytes.len() {
+                assert_eq!(
+                    printable_run(&bytes[at..]),
+                    by_one(&bytes[at..]),
+                    "{bytes:?} from {at}"
+                );
+            }
+        }
     }
 }
