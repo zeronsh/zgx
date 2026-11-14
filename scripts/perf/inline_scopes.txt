@@ -21,7 +21,7 @@ zgx	193	2414	mount_style_with_intrinsic
 zgx	371	9710	mount_style_with_intrinsic::{closure#10}
 zgx	97	1723	mount_element
 zgx	61	768	compose::<impl in crates/zgx/src/compose.rs>::mount
-zgx-gpu	294	3369	<impl in crates/zgx-gpu/src/lib.rs>::prepare
+zgx-gpu	299	3524	<impl in crates/zgx-gpu/src/lib.rs>::prepare
 zgx-gpu	23	727	<impl in crates/zgx-gpu/src/lib.rs>::prepare_layer
 zgx-gpu	322	6301	<impl in crates/zgx-gpu/src/lib.rs>::prepare_layer_planned
 zgx-gpu	182	1494	<impl in crates/zgx-gpu/src/lib.rs>::encode_damage
