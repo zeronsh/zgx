@@ -67,8 +67,22 @@ pub fn paint_only(scene: &Scene) {
 #[cold]
 #[inline(never)]
 fn note_paint(scene: &Scene) {
+    append_paint(paint(scene));
+}
+/// A frame drawn with no scene (a 3D world's), as its pixels read back: their
+/// hash in place of the paint's, its damage `-`. Asked only with [`on`]
+/// (reading pixels back is the bench's own work, done for this alone).
+#[cold]
+#[inline(never)]
+pub fn pixels(bytes: &[u8]) {
+    let mut hash = Fnv::new();
+    hash.write(bytes);
+    append_paint(hash.finish());
+}
+/// A paint hash and no damage, appended to `ZGX_FINGERPRINT`'s file.
+fn append_paint(paint: u64) {
     if let Some(path) = std::env::var_os("ZGX_FINGERPRINT") {
-        let line = format!("{:016x} -\n", paint(scene));
+        let line = format!("{paint:016x} -\n");
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

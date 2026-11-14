@@ -684,8 +684,6 @@ def unit_of(env):
 FINGERPRINT = os.environ.get('ZGX_GATE_FINGERPRINT', '1') != '0'
 # Scenes whose bench gives no fingerprint yet, and why: said so in the table.
 UNPRINTED = {
-    '3d-textured': 'not hooked: a 3D world drawn without a scene',
-    '3d-mixed': 'not hooked: a 3D world drawn without a scene',
 }
 
 
