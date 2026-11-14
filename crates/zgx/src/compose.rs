@@ -1136,6 +1136,24 @@ impl View {
             }
         })
     }
+    /// What a copy or cut out of this editor puts on the clipboard (⌘C and ⌘X,
+    /// the Edit menu, its context menu, `EditorHandle::copy_to_clipboard`):
+    /// `hook` is asked with what is selected and whether it is a cut, and
+    /// gives text with HTML beside it, or none for the selection's plain
+    /// text. A cut deletes the selection either way, one undo step. A
+    /// password field never asks it; nor does an empty selection. (Pin line.)
+    #[doc(hidden)]
+    pub fn on_copy(
+        self,
+        hook: impl Fn(&crate::widgets::CopyRequest) -> Option<crate::widgets::ClipboardContent>
+        + 'static,
+    ) -> Self {
+        self.on_mount(move |handle| {
+            if let Some(ui) = handle.ui.upgrade() {
+                ui.set_copy_hook(handle.node, Rc::new(hook));
+            }
+        })
+    }
     /// The item this view is on while focus stays in it (`aria-activedescendant`):
     /// the id of a node, as `id()` names it, or `None`. An editor driving a
     /// list of suggestions (a mention's, `View::at_caret`) keeps focus and

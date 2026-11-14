@@ -1388,6 +1388,23 @@ impl EditorHandle {
         }
         text
     }
+    /// Copy the selection to `platform`'s clipboard as the person would
+    /// (`Ui::copy_from`): what `View::on_copy` gives, else its text.
+    /// Whether the clipboard took it. (Pin line.)
+    #[doc(hidden)]
+    pub fn copy_to_clipboard(&self, ui: &Ui, platform: &crate::platform::PlatformService) -> bool {
+        ui.copy_from(self, false, |text, html| {
+            write_clipboard(platform, text, html)
+        })
+    }
+    /// Cut the selection to `platform`'s clipboard as the person would
+    /// (`Ui::copy_from`). Whether the clipboard took it. (Pin line.)
+    #[doc(hidden)]
+    pub fn cut_to_clipboard(&self, ui: &Ui, platform: &crate::platform::PlatformService) -> bool {
+        ui.copy_from(self, true, |text, html| {
+            write_clipboard(platform, text, html)
+        })
+    }
     /// Replace the selection with `text`, as typed: what a text service
     /// (Windows' emoji panel, dictation, touch keyboard) inserts. A
     /// single-line editor joins its lines; a read-only one ignores it.
@@ -1525,6 +1542,39 @@ impl EditorHandle {
 /// (none where the clipboard holds no text: an image, say), true if it took
 /// the paste.
 pub(crate) type PasteHook = Rc<dyn Fn(Option<&str>) -> bool>;
+/// A copy or a cut out of an editor, as `View::on_copy` hears it.
+/// (Pin line.)
+#[doc(hidden)]
+pub struct CopyRequest<'a> {
+    /// A cut: the selection goes once the clipboard has it.
+    pub cut: bool,
+    /// What is selected, in bytes of the editor's text.
+    pub range: std::ops::Range<usize>,
+    /// What is selected.
+    pub text: &'a str,
+}
+/// What goes on the clipboard: text, and HTML beside it where given.
+/// (Pin line.)
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClipboardContent {
+    pub text: String,
+    pub html: Option<String>,
+}
+/// What `View::on_copy` gives an editor: what goes on the clipboard for a
+/// copy or a cut, or none for the selection's plain text.
+pub(crate) type CopyHook = Rc<dyn Fn(&CopyRequest) -> Option<ClipboardContent>>;
+/// `text` on `platform`'s clipboard, with `html` beside it where given.
+pub(crate) fn write_clipboard(
+    platform: &crate::platform::PlatformService,
+    text: String,
+    html: Option<String>,
+) -> bool {
+    match html {
+        Some(html) => platform.0.set_clipboard_rich_text(text, html),
+        None => platform.0.set_clipboard_text(text),
+    }
+}
 /// The layout and notification passes a frame takes to settle.
 const LAYOUT_PASSES: usize = 64;
 /// How much of a point a size or a position may differ by and be the same
@@ -1911,6 +1961,9 @@ pub(crate) struct UiStorage {
     editors: RefCell<crate::scene::NodeMap<EditorHandle>>,
     /// What takes a person's paste, for the few editors asked to (`View::on_paste`).
     paste_hooks: RefCell<crate::scene::NodeMap<PasteHook>>,
+    /// What decides what a copy or cut puts on the clipboard, for the few
+    /// editors asked to (`View::on_copy`).
+    copy_hooks: RefCell<crate::scene::NodeMap<CopyHook>>,
     editor_layout: RefCell<Option<EditorLayoutEntry>>,
     editor_layout_revision: Cell<Option<u64>>,
     bounds_geometry_revision: Cell<Option<u64>>,
@@ -2326,6 +2379,7 @@ impl Ui {
             spare: Default::default(),
             editors: RefCell::default(),
             paste_hooks: RefCell::default(),
+            copy_hooks: RefCell::default(),
             editor_layout: RefCell::new(None),
             editor_layout_revision: Cell::new(None),
             bounds_geometry_revision: Cell::new(None),
@@ -4078,6 +4132,66 @@ impl Ui {
             editor.paste(text);
         }
     }
+    #[cold]
+    #[inline(never)]
+    fn take_copy_hooks(&self, ids: &[NodeId]) -> Vec<CopyHook> {
+        let mut hooks = self.storage.copy_hooks.borrow_mut();
+        ids.iter().filter_map(|id| hooks.remove(id)).collect()
+    }
+    /// `hook` decides what copies and cuts out of editor `node` put on the
+    /// clipboard (only an editor: a hook goes as its editor does).
+    pub(crate) fn set_copy_hook(&self, node: NodeId, hook: CopyHook) {
+        debug_assert!(self.is_editor(node), "on_copy is for editors");
+        if self.is_editor(node) {
+            self.storage.copy_hooks.borrow_mut().insert(node, hook);
+        }
+    }
+    /// The person copied (or, with `cut`, cut) out of `editor` (a key, the
+    /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`): its
+    /// `View::on_copy` says what goes on the clipboard, else its selection's
+    /// text, and `write` puts it there (text, and HTML beside it). A
+    /// password field gives nothing and asks no hook; nor does an empty
+    /// selection. A cut the clipboard took deletes the selection, one undo
+    /// step, unless the editor is read-only (a cut there is a copy).
+    /// Whether the clipboard took it. (Pin line.)
+    #[doc(hidden)]
+    pub fn copy_from(
+        &self,
+        editor: &EditorHandle,
+        cut: bool,
+        write: impl FnOnce(String, Option<String>) -> bool,
+    ) -> bool {
+        if editor.is_secure() {
+            return false;
+        }
+        let (range, text) = {
+            let e = editor.editor.borrow();
+            (e.selection().range(), e.selected_text().into_owned())
+        };
+        if text.is_empty() {
+            return false;
+        }
+        let cut = cut && !editor.is_read_only();
+        // Nothing borrowed: the hook may read the editor.
+        let hook = self.storage.copy_hooks.borrow().get(&editor.node).cloned();
+        let request = CopyRequest {
+            cut,
+            range,
+            text: &text,
+        };
+        let content = hook.and_then(|hook| hook(&request));
+        let (text, html) = match content {
+            Some(content) => (content.text, content.html),
+            None => (text, None),
+        };
+        if !write(text, html) {
+            return false;
+        }
+        if cut {
+            editor.cut();
+        }
+        true
+    }
     /// Prepare allocated control geometry before rendering a frame or dispatching input.
     /// Native hosts call this automatically. Headless hosts should call it before `Scene::flush`.
     pub fn prepare_frame(&self) {
@@ -5479,6 +5593,7 @@ impl Ui {
         };
         // A hook can hold a whole script: it goes with its editor.
         let paste_hooks = (!editors.is_empty()).then(|| self.take_paste_hooks(&ids));
+        let copy_hooks = (!editors.is_empty()).then(|| self.take_copy_hooks(&ids));
         // Detach geometry before listener captures or cached layouts can run
         // user destructors. Reentrant removal of this owner (or an ancestor)
         // then observes an already removed subtree instead of stale node IDs.
@@ -5505,6 +5620,7 @@ impl Ui {
         drop(owned);
         drop(editors);
         drop(paste_hooks);
+        drop(copy_hooks);
         if refocus.is_some() && self.input.focused().is_none() {
             self.storage.refocus.set(refocus);
         }
@@ -5550,6 +5666,11 @@ impl Ui {
             let mut storage = self.storage.paste_hooks.borrow_mut();
             storage.extract_if(|id, _| !scene.contains(*id)).collect()
         };
+        let copy_hooks: Vec<_> = {
+            let scene = self.scene.borrow();
+            let mut storage = self.storage.copy_hooks.borrow_mut();
+            storage.extract_if(|id, _| !scene.contains(*id)).collect()
+        };
         self.semantics.borrow_mut().bury(&ids);
         self.input.forget_removed(&self.scene);
         self.storage.dying.borrow_mut().extend(ids);
@@ -5559,6 +5680,7 @@ impl Ui {
         drop(resources);
         drop(editors);
         drop(paste_hooks);
+        drop(copy_hooks);
         if refocus.is_some() && self.input.focused().is_none() {
             self.storage.refocus.set(refocus);
         }

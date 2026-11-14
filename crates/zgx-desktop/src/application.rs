@@ -3841,16 +3841,26 @@ impl Host {
             self.context.ui.paste_into(&editor, text.as_deref());
             return true;
         }
-        let mut clipboard = self.clipboard.borrow_mut();
-        let Some(clipboard) = clipboard.as_mut() else {
+        if self.clipboard.borrow().is_none() {
             return true;
-        };
-        {
-            let text = editor.copy();
-            if !text.is_empty() && clipboard.set_text(text).is_ok() && k.eq_ignore_ascii_case("x") {
-                editor.cut();
-            }
         }
+        // The clipboard taken only to write: what the app's `View::on_copy`
+        // does first may read it.
+        let clipboard = self.clipboard.clone();
+        copy_or_cut_editor(
+            &self.context.ui,
+            &editor,
+            k.eq_ignore_ascii_case("x"),
+            |text, html| {
+                clipboard
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|clipboard| match html {
+                        Some(html) => clipboard.set_rich_text(text, html).is_ok(),
+                        None => clipboard.set_text(text).is_ok(),
+                    })
+            },
+        );
         true
     }
     fn accessibility_action(&mut self, request: accesskit::ActionRequest) {
@@ -9468,9 +9478,84 @@ fn app_is_active(renders_when_covered: bool, focused: bool) -> bool {
     renders_when_covered || focused
 }
 
+/// ⌘C or ⌘X (Ctrl elsewhere), and the Edit menu's Copy and Cut, which come
+/// as them (`clipboard_command`), in a focused editor: through the app's
+/// `View::on_copy` (`Ui::copy_from`), what it gives or the selection's text
+/// put on the clipboard by `write`; a cut then deletes the selection.
+fn copy_or_cut_editor(
+    ui: &zgx::widgets::Ui,
+    editor: &zgx::widgets::EditorHandle,
+    cut: bool,
+    write: impl FnOnce(String, Option<String>) -> bool,
+) -> bool {
+    ui.copy_from(editor, cut, write)
+}
 #[cfg(test)]
 mod tests {
     use zgx::scene::Rect;
+
+    /// ⌘C and ⌘X, and the Edit menu's Copy and Cut (which come as
+    /// `clipboard_command("c")` and `("x")`), in a focused editor go through
+    /// its `View::on_copy`: what it gives is what the clipboard is written
+    /// (an in-memory one here, never the machine's), and ⌘X deletes the
+    /// selection. A password field writes nothing.
+    #[test]
+    fn copy_and_cut_keys_write_what_on_copy_gives() {
+        use zgx::compose::prelude::*;
+        use zgx::widgets::ClipboardContent;
+        let mut ui = zgx::widgets::Ui::new(300., 100.);
+        let value = ui.signal("Hello world".to_owned());
+        let view = ui.mount(
+            text_input("Name", value.clone())
+                .id("field")
+                .w(200.)
+                .h(30.)
+                .on_copy(|request| {
+                    Some(ClipboardContent {
+                        text: request.text.to_uppercase(),
+                        html: Some(format!("<i>{}</i>", request.text)),
+                    })
+                }),
+        );
+        ui.prepare_frame();
+        let editor = ui.editor(view.find("field").unwrap()).unwrap();
+        editor.set_selection(0, 5);
+        let mut written = None;
+        assert!(super::copy_or_cut_editor(
+            &ui,
+            &editor,
+            false,
+            |text, html| {
+                written = Some((text, html));
+                true
+            }
+        ));
+        assert_eq!(
+            written,
+            Some(("HELLO".to_owned(), Some("<i>Hello</i>".to_owned())))
+        );
+        assert_eq!(value.get(), "Hello world", "\u{2318}C leaves the text");
+        let mut written = None;
+        assert!(super::copy_or_cut_editor(
+            &ui,
+            &editor,
+            true,
+            |text, html| {
+                written = Some((text, html));
+                true
+            }
+        ));
+        assert_eq!(
+            written,
+            Some(("HELLO".to_owned(), Some("<i>Hello</i>".to_owned())))
+        );
+        assert_eq!(value.get(), " world", "\u{2318}X deletes the selection");
+        editor.set_secure(true);
+        editor.set_selection(0, 6);
+        assert!(!super::copy_or_cut_editor(&ui, &editor, false, |_, _| {
+            panic!("a password field writes nothing")
+        }));
+    }
 
     /// A window at rest gives back Metal's queue, then its glyph atlas, each
     /// at its own delay past the trim, and nothing once both have gone.
