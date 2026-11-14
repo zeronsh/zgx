@@ -33,6 +33,7 @@ pub mod iosurface;
 mod passes;
 #[cfg(d3d11)]
 mod view_host;
+mod warm;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub use core_text_glyphs::core_text_glyph;
@@ -684,6 +685,9 @@ struct QuadPipelines {
     /// Whether canvases' filled areas draw as quads (`areas_on_gpu`): their
     /// shader is in the polylines' module then.
     areas: bool,
+    /// The pipelines a launch's context made ahead (warm.rs), taken in as
+    /// the first is needed.
+    warm: warm::Warming<warm::Quads>,
 }
 /// The polyline strokes' module (draw.wgsl and polyline.wgsl), its layout
 /// (the quads' groups, and their points as group 2) and its pipeline into
@@ -710,6 +714,10 @@ impl QuadPipelines {
             Shading::SourceIn => (&self.source_in, false, Some(SOURCE_IN)),
             Shading::Behind => (&self.behind, false, Some(BEHIND)),
         };
+        if let Some(pipeline) = cell.get() {
+            return pipeline;
+        }
+        self.take_warm();
         cell.get_or_init(|| {
             quad_pipeline(
                 &self.device,
@@ -721,14 +729,20 @@ impl QuadPipelines {
             )
         })
     }
+    /// What a launch's context made ahead, into the cells (once; a cell
+    /// filled already keeps its own).
+    #[cold]
+    fn take_warm(&self) {
+        if let Some(warm) = self.warm.take() {
+            let _ = self.shader.set(warm.shader);
+            let _ = self.full.set(warm.full);
+            let _ = self.full_clear.set(warm.full_clear);
+            let _ = self.basic.set(warm.basic);
+            let _ = self.basic_clear.set(warm.basic_clear);
+        }
+    }
     fn shader(&self) -> &wgpu::ShaderModule {
-        self.shader.get_or_init(|| {
-            self.device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("quads"),
-                    source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
-                })
-        })
+        self.shader.get_or_init(|| quad_shader(&self.device))
     }
     fn polylines(&self) -> &Polylines {
         self.polylines.get_or_init(|| {
@@ -773,6 +787,10 @@ impl QuadPipelines {
         if basic {
             self.get(Shading::Opaque)
         } else {
+            if let Some(pipeline) = self.full_clear.get() {
+                return pipeline;
+            }
+            self.take_warm();
             self.full_clear.get_or_init(|| {
                 quad_pipeline(&self.device, self.shader(), &self.layout, None, None, false)
             })
@@ -4269,6 +4287,8 @@ struct Prepared {
     mapped_uploads: bool,
     vertex_ring: bool,
     areas: bool,
+    /// The first frames' pipelines, being made (a launch's context alone).
+    warm: warm::Warm,
     #[cfg(d3d11)]
     d3d11: Option<d3d11_frame::Made>,
 }
@@ -4322,6 +4342,11 @@ struct GpuContextInner {
     vertex_ring: bool,
     /// For dual-output (single-pass presentation) pipelines.
     quad_layout: wgpu::PipelineLayout,
+    /// The first window's backdrop blur pipelines and direct Metal frame,
+    /// made ahead by a launch's context (warm.rs).
+    warm_blur: warm::Warming<BlurPipelines>,
+    #[cfg(target_os = "macos")]
+    warm_metal: warm::Warming<Option<metal_frame::Parts>>,
     /// With `ZGX_D3D11`, the Direct3D 11 device frames are drawn with; wgpu
     /// then runs on its no-op backend (d3d11_frame.rs).
     #[cfg(d3d11)]
@@ -4338,7 +4363,7 @@ impl GpuContext {
         Self::create(None)
     }
     fn create(window: Option<Arc<winit::window::Window>>) -> Result<Self, GpuError> {
-        Ok(Self::finish(Self::prepare(window)?))
+        Ok(Self::finish(Self::prepare(window, false)?))
     }
     /// Start making a context on another thread (the device, its pipelines
     /// and the system fonts take a few milliseconds), to take with
@@ -4349,12 +4374,17 @@ impl GpuContext {
         PendingGpuContext(
             std::thread::Builder::new()
                 .name("zgx GPU setup".into())
-                .spawn(|| Self::prepare(None))
+                .spawn(|| Self::prepare(None, true))
                 .ok(),
         )
     }
     /// What a context is made of that can be made on any thread.
-    fn prepare(window: Option<Arc<winit::window::Window>>) -> Result<Prepared, GpuError> {
+    /// With `warm`, the first frames' pipelines start being made as soon as
+    /// the device is (warm.rs).
+    fn prepare(
+        window: Option<Arc<winit::window::Window>>,
+        warm: bool,
+    ) -> Result<Prepared, GpuError> {
         // Avoid initializing secondary graphics stacks merely to enumerate
         // adapters. On Linux this can create an unused EGL driver and worker
         // pool even when Vulkan is selected; macOS uses Metal. Windows uses
@@ -4599,6 +4629,12 @@ impl GpuContext {
             lost.clone(),
         );
         let (texture_layout, viewport_layout, quad_layout) = create_quad_pipelines(&device);
+        // (macOS's: measured there, a launch's first frames waiting on
+        // Metal's compiler service. Elsewhere, made as they are met.)
+        let warm = match warm && cfg!(target_os = "macos") {
+            true => warm::Warm::start(&device, &quad_layout),
+            false => warm::Warm::default(),
+        };
         zgx::profile::mark("GPU device and pipelines");
         let fonts = font_cache::system_fonts();
         zgx::profile::mark("system fonts");
@@ -4617,6 +4653,7 @@ impl GpuContext {
             mapped_uploads,
             vertex_ring,
             areas,
+            warm,
             #[cfg(d3d11)]
             d3d11: d3d11.map(d3d11_frame::Made),
         })
@@ -4638,6 +4675,7 @@ impl GpuContext {
             mapped_uploads,
             vertex_ring,
             areas,
+            warm,
             #[cfg(d3d11)]
             d3d11,
         } = prepared;
@@ -4655,6 +4693,7 @@ impl GpuContext {
             viewport_layout: viewport_layout.clone(),
             polylines: Default::default(),
             areas,
+            warm: warm.quads,
         };
         Self {
             inner: Rc::new({
@@ -4677,6 +4716,9 @@ impl GpuContext {
                     quad_layout,
                     mapped_uploads,
                     vertex_ring,
+                    warm_blur: warm.blur,
+                    #[cfg(target_os = "macos")]
+                    warm_metal: warm.metal,
                     #[cfg(d3d11)]
                     d3d11: d3d11.map(|made| Rc::new(made.0)),
                 }
@@ -5270,6 +5312,14 @@ impl GpuRenderer {
     pub fn new(width: u32, height: u32) -> Result<Self, GpuError> {
         let context = GpuContext::new()?;
         Self::create(None, width, height, &context)
+    }
+    /// The direct Metal frame's pipelines: a launch's, made ahead (warm.rs),
+    /// or made now.
+    #[cfg(target_os = "macos")]
+    #[cold]
+    fn make_metal_frame(&self) -> Option<metal_frame::MetalFrame> {
+        let parts = self.context.inner.warm_metal.take().flatten();
+        metal_frame::MetalFrame::new(&self.device, &self.queue, parts).ok()
     }
     /// A renderer for `window`, on a context made for it, at its size and
     /// scale.
@@ -11543,7 +11593,7 @@ impl GpuRenderer {
             && (!polylines
                 || self
                     .metal_frame
-                    .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
+                    .get_or_init(|| self.make_metal_frame())
                     .as_ref()
                     .is_some_and(|frame| frame.polylines()))
             // Special draws are emitted only after preparing their wgpu
@@ -11559,7 +11609,7 @@ impl GpuRenderer {
                     .all(|draw| match draw.shading {
                 Shading::Fill(id) => self.fill_shaders.get(&id).is_some_and(|shader| {
                     self.metal_frame
-                        .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
+                        .get_or_init(|| self.make_metal_frame())
                         .as_ref()
                         .is_some_and(|frame| {
                             frame.fills(shader, self.offscreen_waits && !self.presents())
@@ -11567,7 +11617,7 @@ impl GpuRenderer {
                 }),
                 Shading::ImageEffect => self
                     .metal_frame
-                    .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
+                    .get_or_init(|| self.make_metal_frame())
                     .as_ref()
                     .is_some_and(|frame| frame.image_effects()),
                 // Layer shaders and blend modes take the wgpu path, as layers'
@@ -11585,7 +11635,7 @@ impl GpuRenderer {
             })
             && self
                 .metal_frame
-                .get_or_init(|| metal_frame::MetalFrame::new(&self.device, &self.queue).ok())
+                .get_or_init(|| self.make_metal_frame())
                 .as_ref()
                 .is_some_and(|frame| {
                     (batches.is_empty() || frame.blurs())
@@ -14241,7 +14291,8 @@ impl GpuRenderer {
         } = plan;
         let mixed = *mixed;
         if self.blur_pipelines.is_none() {
-            self.blur_pipelines = Some(BlurPipelines::new(&self.device));
+            let warm = self.context.inner.warm_blur.take();
+            self.blur_pipelines = Some(warm.unwrap_or_else(|| BlurPipelines::new(&self.device)));
         }
         // A popup blurs its window's frame (`set_backdrop`), but what it mixes
         // the blur over stays its own: past a rounded box's curve, its target
@@ -19746,6 +19797,13 @@ const BEHIND: wgpu::BlendState = {
         alpha: component,
     }
 };
+/// The quads' module (draw.wgsl).
+fn quad_shader(device: &wgpu::Device) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("quads"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
+    })
+}
 fn quad_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
