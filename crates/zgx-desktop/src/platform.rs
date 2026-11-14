@@ -154,6 +154,14 @@ impl Platform for Desktop {
             .and_then(|clipboard| clipboard.get_files().ok())
             .unwrap_or_default()
     }
+    fn clipboard_html(&self) -> Option<String> {
+        self.clipboard
+            .borrow_mut()
+            .as_mut()?
+            .get_html()
+            .ok()
+            .filter(|html| !html.is_empty())
+    }
     fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
         self.clipboard
             .borrow_mut()
