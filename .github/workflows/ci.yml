@@ -79,7 +79,9 @@ env:
 jobs:
   # Named `plan`: admission (admit.py) leaves a job of that name out of reservations.
   plan:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not -latest, as every job here: -latest moved to 26.04
+    # (Mesa 26) on Nov 14, where lavapipe's tests and probes fail (see linux).
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -105,7 +107,9 @@ jobs:
     name: "admit [${{ needs.plan.outputs.reservation }}]${{ needs.plan.outputs.pr != '' && format(' #{0}', needs.plan.outputs.pr) || '' }}"
     needs: plan
     if: needs.plan.outputs.any == 'true'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not -latest, as every job here: -latest moved to 26.04
+    # (Mesa 26) on Nov 14, where lavapipe's tests and probes fail (see linux).
+    runs-on: ubuntu-24.04
     # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
     timeout-minutes: 330
     permissions:
@@ -142,7 +146,9 @@ jobs:
   linux:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.jobs).linux
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not -latest: on 26.04 (Mesa 26) the GPU tests and
+    # native probes on lavapipe fail (zink, a SIGSEGV); moved by GitHub on Nov 14.
+    runs-on: ubuntu-24.04
     # A cold cache (a release's version bump changes Cargo.lock) takes about
     # twice a warm one's 21 minutes.
     timeout-minutes: 60
@@ -489,7 +495,9 @@ jobs:
   perf:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.jobs).perf
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, as perf-base.yml's: the gate compares counts made on one
+    # image, and the linux job's is pinned (-latest moved to 26.04 on Nov 14).
+    runs-on: ubuntu-24.04
     # With the base's binaries not cached, both sides build: the head's took
     # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew); the
     # inlining check adds a MIR build of three crates.
@@ -587,7 +595,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ runner.temp }}/gate-bin
-          key: gate-bin-${{ github.sha }}
+          key: gate-bin-u24-${{ github.sha }}
       - run: rm -rf "$RUNNER_TEMP/gate-bin"
       # The base's binaries as main kept them (perf-base.yml, or main's own
       # perf job): the base's own, or else those of the newest kept commit
@@ -985,7 +993,9 @@ jobs:
     name: CI result
     needs: [plan, admit, linux, perf, macos, windows]
     if: always()
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not -latest, as every job here: -latest moved to 26.04
+    # (Mesa 26) on Nov 14, where lavapipe's tests and probes fail (see linux).
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - env:
