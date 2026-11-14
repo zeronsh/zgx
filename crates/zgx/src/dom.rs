@@ -620,6 +620,9 @@ pub struct Overlay {
     pub backdrop: Option<String>,
     /// Its panel's children are made the first time it opens (`View::lazy`).
     pub lazy: bool,
+    /// A popover's arrow (`View::arrow`): how far it reaches from the
+    /// panel's edge, 0 for none.
+    pub arrow: f32,
 }
 
 /// A rich paragraph's spans as the DOM shows them (tracked: theme tokens
@@ -1371,8 +1374,16 @@ fn overlay(
             } else {
                 tok::SURFACE_OVERLAY
             })
-            .rounded(radius)
-            .overflow_hidden();
+            .rounded(radius);
+        // Its content clipped to its corners, unless an arrow shows past
+        // its edge.
+        let arrowed = kind == OverlayKind::Popover
+            && options
+                .as_ref()
+                .is_some_and(|o| o.arrow.is_some_and(|a| a > 0.));
+        if !arrowed {
+            defaults = defaults.overflow_hidden();
+        }
         if is_menu {
             defaults = defaults.items_stretch();
         }
@@ -1441,6 +1452,11 @@ fn overlay(
         interactive,
         backdrop,
         lazy: options.as_ref().is_some_and(|o| o.lazy),
+        // Anchored popovers have one; menus none.
+        arrow: match kind {
+            OverlayKind::Popover => options.as_ref().and_then(|o| o.arrow).unwrap_or(0.),
+            _ => 0.,
+        },
     };
     let mut el = primitive(
         view,
