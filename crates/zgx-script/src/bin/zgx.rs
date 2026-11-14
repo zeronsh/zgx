@@ -495,7 +495,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   zoom [in|out|reset|150%]               the window's zoom and its viewport
   full-screen [on|off|toggle]            the window into or out of full screen, as its green button
   clipboard [set --text T | --html H | --image file.png]
-                       the window's clipboard (its own under ZGX_CLIPBOARD=memory);
+                       the window's clipboard (its own under ZGX_CLIPBOARD=memory or ZGX_OFFSCREEN);
                        set it, then `key cmd+v` pastes it
   memory [--human]                       what the app holds, a line each, as JSON
   sleep <ms>           raw <json>

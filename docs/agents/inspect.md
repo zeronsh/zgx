@@ -149,7 +149,7 @@ zgx inspect clipboard set --image shot.png
 zgx inspect key cmd+v                                  # pastes it into the focused editor (ctrl+v off macOS)
 ```
 
-`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA and off-screen sessions.
+`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. An off-screen session (`ZGX_OFFSCREEN=1`) has one of its own anyway, unless `ZGX_CLIPBOARD` names another (`system`, the person's).
 
 ## Popovers, menus and other popups
 
