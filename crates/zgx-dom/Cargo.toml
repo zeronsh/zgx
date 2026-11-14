@@ -50,3 +50,9 @@ crate-type = ["cdylib"]
 name = "luau"
 crate-type = ["cdylib"]
 required-features = ["luau"]
+
+# The table benchmark in Luau (`bench/build.sh luau-bench`).
+[[example]]
+name = "luau_bench"
+crate-type = ["cdylib"]
+required-features = ["luau"]
