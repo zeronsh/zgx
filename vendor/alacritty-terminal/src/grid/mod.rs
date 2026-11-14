@@ -26,6 +26,15 @@ pub trait GridCell: Sized {
     /// Perform an opinionated cell reset based on a template cell.
     fn reset(&mut self, template: &Self);
 
+    /// Each of `cells` reset as `reset` resets it.
+    // zgx: so a cell type can reset a row's at once.
+    #[inline]
+    fn reset_all(cells: &mut [Self], template: &Self) {
+        for cell in cells {
+            cell.reset(template);
+        }
+    }
+
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
 }
