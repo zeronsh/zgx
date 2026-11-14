@@ -35,7 +35,9 @@ env:
 jobs:
   # Named `perf`, as CI's job: the dependency cache's key includes the job's name.
   perf:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, as ci.yml's perf job: the gate compares counts made on
+    # one image (-latest moved to 26.04 on Nov 14).
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -86,7 +88,7 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ runner.temp }}/gate-bin
-          key: gate-bin-${{ github.sha }}
+          key: gate-bin-u24-${{ github.sha }}
       - name: Prune caches
         if: ${{ !cancelled() }}
         continue-on-error: true
