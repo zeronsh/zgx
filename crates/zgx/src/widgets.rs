@@ -18,7 +18,7 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{
-    Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans,
+    Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans, MarkImage,
     SpanHighlighter, SpanStyle,
 };
 
@@ -6297,10 +6297,19 @@ impl Ui {
                             } else {
                                 (tall - mark.y - mark.bottom).max(0.)
                             };
-                            let x = if mark.from_right {
-                                right - mark.x - width - scrolled
-                            } else {
-                                mark.x - scroll.0
+                            use crate::text_layout::TextAlign;
+                            let x = match mark.align {
+                                // Across the line's width, from its indent to its right edge.
+                                Some(TextAlign::Center) => {
+                                    inset.left + (right - inset.left - width) / 2. + mark.x
+                                        - scrolled
+                                }
+                                Some(TextAlign::Right | TextAlign::End) => {
+                                    right - mark.x - width - scrolled
+                                }
+                                Some(TextAlign::Left | TextAlign::Start) => mark.x - scroll.0,
+                                None if mark.from_right => right - mark.x - width - scrolled,
+                                None => mark.x - scroll.0,
                             };
                             wanted.push((Rect::new(x, top + mark.y, width, height), mark));
                         }
@@ -6351,10 +6360,73 @@ impl Ui {
                             border_over: false,
                             outline: None,
                         };
-                        if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
+                        // A picture's box lays it out (a panel: its quad and a child), clipped to its corners; a box
+                        // without one is a quad, its picture gone first.
+                        if mark.image.is_none()
+                            && let Some(picture) = s.children(id).first().copied()
+                        {
+                            s.remove(picture);
+                        }
+                        if mark.image.is_some() {
+                            if !matches!(s.kind(id), NodeKind::Panel { quad: q, .. } if *q == quad)
+                            {
+                                s.set_kind(
+                                    id,
+                                    NodeKind::Panel {
+                                        layout: Layout::Overlay,
+                                        quad,
+                                    },
+                                );
+                            }
+                        } else if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
                             s.set_kind(id, NodeKind::Quad(quad));
                         }
-                        s.set_style(id, fixed(rect.width, rect.height));
+                        // A picture: in the box, clipped to its rounded corners.
+                        let picture = s.children(id).first().copied();
+                        match &mark.image {
+                            Some(image) => {
+                                s.set_style(
+                                    id,
+                                    Style {
+                                        clip: true,
+                                        ..fixed(rect.width, rect.height)
+                                    },
+                                );
+                                let picture = picture.unwrap_or_else(|| {
+                                    s.append(
+                                        id,
+                                        NodeKind::Rect(Color(0, 0, 0, 0)),
+                                        Style::default(),
+                                    )
+                                });
+                                let (w, h) = crate::compose::fitted_image_size(
+                                    rect.width,
+                                    rect.height,
+                                    image.image.width() as f32,
+                                    image.image.height() as f32,
+                                    image.fit,
+                                );
+                                if !matches!(s.kind(picture), NodeKind::Image(shown) if *shown == image.image)
+                                {
+                                    s.set_kind(picture, NodeKind::Image(image.image.clone()));
+                                }
+                                s.set_style(
+                                    picture,
+                                    Style {
+                                        absolute: true,
+                                        ..fixed(w, h)
+                                    },
+                                );
+                                s.set_transform(
+                                    picture,
+                                    Transform {
+                                        x: (rect.width - w) / 2.,
+                                        y: (rect.height - h) / 2.,
+                                    },
+                                );
+                            }
+                            None => s.set_style(id, fixed(rect.width, rect.height)),
+                        }
                         s.set_transform(
                             id,
                             Transform {
