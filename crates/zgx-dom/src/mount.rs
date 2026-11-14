@@ -45,6 +45,8 @@ pub(crate) enum Event {
 enum Handler {
     Event(Box<dyn FnMut(Event)>),
     Click(Runtime, Box<dyn FnMut(Modifiers)>),
+    /// An element's `on_event` listeners, and its node.
+    Listeners(Runtime, __dom::Listeners, u32),
 }
 impl Handler {
     fn call(&mut self, event: Event) {
@@ -55,6 +57,7 @@ impl Handler {
                     runtime.batch(|| click(modifiers));
                 }
             }
+            Handler::Listeners(..) => {}
         }
     }
 }
@@ -83,6 +86,93 @@ thread_local! {
 struct Started {
     _dispatch: Closure<dyn FnMut(u32, u32, f64, Option<String>)>,
     _flush: Closure<dyn FnMut()>,
+    _event: Closure<EventFn>,
+    _keys: Closure<dyn FnMut(String, String, String, u32) -> u32>,
+}
+
+/// An event for an element's listeners: their handler; its kind, phase,
+/// modifiers, click count and repeat, in bits; whether it is for the
+/// element itself (1); where; a wheel's deltas, a button or an action's
+/// number; and its key and code (`key\ncode`). What the listeners decided
+/// comes back.
+pub(crate) type EventFn = dyn FnMut(u32, u32, u32, f64, f64, f64, f64, Option<String>) -> u32;
+
+#[allow(clippy::too_many_arguments)]
+fn element_event(
+    id: u32,
+    bits: u32,
+    at_self: u32,
+    x: f64,
+    y: f64,
+    dx: f64,
+    dy: f64,
+    keys: Option<String>,
+) -> u32 {
+    let taken = HANDLERS.with(|handlers| {
+        let mut handlers = handlers.borrow_mut();
+        match handlers.slots.get_mut(id as usize) {
+            Some(slot @ Slot::Full(Handler::Listeners(..))) => {
+                match std::mem::replace(slot, Slot::Taken) {
+                    Slot::Full(handler) => Some(handler),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    });
+    let Some(mut handler) = taken else {
+        return 0;
+    };
+    let (key, code) = keys
+        .as_deref()
+        .and_then(|keys| keys.split_once('\n'))
+        .unwrap_or(("", ""));
+    let outcome = match &mut handler {
+        Handler::Listeners(runtime, listeners, node) => {
+            let event = __dom::DomEvent {
+                kind: bits & 0xff,
+                phase: (bits >> 8) & 0xf,
+                at_self: at_self == 1,
+                node: *node,
+                x: x as f32,
+                y: y as f32,
+                dx: dx as f32,
+                dy: dy as f32,
+                modifiers: modifiers((bits >> 12) & 0xf),
+                clicks: ((bits >> 16) & 0xff) as u8,
+                repeat: bits >> 24 & 1 == 1,
+                key,
+                code,
+            };
+            runtime.batch(|| listeners.run(&event))
+        }
+        _ => 0,
+    };
+    let dropped = HANDLERS.with(|handlers| {
+        let mut handlers = handlers.borrow_mut();
+        let slot = &mut handlers.slots[id as usize];
+        match slot {
+            Slot::Taken => {
+                *slot = Slot::Full(handler);
+                None
+            }
+            _ => Some(handler),
+        }
+    });
+    drop(dropped);
+    flush();
+    outcome
+}
+
+fn keys(path: String, key: String, code: String, bits: u32) -> u32 {
+    let path: Vec<u32> = path.split(',').filter_map(|n| n.parse().ok()).collect();
+    __dom::resolve_keys(
+        &path,
+        &key,
+        &code,
+        modifiers(bits & 0xf),
+        bits >> 4 & 1 == 1,
+    )
 }
 
 fn handler(f: impl FnMut(Event) + 'static) -> u32 {
@@ -231,10 +321,14 @@ fn start() {
         }
         let dispatch = Closure::<dyn FnMut(u32, u32, f64, Option<String>)>::new(dispatch);
         let flush = Closure::<dyn FnMut()>::new(flush);
-        js::zgx_init(sheet::BASE_CSS, &dispatch, &flush);
+        let event = Closure::<EventFn>::new(element_event);
+        let keys = Closure::<dyn FnMut(String, String, String, u32) -> u32>::new(keys);
+        js::zgx_init(sheet::BASE_CSS, &dispatch, &flush, &event, &keys);
         *started.borrow_mut() = Some(Started {
             _dispatch: dispatch,
             _flush: flush,
+            _event: event,
+            _keys: keys,
         });
     });
 }
@@ -521,6 +615,35 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
     }
     if let Some(click) = el.click.take() {
         block.on_click(id, runtime.clone(), click);
+    }
+    if let Some(listeners) = el.listeners.take() {
+        let handler = register(Handler::Listeners(runtime.clone(), listeners, id));
+        block.handlers.push(handler);
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::ON_EVENT, handler]);
+        });
+    }
+    if let Some(keymap) = el.keymap.take() {
+        block.resources.push(__dom::bind_keymap(id, *keymap));
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::KEYMAP, id]);
+        });
+    }
+    if let Some((axis, chooses)) = el.focus_group {
+        let axis = match axis {
+            zgx::input::FocusGroup::Vertical => 1,
+            zgx::input::FocusGroup::Horizontal => 2,
+            zgx::input::FocusGroup::Both => 3,
+        };
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::GROUP, axis | (chooses as u32) << 2]);
+        });
     }
     let kind = std::mem::replace(&mut el.kind, ElementKind::Text(String::new()));
     let root = mount_kind(kind, id, scope, &runtime, block);

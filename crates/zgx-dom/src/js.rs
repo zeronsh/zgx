@@ -8,6 +8,8 @@ extern "C" {
         base_css: &str,
         dispatch: &Closure<dyn FnMut(u32, u32, f64, Option<String>)>,
         flush: &Closure<dyn FnMut()>,
+        event: &Closure<crate::mount::EventFn>,
+        keys: &Closure<dyn FnMut(String, String, String, u32) -> u32>,
     );
     pub(crate) fn zgx_schedule();
     pub(crate) fn zgx_adopt(id: u32, element: &web_sys::Element);
