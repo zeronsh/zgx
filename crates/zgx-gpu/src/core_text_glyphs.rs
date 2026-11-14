@@ -28,7 +28,7 @@ struct CGRect {
     size: CGSize,
 }
 #[repr(C)]
-struct CGAffineTransform {
+pub(crate) struct CGAffineTransform {
     a: f64,
     b: f64,
     c: f64,
