@@ -75,6 +75,8 @@ mod list_key_field;
 mod list_keys_read;
 #[path = "../list_long_budget.rs"]
 mod list_long_budget;
+#[path = "../list_recycle.rs"]
+mod list_recycle;
 #[path = "../list_reindex.rs"]
 mod list_reindex;
 #[path = "../list_tab_rows.rs"]

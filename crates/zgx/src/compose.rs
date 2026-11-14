@@ -249,6 +249,10 @@ impl ListOptions {
     pub(crate) fn ahead(&self) -> Option<f32> {
         self.edges.as_ref().and_then(|edges| edges.ahead)
     }
+    /// `View::list_recycle`.
+    pub(crate) fn recycle(&self) -> bool {
+        self.edges.as_ref().is_some_and(|edges| edges.recycle)
+    }
 }
 /// What a virtual list reports of its edges: its end and its start coming
 /// in reach (`View::on_end`, `View::on_start`) and whether it rests at its
@@ -260,6 +264,8 @@ pub(crate) struct ListEdges {
     at_end: Option<Box<dyn FnMut(bool)>>,
     /// `View::list_ahead`.
     ahead: Option<f32>,
+    /// `View::list_recycle`.
+    recycle: bool,
     /// `View::scrollbar_style` (a scroll view's too): with what few views
     /// have, so `Rare` stays the size it was.
     scrollbar_style: Option<Rc<crate::compose_scrollbar::ScrollbarStyle>>,
@@ -323,6 +329,7 @@ pub(crate) fn watch_edges(
         mut at_end,
         ancestor: _,
         ahead: _,
+        recycle: _,
         scrollbar_style: _,
     } = edges;
     let runtime = ui.runtime.clone();
@@ -1065,6 +1072,16 @@ impl View {
     /// overscan alone, and drops the rest.
     pub fn list_ahead(mut self, viewports: f32) -> Self {
         self.edges_mut().ahead = Some(viewports);
+        self
+    }
+    /// A fixed-height virtual list hands a row scrolled out of what it
+    /// keeps to a key coming into view, its index signal set to the new
+    /// place, instead of dropping it and building another: a fast scroll
+    /// writes rows rather than building them. Only for rows that follow
+    /// their index (or item) in everything they show and do: what a row
+    /// read once as it was built stays with it.
+    pub fn list_recycle(mut self) -> Self {
+        self.edges_mut().recycle = true;
         self
     }
     fn edges_mut(&mut self) -> &mut ListEdges {
@@ -3827,6 +3844,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 .list_ahead(options.ahead(), tick)
                 .map(|ahead| crate::spare::Kept::new(ahead, overscan));
             let overscan = if kept.is_some() { 0 } else { overscan };
+            let recycle = options.recycle();
             let ListOptions {
                 scrollbar,
                 keyboard_navigation,
@@ -4051,6 +4069,9 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 runtime.untracked(|| {
                     let _theme = ui.enter_theme(&environment.theme);
                     let mut transaction = MountTransaction::new(&ui, content);
+                    if recycle && fresh != 0 && entries.len() + fresh > keys.len() {
+                        fresh -= recycle_rows(&ui, &mut entries, &keys, run);
+                    }
                     // Construct first: a failed row constructor leaves old rows intact.
                     if fresh != 0 {
                         let mut added = Vec::new();
@@ -4177,6 +4198,40 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
         },
     )))
     .list_rows(source)
+}
+/// `View::list_recycle`: each key in `keys` without a row takes a row this
+/// pass leaves (`run` unstamped), one not holding the keyboard's focus or
+/// what is open from it, placed afresh; its index is set with the rest.
+/// The rows it handed on.
+fn recycle_rows<K: Eq + std::hash::Hash + Clone>(
+    ui: &Ui,
+    entries: &mut HashMap<K, (NodeId, Signal<usize>, Placed), rustc_hash::FxBuildHasher>,
+    keys: &[(K, usize)],
+    run: u64,
+) -> usize {
+    let (focused, scope) = (ui.input.focused(), ui.input.focus_scope());
+    let mut leaving: Vec<K> = entries
+        .iter()
+        .filter(|(_, (node, _, placed))| {
+            placed.run != run
+                && focused.is_none_or(|focused| !ui.opened_from(focused, *node))
+                && scope.is_none_or(|scope| !ui.opened_from(scope, *node))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut handed = 0;
+    for (key, _) in keys {
+        if entries.contains_key(key) {
+            continue;
+        }
+        let Some(from) = leaving.pop() else {
+            break;
+        };
+        let (node, index, _) = entries.remove(&from).expect("a row leaving");
+        entries.insert(key.clone(), (node, index, Placed { run, at: None }));
+        handed += 1;
+    }
+    handed
 }
 // Roll back newly appended roots if a component constructor or initial binding
 // panics. Existing siblings are never removed by this guard. This is ownership

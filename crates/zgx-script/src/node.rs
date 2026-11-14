@@ -1091,6 +1091,9 @@ pub(crate) struct ListRare {
     pub(crate) start_distance: Option<f32>,
     /// `ahead`: viewports of rows built ahead (`View::list_ahead`).
     pub(crate) ahead: Option<f32>,
+    /// `recycle = true`: rows scrolled away are written with the rows
+    /// coming into view (`View::list_recycle`).
+    pub(crate) recycle: bool,
     /// `estimate = { … }`, with `measured`: how a row's data makes its height.
     pub(crate) estimate: Option<Rc<crate::estimate::Rule>>,
     /// `at_end = state`: kept saying whether it rests at its end.
@@ -3846,6 +3849,7 @@ const LATE_FIELDS: &[&str] = &[
     "on_start",
     "start_distance",
     "ahead",
+    "recycle",
     "at_end",
     "on_paste",
     "overscroll",
@@ -3962,7 +3966,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 }
             }
         }
-        "on_start" | "start_distance" | "ahead" | "at_end" => {
+        "on_start" | "start_distance" | "ahead" | "recycle" | "at_end" => {
             if let Kind::List { rare, .. } = &mut node.kind {
                 let rare = rare.get_or_insert_default();
                 match name {
@@ -3972,6 +3976,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         rare.start_distance = distance.is_finite().then_some(distance);
                     }
                     "ahead" => rare.ahead = Some(lua.unpack(value)?),
+                    "recycle" => rare.recycle = lua.unpack(value)?,
                     _ => rare.at_end = Some(expect_state(&value, "`at_end`")?),
                 }
             }
