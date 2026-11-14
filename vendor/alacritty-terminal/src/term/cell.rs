@@ -264,6 +264,27 @@ impl GridCell for Cell {
             ..Cell::default()
         };
     }
+
+    /// zgx: cells with nothing extra (the usual: a log scrolled into the
+    /// history) are cleared field by field, nothing to drop in any; cells
+    /// holding an extra anywhere are reset one at a time, as before. Read
+    /// from the cells each time, so nothing else has to keep it.
+    #[inline]
+    fn reset_all(cells: &mut [Self], template: &Self) {
+        if cells.iter().any(|cell| cell.extra.is_some()) {
+            for cell in cells {
+                cell.reset(template);
+            }
+            return;
+        }
+        let blank = Cell::default();
+        for cell in cells {
+            cell.c = blank.c;
+            cell.fg = blank.fg;
+            cell.bg = template.bg;
+            cell.flags = blank.flags;
+        }
+    }
 }
 
 impl From<Color> for Cell {
@@ -319,6 +340,50 @@ mod tests {
 
         // Ensure that cell size isn't growing by accident.
         assert!(mem::size_of::<Cell>() <= EXPECTED_CELL_SIZE);
+    }
+
+    /// zgx: a row resets to blanks on the template's background whatever its
+    /// cells hold (a combining mark, an underline colour, a hyperlink, one
+    /// shared with others, or nothing extra) and wherever, and lets go of
+    /// what they held.
+    #[test]
+    fn a_row_resets_whatever_its_cells_hold() {
+        let shared = Arc::new(CellExtra {
+            hyperlink: Some(Hyperlink::new(Some("a"), "https://example.com".into())),
+            ..CellExtra::default()
+        });
+        let extras: [&dyn Fn(&mut Cell); 5] = [
+            &|_| {},
+            &|cell| cell.push_zerowidth('\u{301}'),
+            &|cell| cell.set_underline_color(Some(Color::Indexed(3))),
+            &|cell| cell.set_hyperlink(Some(Hyperlink::new(Some("b"), "https://b.com".into()))),
+            &|cell| cell.extra = Some(shared.clone()),
+        ];
+        for bg in [Color::Named(NamedColor::Background), Color::Indexed(21)] {
+            let template = Cell {
+                bg,
+                ..Cell::default()
+            };
+            for (kind, extra) in extras.iter().enumerate() {
+                for at in [0, 4, 9] {
+                    let mut row = Row::<Cell>::new(10);
+                    for column in 0..10 {
+                        let cell = &mut row[Column(column)];
+                        cell.c = 'x';
+                        cell.fg = Color::Indexed(1);
+                        cell.bg = bg;
+                        cell.flags = Flags::BOLD | Flags::UNDERLINE;
+                    }
+                    extra(&mut row[Column(at)]);
+                    extra(&mut row[Column(9 - at)]);
+                    row.reset(&template);
+                    for column in 0..10 {
+                        assert_eq!(row[Column(column)], template, "{kind} at {at}, {column}");
+                    }
+                    assert_eq!(Arc::strong_count(&shared), 1, "{kind} at {at}");
+                }
+            }
+        }
     }
 
     #[test]

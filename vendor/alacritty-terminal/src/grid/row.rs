@@ -109,9 +109,7 @@ impl<T: Default> Row<T> {
         }
 
         // Reset every dirty cell in the row.
-        for item in &mut self.inner[0..self.occ] {
-            item.reset(template);
-        }
+        T::reset_all(&mut self.inner[0..self.occ], template);
 
         self.occ = 0;
     }
