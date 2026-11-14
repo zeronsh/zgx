@@ -14,6 +14,7 @@ use zgx_script::ScriptHost;
 
 struct Fake {
     clipboard: RefCell<String>,
+    html: RefCell<Option<String>>,
     image: RefCell<Option<std::sync::Arc<zgx::image::ImageData>>>,
     /// What the open dialog picks, and where the save dialog saves.
     opens: PathBuf,
@@ -25,6 +26,15 @@ impl Platform for Fake {
     }
     fn set_clipboard_text(&self, text: String) -> bool {
         *self.clipboard.borrow_mut() = text;
+        *self.html.borrow_mut() = None;
+        true
+    }
+    fn clipboard_html(&self) -> Option<String> {
+        self.html.borrow().clone()
+    }
+    fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
+        *self.clipboard.borrow_mut() = text;
+        *self.html.borrow_mut() = Some(html);
         true
     }
     fn clipboard_image(&self) -> Pending<Option<zgx::image::ImageData>> {
@@ -55,6 +65,13 @@ return ui.column {
     ui.button { id = "copy", w = 40, h = 20, "c", on_click = function()
         ui.clipboard.write("copied text")
         shown:set(ui.clipboard.read() or "")
+    end },
+    ui.button { id = "html", w = 40, h = 20, "h", on_click = function()
+        local none = ui.clipboard.read_html()
+        local written = ui.clipboard.write_html("Rich bold", "<p>Rich <b>bold</b></p>")
+        local html, text = ui.clipboard.read_html(), ui.clipboard.read()
+        ui.clipboard.write("plain")
+        shown:set(`{none == nil} {written} {html} {text} {ui.clipboard.read_html() == nil}`)
     end },
     ui.button { id = "image", w = 40, h = 20, "i", on_click = function()
         ui.task(function()
@@ -93,6 +110,7 @@ fn dir(name: &str) -> PathBuf {
 fn app(dir: &std::path::Path, code: &'static str, plugin: Option<&'static str>) -> Harness {
     let fake = Rc::new(Fake {
         clipboard: RefCell::new(String::new()),
+        html: RefCell::new(None),
         image: RefCell::new(None),
         opens: dir.join("in.txt"),
         saves: dir.join("out.txt"),
@@ -131,6 +149,16 @@ fn the_clipboard_takes_and_gives_text() {
     let mut h = app(&dir, APP, None);
     h.click("copy");
     wait_for(&mut h, "copied text");
+}
+
+/// HTML with its text, as a browser's or word processor's copy: none on a
+/// clipboard of text, read back as written, and gone once text replaces it.
+#[test]
+fn the_clipboard_takes_and_gives_html_with_its_text() {
+    let dir = dir("clipboard-html");
+    let mut h = app(&dir, APP, None);
+    h.click("html");
+    wait_for(&mut h, "true true <p>Rich <b>bold</b></p> Rich bold true");
 }
 
 #[test]
