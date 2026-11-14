@@ -162,6 +162,7 @@ fn made() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
 /// An interrupt's cleanup removes everything listed, then ends the process
 /// with `code`, the lock still held: a test still running can neither make
 /// a directory nor write in one after the cleanup began.
+#[cfg(any(unix, windows))]
 fn remove_all_and_exit(code: i32) -> ! {
     let mut dirs = made();
     for dir in dirs.drain(..) {
