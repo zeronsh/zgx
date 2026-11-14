@@ -249,6 +249,36 @@ fn the_window_zoom_is_a_state_a_script_reads_and_sets() {
     assert!(!h.ui.zoomable());
 }
 
+/// `ui.window.hold_frames` holds the app's window's frame (the host draws
+/// none) until the script lets it go or the hold runs out; asked again, it
+/// holds again.
+#[test]
+fn the_window_holds_its_frame_as_a_script_asks() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.button { id = "hold", on_click = function() ui.window.hold_frames(200) end, "Hold" },
+            ui.button { id = "go", on_click = function() ui.window.release_frames() end, "Go" },
+            ui.button { id = "forever", on_click = function() ui.window.hold_frames(60000) end, "Forever" },
+        }"##,
+    );
+    h.host.window_hold(&h.ui);
+    h.frames(1);
+    let now = std::time::Instant::now;
+    assert_eq!(h.ui.frames_held(now()), None, "nothing held at first");
+    h.click("hold");
+    assert!(h.ui.frames_held(now()).is_some(), "held");
+    h.click("go");
+    assert_eq!(h.ui.frames_held(now()), None, "let go");
+    h.click("hold");
+    assert!(h.ui.frames_held(now()).is_some(), "held again");
+    h.click("go");
+    // However long it asks, the window shows again within the most.
+    h.click("forever");
+    let until = h.ui.frames_held(now()).expect("held");
+    assert!(until <= now() + zgx::frame_hold::FRAME_HOLD_MOST);
+    assert_eq!(h.ui.frames_held(until), None, "ran out");
+}
+
 /// A script that never reads `ui.window.zoom` makes no state for it.
 #[test]
 fn the_window_zoom_is_made_on_first_read() {

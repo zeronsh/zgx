@@ -1719,6 +1719,14 @@ declare extern type WindowApi with
 	-- layout can't make (a sidebar collapsing to icons below a width).
 	-- Sizes themselves are layout's: percentages, `grow`, `max_w`.
 	size: State<{ width: number, height: number }>
+	-- Keep showing the window's frame while what it changes to comes (a
+	-- page opened before its content has arrived), for up to `ms`
+	-- milliseconds (at most 250), until `release_frames`: what changed
+	-- meanwhile then shows whole, in one frame, with no frame of the page
+	-- half there between. Input still arrives and scripts still run. The
+	-- app's own window only.
+	hold_frames: (ms: number) -> ()
+	release_frames: () -> ()
 	function __call(self, opts: WindowOptions): ()
 end
 
