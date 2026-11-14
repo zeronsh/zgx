@@ -26,6 +26,7 @@ mod js;
 mod keyed;
 mod mount;
 mod ops;
+mod platform;
 mod sheet;
 mod template;
 
