@@ -85,6 +85,7 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 | `on_drag`, `start_drag`, `on_drop`, `on_drag_end` | a drag a listener starts: a copy of its source follows the pointer; what's under it, from the innermost element with listeners out, hears `Over` until one takes it (`accept_drag`), then `Leave` and, as the button comes up there, `Drop`; the source hears `Start`, `Move` and `End` (accepted or not), and the press ends in no click. A `drag_preview` isn't built yet: the copy stands for it |
 | `keymap` | zgx's keymap resolution (bindings by context, sequences of up to four keys, `NoAction`): a key goes to the keymaps from the focused element out before anything hears it; a sequence's first keys are taken, and a match's actions go out in turn from the focused element until a listener handles one (`prevent_default`) |
 | `focus_group`, and list boxes, tab lists, toolbars and radio groups | one Tab stop (roving `tabindex`, on the checked or selected member first); the arrows of its axis, Home and End move among its own members (right to left, Left and Right swap); a radio group's wrap and choose |
+| `context_menu`, `context_menu_with_span`, `TextSpan::context_menu` | a secondary click builds the entries and opens them as a menu with its corner at the pointer, replacing any menu already open; none lets the browser's own menu show. A span's own menu comes before its paragraph's, and `context_menu_with_span` is told the span (its place, link and text) |
 | `on_mount` handles | `observe_size`, `observe_bounds` (ResizeObserver), `observe_visibility`, `observe_visibility_within` (IntersectionObserver with that `rootMargin`), `is_mounted`, `retain` |
 
 ## What doesn't map
@@ -94,7 +95,7 @@ Shown as a labelled placeholder box, or left out:
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
 - **Luau apps' host services**: `ui.fetch`, sockets, files, plugins from the disk, hot reload and `zgx check` need hosts zgx-dom doesn't have yet; images in Luau apps show their labels (zgx-script decodes them with zgx-gpu, which isn't linked in the browser).
 - **Overlays**: `at_caret`, `hoist` and `modal_placement` placement; menus have no typeahead; an arrow has no border on its outer edges.
-- **Rich text**: a span's own context menu, and a link's middle click.
+- **Rich text**: a link's middle click.
 - **Input**: `drag_preview` builders (a copy of the source stands for them), file drops, `drag_export` and pinch; text and IME stay the browser's own in `<input>` and `<textarea>`. `reactive_interaction` isn't applied.
 - **Lists**: the `_watched` variants' watchers aren't called.
 - **Canvas**: a canvas view's pan and zoom (`canvas_view`) isn't applied.

@@ -21,6 +21,13 @@ impl PartialEq for InlineAction {
     }
 }
 #[cfg(feature = "dom")]
+impl SpanMenu {
+    /// Build its entries for `event`.
+    pub(crate) fn build(&self, event: &crate::compose::ContextMenuEvent) -> Vec<View> {
+        (self.0.borrow_mut())(event)
+    }
+}
+#[cfg(feature = "dom")]
 impl InlineAction {
     /// Run it, told the keys held: whether it handled the click.
     pub(crate) fn call(&self, held: crate::input::Modifiers) -> bool {

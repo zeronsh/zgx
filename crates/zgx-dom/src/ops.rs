@@ -35,6 +35,7 @@ pub(crate) const WALK: u32 = 28;
 pub(crate) const OVERLAY: u32 = 29;
 pub(crate) const SHOW: u32 = 30;
 pub(crate) const PREVENT: u32 = 31;
+pub(crate) const MENU_AT: u32 = 33;
 
 /// Words a frame holds before it applies what it has (`Ops::op`).
 pub(crate) const EARLY: usize = 1 << 12;
@@ -68,6 +69,10 @@ pub(crate) const KEYMAP: u32 = 6;
 /// A focus group: `HANDLER id GROUP axis` (1 vertical, 2 horizontal,
 /// 3 both; 4 set: moving chooses).
 pub(crate) const GROUP: u32 = 7;
+/// A context menu's handler: `HANDLER id ON_MENU handler`.
+pub(crate) const ON_MENU: u32 = 9;
+/// A span's place in its paragraph: `HANDLER id SPAN_AT index`.
+pub(crate) const SPAN_AT: u32 = 10;
 
 /// `NUMBER`'s properties.
 pub(crate) const NUM_VALUE: u32 = 0;

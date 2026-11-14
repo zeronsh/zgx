@@ -37,6 +37,12 @@ pub(crate) enum Event {
     Visible(bool),
     /// An overlay shown or hidden by the browser (or by its signal).
     Toggle(bool),
+    /// A secondary click: where, in the window and in the element, and the
+    /// span of a paragraph it was on (its place, link and text), if any.
+    Menu(
+        zgx::compose::ContextMenuEvent,
+        Option<zgx::compose::ContextMenuSpan>,
+    ),
 }
 
 /// What runs for a node's events. A click handler is the view's own closure
@@ -282,6 +288,30 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
             Event::Resize(number as f32, h, x, y)
         }
         6 => Event::Visible(number == 1.),
+        8 => {
+            let text = text.unwrap_or_default();
+            let mut parts = text.splitn(7, '\n');
+            let mut num = || {
+                parts
+                    .next()
+                    .and_then(|p| p.parse::<f32>().ok())
+                    .unwrap_or(0.)
+            };
+            let (x, y, local_x, local_y, index) = (num(), num(), num(), num(), num());
+            let href = parts.next().filter(|h| !h.is_empty()).map(str::to_owned);
+            let text = parts.next().unwrap_or("");
+            let span =
+                (index >= 0.).then(|| __dom::menu_span(index as usize, href.as_deref(), text));
+            Event::Menu(
+                zgx::compose::ContextMenuEvent {
+                    x,
+                    y,
+                    local_x,
+                    local_y,
+                },
+                span,
+            )
+        }
         _ => Event::Toggle(number == 1.),
     };
     handler.call(event);
@@ -308,7 +338,7 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
     // What input wrote shows before the browser reads or paints; scroll
     // reads and observers' reports, delivered many at once, are applied
     // together in this task's one flush (scheduled already).
-    if kind <= 3 || kind == 7 {
+    if kind <= 3 || kind == 7 || kind == 8 {
         flush();
     }
 }
@@ -422,6 +452,11 @@ impl Mounted {
     }
     fn remove(&mut self) {
         if let Some(block) = self.block.take() {
+            // Context menus mounted in it go with it.
+            if MENU_HOST.with(|host| host.get()) == Some(block.root) {
+                MENU_HOST.with(|host| host.set(None));
+                drop(CONTEXT_MENU.with(|menu| menu.borrow_mut().take()));
+            }
             ops::with(|ops| ops.op(&[ops::REMOVE, block.root]));
             drop(block);
             // The element it mounted into, no longer held.
@@ -462,6 +497,12 @@ pub fn mount(runtime: &Runtime, parent: &web_sys::Element, view: View) -> Mounte
             ops::with(|ops| {
                 ops.op(&[ops::APPEND, root, child]);
                 ops.op(&[ops::APPEND, parent_id, root]);
+            });
+            // Context menus mount beside the first view, in its typography.
+            MENU_HOST.with(|host| {
+                if host.get().is_none() {
+                    host.set(Some(root));
+                }
             });
             block
         })
@@ -623,6 +664,15 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
     }
     if let Some(click) = el.click.take() {
         block.on_click(id, runtime.clone(), click);
+    }
+    if let Some(menu) = el.context_menu.take() {
+        let id_handler = handler(menu_opener(scope.clone(), menu));
+        block.handlers.push(id_handler);
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::ON_MENU, id_handler]);
+        });
     }
     if let Some(listeners) = el.listeners.take() {
         let handler = register(Handler::Listeners(runtime.clone(), listeners, id));
@@ -1014,7 +1064,7 @@ fn mount_kind(
         ElementKind::Region(region) => mount_region(region, id, scope, block),
         ElementKind::Canvas(draw) => mount_canvas(draw, id, runtime, block),
         ElementKind::Overlay(overlay) => return Some(mount_overlay(*overlay, id, runtime, block)),
-        ElementKind::Rich(inlines) => mount_rich(inlines, id, runtime, block),
+        ElementKind::Rich(inlines) => mount_rich(inlines, id, scope, runtime, block),
         ElementKind::Unsupported(name) => ops::with(|ops| {
             let text = block.node(ops);
             ops.op_str(ops::TEXT, text, &format!("{name}: not shown in the DOM"));
@@ -1151,6 +1201,8 @@ struct RichSpan {
     node: u32,
     ids: Vec<u32>,
     handler: Option<u32>,
+    /// Its own context menu's handler.
+    menu: Option<u32>,
     shown: Inline,
 }
 
@@ -1166,7 +1218,7 @@ impl Drop for RichSpans {
 }
 
 fn free_span(mut span: RichSpan) {
-    if let Some(handler) = span.handler {
+    for handler in [span.handler, span.menu].into_iter().flatten() {
         release_handlers(&[handler]);
     }
     span.ids.reverse();
@@ -1177,10 +1229,17 @@ fn free_span(mut span: RichSpan) {
 /// and `<a>`s with classes for their looks. As the spans change, those
 /// that still show as they did stay (streamed text appends), their clicks
 /// replaced; from the first that differs on, they are made again.
-fn mount_rich(mut inlines: Inlines, paragraph: u32, runtime: &Runtime, block: &mut Block) {
+fn mount_rich(
+    mut inlines: Inlines,
+    paragraph: u32,
+    scope: &Scope,
+    runtime: &Runtime,
+    block: &mut Block,
+) {
     let state: Rc<RefCell<RichSpans>> = Rc::default();
     let spans = state.clone();
     let clicks = runtime.clone();
+    let scope = scope.clone();
     block.effect(paragraph, runtime, move || {
         let mut next = inlines();
         let mut spans = spans.borrow_mut();
@@ -1199,6 +1258,12 @@ fn mount_rich(mut inlines: Inlines, paragraph: u32, runtime: &Runtime, block: &m
                 let opens = inline.href.is_some();
                 replace_handler(handler, link_click(clicks.clone(), action, opens));
             }
+            if let (Some(handler), Some(mut menu)) = (span.menu, inline.menu.take()) {
+                replace_handler(
+                    handler,
+                    menu_opener(scope.clone(), move |event, _| menu(event)),
+                );
+            }
         }
         for mut inline in next.drain(same..) {
             let mut ids = Vec::new();
@@ -1214,15 +1279,79 @@ fn mount_rich(mut inlines: Inlines, paragraph: u32, runtime: &Runtime, block: &m
                 ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::ON_CLICK, id]));
                 id
             });
+            let index = spans.len() as u32;
+            let menu = inline.menu.take().map(|mut menu| {
+                let id = register(Handler::Event(Box::new(menu_opener(
+                    scope.clone(),
+                    move |event, _| menu(event),
+                ))));
+                ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::ON_MENU, id]));
+                id
+            });
+            // Its place, for a paragraph's menu told the span it was on.
+            if !inline.bare() {
+                ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::SPAN_AT, index]));
+            }
             spans.push(RichSpan {
                 node,
                 ids,
                 handler,
+                menu,
                 shown: inline,
             });
         }
     });
     block.regions.push(state);
+}
+
+thread_local! {
+    /// The context menu showing (or last shown): its block and the node
+    /// holding it, replaced by the next.
+    static CONTEXT_MENU: RefCell<Option<(Block, u32)>> = const { RefCell::new(None) };
+    /// Where context menus mount: the first mounted view's root.
+    static MENU_HOST: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// A context menu's handler: on a secondary click its entries are built;
+/// none lets the browser's own menu show, else the click's default is
+/// prevented and a menu of them opens at the pointer, replacing the last.
+fn menu_opener(
+    scope: Scope,
+    mut build: impl FnMut(
+        &zgx::compose::ContextMenuEvent,
+        Option<&zgx::compose::ContextMenuSpan>,
+    ) -> Vec<View>
+    + 'static,
+) -> impl FnMut(Event) + 'static {
+    move |event| {
+        let Event::Menu(at, span) = event else {
+            return;
+        };
+        let runtime = scope.runtime().clone();
+        let entries = runtime.untracked(|| build(&at, span.as_ref()));
+        if entries.is_empty() {
+            return;
+        }
+        let Some(host) = MENU_HOST.with(|host| host.get()) else {
+            return;
+        };
+        let last = CONTEXT_MENU.with(|menu| menu.borrow_mut().take());
+        if let Some((block, wrapper)) = last {
+            ops::with(|ops| ops.op(&[ops::REMOVE, wrapper]));
+            drop(block);
+        }
+        let open = runtime.signal(true);
+        let view = __dom::context_menu_view(entries, open);
+        let mut block = Block::default();
+        let wrapper = runtime.batch(|| runtime.untracked(|| mount_view(view, &scope, &mut block)));
+        block.root = wrapper;
+        ops::with(|ops| {
+            ops.op(&[ops::PREVENT]);
+            ops.op(&[ops::APPEND, host, wrapper]);
+            ops.op(&[ops::MENU_AT, wrapper, at.x.to_bits(), at.y.to_bits()]);
+        });
+        CONTEXT_MENU.with(|menu| *menu.borrow_mut() = Some((block, wrapper)));
+    }
 }
 
 /// A link's click: its action run (batched), and its `href` kept from

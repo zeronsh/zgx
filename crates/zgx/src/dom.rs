@@ -149,6 +149,9 @@ pub struct Element {
     pub listeners: Option<Listeners>,
     /// Its keymap (`View::keymap`).
     pub keymap: Option<Box<crate::actions::Keymap>>,
+    /// Its context menu (`View::context_menu`): entries for a secondary
+    /// click, told the paragraph's span it was on, if any.
+    pub context_menu: Option<DomMenu>,
     /// A focus group (`View::focus_group`, or its role's): its arrows, and
     /// whether moving chooses (a radio group's).
     pub focus_group: Option<(crate::input::FocusGroup, bool)>,
@@ -649,7 +652,12 @@ pub struct Inline {
     /// Its text fading in (`TextSpan::fade_in`): how long, in milliseconds,
     /// and how far in it is already.
     pub fade: Option<(f32, f32)>,
+    /// Its own context menu (`TextSpan::context_menu`).
+    pub menu: Option<SpanMenuBuild>,
 }
+
+/// A span's own context menu's entries, built for a secondary click.
+pub type SpanMenuBuild = Box<dyn FnMut(&super::ContextMenuEvent) -> Vec<View>>;
 impl Inline {
     /// Whether it shows as `other` does (its click aside).
     pub fn looks_as(&self, other: &Inline) -> bool {
@@ -660,10 +668,15 @@ impl Inline {
             && self.href == other.href
             && self.icon == other.icon
             && self.action.is_some() == other.action.is_some()
+            && self.menu.is_some() == other.menu.is_some()
     }
     /// Whether it needs no element: a bare text node.
     pub fn bare(&self) -> bool {
-        self.css.is_empty() && !self.link && self.icon.is_none() && self.fade.is_none()
+        self.css.is_empty()
+            && !self.link
+            && self.icon.is_none()
+            && self.fade.is_none()
+            && self.menu.is_none()
     }
 }
 
@@ -1653,7 +1666,38 @@ fn inline(
         action,
         icon,
         fade,
+        menu: extras.menu.map(|menu| {
+            Box::new(move |event: &super::ContextMenuEvent| menu.build(event)) as SpanMenuBuild
+        }),
     }
+}
+
+/// A view's context menu in the DOM: its entries for a secondary click,
+/// told the span of a paragraph it was on (`context_menu_with_span`).
+pub type DomMenu =
+    Box<dyn FnMut(&super::ContextMenuEvent, Option<&super::ContextMenuSpan>) -> Vec<View>>;
+
+/// The span a secondary click was on: its place among the paragraph's
+/// spans, where it links, and its text.
+pub fn menu_span(index: usize, href: Option<&str>, text: &str) -> super::ContextMenuSpan {
+    super::ContextMenuSpan {
+        index,
+        href: href.map(Into::into),
+        text: text.into(),
+    }
+}
+
+/// A context menu of `entries`, open while `open` is, for the host to show
+/// at the pointer (its anchor holds no place).
+pub fn context_menu_view(entries: Vec<View>, open: Signal<bool>) -> View {
+    super::menu("Context menu", open, super::div().contents())
+        // Its corner at the pointer.
+        .placement(super::Placement {
+            side: super::PlacementSide::Bottom,
+            align: super::PlacementEdge::Start,
+            offset: 0.,
+        })
+        .children(entries)
 }
 
 /// An SVG's bytes as a CSS `url()` of a data URL.
@@ -1687,6 +1731,7 @@ fn primitive(
     let listeners = (!view.events.is_empty()).then(|| Listeners(std::mem::take(&mut view.events)));
     let mut keymap = None;
     let mut focus_group = None;
+    let mut context_menu = None;
     let mut attrs = Vec::new();
     let mut bound_attrs: Vec<BoundAttr> = Vec::new();
     let mut conditional = Vec::new();
@@ -1705,8 +1750,10 @@ fn primitive(
             dom_conditional,
             selectable,
             keymap: map,
+            dom_menu,
             ..
         } = *rare;
+        context_menu = dom_menu;
         conditional = dom_conditional;
         if !map.bindings.is_empty() || !map.contexts.is_empty() {
             keymap = Some(Box::new(map));
@@ -1866,6 +1913,7 @@ fn primitive(
         listeners,
         keymap,
         focus_group,
+        context_menu,
     }
 }
 

@@ -610,6 +610,9 @@ pub(crate) struct Rare {
     /// `conditional`'s, to the DOM.
     #[cfg(feature = "dom")]
     pub(crate) dom_conditional: Vec<__dom::Region>,
+    /// Its context menu, to the DOM (`context_menu`, `DOM_ONLY`).
+    #[cfg(feature = "dom")]
+    pub(crate) dom_menu: Option<__dom::DomMenu>,
 }
 /// `Rare::merge_into`'s part for assistive technology (a control a row already
 /// stands for, hidden from outside it): each part the outer view set wins.
@@ -672,6 +675,10 @@ impl Rare {
         if self.context_menu.is_some() {
             inner.context_menu = self.context_menu;
             inner.context_menu_spans = self.context_menu_spans;
+        }
+        #[cfg(feature = "dom")]
+        if self.dom_menu.is_some() {
+            inner.dom_menu = self.dom_menu;
         }
         if self.context_menu_style.is_some() {
             inner.context_menu_style = self.context_menu_style;
