@@ -745,11 +745,15 @@ export type State<T> = {
 	-- Adds to a number (1 by default).
 	add: (self: State<T>, by: number?) -> (),
 	-- Lists: append, insert at an index from 1, remove (returning the item,
-	-- nil outside the list), and the length (tracked, as `get` is).
+	-- nil outside the list), and the length (tracked, as `get` is); a
+	-- string's length is its bytes (`#`), read where it is held.
 	push: (self: State<T>, item: Item<T>) -> (),
 	insert: (self: State<T>, index: number, item: Item<T>) -> (),
 	remove: (self: State<T>, index: number) -> Item<T>?,
 	len: (self: State<T>) -> number,
+	-- Strings: `string.sub` of the string held (tracked, as `get` is), only
+	-- those bytes copied: a long document's part without the rest of it.
+	sub: (self: State<T>, i: number, j: number?) -> string,
 	-- One item of a list (from 1), tracked as `get` is, without the list
 	-- made into a table (a long list's rows, as a list shows them).
 	at: (self: State<T>, index: number) -> Item<T>?,
