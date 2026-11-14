@@ -152,14 +152,41 @@ pub fn run(
 #[derive(Clone, Default)]
 struct Made(Rc<RefCell<Vec<PathBuf>>>);
 /// Every run's directories not yet removed, for `remove_made_on_interrupt`.
+/// Held while a test makes or writes in one of them (`Files::write`): an
+/// interrupt's cleanup waits for a write under way, and once it has the
+/// lock it keeps it until the process ends, so nothing is made after it.
 static MADE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+fn made() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    MADE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+/// An interrupt's cleanup removes everything listed, then ends the process
+/// with `code`, the lock still held: a test still running can neither make
+/// a directory nor write in one after the cleanup began.
+fn remove_all_and_exit(code: i32) -> ! {
+    let mut dirs = made();
+    for dir in dirs.drain(..) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[cfg(feature = "test-hooks")]
+    if let Some(ms) = std::env::var("ZGX_TEST_EXIT_DELAY_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        // Test-only: a window between the cleanup and the end, in which a
+        // test still running would make its files again without the lock.
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    std::process::exit(code);
+}
 impl Made {
     /// `dir`, to remove when it's done with.
     fn add(&self, dir: PathBuf) -> PathBuf {
+        self.add_held(&mut made(), dir)
+    }
+    /// `add`, with `MADE` already held (`made`).
+    fn add_held(&self, made: &mut Vec<PathBuf>, dir: PathBuf) -> PathBuf {
         self.0.borrow_mut().push(dir.clone());
-        MADE.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(dir.clone());
+        made.push(dir.clone());
         dir
     }
     /// Remove everything listed: what an app held past its test may have
@@ -169,9 +196,7 @@ impl Made {
         for dir in &dirs {
             let _ = std::fs::remove_dir_all(dir);
         }
-        MADE.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|made| !dirs.contains(made));
+        made().retain(|made| !dirs.contains(made));
     }
 }
 /// Removes what its `Made` lists as it goes (`run`).
@@ -203,11 +228,7 @@ pub fn remove_made_on_interrupt() {
         if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
             return;
         }
-        let dirs = std::mem::take(&mut *MADE.lock().unwrap_or_else(PoisonError::into_inner));
-        for dir in dirs {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-        std::process::exit(128 + signal);
+        remove_all_and_exit(128 + signal);
     });
 }
 /// `zgx test`'s Ctrl-C and Ctrl-Break (Windows): the directories its tests
@@ -221,12 +242,8 @@ pub fn remove_made_on_interrupt() {
         if kind != CTRL_C_EVENT && kind != CTRL_BREAK_EVENT {
             return false.into();
         }
-        let dirs = std::mem::take(&mut *MADE.lock().unwrap_or_else(PoisonError::into_inner));
-        for dir in dirs {
-            let _ = std::fs::remove_dir_all(dir);
-        }
         // STATUS_CONTROL_C_EXIT, the code a console interrupt ends with.
-        std::process::exit(0xC000_013A_u32 as i32);
+        remove_all_and_exit(0xC000_013A_u32 as i32);
     }
     // SAFETY: a handler of the signature the console calls, added once.
     let _ = unsafe { SetConsoleCtrlHandler(Some(interrupted), true) };
@@ -420,6 +437,18 @@ struct Files(OnceCell<PathBuf>, Made);
 impl Files {
     /// Where `name` lies: inside the directory, or an error.
     fn path(&self, name: &str) -> mlua::Result<PathBuf> {
+        self.path_held(&mut made(), name)
+    }
+    /// `op` on `name`'s path, `MADE` held from making the directory to the
+    /// end of `op`: an interrupt's cleanup can't run between them, or leave
+    /// what `op` writes behind.
+    fn write<T>(&self, name: &str, op: impl FnOnce(&Path) -> mlua::Result<T>) -> mlua::Result<T> {
+        let mut made = made();
+        let path = self.path_held(&mut made, name)?;
+        op(&path)
+    }
+    /// `path`, with `MADE` already held (`made`).
+    fn path_held(&self, made: &mut Vec<PathBuf>, name: &str) -> mlua::Result<PathBuf> {
         if !Path::new(name)
             .components()
             .all(|part| matches!(part, std::path::Component::Normal(_)))
@@ -430,11 +459,14 @@ impl Files {
         }
         static MOUNTS: AtomicUsize = AtomicUsize::new(0);
         let dir = self.0.get_or_init(|| {
-            self.1.add(std::env::temp_dir().join(format!(
-                "zgx-test-{}-{}",
-                std::process::id(),
-                MOUNTS.fetch_add(1, Ordering::Relaxed)
-            )))
+            self.1.add_held(
+                made,
+                std::env::temp_dir().join(format!(
+                    "zgx-test-{}-{}",
+                    std::process::id(),
+                    MOUNTS.fetch_add(1, Ordering::Relaxed)
+                )),
+            )
         });
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
@@ -659,7 +691,9 @@ impl UserData for Mounted {
             Ok(())
         });
         methods.add_method("write_file", |_, m, (name, text): (String, String)| {
-            std::fs::write(m.files.path(&name)?, text).map_err(mlua::Error::external)
+            m.files.write(&name, |path| {
+                std::fs::write(path, text).map_err(mlua::Error::external)
+            })
         });
         // A fixture of the app's directory (an image, a folder of them),
         // copied in as `name`, for the dialogs to answer with.
@@ -676,8 +710,10 @@ impl UserData for Mounted {
                     "`{from}`: a fixture comes from the app's directory"
                 )));
             }
-            copy(&source, &m.files.path(&name)?)
-                .map_err(|error| mlua::Error::runtime(format!("copy_file `{from}`: {error}")))
+            m.files.write(&name, |path| {
+                copy(&source, path)
+                    .map_err(|error| mlua::Error::runtime(format!("copy_file `{from}`: {error}")))
+            })
         });
         methods.add_method("read_file", |_, m, name: String| {
             std::fs::read_to_string(m.files.path(&name)?).map_err(mlua::Error::external)
