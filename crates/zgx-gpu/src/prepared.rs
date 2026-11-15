@@ -2933,6 +2933,47 @@ mod tests {
         assert!(places[0].1 < 0.01 && places[0].2 > 0., "{places:?}");
     }
 
+    /// A box over a run of text of its own (an editor atom shown as a
+    /// picture): as wide as the box whatever its text, the text after it
+    /// moved over by the box, not by its text; the line grown to hold it.
+    #[test]
+    fn a_box_over_text_takes_its_width_not_its_texts() {
+        use zgx::rich_text::{InlineBox, RichText, TextRun};
+        use zgx::text_layout::TextLayout;
+        let mut fonts = FontSystem::new();
+        let text = "area is x^2+y^2 here";
+        let run = |range: std::ops::Range<usize>| TextRun {
+            range,
+            font_size: 14.,
+            ..Default::default()
+        };
+        let plain = RichText::new(text, vec![run(0..8), run(8..15), run(15..20)]).unwrap();
+        let boxed = plain
+            .clone()
+            .with_inline_boxes(vec![InlineBox {
+                width: 30.,
+                height: 24.,
+                baseline: 18.,
+                ..InlineBox::new(8)
+            }])
+            .unwrap();
+        let (a, b) = (
+            ShapedText::with_runs(&mut fonts, &plain, None),
+            ShapedText::with_runs(&mut fonts, &boxed, None),
+        );
+        let (start, end) = (TextLayout::caret(&b, 8).x, TextLayout::caret(&b, 15).x);
+        assert!(
+            (end - start - 30.).abs() < 0.5,
+            "the box's width: {start} {end}"
+        );
+        assert!(
+            (TextLayout::caret(&a, 8).x - start).abs() < 0.01,
+            "it starts where its text did"
+        );
+        assert!(b.size().1 > a.size().1, "its line holds it");
+        assert_eq!(b.inline_boxes().first().map(|p| p.0), Some(8));
+    }
+
     /// A font feature tag a script can write (`font_features =
     /// "_ibw"`) on an ordinary padded span: it stays text, with its padding,
     /// and no box.

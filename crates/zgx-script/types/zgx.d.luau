@@ -9653,6 +9653,9 @@ export type AtomLook = {
 	weight: number?,
 	underline: (boolean | { color: Color?, offset: number? })?,
 	icon: { src: string?, code: string?, size: number?, gap: number?, tint: Color? }?,
+	-- Its text shown as a picture instead (an equation), sized in EM of the
+	-- textarea's text: one caret unit, its text kept for copy and search.
+	svg: { src: string?, code: string?, width: number, height: number, descent: number? }?,
 }
 export type AtomItem = {
 	id: string?,

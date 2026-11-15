@@ -2088,9 +2088,16 @@ pub(crate) fn rich_buffer_unshaped(
         if run.min_width > 0. {
             attributes = attributes.min_width(run.min_width / run.font_size.max(1.));
         }
-        if run.padding[0] != 0. {
-            attributes = attributes.padding(run.padding[0] / run.font_size.max(1.));
-            if run.padding[0] > 0. && run.font.features.is_inline_box() {
+        if run.padding[0] > 0. {
+            // Negative down: all of it before the text (`TextRun::padding`),
+            // which the shaper takes as a negative padding.
+            let across = if run.padding[1] < 0. {
+                -2. * run.padding[0]
+            } else {
+                run.padding[0]
+            };
+            attributes = attributes.padding(across / run.font_size.max(1.));
+            if run.font.features.is_inline_box() {
                 let boxes = boxes.get_or_insert_with(|| rich.inline_boxes());
                 attributes = attributes.inline_box(box_at(boxes, run.range.start));
             }

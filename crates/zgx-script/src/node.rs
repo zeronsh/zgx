@@ -1581,6 +1581,9 @@ pub(crate) struct AtomLook {
     pub weight: Option<u16>,
     pub underline: Option<(Option<Value>, Option<f32>)>,
     pub icon: Option<SpanIcon>,
+    /// `svg = { src | code, width, height, descent }` (EM): its text shown
+    /// as that picture.
+    pub svg: Option<(String, [f32; 3])>,
 }
 /// `style`'s mention look, if it sets any of it.
 pub(crate) fn atom_look(style: &Table) -> mlua::Result<Option<AtomLook>> {
@@ -1606,17 +1609,41 @@ pub(crate) fn atom_look(style: &Table) -> mlua::Result<Option<AtomLook>> {
         Some(icon) => Some(span_icon(&icon)?),
         None => None,
     };
+    let svg = match style.raw_get::<Option<Value>>("svg")? {
+        Some(svg) => Some(atom_svg(&svg).ok_or_else(|| {
+            mlua::Error::runtime("an atom's `svg` takes `src` or `code`, and `width` and `height`")
+        })?),
+        None => None,
+    };
     let look = AtomLook {
         color: (!matches!(color, Value::Nil)).then_some(color),
         weight: weight.map(|w| w.clamp(1., 1000.) as u16),
         underline,
         icon,
+        svg,
     };
     Ok((look.color.is_some()
         || look.weight.is_some()
         || look.underline.is_some()
-        || look.icon.is_some())
+        || look.icon.is_some()
+        || look.svg.is_some())
     .then_some(look))
+}
+/// An atom's `svg = { src | code, width, height, descent }` (EM).
+fn atom_svg(svg: &Value) -> Option<(String, [f32; 3])> {
+    let src = match (svg.field("src"), svg.field("code")) {
+        (Some(Value::Str(src)), _) => src.to_string(),
+        (None, Some(Value::Str(code))) => format!("code:{code}"),
+        _ => return None,
+    };
+    let em = |key: &str| match svg.field(key) {
+        Some(Value::Num(n)) if n.is_finite() => Some(*n as f32),
+        _ => None,
+    };
+    Some((
+        src,
+        [em("width")?, em("height")?, em("descent").unwrap_or(0.)],
+    ))
 }
 /// An atom's own `style` (a value from its item) as a mention look, if it
 /// sets any of it: as `atom_look`, its icon `{ src | code, size, gap, tint }`.
@@ -1668,11 +1695,13 @@ pub(crate) fn atom_look_of(style: &Value) -> Option<AtomLook> {
         weight: number(style.field("weight")).map(|w| w.clamp(1., 1000.) as u16),
         underline,
         icon,
+        svg: style.field("svg").and_then(atom_svg),
     };
     (look.color.is_some()
         || look.weight.is_some()
         || look.underline.is_some()
-        || look.icon.is_some())
+        || look.icon.is_some()
+        || look.svg.is_some())
     .then_some(look)
 }
 /// A span's `icon = { src | code, size, gap, … }`.
