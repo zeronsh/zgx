@@ -1732,6 +1732,10 @@ declare extern type WindowApi with
 	-- layout can't make (a sidebar collapsing to icons below a width).
 	-- Sizes themselves are layout's: percentages, `grow`, `max_w`.
 	size: State<{ width: number, height: number }>
+	-- How many device pixels a point is (2 on a Retina display, 1.5 at
+	-- 150%, times the window's zoom), read-only and followed: what a raster
+	-- of something costs. 1 until the window has one.
+	scale: State<number>
 	function __call(self, opts: WindowOptions): ()
 end
 

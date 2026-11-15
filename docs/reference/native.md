@@ -245,7 +245,7 @@ Whether the app's window shows. zgx.json's `"visible": false` opens it hidden, f
 ui.window.size: State<{ width: number, height: number }>
 ```
 
-The app's window's size in points, read-only, followed as the window resizes, zooms or moves between displays, as the web's `innerWidth` and `innerHeight` are. It is for decisions layout can't make: a sidebar collapsing to icons below a width, a menu taking the place of tabs. Sizes themselves are layout's (percentages, `grow`, `min_w` and `max_w`), which follows a resize without the script, and `zgx lint` reports an element's size computed from it (`window-size-layout`). A ref's `width` gives the room one element has. A plugin reads it too, with no grant (a picture fitted to the window), and of `ui.window` reads it alone. `zgx run` keeps it; a Rust host passes its window's `WindowContext::viewport` with `ScriptHost::window_size`.
+The app's window's size in points, read-only, followed as the window resizes, zooms or moves between displays, as the web's `innerWidth` and `innerHeight` are. It is for decisions layout can't make: a sidebar collapsing to icons below a width, a menu taking the place of tabs. Sizes themselves are layout's (percentages, `grow`, `min_w` and `max_w`), which follows a resize without the script, and `zgx lint` reports an element's size computed from it (`window-size-layout`). A ref's `width` gives the room one element has. A plugin reads it too, with no grant (a picture fitted to the window), and of `ui.window` reads it and `scale` alone. `zgx run` keeps it; a Rust host passes its window's `WindowContext::viewport` with `ScriptHost::window_size`.
 
 ```lua
 local narrow = ui.computed(function()
@@ -261,6 +261,14 @@ return ui.row {
 	ui.column { grow = 1, ui.text { "Content" } },
 }
 ```
+
+### Scale
+
+```luau
+ui.window.scale: State<number>
+```
+
+How many device pixels a point is in the app's window, read-only, followed as the window moves between displays or zooms, as the web's `devicePixelRatio` is: 2 on a Retina display, 1.5 on a Windows display at 150%, times `ui.window.zoom`. 1 until the window has one. It is for what layout and the renderer can't decide: how much a canvas's raster costs (its pixels are its points times the scale, squared), or which size of an image to load. A plugin reads it too, with no grant. `zgx run` keeps it; a Rust host passes its window with `ScriptHost::window_zoom`, which keeps it with the zoom.
 
 ### Notifications and badges
 

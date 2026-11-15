@@ -1792,6 +1792,8 @@ struct Inner {
     full_screen: RefCell<Option<zgx::reactive::Effect>>,
     /// Keeps the window's zoom and `ui.window.zoom` the same (`window_zoom`).
     zoom: RefCell<Option<zgx::reactive::Effect>>,
+    /// Keeps `ui.window.scale` as the window's pixel scale (`window_zoom`).
+    scale: RefCell<Option<zgx::reactive::Effect>>,
     visible: RefCell<Option<zgx::reactive::Effect>>,
     /// What publishes the window's state: `window_maximized`'s (true) and
     /// `window_state`'s, each starting only its own anew.
@@ -2006,6 +2008,7 @@ impl ScriptHost {
             window_size: RefCell::default(),
             full_screen: RefCell::default(),
             zoom: RefCell::default(),
+            scale: RefCell::default(),
             visible: RefCell::default(),
             window_state: RefCell::default(),
             actions: Actions::default(),
@@ -3000,8 +3003,23 @@ impl ScriptHost {
     /// them, and its zoom as a script sets them: the zoom's keys and menu
     /// items show in the state, and a script's `zoom:set(1.5)` zooms the
     /// window (Chrome's 25% to 500%), `zoomable:set(false)` turns its keys
-    /// off.
+    /// off. And `ui.window.scale` as how many device pixels a point is
+    /// there (`Ui::pixel_scale`: the display's scale times the zoom).
     pub fn window_zoom(&self, ui: &zgx::widgets::Ui) {
+        {
+            let pixels = ui.pixel_scale();
+            let state = (self.0.shared).state(
+                windows::SCALE,
+                windows::scale(pixels.with_untracked(|now| *now)),
+            );
+            let effect = self.0.runtime.effect(move || {
+                let now = windows::scale(pixels.get());
+                if state.with_untracked(|was| *was != now) {
+                    state.set(now);
+                }
+            });
+            *self.0.scale.borrow_mut() = Some(effect);
+        }
         let zoom = self.0.shared.state(windows::ZOOM, Value::Num(ui.zoom()));
         let zoomable = self
             .0
