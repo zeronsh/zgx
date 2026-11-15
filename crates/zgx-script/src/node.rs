@@ -1739,6 +1739,7 @@ pub(crate) struct Anim {
     pub to: Option<Value>,
     /// Where the script made it, while tracing ([`made_at`]): its value's
     /// writes are named so.
+    #[cfg(feature = "inspect")]
     pub site: Option<Rc<str>>,
 }
 #[derive(Clone, Copy)]
@@ -6876,13 +6877,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 Curve::Loop { .. } => "loop",
             },
         );
-        #[cfg(not(feature = "inspect"))]
-        let site = None;
         lua.create_userdata(AnimUd(Rc::new(Anim {
             source,
             curve,
             from,
             to,
+            #[cfg(feature = "inspect")]
             site,
         })))
     };
@@ -7159,14 +7159,13 @@ pub(crate) fn computed(lua: &Lua, env: &Env, f: Function) -> Signal<Value> {
 }
 /// `ui.computed`: the value `f` makes, kept current as what it reads
 /// changes, and brought up to date when a script reads it.
-pub(crate) fn computed_state(
-    #[allow(unused_variables)] lua: &Lua,
-    env: &Env,
-    f: Function,
-) -> crate::value::State {
+pub(crate) fn computed_state(lua: &Lua, env: &Env, f: Function) -> crate::value::State {
     let signal = env.runtime.signal(Value::Nil);
+    // Named for traces by where the script made it (devtools only).
     #[cfg(feature = "inspect")]
     name_made(lua, &signal, "computed");
+    #[cfg(not(feature = "inspect"))]
+    let _ = lua;
     let (vm, out) = (env.vm.clone(), signal.clone());
     let meter = env.meter.clone();
     // Its value is there as soon as it is made, even while a component
