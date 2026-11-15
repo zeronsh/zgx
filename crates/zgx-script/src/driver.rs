@@ -886,6 +886,8 @@ pub struct TreeLine {
     pub line: Line,
     /// It doesn't show (`shows`): hidden, or in a closed panel.
     pub hidden: bool,
+    /// A toggle button pressed or not (`aria-pressed`), if it is one.
+    pub pressed: Option<bool>,
 }
 
 /// The tree under `from` (the view, by default), one node a line: its
@@ -948,6 +950,7 @@ pub fn tree_lines(
                         checked: s.and_then(|s| s.checked),
                     },
                     hidden: !shows(&scene, node),
+                    pressed: s.and_then(|s| s.pressed),
                 });
             } else {
                 hidden += 1;
@@ -1021,18 +1024,23 @@ fn fold(lines: Vec<TreeLine>) -> Vec<TreeLine> {
 
 /// [`tree`]'s lines as text: indented two spaces a level.
 pub fn tree_text(lines: &[Line], hidden: usize) -> String {
-    let lines: Vec<(&Line, bool)> = lines.iter().map(|line| (line, false)).collect();
+    let lines: Vec<_> = lines.iter().map(|line| (line, false, None)).collect();
     lines_text(&lines, hidden)
 }
 /// [`tree_lines`]' lines as text, as [`tree_text`], a node that doesn't
 /// show saying so.
 pub fn tree_lines_text(lines: &[TreeLine], hidden: usize) -> String {
-    let lines: Vec<(&Line, bool)> = lines.iter().map(|l| (&l.line, l.hidden)).collect();
+    let lines: Vec<_> = lines
+        .iter()
+        .map(|l| (&l.line, l.hidden, l.pressed))
+        .collect();
     lines_text(&lines, hidden)
 }
-fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
+/// Each line with whether it doesn't show and, a toggle button, whether
+/// it is pressed.
+fn lines_text(lines: &[(&Line, bool, Option<bool>)], hidden: usize) -> String {
     let mut out = String::new();
-    for &(line, not_shown) in lines {
+    for &(line, not_shown, pressed) in lines {
         let _ = write!(out, "{}@{}", "  ".repeat(line.depth), line.number);
         if let Some(id) = &line.id {
             let _ = write!(out, " #{id}");
@@ -1059,6 +1067,11 @@ fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
         match line.checked {
             Some(true) => out.push_str(" checked"),
             Some(false) => out.push_str(" unchecked"),
+            None => {}
+        }
+        match pressed {
+            Some(true) => out.push_str(" pressed"),
+            Some(false) => out.push_str(" not-pressed"),
             None => {}
         }
         out.push('\n');
