@@ -1143,8 +1143,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             // (Gliding there, it rests at its end.)
                             at_end: limit - position <= 0.5 || gliding,
                             short: (limit - position).max(0.),
-                            last: length
-                                .checked_sub(1)
+                            // (Only a list that glides reads it.)
+                            last: glide
+                                .as_ref()
+                                .and_then(|_| length.checked_sub(1))
                                 .and_then(|last| model.row_height(last)),
                         }),
                         None if length == 0 => Some(Anchor {
