@@ -24,6 +24,12 @@ fn board(shade: u8) -> Arc<Canvas> {
 }
 const W: f32 = 700.;
 const H: f32 = 450.;
+/// How many of `out` are drawn (not only uploaded: an empty `rect`).
+fn drawn(out: &[(Raster, Placement)]) -> usize {
+    out.iter()
+        .filter(|(_, p)| p.rect[2] * p.rect[3] > 0.)
+        .count()
+}
 /// What `out` shows, unscaled, put together into one image of the box.
 fn composed(out: &[(Raster, Placement)], scale: f32) -> Vec<u8> {
     let size = [(W * scale).ceil() as usize, (H * scale).ceil() as usize];
@@ -212,13 +218,6 @@ fn a_changed_drawing_shows_at_once_and_tiles_keep_to_their_budget() {
     let mut out = Vec::new();
     (cache.get_tiles(node, &changed, at, W, H, 2., false, 0, &mut out)).unwrap();
     // Each cell its new tile, or its old one until that lands: never none.
-    // (Drawn ones: a backdrop's pieces, made off the frame, may come
-    // along to upload, with nowhere to draw.)
-    let drawn = |out: &[(Raster, Placement)]| {
-        (out.iter())
-            .filter(|(_, p)| p.rect[2] > 0. && p.rect[3] > 0.)
-            .count()
-    };
     assert_eq!(drawn(&out), drawn(&before), "every cell shows at once");
     composed(&out, 2.);
     // All landed, more than a frame uploads: the rest show their old tiles.
@@ -767,4 +766,97 @@ fn a_box_wider_than_any_screen_asks_for_at_most_its_span_of_tiles() {
     // (Its middle off the tiles' grid: one more each way, and the ring.)
     let most = ((MAX_SPAN + 3) * (MAX_SPAN + 3)) as usize;
     assert!(asked > 0 && asked <= most, "{asked} tiles asked for");
+}
+
+/// `slow`'s cards, each a part (as `each` items are), and over them a
+/// light shape (a part of its own) `grow` points bigger: a shape resized
+/// on a busy board.
+fn resized(grow: f32) -> Arc<Canvas> {
+    let mut canvas = Canvas::new();
+    for row in 0..8 {
+        for col in 0..10 {
+            let card = Rect::new(col as f32 * 90., row as f32 * 70., 80., 60.);
+            let mut part = Canvas::new();
+            for _ in 0..4 {
+                part.shadow(
+                    Path::rounded_rect(card, 8.).unwrap(),
+                    Color(0, 0, 0, 40),
+                    Point { x: 0., y: 6. },
+                    24.,
+                    4.,
+                );
+            }
+            part.fill(
+                Path::rounded_rect(card, 8.).unwrap(),
+                Color(40, 120, 200, 255),
+            );
+            canvas.extend(&part);
+        }
+    }
+    let mut part = Canvas::new();
+    let shape = Rect::new(60., 50., 220. + grow, 150. + grow * 0.6);
+    part.fill(
+        Path::rounded_rect(shape, 70.).unwrap(),
+        Color(217, 217, 217, 255),
+    );
+    canvas.extend(&part);
+    Arc::new(canvas)
+}
+/// What `out` shows put together, or None if some of it is scaled (another
+/// level's, the stand-in's or the backdrop's: of a drawing before).
+fn composed_unscaled(out: &[(Raster, Placement)], scale: f32) -> Option<Vec<u8>> {
+    out.iter()
+        .all(|(_, p)| !p.scaled)
+        .then(|| composed(out, scale))
+}
+#[test]
+fn a_shape_resized_frame_after_frame_never_shows_two_sizes_at_once() {
+    let (scale, at, zoomed) = (2., view(0., 0., 1.), view(-30., -20., 1.25));
+    let sizes: Vec<Arc<Canvas>> = (0..10).map(|k| resized(k as f32 * 30.)).collect();
+    // Each size's tiles at rest, from a cache that never saw another.
+    let settled_of = |canvas: &Arc<Canvas>| {
+        let node = node();
+        let mut cache = CanvasCache::default();
+        (cache.get_panned(node, canvas, at, W, H, scale, false)).unwrap();
+        (cache.get_panned(node, canvas, zoomed, W, H, scale, false)).unwrap();
+        composed(&settled(&mut cache, node, canvas, zoomed, scale), scale)
+    };
+    let theirs: Vec<Vec<u8>> = sizes.iter().map(settled_of).collect();
+    let node = node();
+    let mut cache = CanvasCache::default();
+    (cache.get_panned(node, &sizes[0], at, W, H, scale, false)).unwrap();
+    (cache.get_panned(node, &sizes[0], zoomed, W, H, scale, false)).unwrap();
+    settled(&mut cache, node, &sizes[0], zoomed, scale);
+    // A new size every other frame, a frame's time apart (the tiles of a
+    // size land over a few frames, some within the change's wait).
+    let mut torn = Vec::new();
+    for frame in 0..40u64 {
+        let k = (frame as usize / 2).min(sizes.len() - 1);
+        let mut out = Vec::new();
+        (cache.get_tiles(
+            node,
+            &sizes[k],
+            zoomed,
+            W,
+            H,
+            scale,
+            false,
+            frame + 1,
+            &mut out,
+        ))
+        .unwrap();
+        let whole =
+            composed_unscaled(&out, scale).is_some_and(|shown| (0..=k).any(|j| shown == theirs[j]));
+        if !whole {
+            torn.push(frame);
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    assert!(
+        torn.is_empty(),
+        "frames {torn:?} show pieces of more than one size"
+    );
+    // And at rest, the last size.
+    let out = settled(&mut cache, node, &sizes[9], zoomed, scale);
+    assert!(composed(&out, scale) == theirs[9]);
 }

@@ -78,7 +78,14 @@ pub(super) struct Pyramid {
     stand_in: Option<StandIn>,
     /// Its backdrop's pieces uploaded (`pieces`): kept while it is the same.
     pinned: std::collections::HashSet<u64>,
+    /// Where the drawing changed since its cells there last switched to
+    /// their new tiles (in its points; everywhere when that can't be told):
+    /// those cells switch together, once each has its new tile, so a frame
+    /// never shows pieces of two drawings side by side.
+    pending: Option<[f32; 4]>,
 }
+/// `Pyramid::pending` where a change can't be told: everywhere.
+const EVERYWHERE: [f32; 4] = [f32::MIN, f32::MIN, f32::MAX, f32::MAX];
 /// A promoted raster standing in for its level's tiles: drawn under `view`,
 /// `region` of its device pixels, its texture keyed by `id`.
 #[derive(Clone, Copy)]
@@ -101,10 +108,13 @@ struct Tile {
     /// Of a drawing before, where it changed since: shown until its
     /// cell's tile of this drawing lands.
     stale: bool,
-    /// The tile it replaced, uploaded: shown in its place until the frame
-    /// has the upload budget for it (a change lands more than one frame
-    /// uploads).
+    /// What its cell showed before it, uploaded, while it hasn't shown yet:
+    /// shown in its place until the frame has the upload budget for it (a
+    /// change lands more than one frame uploads), or until every cell of
+    /// its change can show its own (`Pyramid::pending`).
     before: Option<Arc<ImageData>>,
+    /// Whether it has shown in its cell.
+    shown: bool,
 }
 type MadeTile = Result<ImageData, GpuError>;
 /// Tiles made off the frame, for the frame to take.
@@ -444,13 +454,17 @@ impl Pyramid {
                         used: clock,
                         stale: false,
                         before: None,
+                        shown: false,
                     };
                     self.bytes += TILE_BYTES;
                     if let Some(old) = level.tiles.insert((task.key.1, task.key.2), tile) {
                         self.bytes -= TILE_BYTES;
-                        let before = match self.textured.contains_key(&old.image.id()) {
-                            true => Some(old.image),
-                            false => old.before,
+                        // (What the cell shows: the old tile's own `before`
+                        // while that one hasn't shown, else the old tile.)
+                        let before = match old.before {
+                            Some(shown) => Some(shown),
+                            None => (old.shown && self.textured.contains_key(&old.image.id()))
+                                .then_some(old.image),
                         };
                         level
                             .tiles
@@ -602,6 +616,7 @@ impl CanvasCache {
             textured: stand_in.iter().map(|s| (s.id, 0)).collect(),
             stand_in,
             pinned: Default::default(),
+            pending: None,
         };
         self.backdrops.entry(node).or_default();
         self.pyramids.insert(node, pyramid);
@@ -664,7 +679,6 @@ impl CanvasCache {
         let rescaled = p.scale != scale;
         let redrawn = !same && !rescaled;
         let changed = !same || rescaled;
-        let mut differs = Some(None);
         if rescaled {
             p.cancel_all();
             self.retired.extend(p.ids());
@@ -674,9 +688,21 @@ impl CanvasCache {
             p.pinned.clear();
             p.levels.clear();
             p.bytes = 0;
+            p.pending = None;
         } else if redrawn {
             p.cancel_all();
-            differs = changed_region(&p.drawing, canvas, &self.text);
+            let differs = changed_region(&p.drawing, canvas, &self.text);
+            p.pending = match (differs, p.pending) {
+                (Some(None), pending) => pending,
+                (Some(Some(r)), None) => Some(r),
+                (Some(Some(r)), Some(o)) => Some([
+                    o[0].min(r[0]),
+                    o[1].min(r[1]),
+                    o[2].max(r[2]),
+                    o[3].max(r[3]),
+                ]),
+                (None, _) => Some(EVERYWHERE),
+            };
             // (Where it paints the same, only texts in layers joined past
             // their most may differ: remade too, but not waited for.)
             if differs != Some(None) {
@@ -840,15 +866,13 @@ impl CanvasCache {
                 wanted.push(task.clone());
             }
             let visible = wanted.len().min(cells.iter().filter(|c| !made(c)).count());
-            // A change's: those it reaches first, the frame waiting for them.
+            // A change's: those it reaches (since its cells last switched)
+            // first, the frame waiting for them.
             let mut hot = 0;
             if redrawn {
-                let hit = differs.map(|r| r.map(|r| device_bounds(Some(r), level.view, scale)));
-                let reaches = |t: &Arc<Task>| match hit {
-                    None => true,
-                    Some(None) => false,
-                    Some(Some(hit)) => !is_empty(intersect(t.region, hit)),
-                };
+                let hit = p.pending.map(|r| device_bounds(Some(r), level.view, scale));
+                let reaches =
+                    |t: &Arc<Task>| hit.is_some_and(|hit| !is_empty(intersect(t.region, hit)));
                 wanted[..visible].sort_by_key(|t| !reaches(t));
                 hot = wanted[..visible].iter().filter(|t| reaches(t)).count();
             }
@@ -954,6 +978,71 @@ impl CanvasCache {
         };
         p.shown.clear();
         let full = [0., 0., width * scale, height * scale];
+        let shows_in_box = |cell: &(i32, i32)| {
+            let at = region(*cell);
+            let box_at = [
+                at[0] + shift[0],
+                at[1] + shift[1],
+                at[2] + shift[0],
+                at[3] + shift[1],
+            ];
+            !is_empty(intersect(box_at, [0, 0, size[0], size[1]]))
+        };
+        // A change's cells (`pending`) that show: all their new tiles at
+        // once, uploaded first, when each has landed and they fit in what
+        // a frame uploads; else what each showed before. (Those that don't
+        // fit are uploaded unshown, a frame's worth at a time.)
+        let mut hot: std::collections::HashSet<(i32, i32)> = Default::default();
+        let mut switch = true;
+        if let Some(cur) = current
+            && let Some(r) = p.pending
+        {
+            let level = &p.levels[cur];
+            let hit = device_bounds(Some(r), level.view, scale);
+            hot = (cells.iter())
+                .filter(|c| {
+                    shows_in_box(c)
+                        && !is_empty(intersect(region(**c), intersect(hit, level.painted)))
+                })
+                .copied()
+                .collect();
+            let uploads = (hot.iter())
+                .filter_map(|c| level.tiles.get(c))
+                .filter(|t| !p.textured.contains_key(&t.image.id()))
+                .count();
+            switch = hot
+                .iter()
+                .all(|c| level.tiles.get(c).is_some_and(|t| !t.stale))
+                && uploads <= most.max(UPLOADS_MOST.min(hot.len()));
+            if switch {
+                p.pending = None;
+            } else {
+                awaiting = true;
+                // Their new tiles uploaded meanwhile (not drawn), so the
+                // switch comes once the last has landed.
+                for c in &hot {
+                    if let Some(t) = level.tiles.get(c)
+                        && !t.stale
+                        && !p.textured.contains_key(&t.image.id())
+                        && fresh < most
+                    {
+                        fresh += 1;
+                        p.shown.push(t.image.id());
+                        out.push((
+                            Raster {
+                                id: t.image.id(),
+                                pixels: Some(t.image.clone()),
+                            },
+                            Placement {
+                                rect: [0.; 4],
+                                uv: [0.; 4],
+                                scaled: false,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
         for cell in &cells {
             let at = region(*cell);
             let box_at = [
@@ -966,11 +1055,27 @@ impl CanvasCache {
             if is_empty(c) {
                 continue;
             }
-            // Its tile, or the one it replaced while the frame can't upload it.
+            let held = hot.contains(cell) && !switch;
+            let forced = hot.contains(cell) && switch;
+            // Its tile, or the one it replaced while the frame can't upload
+            // it, or while its change's other cells wait for theirs.
             let tile = match current.and_then(|cur| p.levels[cur].tiles.get_mut(cell)) {
-                Some(tile) if ready(&p.textured, fresh, tile.image.id()) => {
+                Some(tile) if held => {
+                    // What it showed: what it replaced, or itself if shown.
+                    let shown = match &tile.before {
+                        Some(before) => Some(before.clone()),
+                        None => tile.shown.then(|| tile.image.clone()),
+                    }
+                    .filter(|b| p.textured.contains_key(&b.id()));
+                    if shown.is_some() {
+                        tile.used = clock;
+                    }
+                    shown
+                }
+                Some(tile) if forced || ready(&p.textured, fresh, tile.image.id()) => {
                     fresh += usize::from(!p.textured.contains_key(&tile.image.id()));
                     tile.before = None;
+                    tile.shown = true;
                     tile.used = clock;
                     awaiting |= tile.stale;
                     Some(tile.image.clone())
