@@ -4240,6 +4240,10 @@ fn styled(
     }
     if let Some(selectable) = node.selectable {
         view = view.selectable(selectable);
+        // Its copy hook: read only on a region, as few are.
+        if selectable {
+            view = region_copy(view, node, vm, low);
+        }
     }
     if let Some(colors) = &node.selection_colors {
         // A token (`"$accent"`) follows the node's theme; anything that
@@ -4332,14 +4336,6 @@ fn styled(
     }
     if let Some(style) = &node.events().context_menu_style {
         view = view.context_menu_style(apply_all(Styles::new(), style));
-    }
-    if let Some(hook) = node
-        .events()
-        .rare
-        .as_ref()
-        .and_then(|rare| rare.copy.clone())
-    {
-        view = on_selection_copy(view, hook, vm, low.elements.clone());
     }
     if node.events().context_menu_below {
         view = view.context_menu_below(true);
@@ -9889,6 +9885,20 @@ fn on_paste(view: View, hook: mlua::Function, vm: &Rc<Vm>) -> View {
     })
 }
 
+/// A selectable region's `on_copy`, if it has one.
+#[cold]
+#[inline(never)]
+fn region_copy(view: View, node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    match node
+        .events()
+        .rare
+        .as_ref()
+        .and_then(|rare| rare.copy.clone())
+    {
+        Some(hook) => on_selection_copy(view, hook, vm, low.elements.clone()),
+        None => view,
+    }
+}
 /// `on_copy` on a selectable region: handed `{ text, html, leaves }`, the
 /// selection's text and HTML and, for each text node it spans in order, the
 /// id of the element it is in (its own or the nearest around it, `false`
