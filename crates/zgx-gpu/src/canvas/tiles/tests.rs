@@ -622,6 +622,39 @@ fn a_promoted_raster_stands_in_for_its_level_until_unshown_a_while() {
     assert!(cache.take_retired().contains(&raster), "its texture goes");
 }
 #[test]
+fn a_pan_just_past_the_raster_shows_all_it_holds_until_tiles_land() {
+    let canvas = board(90);
+    let node = node();
+    let mut cache = CanvasCache::default();
+    let first = view(-40.3, -25.7, 1.);
+    cache
+        .get_panned(node, &canvas, first, W, H, 1., false)
+        .unwrap();
+    let raster = cache.entries[&node].id;
+    // 37 points on: the raster still holds all but a strip of the box, but
+    // most of its cells only in part.
+    let panned = view(-77.3, -25.7, 1.);
+    cache
+        .get_panned(node, &canvas, panned, W, H, 1., false)
+        .unwrap();
+    assert!(cache.tiled(node));
+    let mut out = Vec::new();
+    (cache.get_tiles(node, &canvas, panned, W, H, 1., false, 1, &mut out)).unwrap();
+    assert!(
+        out.iter()
+            .all(|(r, _)| r.id == raster && r.pixels.is_none())
+    );
+    let shown: f32 = out.iter().map(|(_, p)| p.rect[2] * p.rect[3]).sum();
+    assert!(
+        (shown - (W - 37.) * H).abs() < 1.,
+        "the stand-in shows all it holds of the box: {shown}"
+    );
+    // Its tiles: those of the strip it doesn't hold first, the rest in order.
+    let mut cells = vec![(1, 0), (0, 0), (2, 0), (1, 1), (0, 1), (2, 1)];
+    cache.pyramids[&node].stand_in_last(&mut cells, panned, 1., [-37, 0], [W as i32, H as i32]);
+    assert_eq!(cells, [(2, 0), (2, 1), (1, 0), (0, 0), (1, 1), (0, 1)]);
+}
+#[test]
 fn a_frame_uploads_what_its_time_allows_and_never_more_than_a_dozen() {
     let mut cache = CanvasCache::default();
     let quick = Duration::from_micros(10);

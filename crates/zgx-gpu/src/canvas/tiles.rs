@@ -402,9 +402,16 @@ impl Pyramid {
             .chain(self.stand_in.map(|s| s.id))
             .chain(self.pinned.iter().copied())
     }
-    /// Where its stand-in shows under `view` in a box at `scale`, if it
-    /// covers all of `cell` (in the box's device pixels).
-    fn stand_in_over(&self, view: View, scale: f32, cell: [f32; 4]) -> Option<(u64, Placement)> {
+    /// Where its stand-in shows under `view` in a box at `scale`, within
+    /// `cell` (in the box's device pixels): if it covers all of it, or
+    /// unless `whole`, any of it.
+    fn stand_in_over(
+        &self,
+        view: View,
+        scale: f32,
+        cell: [f32; 4],
+        whole: bool,
+    ) -> Option<(u64, Placement)> {
         let s = self
             .stand_in
             .filter(|s| self.textured.contains_key(&s.id))?;
@@ -419,10 +426,37 @@ impl Pyramid {
             && y0 * k + oy <= cell[1] + 0.5
             && x1 * k + ox >= cell[2] - 0.5
             && y1 * k + oy >= cell[3] - 0.5;
-        if !covers {
+        if whole && !covers {
             return None;
         }
         scaled_part(s.region, s.view, view, scale, cell).map(|p| (s.id, p))
+    }
+    /// `cells` (a level's, shown `shift` device pixels on in a box of
+    /// `size` under `view` at `scale`) with those its stand-in holds whole
+    /// last, else in order: a pan's tiles for the strip it uncovered are
+    /// made first, the stand-in showing the rest meanwhile.
+    fn stand_in_last(
+        &self,
+        cells: &mut [(i32, i32)],
+        view: View,
+        scale: f32,
+        shift: [i32; 2],
+        size: [i32; 2],
+    ) {
+        if self.stand_in.is_none() {
+            return;
+        }
+        cells.sort_by_cached_key(|cell| {
+            let at = region(*cell);
+            let at = [
+                at[0] + shift[0],
+                at[1] + shift[1],
+                at[2] + shift[0],
+                at[3] + shift[1],
+            ];
+            let c = intersect(at, [0, 0, size[0], size[1]]).map(|v| v as f32);
+            self.stand_in_over(view, scale, c, true).is_some()
+        });
     }
     fn cancel_all(&mut self) {
         for task in self.tasks.values() {
@@ -813,6 +847,7 @@ impl CanvasCache {
             x * x + y * y
         };
         cells.sort_by(|a, b| distance(a).total_cmp(&distance(b)));
+        p.stand_in_last(&mut cells, view, scale, shift, size);
         let fonts = self
             .text
             .lock()
@@ -1133,7 +1168,7 @@ impl CanvasCache {
                     })
                 {
                     stand_tried = true;
-                    if let Some((id, placement)) = p.stand_in_over(view, scale, c) {
+                    if let Some((id, placement)) = p.stand_in_over(view, scale, c, true) {
                         p.shown.push(id);
                         out.push((Raster { id, pixels: None }, placement));
                         covered = true;
@@ -1214,6 +1249,15 @@ impl CanvasCache {
                         ));
                     }
                 }
+            }
+            // Else, over the backdrop if any, what the stand-in holds of it
+            // (a pan just past the raster: most of the box until tiles land).
+            if !covered
+                && stand_off.is_some()
+                && let Some((id, placement)) = p.stand_in_over(view, scale, c, false)
+            {
+                p.shown.push(id);
+                out.push((Raster { id, pixels: None }, placement));
             }
         }
         // Those used least go past the budget, but none shown now.
