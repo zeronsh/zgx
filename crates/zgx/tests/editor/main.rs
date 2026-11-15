@@ -26,6 +26,8 @@ mod editor_code;
 mod editor_context_menu;
 #[path = "../editor_external_edits.rs"]
 mod editor_external_edits;
+#[path = "../editor_focus_snapshot.rs"]
+mod editor_focus_snapshot;
 #[path = "../editor_hints.rs"]
 mod editor_hints;
 #[path = "../editor_ingress_normalization.rs"]

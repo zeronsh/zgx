@@ -1154,6 +1154,14 @@ export type SocketOptions = {
 	on_close: ((error: UiError?) -> ())?,
 }
 
+-- Internal, subject to change: what had keyboard focus, and a field's
+-- selection, from `ui.focus_snapshot()`.
+export type FocusSnapshot = {
+	-- Focus back where it was, a field's selection with it, nothing
+	-- scrolled: false if its element is gone or its text no longer fits.
+	restore: (self: FocusSnapshot) -> boolean,
+}
+
 -- A connection kept open (`ui.socket`).
 export type Socket = {
 	status: State<"connecting" | "open" | "reconnecting" | "closed">,
@@ -22337,6 +22345,9 @@ declare ui: {
 		-- A textarea's line, from 1, at that place in its view; its caret stays.
 		scroll_to_line: (el: Element, line: number, options: { align: ("start" | "center" | "end" | "nearest")? }?) -> boolean,
 	},
+	-- Internal, subject to change: what has keyboard focus and a field's
+	-- selection, to put back later; nil if nothing has focus.
+	focus_snapshot: () -> FocusSnapshot?,
 	-- An HTTP request through the host's transport (`ScriptHost::fetcher`):
 	-- a promise of a `Response`. A plugin needs the host's grant.
 	fetch: (url: string, opts: FetchOptions?) -> Promise<Response>,

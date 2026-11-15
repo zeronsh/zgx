@@ -27,6 +27,8 @@ mod exiting_rows;
 mod failures;
 #[path = "../file_drop.rs"]
 mod file_drop;
+#[path = "../focus_snapshot.rs"]
+mod focus_snapshot;
 #[path = "../grid_areas.rs"]
 mod grid_areas;
 #[path = "../grid_tracks.rs"]
