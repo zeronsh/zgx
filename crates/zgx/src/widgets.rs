@@ -2069,7 +2069,7 @@ impl Drop for InitialBindingGuard {
         // User resource destructors can mount new siblings during cleanup.
         // They must not inherit the failed initialization scope.
         drop(self.scope.take());
-        if !self.completed && std::thread::panicking() {
+        if !self.completed && crate::reactive::unwinding() {
             self.token.fail();
         }
     }

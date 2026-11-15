@@ -566,7 +566,7 @@ impl Runtime {
                     .inner
                     .batch_depth
                     .set(self.0.inner.batch_depth.get() - 1);
-                if !std::thread::panicking() {
+                if !unwinding() {
                     self.0.flush();
                 }
             }
@@ -615,7 +615,7 @@ impl Runtime {
                     .inner
                     .batch_depth
                     .set(self.0.inner.batch_depth.get() - 1);
-                if !std::thread::panicking() {
+                if !unwinding() {
                     if (self.2)() {
                         self.0.flush_watched(&mut self.1);
                     } else {
@@ -1049,8 +1049,7 @@ impl Drop for HeldEffects {
     fn drop(&mut self) {
         let inner = &self.0.inner;
         inner.batch_depth.set(inner.batch_depth.get() - 1);
-        if !std::thread::panicking()
-            && (!inner.queued.borrow().is_empty() || !inner.pending.borrow().is_empty())
+        if !unwinding() && (!inner.queued.borrow().is_empty() || !inner.pending.borrow().is_empty())
         {
             self.0.flush();
         }
@@ -1285,6 +1284,20 @@ impl ServiceScope {
     }
 }
 
+/// Whether a panic is unwinding through this frame, so a guard's clean-up
+/// (a flush, a gesture's end) would act on half-made state: where panics
+/// unwind, `std::thread::panicking` itself.
+#[cfg(panic = "unwind")]
+pub(crate) use std::thread::panicking as unwinding;
+/// Where panics abort (wasm32), nothing unwinds, so no guard is ever
+/// dropped by one; `std::thread::panicking` stays true after a panic a host
+/// caught (a trap the page's JS carried on past), and trusting it would
+/// leave every later effect unrun.
+#[cfg(not(panic = "unwind"))]
+#[inline(always)]
+pub(crate) fn unwinding() -> bool {
+    false
+}
 #[cfg(test)]
 mod tests {
     use super::*;

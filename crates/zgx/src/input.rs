@@ -3119,7 +3119,7 @@ impl InputDispatcher {
         struct Unwinding<'a>(&'a RefCell<State>);
         impl Drop for Unwinding<'_> {
             fn drop(&mut self) {
-                if std::thread::panicking()
+                if crate::reactive::unwinding()
                     && let Ok(mut state) = self.0.try_borrow_mut()
                 {
                     state.captured = None;
