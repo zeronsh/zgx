@@ -81,8 +81,9 @@ impl Chat {
             wanted,
             told,
         };
-        // Settled (its rows measured, at its end), then a reply is written.
-        chat.run(100);
+        // Settled (its rows measured, at its end, its last row there a while),
+        // then a reply is written.
+        chat.run(200);
         chat.wanted.set(true);
         chat.told.borrow_mut().clear();
         chat.told.borrow_mut().push(true);
@@ -230,4 +231,20 @@ fn screens_from_the_end_it_jumps_to_a_screen_short_then_glides() {
         chat.short()
     );
     assert!(chat.at_end());
+}
+
+#[test]
+fn a_last_row_just_come_settling_is_held_at_the_end_not_glided() {
+    let mut chat = Chat::new();
+    // A row comes at the end (a reply begun), and settles taller a moment on.
+    // (The fixture's rows are fixed: the last's height stands in for it.)
+    chat.heights.resize(ROWS + 1).unwrap();
+    chat.frame();
+    chat.tail.set(120.);
+    chat.frame();
+    assert!(
+        chat.short().abs() < 0.5,
+        "held at the end: {}",
+        chat.short()
+    );
 }

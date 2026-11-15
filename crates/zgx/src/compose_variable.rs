@@ -29,6 +29,8 @@ type GlideWhen = Rc<dyn Fn() -> bool>;
 /// How many screens from its end a list gliding there glides from: farther,
 /// it jumps to a screen short of the end first.
 const GLIDE_FARTHEST: f32 = 2.5;
+/// How long a list's last row is there before its growth is glided to.
+const GLIDE_SETTLED: std::time::Duration = std::time::Duration::from_millis(150);
 impl VariableHeights {
     /// `count` rows, each `estimate` tall until measured. Panics if `estimate`
     /// isn't finite and positive.
@@ -161,6 +163,10 @@ struct Anchor {
     /// the row starts lower, in view).
     within: f32,
     at_end: bool,
+    /// How far short of its end the view was, and the last row's height
+    /// then: what a list gliding to its end goes on from.
+    short: f32,
+    last: Option<f32>,
 }
 
 /// Mount only visible variable-height keyed rows and an overscan margin.
@@ -790,6 +796,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             // there by its key. Beside the anchor, not in it, so that other
             // lists' passes neither move nor drop a key.
             let mut anchor_key: Option<K> = None;
+            // Since when the last row has been the one it is (a list gliding
+            // to its end glides its growth only once it has settled).
+            let mut last_since: Option<(usize, crate::time::Instant)> = None;
             ui.bind(root, move || {
                 heights.revision.get();
                 let mounted = mounted_revision.get();
@@ -935,23 +944,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     } else {
                         requested.clamp(0., limit)
                     };
-                    // Where the anchor row puts the view: rows above it
-                    // resized or come move nothing in view.
-                    let anchored = |previous: &Anchor, index: usize| -> Option<f32> {
-                        let row_height = model.row_height(index)?;
-                        let top = model.row_offset(index);
-                        let bottom = (top as f64 + row_height as f64).min(f32::MAX as f64) as f32;
-                        // Clamp the final coordinate, too: adding a sub-height
-                        // intra-row offset can round up to the following row.
-                        let last = bottom.next_down().max(top);
-                        Some(
-                            ((top as f64 + previous.within as f64).clamp(0., f32::MAX as f64)
-                                as f32)
-                                .min(last)
-                                .min(limit),
-                        )
-                    };
                     let mut gliding = false;
+                    if glide.is_some() && last_since.is_none_or(|(len, _)| len != length) {
+                        last_since = Some((length, crate::clock::now()));
+                    }
                     if let Some(previous) = &anchor
                         && previous.revision != revision
                         && (requested == previous.position || own_step)
@@ -959,20 +955,38 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         && heights.end.get()
                     {
                         if glide_wanted {
-                            // What shows stays where it is, and the view
-                            // glides the rest of the way to the end.
-                            let from = if own_step {
-                                position
+                            // The end held as ever (rows above it measured,
+                            // resized or come move nothing shown), but for
+                            // what the last row grew by (a reply written):
+                            // the view glides that rest of the way.
+                            // (Only as far as the end itself moved: rows above
+                            // giving back room as it grows move it less.)
+                            // (A row just come doesn't grow: its layout
+                            // settling for a moment, as a runway hands over,
+                            // the end is held as ever.)
+                            let settled = last_since.is_some_and(|(_, since)| {
+                                crate::clock::now().saturating_duration_since(since)
+                                    >= GLIDE_SETTLED
+                            });
+                            let grew =
+                                match (previous.length == length && settled, previous.last) {
+                                    (true, Some(was)) => length
+                                        .checked_sub(1)
+                                        .and_then(|last| model.row_height(last))
+                                        .map_or(0., |now| (now - was).max(0.)),
+                                    _ => 0.,
+                                }
+                                .min((limit - (previous.position + previous.short)).max(0.));
+                            // (Its own step: as far short as the step left it.)
+                            let short = if own_step {
+                                (previous.short - (position - previous.position)).max(0.)
                             } else {
-                                moved
-                                    .or((previous.length == length).then_some(previous.index))
-                                    .and_then(|index| anchored(previous, index))
-                                    .unwrap_or(position)
+                                previous.short
                             };
                             // (Screens from it, a screen short of it first:
                             // what's between isn't read, and a glide that
                             // long would crawl.)
-                            position = from.min(limit);
+                            position = (limit - short - grew).max(0.);
                             if limit - position > GLIDE_FARTHEST * height {
                                 position = limit - height;
                             }
@@ -1128,6 +1142,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             within: (position - model.row_offset(index)).max(0.),
                             // (Gliding there, it rests at its end.)
                             at_end: limit - position <= 0.5 || gliding,
+                            short: (limit - position).max(0.),
+                            last: length
+                                .checked_sub(1)
+                                .and_then(|last| model.row_height(last)),
                         }),
                         None if length == 0 => Some(Anchor {
                             revision,
@@ -1136,6 +1154,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             index: 0,
                             within: 0.,
                             at_end: true,
+                            short: 0.,
+                            last: None,
                         }),
                         None => None,
                     };
@@ -1241,6 +1261,16 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     {
                         anchor.index = *index;
                         anchor.within = anchor.position - top;
+                    }
+                    // The last row's height counts as where it grows from
+                    // only once it was measured: a row come in at its
+                    // estimate, measured the next pass, didn't grow.
+                    if anchor.last.is_some()
+                        && !keys.iter().any(|(key, index, ..)| {
+                            *index + 1 == anchor.length && measured_row(key)
+                        })
+                    {
+                        anchor.last = None;
                     }
                     anchor
                 });
