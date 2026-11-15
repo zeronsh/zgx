@@ -1164,20 +1164,26 @@ pub(crate) fn mount_links(
                 );
             }
             if link.is_link() {
-                ui.semantics.borrow_mut().set(
-                    entry.node,
-                    SemanticNode::new(
-                        // A run that only acts is a button (Space too), one that goes somewhere a link.
-                        if link.href.is_some() {
-                            Role::Link
-                        } else {
-                            Role::Button
-                        },
-                        link.label
-                            .as_deref()
-                            .unwrap_or(&data.rich.text()[link.range.clone()]),
-                    ),
+                let mut semantic = SemanticNode::new(
+                    // A run that only acts is a button (Space too), one that goes somewhere a link.
+                    if link.href.is_some() {
+                        Role::Link
+                    } else {
+                        Role::Button
+                    },
+                    link.label
+                        .as_deref()
+                        .unwrap_or(&data.rich.text()[link.range.clone()]),
                 );
+                // Named apart from its text (a citation's "1"): read once,
+                // as the control, where it is in the paragraph, as a
+                // browser reads an inline link; its text goes from the
+                // paragraph's.
+                if link.label.is_some() {
+                    semantic.logical_parent = Some(paragraph);
+                    semantic.inline_range = Some(link.range.clone());
+                }
+                ui.semantics.borrow_mut().set(entry.node, semantic);
             }
             let rects = &geometry[index];
             let first = rects.first().copied().unwrap_or_default();
