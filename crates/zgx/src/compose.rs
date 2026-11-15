@@ -158,6 +158,7 @@ impl Context {
         self.runtime.clone()
     }
     /// A signal holding `initial`, made once as the component mounts.
+    #[cfg_attr(feature = "trace", track_caller)]
     pub fn state<T: 'static>(&self, initial: T) -> Signal<T> {
         self.runtime.signal(initial)
     }
