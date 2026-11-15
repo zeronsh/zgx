@@ -570,6 +570,7 @@ fn show_decorations(
     s.set_style(id, style);
     s.set_text_mark_shapes(id, shaped, ends, radius);
 }
+pub use crate::editor_atom_pointer::{AtomHover, AtomPress};
 /// What is told of an editor's atoms: what happened to them, then all of
 /// them as they are.
 pub type AtomListener = Box<dyn FnMut(&AtomEvent<'_>)>;
@@ -648,6 +649,9 @@ struct CodeHint {
     top_line_listened: Cell<bool>,
     top_line_drawn: Cell<Option<usize>>,
     top_line_told: Cell<Option<usize>>,
+    /// Called after each draw (`EditorHandle::on_drawn`): what follows its
+    /// atoms under the pointer as a scroll or a new layout moves them.
+    on_drawn: RefCell<Option<Box<dyn FnMut()>>>,
 }
 impl Drop for CodeHint {
     /// A long text's last layout and its line cache hold each other.
@@ -1310,6 +1314,52 @@ impl EditorHandle {
     /// A new atom's id, for one made by `set_atoms`.
     pub fn new_atom_id(&self) -> u64 {
         self.editor.borrow_mut().new_atom_id()
+    }
+    /// The box of each line bytes `range` of its text run on, in the
+    /// window's points, in order: an atom wrapped across lines has one on
+    /// each. Shapes the text: for a pointer over it, not every frame.
+    pub fn range_boxes(&self, range: std::ops::Range<usize>) -> Vec<Rect> {
+        let scene = self.scene.borrow();
+        let Some(lines) = self.hint.shown_lines() else {
+            return scene.text_range_rects(self.text, range);
+        };
+        // Shown a line at a time: each line it runs on gives its piece.
+        let (start, end) = (range.start, range.end.max(range.start));
+        let mut boxes = Vec::new();
+        for (line, node) in lines {
+            if !(line.start < end && start < line.end) {
+                continue;
+            }
+            let local = start.max(line.start) - line.start..end.min(line.end) - line.start;
+            boxes.extend(scene.text_range_rects(node, local));
+        }
+        boxes
+    }
+    /// The atom drawn under `x`, `y` (the window's points), and its box on
+    /// the line there: none between atoms, or past a line's end beside one.
+    pub fn atom_at(&self, x: f32, y: f32) -> Option<(crate::text_edit::Atom, Rect)> {
+        let at = self.offset_at(x, y)?;
+        let atoms = self.atoms();
+        // The byte a point lands on is a caret's place: an atom it starts,
+        // ends or lies inside.
+        atoms
+            .into_iter()
+            .filter(|atom| atom.range.start <= at && at <= atom.range.end)
+            .find_map(|atom| {
+                let hit = self
+                    .range_boxes(atom.range.clone())
+                    .into_iter()
+                    .find(|piece| {
+                        (piece.x..=piece.x + piece.width).contains(&x)
+                            && (piece.y..=piece.y + piece.height).contains(&y)
+                    })?;
+                Some((atom, hit))
+            })
+    }
+    /// Call `drawn` after each time it is drawn: a scroll, a new layout or
+    /// an edit (what is under the pointer may have moved).
+    pub fn on_drawn(&self, drawn: impl FnMut() + 'static) {
+        *self.hint.code_made().on_drawn.borrow_mut() = Some(Box::new(drawn));
     }
     /// Call `told` with what happened to its atoms, and all of them as they
     /// are, whenever they are made, lost or moved (an edit, an undo): after
@@ -7347,6 +7397,15 @@ impl Ui {
                         let mut slot = code.on_top_line.borrow_mut();
                         if slot.is_none() {
                             *slot = Some(callback);
+                        }
+                    }
+                    // Taken while it runs: one it draws again skips it.
+                    let drawn = code.on_drawn.borrow_mut().take();
+                    if let Some(mut drawn) = drawn {
+                        drawn();
+                        let mut slot = code.on_drawn.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some(drawn);
                         }
                     }
                 }

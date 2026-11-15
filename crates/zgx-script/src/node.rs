@@ -1683,6 +1683,12 @@ pub(crate) struct CodeProps {
     pub atoms: Option<zgx::reactive::Signal<Value>>,
     /// `on_atoms = function(change)`: told as atoms are made, lost or moved.
     pub on_atoms: Option<Function>,
+    /// `on_atom_press = function(atom, at)`: an atom pressed in place; true
+    /// takes the press (the caret stays out of the chip).
+    pub on_atom_press: Option<Function>,
+    /// `on_atom_hover = function(atom?, box?)`: the atom under the pointer
+    /// and its box, nil as it leaves.
+    pub on_atom_hover: Option<Function>,
     /// `atom_style = { bg }`: the wash behind atoms with none of their own.
     pub atom_style: Option<Source>,
     /// `find = { query, case, current, limit, color, current_color }`: a
@@ -3773,6 +3779,8 @@ const WIDGET_FIELDS: &[&str] = &[
     "on_top_line",
     "atoms",
     "on_atoms",
+    "on_atom_press",
+    "on_atom_hover",
     "atom_style",
     "animate",
     "size",
@@ -5848,6 +5856,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             })?),
                         };
                         let on_atoms = table.raw_get::<Option<Function>>("on_atoms")?;
+                        let on_atom_press = table.raw_get::<Option<Function>>("on_atom_press")?;
+                        let on_atom_hover = table.raw_get::<Option<Function>>("on_atom_hover")?;
                         let atom_style = match table.raw_get::<Option<Table>>("atom_style")? {
                             None => None,
                             Some(style) => match style.raw_get::<mlua::Value>("bg")? {
@@ -5887,6 +5897,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             || on_top_line.is_some()
                             || atoms.is_some()
                             || on_atoms.is_some()
+                            || on_atom_press.is_some()
+                            || on_atom_hover.is_some()
                             || atom_style.is_some()
                             || find.is_some())
                         .then(|| {
@@ -5900,6 +5912,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                                 on_top_line,
                                 atoms,
                                 on_atoms,
+                                on_atom_press,
+                                on_atom_hover,
                                 atom_style,
                                 find,
                             })

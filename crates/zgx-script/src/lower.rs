@@ -6835,6 +6835,51 @@ fn code_editor(
             }
         });
     }
+    if let Some(told) = &code.on_atom_press {
+        let (told, vm) = (told.clone(), vm.clone());
+        view = view.on_atom_press(move |press| {
+            let result = (|| -> mlua::Result<Option<bool>> {
+                let atom = atom_value(&vm.lua, press.atom, press.text)?;
+                let at = vm.lua.create_table()?;
+                at.set("x", press.x)?;
+                at.set("y", press.y)?;
+                vm.call(&told, (atom, at))
+            })();
+            match result {
+                Ok(taken) => taken == Some(true),
+                Err(error) => {
+                    vm.report(error);
+                    false
+                }
+            }
+        });
+    }
+    if let Some(told) = &code.on_atom_hover {
+        let (told, vm) = (told.clone(), vm.clone());
+        view = view.on_atom_hover(move |hover| {
+            let result = (|| -> mlua::Result<()> {
+                let atom = match hover.atom {
+                    Some(atom) => mlua::Value::Table(atom_value(&vm.lua, atom, hover.text)?),
+                    None => mlua::Value::Nil,
+                };
+                let area = match hover.area {
+                    Some(area) => {
+                        let table = vm.lua.create_table()?;
+                        table.set("x", area.x)?;
+                        table.set("y", area.y)?;
+                        table.set("width", area.width)?;
+                        table.set("height", area.height)?;
+                        mlua::Value::Table(table)
+                    }
+                    None => mlua::Value::Nil,
+                };
+                vm.call(&told, (atom, area))
+            })();
+            if let Err(error) = result {
+                vm.report(error);
+            }
+        });
+    }
     if let Some(told) = &code.on_caret {
         let (told, vm) = (told.clone(), vm.clone());
         view = view.on_caret(move |caret| {
@@ -6853,6 +6898,22 @@ fn code_editor(
         });
     }
     view
+}
+/// An atom as a script reads it (`{ id, from, to, data?, style? }`,
+/// characters from 0), from `text`, the text its range is in.
+fn atom_value(
+    lua: &mlua::Lua,
+    atom: &zgx::text_edit::Atom,
+    text: &str,
+) -> mlua::Result<mlua::Table> {
+    let chars = (
+        crate::atoms::char_of_byte(text, atom.range.start),
+        crate::atoms::char_of_byte(text, atom.range.end),
+    );
+    match crate::value::to_lua(&crate::atoms::item(atom, chars), lua, false)? {
+        mlua::Value::Table(table) => Ok(table),
+        _ => lua.create_table(),
+    }
 }
 /// An exact short hex key, copied while its Lua string is on the stack.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]

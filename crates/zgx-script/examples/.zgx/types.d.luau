@@ -9212,6 +9212,15 @@ export type InputProps = {
 	-- added and removed (a removed one with its `label` and the range it had),
 	-- all of them, and why: "edit", "undo", "redo" or "set".
 	on_atoms: ((change: AtomChange) -> ())?,
+	-- Internal, subject to change: an atom pressed and let go in place
+	-- (within 4 points, no text dragged over), with where, in the window's
+	-- points. True takes the press: the caret stays where it was, out of
+	-- the chip.
+	on_atom_press: ((atom: AtomItem, at: { x: number, y: number }) -> boolean?)?,
+	-- Internal, subject to change: the atom the pointer comes onto, with
+	-- its box on the line under the pointer (window points), and nil, nil as
+	-- it leaves; again when a scroll or a new layout moves it.
+	on_atom_hover: ((atom: AtomItem?, box: { x: number, y: number, width: number, height: number }?) -> ())?,
 	-- The wash behind atoms that have none of their own (`style.bg`).
 	atom_style: { bg: Color? }?,
 }
