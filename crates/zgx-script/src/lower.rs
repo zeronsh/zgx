@@ -8567,6 +8567,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         followed: Vec<(&'static str, Ty, Owned)>,
         click: Option<Handler>,
         href: Option<Arc<str>>,
+        label: Option<Arc<str>>,
         rare: Option<Rc<crate::node::SpanRare>>,
     }
     #[derive(Clone, Copy)]
@@ -8635,6 +8636,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     .collect(),
                 click: s.click.clone(),
                 href: s.href.clone(),
+                label: s.label.clone(),
                 rare: s.rare.clone(),
             }
         })
@@ -8791,6 +8793,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         out = out
                             .context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
                     }
+                }
+                if let Some(label) = &span.label {
+                    out = out.label(label.clone());
                 }
                 if let Some(href) = &span.href {
                     out = out.href(href.clone());

@@ -348,3 +348,22 @@ fn a_repeated_error_reaches_the_error_hook_each_time() {
     assert_eq!(seen.borrow().len(), 2, "{:?}", seen.borrow());
     assert!(seen.borrow().iter().all(|e| e.contains("same-boom")));
 }
+
+#[test]
+fn a_span_label_is_the_runs_accessible_name() {
+    let h = Harness::inline(
+        r##"return ui.column { w = 400, h = 100,
+    ui.rich { id = "p", ui.span { "see " }, ui.span { "1", label = "Citation 1, Sleep study.pdf", on_click = function() end } },
+}"##,
+    );
+    h.settle();
+    h.frames(3);
+    let names: Vec<String> =
+        h.ui.semantics
+            .borrow()
+            .iter()
+            .filter(|(_, s)| s.role == zgx::semantics::Role::Button)
+            .map(|(_, s)| s.label.clone())
+            .collect();
+    assert_eq!(names, vec!["Citation 1, Sleep study.pdf".to_string()]);
+}

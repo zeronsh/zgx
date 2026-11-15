@@ -5282,6 +5282,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     range: start..content.len(),
                     action: span.action,
                     href: span.href,
+                    label: span.label,
                     styled_hover,
                     menu,
                 });

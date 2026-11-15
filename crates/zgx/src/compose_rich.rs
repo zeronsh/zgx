@@ -57,6 +57,8 @@ pub(crate) struct Link {
     /// Where it goes (`TextSpan::href`): a click opens it, its context menu
     /// opens or copies it.
     pub href: Option<Arc<str>>,
+    /// What assistive technology reads in place of its text (`TextSpan::label`).
+    pub label: Option<Arc<str>>,
     /// It restyles under the pointer, so no hover ring.
     pub styled_hover: bool,
     /// Its own context menu, in place of a link's.
@@ -135,6 +137,7 @@ pub(crate) const ICON_PLACEHOLDER: &str = "\u{2060}";
 pub struct TextSpan {
     pub(crate) action: Option<InlineAction>,
     pub(crate) href: Option<Arc<str>>,
+    pub(crate) label: Option<Arc<str>>,
     pub(crate) text: Arc<str>,
     pub(crate) styles: Styles,
     pub(crate) background: Option<Color>,
@@ -213,6 +216,7 @@ pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
     TextSpan {
         action: None,
         href: None,
+        label: None,
         text: text.into(),
         styles: Styles::new(),
         background: None,
@@ -319,6 +323,12 @@ impl TextSpan {
         build: impl FnMut(&crate::compose::ContextMenuEvent) -> Vec<View> + 'static,
     ) -> Self {
         self.extras.get_or_insert_default().menu = Some(SpanMenu(Rc::new(RefCell::new(build))));
+        self
+    }
+    /// What assistive technology reads for this run in place of its text
+    /// (`aria-label`): a citation badge's "Citation 1, Sleep study.pdf".
+    pub fn label(mut self, label: impl Into<Arc<str>>) -> Self {
+        self.label = Some(label.into());
         self
     }
     /// A link to `url`: a click (after `on_click`'s, if it has one) opens it
@@ -1035,7 +1045,17 @@ pub(crate) fn mount_links(
             if link.is_link() {
                 ui.semantics.borrow_mut().set(
                     entry.node,
-                    SemanticNode::new(Role::Link, &data.rich.text()[link.range.clone()]),
+                    SemanticNode::new(
+                        // A run that only acts is a button (Space too), one that goes somewhere a link.
+                        if link.href.is_some() {
+                            Role::Link
+                        } else {
+                            Role::Button
+                        },
+                        link.label
+                            .as_deref()
+                            .unwrap_or(&data.rich.text()[link.range.clone()]),
+                    ),
                 );
             }
             let rects = &geometry[index];
