@@ -1638,3 +1638,42 @@ pub(crate) fn scroll_into_view_options(
         },
     })
 }
+
+/// What had keyboard focus and a field's selection (`ui.focus_snapshot()`),
+/// put back by `:restore()`.
+struct FocusSnapshotUd(
+    zgx::widgets::FocusSnapshot,
+    std::rc::Rc<std::cell::RefCell<Option<NodeHandle>>>,
+);
+impl mlua::UserData for FocusSnapshotUd {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // Focus back where it was, a field's selection with it, nothing
+        // scrolled: false if its node is gone or its text no longer fits.
+        methods.add_method("restore", |lua, snapshot, ()| {
+            let root = snapshot.1.borrow().clone();
+            let restored = root.is_some_and(|root| root.restore_focus(&snapshot.0));
+            settle(lua);
+            Ok(restored)
+        });
+    }
+}
+
+/// `ui.focus_snapshot()`: what has keyboard focus in the app's window and,
+/// for a text field, its selection, to put back later (a guide that takes
+/// the user elsewhere and returns them); nil if nothing has focus. Taking
+/// one moves neither.
+pub(crate) fn install_focus_snapshot(
+    lua: &mlua::Lua,
+    ui: &mlua::Table,
+    root: std::rc::Rc<std::cell::RefCell<Option<NodeHandle>>>,
+) -> mlua::Result<()> {
+    ui.set(
+        "focus_snapshot",
+        lua.create_function(move |_, ()| {
+            let handle = root.borrow().clone();
+            Ok(handle
+                .and_then(|handle| handle.focus_snapshot())
+                .map(|snapshot| FocusSnapshotUd(snapshot, root.clone())))
+        })?,
+    )
+}

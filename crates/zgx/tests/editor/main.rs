@@ -36,6 +36,8 @@ mod editor_copy_hook;
 mod editor_drag_source;
 #[path = "../editor_external_edits.rs"]
 mod editor_external_edits;
+#[path = "../editor_focus_snapshot.rs"]
+mod editor_focus_snapshot;
 #[path = "../editor_hints.rs"]
 mod editor_hints;
 #[path = "../editor_ingress_normalization.rs"]

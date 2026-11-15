@@ -131,7 +131,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use zgx::{
-    compose::{View, prelude::*, switch},
+    compose::{NodeHandle, View, prelude::*, switch},
     reactive::{Runtime, Signal},
 };
 
@@ -1791,6 +1791,9 @@ struct Inner {
     /// (`window_chrome`).
     chrome: RefCell<Option<zgx::reactive::Effect>>,
     window_size: RefCell<Option<zgx::reactive::Effect>>,
+    /// The host's view as it's mounted: what `ui.focus_snapshot` asks of
+    /// its window.
+    root: Rc<RefCell<Option<NodeHandle>>>,
     /// `ui.window.full_screen` and `full_screen_transition` kept as the
     /// window says (`ScriptHost::window_full_screen`).
     full_screen: RefCell<Option<zgx::reactive::Effect>>,
@@ -2008,6 +2011,7 @@ impl ScriptHost {
             shared: Rc::new(Store::new(runtime)),
             chrome: RefCell::default(),
             window_size: RefCell::default(),
+            root: Rc::default(),
             full_screen: RefCell::default(),
             zoom: RefCell::default(),
             control_windows: Rc::default(),
@@ -4102,6 +4106,9 @@ impl ScriptHost {
                 },
             )
         });
+        // Its window, for `ui.focus_snapshot`.
+        let root = self.0.root.clone();
+        let view = view.on_mount(move |handle| *root.borrow_mut() = Some(handle));
         match links {
             Some(links) => zgx::compose::provide(links, view),
             None => view,
@@ -4706,9 +4713,17 @@ impl ScriptHost {
         });
         i18n::install(&lazy, self.0.locales.clone(), self.files());
         let (windows, shared) = (self.0.windows.clone(), self.0.shared.clone());
-        lazy.ui(&["window", "window_rect", "windows"], move |lua, ui| {
-            windows::install(lua, ui, windows, &shared)
-        });
+        // The window's focus with it: a module of its own costs every VM
+        // made one more entry, and every name a script reads first one more
+        // to pass.
+        let root = self.0.root.clone();
+        lazy.ui(
+            &["window", "window_rect", "windows", "focus_snapshot"],
+            move |lua, ui| {
+                windows::install(lua, ui, windows, &shared)?;
+                element::install_focus_snapshot(lua, ui, root)
+            },
+        );
         let may = |capability: Capability| grants.allows(&capability);
         let fetch = may(Capability::Fetch).then(|| self.0.fetcher.clone());
         let policy = self.0.fetch_policy.clone();

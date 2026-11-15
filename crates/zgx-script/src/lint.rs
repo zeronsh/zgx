@@ -249,6 +249,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "socket",
     "sleep",
     "editor",
+    "focus_snapshot",
     "form",
     "try",
     "effect",
