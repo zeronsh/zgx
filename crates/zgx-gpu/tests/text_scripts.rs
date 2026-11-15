@@ -1365,7 +1365,10 @@ fn a_family_that_is_not_installed_falls_to_the_system_font_at_the_weight_asked()
 
 /// Kana that a line break opportunity separates kern as they do shaped
 /// together, as Core Text and Chrome set them (Hiragino Sans W3's `kern` makes
-/// ォ before ル 12.48 at 13 px, イ before ル 12.35; the line 154.83).
+/// ォ before ル 12.48 at 13 px, イ before ル 12.35; the line 154.83). In
+/// Japanese (`lang="ja"` in Chrome, whose standard font for it is Hiragino
+/// Kaku Gothic ProN; with no language Chrome's kana take Core Text's
+/// `.CJK Symbols Fallback SC`).
 #[cfg(target_os = "macos")]
 #[test]
 fn kana_pairs_kern_across_break_opportunities() {
@@ -1381,6 +1384,7 @@ fn kana_pairs_kern_across_break_opportunities() {
         eprintln!("no Hiragino Sans W3: nothing checked");
         return;
     }
+    fonts.set_language(Some("ja"));
     let mut buffer = Buffer::new(&mut fonts, Metrics::new(13., 20.));
     let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
     buffer.set_text("フォルダにファイルを追加", &attrs, Shaping::Advanced, None);

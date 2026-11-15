@@ -141,9 +141,8 @@ fn fonts_of(locale: &str) -> FontSystem {
 /// (153.50), and one with `lang="ja"`, whose script's standard font,
 /// Hiragino Kaku Gothic ProN, takes them all before Core Text. zgx's
 /// language (`FontSystem::set_language`, an app's i18n locale) stands for
-/// the page's. Chrome's Japanese line is 154.84: its kana pairs kern across
-/// the line's break opportunities (ォ before ル), which zgx shapes word by
-/// word here, so this line is Hiragino's full width, 13 a glyph.
+/// the page's. Chrome's Japanese line is 154.84, its kana pairs kerned across
+/// the line's break opportunities (ォ before ル) as zgx shapes them here.
 #[test]
 fn a_japanese_line_falls_back_as_chrome_with_and_without_a_language() {
     let line = "フォルダにファイルを追加";
@@ -154,7 +153,7 @@ fn a_japanese_line_falls_back_as_chrome_with_and_without_a_language() {
             ".PingFangUITextSC",
             153.50,
         ),
-        ("ja-JP", "HiraKakuProN-W3", "HiraKakuProN-W3", 12. * 13.),
+        ("ja-JP", "HiraKakuProN-W3", "HiraKakuProN-W3", 154.84),
     ] {
         let mut fonts = fonts_of(locale);
         let glyphs = shaped(&mut fonts, line, 400, 13);
