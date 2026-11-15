@@ -216,6 +216,11 @@ pub struct SemanticRare {
     /// Accessible ownership for a portal whose physical parent differs. Native
     /// projection ignores missing, hidden, self-referential or cyclic parents.
     pub logical_parent: Option<NodeId>,
+    /// A control inline in a paragraph's text (a labelled span that acts,
+    /// its `logical_parent` the paragraph): the UTF-8 bytes of that text it
+    /// stands for. A reader hears it there, by its name, in place of them,
+    /// as a browser's inline link; the paragraph's value goes without them.
+    pub inline_range: Option<std::ops::Range<usize>>,
     /// A range's smallest value.
     pub min: Option<f64>,
     /// A range's largest value.
@@ -248,6 +253,7 @@ pub struct SemanticRare {
 static NO_RARE: SemanticRare = SemanticRare {
     text_selection: None,
     logical_parent: None,
+    inline_range: None,
     min: None,
     max: None,
     numeric_value: None,
