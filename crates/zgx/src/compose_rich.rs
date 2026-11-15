@@ -193,6 +193,8 @@ pub(crate) struct SpanExtras {
     /// Room after the text, where it isn't `padding`'s across
     /// (`TextSpan::padding_end`).
     pub padding_end: Option<f32>,
+    /// A box of its own (`TextSpan::inline_box`).
+    pub boxed: bool,
     /// Its text fading in (`TextSpan::fade_in`).
     pub fade: Option<TextFade>,
     /// Its background reaching past the text across (`TextSpan::outset`).
@@ -333,6 +335,17 @@ impl TextSpan {
     /// the text: an inline code chip.
     pub fn padding(mut self, x: f32, y: f32) -> Self {
         self.padding = [x.max(0.), y.max(0.)];
+        self
+    }
+    /// The span a box of its own, as CSS's `display: inline-flex` makes
+    /// it: its line height and `padding` are its box, baseline-aligned, and
+    /// its line's box grows to hold it as CSS's does (each glyph's
+    /// half-leading its own). A plain span's padding is its background's
+    /// alone, never its line's (CSS's for an inline span): a badge whose
+    /// box is taller than the text's half-leading reaches past its line.
+    #[doc(hidden)]
+    pub fn inline_box(mut self) -> Self {
+        self.extras.get_or_insert_default().boxed = true;
         self
     }
     /// Room after the text other than before it (`padding`'s `x` is then

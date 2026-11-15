@@ -5987,6 +5987,10 @@ export type SpanProps = {
 			align: ("center" | "baseline")?,
 		}?,
 	}?,
+	-- Internal, and may change: a box of its own (CSS's `display:
+	-- inline-flex`), its line height and `padding` its box, which its
+	-- line's box holds (a badge taller than the text grows its line).
+	box: boolean?,
 	-- An icon before the text, in the line (a file chip's file type):
 	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
 	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,

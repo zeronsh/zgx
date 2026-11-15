@@ -1789,6 +1789,10 @@ pub(crate) struct SpanRare {
     /// text, in ems of it (width, height above the baseline, depth below):
     /// a formula among words (`TextSpan::inline_svg`).
     pub inline_svg: Option<(String, f32, f32, f32)>,
+    /// `box = true`: a box of its own (CSS's `display: inline-flex`), its
+    /// line height and padding its line's (`TextSpan::inline_box`).
+    /// Internal until its API is settled.
+    pub boxed: bool,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -5527,6 +5531,11 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                     rare_mut(&mut span).trailing_icon = Some(span_icon(&icon)?);
                 }
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
+                b"box" => {
+                    if lua.unpack::<bool>(given)? {
+                        rare_mut(&mut span).boxed = true;
+                    }
+                }
                 b"on_click" => span.click = Some(handler(given)?),
                 b"on_hover" => rare_mut(&mut span).on_hover = Some(lua.unpack(given)?),
                 b"inline_svg" => {
