@@ -353,6 +353,18 @@ async fn sleep(ms: i32) {
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }
 
+/// Wait until `ready` holds, checking every 10 ms on the browser's clock,
+/// for at most 2 s: observers report with a rendering update, which a busy
+/// machine may deliver late.
+async fn until(ready: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if ready() {
+            return;
+        }
+        sleep(10).await;
+    }
+}
+
 #[wasm_bindgen_test]
 async fn observers_report_sizes_and_visibility() {
     use std::{cell::RefCell, rc::Rc};
@@ -381,14 +393,21 @@ async fn observers_report_sizes_and_visibility() {
                 ));
             }),
     );
-    sleep(50).await;
+    until(|| {
+        seen.borrow()
+            .as_ref()
+            .is_some_and(|(size, bounds, visible)| {
+                size.get() == (120., 40.) && bounds.get().width == 120. && visible.get()
+            })
+    })
+    .await;
     let (size, bounds, visible) = seen.borrow().clone().unwrap();
     assert_eq!(size.get(), (120., 40.));
     assert_eq!(bounds.get().width, 120.);
     assert!(visible.get());
     width.set(200.);
     zgx_dom::flush();
-    sleep(50).await;
+    until(|| size.get() == (200., 40.)).await;
     assert_eq!(size.get(), (200., 40.));
     mounted.unmount();
 }
