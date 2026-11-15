@@ -1909,6 +1909,8 @@ pub(crate) struct UiStorage {
     elastic: RefCell<crate::elastic::State>,
     /// Scroll views that page (`View::paging`): none, never more than a look.
     paging: RefCell<crate::paging::State>,
+    /// Lists that glide to their end (`VariableHeights::glide_end`).
+    follow_glides: RefCell<crate::follow_glide::State>,
     /// Scrollbars hide until their view scrolls (`Ui::set_overlay_scrollbars`).
     overlay_scrollbars: Signal<bool>,
     /// Editors' caret width in points (`Ui::set_caret_width`).
@@ -2272,6 +2274,7 @@ impl Ui {
             last_pressed: Cell::new(None),
             elastic: Default::default(),
             paging: Default::default(),
+            follow_glides: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
             scrollbar_styles: Default::default(),
             held_scrollbar_style: Default::default(),
@@ -3444,6 +3447,9 @@ impl Ui {
     }
     pub(crate) fn paging_state(&self) -> &RefCell<crate::paging::State> {
         &self.storage.paging
+    }
+    pub(crate) fn follow_glide_state(&self) -> &RefCell<crate::follow_glide::State> {
+        &self.storage.follow_glides
     }
     pub(crate) fn elastic_state(&self) -> &RefCell<crate::elastic::State> {
         &self.storage.elastic
@@ -5047,6 +5053,7 @@ impl Ui {
             crate::compose_scrollbar::next_fade(self),
             crate::elastic::next_step(self),
             crate::paging::next_step(self),
+            crate::follow_glide::next_step(self),
             crate::caret_blink::next(self),
             crate::find::next_step(self),
         ]
@@ -5100,6 +5107,13 @@ impl Ui {
         };
         // A paged scroll view going to its page.
         let keys = if crate::paging::advance(self, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // A list gliding to its end.
+        let keys = if crate::follow_glide::advance(self, now) {
             self.try_prepare_frame()?;
             true
         } else {

@@ -21,7 +21,16 @@ pub struct VariableHeights {
     structure: Rc<Cell<u64>>,
     /// A list over it keeps rows (`crate::spare`).
     keeps: Rc<Cell<bool>>,
+    /// Following the end, whether it glides there now (`glide_end`).
+    glide: Rc<RefCell<Option<GlideWhen>>>,
 }
+/// When a list following its end glides there (`VariableHeights::glide_end`).
+type GlideWhen = Rc<dyn Fn() -> bool>;
+/// How many screens from its end a list gliding there glides from: farther,
+/// it jumps to a screen short of the end first.
+const GLIDE_FARTHEST: f32 = 2.5;
+/// How long a list's last row is there before its growth is glided to.
+const GLIDE_SETTLED: std::time::Duration = std::time::Duration::from_millis(150);
 impl VariableHeights {
     /// `count` rows, each `estimate` tall until measured. Panics if `estimate`
     /// isn't finite and positive.
@@ -37,6 +46,7 @@ impl VariableHeights {
             end: Default::default(),
             structure: Default::default(),
             keeps: Default::default(),
+            glide: Default::default(),
         })
     }
     /// Keep a viewport resting at the end there through height and count
@@ -46,6 +56,16 @@ impl VariableHeights {
     pub fn anchor_end(self) -> Self {
         self.end.set(true);
         self
+    }
+    /// Keep a viewport resting at the end there (`anchor_end`), gliding to
+    /// the end on a spring as it grows while `when()` says so (a reply being
+    /// written), rather than jumping there. Rows growing above the view move
+    /// nothing in it; a scroll of anyone else's stops the glide where it is.
+    /// Meanwhile the list rests at its end, as far as `on_at_end` says.
+    /// `when` is asked as the list lays out, following nothing.
+    pub fn glide_end(self, when: impl Fn() -> bool + 'static) -> Self {
+        *self.glide.borrow_mut() = Some(Rc::new(when));
+        self.anchor_end()
     }
     /// Update many heights, passing once.
     pub fn set_heights(&self, rows: &[(usize, f32)]) {
@@ -143,6 +163,10 @@ struct Anchor {
     /// the row starts lower, in view).
     within: f32,
     at_end: bool,
+    /// How far short of its end the view was, and the last row's height
+    /// then: what a list gliding to its end goes on from.
+    short: f32,
+    last: Option<f32>,
 }
 
 /// Mount only visible variable-height keyed rows and an overscan margin.
@@ -635,6 +659,12 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             // that view's wheel, scrollbar and edges are its own. Not for
             // rows measured: their anchoring moves the list's own offset.
             let ancestor = !measured && edges.as_ref().is_some_and(|edges| edges.ancestor);
+            // Gliding to its end (`VariableHeights::glide_end`): its spring,
+            // and when it's wanted. (Not scrolled by a view around it.)
+            let glide = (!ancestor)
+                .then(|| heights.glide.borrow().clone())
+                .flatten()
+                .map(|when| (crate::follow_glide::register(ui, offset.clone()), when));
             if let Some(edges) = edges.filter(|edges| !edges.ancestor) {
                 crate::compose::watch_edges(
                     ui,
@@ -643,6 +673,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     size.clone(),
                     extent.clone(),
                     *edges,
+                    glide.as_ref().map(|(glide, _)| glide.following.clone()),
                 );
             }
             // Clip rows to the allocated content box, keeping root padding clear.
@@ -765,6 +796,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             // there by its key. Beside the anchor, not in it, so that other
             // lists' passes neither move nor drop a key.
             let mut anchor_key: Option<K> = None;
+            // Since when the last row has been the one it is (a list gliding
+            // to its end glides its growth only once it has settled).
+            let mut last_since: Option<(usize, crate::time::Instant)> = None;
             ui.bind(root, move || {
                 heights.revision.get();
                 let mounted = mounted_revision.get();
@@ -875,6 +909,29 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     .map(|(index, align, _, _, keys)| (index, align, keys));
                 let asked = (serial != handled_reveal).then_some((row, align, false));
                 handled_reveal = serial;
+                // Gliding to its end: an offset its own step wrote is its
+                // own; any other new one (a wheel, a script) is someone
+                // else's, and the glide stops where it is.
+                let own_step = glide
+                    .as_ref()
+                    .is_some_and(|(glide, _)| glide.chasing() && glide.wrote(requested));
+                if let Some((glide, _)) = &glide
+                    && glide.chasing()
+                    && !own_step
+                    && anchor
+                        .as_ref()
+                        .is_none_or(|previous| previous.position.to_bits() != requested.to_bits())
+                {
+                    glide.stop();
+                }
+                // Whether it glides now, rather than jumps (`glide_end`'s
+                // `when`, asked untracked: it's the app's).
+                let glide_wanted = glide
+                    .as_ref()
+                    .is_some_and(|(_, when)| runtime.untracked(|| when()));
+                // Where the glide goes from and to, once the index is let go.
+                let mut glide_to: Option<(f32, f32)> = None;
+                let mut stop_glide = false;
                 let (length, total, position, target, geometry, dragged, next_anchor) = {
                     let model = heights.index.borrow();
                     let length = model.count();
@@ -887,13 +944,62 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     } else {
                         requested.clamp(0., limit)
                     };
+                    let mut gliding = false;
+                    if glide.is_some() && last_since.is_none_or(|(len, _)| len != length) {
+                        last_since = Some((length, crate::clock::now()));
+                    }
                     if let Some(previous) = &anchor
                         && previous.revision != revision
-                        && requested == previous.position
+                        && (requested == previous.position || own_step)
                         && previous.at_end
                         && heights.end.get()
                     {
-                        position = limit;
+                        if glide_wanted {
+                            // The end held as ever (rows above it measured,
+                            // resized or come move nothing shown), but for
+                            // what the last row grew by (a reply written):
+                            // the view glides that rest of the way.
+                            // (Only as far as the end itself moved: rows above
+                            // giving back room as it grows move it less.)
+                            // (A row just come doesn't grow: its layout
+                            // settling for a moment, as a runway hands over,
+                            // the end is held as ever.)
+                            let settled = last_since.is_some_and(|(_, since)| {
+                                crate::clock::now().saturating_duration_since(since)
+                                    >= GLIDE_SETTLED
+                            });
+                            let grew =
+                                match (previous.length == length && settled, previous.last) {
+                                    (true, Some(was)) => length
+                                        .checked_sub(1)
+                                        .and_then(|last| model.row_height(last))
+                                        .map_or(0., |now| (now - was).max(0.)),
+                                    _ => 0.,
+                                }
+                                .min((limit - (previous.position + previous.short)).max(0.));
+                            // (Its own step: as far short as the step left it.)
+                            let short = if own_step {
+                                (previous.short - (position - previous.position)).max(0.)
+                            } else {
+                                previous.short
+                            };
+                            // (Screens from it, a screen short of it first:
+                            // what's between isn't read, and a glide that
+                            // long would crawl.)
+                            position = (limit - short - grew).max(0.);
+                            if limit - position > GLIDE_FARTHEST * height {
+                                position = limit - height;
+                            }
+                            glide_to = Some((position, limit));
+                            gliding = true;
+                        } else {
+                            position = limit;
+                            stop_glide = true;
+                        }
+                    } else if own_step {
+                        // A step of the glide: the end may have moved meanwhile.
+                        glide_to = Some((position, limit));
+                        gliding = true;
                     } else if let Some(previous) = &anchor
                         && previous.revision != revision
                         && requested == previous.position
@@ -923,7 +1029,11 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         .or(request
                             .filter(|(serial, _)| *serial != handled_request)
                             .map(|(_, index)| (index, RowAlign::Nearest, true)))
-                        .or(pending_target)
+                        // (Gliding to the end, a reveal of the last row's end
+                        // followed through measurement would jump there.)
+                        .or(pending_target.filter(|(index, align, _)| {
+                            !(gliding && *align == RowAlign::End && index + 1 >= length)
+                        }))
                         .and_then(|(index, align, keys)| {
                             (length > 0).then_some((
                                 index.min(length.saturating_sub(1)),
@@ -932,6 +1042,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             ))
                         });
                     if let Some((index, align, _)) = target {
+                        // A row asked for goes where it's asked: no glide.
+                        if gliding {
+                            (gliding, glide_to, stop_glide) = (false, None, true);
+                        }
                         let top = model.row_offset(index);
                         let row_height = model.row_height(index).unwrap();
                         match &window {
@@ -1026,7 +1140,14 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             position,
                             index,
                             within: (position - model.row_offset(index)).max(0.),
-                            at_end: limit - position <= 0.5,
+                            // (Gliding there, it rests at its end.)
+                            at_end: limit - position <= 0.5 || gliding,
+                            short: (limit - position).max(0.),
+                            // (Only a list that glides reads it.)
+                            last: glide
+                                .as_ref()
+                                .and_then(|_| length.checked_sub(1))
+                                .and_then(|last| model.row_height(last)),
                         }),
                         None if length == 0 => Some(Anchor {
                             revision,
@@ -1035,6 +1156,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             index: 0,
                             within: 0.,
                             at_end: true,
+                            short: 0.,
+                            last: None,
                         }),
                         None => None,
                     };
@@ -1048,6 +1171,17 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         next_anchor,
                     )
                 };
+                // The glide set going, moved on, or stopped (the index let go:
+                // what it tells may run the app's).
+                if let Some((glide, _)) = &glide {
+                    if let Some((from, to)) = glide_to
+                        && let Some(ui) = weak.upgrade()
+                    {
+                        glide.chase(&ui, from, to);
+                    } else if stop_glide {
+                        glide.stop();
+                    }
+                }
                 // Release the index borrow before application key/build callbacks.
                 let mut keys: Vec<_> = geometry
                     .into_iter()
@@ -1129,6 +1263,16 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     {
                         anchor.index = *index;
                         anchor.within = anchor.position - top;
+                    }
+                    // The last row's height counts as where it grows from
+                    // only once it was measured: a row come in at its
+                    // estimate, measured the next pass, didn't grow.
+                    if anchor.last.is_some()
+                        && !keys.iter().any(|(key, index, ..)| {
+                            *index + 1 == anchor.length && measured_row(key)
+                        })
+                    {
+                        anchor.last = None;
                     }
                     anchor
                 });

@@ -316,6 +316,7 @@ pub(crate) fn watch_edges(
     size: Signal<(f32, f32)>,
     extent: Signal<f32>,
     edges: ListEdges,
+    following: Option<Signal<bool>>,
 ) {
     let ListEdges {
         end,
@@ -353,7 +354,8 @@ pub(crate) fn watch_edges(
         }
         let to_end = extent - offset - height;
         if let Some(at_end) = &mut at_end {
-            let now = to_end <= AT_END;
+            // (Gliding to its end, it rests there: `follow_glide`.)
+            let now = to_end <= AT_END || following.as_ref().is_some_and(|f| f.get());
             if was_at_end.replace(now) != Some(now) {
                 runtime.untracked(|| at_end(now));
             }
@@ -3723,6 +3725,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     size.clone(),
                     extent.clone(),
                     *edges,
+                    None,
                 );
             }
             // Clip rows to the allocated content box, keeping root padding clear.

@@ -7693,18 +7693,35 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
 /// A `ui.list` (kept out of `build`, which recurses: its locals would
 /// weigh on every level of a deep interface's stack).
 #[inline(never)]
+/// A following list's rows (`follow = true`): its end held as it grows, or
+/// glided to while its `glide` says so.
+fn follow_end(
+    rows: zgx::compose::VariableHeights,
+    rare: Option<&crate::node::ListRare>,
+    vm: &Rc<Vm>,
+) -> zgx::compose::VariableHeights {
+    match rare.and_then(|rare| rare.glide.as_ref()) {
+        Some(glide) => {
+            let (glide, vm) = (Rc::new(resolve_owned(glide)), vm.clone());
+            rows.glide_end(move || resolve(&glide, Ty::Bool, None, &vm) == Some(Lit::Bool(true)))
+        }
+        None => rows.anchor_end(),
+    }
+}
+
 /// The rows of a list with `heights`: every height replaced when the list
 /// changes (linear, in Rust).
 fn list_heights(
     heights: &crate::node::Heights,
     height: f32,
     follow: bool,
+    rare: Option<&crate::node::ListRare>,
     vm: &Rc<Vm>,
     cx: &mut Context,
 ) -> zgx::compose::VariableHeights {
     let mut rows = zgx::compose::VariableHeights::new(&cx.runtime(), 0, height);
     if follow {
-        rows = rows.anchor_end();
+        rows = follow_end(rows, rare, vm);
     }
     let (list, heights_vm, r) = (heights.clone(), vm.clone(), rows.clone());
     cx.retain(cx.runtime().effect(move || {
@@ -7889,7 +7906,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
         // `height` is the estimate of a row not yet mounted.
         let mut rows = zgx::compose::VariableHeights::new(&cx.runtime(), 0, *height);
         if *follow {
-            rows = rows.anchor_end();
+            rows = follow_end(rows, rare.as_deref(), vm);
         }
         let list = match key {
             // Heights by place, as many as there are rows.
@@ -7915,7 +7932,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
     }
     if let Some(heights) = heights {
         let cx = need(&mut cx);
-        let rows = list_heights(heights, *height, *follow, vm, cx);
+        let rows = list_heights(heights, *height, *follow, rare.as_deref(), vm, cx);
         let (sticky_key, sticky_row, sticky_plain) =
             (list_key.clone(), row.clone(), plain_row.clone());
         let list = match key {
@@ -8295,7 +8312,7 @@ fn lower_item_list(
         let cx = need(&mut cx);
         let mut rows = zgx::compose::VariableHeights::new(&cx.runtime(), 0, *height);
         if *follow {
-            rows = rows.anchor_end();
+            rows = follow_end(rows, rare.as_deref(), vm);
         }
         // With `estimate`: told of its passes, rows out of view get heights.
         let watch = rare
@@ -8355,7 +8372,7 @@ fn lower_item_list(
     }
     if let Some(heights) = heights {
         let cx = need(&mut cx);
-        let rows = list_heights(heights, *height, *follow, vm, cx);
+        let rows = list_heights(heights, *height, *follow, rare.as_deref(), vm, cx);
         let (sticky_key, sticky_row) = (list_key.clone(), row.clone());
         let list = variable_virtual_list(offset.clone(), rows.clone(), *overscan, list_key, row)
             .keyboard_navigation(keyboard)
