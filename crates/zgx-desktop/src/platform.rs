@@ -154,6 +154,12 @@ impl Platform for Desktop {
             .and_then(|clipboard| clipboard.get_files().ok())
             .unwrap_or_default()
     }
+    fn set_clipboard_files(&self, files: Vec<std::path::PathBuf>) -> bool {
+        self.clipboard
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|clipboard| clipboard.set_files(files))
+    }
     fn clipboard_html(&self) -> Option<String> {
         self.clipboard
             .borrow_mut()

@@ -127,6 +127,7 @@ zgx inspect right-click '#row'                         # its context menu opens;
 zgx inspect drag '#card' '#done'                       # from one to another
 zgx inspect drag '#slider' 340,120                     # or to a point, window points
 zgx inspect type '#composer' 'Write me a function'     # clicks it, then types
+zgx inspect type --no-click ' and a test'              # where focus is: no click, so the caret stays where it is
 zgx inspect key Enter                                  # Escape, Tab, cmd+k, alt+ArrowDown, shift+Tab, F5…
 zgx inspect key alt                                    # modifiers alone (ctrl+shift): held, then let go, as a window reports a tap
 zgx inspect scroll '#transcript' 400                   # points; down is positive
@@ -145,13 +146,14 @@ zgx inspect sleep 500                                  # let the app run
 ## Clipboard
 
 ```sh
-zgx inspect clipboard                                  # its text, HTML and image's size
+zgx inspect clipboard                                  # its text, HTML, image's size and files
 zgx inspect clipboard set --text "hello"               # or --html "<p>hi</p>" (with --text: a rich copy)
 zgx inspect clipboard set --image shot.png
+zgx inspect clipboard set --files notes.pdf shot.png   # as a file manager copies them: a paste hears them as files
 zgx inspect key cmd+v                                  # pastes it into the focused editor (ctrl+v off macOS)
 ```
 
-`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA and off-screen sessions.
+`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA and off-screen sessions. `--files` needs it: the system's clipboard takes no files from here, and the readback's `files:` line lists what a paste would hear.
 
 ## Popovers, menus and other popups
 
