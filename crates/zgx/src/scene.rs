@@ -3522,6 +3522,10 @@ pub struct Scene {
     /// `read_bits` calls, for the same.
     #[cfg(test)]
     pub(crate) read_bits_calls: std::cell::Cell<u64>,
+    /// Hit tests walked (not answered from `HitMemo`), for tests of how often
+    /// hover is looked for.
+    #[cfg(test)]
+    pub(crate) hit_walks: std::cell::Cell<u64>,
     /// While a mount defers its text inputs' layout: the observer running
     /// now, whose geometry reads (`bounds` and the boxes made from it) are
     /// kept with what they found (`geometry_reads`), to run it again if
@@ -3864,6 +3868,8 @@ impl Scene {
             grown_inks: Default::default(),
             #[cfg(test)]
             inks_asked: Default::default(),
+            #[cfg(test)]
+            hit_walks: Default::default(),
             hit_memo: Default::default(),
             #[cfg(debug_assertions)]
             hit_walked: Default::default(),
@@ -6430,6 +6436,8 @@ impl Scene {
         f(&memo)
     }
     fn hit_test_all_walked(&self, x: f32, y: f32) -> Vec<NodeId> {
+        #[cfg(test)]
+        self.hit_walks.set(self.hit_walks.get() + 1);
         // Before the others, which compile as they did: a scene with
         // targets walks apart (`hit_test_targets`).
         if self.has_hit_targets() {
