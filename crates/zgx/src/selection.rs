@@ -700,6 +700,27 @@ impl Ui {
                 _ => None,
             })
     }
+    /// What select-all selects with no region pressed in yet and no field
+    /// focused: the region under the pointer's last place, else the one
+    /// region if there is only one; with several and none under it,
+    /// nothing, as in a browser with no focus to go by.
+    #[cold]
+    #[inline(never)]
+    fn select_all_fallback(&self) -> Option<NodeId> {
+        let scene = self.scene.borrow();
+        let under = self.input.pointer().and_then(|(x, y)| {
+            let hit = scene.hit_test(x, y)?;
+            scene.selection_root(hit)
+        });
+        if under.is_some() {
+            return under;
+        }
+        // Regions inside another are part of it: the outermost, once each.
+        let state = self.selection_state().borrow();
+        let mut outermost = (state.roots.keys()).filter_map(|root| scene.selection_root(*root));
+        let only = outermost.next()?;
+        outermost.all(|other| other == only).then_some(only)
+    }
     /// Whether `x`, `y` in `root` falls inside its selection, not at an edge.
     fn on_selection(&self, root: NodeId, x: f32, y: f32) -> bool {
         let (anchor, focus) = {
@@ -2278,7 +2299,8 @@ impl Ui {
                     let state = self.selection_state().borrow();
                     state.root.or(state.active_root)
                 };
-                if let Some(root) = root.filter(|root| self.scene.borrow().contains(*root))
+                let root = root.filter(|root| self.scene.borrow().contains(*root));
+                if let Some(root) = root.or_else(|| self.select_all_fallback())
                     && self.select_all_text(root)
                 {
                     result.default_prevented = true;
