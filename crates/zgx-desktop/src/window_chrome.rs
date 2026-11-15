@@ -2849,6 +2849,16 @@ mod mac {
                 }
                 place(&window, zoom, position, true);
                 REPLACING.set(false);
+                // A button's own frame change comes while AppKit is still
+                // setting its frame, which keeps AppKit's place over what
+                // `place` just set: the others' changes put it back, but
+                // nothing follows the last one laid out (the zoom button,
+                // left where AppKit has it after a new title). Placed again
+                // once AppKit is done, before the frame is committed.
+                use objc2::runtime::NSObjectProtocol as _;
+                if view.isKindOfClass(objc2_app_kit::NSButton::class()) {
+                    place_again(&window);
+                }
             });
             let object: &objc2::runtime::AnyObject = view;
             // SAFETY: with no queue the block runs where AppKit posts the
@@ -2867,6 +2877,55 @@ mod mac {
                 placed.observers = observers;
             }
         });
+    }
+
+    thread_local! {
+        /// The windows (by number) with a `place_again` waiting.
+        static AGAIN: std::cell::RefCell<std::collections::HashSet<isize>> =
+            Default::default();
+    }
+
+    /// `place` the window's buttons again as the run loop gets to its
+    /// blocks (once a window, however many ask before then): after the
+    /// layout under way, and before the loop waits, where Core Animation
+    /// commits what it draws.
+    fn place_again(window: &NSWindow) {
+        let number = window.windowNumber();
+        if !AGAIN.with_borrow_mut(|again| again.insert(number)) {
+            return;
+        }
+        let block = block2::RcBlock::new(move || {
+            AGAIN.with_borrow_mut(|again| again.remove(&number));
+            let Some(mtm) = objc2::MainThreadMarker::new() else {
+                return;
+            };
+            let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+            let Some(window) = app.windowWithWindowNumber(number) else {
+                return;
+            };
+            let Some((zoom, position)) = PLACED.with_borrow(|placed| {
+                placed
+                    .get(&number)
+                    .map(|placed| (placed.zoom, placed.position))
+            }) else {
+                return;
+            };
+            if REPLACING.replace(true) {
+                return;
+            }
+            place(&window, zoom, position, false);
+            REPLACING.set(false);
+        });
+        let modes = objc2_foundation::NSArray::from_retained_slice(&[
+            NSString::from_str("kCFRunLoopCommonModes"),
+            NSString::from_str("kCFRunLoopDefaultMode"),
+        ]);
+        // SAFETY: NSRunLoop's +mainRunLoop and -performInModes:block: (macOS
+        // 10.12), with an array of mode names and a block it copies.
+        unsafe {
+            let run_loop: Retained<AnyObject> = msg_send![objc2::class!(NSRunLoop), mainRunLoop];
+            let _: () = msg_send![&*run_loop, performInModes: &*modes, block: &*block];
+        }
     }
 
     /// `place_buttons` on an `NSWindow`: `in_layout` when AppKit is laying
