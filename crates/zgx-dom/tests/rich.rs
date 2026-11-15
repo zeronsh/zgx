@@ -334,3 +334,33 @@ fn a_boxed_span_is_inline_flex() {
     mounted.unmount();
     host.remove();
 }
+
+/// A citation in a sentence (`TextSpan::label`): a button named by its
+/// label (`aria-label`), read once in its place, as the desktop's; its text
+/// stays the paragraph's to show and copy.
+#[wasm_bindgen_test]
+fn a_labelled_run_that_acts_is_a_button_named_by_its_label() {
+    let runtime = Runtime::new();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            rich_text()
+                .child(text_span("step "))
+                .child(text_span("1").label("Citation 1").on_click(|| {}))
+                .child(text_span(".")),
+        ),
+    );
+    let p = paragraph(&host);
+    assert_eq!(p.text_content().unwrap(), "step 1.");
+    let citation = element(p.child_nodes().item(1).unwrap());
+    assert_eq!(citation.get_attribute("role").as_deref(), Some("button"));
+    assert_eq!(
+        citation.get_attribute("aria-label").as_deref(),
+        Some("Citation 1")
+    );
+    assert_eq!(citation.text_content().as_deref(), Some("1"));
+    mounted.unmount();
+    host.remove();
+}

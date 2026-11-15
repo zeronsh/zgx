@@ -75,9 +75,12 @@ export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
 }
 
 // A link with no href (`role=link`): Enter presses it, as it does a link.
+// A run that only acts (`role=button`): Enter and Space, as a button's.
 function onLinkKey(event) {
   const node = event.target;
-  if (event.key === "Enter" && node.$$c !== undefined && node.getAttribute && node.getAttribute("role") === "link") {
+  if (node.$$c === undefined || !node.getAttribute) return;
+  const role = node.getAttribute("role");
+  if ((event.key === "Enter" && (role === "link" || role === "button")) || (event.key === " " && role === "button")) {
     event.preventDefault();
     node.click();
   }

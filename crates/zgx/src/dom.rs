@@ -692,6 +692,12 @@ pub struct Inline {
     pub link: bool,
     /// Where it goes, if it is a web or mail link the browser may open.
     pub href: Option<std::sync::Arc<str>>,
+    /// It only acts, going nowhere (`on_click`, no `href`): a button
+    /// (`role=button`), which Space presses too, as the desktop's.
+    pub button: bool,
+    /// What assistive technology reads for it in place of its text
+    /// (`TextSpan::label`, `aria-label`): a citation's "Citation 1".
+    pub label: Option<std::sync::Arc<str>>,
     /// Its click, told the keys held: `true` back keeps `href` from
     /// opening.
     pub action: Option<Box<dyn FnMut(crate::input::Modifiers) -> bool>>,
@@ -714,6 +720,8 @@ impl Inline {
             && self.hover == other.hover
             && self.link == other.link
             && self.href == other.href
+            && self.button == other.button
+            && self.label == other.label
             && self.icon == other.icon
             && self.action.is_some() == other.action.is_some()
             && self.menu.is_some() == other.menu.is_some()
@@ -1705,6 +1713,7 @@ fn inline(
         .fade
         .filter(|fade| fade.fading(now))
         .map(|fade| (fade.ms, (now - fade.start).max(0.) as f32));
+    let button = span.action.is_some() && span.href.is_none();
     let href = span.href.filter(|href| crate::compose_rich::opens(href));
     let action = span.action.map(|action| {
         Box::new(move |held| action.call(held)) as Box<dyn FnMut(crate::input::Modifiers) -> bool>
@@ -1715,6 +1724,8 @@ fn inline(
         hover,
         link,
         href,
+        button,
+        label: span.label,
         action,
         icon,
         fade,
