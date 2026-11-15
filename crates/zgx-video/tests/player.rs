@@ -357,22 +357,53 @@ impl Shown {
 
 #[test]
 fn an_unseen_player_draws_nothing_and_seen_again_shows_the_frame_due_then() {
-    let dir = temp_dir("player-unseen");
+    unseen_then_seen("player-unseen", None);
+}
+
+/// As above with each frame slow to draw (~150 ms, a loaded runner's): the
+/// frame under way as it is told it's unseen comes late, and is the last.
+#[test]
+fn a_frame_drawing_as_its_player_goes_unseen_is_the_last_it_shows() {
+    unseen_then_seen("player-unseen-slow", Some(Duration::from_millis(150)));
+}
+
+/// Played, told it's unseen, then seen again: it shows at most the frame
+/// it was drawing when told, however long that takes, then nothing while
+/// unseen; seen again, the frame its clock is at.
+fn unseen_then_seen(name: &str, slow_draw: Option<Duration>) {
+    let dir = temp_dir(name);
     std::fs::write(dir.join("video.luau"), RUN.replace("DURATION", "900")).unwrap();
     let mut shown = shown(&dir, |view| view);
+    if let Some(by) = slow_draw {
+        shown.player.debug_slow_draw(by);
+    }
     shown.player.open("Run", json!({}), 0);
     shown.player.play(true);
     shown.until(|frame| frame.is_some_and(|f| f >= 10));
     shown.player.watch(false);
     let hidden = Instant::now();
-    // A frame on its way as it was told may still come; then none.
-    shown.watch_for(Duration::from_millis(100));
-    let held = shown.frame();
-    let meanwhile = shown.watch_for(Duration::from_millis(600));
-    assert!(
-        meanwhile.iter().all(|f| *f == held),
-        "drew unseen: {meanwhile:?}"
-    );
+    // What it had drawn by then reaches the stage first.
+    std::thread::sleep(Duration::from_millis(20));
+    shown.stage.step().unwrap();
+    let told = shown.frame();
+    // It starts a frame only after reading what it's told, so the frame it
+    // was drawing as it was told may still come, however long it takes;
+    // then none: watched until what it shows has held 600 ms.
+    let (mut seen, mut changed) = (vec![told], Instant::now());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while changed.elapsed() < Duration::from_millis(600) {
+        assert!(Instant::now() < deadline, "still drawing unseen: {seen:?}");
+        shown.stage.step().unwrap();
+        let frame = shown.frame();
+        if Some(&frame) != seen.last() {
+            changed = Instant::now();
+        }
+        seen.push(frame);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let changes = seen.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    assert!(changes <= 1, "drew unseen: {seen:?}");
+    let held = *seen.last().unwrap();
     // Seen again: the frame its clock is at, not the one it left.
     let before = held.unwrap();
     let seen_at = Instant::now();
