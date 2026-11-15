@@ -239,11 +239,15 @@ fn a_long_press_on_a_button_in_text_selects_its_word_and_never_clicks_it() {
     let mut ui = Ui::new(400., 300.);
     let clicks = Rc::new(Cell::new(0));
     let counted = clicks.clone();
+    // A button whose label is text to select (`selectable(true)`; one that
+    // doesn't say so is left out: `a_selection_across_a_button_leaves_its_
+    // label_out`).
     document(
         &mut ui,
         vec![
             text("Before"),
             button()
+                .selectable(true)
                 .child(text("Press"))
                 .on_click(move || counted.set(counted.get() + 1)),
             text("After"),
@@ -2279,4 +2283,28 @@ fn select_all_with_no_region_pressed_takes_the_one_under_the_pointer_or_the_only
     ui.dispatch(shortcut("a"));
     ui.prepare_frame();
     assert_eq!(ui.selected_text(), "");
+}
+
+/// A button's label is left out of a selection across it, as a browser
+/// leaves it, unless the button says `selectable(true)` itself.
+#[test]
+fn a_selection_across_a_button_leaves_its_label_out() {
+    for opted_in in [false, true] {
+        let mut ui = Ui::new(400., 300.);
+        let mut label = button().child(text("Click"));
+        if opted_in {
+            label = label.selectable(true);
+        }
+        document(&mut ui, vec![text("Before"), label, text("After")]);
+        press(&mut ui, 1., 10., false);
+        release(&mut ui, 1., 10.);
+        ui.dispatch(shortcut("a"));
+        ui.prepare_frame();
+        let selected = ui.selected_text();
+        assert_eq!(selected.contains("Click"), opted_in, "{selected:?}");
+        assert!(
+            selected.contains("Before") && selected.contains("After"),
+            "{selected:?}"
+        );
+    }
 }

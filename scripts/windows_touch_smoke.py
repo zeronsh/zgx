@@ -386,7 +386,8 @@ def main():
                                 capture_output=True, text=True).stdout.strip()
         check(copied == "Drag across this paragraph",
               f"the hold selected the word and the drag extended it by words ({copied!r})")
-        # Held on the "Press me" button in the text: its word, and no click.
+        # Held on the "Press me" button in the text: no click, and its label
+        # left out of the selection, as a browser's is.
         win.key("escape")
         before = win.capture(window)
         hold(window, 55, 240, 0.8)
@@ -397,8 +398,8 @@ def main():
         time.sleep(0.3)
         copied = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
                                 capture_output=True, text=True).stdout.strip()
-        check(copied == "Press" and region(before, 123, 230, 230, 250) == region(win.capture(window), 123, 230, 230, 250),
-              "a finger held on a button in the text selects its word and does not press it")
+        check("Press" not in copied and region(before, 123, 230, 230, 250) == region(win.capture(window), 123, 230, 230, 250),
+              f"a finger held on a button in the text selects none of its label and does not press it ({copied!r})")
     finally:
         finish(proc, window)
     if not args.existing_only:
