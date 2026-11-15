@@ -1237,6 +1237,8 @@ fn main() {
         println!("layer_frames: faded scrolls copy their interior and match drawing whole");
         rounded_corners_scrolled_by_a_copy_match_drawing_whole();
         println!("layer_frames: rounded corners scrolled by a copy match drawing whole");
+        moves_before_a_frame_copy_once_and_match_drawing_whole();
+        println!("layer_frames: moves before a frame copy once and match drawing whole");
     }
 }
 
@@ -1311,6 +1313,151 @@ fn rounded_corners_scrolled_by_a_copy_match_drawing_whole() {
     for scale in [1., 1.5] {
         let copies = scrolled_matches_drawing_whole_at(rounded_cards, &steps, scale);
         assert!(copies > 0, "scale {scale}: no copy");
+    }
+}
+/// `scrolled_matches_drawing_whole_at`, with several moves a frame: each
+/// frame's offsets set in turn, laid out after each (as notches dispatched
+/// between two refreshes are), and `shown` flipped after the first where a
+/// frame says so (a row hidden or shown while the content sat between two
+/// moves). Returns how many scrolls copied.
+#[cfg(target_os = "macos")]
+fn moved_in_steps_matches_drawing_whole(
+    view: impl Fn(Signal<f32>, Signal<bool>) -> View,
+    frames: &[(&[f32], bool)],
+    scale: f32,
+) -> usize {
+    let renderer = |host: &objc2::rc::Retained<objc2_quartz_core::CALayer>| {
+        let mut gpu = GpuRenderer::debug_for_layer(
+            host.clone(),
+            (SIZE.0 * scale) as u32,
+            (SIZE.1 * scale) as u32,
+        )
+        .unwrap();
+        gpu.set_scale_factor(scale);
+        gpu
+    };
+    let host = objc2_quartz_core::CALayer::new();
+    let mut gpu = renderer(&host);
+    let mut ui = Ui::new(SIZE.0, SIZE.1);
+    ui.scene.borrow_mut().set_pixel_scale(scale);
+    gpu.install_text(&mut ui.scene.borrow_mut());
+    let offset = ui.signal(0.);
+    let shown = ui.signal(true);
+    ui.mount(view(offset.clone(), shown.clone()));
+    let mut copies = 0;
+    for (n, &(steps, flip)) in frames.iter().enumerate() {
+        for (i, &at) in steps.iter().enumerate() {
+            offset.set(at);
+            ui.prepare_frame();
+            if i == 0 && flip {
+                shown.set(!shown.get());
+                ui.prepare_frame();
+            }
+        }
+        let damage = ui.scene.borrow_mut().flush().damage;
+        copies += gpu
+            .render(&ui.scene.borrow(), &damage)
+            .unwrap()
+            .scroll_copies;
+        gpu.present().unwrap();
+        let pixels = gpu.shown_pixels().expect("a surface shown").2;
+        let whole_host = objc2_quartz_core::CALayer::new();
+        let mut whole = renderer(&whole_host);
+        whole
+            .render(
+                &ui.scene.borrow(),
+                &[zgx::scene::Rect::new(0., 0., SIZE.0, SIZE.1)],
+            )
+            .unwrap();
+        whole.present().unwrap();
+        let expected = whole.shown_pixels().expect("a surface shown").2;
+        if pixels != expected {
+            let width = (SIZE.0 * scale) as usize;
+            let spots: Vec<(usize, usize)> = pixels
+                .chunks(4)
+                .zip(expected.chunks(4))
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(i, _)| (i % width, i / width))
+                .collect();
+            let ys = (
+                spots.iter().map(|s| s.1).min(),
+                spots.iter().map(|s| s.1).max(),
+            );
+            eprintln!("DIFF frame {n} {steps:?}: {} px, y {ys:?}", spots.len());
+        }
+        assert!(
+            pixels == expected,
+            "frame {n} {steps:?}: the surface shown differs from the scene drawn whole"
+        );
+    }
+    copies
+}
+/// `under_glass`, its sixth row hidden while `shown` is false.
+#[cfg(target_os = "macos")]
+fn under_glass_toggled(offset: Signal<f32>, shown: Signal<bool>) -> View {
+    let mut rows = column().gap(4.).p(4.);
+    for i in 0..40 {
+        let mut row = div().w(500.).h(34.).bg(if i % 3 == 0 {
+            Color(170, 60, 60, 255)
+        } else if i % 3 == 1 {
+            Color(60, 170, 60, 255)
+        } else {
+            Color(60, 60, 170, 255)
+        });
+        if i == 5 {
+            let shown = shown.clone();
+            row = row.reactive_style(move || match shown.get() {
+                true => Styles::new(),
+                false => Styles::new().opacity(0.),
+            });
+        }
+        rows = rows.child(row);
+    }
+    overlay()
+        .size(SIZE.0, SIZE.1)
+        .bg(Color(17, 17, 17, 255))
+        .child(
+            scroll(offset)
+                .w(SIZE.0)
+                .h(SIZE.1)
+                .bg(Color(17, 17, 17, 255))
+                .child(rows),
+        )
+        .child(
+            div()
+                .w(300.)
+                .h(50.)
+                .left(40.)
+                .top(SIZE.1 - 70.)
+                .rounded(12.)
+                .bg(Color(255, 255, 255, 40))
+                .backdrop_blur(8.),
+        )
+}
+/// Two and three moves between two frames (more notches than refreshes)
+/// copy once by the net move and show what one move a frame does: under
+/// glass, faded, with a row hidden and shown again between two moves, moved
+/// back where it was, and past the view.
+#[cfg(target_os = "macos")]
+fn moves_before_a_frame_copy_once_and_match_drawing_whole() {
+    let frames: &[(&[f32], bool)] = &[
+        (&[0.], false),
+        (&[3., 10.], false),
+        (&[20., 25., 31.], false),
+        (&[60., 40.], false),
+        (&[50., 70.], true),
+        (&[90., 89., 95.], true),
+        (&[120., 95.], false),
+        (&[400., 380.], false),
+        (&[0.], false),
+    ];
+    for scale in [2., 1., 1.5] {
+        let copies = moved_in_steps_matches_drawing_whole(under_glass_toggled, frames, scale);
+        assert!(copies >= 5, "scale {scale}: {copies} copies");
+        let faded_copies =
+            moved_in_steps_matches_drawing_whole(|offset, _| faded(offset, true), frames, scale);
+        assert!(faded_copies > 0, "scale {scale}: faded, no copy");
     }
 }
 /// A scroll view with a glass bar over its foot: what's clear of the bar's blur
