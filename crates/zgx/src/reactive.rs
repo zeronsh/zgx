@@ -412,16 +412,23 @@ impl Runtime {
         };
         callback()
     }
-    /// A signal in this runtime holding `value`.
+    /// A signal in this runtime holding `value`. Traced, it is named by the
+    /// line that made it until a maker names it better (a script's line).
+    #[cfg_attr(feature = "trace", track_caller)]
     pub fn signal<T: 'static>(&self, value: T) -> Signal<T> {
-        Signal {
+        let signal = Signal {
             inner: Rc::new(SignalInner {
                 value: RefCell::new(value),
                 version: Cell::new(0),
                 subscribers: RefCell::default(),
                 runtime: Rc::downgrade(&self.inner),
             }),
+        };
+        #[cfg(feature = "trace")]
+        if crate::trace::enabled() {
+            crate::trace::made(signal.addr(), std::panic::Location::caller());
         }
+        signal
     }
     /// Runs immediately. Keep the returned handle alive to keep the subscription.
     pub fn effect(&self, callback: impl FnMut() + 'static) -> Effect {
