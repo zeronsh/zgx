@@ -7087,6 +7087,15 @@ fn atom_style_of(
                 offset: *offset,
             }),
         icon,
+        svg: look
+            .svg
+            .as_ref()
+            .map(|(src, [width, height, descent])| zgx::widgets::AtomSvg {
+                svg: load_svg(vm, low, src),
+                width: *width,
+                height: *height,
+                descent: *descent,
+            }),
     }
 }
 /// An atom as a script reads it (`{ id, from, to, data?, style? }`,
