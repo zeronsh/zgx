@@ -6,7 +6,7 @@ use std::ops::{Index, IndexMut};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use super::Row;
+use super::{GridCell, Row};
 use crate::index::Line;
 
 /// Maximum number of buffered lines outside of the grid for performance optimization.
@@ -52,7 +52,7 @@ pub struct Storage<T> {
     len: usize,
 }
 
-impl<T: PartialEq> PartialEq for Storage<T> {
+impl<T: GridCell + Clone + PartialEq> PartialEq for Storage<T> {
     fn eq(&self, other: &Self) -> bool {
         // Both storage buffers need to be truncated and zeroed.
         assert_eq!(self.zero, 0);
@@ -155,8 +155,16 @@ impl<T> Storage<T> {
     /// The default implementation from swap generates 8 movups and 4 movaps
     /// instructions. This implementation achieves the swap in only 8 movups
     /// instructions.
+    ///
+    /// zgx: a row is as many qwords as it takes (four, its cells and its
+    /// table of extras boxed), not a fixed count. Kept over
+    /// `slice::swap` and `ptr::swap_nonoverlapping`: a scroll region swaps
+    /// its rows one by one, and either cost it a seventh more (a 20 MB log
+    /// in a 28-row region: 335M instructions scrolling, against 384M and
+    /// 394M).
     pub fn swap(&mut self, a: Line, b: Line) {
-        debug_assert_eq!(mem::size_of::<Row<T>>(), mem::size_of::<usize>() * 4);
+        const { assert!(mem::size_of::<Row<T>>() % mem::size_of::<usize>() == 0) };
+        let words = mem::size_of::<Row<T>>() / mem::size_of::<usize>();
 
         let a = self.compute_index(a);
         let b = self.compute_index(b);
@@ -172,7 +180,7 @@ impl<T> Storage<T> {
             //
             // The optimizer unrolls this loop and vectorizes it.
             let mut tmp: MaybeUninit<usize>;
-            for i in 0..4 {
+            for i in 0..words as isize {
                 tmp = *a_ptr.offset(i);
                 *a_ptr.offset(i) = *b_ptr.offset(i);
                 *b_ptr.offset(i) = tmp;

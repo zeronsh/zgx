@@ -1236,8 +1236,8 @@ impl Engine {
         let uri = self
             .with_session(|session| {
                 let term = session.term();
-                term.grid()[point]
-                    .hyperlink()
+                term.grid()[point.line]
+                    .hyperlink(point.column)
                     .map(|link| link.uri().to_owned())
             })
             .flatten();

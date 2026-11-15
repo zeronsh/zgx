@@ -17,7 +17,7 @@ use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
-use crate::term::cell::{Cell, Flags, LineLength};
+use crate::term::cell::{Cell, CellExtra, Flags, LineLength};
 use crate::term::color::Colors;
 use crate::term::graphics::{Placement, Placements};
 use crate::vi_mode::{ViModeCursor, ViMotion};
@@ -782,7 +782,7 @@ impl<T> Term<T> {
                 text.push(cell.c);
 
                 // Push zero-width characters.
-                for c in cell.zerowidth().into_iter().flatten() {
+                for c in grid_line.zerowidth(column).into_iter().flatten() {
                     text.push(*c);
                 }
             }
@@ -1248,9 +1248,9 @@ impl<T> Term<T> {
         let fg = self.grid.cursor.template.fg;
         let bg = self.grid.cursor.template.bg;
         let flags = self.grid.cursor.template.flags;
-        let extra = self.grid.cursor.template.extra.clone();
+        let point = self.grid.cursor.point;
 
-        let mut cursor_cell = self.grid.cursor_cell();
+        let cursor_cell = self.grid.cursor_cell();
 
         // Clear all related cells when overwriting a fullwidth cell.
         if cursor_cell
@@ -1259,13 +1259,12 @@ impl<T> Term<T> {
         {
             // Remove wide char and spacer.
             let wide = cursor_cell.flags.contains(Flags::WIDE_CHAR);
-            let point = self.grid.cursor.point;
             if wide && point.column < self.last_column() {
                 self.grid[point.line][point.column + 1]
                     .flags
                     .remove(Flags::WIDE_CHAR_SPACER);
             } else if point.column > 0 {
-                self.grid[point.line][point.column - 1].clear_wide();
+                self.grid[point.line].clear_wide(point.column - 1);
             }
 
             // Remove leading spacers.
@@ -1275,10 +1274,13 @@ impl<T> Term<T> {
                     .flags
                     .remove(Flags::LEADING_WIDE_CHAR_SPACER);
             }
-
-            cursor_cell = self.grid.cursor_cell();
         }
 
+        // zgx: the pen's extra as a slot of the row's table, found after the
+        // wide character's cells are cleared (a slot pushed may renumber
+        // the row's).
+        let extra = self.grid.pen_handle(point);
+        let cursor_cell = self.grid.cursor_cell();
         cursor_cell.c = c;
         cursor_cell.fg = fg;
         cursor_cell.bg = bg;
@@ -1336,7 +1338,7 @@ impl<T> Term<T> {
         if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
             return false;
         }
-        let rest = cell.zerowidth().unwrap_or(&[]);
+        let rest = self.grid[line].zerowidth(column).unwrap_or(&[]);
         let last = rest.last().copied().unwrap_or(cell.c);
         // Told without segmenting where it can be: a regional indicator
         // continues one alone, most emoji only a ZWJ, a variation selector,
@@ -1365,7 +1367,7 @@ impl<T> Term<T> {
             }
             _ => Point::new(line, column),
         };
-        self.grid[at.line][at.column].push_zerowidth(c);
+        self.grid[at.line].push_zerowidth(at.column, c);
         self.damage
             .damage_point(Point::new(at.line.0 as usize, at.column));
         true
@@ -1386,8 +1388,11 @@ impl<T> Term<T> {
             return None;
         }
         let line = self.grid.cursor.point.line;
-        let mut glyph = self.grid[line][column].clone();
+        let mut glyph = self.grid[line][column];
         glyph.flags.insert(Flags::WIDE_CHAR);
+        // zgx: its extra, given it again where it's written (maybe the next
+        // line, another table).
+        let glyph_extra = self.grid[line].slot(glyph.extra).cloned();
 
         if column + 1 >= columns {
             // The last column, the cursor on it waiting to wrap.
@@ -1415,6 +1420,7 @@ impl<T> Term<T> {
         let at = self.grid.cursor.point;
         self.write_at_cursor(' ');
         *self.grid.cursor_cell() = glyph;
+        self.grid[at.line].set_extra(at.column, glyph_extra);
         self.damage_cursor();
         self.grid.cursor.point.column += 1;
         let spacer = self.grid.cursor.point.column;
@@ -1549,7 +1555,7 @@ impl<T: EventListener> Term<T> {
                 column.0 = column.saturating_sub(1);
             }
 
-            self.grid[line][column].push_zerowidth(c);
+            self.grid[line].push_zerowidth(column, c);
             return;
         }
 
@@ -1624,14 +1630,24 @@ impl<T: EventListener> Term<T> {
 }
 
 /// zgx: `run` written over `cells` (as long), each byte's cell made by
-/// `cell`, up to the first cell holding part of a wide character or an
-/// extra (`write_at_cursor` writes those, dropping what they hold): how many
-/// were written. Cells from `clean` on are past the row's `occ`, which
-/// `Row::reset` already counts on holding neither: written straight, no
-/// check and nothing to drop (a line a flood writes into a row just reset
+/// `cell`, up to the first cell holding part of a wide character
+/// (`write_at_cursor` writes those, clearing the rest of it): how many were
+/// written. Cells from `clean` on are past the row's `occ`, which
+/// `Row::reset` already counts on holding no part of one (nor an extra):
+/// written straight, no check (a line a flood writes into a row just reset
 /// is all of them).
 #[inline(always)]
-fn write_run(cells: &mut [Cell], run: &[u8], clean: usize, cell: impl Fn(u8) -> Cell) -> usize {
+fn write_run(
+    cells: &mut [Cell],
+    run: &[u8],
+    clean: usize,
+    blank: Cell,
+    c: impl Fn(u8) -> char,
+) -> usize {
+    // Each cell the pen's `blank` copied as bytes, then its character: a
+    // `Cell` stored a field at a time is four stores (`Color`'s padding),
+    // its bytes copied, one.
+    let blank = std::slice::from_ref(&blank);
     let cells = &mut cells[..run.len()];
     let clean = clean.min(run.len());
     for at in 0..clean {
@@ -1639,25 +1655,41 @@ fn write_run(cells: &mut [Cell], run: &[u8], clean: usize, cell: impl Fn(u8) -> 
         if old
             .flags
             .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
-            || old.extra.is_some()
         {
             return at;
         }
-        let replaced = mem::replace(old, cell(run[at]));
-        // Nothing to drop: a cell with an extra stopped the loop above.
-        debug_assert!(replaced.extra.is_none());
-        mem::forget(replaced);
+        std::slice::from_mut(old).copy_from_slice(blank);
+        old.c = c(run[at]);
+    }
+    // With the default pen (most text): the cells blanked in one copy, then
+    // each one's character.
+    if blank[0] == Cell::default() {
+        #[cfg(debug_assertions)]
+        for old in &cells[clean..] {
+            debug_assert!(
+                !old.has_extra()
+                    && !old
+                        .flags
+                        .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER),
+                "a cell past the row's occupied ones holds something: {old:?}"
+            );
+        }
+        Cell::blank_all(&mut cells[clean..]);
+        for (old, &byte) in cells[clean..].iter_mut().zip(&run[clean..]) {
+            old.c = c(byte);
+        }
+        return run.len();
     }
     for (old, &byte) in cells[clean..].iter_mut().zip(&run[clean..]) {
-        let replaced = mem::replace(old, cell(byte));
         debug_assert!(
-            replaced.extra.is_none()
-                && !replaced
+            !old.has_extra()
+                && !old
                     .flags
                     .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER),
-            "a cell past the row's occupied ones holds something: {replaced:?}"
+            "a cell past the row's occupied ones holds something: {old:?}"
         );
-        mem::forget(replaced);
+        std::slice::from_mut(old).copy_from_slice(blank);
+        old.c = c(byte);
     }
     run.len()
 }
@@ -1709,33 +1741,32 @@ impl<T: EventListener> Handler for Term<T> {
             let charset = self.grid.cursor.charsets[self.active_charset];
             let template = &self.grid.cursor.template;
             let (fg, bg, flags) = (template.fg, template.bg, template.flags);
-            let extra = template.extra.clone();
             let mut at = 0;
             while at < count {
                 let (start, end) = (point.column + at, point.column + count);
+                // zgx: the pen's extra as a slot of the row's table, found
+                // again after each cell `write_at_cursor` writes (a slot
+                // pushed may renumber the row's).
+                let extra = self.grid.pen_handle(Point::new(point.line, start));
                 let row = &mut self.grid[point.line];
                 // The cells from the row's `occ` on hold nothing yet.
                 let clean = row.occ.saturating_sub(start.0);
                 let cells = &mut row[start..end];
                 let run = &bytes[at..count];
                 // Up to a cell holding a wide character, written straight; in
-                // ASCII with nothing extra (the usual), nothing mapped or
-                // cloned.
-                let plain = match (charset, &extra) {
-                    (StandardCharset::Ascii, None) => write_run(cells, run, clean, |byte| Cell {
-                        c: byte as char,
-                        fg,
-                        bg,
-                        flags,
-                        extra: None,
-                    }),
-                    _ => write_run(cells, run, clean, |byte| Cell {
-                        c: charset.map(byte as char),
-                        fg,
-                        bg,
-                        flags,
-                        extra: extra.clone(),
-                    }),
+                // ASCII (the usual), nothing mapped.
+                let blank = Cell {
+                    c: ' ',
+                    fg,
+                    bg,
+                    flags,
+                    extra,
+                };
+                let plain = match charset {
+                    StandardCharset::Ascii => {
+                        write_run(cells, run, clean, blank, |byte| byte as char)
+                    }
+                    _ => write_run(cells, run, clean, blank, |byte| charset.map(byte as char)),
                 };
                 at += plain;
                 if at < count {
@@ -2297,6 +2328,11 @@ impl<T: EventListener> Handler for Term<T> {
         for cell in &mut row[left..right] {
             *cell = bg.into();
         }
+        // zgx: the whole line blank, no cell holds an extra: the row lets go
+        // of them.
+        if left.0 == 0 && right.0 == row.len() {
+            row.extras.clear();
+        }
 
         let range = self.grid.cursor.point.line..=self.grid.cursor.point.line;
         self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
@@ -2546,10 +2582,10 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
         trace!("Setting hyperlink: {hyperlink:?}");
-        self.grid
-            .cursor
-            .template
-            .set_hyperlink(hyperlink.map(|e| e.into()));
+        CellExtra::set_hyperlink(
+            &mut self.grid.cursor.template_extra,
+            hyperlink.map(|e| e.into()),
+        );
     }
 
     /// Set a terminal attribute.
@@ -2560,12 +2596,14 @@ impl<T: EventListener> Handler for Term<T> {
         match attr {
             Attr::Foreground(color) => cursor.template.fg = color,
             Attr::Background(color) => cursor.template.bg = color,
-            Attr::UnderlineColor(color) => cursor.template.set_underline_color(color),
+            Attr::UnderlineColor(color) => {
+                CellExtra::set_underline_color(&mut cursor.template_extra, color)
+            }
             Attr::Reset => {
                 cursor.template.fg = Color::Named(NamedColor::Foreground);
                 cursor.template.bg = Color::Named(NamedColor::Background);
                 cursor.template.flags = Flags::empty();
-                cursor.template.set_underline_color(None);
+                CellExtra::set_underline_color(&mut cursor.template_extra, None);
             }
             Attr::Reverse => cursor.template.flags.insert(Flags::INVERSE),
             Attr::CancelReverse => cursor.template.flags.remove(Flags::INVERSE),
@@ -2996,7 +3034,10 @@ impl<T: EventListener> Handler for Term<T> {
     // the scrolling region (DECSTBM).
     fn report_setting(&mut self, setting: &[u8]) {
         let value = match setting {
-            b"m" => Some(sgr_setting(&self.grid.cursor.template)),
+            b"m" => Some(sgr_setting(
+                &self.grid.cursor.template,
+                self.grid.cursor.template_extra.as_deref(),
+            )),
             b" q" => {
                 let style = self
                     .cursor_style
@@ -3082,8 +3123,9 @@ const TERMCAPS: &[(&str, Option<&str>)] = &[
 /// zgx: the text attributes `template` holds as SGR would set them, after a
 /// reset (`0`): underline styles as `4:2` to `4:5`, colours by name, or by
 /// index or value in their colon forms (`38:5:n`, `48:2:r:g:b`; nvim reads
-/// direct colour only so), the underline's as `58`.
-fn sgr_setting(template: &Cell) -> String {
+/// direct colour only so), the underline's as `58` (from the pen's extra,
+/// `extra`).
+fn sgr_setting(template: &Cell, extra: Option<&CellExtra>) -> String {
     let mut text = String::from("0");
     let flags = template.flags;
     let codes = [
@@ -3118,7 +3160,7 @@ fn sgr_setting(template: &Cell) -> String {
     };
     color(template.fg, 30, 38);
     color(template.bg, 40, 48);
-    match template.underline_color() {
+    match extra.and_then(CellExtra::underline_color) {
         Some(Color::Indexed(index)) => text.push_str(&format!(";58:5:{index}")),
         Some(Color::Spec(Rgb { r, g, b })) => text.push_str(&format!(";58:2:{r}:{g}:{b}")),
         _ => {}
@@ -3406,7 +3448,7 @@ mod tests {
     use std::mem;
 
     use crate::event::VoidListener;
-    use crate::grid::{Grid, Scroll};
+    use crate::grid::{Grid, Row, Scroll};
     use crate::index::{Column, Point, Side};
     use crate::selection::{Selection, SelectionType};
     use crate::term::cell::{Cell, Flags};
@@ -3417,6 +3459,23 @@ mod tests {
         /// zgx: `input_str` as `input` for each character, to check the run
         /// against.
         pub(super) static BY_CHARACTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// zgx: every cell of `grid`, the history's too, top to bottom, with the
+    /// extra it holds (its handle, which numbers a slot of its row's table,
+    /// left out).
+    fn resolved(grid: &Grid<Cell>) -> Vec<(Cell, Option<CellExtra>)> {
+        let lines = grid.topmost_line().0..=grid.bottommost_line().0;
+        lines
+            .flat_map(|line| {
+                let row = &grid[Line(line)];
+                (0..grid.columns()).map(move |column| {
+                    let mut cell = row[Column(column)];
+                    cell.extra = 0;
+                    (cell, row.extra(Column(column)).cloned())
+                })
+            })
+            .collect()
     }
 
     /// zgx: random output, through the parser in reads of any length, leaves
@@ -3503,7 +3562,7 @@ mod tests {
                 for column in row.occ..grid.columns() {
                     let cell = &row[Column(column)];
                     assert!(
-                        cell.extra.is_none()
+                        !cell.has_extra()
                             && !cell
                                 .flags
                                 .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER),
@@ -3544,16 +3603,7 @@ mod tests {
             let cursor = |term: &Term<VoidListener>| {
                 (term.grid.cursor.point, term.grid.cursor.input_needs_wrap)
             };
-            let cells = |term: &Term<VoidListener>| {
-                let grid = term.grid();
-                let lines = grid.topmost_line().0..=grid.bottommost_line().0;
-                lines
-                    .flat_map(|line| {
-                        (0..grid.columns())
-                            .map(move |column| grid[Line(line)][Column(column)].clone())
-                    })
-                    .collect::<Vec<_>>()
-            };
+            let cells = |term: &Term<VoidListener>| resolved(term.grid());
             let shown = String::from_utf8_lossy(&bytes);
             assert_eq!(cursor(&runs), cursor(&one), "case {case}: {shown:?}");
             let (written, expected) = (cells(&runs), cells(&one));
@@ -3567,11 +3617,12 @@ mod tests {
                     written[at], expected[at]
                 );
             }
-            extra += written.iter().any(|cell| cell.extra.is_some()) as usize;
+            extra += written.iter().any(|(_, extra)| extra.is_some()) as usize;
             wide += written
                 .iter()
-                .any(|cell| cell.flags.contains(Flags::WIDE_CHAR)) as usize;
-            drawn += written.iter().any(|cell| cell.c == '▒') as usize;
+                .any(|(cell, _)| cell.flags.contains(Flags::WIDE_CHAR))
+                as usize;
+            drawn += written.iter().any(|(cell, _)| cell.c == '▒') as usize;
         }
         assert!(
             extra > 30 && wide > 30 && drawn > 30 && resized > 100,
@@ -3951,16 +4002,7 @@ mod tests {
                 };
                 // Every cell, the history's too (a grid scrolled compares
                 // only by its cells).
-                let cells = |term: &Term<VoidListener>| {
-                    let grid = term.grid();
-                    let lines = grid.topmost_line().0..=grid.bottommost_line().0;
-                    lines
-                        .flat_map(|line| {
-                            (0..grid.columns())
-                                .map(move |column| grid[Line(line)][Column(column)].clone())
-                        })
-                        .collect::<Vec<_>>()
-                };
+                let cells = |term: &Term<VoidListener>| resolved(term.grid());
                 assert_eq!(state(&runs), state(&one), "setup {at}, {text:?}");
                 assert!(cells(&runs) == cells(&one), "setup {at}, {text:?}");
             }
@@ -3968,8 +4010,8 @@ mod tests {
     }
 
     /// zgx: plain text written over cells holding extras (combining marks,
-    /// a hyperlink, an underline colour) leaves none of them, and frees
-    /// every one; so does erasing a line of more of them.
+    /// a hyperlink, an underline colour) leaves none of them, and the line
+    /// erased frees every one; so does erasing a line of more of them.
     #[test]
     fn plain_text_over_extras_frees_them() {
         let size = TermSize::new(20, 3);
@@ -3978,23 +4020,29 @@ mod tests {
         let extras: &[u8] = "e\u{301}e\u{301}e\u{301}\x1b]8;id=a;https://example.com\x1b\\abc\
                               \x1b]8;;\x1b\\\x1b[58;2;1;2;3mdef\x1b[0m"
             .as_bytes();
-        // Every extra the first line's cells hold, held weakly: dead once
-        // its allocation is freed.
+        // Every extra a line's cells hold, held weakly: dead once its
+        // allocation is freed. A hyperlink's run is one slot, as is the
+        // underline colour's.
         let held = |term: &Term<VoidListener>, line: i32| {
-            (0..term.columns())
-                .filter_map(|column| term.grid()[Line(line)][Column(column)].extra.as_ref())
+            let row = &term.grid()[Line(line)];
+            assert_eq!((0..20).filter(|&at| row[Column(at)].has_extra()).count(), 9);
+            row.extras
+                .as_slice()
+                .iter()
                 .map(Arc::downgrade)
                 .collect::<Vec<_>>()
         };
         parser.advance(&mut term, extras);
         let overwritten = held(&term, 0);
-        assert_eq!(overwritten.len(), 9);
+        assert_eq!(overwritten.len(), 5);
         parser.advance(&mut term, b"\x1b[1;1Hplain text over it");
         let line: String = (0..20)
             .map(|column| term.grid()[Line(0)][Column(column)].c)
             .collect();
         assert_eq!(line, "plain text over it  ");
-        assert!((0..20).all(|column| term.grid()[Line(0)][Column(column)].extra.is_none()));
+        assert!((0..20).all(|column| !term.grid()[Line(0)][Column(column)].has_extra()));
+        // Their slots kept until the line is erased.
+        parser.advance(&mut term, b"\x1b[2K");
         assert!(
             overwritten.iter().all(|extra| extra.upgrade().is_none()),
             "an extra kept"
@@ -4003,7 +4051,7 @@ mod tests {
         parser.advance(&mut term, b"\x1b[2;1H");
         parser.advance(&mut term, extras);
         let cleared = held(&term, 1);
-        assert_eq!(cleared.len(), 9);
+        assert_eq!(cleared.len(), 5);
         // The line erased (all of the screen, ED 2, would keep it in the
         // history).
         parser.advance(&mut term, b"\x1b[2K");
@@ -4011,6 +4059,190 @@ mod tests {
             cleared.iter().all(|extra| extra.upgrade().is_none()),
             "an extra kept"
         );
+    }
+
+    /// zgx: no row's table of extras holds more than `max(width, 8)` slots
+    /// after `term` repaints its first `rows` lines in place `times` times
+    /// with `line` (the CUP to each row before it), each row checked by
+    /// `check` after each repaint.
+    fn repaint_in_place(line: &[u8], rows: usize, times: usize, check: impl Fn(&Row<Cell>, usize)) {
+        let size = TermSize::new(30, rows + 1);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        let limit = cmp::max(term.columns(), 8);
+        for time in 0..times {
+            for row in 0..rows {
+                parser.advance(&mut term, format!("\x1b[{};1H", row + 1).as_bytes());
+                parser.advance(&mut term, line);
+            }
+            for row in 0..rows {
+                let row = &term.grid()[Line(row as i32)];
+                assert!(
+                    row.extras.len() <= limit,
+                    "{} slots at {time}",
+                    row.extras.len()
+                );
+                check(row, time);
+            }
+        }
+    }
+
+    /// zgx: a TUI repainting hyperlinked text in place (each repaint a link
+    /// of its own, as OSC 8 makes one; a run of it, and cells each with its
+    /// own) keeps each row's table bounded, every cell on the link it was
+    /// written with.
+    #[test]
+    fn hyperlinks_repainted_in_place_keep_their_tables_bounded() {
+        let mut line = b"\x1b]8;id=x;https://e.com\x1b\\a run of a link\x1b]8;;\x1b\\ ".to_vec();
+        for at in 0..12 {
+            line.extend_from_slice(format!("\x1b]8;id={at};https://{at}.com\x1b\\c").as_bytes());
+        }
+        line.extend_from_slice(b"\x1b]8;;\x1b\\");
+        repaint_in_place(&line, 3, 10_000, |row, time| {
+            for at in 0..15 {
+                let link = row.hyperlink(Column(at)).expect("a link");
+                assert_eq!((link.id(), link.uri()), ("x", "https://e.com"), "{time}");
+            }
+            assert_eq!(row.hyperlink(Column(15)), None);
+            for at in 0..12 {
+                let link = row.hyperlink(Column(16 + at)).expect("a link");
+                assert_eq!(link.uri(), format!("https://{at}.com"), "{time}");
+            }
+        });
+    }
+
+    /// zgx: combining marks repainted in place keep each row's table
+    /// bounded, each cell with its mark.
+    #[test]
+    fn combining_marks_repainted_in_place_keep_their_tables_bounded() {
+        repaint_in_place("e\u{301}".repeat(29).as_bytes(), 3, 10_000, |row, time| {
+            for at in 0..29 {
+                assert_eq!(row[Column(at)].c, 'e');
+                assert_eq!(row.zerowidth(Column(at)), Some(&['\u{301}'][..]), "{time}");
+            }
+        });
+    }
+
+    /// zgx: a run written with a hyperlink and an underline colour (a run at
+    /// once or a character at a time) holds one slot of its row's table; a
+    /// mark joined to one of its cells is that cell's alone.
+    #[test]
+    fn a_run_written_with_the_pen_is_one_slot() {
+        for by_character in [false, true] {
+            let size = TermSize::new(80, 3);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+            BY_CHARACTER.set(by_character);
+            parser.advance(
+                &mut term,
+                b"\x1b]8;id=a;https://example.com\x1b\\\x1b[4;58;5;3m",
+            );
+            parser.advance(&mut term, "x".repeat(40).as_bytes());
+            BY_CHARACTER.set(false);
+            let row = &term.grid()[Line(0)];
+            assert_eq!(row.extras.len(), 1, "{by_character}");
+            for at in 0..40 {
+                assert_eq!(
+                    row.hyperlink(Column(at)).map(|link| link.uri().to_owned()),
+                    Some("https://example.com".into())
+                );
+                assert_eq!(row.underline_color(Column(at)), Some(Color::Indexed(3)));
+            }
+            assert!(!row[Column(40)].has_extra());
+
+            parser.advance(&mut term, "\u{301}".as_bytes());
+            let row = &term.grid()[Line(0)];
+            assert_eq!(row.extras.len(), 2);
+            assert_eq!(row.zerowidth(Column(39)), Some(&['\u{301}'][..]));
+            assert_eq!(row.underline_color(Column(39)), Some(Color::Indexed(3)));
+            assert!(row.hyperlink(Column(39)).is_some());
+            assert_eq!(
+                row.zerowidth(Column(38)),
+                Some(&[][..]),
+                "the run's left alone"
+            );
+        }
+    }
+
+    /// zgx: DECSC and DECRC save and restore the pen's hyperlink and
+    /// underline colour with the rest of it.
+    #[test]
+    fn a_saved_cursor_keeps_the_pens_hyperlink_and_underline_colour() {
+        let size = TermSize::new(20, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        parser.advance(
+            &mut term,
+            b"\x1b]8;id=a;https://example.com\x1b\\\x1b[58;5;3m\x1b7",
+        );
+        parser.advance(&mut term, b"\x1b]8;;\x1b\\\x1b[0mplain\x1b8linked");
+        let row = &term.grid()[Line(0)];
+        for at in 0..6 {
+            let link = row.hyperlink(Column(at)).expect("a link");
+            assert_eq!((link.id(), link.uri()), ("a", "https://example.com"));
+            assert_eq!(row.underline_color(Column(at)), Some(Color::Indexed(3)));
+        }
+        // The restored pen asked for, as a program would.
+        assert_eq!(
+            sgr_setting(
+                &term.grid.cursor.template,
+                term.grid.cursor.template_extra.as_deref()
+            ),
+            "0;58:5:3"
+        );
+    }
+
+    /// zgx: lines with hyperlinks (a wide character in one), underline
+    /// colours and combining marks keep them as a resize reflows them
+    /// narrower and wider, and are as they were back at their width; no
+    /// table grows past its bound.
+    #[test]
+    fn reflow_keeps_the_cells_extras() {
+        let size = TermSize::new(20, 6);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        let line = "\x1b]8;id=l;https://e.com\x1b\\linked 日本 t\x1b]8;;\x1b\\ \x1b[4;58;5;3mund\
+                    \x1b[0m e\u{301}x\r\n";
+        for _ in 0..3 {
+            parser.advance(&mut term, line.as_bytes());
+        }
+        let before = resolved(term.grid());
+        let bounded = |term: &Term<VoidListener>| {
+            let grid = term.grid();
+            let limit = cmp::max(grid.columns(), 8);
+            for line in grid.topmost_line().0..=grid.bottommost_line().0 {
+                assert!(grid[Line(line)].extras.len() <= limit, "line {line}");
+            }
+        };
+        for columns in [7, 4, 13, 9] {
+            term.resize(TermSize::new(columns, 6));
+            bounded(&term);
+            // The link's text, the underline colour's and the marks, read
+            // through the reflowed lines.
+            let (mut linked, mut coloured, mut marked) = (String::new(), 0, 0);
+            let grid = term.grid();
+            for line in grid.topmost_line().0..=grid.bottommost_line().0 {
+                let row = &grid[Line(line)];
+                for at in (0..columns).map(Column) {
+                    let spacer = row[at]
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
+                    if row.hyperlink(at).is_some() && !spacer {
+                        linked.push(row[at].c);
+                    }
+                    coloured += (row.underline_color(at) == Some(Color::Indexed(3))) as usize;
+                    marked += (row.zerowidth(at) == Some(&['\u{301}'][..])) as usize;
+                }
+            }
+            assert_eq!(linked, "linked 日本 t".repeat(3), "{columns} columns");
+            assert_eq!((coloured, marked), (9, 3), "{columns} columns");
+            term.resize(TermSize::new(20, 6));
+            bounded(&term);
+            assert!(
+                resolved(term.grid()) == before,
+                "{columns} columns and back"
+            );
+        }
     }
 
     /// zgx: REP repeats a run's last character, as it repeats a character's.
@@ -4889,12 +5121,12 @@ mod grapheme_tests {
     fn row(term: &Term<Answers>) -> Vec<(String, bool)> {
         let line = &term.grid[Line(0)];
         (0..term.columns())
-            .map(|column| &line[Column(column)])
-            .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
-            .map(|cell| {
-                let mut cluster = String::from(cell.c);
-                cluster.extend(cell.zerowidth().into_iter().flatten());
-                (cluster, cell.flags.contains(Flags::WIDE_CHAR))
+            .map(Column)
+            .filter(|&column| !line[column].flags.contains(Flags::WIDE_CHAR_SPACER))
+            .map(|column| {
+                let mut cluster = String::from(line[column].c);
+                cluster.extend(line.zerowidth(column).into_iter().flatten());
+                (cluster, line[column].flags.contains(Flags::WIDE_CHAR))
             })
             .collect()
     }

@@ -3,7 +3,7 @@
 //! the screen model only for rows that changed.
 use crate::{Palette, Term, dim};
 use alacritty_terminal::{
-    grid::Dimensions,
+    grid::{Dimensions, Row},
     index::{Column, Line, Point},
     selection::SelectionRange,
     term::cell::{Cell, Flags},
@@ -444,9 +444,10 @@ fn row_built<L, const STYLED: bool, const RUNS: bool>(
             // A plain row's runs say whether it has one (`row`).
             if STYLED
                 && !underline.is_empty()
-                && (underline.intersects(STYLED_UNDERLINES) || cell.underline_color().is_some())
+                && (underline.intersects(STYLED_UNDERLINES)
+                    || cells.underline_color(Column(column)).is_some())
             {
-                styled_underline(&mut paint, term, palette, cell, column, width, ink);
+                styled_underline(&mut paint, term, palette, cells, column, width, ink);
                 underline = Flags::empty();
             }
             if blank && underline.is_empty() {
@@ -467,8 +468,9 @@ fn row_built<L, const STYLED: bool, const RUNS: bool>(
                 underlines |= underline;
                 let mut text = String::new();
                 text.push(c);
-                if let Some(extra) = cell.zerowidth() {
-                    coloured |= !underline.is_empty() && cell.underline_color().is_some();
+                if let Some(extra) = cells.zerowidth(Column(column)) {
+                    coloured |=
+                        !underline.is_empty() && cells.underline_color(Column(column)).is_some();
                     text.extend(extra);
                 }
                 paint.runs.push(Run {
@@ -506,8 +508,9 @@ fn row_built<L, const STYLED: bool, const RUNS: bool>(
                 });
             }
             open.push(if blank { ' ' } else { c });
-            if let Some(extra) = cell.zerowidth() {
-                coloured |= !underline.is_empty() && cell.underline_color().is_some();
+            if let Some(extra) = cells.zerowidth(Column(column)) {
+                coloured |=
+                    !underline.is_empty() && cells.underline_color(Column(column)).is_some();
                 open.extend(extra);
             }
         }
@@ -518,7 +521,7 @@ fn row_built<L, const STYLED: bool, const RUNS: bool>(
             let cell: &Cell = &cells[Column(column)];
             let flags = cell.flags;
             let plain = |c: char| (' '..='~').contains(&c);
-            if cell.extra.is_none()
+            if !cell.has_extra()
                 && plain(cell.c)
                 && !flags.intersects(
                     Flags::WIDE_CHAR
@@ -542,7 +545,7 @@ fn row_built<L, const STYLED: bool, const RUNS: bool>(
                     if cell.flags != flags
                         || cell.fg != fg
                         || cell.bg != bg
-                        || cell.extra.is_some()
+                        || cell.has_extra()
                         || !plain(c)
                         || (c != ' ' && !in_style)
                     {
@@ -597,21 +600,21 @@ const STYLED_UNDERLINES: Flags = Flags::DOUBLE_UNDERLINE
     .union(Flags::DOTTED_UNDERLINE)
     .union(Flags::DASHED_UNDERLINE);
 
-/// `cell`'s underline in a style or colour of its own (column `column`,
-/// cells `width` wide, its text in `ink`), joined to the one before it where
-/// they meet in the same style and colour.
+/// The underline of `cells`' cell at `column` in a style or colour of its
+/// own (cells `width` wide, its text in `ink`), joined to the one before it
+/// where they meet in the same style and colour.
 #[cold]
 #[inline(never)]
 fn styled_underline<L>(
     paint: &mut RowPaint,
     term: &alacritty_terminal::Term<L>,
     palette: &Palette,
-    cell: &Cell,
+    cells: &Row<Cell>,
     column: usize,
     width: f32,
     ink: Color,
 ) {
-    let flags = cell.flags;
+    let flags = cells[Column(column)].flags;
     let style = if flags.contains(Flags::UNDERCURL) {
         UnderlineStyle::Curly
     } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
@@ -623,8 +626,8 @@ fn styled_underline<L>(
     } else {
         UnderlineStyle::Single
     };
-    let color = cell
-        .underline_color()
+    let color = cells
+        .underline_color(Column(column))
         .map_or(ink, |given| self::color(resolve(term, palette, given)));
     let span = if flags.contains(Flags::WIDE_CHAR) {
         2.
