@@ -185,6 +185,22 @@ impl Search {
                 .position(|cell| cell.c == lead || cell.c == other)
             {
                 let start = at + skipped;
+                // Most candidates differ at the second character: where it's
+                // the next cell on this row (no spacer between), it's read
+                // here, before the whole match (`matches_at` would read it
+                // there and give up).
+                if let (Some(&second), Some(next)) = (self.needle.get(1), cells.get(start + 1))
+                    && !next
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    && fold_char(next.c, self.fold) != second
+                {
+                    at = start + 1;
+                    if at >= columns {
+                        break;
+                    }
+                    continue;
+                }
                 match self.matches_at(term, number, start, last) {
                     Some(end) => {
                         found.push(Hit::new((number, start), end));
@@ -459,6 +475,22 @@ mod tests {
         assert_eq!(wide.total(), 2);
         let first = wide.at(0);
         assert_eq!((first.start().1, first.end().1), (0, 3), "two wide cells");
+    }
+
+    /// A needle whose first character ends a row (its second starts the
+    /// next), or is wide (its spacer between): found, not turned away by the
+    /// second character's look on the first row.
+    #[test]
+    fn a_second_character_past_the_row_or_a_spacer_is_found() {
+        // 20 columns: "needle" from column 19, "n" alone on its row.
+        let session = session(100, &format!("{}needle\r\n日x 日本\r\n", "x".repeat(19)));
+        let found = search(&session, "needle");
+        assert_eq!(found.total(), 1);
+        let hit = found.at(0);
+        assert_eq!((hit.start().1, hit.end().1), (19, 4), "{hit:?}");
+        assert_eq!(hit.end().0, hit.start().0 + 1, "on the next line");
+        assert_eq!(search(&session, "日本").total(), 1);
+        assert_eq!(search(&session, "日x").total(), 1);
     }
 
     /// Output arriving while a search is open: the history's lines are
