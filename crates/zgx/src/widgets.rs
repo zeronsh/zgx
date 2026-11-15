@@ -1,5 +1,8 @@
 //! Retained widgets with reactive values, keyboard input and accessibility semantics.
 use crate::time::Instant;
+/// What a key, a press, the wheel or text adds to `UiStorage::inputs`, a
+/// pointer move one: a frame after it reads the clock (`Ui::input_frame`).
+const DISCRETE: u64 = 1 << 32;
 use crate::{
     input::{EventPhase, InputBinding, InputDispatcher, InputEvent, Key, PointerButton},
     reactive::{Effect, Runtime, Signal},
@@ -1905,6 +1908,15 @@ pub(crate) struct UiStorage {
     /// What the last primary press went to: the keyboard scrolls the scroll
     /// view around it (`scroll_keys`).
     last_pressed: Cell<Option<NodeId>>,
+    /// Input events the window had (keys, the pointer, the wheel, text;
+    /// not its focus coming or going), and how many of them `last_input`
+    /// has seen, and when it saw the last.
+    inputs: Cell<u64>,
+    inputs_seen: Cell<u64>,
+    last_input: Cell<Option<Instant>>,
+    /// Frames with only the pointer moving to go before the clock is read
+    /// again for input (`input_frame`).
+    input_skip: Cell<u8>,
     /// Elastic scrolling (`Ui::set_elastic_scrolling`): off, never read.
     elastic: RefCell<crate::elastic::State>,
     /// Scroll views that page (`View::paging`): none, never more than a look.
@@ -2270,6 +2282,10 @@ impl Ui {
             list_rows: Default::default(),
             wheel_lines: Default::default(),
             last_pressed: Cell::new(None),
+            inputs: Cell::new(0),
+            inputs_seen: Cell::new(0),
+            last_input: Cell::new(None),
+            input_skip: Cell::new(0),
             elastic: Default::default(),
             paging: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
@@ -3898,6 +3914,50 @@ impl Ui {
         }
         true
     }
+    /// When the window last had input (a key, the pointer, the wheel, text;
+    /// not its focus coming or going), for an app's idle gate (nothing
+    /// touched for a minute): as of the frame after it, or of this call if
+    /// no frame came since. While input goes on frame after frame (the
+    /// pointer moving), the clock is read once in 64 of them, so the time
+    /// may be up to that many frames old; a key, a press, the wheel or text
+    /// is read at its own frame. None before any.
+    #[doc(hidden)]
+    pub fn last_input(&self) -> Option<Instant> {
+        if self.storage.inputs.get() != self.storage.inputs_seen.get() {
+            self.note_input();
+        }
+        self.storage.last_input.get()
+    }
+    /// Input noted since `last_input` last looked: now.
+    #[cold]
+    #[inline(never)]
+    fn note_input(&self) {
+        self.storage.inputs_seen.set(self.storage.inputs.get());
+        self.storage.last_input.set(Some(Instant::now()));
+        self.storage.input_skip.set(63);
+    }
+    /// A frame after input: its time read (`note_input`), unless only the
+    /// pointer moved since and it was read in one of the last 64 such
+    /// frames.
+    #[cold]
+    #[inline(never)]
+    fn input_frame(&self) {
+        let skip = self.storage.input_skip.get();
+        let since = (self.storage.inputs.get()).wrapping_sub(self.storage.inputs_seen.get());
+        if skip == 0 || since >= DISCRETE || self.storage.last_input.get().is_none() {
+            self.note_input();
+        } else {
+            self.storage.inputs_seen.set(self.storage.inputs.get());
+            self.storage.input_skip.set(skip - 1);
+        }
+    }
+    /// Whether anything is open over the window's content: a modal or a
+    /// dialog in the window (which holds focus and the pointer), a menu or
+    /// popover, or a popup window.
+    #[doc(hidden)]
+    pub fn overlay_open(&self) -> bool {
+        self.input.focus_scope().is_some() || !self.scene.borrow().popups().is_empty()
+    }
     /// Prepare allocated control geometry before rendering a frame or dispatching input.
     /// Native hosts call this automatically. Headless hosts should call it before `Scene::flush`.
     pub fn prepare_frame(&self) {
@@ -3934,6 +3994,11 @@ impl Ui {
         if self.storage.pixel_scale_seen.get() != scale {
             self.storage.pixel_scale_seen.set(scale);
             self.storage.pixel_scale.set(scale);
+        }
+        // Input since the last frame: its time (`last_input`), as the frame
+        // after it is prepared (not the passes ahead of one, for input).
+        if !AHEAD && self.storage.inputs.get() != self.storage.inputs_seen.get() {
+            self.input_frame();
         }
         self.prepare_frame_once::<AHEAD>()?;
         // Find in page's marks where text mounted or moved, and what its
@@ -5013,6 +5078,22 @@ impl Ui {
         // scroll view's.
         let wheel = matches!(event, InputEvent::Scroll { .. });
         self.storage.wheel_in_window.set(wheel);
+        // Input for `last_input`: a move counts one; a key, a press, the
+        // wheel or text a whole step (`DISCRETE`), which reads the clock at
+        // its frame; the window's focus coming or going, nothing. One add,
+        // no branch.
+        let step = match event {
+            InputEvent::PointerMove { .. } => 1,
+            InputEvent::Focus
+            | InputEvent::Blur
+            | InputEvent::FocusScopeClosed
+            | InputEvent::PointerCancel
+            | InputEvent::PointerLockChange(_) => 0,
+            _ => DISCRETE,
+        };
+        self.storage
+            .inputs
+            .set(self.storage.inputs.get().wrapping_add(step));
         let mut result = dispatch(self, event);
         self.storage.wheel_in_window.set(false);
         self.after_dispatch(after, &mut result);

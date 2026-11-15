@@ -1122,3 +1122,57 @@ fn reserved_commands_publish_their_shortcuts() {
         "reserved commands are menu items too"
     );
 }
+
+/// When the window last had input, for an app's idle gate: none before
+/// any, then a key or the pointer, and not its focus coming or going.
+#[test]
+fn the_window_tells_when_it_last_had_input() {
+    use zgx::input::{InputEvent, Key, Modifiers};
+    let mut h = Harness::inline(r#"return ui.text { "idle", id = "label" }"#);
+    h.ui.prepare_frame();
+    assert_eq!(h.ui.last_input(), None);
+    let before = std::time::Instant::now();
+    h.ui.dispatch(InputEvent::PointerMove { x: 5., y: 5. });
+    h.ui.prepare_frame();
+    let moved = h.ui.last_input().expect("the pointer moved");
+    assert!(moved >= before);
+    // Moving on, frame after frame: the clock is read once in 64 of them.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    h.ui.dispatch(InputEvent::PointerMove { x: 6., y: 5. });
+    h.ui.prepare_frame();
+    assert_eq!(h.ui.last_input(), Some(moved), "read in an earlier frame");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    h.ui.dispatch(InputEvent::Blur);
+    h.ui.dispatch(InputEvent::Focus);
+    h.ui.prepare_frame();
+    assert_eq!(h.ui.last_input(), Some(moved), "focus isn't input");
+    h.ui.dispatch(InputEvent::KeyDown {
+        key: Key::Character("a".into()),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    assert!(h.ui.last_input().unwrap() > moved, "a key is");
+}
+
+/// A modal in the window holds focus and the pointer as an overlay, not
+/// a popup window: `overlay_open` tells it, as it does a popup.
+#[test]
+fn an_open_modal_is_told_as_an_overlay() {
+    let h = Harness::inline(
+        r#"local open = ui.state("open", false)
+ui.command { id = "open", run = function() open:set(true) end }
+return ui.column {
+    ui.text { "page", id = "label" },
+    ui.modal { open = open, ui.text { "dialog" } },
+}"#,
+    );
+    h.ui.prepare_frame();
+    assert!(!h.ui.overlay_open());
+    assert!(h.host.run_command("open"));
+    h.settle();
+    assert!(
+        h.ui.scene.borrow().popups().is_empty(),
+        "not a popup window"
+    );
+    assert!(h.ui.overlay_open());
+}
