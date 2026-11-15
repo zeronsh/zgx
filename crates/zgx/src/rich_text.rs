@@ -143,7 +143,10 @@ pub struct TextRun {
     /// Room around the run, as CSS's inline padding: across, it is added
     /// before and after the run's text (it takes space in the line); both
     /// widen its background, which then hugs the text (its font's content
-    /// area) instead of filling the line: an inline code chip.
+    /// area) instead of filling the line: an inline code chip. Negative
+    /// down: all the room across goes before its text, none after (an
+    /// editor atom's leading icon, a run of one grapheme), for a run with no
+    /// background.
     pub padding: [f32; 2],
     /// The background's corner radius.
     pub radius: f32,

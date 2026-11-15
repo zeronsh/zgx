@@ -5,6 +5,8 @@
 #![allow(clippy::duplicate_mod)]
 #[path = "../atom_pointer.rs"]
 mod atom_pointer;
+#[path = "../atom_style.rs"]
+mod atom_style;
 #[cfg(feature = "audio")]
 #[path = "../audio.rs"]
 mod audio;

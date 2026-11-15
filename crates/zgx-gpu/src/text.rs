@@ -2014,7 +2014,14 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
         }
         let mut attributes = attrs(&run.font, run.font_size.max(1.));
         if run.padding[0] > 0. {
-            attributes = attributes.padding(run.padding[0] / run.font_size.max(1.));
+            // Negative down: all of it before the text (`TextRun::padding`),
+            // which the shaper takes as a negative padding.
+            let across = if run.padding[1] < 0. {
+                -2. * run.padding[0]
+            } else {
+                run.padding[0]
+            };
+            attributes = attributes.padding(across / run.font_size.max(1.));
             if run.font.features.is_inline_box() {
                 let boxes = boxes.get_or_insert_with(|| rich.inline_boxes());
                 attributes = attributes.inline_box(box_at(boxes, run.range.start));
@@ -2834,6 +2841,14 @@ pub fn rich_decorations_in<'a>(
                         strike: false,
                     });
                 }
+                // A lead's room (an atom's icon, `TextRun::padding` negative
+                // down) is no text: its lines start after it, as the web's
+                // decorations cover the text, not an inline box's padding.
+                let left = if run.padding[1] < 0. {
+                    (left + 2. * run.padding[0]).min(right)
+                } else {
+                    left
+                };
                 for (decoration, y, strike) in [
                     (
                         run.underline,
@@ -2942,6 +2957,45 @@ mod wash_tests {
             .filter(|d| d.background)
             .map(|d| d.bounds)
             .collect()
+    }
+
+    /// A mention's underline starts at its name, after its icon's room
+    /// (a lead: half across, negative down), not under the icon.
+    #[test]
+    fn an_underline_starts_after_a_leads_room() {
+        let text = "ask Ada now";
+        let lined = |range: std::ops::Range<usize>, padding: [f32; 2]| TextRun {
+            range,
+            padding,
+            underline: Some(zgx::rich_text::Decoration::new(1.)),
+            font_size: 18.,
+            ..Default::default()
+        };
+        let underline_left = |padding: [f32; 2]| {
+            let rich = RichText::new(
+                text,
+                vec![
+                    run(0..4, None),
+                    lined(4..5, padding),
+                    lined(5..7, [0.; 2]),
+                    run(7..11, None),
+                ],
+            )
+            .unwrap();
+            let mut fonts = FontSystem::new();
+            let buffer = rich_buffer(&mut fonts, &rich, Some(600.), None);
+            rich_decorations(&buffer, &rich, &mut fonts)
+                .into_iter()
+                .filter(|d| !d.background && d.run == 1)
+                .map(|d| d.bounds.x)
+                .fold(f32::MAX, f32::min)
+        };
+        let plain = underline_left([0.; 2]);
+        let led = underline_left([10., -1.]);
+        assert!(
+            (led - plain - 20.).abs() < 0.5,
+            "after the 20 point room: {plain} {led}"
+        );
     }
 
     /// A chip with an icon is runs of its own (the icon's room, its text,

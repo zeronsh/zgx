@@ -179,6 +179,9 @@ pub struct Atom {
     /// What the host keeps with it (a mention's file, a skill's body), carried
     /// through edits and undo with it.
     pub payload: Option<std::sync::Arc<dyn AtomPayload>>,
+    /// How it shows, over its text area's atom style (a mention's icon).
+    #[doc(hidden)]
+    pub style: Option<std::sync::Arc<crate::editor_atom_style::AtomStyle>>,
 }
 impl Atom {
     /// An atom named `id` over `range`, with no wash or payload.
@@ -188,6 +191,7 @@ impl Atom {
             range,
             wash: None,
             payload: None,
+            style: None,
         }
     }
 }
@@ -201,6 +205,7 @@ impl PartialEq for Atom {
                 (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
                 _ => false,
             }
+            && self.style == other.style
     }
 }
 impl Eq for Atom {}
@@ -659,6 +664,7 @@ impl TextEditor {
             range: start..start + label.len(),
             wash,
             payload,
+            style: None,
         };
         // (The text was already there: no step holds it, and any atom on it
         // goes as an edit would have taken it.)
