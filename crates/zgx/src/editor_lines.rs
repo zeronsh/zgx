@@ -308,6 +308,8 @@ pub struct LineMark {
     pub align: Option<crate::text_layout::TextAlign>,
     /// A picture drawn as given in its box, in place of its fill and border.
     pub svg: Option<std::sync::Arc<crate::svg::SvgData>>,
+    /// Per-side borders and per-corner radii (a table's outer cells), over `radius` and `border_width`.
+    pub decoration: Option<std::sync::Arc<crate::decoration::Decoration>>,
 }
 /// A line mark's picture (`LineMark::image`): decoded pixels and how they fit the mark's box. A file is decoded by
 /// the app, as an image view's is (`zgx_gpu::assets::decode_image_kept`), and kept in its `ImageCache`.
@@ -345,6 +347,7 @@ impl Default for LineMark {
             image: None,
             align: None,
             svg: None,
+            decoration: None,
         }
     }
 }

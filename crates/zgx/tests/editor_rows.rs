@@ -160,3 +160,45 @@ fn up_and_down_move_between_rows_at_the_carets_x() {
     }
     assert_eq!(editor.selection().1, at("A2"));
 }
+
+#[test]
+fn a_marks_decoration_gives_its_quad_per_corner_radii_and_per_side_borders() {
+    use std::sync::Arc;
+    use zgx::decoration::{Corners, Decoration};
+    use zgx::scene::Insets;
+    let (ui, editor) = table();
+    let decoration = Arc::new(Decoration {
+        corners: Some(Corners {
+            top_left: 15.,
+            ..Corners::default()
+        }),
+        border_widths: Some(Insets {
+            top: 1.,
+            right: 1.,
+            bottom: 0.,
+            left: 1.,
+        }),
+        ..Decoration::default()
+    });
+    let shown = decoration.clone();
+    editor.set_line_marks(Some(Rc::new(move |i| match cell(i) {
+        Some((left, _)) if i == 1 => vec![LineMark {
+            x: left,
+            width: 100.,
+            height: 20.,
+            border_color: BORDER,
+            border_width: 1.,
+            decoration: Some(shown.clone()),
+            ..LineMark::default()
+        }],
+        _ => Vec::new(),
+    })));
+    let mut ui = ui;
+    ui.prepare_frame();
+    let decorated: Vec<_> = nodes(&ui, editor.node, |kind| match kind {
+        NodeKind::Quad(quad) if quad.border_color == BORDER => quad.decoration.clone(),
+        _ => None,
+    });
+    assert_eq!(decorated.len(), 1, "the first cell's mark");
+    assert_eq!(decorated[0].0, decoration);
+}
