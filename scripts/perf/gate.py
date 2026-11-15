@@ -220,6 +220,10 @@ SCENES = [
     # walk keeping paint order, which must search a long column of rows as
     # the plain walk does, not look at each.
     ('pointer-move-raised', 'zgx', 'pointer_bench', {'SIDEBAR': '500'}),
+    # The pointer over the page beside a sidebar of 500 rows with icons (an
+    # app's folder tree): an image or SVG in a subtree must not keep the hit
+    # test from skipping it where the pointer isn't.
+    ('pointer-move-icons', 'zgx', 'pointer_bench', {'SIDEBAR': '500', 'ICONS': '1'}),
     # Effects' CPU work through the whole renderer, drawn by wgpu's no-op
     # backend: a scene of boxes as they are, then the same with an animated
     # layer shader painting past its box, and with one reading what's behind
