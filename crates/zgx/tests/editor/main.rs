@@ -14,6 +14,8 @@ mod editor_answer_history;
 mod editor_atom_moves;
 #[path = "../editor_atom_pointer.rs"]
 mod editor_atom_pointer;
+#[path = "../editor_atom_style.rs"]
+mod editor_atom_style;
 #[path = "../editor_atoms.rs"]
 mod editor_atoms;
 #[path = "../editor_autocorrect.rs"]

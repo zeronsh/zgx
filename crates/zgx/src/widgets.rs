@@ -487,6 +487,8 @@ fn show_decorations(
     s.set_text_mark_shapes(id, shaped, ends, radius);
 }
 pub use crate::editor_atom_pointer::{AtomHover, AtomPress};
+#[doc(hidden)]
+pub use crate::editor_atom_style::{AtomIcon, AtomStyle, AtomUnderline};
 /// What is told of an editor's atoms: what happened to them, then all of
 /// them as they are.
 pub type AtomListener = Box<dyn FnMut(&AtomEvent<'_>)>;
@@ -581,6 +583,12 @@ struct CodeHint {
     /// Called after each draw (`EditorHandle::on_drawn`): what follows its
     /// atoms under the pointer as a scroll or a new layout moves them.
     on_drawn: RefCell<Option<Box<dyn FnMut()>>>,
+    /// How its atoms show (`EditorHandle::set_atom_style`), and the atoms'
+    /// and text's revisions the line cache's atom spans are of.
+    atom_style: RefCell<Option<std::sync::Arc<crate::editor_atom_style::AtomStyle>>>,
+    atom_spans_of: Cell<Option<(u64, u64)>>,
+    /// Its atoms' icons, shown: each node and what it shows.
+    atom_icons: RefCell<Vec<(NodeId, std::sync::Arc<crate::svg::SvgData>)>>,
 }
 impl Drop for CodeHint {
     /// A long text's last layout and its line cache hold each other.
@@ -739,6 +747,34 @@ impl EditorHint {
             .and_then(|code| code.lines.borrow().clone())
             .is_some_and(|lines| lines.highlighted())
     }
+}
+/// The line cache's atom spans (`AtomStyle`), made again when its atoms,
+/// its text or their style changed; none while no atom is styled.
+#[inline(never)]
+fn follow_atom_styles(code: &CodeHint, hint: &EditorHint, e: &TextEditor) {
+    let style = code.atom_style.borrow().clone();
+    let atoms = e.atoms();
+    if style.is_none() && !atoms.iter().any(|atom| atom.style.is_some()) {
+        if code.atom_spans_of.replace(None).is_some() {
+            hint.line_cache().set_atom_spans(None);
+        }
+        return;
+    }
+    let key = (e.atoms_revision(), e.revision());
+    if code.atom_spans_of.get() == Some(key) {
+        return;
+    }
+    code.atom_spans_of.set(Some(key));
+    let base = style.as_deref().cloned().unwrap_or_default();
+    let text = e.text();
+    let mut spans = Vec::new();
+    for atom in atoms {
+        base.under(atom.style.as_deref())
+            .spans(&text, atom.range.clone(), &mut spans);
+    }
+    spans.sort_by_key(|(range, _)| range.start);
+    hint.line_cache()
+        .set_atom_spans((!spans.is_empty()).then_some(spans));
 }
 /// An editor's blur (`build_text_input_inner`): none, its window going to
 /// the back, or a context menu taking its focus (`context_menu_holds`).
@@ -1235,6 +1271,15 @@ impl EditorHandle {
         if self.editor.borrow_mut().set_atoms(atoms) {
             self.refresh();
         }
+    }
+    /// How its atoms show beyond a wash (a mention's colour, weight,
+    /// underline and leading icon), under each atom's own `Atom::style`.
+    #[doc(hidden)]
+    pub fn set_atom_style(&self, style: Option<crate::editor_atom_style::AtomStyle>) {
+        let code = self.hint.code_made();
+        *code.atom_style.borrow_mut() = style.filter(|s| !s.is_empty()).map(std::sync::Arc::new);
+        code.atom_spans_of.set(None);
+        self.refresh();
     }
     /// The wash behind atoms that have none of their own (`Atom::wash`).
     pub fn set_atom_wash(&self, color: Option<Color>) {
@@ -6184,6 +6229,10 @@ impl Ui {
             // The gutter: as wide as the last line's number (two digits at
             // least, so the text does not move at line 10), and a gap.
             let numbered = draw_numbers.get();
+            // Atoms styled beyond a wash show through the styled lines.
+            if let Some(code) = draw_hint.code() {
+                follow_atom_styles(code, &draw_hint, &e);
+            }
             // Long, or coloured a line at a time: laid out by its lines.
             let long = display_text.is_some()
                 || (draw_hint.lines && display.contains('\n'))
@@ -7027,6 +7076,79 @@ impl Ui {
                     }
                 }
                 drop(marked);
+                // Atoms' leading icons, in the room before each one's text.
+                if code.atom_spans_of.get().is_some() || !code.atom_icons.borrow().is_empty() {
+                    let mut wanted: Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> = Vec::new();
+                    if code.atom_spans_of.get().is_some() {
+                        let base = code.atom_style.borrow().clone();
+                        let text = e.text();
+                        for atom in e.atoms() {
+                            let icon = atom
+                                .style
+                                .as_deref()
+                                .and_then(|own| own.icon.clone())
+                                .or_else(|| base.as_deref().and_then(|b| b.icon.clone()));
+                            let Some(icon) = icon else {
+                                continue;
+                            };
+                            let Some(first) = text
+                                .get(atom.range.clone())
+                                .and_then(|label| label.chars().next())
+                                .map(|c| atom.range.start + c.len_utf8())
+                            else {
+                                continue;
+                            };
+                            let Some(r) = layout
+                                .selection_within(
+                                    atom.range.start..first,
+                                    scroll.1 - inner_height,
+                                    scroll.1 + 2. * inner_height,
+                                )
+                                .into_iter()
+                                .next()
+                            else {
+                                continue;
+                            };
+                            let size = icon.size.max(0.);
+                            wanted.push((
+                                Rect::new(
+                                    r.x - scroll.0,
+                                    r.y - scroll.1 + (r.height - size) / 2.,
+                                    size,
+                                    size,
+                                ),
+                                icon.svg,
+                            ));
+                        }
+                    }
+                    let mut shown = code.atom_icons.borrow_mut();
+                    while shown.len() > wanted.len() {
+                        s.remove(shown.pop().unwrap().0);
+                    }
+                    for (k, (rect, svg)) in wanted.into_iter().enumerate() {
+                        if k == shown.len() {
+                            let id = s.append(
+                                viewport,
+                                NodeKind::Svg(svg.clone()),
+                                fixed(rect.width, rect.height),
+                            );
+                            shown.push((id, svg.clone()));
+                        }
+                        let (id, was) = &mut shown[k];
+                        if !std::sync::Arc::ptr_eq(was, &svg) {
+                            s.set_kind(*id, NodeKind::Svg(svg.clone()));
+                            *was = svg;
+                        }
+                        s.set_style(*id, fixed(rect.width, rect.height));
+                        s.set_transform(
+                            *id,
+                            Transform {
+                                x: rect.x,
+                                y: rect.y,
+                            },
+                        );
+                    }
+                }
                 // The decorations, over the current line: a node of their own.
                 if !shaped.is_empty() || code.decoration_text.get().is_some() {
                     let size = (inner_width, inner_height);

@@ -5,6 +5,8 @@
 #![allow(clippy::duplicate_mod)]
 #[path = "../atom_pointer.rs"]
 mod atom_pointer;
+#[path = "../atom_style.rs"]
+mod atom_style;
 #[path = "../base_ui_props.rs"]
 mod base_ui_props;
 #[path = "../components.rs"]

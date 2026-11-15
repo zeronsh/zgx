@@ -17,6 +17,9 @@ pub(crate) struct ScriptAtom {
     pub key: String,
     pub data: Option<String>,
     pub bg: Option<String>,
+    /// Its whole `style` as JSON when it sets more than `bg` (a mention's
+    /// look), read back as it was given.
+    pub style: Option<String>,
 }
 
 /// A name for an atom made without one.
@@ -69,10 +72,21 @@ pub(crate) fn value_json(value: &Value) -> Option<String> {
 
 /// A payload for an atom named `key`.
 pub(crate) fn payload(key: String, data: &Value, bg: Option<String>) -> Arc<dyn AtomPayload> {
+    styled_payload(key, data, bg, None)
+}
+
+/// `payload`, with its whole `style` kept (as JSON) when it is a look.
+fn styled_payload(
+    key: String,
+    data: &Value,
+    bg: Option<String>,
+    style: Option<String>,
+) -> Arc<dyn AtomPayload> {
     Arc::new(ScriptAtom {
         key,
         data: value_json(data),
         bg,
+        style,
     })
 }
 
@@ -124,7 +138,13 @@ pub(crate) fn item(atom: &Atom, chars: (usize, usize)) -> Value {
             {
                 fields.push(("data", data));
             }
-            if let Some(bg) = &script.bg {
+            if let Some(style) = script
+                .style
+                .as_deref()
+                .and_then(|json| crate::json::parse(json).ok())
+            {
+                fields.push(("style", style));
+            } else if let Some(bg) = &script.bg {
                 fields.push((
                     "style",
                     Value::record([("bg", Value::Str(bg.as_str().into()))]),
@@ -165,6 +185,7 @@ pub(crate) fn from_list(
     value: &Value,
     handle: &EditorHandle,
     color_of: &dyn Fn(&str) -> Option<Color>,
+    look_of: &dyn Fn(&Value) -> Option<Arc<zgx::widgets::AtomStyle>>,
 ) -> Vec<Atom> {
     let Value::List(items) = value else {
         return Vec::new();
@@ -192,9 +213,16 @@ pub(crate) fn from_list(
             Some(Value::Str(bg)) => Some(bg.to_string()),
             _ => None,
         };
+        // A look beyond its wash: kept whole, to read back as given.
+        let look = item
+            .field("style")
+            .and_then(|style| Some((style, look_of(style)?)));
+        let style_json = look.as_ref().and_then(|(style, _)| value_json(style));
         let json = value_json(&data);
         let same = current.iter().find(|atom| {
-            script_atom(atom).is_some_and(|s| s.key == key && s.data == json && s.bg == bg)
+            script_atom(atom).is_some_and(|s| {
+                s.key == key && s.data == json && s.bg == bg && s.style == style_json
+            })
         });
         let atom = match same {
             Some(old) => Atom {
@@ -210,7 +238,8 @@ pub(crate) fn from_list(
                     id,
                     range: start..end,
                     wash: bg.as_deref().and_then(color_of),
-                    payload: Some(payload(key, &data, bg)),
+                    payload: Some(styled_payload(key, &data, bg, style_json)),
+                    style: look.map(|(_, style)| style),
                 }
             }
         };

@@ -881,12 +881,19 @@ fn pad(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, attrs: &At
         if padding.0.is_nan() {
             continue;
         }
+        // Negative: that much room before the span only (an editor atom's
+        // leading icon), none after.
+        let (before, after) = if padding.0 < 0. {
+            (-padding.0, 0.)
+        } else {
+            (padding.0, padding.0)
+        };
         if glyph.start == 0 || attrs_list.get_span(glyph.start - 1) != attrs {
-            glyph.x_advance += padding.0;
-            glyph.x_offset += padding.0;
+            glyph.x_advance += before;
+            glyph.x_offset += before;
         }
         if glyph.end >= line.len() || attrs_list.get_span(glyph.end) != attrs {
-            glyph.x_advance += padding.0;
+            glyph.x_advance += after;
         }
     }
     // A span's least width: what it lacks is added half before and half after.
