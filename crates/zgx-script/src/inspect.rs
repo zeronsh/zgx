@@ -58,9 +58,10 @@ fn ok(text: String, data: Value) -> String {
     ])
     .to_json()
 }
-/// `clipboard`: what the window's clipboard holds (its text, HTML and
-/// image), or with `action` `set`, put `text` and `html` there (either
-/// alone; both as a rich copy) or the picture at `image` (a file). An
+/// `clipboard`: what the window's clipboard holds (its text, HTML, image
+/// and files), or with `action` `set`, put `text` and `html` there (either
+/// alone; both as a rich copy), the picture at `image` (a file) or `files`
+/// (paths, as a file manager copies them; an app's own clipboard only). An
 /// off-screen session's is its own (`ZGX_CLIPBOARD=memory`), so a QA script
 /// sets it and then presses ⌘V (`key`), the app pasting it as a person's
 /// paste: through the editor's `on_paste`.
@@ -71,6 +72,28 @@ async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String
     let field = |name: &str| request.field(name).map(|v| v.to_string());
     if field("action").as_deref() == Some("set") {
         let (text, html) = (field("text"), field("html"));
+        // Files, as a file manager copies them: a list, or one path.
+        let files: Vec<std::path::PathBuf> = match request.field("files") {
+            Some(Value::List(files)) => files.iter().map(|f| f.to_string().into()).collect(),
+            Some(file @ Value::Str(_)) => vec![file.to_string().into()],
+            _ => Vec::new(),
+        };
+        if !files.is_empty() {
+            let count = files.len();
+            return match platform.0.set_clipboard_files(files) {
+                true => ok(
+                    format!(
+                        "the clipboard holds {count} file{}",
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    Value::Nil,
+                ),
+                false => failed(
+                    "the clipboard didn't take the files: only a clipboard of the app's own \
+                     (ZGX_CLIPBOARD=memory) does",
+                ),
+            };
+        }
         if let Some(path) = field("image") {
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
@@ -93,7 +116,9 @@ async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String
             (Some(text), Some(html)) => platform.0.set_clipboard_rich_text(text, html),
             (None, Some(html)) => platform.0.set_clipboard_rich_text(String::new(), html),
             (Some(text), None) => platform.0.set_clipboard_text(text),
-            (None, None) => return failed("clipboard set takes `text`, `html` or `image`"),
+            (None, None) => {
+                return failed("clipboard set takes `text`, `html`, `image` or `files`");
+            }
         };
         return match written {
             true => ok("set the clipboard".into(), Value::Nil),
@@ -105,6 +130,9 @@ async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String
     let size = image
         .as_ref()
         .map(|i| format!("{}x{}", i.width(), i.height()));
+    let files: Vec<String> = (platform.0.clipboard_files().iter())
+        .map(|f| f.display().to_string())
+        .collect();
     let line = |name: &str, value: &Option<String>| match value {
         Some(value) => format!("{name}: {value:?}"),
         None => format!("{name}: none"),
@@ -114,12 +142,20 @@ async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String
             line("text", &text),
             line("html", &html),
             line("image", &size),
+            match files.is_empty() {
+                true => "files: none".to_string(),
+                false => format!("files: {files:?}"),
+            },
         ]
         .join("\n"),
         Value::record([
             ("text", text.as_deref().map_or(Value::Nil, Value::from)),
             ("html", html.as_deref().map_or(Value::Nil, Value::from)),
             ("image", size.as_deref().map_or(Value::Nil, Value::from)),
+            (
+                "files",
+                Value::List(files.iter().map(|f| Value::from(f.as_str())).collect()),
+            ),
         ]),
     )
 }
@@ -1114,8 +1150,21 @@ impl Session {
                 ))
             })(),
             "type" => (|| {
-                let (node, b) = reach(&ui)?;
                 let typed = text("text").ok_or("type takes a `text`")?;
+                // Where focus is, with the caret and selection as they
+                // are: a click would move them.
+                if field("no_click").is_some_and(|v| v.truthy()) {
+                    if field("target").is_some() {
+                        return Err("type --no-click types where focus is: give no target".into());
+                    }
+                    let focused = ui.input.focused().ok_or("nothing has focus to type into")?;
+                    ui.dispatch(zgx::input::InputEvent::Text(typed));
+                    return Ok((
+                        format!("typed into @{}", driver::number(focused)),
+                        Value::Nil,
+                    ));
+                }
+                let (node, b) = reach(&ui)?;
                 driver::click_at(&mut ui, b);
                 ui.dispatch(zgx::input::InputEvent::Text(typed));
                 Ok((format!("typed into @{}", driver::number(node)), Value::Nil))

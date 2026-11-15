@@ -172,6 +172,20 @@ impl Clipboard {
         }
     }
 
+    /// Put `files` on the clipboard, replacing what it holds: only a
+    /// clipboard of the process's own takes them (`ZGX_CLIPBOARD=memory`),
+    /// for a driven session to paste files without a file manager.
+    pub(crate) fn set_files(&mut self, files: Vec<std::path::PathBuf>) -> bool {
+        match &mut self.backend {
+            Backend::Memory(memory) => {
+                memory.set(None, None);
+                memory.with(|held| held.files = files);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Wayland publication is asynchronous: success means the selection was
     /// offered, not that another process has accepted or persisted its data.
     pub(crate) fn set_text(&mut self, text: String) -> Result<()> {

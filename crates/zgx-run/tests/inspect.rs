@@ -1158,3 +1158,118 @@ return ui.column(rows)
     // Every row's write named: what is left unnamed is the engine's own.
     assert!(!frames.contains("40 unnamed"), "{frames}");
 }
+
+/// Files put on the clipboard (`clipboard set --files`), as a file manager
+/// copies them, read back on its `files:` line and reach a field's
+/// `on_paste` as files: an app's paste-as-upload, driven off-screen.
+#[test]
+fn files_set_on_the_clipboard_read_back_and_paste_as_files() {
+    const PASTING: &str = r##"
+local heard = ui.state("heard", "")
+local value = ui.state("value", "")
+return ui.column {
+    ui.input { id = "field", label = "Field", value = value, w = 160, on_paste = function(e)
+        local names = {}
+        for _, file in e.files do
+            table.insert(names, file.name)
+        end
+        heard:set(`files {table.concat(names, " ")}`)
+        return true
+    end },
+    ui.text { id = "heard", "{heard}" },
+}
+"##;
+    let app = TestApp::with_desktop(|runtime| ScriptHost::inline(runtime, "app", PASTING));
+    let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
+    let dir = std::env::temp_dir().join(format!("zgx-paste-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (notes, shot) = (dir.join("notes.txt"), dir.join("shot.png"));
+    std::fs::write(&notes, "notes").unwrap();
+    std::fs::write(&shot, "png").unwrap();
+    let files = Value::List(
+        [&notes, &shot]
+            .map(|path| Value::from(path.to_str().unwrap()))
+            .into(),
+    );
+    let set = format!(
+        r#"{{"cmd":"clipboard","action":"set","files":{}}}"#,
+        files.to_json()
+    );
+    assert_eq!(
+        text(&ask(&app, &session, &set)),
+        "the clipboard holds 2 files"
+    );
+    let read = ask(&app, &session, r#"{"cmd":"clipboard"}"#);
+    let line = format!(
+        "files: {:?}",
+        [notes.display().to_string(), shot.display().to_string()]
+    );
+    assert!(text(&read).lines().any(|l| l == line), "{}", text(&read));
+    assert_eq!(
+        read.field("data")
+            .and_then(|d| d.field("files"))
+            .map(Value::to_json),
+        Some(files.to_json())
+    );
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"click","target":"#field"}"##,
+    ));
+    let paste = if cfg!(target_os = "macos") {
+        "cmd+v"
+    } else {
+        "ctrl+v"
+    };
+    text(&ask(
+        &app,
+        &session,
+        &format!(r#"{{"cmd":"key","keys":"{paste}"}}"#),
+    ));
+    let wait = r##"{"cmd":"wait","target":"#heard","text":"files notes.txt shot.png"}"##;
+    text(&ask(&app, &session, wait));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// `type --no-click` types where focus is, the caret where it was: a click
+/// first would put it where the click landed.
+#[test]
+fn type_without_a_click_types_at_the_caret_where_focus_is() {
+    let (app, session) = app();
+    let no_focus = ask(
+        &app,
+        &session,
+        r#"{"cmd":"type","text":"x","no_click":true}"#,
+    );
+    assert_eq!(error(&no_focus), "nothing has focus to type into");
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"type","target":"#name","text":"world"}"##,
+    ));
+    // The caret back before "world", a character at a time.
+    for _ in 0..5 {
+        text(&ask(&app, &session, r#"{"cmd":"key","keys":"ArrowLeft"}"#));
+    }
+    let typed = text(&ask(
+        &app,
+        &session,
+        r#"{"cmd":"type","text":"hello ","no_click":true}"#,
+    ));
+    assert!(typed.starts_with("typed into @"), "{typed}");
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"wait","target":"#name","text":"hello world"}"##,
+    ));
+    let both = ask(
+        &app,
+        &session,
+        r##"{"cmd":"type","target":"#name","text":"x","no_click":true}"##,
+    );
+    assert!(
+        error(&both).contains("give no target"),
+        "{}",
+        both.to_json()
+    );
+}
