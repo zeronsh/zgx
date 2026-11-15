@@ -4514,6 +4514,14 @@ fn styled(
     if let Some(style) = &node.events().context_menu_style {
         view = view.context_menu_style(apply_all(Styles::new(), style));
     }
+    if let Some(hook) = node
+        .events()
+        .rare
+        .as_ref()
+        .and_then(|rare| rare.copy.clone())
+    {
+        view = on_selection_copy(view, hook, vm, low.elements.clone());
+    }
     if node.events().context_menu_below {
         view = view.context_menu_below(true);
     }
@@ -10444,6 +10452,72 @@ fn on_paste(view: View, hook: mlua::Function, vm: &Rc<Vm>) -> View {
             }
         }
     })
+}
+
+/// `on_copy` on a selectable region: handed `{ text, html, leaves }`, the
+/// selection's text and HTML and, for each text node it spans in order, the
+/// id of the element it is in (its own or the nearest around it, `false`
+/// for none), it returns `{ text, html }` for the clipboard (`text` the
+/// selection's where left out), or nil for the selection's own.
+#[cold]
+#[inline(never)]
+fn on_selection_copy(
+    view: View,
+    hook: mlua::Function,
+    vm: &Rc<Vm>,
+    elements: Rc<crate::element::Elements>,
+) -> View {
+    let vm = vm.clone();
+    view.on_selection_copy(move |request| {
+        let lua = &vm.lua;
+        let event = (|| {
+            let event = lua.create_table()?;
+            event.set("text", request.text)?;
+            event.set("html", request.html)?;
+            let leaves = lua.create_table()?;
+            for (i, leaf) in request.leaves.iter().enumerate() {
+                match leaf_id(&elements, request, *leaf) {
+                    Some(id) => leaves.raw_set(i + 1, id.as_ref())?,
+                    None => leaves.raw_set(i + 1, false)?,
+                }
+            }
+            event.set("leaves", leaves)?;
+            Ok(event)
+        })();
+        match event.and_then(|event| vm.call::<mlua::Value>(&hook, event)) {
+            Ok(mlua::Value::Table(content)) => {
+                let text: Option<String> = content.get("text").unwrap_or(None);
+                let html: Option<String> = content.get("html").unwrap_or(None);
+                Some(zgx::widgets::ClipboardContent {
+                    text: text.unwrap_or_else(|| request.text.to_owned()),
+                    html,
+                })
+            }
+            Ok(_) => None,
+            Err(error) => {
+                vm.report(error);
+                None
+            }
+        }
+    })
+}
+
+/// The id of the element `leaf` (a text node) is in: its own, else the
+/// nearest element with one around it inside the region, else none.
+fn leaf_id(
+    elements: &crate::element::Elements,
+    request: &zgx::widgets::SelectionCopyRequest,
+    leaf: zgx::scene::NodeId,
+) -> Option<Rc<str>> {
+    let scene = request.ui.scene.borrow();
+    let mut node = Some(leaf);
+    while let Some(at) = node.filter(|&at| at != request.region) {
+        if let Some(id) = elements.at(at).and_then(|element| element.id.clone()) {
+            return Some(id);
+        }
+        node = scene.parent(at);
+    }
+    None
 }
 
 /// `autocorrect` and `smart_punctuation`: few inputs ask.

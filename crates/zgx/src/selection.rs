@@ -201,6 +201,9 @@ pub(crate) struct State {
     /// Mounted selectable regions and their highlight colours (in a
     /// focused window, and in one at the back).
     roots: HashMap<NodeId, Palette>,
+    /// What decides a copy out of the few regions asked to
+    /// (`View::on_selection_copy`), by region.
+    copy_hooks: HashMap<NodeId, crate::widgets::SelectionCopyHook>,
     root: Option<NodeId>,
     anchor: Option<TextPoint>,
     focus: Option<TextPoint>,
@@ -427,10 +430,14 @@ struct RootGuard {
 }
 impl Drop for RootGuard {
     fn drop(&mut self) {
+        // The app's hook goes after the state is let go: dropping it may
+        // run the app's code.
+        let mut hook = None;
         if let Some(ui) = self.ui.upgrade()
             && let Ok(mut state) = ui.selection_state().try_borrow_mut()
         {
             state.roots.remove(&self.root);
+            hook = state.copy_hooks.remove(&self.root);
             if state.active_root == Some(self.root) {
                 state.active_root = None;
             }
@@ -441,6 +448,7 @@ impl Drop for RootGuard {
                 state.pending = None;
             }
         }
+        drop(hook);
     }
 }
 
@@ -1531,6 +1539,70 @@ impl Ui {
         let state = self.selection_state().borrow();
         state.anchor.zip(state.focus)
     }
+    /// `hook` decides what a copy out of selectable region `root` puts on
+    /// the clipboard (`View::on_selection_copy`); it goes as the region does.
+    pub(crate) fn set_selection_copy_hook(
+        &self,
+        root: NodeId,
+        hook: crate::widgets::SelectionCopyHook,
+    ) {
+        self.selection_state()
+            .borrow_mut()
+            .copy_hooks
+            .insert(root, hook);
+    }
+    /// The person copied the selected display text (⌘C, the Edit menu, the
+    /// selection's context menu, `Ui::copy_selection`): its region's
+    /// `View::on_selection_copy` says what goes on the clipboard, else the
+    /// selection's text and HTML, and `write` puts it there. Nothing is
+    /// asked of a region without a hook. Whether the clipboard took it; no
+    /// selection, nothing. (Pin line.)
+    #[doc(hidden)]
+    pub fn copy_selection_from(&self, write: impl FnOnce(String, Option<String>) -> bool) -> bool {
+        if !self.has_text_selection() {
+            return false;
+        }
+        let (text, html) = (self.selected_text(), self.selected_html());
+        let hook = {
+            let state = self.selection_state().borrow();
+            state
+                .root
+                .and_then(|root| Some((root, state.copy_hooks.get(&root).cloned()?)))
+        };
+        // Nothing borrowed: the hook may read the selection or the scene.
+        let content = hook.and_then(|(region, hook)| {
+            let leaves = self.selected_leaves();
+            hook(&crate::widgets::SelectionCopyRequest {
+                text: &text,
+                html: &html,
+                leaves: &leaves,
+                region,
+                ui: self,
+            })
+        });
+        match content {
+            Some(content) => write(content.text, content.html),
+            None => write(text, Some(html)),
+        }
+    }
+    /// Copy the selected display text to `platform`'s clipboard as the
+    /// person would (`Ui::copy_selection_from`). Whether the clipboard took
+    /// it. (Pin line.)
+    #[doc(hidden)]
+    pub fn copy_selection(&self, platform: &crate::platform::PlatformService) -> bool {
+        self.copy_selection_from(|text, html| crate::widgets::write_clipboard(platform, text, html))
+    }
+    /// The text nodes the selection spans, in order, each once.
+    fn selected_leaves(&self) -> Vec<NodeId> {
+        let state = self.selection_state().borrow();
+        let mut leaves: Vec<NodeId> = Vec::with_capacity(state.shown.len());
+        for part in &state.shown {
+            if leaves.last() != Some(&part.node) {
+                leaves.push(part.node);
+            }
+        }
+        leaves
+    }
     /// Whether some text is selected.
     pub fn has_text_selection(&self) -> bool {
         !self.selection_state().borrow().shown.is_empty()
@@ -2389,9 +2461,7 @@ pub(crate) fn context_menu(
                 .id("selection-copy")
                 .on_click(move || {
                     if let (Some(ui), Some(platform)) = (copy.upgrade(), &platform) {
-                        platform
-                            .0
-                            .set_clipboard_rich_text(ui.selected_text(), ui.selected_html());
+                        ui.copy_selection(platform);
                     }
                 }),
             crate::compose::menu_item("Select All")
