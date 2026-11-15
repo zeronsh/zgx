@@ -4821,6 +4821,8 @@ fn look_at_functions(
 #[inline(never)]
 fn styles_apart(dynamic: &[(Prop, Owned, Option<Signal<f32>>)], vm: &Rc<Vm>) -> Box<StylesApart> {
     let lits = vm.runtime.signal(Rc::new(Vec::new()));
+    #[cfg(feature = "inspect")]
+    crate::node::name_kind(&lits, "a node's style functions (beside an animated style)");
     let functions: Vec<_> = dynamic
         .iter()
         .filter(|(_, source, _)| matches!(source, Owned::Computed(..)))
