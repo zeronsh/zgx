@@ -112,7 +112,10 @@ def main():
                 reports["drag"] = report()
                 text = reports["drag"]["text"]
                 assert text.startswith("Selectable text\n\nDrag across"), reports
-                assert "Double-press a word" in text and "Press me" in text, reports
+                # The button's label stays out, as a browser's does; the
+                # text either side of it is kept.
+                assert "Double-press a word" in text and "Pressed 0 times" in text, reports
+                assert "Press me" not in text, reports
                 assert "left out of copies" not in text, reports
                 # Once the drag ends, the selection is the primary selection.
                 primary = subprocess.run(["python3", "-c", PRIMARY], env=env, text=True, capture_output=True, timeout=10)

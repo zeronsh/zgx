@@ -889,9 +889,17 @@ impl Ui {
     /// own, nor a list's markers.
     fn selectable_leaves(&self, scene: &Scene, root: NodeId, visit: impl FnMut(TextLeaf)) {
         let semantics = self.semantics.borrow();
+        // A button's label isn't text to select, as in a browser: left out
+        // with what it holds unless it says `selectable(true)` itself.
+        let button = |id: NodeId| {
+            semantics
+                .get(id)
+                .is_some_and(|node| node.role == Role::Button)
+                && scene.user_select(id) != Some(true)
+        };
         scene.selectable_text(
             root,
-            |id| self.is_editor(id) || list_marker(scene, &semantics, id).is_some(),
+            |id| self.is_editor(id) || list_marker(scene, &semantics, id).is_some() || button(id),
             visit,
         );
     }
