@@ -866,6 +866,26 @@ impl __dom::Hooks for NodeHooks {
             state.retained.push(resource);
         }
     }
+    fn scroll_into_view(&self, how: &zgx::compose::ScrollIntoView) -> bool {
+        use zgx::compose::RowAlign;
+        if !self.state.borrow().alive {
+            return false;
+        }
+        let name = |align: RowAlign| match align {
+            RowAlign::Start => "start",
+            RowAlign::Center => "center",
+            RowAlign::End => "end",
+            RowAlign::Nearest => "nearest",
+        };
+        // What was made since is in the document first.
+        flush();
+        let animate = match how.animate {
+            None => -1,
+            Some(false) => 0,
+            Some(true) => 1,
+        };
+        js::zgx_scroll_into_view(self.node, name(how.block), name(how.inline), animate)
+    }
 }
 
 /// Ends a node's hooks with its block: handlers released, what was

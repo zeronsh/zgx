@@ -1909,6 +1909,8 @@ pub(crate) struct UiStorage {
     elastic: RefCell<crate::elastic::State>,
     /// Scroll views that page (`View::paging`): none, never more than a look.
     paging: RefCell<crate::paging::State>,
+    /// Scroll views easing to where `NodeHandle::scroll_into_view` asked.
+    scroll_reveals: RefCell<crate::scroll_reveal::State>,
     /// Scrollbars hide until their view scrolls (`Ui::set_overlay_scrollbars`).
     overlay_scrollbars: Signal<bool>,
     /// Editors' caret width in points (`Ui::set_caret_width`).
@@ -2272,6 +2274,7 @@ impl Ui {
             last_pressed: Cell::new(None),
             elastic: Default::default(),
             paging: Default::default(),
+            scroll_reveals: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
             scrollbar_styles: Default::default(),
             held_scrollbar_style: Default::default(),
@@ -3444,6 +3447,9 @@ impl Ui {
     }
     pub(crate) fn paging_state(&self) -> &RefCell<crate::paging::State> {
         &self.storage.paging
+    }
+    pub(crate) fn scroll_reveal_state(&self) -> &RefCell<crate::scroll_reveal::State> {
+        &self.storage.scroll_reveals
     }
     pub(crate) fn elastic_state(&self) -> &RefCell<crate::elastic::State> {
         &self.storage.elastic
@@ -5013,6 +5019,9 @@ impl Ui {
         // scroll view's.
         let wheel = matches!(event, InputEvent::Scroll { .. });
         self.storage.wheel_in_window.set(wheel);
+        if wheel {
+            crate::scroll_reveal::cancel(self);
+        }
         let mut result = dispatch(self, event);
         self.storage.wheel_in_window.set(false);
         self.after_dispatch(after, &mut result);
@@ -5047,6 +5056,7 @@ impl Ui {
             crate::compose_scrollbar::next_fade(self),
             crate::elastic::next_step(self),
             crate::paging::next_step(self),
+            crate::scroll_reveal::next_step(self),
             crate::caret_blink::next(self),
             crate::find::next_step(self),
         ]
@@ -5100,6 +5110,13 @@ impl Ui {
         };
         // A paged scroll view going to its page.
         let keys = if crate::paging::advance(self, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // A scroll view easing to where a reveal asked.
+        let keys = if crate::scroll_reveal::advance(self, now) {
             self.try_prepare_frame()?;
             true
         } else {

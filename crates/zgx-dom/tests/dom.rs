@@ -261,6 +261,52 @@ fn scroll_offsets_write_the_viewport() {
     assert_eq!(viewport.scroll_top(), 200);
 }
 
+/// `NodeHandle::scroll_into_view` by the browser's own `scrollIntoView`,
+/// at once: whether its scroll container moved, as on the desktop.
+#[wasm_bindgen_test]
+fn a_node_scrolls_into_view_by_the_browsers_own() {
+    use zgx::compose::{RowAlign, ScrollIntoView};
+    let runtime = Runtime::new();
+    let offset = runtime.signal(0_f32);
+    let host = host();
+    let handle = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let kept = handle.clone();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        scroll(offset.clone())
+            .h(100.)
+            .children((0..10).map(move |i| {
+                let kept = kept.clone();
+                let row = text(format!("row {i}")).h(40.);
+                if i == 5 {
+                    row.on_mount(move |node| *kept.borrow_mut() = Some(node))
+                } else {
+                    row
+                }
+            })),
+    );
+    zgx_dom::flush();
+    let viewport = first(&host);
+    let row5 = handle.borrow().clone().expect("row 5 mounted");
+    let at_start = ScrollIntoView {
+        block: RowAlign::Start,
+        inline: RowAlign::Nearest,
+        animate: Some(false),
+    };
+    // Row 5 is 200 to 240 down: at the top of what shows.
+    assert!(row5.scroll_into_view(at_start));
+    assert_eq!(viewport.scroll_top(), 200);
+    assert!(!row5.scroll_into_view(at_start), "already there");
+    assert!(
+        !row5.scroll_into_view(ScrollIntoView {
+            block: RowAlign::Nearest,
+            ..at_start
+        }),
+        "it shows: nearest leaves it"
+    );
+}
+
 #[wasm_bindgen_test]
 fn virtual_lists_mount_what_shows() {
     let runtime = Runtime::new();

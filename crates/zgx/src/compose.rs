@@ -2505,6 +2505,8 @@ pub use crate::compose_rich::{
 };
 pub use crate::compose_scrollbar::{ScrollbarEase, ScrollbarStyle};
 pub use crate::compose_tooltip::{Tooltip, TooltipTiming, set_tooltip_timing};
+#[doc(hidden)]
+pub use crate::scroll_reveal::ScrollIntoView;
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
     View::new(Kind::RichText(Box::new(compute)))
@@ -9069,6 +9071,23 @@ impl NodeHandle {
     /// `max_width` pixels wide (see `Ui::snapshot`).
     pub fn snapshot(&self, max_width: u32) -> Option<std::sync::Arc<crate::image::ImageData>> {
         self.ui.upgrade()?.snapshot(self.node, max_width)
+    }
+    /// Scroll the scroll views around the node, innermost first, so it shows
+    /// as `how` asks, as the web's `element.scrollIntoView` does: `block`
+    /// down and `inline` across each `Nearest` (as little as shows it all;
+    /// none if it does), `Start`, `Center` or `End`, easing there unless the
+    /// system reduces motion (`animate` says otherwise). Whether any moved:
+    /// a list's row scrolled out of its list (no longer mounted) moves none.
+    /// (Hidden until its API is settled.)
+    #[doc(hidden)]
+    pub fn scroll_into_view(&self, how: ScrollIntoView) -> bool {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            return dom.scroll_into_view(&how);
+        }
+        self.ui
+            .upgrade()
+            .is_some_and(|ui| ui.scroll_node_into_view(self.node, how))
     }
     /// Keep `resource` until the node is removed, then drop it.
     pub fn retain(&self, resource: impl Any) {

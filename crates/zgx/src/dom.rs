@@ -83,6 +83,12 @@ pub trait Hooks {
     fn observe_visibility(&self, margin: f32) -> Option<Signal<bool>>;
     fn is_mounted(&self) -> bool;
     fn retain(&self, resource: Box<dyn Any>);
+    /// `NodeHandle::scroll_into_view`, by the browser's own: whether any
+    /// scroll view moved.
+    fn scroll_into_view(&self, how: &crate::scroll_reveal::ScrollIntoView) -> bool {
+        let _ = how;
+        false
+    }
 }
 
 /// A handle to a DOM node, for `on_mount`: its measurements from `hooks`,

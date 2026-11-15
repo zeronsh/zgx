@@ -19,5 +19,6 @@ extern "C" {
     pub(crate) fn zgx_clipboard_html() -> Option<String>;
     pub(crate) fn zgx_clipboard_write(text: &str, html: Option<String>) -> bool;
     pub(crate) fn zgx_open_url(url: &str) -> bool;
+    pub(crate) fn zgx_scroll_into_view(id: u32, block: &str, inline: &str, animate: i32) -> bool;
     pub(crate) fn zgx_measure(font: &str, text: &str) -> Box<[f64]>;
 }

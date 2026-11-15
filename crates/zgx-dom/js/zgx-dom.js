@@ -1317,6 +1317,38 @@ export function zgx_clipboard_write(text, html) {
   return true;
 }
 
+// `NodeHandle::scroll_into_view`: the browser's own, at once, so a script
+// hears whether anything moved. Every scroll container around the node and
+// the page are read before and after an instant scroll; one asked to ease
+// (`animate` 1, or -1 and no prefers-reduced-motion) goes back and eases
+// there from where it was. False for a node not in the document.
+export function zgx_scroll_into_view(id, block, inline, animate) {
+  const node = nodes[id];
+  if (!(node instanceof Element) || !node.isConnected) return false;
+  const around = [];
+  for (let el = node.parentElement; el; el = el.parentElement) {
+    around.push([el, el.scrollLeft, el.scrollTop]);
+  }
+  const page = [window.scrollX, window.scrollY];
+  node.scrollIntoView({ block, inline, behavior: "instant" });
+  const moved =
+    around.some(([el, x, y]) => el.scrollLeft !== x || el.scrollTop !== y) ||
+    window.scrollX !== page[0] ||
+    window.scrollY !== page[1];
+  const ease =
+    animate === 1 ||
+    (animate === -1 && !window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  if (moved && ease) {
+    for (const [el, x, y] of around) {
+      el.scrollLeft = x;
+      el.scrollTop = y;
+    }
+    window.scrollTo(page[0], page[1]);
+    node.scrollIntoView({ block, inline, behavior: "smooth" });
+  }
+  return moved;
+}
+
 export function zgx_open_url(url) {
   return window.open(url, "_blank", "noopener,noreferrer") !== null || true;
 }
