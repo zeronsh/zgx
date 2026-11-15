@@ -72,6 +72,10 @@ pub struct SpanStyle {
     /// Room before its text only, in points: where an atom's leading icon
     /// draws (`AtomStyle::icon`); it moves with the text's first word.
     pub lead: Option<f32>,
+    /// Its text shown as one box `[width, height, descent]` in EM (an
+    /// equation's picture, `AtomStyle::svg`): as wide as that, the line as
+    /// tall as it needs, its text kept for copy and search.
+    pub boxed: Option<[f32; 3]>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -122,6 +126,7 @@ impl SpanStyle {
         self.underline_color = self.underline_color.or(style.underline_color);
         self.underline_offset = self.underline_offset.or(style.underline_offset);
         self.lead = self.lead.or(style.lead);
+        self.boxed = self.boxed.or(style.boxed);
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
@@ -131,10 +136,11 @@ impl SpanStyle {
             && self.background.is_none()
             && !self.underline
             && self.lead.is_none()
+            && self.boxed.is_none()
     }
     /// Whether it changes how its text is shaped (and so its width).
     fn shapes(&self) -> bool {
-        self.weight.is_some() || self.italic || self.lead.is_some()
+        self.weight.is_some() || self.italic || self.lead.is_some() || self.boxed.is_some()
     }
 }
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
@@ -275,7 +281,30 @@ pub(crate) fn styled_line(
         }
         return crate::rich_text::RichText::new(line, runs).ok();
     }
-    let runs: Vec<_> = runs(line, spans)
+    let mut styled = runs(line, spans);
+    // A box is one run, whatever else styles parts of it.
+    styled.dedup_by(|next, run| match (&run.1, &next.1) {
+        (Some(a), Some(b))
+            if a.boxed.is_some() && a.boxed == b.boxed && run.0.end == next.0.start =>
+        {
+            run.0.end = next.0.end;
+            true
+        }
+        _ => false,
+    });
+    let boxes: Vec<crate::rich_text::InlineBox> = styled
+        .iter()
+        .filter_map(|(range, style)| {
+            let [w, h, d] = style.as_ref()?.boxed?;
+            Some(crate::rich_text::InlineBox {
+                width: w * size,
+                height: h * size,
+                baseline: (h - d) * size,
+                ..crate::rich_text::InlineBox::new(range.start)
+            })
+        })
+        .collect();
+    let runs: Vec<_> = styled
         .into_iter()
         .map(|(range, style)| {
             let style = style.unwrap_or_default();
@@ -303,7 +332,10 @@ pub(crate) fn styled_line(
             }
         })
         .collect();
-    crate::rich_text::RichText::new(line, runs).ok()
+    crate::rich_text::RichText::new(line, runs)
+        .ok()?
+        .with_inline_boxes(boxes)
+        .ok()
 }
 /// `style`'s underline: one point thick in its text's colour, or the
 /// font's thickness in its own colour and place when it says them.
@@ -336,7 +368,10 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                     r.end as u32,
                     s.weight.unwrap_or(0),
                     s.italic,
-                    s.lead.map_or(0, f32::to_bits),
+                    s.lead.map_or(0, f32::to_bits)
+                        ^ s.boxed.map_or(0, |[w, h, d]| {
+                            w.to_bits().rotate_left(7) ^ h.to_bits().rotate_left(17) ^ d.to_bits()
+                        }),
                 )
             })
             .collect(),
@@ -1039,6 +1074,20 @@ impl LinesLayout {
         let shown = self.lines_between(top, bottom);
         let lines = shown.start.max(self.line_of(start))..shown.end.min(self.line_of(end) + 1);
         self.selection_on(start..end, lines)
+    }
+    /// Where the inline boxes on the lines between `top` and `bottom` are laid
+    /// out (an atom shown as a picture): each one's byte offset in the text,
+    /// and its left edge and top in the area's points.
+    pub(crate) fn inline_boxes_between(&self, top: f32, bottom: f32) -> Vec<(usize, f32, f32)> {
+        let mut boxes = Vec::new();
+        for i in self.lines_between(top, bottom) {
+            let start = self.line_range(i).start;
+            for (at, x, y) in self.line(i).inline_boxes() {
+                let shown = self.shift(i, Rect::new(x, y, 0., 0.));
+                boxes.push((start + at, shown.x, shown.y));
+            }
+        }
+        boxes
     }
     /// The selection of `range` on `lines`, each shaped.
     fn selection_on(&self, range: Range<usize>, lines: Range<usize>) -> Vec<Rect> {

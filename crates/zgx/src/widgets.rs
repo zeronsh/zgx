@@ -569,7 +569,7 @@ fn show_decorations(
 }
 pub use crate::editor_atom_pointer::{AtomHover, AtomPress};
 #[doc(hidden)]
-pub use crate::editor_atom_style::{AtomIcon, AtomStyle, AtomUnderline};
+pub use crate::editor_atom_style::{AtomIcon, AtomStyle, AtomSvg, AtomUnderline};
 /// What is told of an editor's atoms: what happened to them, then all of
 /// them as they are.
 pub type AtomListener = Box<dyn FnMut(&AtomEvent<'_>)>;
@@ -6811,7 +6811,33 @@ impl Ui {
                     if code.atom_spans_of.get().is_some() {
                         let base = code.atom_style.borrow().clone();
                         let text = e.text();
+                        // Pictures in the boxes their atoms' text shows as.
+                        let boxes = long_lines.as_ref().map(|lines| {
+                            lines.inline_boxes_between(
+                                scroll.1 - inner_height,
+                                scroll.1 + 2. * inner_height,
+                            )
+                        });
                         for atom in e.atoms() {
+                            let picture = atom
+                                .style
+                                .as_deref()
+                                .and_then(|own| own.svg.clone())
+                                .or_else(|| base.as_deref().and_then(|b| b.svg.clone()));
+                            if let Some(picture) = picture {
+                                let at = boxes
+                                    .iter()
+                                    .flatten()
+                                    .find(|(at, ..)| *at == atom.range.start);
+                                if let Some((_, x, y)) = at {
+                                    let [w, h, _] = picture.extents();
+                                    wanted.push((
+                                        Rect::new(x - scroll.0, y - scroll.1, w * size, h * size),
+                                        picture.svg,
+                                    ));
+                                }
+                                continue;
+                            }
                             let icon = atom
                                 .style
                                 .as_deref()

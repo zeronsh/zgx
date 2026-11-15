@@ -16,6 +16,8 @@ mod editor_atom_moves;
 mod editor_atom_pointer;
 #[path = "../editor_atom_style.rs"]
 mod editor_atom_style;
+#[path = "../editor_atom_svg.rs"]
+mod editor_atom_svg;
 #[path = "../editor_atoms.rs"]
 mod editor_atoms;
 #[path = "../editor_autocorrect.rs"]

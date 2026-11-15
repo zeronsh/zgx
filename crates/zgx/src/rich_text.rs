@@ -341,7 +341,10 @@ impl RichText {
     }
     /// With inline `boxes` (see [`InlineBox`]), in order of their offsets.
     /// Errs unless each is at an [`INLINE_BOX_CHAR`] that is a run of its
-    /// own. Sizes that aren't finite are zero; no boxes, none.
+    /// own, or at the start of a run of other text, which then shows as the
+    /// box: as wide as it, its first character, the rest none (an editor
+    /// atom shown as a picture). Sizes that aren't finite are zero; no
+    /// boxes, none.
     pub fn with_inline_boxes(
         mut self,
         boxes: impl Into<Vec<InlineBox>>,
@@ -358,12 +361,17 @@ impl RichText {
         for b in &boxes {
             let end = b.at + INLINE_BOX_TEXT.len();
             let run = rest.find(|run| run.range.start >= b.at);
-            let (false, Some(run), Some(INLINE_BOX_TEXT)) = (
-                last.is_some_and(|last| b.at <= last),
-                run.filter(|run| run.range == (b.at..end)),
-                self.text.get(b.at..end),
-            ) else {
-                return Err("an inline box must be at a replacement character run of its own");
+            // At a replacement character run of its own; or at a run of other
+            // text, which then shows as the box (an editor atom shown as a
+            // picture, its text kept for copy and search).
+            let held = |run: &&mut TextRun| {
+                run.range.start == b.at
+                    && (run.range.end == end && self.text.get(b.at..end) == Some(INLINE_BOX_TEXT)
+                        || !self.text[b.at..].starts_with(INLINE_BOX_CHAR))
+            };
+            let (false, Some(run)) = (last.is_some_and(|last| b.at <= last), run.filter(held))
+            else {
+                return Err("an inline box must be at a run of its own");
             };
             b.sanitized().on_run(run);
             last = Some(b.at);
@@ -637,9 +645,22 @@ pub(crate) fn fallback_boxes(rich: &RichText, width: Option<f32>) -> FallbackBox
         }
         let run = &rich.runs[run_index];
         let newline = grapheme.contains(['\r', '\n']);
-        // Its grapheme may hold a combining mark past its character.
-        let inline = grapheme
-            .starts_with(INLINE_BOX_TEXT)
+        // Its grapheme may hold a combining mark past its character. A box
+        // over text of its own is its first grapheme's; the rest take none.
+        let text_box = rich.boxed
+            && !grapheme.starts_with(INLINE_BOX_TEXT)
+            && run.font.features.is_inline_box();
+        // The rest of a box's text is the box's cell: one place, as wide as
+        // it (a zero-width cell would read as a line's end).
+        if text_box
+            && index != run.range.start
+            && let Some((cell, _)) = out.cells.last_mut()
+        {
+            cell.end = index + grapheme.len();
+            continue;
+        }
+        let inline = (grapheme.starts_with(INLINE_BOX_TEXT)
+            || (text_box && index == run.range.start))
             .then(|| run.font.features.inline_box(index))
             .flatten();
         let advance = inline
@@ -911,12 +932,38 @@ mod tests {
     fn rich_text_stays_forty_bytes() {
         assert_eq!(std::mem::size_of::<RichText>(), 40);
     }
+    /// A box over a run of text (an editor atom's picture): the box's width
+    /// on its first grapheme, none on the rest of it, and the text after it
+    /// its own.
+    #[test]
+    fn a_box_over_text_takes_its_width_and_the_text_after_follows() {
+        let text = "area is x^2 here";
+        let rich = RichText::new(text, vec![run(0..8), run(8..11), run(11..16)])
+            .unwrap()
+            .with_inline_boxes(vec![InlineBox {
+                width: 28.,
+                height: 16.,
+                ..InlineBox::new(8)
+            }])
+            .unwrap();
+        let cells = fallback_boxes(&rich, None).cells;
+        let at = |i: usize| cells.iter().find(|(r, _)| r.start == i).unwrap().1;
+        let boxed = cells.iter().find(|(r, _)| r.start == 8).unwrap();
+        assert_eq!(boxed.0, 8..11, "one cell for the box's text");
+        assert_eq!(boxed.1.width, 28.);
+        assert_eq!(at(11).x, at(8).x + 28.);
+        assert!(at(12).width > 0., "the text after it has its width");
+    }
     #[test]
     fn inline_boxes_are_validated() {
         let text = format!("a{INLINE_BOX_CHAR}b");
         let rich = || RichText::new(text.as_str(), vec![run(0..1), run(1..4), run(4..5)]).unwrap();
         assert!(rich().with_inline_boxes(vec![InlineBox::new(1)]).is_ok());
-        assert!(rich().with_inline_boxes(vec![InlineBox::new(0)]).is_err());
+        // A run of other text shows as its box (an editor atom's picture);
+        // one not at a run's start is no box.
+        assert!(rich().with_inline_boxes(vec![InlineBox::new(0)]).is_ok());
+        let word = || RichText::new("abc", vec![run(0..3)]).unwrap();
+        assert!(word().with_inline_boxes(vec![InlineBox::new(1)]).is_err());
         let merged = RichText::new(text.as_str(), vec![run(0..4), run(4..5)]).unwrap();
         assert!(merged.with_inline_boxes(vec![InlineBox::new(1)]).is_err());
         let two = format!("{INLINE_BOX_CHAR}{INLINE_BOX_CHAR}");
