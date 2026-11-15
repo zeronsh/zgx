@@ -834,6 +834,19 @@ def said(session, output, text, after=0):
 said.nudged = 0.
 
 
+def heard(session, output, pattern, after=0):
+    """Whether what Orca said after its first `after` utterances, joined,
+    matches `pattern`: Orca 50 speaks a name and its role apart ("Before
+    page", "button.") where Orca 46 spoke them as one ("Before page push
+    button."), and names some roles differently."""
+    found = re.search(pattern, " ".join(spoken(output)[after:]))
+    # As `said`: a Shift now and then fills Orca's debug log's block.
+    if not found and time.monotonic() - said.nudged > 2:
+        said.nudged = time.monotonic()
+        session.xdo("key", "shift")
+    return found
+
+
 class Buttons:
     """The mouse button events AT-SPI's registry sends its listeners (Orca
     among them), heard by a listener of ours on the same bus: as they come,
@@ -924,7 +937,8 @@ def read_page(session, output, buttons, checks):
     # previous-heading key reads the heading, in one utterance or two.
     def heading():
         said(session, output, "Probe heading")
-        return re.search(r"Probe heading\.? heading level 1", " ".join(spoken(output)))
+        # Orca 46 says "heading level 1", Orca 50 "heading 1".
+        return re.search(r"Probe heading\.? heading (level )?1", " ".join(spoken(output)))
     # Pressed before the page's first event reached Orca, the key goes to
     # the app's script, which has none: then the heading's own text (Orca
     # reads the line its caret lands on), then the background again.
@@ -944,17 +958,19 @@ def read_page(session, output, buttons, checks):
     # The app's own button, then Tab into the page, as into a form: the
     # page's first field takes focus, and Orca names it (once, with no retry).
     orca_click(session, buttons, 705, 55)
-    session.wait(lambda: said(session, output, "Before page push button."), "Orca never read the app's button", 15)
+    session.wait(lambda: heard(session, output, r"Before page\.? (push )?button\."), "Orca never read the app's button", 15)
     before = len(spoken(output))
     session.key("Tab")
-    session.wait(lambda: said(session, output, "Probe field entry.", before), "Orca never named the field Tab reached", 15)
-    checks["tabbed into the field"] = "Probe field entry."
+    field = r"Probe field\.?( entry\.)?"
+    session.wait(lambda: heard(session, output, field, before), "Orca never named the field Tab reached", 15)
+    checks["tabbed into the field"] = heard(session, output, field, before).group(0)
     # Tab again, within the page: from the field to its `<select>`, focus
     # that moves only in the web process's tree, which Orca follows too.
     before = len(spoken(output))
     session.key("Tab")
-    session.wait(lambda: said(session, output, "combo box", before), "Orca never followed Tab from the field to the select", 15)
-    checks["tabbed within the page"] = [line for line in spoken(output)[before:] if "combo box" in line][0]
+    select = r"combo box\.?( Alpha)?"
+    session.wait(lambda: heard(session, output, select, before), "Orca never followed Tab from the field to the select", 15)
+    checks["tabbed within the page"] = heard(session, output, select, before).group(0)
     return checks
 
 

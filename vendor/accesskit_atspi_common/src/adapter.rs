@@ -340,15 +340,17 @@ impl TreeChangeHandler for AdapterChangeHandler<'_> {
                 self.adapter.window_deactivated(&NodeWrapper(&root_window));
             }
         }
-        // zgx patch: a node embedding another process's tree hands focus
-        // to it: the embedded tree says what is focused (`crate::EMBED`).
-        let embeds = |node: &Node| node.author_id().is_some_and(|id| id.starts_with(crate::EMBED));
-        if let Some(node) = new_node.filter(|node| !embeds(node)) {
+        // zgx patch: a node embedding another process's tree (`crate::EMBED`)
+        // says it is focused too, when focus moves to it: the embedded tree
+        // may say nothing (a web page clicked on its background), and a
+        // reader would then know of no focus in the window at all. What the
+        // embedded tree says it focuses next, a reader moves to as usual.
+        if let Some(node) = new_node {
             self.adapter
                 .emit_object_event(node.id(), ObjectEvent::StateChanged(State::Focused, true));
             self.emit_text_selection_change(None, node);
         }
-        if let Some(node) = old_node.filter(|node| !embeds(node)) {
+        if let Some(node) = old_node {
             self.adapter
                 .emit_object_event(node.id(), ObjectEvent::StateChanged(State::Focused, false));
         }
