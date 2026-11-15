@@ -292,6 +292,10 @@ pub struct RichText {
     /// Whether a run holds an inline box: what reads them asks this, not
     /// each run.
     boxed: bool,
+    /// Whether a run is a span that is a box of its own
+    /// (`FontFeatures::is_box_span`): what lays them out asks this, not
+    /// each run.
+    box_spans: bool,
     text: Arc<str>,
     runs: Arc<[TextRun]>,
 }
@@ -327,6 +331,7 @@ impl RichText {
             overflow: Default::default(),
             line_clamp: None,
             boxed: false,
+            box_spans: false,
             text,
             runs,
         })
@@ -383,12 +388,27 @@ impl RichText {
     ) -> Result<Self, &'static str> {
         let mut remade = Self::new(text, runs)?;
         remade.boxed = self.boxed;
+        remade.box_spans = self.box_spans;
         Ok(remade)
     }
     /// Whether it has inline boxes.
     #[inline]
     pub fn has_inline_boxes(&self) -> bool {
         self.boxed
+    }
+    /// Said to hold a span that is a box of its own (a run's font features
+    /// `is_box_span`), as its maker knows: text not said so lays none out.
+    #[doc(hidden)]
+    pub fn with_box_spans(mut self) -> Self {
+        self.box_spans = true;
+        self
+    }
+    /// Whether it is said to hold a span that is a box of its own
+    /// (`with_box_spans`).
+    #[doc(hidden)]
+    #[inline]
+    pub fn has_box_spans(&self) -> bool {
+        self.box_spans
     }
     /// The same text with its boxes' sizes changed to `sized`'s (width,
     /// height, baseline), in order (where its layout measured what they

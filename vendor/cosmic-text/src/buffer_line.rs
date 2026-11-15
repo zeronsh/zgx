@@ -23,6 +23,9 @@ pub struct BufferLine {
     /// zgx: whether a span is an inline box (`Attrs::inline_box`), as
     /// `set_inline_boxes` says: in its padding, so no line is bigger.
     boxes: bool,
+    /// zgx: each of its lines takes CSS's line box, a span in it being a
+    /// box (inline-flex) of its own (`set_css_line_box`).
+    css: bool,
 }
 
 impl BufferLine {
@@ -45,6 +48,7 @@ impl BufferLine {
             shaping,
             metadata: None,
             boxes: false,
+            css: false,
         }
     }
 
@@ -67,6 +71,7 @@ impl BufferLine {
         self.shaping = shaping;
         self.metadata = None;
         self.boxes = false;
+        self.css = false;
     }
 
     /// Get current text
@@ -91,6 +96,7 @@ impl BufferLine {
             self.ending = ending;
             self.attrs_list = attrs_list;
             self.boxes = false;
+        self.css = false;
             self.reset();
             true
         } else {
@@ -135,6 +141,7 @@ impl BufferLine {
         if attrs_list != self.attrs_list {
             self.attrs_list = attrs_list;
             self.boxes = false;
+        self.css = false;
             self.reset_shaping();
             true
         } else {
@@ -150,6 +157,21 @@ impl BufferLine {
         if holds != self.boxes {
             self.reset_shaping();
             self.boxes = holds;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// zgx: say whether each of its lines takes CSS's line box, its every
+    /// glyph's half-leading its own (`ShapeLine::inline_line_box`), as one
+    /// holding an inline box's does: a span in it is a box of its own, its
+    /// line height its box's. Its text or attributes set again say not.
+    /// Resets its shape if it differs; returns whether it did.
+    pub fn set_css_line_box(&mut self, css: bool) -> bool {
+        if css != self.css {
+            self.reset_shaping();
+            self.css = css;
             true
         } else {
             false
@@ -221,6 +243,7 @@ impl BufferLine {
             self.boxes = self.attrs_list.holds_inline_boxes();
             new.boxes = new.attrs_list.holds_inline_boxes();
         }
+        new.css = self.css;
         new
     }
 
@@ -259,6 +282,8 @@ impl BufferLine {
                 tab_width,
             );
             font_system.shape_buffer.boxes = false;
+            // zgx: its lines' boxes, CSS's or not (laid out, not shaped).
+            line.css = self.css;
             self.shape_opt.set_used(line);
             self.layout_opt.set_unused();
         }
@@ -355,6 +380,7 @@ impl BufferLine {
             shaping: Shaping::Advanced,
             metadata: None,
             boxes: false,
+            css: false,
         }
     }
 

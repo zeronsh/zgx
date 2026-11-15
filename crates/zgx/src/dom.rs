@@ -1600,6 +1600,10 @@ fn inline(
     if span.radius > 0. {
         let _ = write!(css, "border-radius:{}px;", num(span.radius));
     }
+    // A box of its own (`TextSpan::inline_box`): CSS's own.
+    if extras.boxed {
+        css.push_str("display:inline-flex;align-items:baseline;");
+    }
     if link {
         // In the paragraph's colour unless it has its own, as the desktop
         // draws a link (not the browser's blue).

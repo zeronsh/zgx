@@ -1532,6 +1532,10 @@ pub(crate) struct SpanRare {
     /// `fade_in = { start = ui.now(), ms = 200, power = 1.6 }`: its text
     /// fading in, drawn in Rust a frame at a time (`TextSpan::fade_in`).
     pub fade: Option<zgx::compose::TextFade>,
+    /// `box = true`: a box of its own (CSS's `display: inline-flex`), its
+    /// line height and padding its line's (`TextSpan::inline_box`).
+    /// Internal until its API is settled.
+    pub boxed: bool,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -5112,6 +5116,11 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                     });
                 }
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
+                b"box" => {
+                    if lua.unpack::<bool>(given)? {
+                        rare_mut(&mut span).boxed = true;
+                    }
+                }
                 b"on_click" => span.click = Some(handler(given)?),
                 b"href" => span.href = Some(lua.unpack::<String>(given)?.into()),
                 b"context_menu" => match given {

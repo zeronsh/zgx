@@ -418,6 +418,28 @@ impl FontFeatures {
             (Self::BOX_RAISE, f32::to_bits(raise)),
         ]))
     }
+    /// zgx's own tag for a span that is a box of its own (`_ibx`, never
+    /// given to a font, as `HYPHENS`): CSS's `display: inline-flex` on it,
+    /// its line height and padding its box, which its line's box holds as
+    /// CSS's does (`TextSpan::inline_box`). Text without one pays nothing.
+    #[doc(hidden)]
+    pub const BOX_SPAN: [u8; 4] = *b"_ibx";
+    /// Whether these are a span that is a box of its own (`BOX_SPAN`).
+    #[doc(hidden)]
+    pub fn is_box_span(&self) -> bool {
+        self.settings()
+            .iter()
+            .any(|(tag, value)| *tag == Self::BOX_SPAN && *value != 0)
+    }
+    /// These saying a span that is a box of its own (`BOX_SPAN`).
+    #[doc(hidden)]
+    pub fn with_box_span(&self) -> Self {
+        if self.is_box_span() {
+            return self.clone();
+        }
+        let others = self.settings().iter().copied();
+        Self::settled(others.chain([(Self::BOX_SPAN, 1)]))
+    }
     /// These saying no inline box (an ellipsis cloned from a box's run).
     pub fn without_inline_box(&self) -> Self {
         if !self.is_inline_box() {
