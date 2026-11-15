@@ -3547,12 +3547,17 @@ impl Store {
     }
     /// Drops the states nothing else holds that are nil or still at their first value:
     /// a key declared for a tab that has since closed comes back the same.
+    /// One a live effect reads stays (its subscription holds it, as a
+    /// handle does): a reader that asks `ui.shared(key)` afresh on each run
+    /// keeps no handle, and the host's first publish must reach it. Once
+    /// those effects are gone it can go.
     pub(crate) fn sweep_unheld(&self) -> usize {
         let mut signals = self.signals.borrow_mut();
         let mut initials = self.initials.borrow_mut();
         let before = signals.len();
         signals.retain(|key, s| {
             s.handles() > 1
+                || s.is_observed()
                 || s.with_untracked(|v| !matches!(v, Value::Nil))
                     && initials
                         .get(key)
@@ -3589,6 +3594,44 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A state a live effect reads stays through `sweep_unheld` with no
+    /// handle kept (its subscription holds it), and goes at the first
+    /// sweep after that effect is gone: nothing leaks.
+    #[test]
+    fn a_state_an_effect_reads_stays_until_the_effect_goes() {
+        let runtime = Runtime::new();
+        let store = Rc::new(Store::new(&runtime));
+        // Unread and unheld, at nil: swept, as before.
+        drop(store.shared("unread", Value::Nil, false));
+        // Read by an effect that asks for it afresh on each run.
+        drop(store.shared("note_open", Value::Nil, false));
+        let reads = Rc::new(std::cell::Cell::new(0));
+        let effect = {
+            let (store, reads) = (store.clone(), reads.clone());
+            runtime.effect(move || {
+                if let Some(state) = store.get("note_open") {
+                    state.get();
+                }
+                reads.set(reads.get() + 1);
+            })
+        };
+        assert_eq!(reads.get(), 1);
+        assert_eq!(store.sweep_unheld(), 1, "only the unread state went");
+        assert!(store.get("unread").is_none());
+        // The host's first publish reaches the effect.
+        store
+            .state("note_open", Value::Nil)
+            .set(Value::from("doc-1"));
+        runtime.flush();
+        assert_eq!(reads.get(), 2, "the effect heard the publish");
+        store.state("note_open", Value::Nil).set(Value::Nil);
+        runtime.flush();
+        // The effect gone, the state is unread, unheld and nil: it goes.
+        drop(effect);
+        assert_eq!(store.sweep_unheld(), 1);
+        assert!(store.get("note_open").is_none(), "no leak");
+    }
 
     /// A value is three words: every slot of every list and map holds one.
     #[test]
