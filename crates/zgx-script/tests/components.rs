@@ -110,6 +110,34 @@ fn disclosures_and_accordions_show_their_content() {
     assert!(h.find("pay-body").is_none());
 }
 
+/// `pressed` makes a button a toggle button (`aria-pressed`): its state
+/// follows, and the inspector says it.
+#[test]
+fn a_pressed_button_says_its_state_and_follows_it() {
+    let mut h = Harness::inline(
+        r#"local bold = ui.state("bold", false)
+        return ui.button { id = "bold", pressed = bold, on_click = ui.toggle(bold), "Bold" }"#,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    let state = |h: &mut Harness| {
+        let node = h.find("bold").unwrap();
+        zgx_script::driver::node(&h.ui, None, node)
+            .into_iter()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value)
+    };
+    assert_eq!(node(&mut h, "bold").pressed, Some(false));
+    assert_eq!(state(&mut h).as_deref(), Some("not-pressed"));
+    h.click("bold");
+    assert_eq!(
+        node(&mut h, "bold").pressed,
+        Some(true),
+        "it follows its state"
+    );
+    assert_eq!(state(&mut h).as_deref(), Some("pressed"));
+}
+
 #[test]
 fn menu_items_check_and_show_shortcuts_and_nodes_say_their_state() {
     let mut h = Harness::inline(

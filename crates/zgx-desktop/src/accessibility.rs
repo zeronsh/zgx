@@ -944,6 +944,16 @@ impl AccessibilityTree {
                     accesskit::Toggled::False
                 });
             }
+            // A toggle button (`aria-pressed`): a button with its state,
+            // which each platform reads as one (ATK's toggle button and
+            // pressed, macOS's toggle, UIA's Toggle pattern).
+            if let Some(pressed) = semantic.pressed.filter(|_| semantic.checked.is_none()) {
+                n.set_toggled(if pressed {
+                    accesskit::Toggled::True
+                } else {
+                    accesskit::Toggled::False
+                });
+            }
 
             if disabled {
                 n.set_disabled();
@@ -1813,6 +1823,9 @@ fn semantic_role(semantic: &zgx::semantics::SemanticNode) -> accesskit::Role {
         accesskit::Role::MenuItemRadio
     } else if semantic.role == Role::MenuItem && semantic.checked.is_some() {
         accesskit::Role::MenuItemCheckBox
+    } else if semantic.pressed.is_some() && semantic.checked.is_none() {
+        // A toggle button: a button with its state (`toggled`).
+        accesskit::Role::Button
     } else {
         role(semantic.role)
     }

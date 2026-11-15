@@ -2387,6 +2387,9 @@ export type NodeProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: (boolean | Readable<boolean> | (() -> boolean))?,
 	expanded: (boolean | Readable<boolean> | (() -> boolean))?,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: ("polite" | "assertive" | "off")?,
@@ -2818,6 +2821,9 @@ export type Props = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -3194,6 +3200,7 @@ export type Props_heading = number?
 export type Props_selected = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_checked = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_expanded = (boolean | Readable<boolean> | (() -> boolean))?
+export type Props_pressed = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_live = ("polite" | "assertive" | "off")?
 export type Props_description = (string | ReadOnlyState<string> | (() -> string))?
 export type Props_value_text = Reactive<string>?
@@ -3498,6 +3505,9 @@ export type ContainerProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -3943,6 +3953,9 @@ export type GlassProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -4397,6 +4410,9 @@ export type ScrollProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -4868,6 +4884,9 @@ export type TextProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -5298,6 +5317,9 @@ export type MarkdownViewProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -5814,6 +5836,9 @@ export type RichProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -6238,6 +6263,9 @@ export type ImageProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -6679,6 +6707,9 @@ export type SvgProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -7231,6 +7262,9 @@ export type Scene3DProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -7678,6 +7712,9 @@ export type CanvasProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -8134,6 +8171,9 @@ export type CheckboxProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -8568,6 +8608,9 @@ export type InputProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -9103,6 +9146,9 @@ export type ProgressProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -9528,6 +9574,9 @@ export type SliderProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -9968,6 +10017,9 @@ export type SegmentedProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -10404,6 +10456,9 @@ export type StepperProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -10841,6 +10896,9 @@ export type DisclosureProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -11289,6 +11347,9 @@ export type AccordionProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -11711,6 +11772,9 @@ export type SectionProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -12158,6 +12222,9 @@ export type SeparatorProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -12588,6 +12655,9 @@ export type TabsProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -13040,6 +13110,9 @@ export type TreeProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -13488,6 +13561,9 @@ export type DataGridProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -13932,6 +14008,9 @@ export type CalendarProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -14369,6 +14448,9 @@ export type DatePickerProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -14804,6 +14886,9 @@ export type TimeFieldProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -15238,6 +15323,9 @@ export type ComboboxProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -15680,6 +15768,9 @@ export type CommandPaletteProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -16110,6 +16201,9 @@ export type SelectProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -16547,6 +16641,9 @@ export type SplitProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -17040,6 +17137,9 @@ export type ListProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -17564,6 +17664,9 @@ export type LayerProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -18008,6 +18111,9 @@ export type ModalProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -18470,6 +18576,9 @@ export type PopoverProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -18938,6 +19047,9 @@ export type MenuItemProps = {
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -19371,6 +19483,9 @@ export type SubmenuProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -19821,6 +19936,9 @@ export type WebViewProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -20271,6 +20389,9 @@ export type TerminalProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -20696,6 +20817,9 @@ export type SlotProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -21172,6 +21296,9 @@ export type EachOptions = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
@@ -21612,6 +21739,9 @@ export type PresenceOptions = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: Props_checked,
 	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: Props_live,
