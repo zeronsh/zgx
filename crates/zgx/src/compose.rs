@@ -8892,6 +8892,20 @@ impl NodeHandle {
     pub fn refresh_interval(&self) -> Option<std::time::Duration> {
         self.ui.upgrade().map(|ui| ui.refresh_interval())
     }
+    /// What has keyboard focus in its window, and a text field's
+    /// selection (`Ui::focus_snapshot`).
+    #[doc(hidden)]
+    pub fn focus_snapshot(&self) -> Option<crate::widgets::FocusSnapshot> {
+        self.ui.upgrade()?.focus_snapshot()
+    }
+    /// Focus back where `snapshot` found it in its window
+    /// (`Ui::restore_focus`).
+    #[doc(hidden)]
+    pub fn restore_focus(&self, snapshot: &crate::widgets::FocusSnapshot) -> bool {
+        self.ui
+            .upgrade()
+            .is_some_and(|mut ui| ui.restore_focus(snapshot))
+    }
     /// Whether the node is still in the scene.
     pub fn is_mounted(&self) -> bool {
         #[cfg(feature = "dom")]

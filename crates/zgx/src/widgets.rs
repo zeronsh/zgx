@@ -20,6 +20,18 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{Highlighter, LineColors, LineSpans, SpanHighlighter, SpanStyle};
 
+/// What had keyboard focus, and a text field's selection there, when it
+/// was taken (`Ui::focus_snapshot`), to put back (`Ui::restore_focus`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FocusSnapshot {
+    /// The focused node.
+    pub node: NodeId,
+    /// A text field's selection, `(anchor, focus)` in UTF-8 bytes of its
+    /// own text.
+    pub selection: Option<(usize, usize)>,
+}
+
 #[derive(Default)]
 struct Owned {
     /// Most nodes own one effect: inline, it costs no allocation.
@@ -403,6 +415,11 @@ struct EditorHint {
     /// A selection set by the program shows the next time it is drawn,
     /// focused or not (a search's match, chosen from its field).
     reveal: Cell<bool>,
+    /// The next draw leaves the view scrolled as it is, wherever the caret
+    /// lies: a wheel's or a drag's scroll, focus put back
+    /// (`Ui::restore_focus`). Drawn focused otherwise, the caret is
+    /// scrolled into view.
+    hold: Cell<bool>,
     /// Another editor was just refreshed for its new size, in the same step
     /// of a frame (`refresh_if_resized`): the next draw takes its size from
     /// the layout that one made, not laying out what that one's draw dirtied.
@@ -615,6 +632,7 @@ impl EditorHint {
             clause: Cell::default(),
             composition_layer: Cell::default(),
             reveal: Cell::default(),
+            hold: Cell::default(),
             laid_out: Cell::default(),
             reveal_at: Cell::default(),
             point: std::cell::OnceCell::new(),
@@ -974,6 +992,11 @@ impl EditorHandle {
     /// Select from `anchor` to `focus` (UTF-8 byte offsets, clamped to the
     /// text and moved back to a grapheme boundary), as a drag would.
     pub fn set_selection(&self, anchor: usize, focus: usize) {
+        self.select(anchor, focus, true);
+    }
+    /// `set_selection`, the caret scrolled into view (`reveal`) or left
+    /// where it is (`Ui::restore_focus`).
+    fn select(&self, anchor: usize, focus: usize, reveal: bool) {
         let focus = {
             let mut editor = self.editor.borrow_mut();
             editor.set_selection(anchor, focus);
@@ -984,7 +1007,13 @@ impl EditorHandle {
             affinity: TextAffinity::After,
         });
         self.preferred_x.set(None);
-        self.hint.reveal.set(true);
+        // Its draw scrolls the caret into view, or leaves the view as it is
+        // even while it is focused.
+        if reveal {
+            self.hint.reveal.set(true);
+        } else {
+            self.hint.hold.set(true);
+        }
         self.refresh();
     }
     /// Select the whole text.
@@ -3898,6 +3927,56 @@ impl Ui {
         }
         true
     }
+    /// What has keyboard focus, and a text field's selection in it, to put
+    /// back later (`restore_focus`): a guide that takes the user elsewhere
+    /// and returns them where they were. None if nothing has focus. Taking
+    /// one moves neither focus nor selection.
+    #[doc(hidden)]
+    pub fn focus_snapshot(&self) -> Option<FocusSnapshot> {
+        let node = self.input.focused()?;
+        let selection = self.editor(node).map(|editor| editor.selection());
+        Some(FocusSnapshot { node, selection })
+    }
+    /// Focus back where `snapshot` found it and, for a text field, its
+    /// selection (anchor and caret), nothing scrolled. False if its node
+    /// is gone, or the field's text no longer holds its offsets.
+    #[doc(hidden)]
+    pub fn restore_focus(&mut self, snapshot: &FocusSnapshot) -> bool {
+        if !self.scene.borrow().contains(snapshot.node) {
+            return false;
+        }
+        let editor = match snapshot.selection {
+            Some((anchor, focus)) => {
+                let Some(editor) = self.editor(snapshot.node) else {
+                    return false;
+                };
+                let fits = {
+                    let model = editor.editor.borrow();
+                    let text = model.text();
+                    [anchor, focus].iter().all(|at| text.is_char_boundary(*at))
+                };
+                if !fits {
+                    return false;
+                }
+                Some((editor, anchor, focus))
+            }
+            None => None,
+        };
+        if let Some((editor, ..)) = &editor {
+            // The draw focus brings leaves the view where the user left it.
+            editor.hint.hold.set(true);
+        }
+        if !self.input.focus_in_place(&self.scene, Some(snapshot.node)) {
+            if let Some((editor, ..)) = &editor {
+                editor.hint.hold.set(false);
+            }
+            return false;
+        }
+        if let Some((editor, anchor, focus)) = editor {
+            editor.select(anchor, focus, false);
+        }
+        true
+    }
     /// Prepare allocated control geometry before rendering a frame or dispatching input.
     /// Native hosts call this automatically. Headless hosts should call it before `Scene::flush`.
     pub fn prepare_frame(&self) {
@@ -5713,8 +5792,6 @@ impl Ui {
         let draw_caret_width = self.storage.caret_width.clone();
         let draw_blink = self.storage.caret_blink.clone();
         let scroll_for_draw = scroll.clone();
-        let reveal_caret = Rc::new(Cell::new(true));
-        let draw_reveal_caret = reveal_caret.clone();
         let scroll_limit = Rc::new(Cell::new((0f32, 0f32)));
         let draw_scroll_limit = scroll_limit.clone();
         let typography = Rc::new(RefCell::new((
@@ -5742,6 +5819,7 @@ impl Ui {
         let wheel_hint = hint.clone();
         hint.composition_layer.set(Some(preedit_layer));
         let draw_hint = hint.clone();
+        let reveal_caret = hint.clone();
         // Its text's line count and its semantic value, by the revision of
         // the text they are for.
         let draw_line_count: Cell<Option<(u64, usize)>> = Cell::new(None);
@@ -5990,7 +6068,7 @@ impl Ui {
             let cy = caret_rect.y;
             let line_height = caret_rect.height;
             let mut scroll = scroll_for_draw.borrow_mut();
-            let reveal = draw_reveal_caret.replace(true) && draw_gesture.mode.get().is_none();
+            let reveal = !draw_hint.hold.replace(false) && draw_gesture.mode.get().is_none();
             // A place asked for (find's match), else the caret.
             let (place, align) = draw_hint.reveal_at.take().unzip();
             let (rx, ry, rh, asked) = match place {
@@ -6773,14 +6851,17 @@ impl Ui {
             let metric_typography = typography.clone();
             let storage = Rc::downgrade(&self.storage);
             Rc::new(move || {
+                let held = told.hold.get();
                 refresh();
                 // Spans that shape their lines found as it drew (the first
-                // bold line): what it placed from plain lines is placed again.
+                // bold line): what it placed from plain lines is placed again,
+                // its view held as the first draw held it.
                 if told
                     .code()
                     .and_then(|code| code.lines.borrow().clone())
                     .is_some_and(|lines| lines.take_restyled())
                 {
+                    told.hold.set(held);
                     refresh();
                 }
                 EditorHint::watch_theme(&told, &storage, root, &watched_theme);
@@ -7069,7 +7150,7 @@ impl Ui {
                         .clamp(0., f64::from(limit.1)) as f32;
                 }
                 select();
-                reveal.set(false);
+                reveal.hold.set(true);
                 draw();
             })
         };
@@ -7251,7 +7332,7 @@ impl Ui {
                             return;
                         }
                         drop(offset);
-                        reveal_caret.set(false);
+                        reveal_caret.hold.set(true);
                         cx.prevent_default();
                         cx.stop_propagation();
                     }
@@ -7459,7 +7540,7 @@ impl Ui {
                 InputEvent::PointerMove { x, y } if gesture.mode.get().is_some() => {
                     gesture.pointer.set((x, y));
                     drag_select();
-                    reveal_caret.set(false);
+                    reveal_caret.hold.set(true);
                 }
                 InputEvent::PointerUp {
                     button: PointerButton::Primary,
@@ -7751,7 +7832,7 @@ impl Ui {
                                         (true, true) => (0., limit.1),
                                         (true, false) => (limit.0, 0.),
                                     };
-                                    reveal_caret.set(false);
+                                    reveal_caret.hold.set(true);
                                 }
                             }
                             Key::Home => {

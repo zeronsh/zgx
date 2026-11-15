@@ -1,0 +1,1 @@
+- `Ui::focus_snapshot` / `Ui::restore_focus` (hidden, internal) and Luau `ui.focus_snapshot()` with `:restore()` (internal, subject to change): what has keyboard focus and a text field's, textarea's or code editor's selection, put back later without scrolling; false if the node is gone or its text no longer holds the offsets.
