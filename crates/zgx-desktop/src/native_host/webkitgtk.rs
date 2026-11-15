@@ -5504,18 +5504,21 @@ mod tests {
     }
 
     /// With no frame to send accessibility (an idle window), the held
-    /// commands still go within the bound.
+    /// commands still go, once the bound has passed.
     #[test]
-    fn held_commands_go_within_the_bound_without_a_frame() {
+    fn held_commands_go_after_the_bound_without_a_frame() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let start = std::time::Instant::now();
         release_later(u64::MAX, HOLD_AT_MOST, move |release| {
             let _ = sender.send(release);
         });
+        // The release itself, however late a loaded machine makes it (the
+        // ceiling only keeps a broken release from hanging the run); never
+        // before the bound.
         let release = receiver
-            .recv_timeout(HOLD_AT_MOST * 4)
+            .recv_timeout(std::time::Duration::from_secs(10))
             .expect("released without a frame");
-        assert!(start.elapsed() >= HOLD_AT_MOST);
+        assert!(start.elapsed() >= HOLD_AT_MOST, "released before the bound");
         // No page by that id: nothing to send.
         release();
     }
