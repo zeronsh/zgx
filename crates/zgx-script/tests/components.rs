@@ -111,7 +111,7 @@ fn disclosures_and_accordions_show_their_content() {
 }
 
 /// `pressed` makes a button a toggle button (`aria-pressed`): its state
-/// follows, and the inspector says it.
+/// follows, and the inspector and the tree's line (`app:tree()`) say it.
 #[test]
 fn a_pressed_button_says_its_state_and_follows_it() {
     let mut h = Harness::inline(
@@ -136,6 +136,16 @@ fn a_pressed_button_says_its_state_and_follows_it() {
         "it follows its state"
     );
     assert_eq!(state(&mut h).as_deref(), Some("pressed"));
+    let line = |h: &mut Harness| {
+        let tree = h.tree();
+        tree.lines()
+            .find(|l| l.contains("#bold"))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("{tree}"))
+    };
+    assert!(line(&mut h).ends_with(" pressed"), "{}", line(&mut h));
+    h.click("bold");
+    assert!(line(&mut h).ends_with(" not-pressed"), "{}", line(&mut h));
 }
 
 #[test]
