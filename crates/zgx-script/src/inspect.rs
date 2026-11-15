@@ -1697,11 +1697,26 @@ impl Session {
                     }
                 })
                 .collect();
-            let unnamed = frame
-                .writes
-                .iter()
-                .filter(|(s, _)| !names.contains_key(s))
-                .count();
+            // The rest by where the script made them (`500 × rows.luau:12
+            // use_state`), most first; those no maker named, counted.
+            let sites: std::collections::HashMap<usize, &Rc<str>> =
+                frame.sites.iter().map(|(s, site)| (*s, site)).collect();
+            let mut made: Vec<(Rc<str>, usize)> = Vec::new();
+            let mut unnamed = 0;
+            for (signal, _) in frame.writes.iter().filter(|(s, _)| !names.contains_key(s)) {
+                match sites.get(signal) {
+                    Some(site) => match made.iter_mut().find(|(m, _)| Rc::ptr_eq(m, site)) {
+                        Some((_, n)) => *n += 1,
+                        None => made.push(((*site).clone(), 1)),
+                    },
+                    None => unnamed += 1,
+                }
+            }
+            made.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            writes.extend(made.into_iter().map(|(site, n)| match n {
+                1 => site.to_string(),
+                n => format!("{n} × {site}"),
+            }));
             if unnamed > 0 {
                 writes.push(format!("{unnamed} unnamed"));
             }

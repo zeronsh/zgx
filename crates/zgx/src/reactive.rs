@@ -1030,6 +1030,15 @@ struct SignalInner<T> {
     subscribers: RefCell<IdSet>,
     runtime: Weak<Inner>,
 }
+// A traced signal's maker goes with it: its address may be another's next.
+#[cfg(feature = "trace")]
+impl<T> Drop for SignalInner<T> {
+    fn drop(&mut self) {
+        if crate::trace::enabled() {
+            crate::trace::forget_signal((self as *const Self).cast::<()>() as usize);
+        }
+    }
+}
 impl<T> Dependency for SignalInner<T> {
     fn unsubscribe(&self, id: EffectId) {
         self.subscribers.borrow_mut().remove(&id);
