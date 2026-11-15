@@ -527,6 +527,8 @@ pub(crate) struct CodeOptions {
     atom_wash: Option<crate::scene::Color>,
     on_atoms: Option<crate::widgets::AtomListener>,
     atoms_when: Option<AtomsFollow>,
+    /// `on_atom_press`, `on_atom_hover`: its atoms under the pointer.
+    atom_pointer: Option<Rc<crate::editor_atom_pointer::AtomPointer>>,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -2013,6 +2015,47 @@ impl View {
     pub fn on_atoms(mut self, told: impl FnMut(&crate::widgets::AtomEvent<'_>) + 'static) -> Self {
         self.code_mut().on_atoms = Some(Box::new(told));
         self
+    }
+    /// Call `told` when a primary press on one of a text area's atoms is let
+    /// go in place (within 4 points, no text dragged over): true takes it,
+    /// and the caret stays where it was, out of the chip.
+    pub fn on_atom_press(
+        mut self,
+        told: impl FnMut(&crate::widgets::AtomPress<'_>) -> bool + 'static,
+    ) -> Self {
+        let (pointer, new) = self.atom_pointer();
+        pointer.set_press(told);
+        if new {
+            self.on_event(move |cx| pointer.event(cx))
+        } else {
+            self
+        }
+    }
+    /// Call `told` when the pointer comes onto one of a text area's atoms
+    /// (another, or the same one's box on another line), with its box on
+    /// the line under the pointer, and with none when it leaves it; again
+    /// when a scroll or a new layout moves the one under it.
+    pub fn on_atom_hover(
+        mut self,
+        told: impl FnMut(&crate::widgets::AtomHover<'_>) + 'static,
+    ) -> Self {
+        let (pointer, new) = self.atom_pointer();
+        pointer.set_hover(told);
+        if new {
+            self.on_event(move |cx| pointer.event(cx))
+        } else {
+            self
+        }
+    }
+    /// Its atoms' pointer listeners, made now if they weren't (`true`).
+    fn atom_pointer(&mut self) -> (Rc<crate::editor_atom_pointer::AtomPointer>, bool) {
+        let code = self.code_mut();
+        let new = code.atom_pointer.is_none();
+        let pointer = code
+            .atom_pointer
+            .get_or_insert_with(Default::default)
+            .clone();
+        (pointer, new)
     }
     /// A text area's atoms follow what `atoms` gives, as the reactive values
     /// it reads change (a draft restored).
@@ -6953,6 +6996,7 @@ fn open_element(
                 atom_wash,
                 on_atoms,
                 atoms_when,
+                atom_pointer,
             } = *code;
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
@@ -6979,6 +7023,9 @@ fn open_element(
             }
             if let Some(told) = on_atoms {
                 editor.on_atoms(told);
+            }
+            if let Some(pointer) = atom_pointer {
+                pointer.attach(editor.clone());
             }
             if let Some(mut atoms) = atoms_when {
                 let editor = editor.clone();
