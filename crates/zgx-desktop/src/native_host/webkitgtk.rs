@@ -4044,8 +4044,78 @@ type Reply = Box<dyn FnOnce(ScriptResult)>;
 type FindReply = Box<dyn FnOnce(FindResult)>;
 type SiteClearReply = Box<dyn FnOnce(Result<usize, String>)>;
 /// A page, on the UI thread: what its controller, box and painter share.
+/// The longest a page's commands wait for zgx's accessibility as focus
+/// enters it (`UiPage::hold`): a window with nothing to redraw sends none.
+const HOLD_AT_MOST: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Commands kept back, in order, while held; passed on at once otherwise.
+struct Hold<T> {
+    held: Option<Vec<T>>,
+}
+impl<T> Default for Hold<T> {
+    fn default() -> Self {
+        Self { held: None }
+    }
+}
+impl<T> Hold<T> {
+    /// Start holding; false if already holding.
+    fn start(&mut self) -> bool {
+        if self.held.is_some() {
+            return false;
+        }
+        self.held = Some(Vec::new());
+        true
+    }
+    /// `item` back to send now, or kept (`None`).
+    fn pass(&mut self, item: T) -> Option<T> {
+        match &mut self.held {
+            Some(held) => {
+                held.push(item);
+                None
+            }
+            None => Some(item),
+        }
+    }
+    /// Stop holding: what was kept, in order.
+    fn release(&mut self) -> Vec<T> {
+        self.held.take().unwrap_or_default()
+    }
+}
+
+/// After `after`, page `id`'s held commands go (`UiPage::release`), on the
+/// UI thread through `deliver`: whether or not a frame came.
+fn release_later(
+    id: u64,
+    after: std::time::Duration,
+    deliver: impl FnOnce(Box<dyn FnOnce() + Send>) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        deliver(Box::new(move || {
+            if let Some(page) = ui_page(id) {
+                page.release();
+            }
+        }));
+    });
+}
+
+/// zgx's accessibility has sent what this frame changed (the window's
+/// focus among it), or had nothing to send: pages focus enters send what
+/// they held.
+pub(crate) fn accessibility_sent() {
+    let pages: Vec<_> =
+        UI_PAGES.with(|pages| pages.borrow().values().filter_map(Weak::upgrade).collect());
+    for page in pages {
+        if page.held.borrow().held.is_some() {
+            page.release();
+        }
+    }
+}
+
 struct UiPage {
     id: u64,
+    /// Commands kept back while focus enters the page (`Hold`).
+    held: RefCell<Hold<Command>>,
     web: WeakWebView,
     gpu: zgx::gpu_view::GpuView,
     schemes: Vec<SchemeHandler>,
@@ -4112,7 +4182,11 @@ impl UiPage {
     fn embed(&self, bus: String, path: String) {
         let count = self.embeddings.get() + 1;
         self.embeddings.set(count);
-        *self.embedding.borrow_mut() = Some(format!("zgx-atspi-embed\n{bus}\n{path}\n{count}"));
+        // Named WebKitGTK, as the page's own nodes are: a reader takes the
+        // box, focused, with the script it reads the page with.
+        *self.embedding.borrow_mut() = Some(format!(
+            "zgx-atspi-embed\n{bus}\n{path}\n{count}\nWebKitGTK"
+        ));
         if let Some(handle) = &*self.handle.borrow() {
             // Projected again: its node's revision moves.
             handle.touch_semantics();
@@ -4125,12 +4199,34 @@ impl UiPage {
         }
     }
     fn send(&self, command: Command) {
+        if let Some(command) = self.held.borrow_mut().pass(command) {
+            self.run_on_gtk(command);
+        }
+    }
+    fn run_on_gtk(&self, command: Command) {
         let id = self.id;
         on_gtk(move |gtk| {
             if let Some(page) = gtk.page(id) {
                 page.run(command);
             }
         });
+    }
+    /// Keep the page's commands back while focus enters it, until zgx's
+    /// accessibility has said so (`accessibility_sent`) or `HOLD_AT_MOST`
+    /// has passed: a reader hears the page's box focused first, then what
+    /// the page focuses in it, not the other way about.
+    fn hold(&self) {
+        if !self.held.borrow_mut().start() {
+            return;
+        }
+        release_later(self.id, HOLD_AT_MOST, deliver);
+    }
+    /// The commands kept back, sent in order.
+    fn release(&self) {
+        let held = self.held.borrow_mut().release();
+        for command in held {
+            self.run_on_gtk(command);
+        }
     }
     /// The cursor the page set: its box's (one of zgx's), or an image the
     /// window shows over it; the window's cursor follows now (`cursor_changed`).
@@ -4414,6 +4510,7 @@ impl UiPage {
                 }
             }
             InputEvent::Focus => {
+                self.hold();
                 self.send(Command::Focus(true));
                 // By Tab (or Shift+Tab), as into a browser's frame: the
                 // page's first focusable element (or its last).
@@ -4595,6 +4692,7 @@ fn backend(
         pressed: Cell::new(None),
         dragging: RefCell::new(None),
         exporting: RefCell::new(None),
+        held: RefCell::new(Hold::default()),
     });
     let spec = Spec {
         id: web.id(),
@@ -5387,6 +5485,40 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Commands sent as focus enters a page (its focus, the Tab into it,
+    /// keys typed meanwhile) are kept back and then sent all, in order;
+    /// once released, they pass straight through.
+    #[test]
+    fn a_hold_keeps_every_command_in_order_and_then_lets_them_pass() {
+        let mut hold = Hold::default();
+        assert_eq!(hold.pass(1), Some(1), "not holding: sent at once");
+        assert!(hold.start());
+        assert!(!hold.start(), "one hold at a time");
+        for key in 2..=6 {
+            assert_eq!(hold.pass(key), None);
+        }
+        assert_eq!(hold.release(), vec![2, 3, 4, 5, 6]);
+        assert_eq!(hold.release(), Vec::<i32>::new());
+        assert_eq!(hold.pass(7), Some(7));
+    }
+
+    /// With no frame to send accessibility (an idle window), the held
+    /// commands still go within the bound.
+    #[test]
+    fn held_commands_go_within_the_bound_without_a_frame() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let start = std::time::Instant::now();
+        release_later(u64::MAX, HOLD_AT_MOST, move |release| {
+            let _ = sender.send(release);
+        });
+        let release = receiver
+            .recv_timeout(HOLD_AT_MOST * 4)
+            .expect("released without a frame");
+        assert!(start.elapsed() >= HOLD_AT_MOST);
+        // No page by that id: nothing to send.
+        release();
+    }
 
     /// Only a page window's own accessible is matched: not a null source,
     /// not another object, even one beside it in memory.

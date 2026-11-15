@@ -34,14 +34,18 @@ pub use rect::*;
 pub use util::WindowBounds;
 
 /// zgx patch: a node whose author ID is `EMBED`, then a bus name, an object
-/// path and anything else (a count that changes to embed again), each on a
-/// line of its own, embeds that AT-SPI object of another process (a web
-/// page's root) as its last child (ZGX_PATCH.md).
+/// path, a count that changes to embed again and, optionally, the embedded
+/// tree's toolkit, each on a line of its own, embeds that AT-SPI object of
+/// another process (a web page's root) as its last child (ZGX_PATCH.md).
 pub const EMBED: &str = "zgx-atspi-embed\n";
 /// The bus name and path an author ID embeds (`EMBED`).
 pub fn embedded(author_id: &str) -> Option<(String, String)> {
     let mut parts = author_id.strip_prefix(EMBED)?.split('\n');
     Some((parts.next()?.into(), parts.next()?.into()))
+}
+/// The toolkit of the tree an author ID embeds (`EMBED`), where it names one.
+pub fn embedded_toolkit(author_id: &str) -> Option<&str> {
+    author_id.strip_prefix(EMBED)?.split('\n').nth(3).filter(|toolkit| !toolkit.is_empty())
 }
 
 #[cfg(test)]
@@ -57,5 +61,12 @@ mod embed_tests {
         );
         assert_eq!(crate::embedded("plain id"), None);
         assert_eq!(crate::embedded(&format!("{}bus-only", crate::EMBED)), None);
+        assert_eq!(crate::embedded_toolkit(&id), None);
+        assert_eq!(crate::embedded_toolkit(&format!("{id}\nWebKitGTK")), Some("WebKitGTK"));
+        assert_eq!(
+            crate::embedded(&format!("{id}\nWebKitGTK")),
+            Some(("org.webkit.app-1.WebProcess".into(), "/org/a11y/webkit/accessible/2".into()))
+        );
+        assert_eq!(crate::embedded_toolkit("plain id"), None);
     }
 }

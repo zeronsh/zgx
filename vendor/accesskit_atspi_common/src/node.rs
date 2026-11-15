@@ -392,12 +392,7 @@ impl NodeWrapper<'_> {
 
         // zgx patch: not a node embedding another process's tree, which
         // says what is focused itself (`crate::EMBED`).
-        if self.is_focused()
-            && !self
-                .0
-                .author_id()
-                .is_some_and(|id| id.starts_with(crate::EMBED))
-        {
+        if self.is_focused() {
             atspi_state.insert(State::Focused);
         }
 
@@ -442,6 +437,12 @@ impl NodeWrapper<'_> {
         }
         if let Some(role_description) = self.braille_role_description() {
             attributes.insert("brailleroledescription", role_description.to_string());
+        }
+        // zgx patch: a node embedding another process's tree names the
+        // toolkit of what it embeds, as that tree's own nodes do, so a
+        // reader takes it with the same script (`crate::embedded_toolkit`).
+        if let Some(toolkit) = self.0.author_id().and_then(crate::embedded_toolkit) {
+            attributes.insert("toolkit", toolkit.to_string());
         }
 
         attributes

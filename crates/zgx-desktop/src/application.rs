@@ -2642,6 +2642,9 @@ impl Host {
                 }
             });
         }
+        // Pages focus entered send what they held, after the focus above.
+        #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
+        crate::native_host::webkitgtk::accessibility_sent();
     }
     /// What AppKit said of this window's full screen (`phase`, of the
     /// transition numbered `seq`, its animation about `duration` long):
