@@ -4,11 +4,12 @@ drags TEXT as another app's selection does (GTK's own XDND on X11, its
 `wl_data_device` on Wayland with `GDK_BACKEND=wayland`), offered as UTF-8
 text in the formats browsers and editors offer.
 
-    text_drag_source.py TITLE X Y TEXT
+    text_drag_source.py TITLE X Y TEXT [--html HTML]
 
 Prints `READY` once shown, `SENT <target>` as a drop asks for the text,
 `FAILED` when a drag is let go of where nothing takes it (or cancelled), and
-`END` as each drag ends."""
+`END` as each drag ends. With `--html`, it offers the same as `text/html`
+too, as a browser's selection does."""
 import argparse
 import sys
 
@@ -27,7 +28,9 @@ def main():
     parser.add_argument("x", type=int)
     parser.add_argument("y", type=int)
     parser.add_argument("text")
+    parser.add_argument("--html", help="offered as text/html too")
     args = parser.parse_args()
+    formats = FORMATS + (["text/html"] if args.html else [])
 
     window = Gtk.Window(title=args.title)
     window.set_default_size(240, 120)
@@ -35,12 +38,15 @@ def main():
     window.connect("destroy", Gtk.main_quit)
     button = Gtk.Button(label="Drag text")
     window.add(button)
-    targets = [Gtk.TargetEntry.new(name, 0, index) for index, name in enumerate(FORMATS)]
+    targets = [Gtk.TargetEntry.new(name, 0, index) for index, name in enumerate(formats)]
     button.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, targets, Gdk.DragAction.COPY)
 
     def data(widget, context, selection, info, time):
-        selection.set_text(args.text, -1)
-        print("SENT", FORMATS[info], flush=True)
+        if formats[info] == "text/html":
+            selection.set(Gdk.Atom.intern("text/html", False), 8, args.html.encode())
+        else:
+            selection.set_text(args.text, -1)
+        print("SENT", formats[info], flush=True)
 
     def failed(widget, context, result):
         print("FAILED", int(result), flush=True)

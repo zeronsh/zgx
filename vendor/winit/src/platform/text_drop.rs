@@ -24,6 +24,20 @@ pub trait TextDrops {
     /// The drag was let go of over `window` at `(x, y)`, carrying `text`:
     /// whether it was taken.
     fn dropped(&self, window: WindowId, x: f64, y: f64, text: &str) -> bool;
+    /// The same, with the drag's text as HTML where the source offered it
+    /// too (macOS: `public.html`; X11 and Wayland: `text/html`; Windows:
+    /// `CF_HTML`'s fragment). By default, the text alone.
+    fn dropped_with_html(
+        &self,
+        window: WindowId,
+        x: f64,
+        y: f64,
+        text: &str,
+        html: Option<&str>,
+    ) -> bool {
+        let _ = html;
+        self.dropped(window, x, y, text)
+    }
 }
 
 thread_local! {
@@ -32,7 +46,8 @@ thread_local! {
 
 /// zgx patch: windows take text dragged in from other apps through `drops`
 /// (macOS: a pasteboard's string; X11: XDND's UTF-8 text; Windows:
-/// `CF_UNICODETEXT`). Main thread only; none refuses such drags.
+/// `CF_UNICODETEXT`), with its HTML where offered. Main thread only; none
+/// refuses such drags.
 pub fn set_text_drops(drops: Option<Rc<dyn TextDrops>>) {
     TEXT_DROPS.with(|cell| *cell.borrow_mut() = drops);
 }

@@ -620,10 +620,10 @@ impl EventProcessor {
 
         if xev.message_type == atoms[XdndDrop] as c_ulong {
             // zgx patch: text drops once it arrives (now, or as it does).
-            if let Some(text) = &mut self.dnd.text {
+            if let Some(accepted) = self.dnd.text.as_ref().map(|text| text.accepted) {
                 let source_window = xev.data.get_long(0) as xproto::Window;
-                if text.accepted && text.text.is_none() {
-                    text.dropped = Some(source_window);
+                if accepted && !self.dnd.text_complete() {
+                    self.dnd.text.as_mut().unwrap().dropped = Some(source_window);
                     return;
                 }
                 self.drop_text(window, source_window);
@@ -695,13 +695,29 @@ impl EventProcessor {
         wt.xconn.set_timestamp(xev.time as xproto::Timestamp);
 
         // zgx patch: a text drag's text (property `None`: none to be had).
+        // Its HTML follows its text, where the source offers it: one
+        // conversion at a time goes through the property.
         if xev.selection == atoms[XdndSelection] as c_ulong && self.dnd.text.is_some() {
-            let text = (xev.property == atoms[XdndSelection] as c_ulong)
-                .then(|| unsafe { self.dnd.read_text(window) })
-                .flatten();
-            let drag = self.dnd.text.as_mut().unwrap();
-            drag.text = Some(text);
-            if let Some(source_window) = drag.dropped {
+            let answered = xev.property == atoms[XdndSelection] as c_ulong;
+            let html_target = self.dnd.html_target();
+            let drag = self.dnd.text.as_ref().unwrap();
+            if drag.asking_html {
+                let html = answered.then(|| unsafe { self.dnd.read_html(window) }).flatten();
+                let drag = self.dnd.text.as_mut().unwrap();
+                drag.asking_html = false;
+                drag.html = Some(html);
+            } else {
+                let text = answered.then(|| unsafe { self.dnd.read_text(window) }).flatten();
+                let ask_html = text.is_some() && drag.html.is_none();
+                let drag = self.dnd.text.as_mut().unwrap();
+                drag.text = Some(text);
+                if let (true, Some(target)) = (ask_html, html_target) {
+                    drag.asking_html = true;
+                    unsafe { self.dnd.convert_text(window, target, wt.xconn.timestamp()) };
+                    return;
+                }
+            }
+            if let Some(source_window) = self.dnd.text.as_ref().unwrap().dropped {
                 self.drop_text(window, source_window);
             }
             return;
@@ -735,9 +751,10 @@ impl EventProcessor {
         let window_id = mkwid(window);
         let drops = crate::platform::text_drop::text_drops();
         let taken = match (self.dnd.text.take(), &drops) {
-            (Some(super::dnd::TextDrag { accepted: true, text: Some(Some(text)), point, .. }), Some(drops)) => {
-                drops.dropped(window_id, point.0, point.1, &text)
-            },
+            (
+                Some(super::dnd::TextDrag { accepted: true, text: Some(Some(text)), html, point, .. }),
+                Some(drops),
+            ) => drops.dropped_with_html(window_id, point.0, point.1, &text, html.flatten().as_deref()),
             _ => false,
         };
         if !taken {

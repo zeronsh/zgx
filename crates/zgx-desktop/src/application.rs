@@ -8119,9 +8119,16 @@ impl WindowManager {
                             x,
                             y,
                             text,
+                            html,
                             accepted,
                         } => {
-                            let taken = crate::text_drop::dropped(&host.context.ui, x, y, &text);
+                            let taken = crate::text_drop::dropped(
+                                &host.context.ui,
+                                x,
+                                y,
+                                &text,
+                                html.as_deref(),
+                            );
                             let _ = accepted.send(taken);
                             Ok(())
                         }
