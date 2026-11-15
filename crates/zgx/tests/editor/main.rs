@@ -10,6 +10,8 @@ mod composition_virtual_keyboard;
 mod editor_accessible_selection;
 #[path = "../editor_answer_history.rs"]
 mod editor_answer_history;
+#[path = "../editor_atom_moves.rs"]
+mod editor_atom_moves;
 #[path = "../editor_atoms.rs"]
 mod editor_atoms;
 #[path = "../editor_autocorrect.rs"]
