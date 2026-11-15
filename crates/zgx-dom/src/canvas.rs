@@ -185,3 +185,40 @@ fn path_words(ops: &mut Ops, path: &Path) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+    use zgx::canvas::{Canvas, CanvasText};
+
+    fn encoded(known_size: Option<(f32, f32)>, anchor: TextAnchor) -> (Vec<u32>, String) {
+        let mut canvas = Canvas::new();
+        canvas.text(CanvasText {
+            text: "a run".into(),
+            x: 16.,
+            y: 0.,
+            size: 13.,
+            color: Color(200, 200, 200, 255),
+            font: Default::default(),
+            anchor,
+            baseline: TextBaseline::Top,
+            known_size,
+        });
+        let mut ops = Ops::default();
+        encode(&mut ops, &canvas);
+        (ops.words, ops.text)
+    }
+
+    /// Canvas 2D places text by its point and anchor alone: a size its
+    /// maker states (a terminal's run on its grid) draws it as without one,
+    /// at any anchor, however far off the stated size is.
+    #[test]
+    fn a_stated_size_draws_as_none() {
+        for anchor in [TextAnchor::Start, TextAnchor::Center, TextAnchor::End] {
+            let none = encoded(None, anchor);
+            assert_eq!(encoded(Some((40., 17.)), anchor), none);
+            assert_eq!(encoded(Some((1., 1.)), anchor), none);
+        }
+    }
+}

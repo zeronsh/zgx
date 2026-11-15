@@ -2478,8 +2478,14 @@ impl CanvasLabels {
                 }
             };
             scene.set_font(node, text.font.clone());
-            let size = match (text.anchor, text.baseline) {
-                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top) => (0., 0.),
+            // A size its maker knows (a terminal's run on its grid) is
+            // kept, for layout and damage not to measure the text again.
+            if let Some(size) = text.known_size {
+                scene.state_text_size(node, size);
+            }
+            let size = match (text.anchor, text.baseline, text.known_size) {
+                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top, _) => (0., 0.),
+                (_, _, Some(size)) => size,
                 _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
             };
             let (x, y) = text.origin(size);
@@ -9676,6 +9682,7 @@ mod canvas_label_tests {
                         font: Default::default(),
                         anchor: TextAnchor::Start,
                         baseline: TextBaseline::Top,
+                        known_size: None,
                     });
                 }
                 canvas

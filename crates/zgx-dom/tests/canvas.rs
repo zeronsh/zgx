@@ -117,6 +117,7 @@ async fn a_canvas_draws_its_commands_and_again_as_they_change() {
                         font: Default::default(),
                         anchor: TextAnchor::Start,
                         baseline: TextBaseline::Top,
+                        known_size: None,
                     });
                 drawing
             })
