@@ -70,6 +70,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             format!("Clicks chart: {} clicks", named_count.get())
                         }),
                     )
+                    // A citation in a sentence: a control inline in the
+                    // paragraph, named apart from its "1", read once there.
+                    .child(
+                        rich_text()
+                            .child(text_span("step "))
+                            .child(
+                                text_span("1")
+                                    .label("AT-SPI citation")
+                                    .on_click(|| println!("ATSPI citation")),
+                            )
+                            .child(text_span(".")),
+                    )
                     .child(checkbox("AT-SPI option", checked.clone()))
                     .child(
                         slider("AT-SPI amount", amount.clone(), 0. ..=100.)
