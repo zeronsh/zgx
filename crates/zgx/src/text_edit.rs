@@ -575,6 +575,43 @@ impl TextEditor {
         }
         destroyed
     }
+    /// An atom an edit took away and brought back (the same id) only moved:
+    /// the changes since `mark` lose both its `Removed` and its `Added`, so
+    /// whoever keeps its payload keeps it. A text's drag carries its atoms.
+    fn settle_atom_moves(&mut self, mark: usize) {
+        let mark = mark.min(self.atom_changes.len());
+        let added: Vec<u64> = self.atom_changes[mark..]
+            .iter()
+            .filter_map(|change| match change {
+                AtomChange::Added(atom) => Some(atom.id),
+                AtomChange::Removed(..) => None,
+            })
+            .collect();
+        let removed: Vec<u64> = self.atom_changes[mark..]
+            .iter()
+            .filter_map(|change| match change {
+                AtomChange::Removed(atom, ..) => Some(atom.id),
+                AtomChange::Added(_) => None,
+            })
+            .collect();
+        let moved: Vec<u64> = added
+            .into_iter()
+            .filter(|id| removed.contains(id))
+            .collect();
+        if moved.is_empty() {
+            return;
+        }
+        let kept: Vec<AtomChange> = self
+            .atom_changes
+            .drain(mark..)
+            .filter(|change| match change {
+                AtomChange::Added(atom) | AtomChange::Removed(atom, ..) => {
+                    !moved.contains(&atom.id)
+                }
+            })
+            .collect();
+        self.atom_changes.extend(kept);
+    }
     /// Atoms brought back (an undo's, a redo's), kept in order.
     fn restore_atoms(&mut self, atoms: &[Atom]) {
         if atoms.is_empty() {
@@ -1601,9 +1638,13 @@ impl TextEditor {
     }
     /// Move the text at `from` to `to` (a byte offset outside it), as a
     /// drag of a selection drops it: one undo step, the moved text
-    /// selected after. False when `to` is within it or it is empty.
+    /// selected after. False when `to` is within it or it is empty. Its
+    /// atoms go with it, and those it passes shift, each the same atom (id,
+    /// wash, payload): a range through an atom takes it whole, and a drop
+    /// inside one goes to its nearer edge, as a web editor's chip.
     pub fn move_text(&mut self, from: Range<usize>, to: usize) -> bool {
         let (from, to) = (self.clamp(from.start)..self.clamp(from.end), self.clamp(to));
+        let (from, to) = (self.over_atoms(from), self.out_of_atoms(to));
         if from.is_empty() || (to > from.start && to < from.end) {
             return false;
         }
@@ -1620,12 +1661,43 @@ impl TextEditor {
             let between = self.text.slice(to..from.start).into_owned();
             (to..from.end, moved.clone() + &between, to)
         };
+        // The span keeps its length: atoms outside it stay. Inside it, the
+        // moved text's go where it goes and those it passes shift by its length.
+        let carried: Vec<Atom> = self
+            .atoms
+            .iter()
+            .filter(|atom| atom.range.start >= span.start && atom.range.end <= span.end)
+            .map(|atom| {
+                let (start, len) = (atom.range.start, atom.range.len());
+                let start = if atom.range.start >= from.start && atom.range.end <= from.end {
+                    at + (start - from.start)
+                } else if to >= from.end {
+                    start - moved.len()
+                } else {
+                    start + moved.len()
+                };
+                Atom {
+                    range: start..start + len,
+                    ..atom.clone()
+                }
+            })
+            .collect();
         self.selection = Selection {
             anchor: span.start,
             focus: span.end,
         };
+        let mark = self.atom_changes.len();
         if !self.replace(&value, None) {
             return false;
+        }
+        // The replacement took them (kept for undo); they come back where the
+        // text put them, as the step's own (for redo), and only moved.
+        if !carried.is_empty() {
+            self.restore_atoms(&carried);
+            if let Some(edit) = self.undo.back_mut() {
+                edit.created = carried;
+            }
+            self.settle_atom_moves(mark);
         }
         self.select_edited(at..at + moved.len());
         true
@@ -1795,8 +1867,10 @@ impl TextEditor {
         self.atom_reason = "undo";
         self.text
             .replace_range(edit.start..edit.start + edit.inserted.len(), &edit.deleted);
+        let mark = self.atom_changes.len();
         self.move_atoms(edit.start, &edit.inserted, edit.deleted.len());
         self.restore_atoms(&edit.destroyed);
+        self.settle_atom_moves(mark);
         self.revision = self.revision.wrapping_add(1);
         self.sync.get_or_insert_default().last_edit =
             (edit.start, edit.inserted.len(), edit.deleted.len());
@@ -1825,8 +1899,10 @@ impl TextEditor {
         self.atom_reason = "redo";
         self.text
             .replace_range(edit.start..edit.start + edit.deleted.len(), &edit.inserted);
+        let mark = self.atom_changes.len();
         self.move_atoms(edit.start, &edit.deleted, edit.inserted.len());
         self.restore_atoms(&edit.created);
+        self.settle_atom_moves(mark);
         self.revision = self.revision.wrapping_add(1);
         self.sync.get_or_insert_default().last_edit =
             (edit.start, edit.deleted.len(), edit.inserted.len());
