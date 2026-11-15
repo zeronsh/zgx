@@ -1423,12 +1423,20 @@ fn make_inline(ops: &mut Ops, inline: &Inline, ids: &mut Vec<u32>) -> u32 {
                 ("target", "_blank"),
                 ("rel", "noopener noreferrer"),
             ],
-            // Focusable and pressed from the keyboard as a link is.
+            // Focusable and pressed from the keyboard as a button is
+            // (Enter, Space), or a link (Enter) where it goes somewhere the
+            // browser isn't given.
+            None if inline.button => &[("tabindex", "0"), ("role", "button")],
             None => &[("tabindex", "0"), ("role", "link")],
         };
         for (name, value) in attrs {
             ops.op_str(ops::ATTR, element, name);
             ops.str(value);
+        }
+        // Named apart from its text (a citation's "1"): read once, by it.
+        if let Some(label) = &inline.label {
+            ops.op_str(ops::ATTR, element, "aria-label");
+            ops.str(label);
         }
     }
     if let Some((ms, elapsed)) = inline.fade {
