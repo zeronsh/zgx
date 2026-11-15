@@ -192,9 +192,7 @@ pub fn label(english: &str) -> String {
 
 /// [`label`] with `{name}` arguments ("Page {page} of {total}"); without the key, each `{name}` takes its value.
 pub fn label_args(english: &str, args: &[(&str, ArgValue)]) -> String {
-    let app = APP
-        .with(|a| a.borrow().as_ref().and_then(std::rc::Weak::upgrade))
-        .map(I18n);
+    let app = APP.with(|a| a.borrow().as_ref().and_then(std::rc::Weak::upgrade)).map(I18n);
     if let Some(i18n) = app.filter(|i18n| i18n.has(english)) {
         let mut message = i18n.t(english);
         for (name, value) in args {
@@ -223,11 +221,7 @@ impl I18n {
 
     /// Whether any locale file has `key`, telling no issue when none does.
     pub fn has(&self, key: &str) -> bool {
-        self.0
-            .catalogs
-            .borrow()
-            .iter()
-            .any(|(_, catalog)| catalog.get(key).is_some())
+        self.0.catalogs.borrow().iter().any(|(_, catalog)| catalog.get(key).is_some())
     }
 
     /// A catalog with no locales yet, its keys defined by `source`'s file.

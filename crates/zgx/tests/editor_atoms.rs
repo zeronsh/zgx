@@ -53,11 +53,9 @@ fn an_atom_deletes_whole_and_the_listener_hears_it_go() {
     assert_eq!(editor.editor.borrow().text(), "see  now");
     assert!(editor.atoms().is_empty());
     assert!(
-        heard.borrow().contains(&AtomChange::Removed(
-            Atom::new(id, 4..13),
-            4..13,
-            "@file.pdf".into()
-        )),
+        heard
+            .borrow()
+            .contains(&AtomChange::Removed(Atom::new(id, 4..13), 4..13, "@file.pdf".into())),
         "{:?}",
         heard.borrow()
     );
