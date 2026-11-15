@@ -310,6 +310,28 @@ fn roles_and_labels_reach_aria() {
     assert_eq!(view.get_attribute("aria-label").unwrap(), "Tools");
 }
 
+/// A toggle button's state reaches `aria-pressed`, and follows.
+#[wasm_bindgen_test]
+fn a_pressed_state_reaches_aria_pressed_and_follows() {
+    let runtime = Runtime::new();
+    let bold = runtime.signal(false);
+    let read = bold.clone();
+    let host = host();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column()
+            .accessible_label("Bold")
+            .pressed_when(move || read.get())
+            .child(text("B")),
+    );
+    let view = first(&host);
+    assert_eq!(view.get_attribute("aria-pressed").unwrap(), "false");
+    bold.set(true);
+    zgx_dom::flush();
+    assert_eq!(view.get_attribute("aria-pressed").unwrap(), "true");
+}
+
 #[wasm_bindgen_test]
 fn clocks_and_tracing_read_the_browser_clock() {
     // std's clock panics in a browser; zgx's reads `performance.now()`.

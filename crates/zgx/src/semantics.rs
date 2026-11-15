@@ -186,6 +186,9 @@ pub struct SemanticNode {
     pub modal: bool,
     /// Whether what it opens is open; `None` for nothing to open.
     pub expanded: Option<bool>,
+    /// A toggle button's state (`aria-pressed`): pressed, not pressed, or
+    /// `None` for not a toggle button.
+    pub pressed: Option<bool>,
     /// What it opens, if anything.
     pub has_popup: Option<PopupKind>,
     /// None preserves the vertical default of legacy scroll views.
@@ -299,6 +302,7 @@ impl SemanticNode {
             read_only: false,
             modal: false,
             expanded: None,
+            pressed: None,
             has_popup: None,
             scroll_axis: None,
             selected: None,

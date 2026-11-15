@@ -2324,6 +2324,9 @@ export type NodeProps = {
 	-- (`aria-expanded`): a custom disclosure's.
 	checked: (boolean | Readable<boolean> | (() -> boolean))?,
 	expanded: (boolean | Readable<boolean> | (() -> boolean))?,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
 	-- note, a message arriving.
 	live: ("polite" | "assertive" | "off")?,

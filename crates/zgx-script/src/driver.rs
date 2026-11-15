@@ -1118,6 +1118,11 @@ pub fn node(
         if s.expanded == Some(true) {
             flags.push("expanded");
         }
+        match s.pressed {
+            Some(true) => flags.push("pressed"),
+            Some(false) => flags.push("not-pressed"),
+            None => {}
+        }
         if !flags.is_empty() {
             out.push(("state".into(), flags.join(" ")));
         }

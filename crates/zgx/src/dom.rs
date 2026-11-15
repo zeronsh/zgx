@@ -1799,7 +1799,13 @@ fn primitive(
                 bound_attrs.push(("aria-label", Box::new(move || Some(f()))));
             }
             if let Some(mut f) = a.checked {
-                bound_attrs.push(("aria-checked", Box::new(move || Some(bool_str(f())))));
+                // A toggle button's (`View::pressed_when`) is `aria-pressed`.
+                let name = if a.toggle {
+                    "aria-pressed"
+                } else {
+                    "aria-checked"
+                };
+                bound_attrs.push((name, Box::new(move || Some(bool_str(f())))));
             }
             if let Some(mut f) = a.selected {
                 bound_attrs.push(("aria-selected", Box::new(move || Some(bool_str(f())))));
@@ -1807,6 +1813,7 @@ fn primitive(
             if let Some(mut f) = a.expanded {
                 bound_attrs.push(("aria-expanded", Box::new(move || Some(bool_str(f())))));
             }
+
             if let Some(mut f) = a.value {
                 bound_attrs.push(("aria-valuetext", Box::new(move || Some(f()))));
             }
