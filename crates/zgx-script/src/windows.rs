@@ -569,6 +569,16 @@ pub(crate) const SIZE: &str = "zgx.window.size";
 /// and sets, to show a window that zgx.json opened hidden.
 pub(crate) const VISIBLE: &str = "zgx.window.visible";
 
+/// The shared key holding how many device pixels a point is in the app's
+/// window (`ScriptHost::window_zoom`): `ui.window.scale`, which a script
+/// reads.
+pub(crate) const SCALE: &str = "zgx.window.scale";
+
+/// A window's scale as `ui.window.scale` holds it: 1 until it has one.
+pub(crate) fn scale(pixels: f32) -> Value {
+    Value::Num(if pixels > 0. { f64::from(pixels) } else { 1. })
+}
+
 /// A window's size as `ui.window.size` holds it.
 pub(crate) fn size(width: f32, height: f32) -> Value {
     let n = |v: f32| Value::Num(f64::from(v));
@@ -622,15 +632,15 @@ pub(crate) fn install(
     let meta = lua.create_table()?;
     // `zoom` and `zoomable` made as a script first reads them: a script that
     // never does makes neither. A plugin reads the size of the window it
-    // draws in (a picture fitted to it), and nothing else here: the rest
-    // is the app's.
+    // draws in (a picture fitted to it) and its scale (what a raster of it
+    // costs), and nothing else here: the rest is the app's.
     let shared = shared.clone();
     meta.set(
         "__index",
         lua.create_function(move |_, (window, key): (Table, mlua::Value)| {
             let name = key.as_string().map(|key| key.to_string_lossy());
             let state = match name.as_deref() {
-                Some("size") => None,
+                Some("size" | "scale") => None,
                 _ if plugin => return Ok(mlua::Value::Nil),
                 Some("zoom") => Some(shared.state(ZOOM, Value::Num(1.))),
                 Some("zoomable") => Some(shared.state(ZOOMABLE, Value::Bool(true))),
@@ -658,6 +668,7 @@ pub(crate) fn install(
                 "full_screen" => shared.state(FULL_SCREEN, Value::Bool(false)),
                 "maximized" => shared.state(MAXIMIZED, Value::Bool(false)),
                 "full_screen_transition" => shared.state(FULL_SCREEN_TRANSITION, Value::Nil),
+                "scale" => shared.state(SCALE, scale(0.)),
                 _ => shared.state(SIZE, size(0., 0.)),
             });
             window.raw_set(key.clone(), ReadState(state, read.into()))?;

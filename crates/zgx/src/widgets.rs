@@ -4262,8 +4262,9 @@ impl Ui {
     /// The scene's pixel scale as this frame found it: what places scroll
     /// content on whole device pixels reads it, to place it again from the
     /// offset it was asked for when the scale changes (the scene alone
-    /// keeps only where it put it).
-    pub(crate) fn pixel_scale(&self) -> Signal<f32> {
+    /// keeps only where it put it). 0 until the host sets one
+    /// (`Scene::set_pixel_scale`).
+    pub fn pixel_scale(&self) -> Signal<f32> {
         self.storage.pixel_scale.clone()
     }
     /// Whether input is being dispatched, so a scroll now is the user's.
