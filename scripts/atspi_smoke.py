@@ -128,6 +128,21 @@ def main():
                 # worked out once a client reads the window.
                 chart = wait_for(lambda: find("Clicks chart: 0 clicks"), "a chart named from state")
                 assert chart.get_role_name() == "image", chart.get_role_name()
+                # A citation inline in a sentence ("step ", a "1" named
+                # "AT-SPI citation", "."): read once, as a browser reads an
+                # inline link. The button is the paragraph's own, its "1"
+                # gone from the paragraph's text, and an object placeholder,
+                # if the paragraph's text has one, where it stands.
+                citation = wait_for(lambda: find("AT-SPI citation"), "an inline citation button")
+                assert citation.get_role_name() in ("button", "push button"), citation.get_role_name()
+                paragraph = citation.get_parent()
+                assert paragraph is not None and "Text" in list(paragraph.get_interfaces()), paragraph
+                sentence = Atspi.Text.get_text(paragraph, 0, -1)
+                print("CITATION", paragraph.get_role_name(), repr(sentence), flush=True)
+                assert sentence.replace("\ufffc", "") == "step .", sentence
+                assert "\ufffc" not in sentence or sentence.index("\ufffc") == 5, sentence
+                twice = [node.get_name() for node, _ in tree() if "step 1" in (node.get_name() or "")]
+                assert not twice, twice
                 def snapshot_tree():
                     result = []
                     for node, depth in tree():
