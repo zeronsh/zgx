@@ -565,6 +565,14 @@ pub struct CanvasText {
     pub anchor: TextAnchor,
     /// Where `y` falls down it.
     pub baseline: TextBaseline,
+    /// Its size unwrapped, when its maker knows it as shaping would measure
+    /// it (a terminal's run: its cells on the grid, by the line's height):
+    /// the scene keeps it rather than measuring the text again. A debug
+    /// build measures anyway and checks it. Hosts that draw canvas text
+    /// themselves (zgx-dom's Canvas 2D) place it by `x`, `y` and its anchor
+    /// alone, never reading this.
+    #[doc(hidden)]
+    pub known_size: Option<(f32, f32)>,
 }
 impl CanvasText {
     /// Its top left, given its size.

@@ -22,6 +22,9 @@ pub(crate) struct Metrics {
     pub font_size: f32,
     pub cell_width: f32,
     pub cell_height: f32,
+    /// A line of text's height as shaping measures it (the cell's, before
+    /// it is rounded up to whole device pixels): a run's stated height.
+    pub line_height: f32,
 }
 
 /// How the terminal colours what programs leave to it.
@@ -694,6 +697,13 @@ pub(crate) fn font() -> FontStyle {
 /// (`LetterSpacing::cells`, set once with the cell, `view::row_view`).
 pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canvas {
     let mut canvas = Canvas::new();
+    // The grid's cell as shaping holds it (to a 1024th of a point): each
+    // run's width is its cells of it, its height the line's, stated for the
+    // scene not to measure what the grid decides (`CanvasText::known_size`).
+    let cell = font
+        .letter_spacing
+        .cell()
+        .filter(|_| metrics.line_height > 0.);
     for fill in paint.fills.iter().chain(&paint.lines) {
         if fill.height < 0. {
             draw_underline(&mut canvas, fill, metrics);
@@ -736,9 +746,22 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
             font,
             anchor,
             baseline: TextBaseline::Top,
+            known_size: cell.map(|cell| (grid_cells(&run.text) as f32 * cell, metrics.line_height)),
         });
     }
     canvas
+}
+
+/// How many cells `text` takes on the grid, as shaping places it there
+/// (`snap_to_cells` in the cosmic-text fork): each character's width as
+/// unicode-width tells it. A cell holds no control character, so ASCII is
+/// a cell a byte.
+fn grid_cells(text: &str) -> usize {
+    if text.is_ascii() {
+        return text.len();
+    }
+    use unicode_width::UnicodeWidthChar;
+    text.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
 /// An underline in a style of its own (`UnderlineStyle`) on a row's canvas:
@@ -899,6 +922,7 @@ mod tests {
             font_size: 13.,
             cell_width: 8.,
             cell_height: 16.,
+            line_height: 15.6,
         };
         let shapes = [
             CursorShape::Block,

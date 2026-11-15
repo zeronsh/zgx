@@ -1605,3 +1605,77 @@ fn a_search_counts_highlights_and_scrolls_to_its_matches() {
     assert_eq!(search(), None);
     assert_eq!(search_fills(&app), (0, 0), "no highlights left");
 }
+
+/// A run states its size, its cells on the grid by the line's height
+/// (`CanvasText::known_size`), and the scene keeps it rather than measuring:
+/// what shaping measures, with a wide CJK cell, a glyph from a fallback
+/// font in a run (a braille spinner), a combining accent, a symbol drawn
+/// alone, bold and italic. (A debug build checks each stated size against
+/// shaping as it is kept, `Scene::state_text_size`; this checks the size
+/// layout gave each.)
+#[test]
+fn a_runs_stated_size_is_what_shaping_measures() {
+    use zgx::{
+        text_layout::FontFamily,
+        theme::{ThemeOverride, tok},
+    };
+    let ui = Ui::new(640., 360.);
+    let text = zgx_gpu::TextServices::new();
+    let font = zgx_gpu::text::FontData::new(std::sync::Arc::<[u8]>::from(zgx_workload::FONT_BYTES))
+        .expect("the bundled font");
+    font.install(&mut text.text_system().borrow_mut());
+    text.install(&mut ui.scene.borrow_mut());
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    app.ui.mount(provide(
+        zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view),
+        theme_scope_with(
+            || ThemeOverride::new().with(tok::FONT_MONO, FontFamily::from(zgx_workload::FONT)),
+            zgx::terminal::terminal(&term).w(600.).h(300.),
+        ),
+    ));
+    app.ui.prepare_frame();
+    replay.feed(
+        "\u{280b} Loading 21\u{2103} done\r\n\
+         \u{4e2d}\u{6587} wide, cafe\u{301}\r\n\
+         \x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \u{2714} ok\r\n"
+            .as_bytes(),
+    );
+    app.ui.prepare_frame();
+    for shown in [
+        "\u{280b} Loading 21\u{2103} done",
+        "\u{4e2d}",
+        "\u{6587}",
+        "bold",
+        "italic",
+    ] {
+        assert!(app.shows(shown), "{shown:?} in {:?}", app.texts());
+    }
+    let scene = app.ui.scene.borrow();
+    let mut runs = 0;
+    for item in scene.paint_items() {
+        let NodeKind::Text {
+            text, font_size, ..
+        } = item.kind
+        else {
+            continue;
+        };
+        // Not a run: the input's empty text, where typing composes.
+        if text.is_empty() {
+            continue;
+        }
+        let (width, height) = scene.measure_text_with_font(text, *font_size, None, item.font);
+        assert!(
+            (item.bounds.width - width).abs() <= 1. / 256. && item.bounds.height == height,
+            "{text:?} laid out {:?}, shaped {:?}",
+            (item.bounds.width, item.bounds.height),
+            (width, height)
+        );
+        runs += 1;
+    }
+    assert!(runs >= 8, "{:?}", app.texts());
+}

@@ -311,6 +311,7 @@ impl UserData for Recorder {
                     font,
                     anchor,
                     baseline,
+                    known_size: None,
                 });
                 Ok(())
             },

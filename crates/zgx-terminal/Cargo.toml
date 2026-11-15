@@ -24,6 +24,9 @@ memchr = "2.7"
 base64 = "0.22"
 flate2 = "1"
 png = "0.18"
+# A run's cells on the grid, counted as the shaper's grid counts them (the
+# version cosmic-text and the screen model use).
+unicode-width = "0.2.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

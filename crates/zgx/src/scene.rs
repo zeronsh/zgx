@@ -3032,6 +3032,13 @@ struct Slot {
 fn stale() -> ! {
     panic!("stale scene node")
 }
+/// Whether a text's stated size is the one shaping measured
+/// (`Scene::state_text_size`): its height exactly, its width to within a
+/// 256th of a point, what summing a grid's cell advances in EM leaves.
+#[cfg(debug_assertions)]
+fn stated_size_agrees(stated: (f32, f32), measured: (f32, f32)) -> bool {
+    (stated.0 - measured.0).abs() <= 1. / 256. && stated.1 == measured.1
+}
 /// Where a parent's children are damaged (`Scene::damage_context`).
 type DamageContext = Option<(Transform, Option<Rect>)>;
 /// What a [`Scene::flush`] did, for renderers and diagnostics.
@@ -8601,6 +8608,31 @@ impl Scene {
         if sizes.get().find(limit, self.text_shaper_revision) != Some(size) {
             TextSizes::remember(sizes, limit, self.text_shaper_revision, size);
         }
+    }
+    /// Keep `size` as text node `id`'s unwrapped size, as its maker states
+    /// it (`CanvasText::known_size`): layout and damage find it rather than
+    /// measuring the text. After its text and font are set (each a change
+    /// that forgets sizes). A debug build measures it anyway, as layout
+    /// would, and checks the two agree where a renderer's shaping measures
+    /// (a headless approximation is not what a renderer draws).
+    pub(crate) fn state_text_size(&self, id: NodeId, size: (f32, f32)) {
+        #[cfg(debug_assertions)]
+        if let NodeKind::Text {
+            text, font_size, ..
+        } = &self.node(id).kind
+            && (self.font_measurer.is_some() || self.font_shaper.is_some())
+        {
+            let font = &self.node(id).font;
+            let measured = match &self.font_measurer {
+                Some(measure) => measure(text, *font_size, None, font),
+                None => self.measure_text_with_font(text, *font_size, None, font),
+            };
+            assert!(
+                stated_size_agrees(size, measured),
+                "{text:?}'s stated size {size:?} is not what shaping measures, {measured:?}"
+            );
+        }
+        self.know_text_size(id, None, size);
     }
     /// Change `id`'s layout style, invalidating its layout.
     pub fn set_style(&mut self, id: NodeId, style: Style) {
