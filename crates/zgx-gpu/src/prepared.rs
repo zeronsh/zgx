@@ -2098,6 +2098,9 @@ impl TextCache {
                 font_size,
             ),
             Source::Plain { .. } => return None,
+            // A span that is a box of its own changes its lines' boxes
+            // (`RichText::has_box_spans`): laid out whole.
+            Source::Rich(rich) if rich.has_box_spans() => return None,
             Source::Rich(rich) => match rich.runs() {
                 [] => return None,
                 [run] if caret_row => (

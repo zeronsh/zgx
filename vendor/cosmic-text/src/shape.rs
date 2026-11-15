@@ -2030,6 +2030,9 @@ pub struct ShapeLine {
     /// `BufferLine::set_inline_boxes`): its lines that hold one take CSS's
     /// line box (`inline_line_box`).
     pub boxes: bool,
+    /// zgx: each of its lines takes CSS's line box
+    /// (`BufferLine::set_css_line_box`), holding a box or not.
+    pub css: bool,
     pub spans: Vec<ShapeSpan>,
     pub metrics_opt: Option<Metrics>,
     ellipsis_span: Option<ShapeSpan>,
@@ -2171,6 +2174,7 @@ impl ShapeLine {
         Self {
             rtl: false,
             boxes: false,
+            css: false,
             spans: Vec::default(),
             metrics_opt: None,
             ellipsis_span: None,
@@ -3188,9 +3192,10 @@ impl ShapeLine {
         font_size: f32,
         glyphs: &mut [LayoutGlyph],
     ) -> Option<(f32, f32)> {
-        if !glyphs
-            .iter()
-            .any(|g| g.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX))
+        if !self.css
+            && !glyphs
+                .iter()
+                .any(|g| g.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX))
         {
             return None;
         }
@@ -4318,7 +4323,7 @@ impl ShapeLine {
             }
 
             // zgx: a line holding an inline box takes CSS's line box.
-            if self.boxes {
+            if self.boxes || self.css {
                 if let Some((above, below)) =
                     self.inline_line_box(visual_line, hyphenation.as_deref(), font_size, &mut glyphs)
                 {

@@ -10790,6 +10790,7 @@ impl GpuRenderer {
                                     laid.runs(Some(bounds.height)),
                                     &starts,
                                     rich,
+                                    &mut fonts,
                                 );
                                 Err((glyphs, decorations, Some(laid.key()), None))
                             } else if let Some(rich) = &rich {
@@ -10836,7 +10837,9 @@ impl GpuRenderer {
                                         self.scale,
                                     ),
                                     match (&rich, item.font.underline) {
-                                        (Some(rich), _) => text::rich_decorations(&b, rich),
+                                        (Some(rich), _) => {
+                                            text::rich_decorations(&b, rich, &mut fonts)
+                                        }
                                         (None, Some(line)) => {
                                             text::plain_underlines(b.layout_runs(), font_size, line)
                                         }

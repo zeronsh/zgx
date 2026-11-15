@@ -1176,6 +1176,19 @@ impl Buffer {
         self.redraw
     }
 
+    /// zgx: each line takes CSS's line box (`BufferLine::set_css_line_box`):
+    /// after its text is set, before it is shaped. Text with no span that is
+    /// a box of its own needs no call.
+    #[cold]
+    #[inline(never)]
+    pub fn set_css_line_boxes(&mut self) {
+        let mut reset = false;
+        for line in &mut self.lines {
+            reset |= line.set_css_line_box(true);
+        }
+        self.redraw |= reset;
+    }
+
     /// Set redraw needed flag
     pub fn set_redraw(&mut self, redraw: bool) {
         self.redraw = redraw;

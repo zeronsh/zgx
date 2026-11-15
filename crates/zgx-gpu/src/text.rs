@@ -903,7 +903,7 @@ impl CpuTextRaster {
                 }
             }
         }
-        (images, rich_decorations(&buffer, rich))
+        (images, rich_decorations(&buffer, rich, &mut self.fonts))
     }
     /// Rasterize `text` at `size` in `font`, laid out in `width` by `height`:
     /// each glyph's position and image.
@@ -1951,6 +1951,32 @@ pub(crate) fn rich_buffer_unshaped(
     ellipsis: bool,
     recycled: Vec<cosmic_text::BufferLine>,
 ) -> Buffer {
+    if rich.has_box_spans() {
+        return rich_buffer_boxed(fonts, rich, ellipsis, recycled);
+    }
+    rich_buffer_built::<false>(fonts, rich, ellipsis, recycled)
+}
+/// `rich_buffer_unshaped` for text holding a span that is a box of its own
+/// (`RichText::has_box_spans`): out of line, as few texts do.
+#[cold]
+#[inline(never)]
+fn rich_buffer_boxed(
+    fonts: &mut FontSystem,
+    rich: &zgx::rich_text::RichText,
+    ellipsis: bool,
+    recycled: Vec<cosmic_text::BufferLine>,
+) -> Buffer {
+    rich_buffer_built::<true>(fonts, rich, ellipsis, recycled)
+}
+/// `rich_buffer_unshaped`, its spans that are boxes of their own read only
+/// where `BOX_SPANS` says it holds one: other text builds as it did.
+#[inline(always)]
+fn rich_buffer_built<const BOX_SPANS: bool>(
+    fonts: &mut FontSystem,
+    rich: &zgx::rich_text::RichText,
+    ellipsis: bool,
+    recycled: Vec<cosmic_text::BufferLine>,
+) -> Buffer {
     let base = rich.runs().first();
     let size = base.map_or(1., |run| run.font_size.max(1.));
     let line_height = base.map_or(1., |run| run.font.line_height.resolve(size));
@@ -1994,11 +2020,14 @@ pub(crate) fn rich_buffer_unshaped(
                 attributes = attributes.inline_box(box_at(boxes, run.range.start));
             }
         }
+        let mut line_height = run.font.line_height.resolve(run.font_size.max(1.));
+        // A span that is a box of its own: its padding is its box's, around
+        // its line height (CSS's inline-flex).
+        if BOX_SPANS && run.font.features.is_box_span() {
+            line_height += 2. * run.padding[1];
+        }
         let attributes = attributes
-            .metrics(Metrics::new(
-                run.font_size.max(1.),
-                run.font.line_height.resolve(run.font_size.max(1.)),
-            ))
+            .metrics(Metrics::new(run.font_size.max(1.), line_height))
             .metadata(if Some(index) == ellipsis_run {
                 usize::MAX
             } else {
@@ -2020,6 +2049,10 @@ pub(crate) fn rich_buffer_unshaped(
     );
     if boxes.is_some() {
         buffer.find_inline_boxes();
+    }
+    // Its lines take CSS's line box.
+    if BOX_SPANS {
+        buffer.set_css_line_boxes();
     }
     buffer
 }
@@ -2678,15 +2711,44 @@ fn joined_wash<'o>(
         None
     }
 }
+/// How far the box of `run`, a span that is a box of its own, reaches above
+/// the baseline: its line height's half-leading above its font's ascent
+/// (`glyph`'s font), then its padding, as `inline_line_box` lays it out.
+#[cold]
+#[inline(never)]
+fn box_span_above(
+    fonts: &mut FontSystem,
+    run: &zgx::rich_text::TextRun,
+    glyph: &cosmic_text::LayoutGlyph,
+) -> f32 {
+    let size = glyph.font_size;
+    let height = run.font.line_height.resolve(run.font_size);
+    let (ascent, descent) =
+        fonts
+            .get_font(glyph.font_id, glyph.font_weight)
+            .map_or((0.8 * size, 0.2 * size), |font| {
+                let m = font.metrics();
+                let upem = f32::from(m.units_per_em.max(1));
+                (m.ascent / upem * size, -m.descent / upem * size)
+            });
+    ascent + (height - ascent - descent) / 2. + run.padding[1]
+}
 /// Derive decoration geometry from shaped visual fragments, including bidi and wrapping.
-pub fn rich_decorations(buffer: &Buffer, rich: &zgx::rich_text::RichText) -> Vec<RichDecoration> {
-    rich_decorations_in(buffer.layout_runs(), &line_starts(buffer), rich)
+/// `fonts` are those it was shaped in: a span that is a box of its own
+/// reads its font's metrics there, as its line's box did.
+pub fn rich_decorations(
+    buffer: &Buffer,
+    rich: &zgx::rich_text::RichText,
+    fonts: &mut FontSystem,
+) -> Vec<RichDecoration> {
+    rich_decorations_in(buffer.layout_runs(), &line_starts(buffer), rich, fonts)
 }
 /// `rich_decorations` over any laid-out runs, given where each line starts.
 pub fn rich_decorations_in<'a>(
     runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
     starts: &[usize],
     rich: &zgx::rich_text::RichText,
+    fonts: &mut FontSystem,
 ) -> Vec<RichDecoration> {
     let mut output = Vec::new();
     for line in runs {
@@ -2695,6 +2757,20 @@ pub fn rich_decorations_in<'a>(
             if run.background.is_none() && run.underline.is_none() && run.strikethrough.is_none() {
                 continue;
             }
+            let glyphs = line.glyphs.iter().filter(|g| {
+                g.metadata != usize::MAX && {
+                    let byte = start + g.start;
+                    byte >= run.range.start
+                        && (byte < run.range.end || index + 1 == rich.runs().len())
+                }
+            });
+            // A box of its own: how far its box reaches above the baseline,
+            // in its first glyph's font, as its line's box has it.
+            let box_above = if rich.has_box_spans() && run.font.features.is_box_span() {
+                glyphs.clone().next().map(|g| box_span_above(fonts, run, g))
+            } else {
+                None
+            };
             let mut spans: Vec<_> = line
                 .glyphs
                 .iter()
@@ -2726,7 +2802,13 @@ pub fn rich_decorations_in<'a>(
                     // A padded or rounded background hugs the text (CSS's
                     // content area, about 0.92 em above the baseline and
                     // 0.24 below) plus its padding; a plain one fills the line.
-                    let bounds = if run.padding != [0.; 2] || run.radius > 0. {
+                    let bounds = if let Some(above) = box_above {
+                        // A box of its own (inline-flex): its line height
+                        // and padding, about its baseline as CSS has them.
+                        let height = run.font.line_height.resolve(run.font_size);
+                        let top = line.line_y - above;
+                        Rect::new(left, top, right - left, height + 2. * run.padding[1])
+                    } else if run.padding != [0.; 2] || run.radius > 0. {
                         let (above, below) = (run.font_size * 0.92, run.font_size * 0.24);
                         let top = line.line_y - above - run.padding[1];
                         Rect::new(left, top, right - left, above + below + 2. * run.padding[1])
@@ -2855,7 +2937,7 @@ mod wash_tests {
     fn washes(rich: &RichText) -> Vec<Rect> {
         let mut fonts = FontSystem::new();
         let buffer = rich_buffer(&mut fonts, rich, Some(600.), None);
-        rich_decorations(&buffer, rich)
+        rich_decorations(&buffer, rich, &mut fonts)
             .into_iter()
             .filter(|d| d.background)
             .map(|d| d.bounds)

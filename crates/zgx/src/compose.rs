@@ -5146,6 +5146,8 @@ fn paragraph_effect<const LOCATING: bool>(
         // Room for what it holds, made once: most spans add one run.
         let mut content = String::with_capacity(spans.iter().map(|span| span.text.len()).sum());
         let mut runs = Vec::with_capacity(spans.len());
+        // Whether a span is a box of its own (`TextSpan::inline_box`).
+        let mut box_spans = false;
         let mut links = Vec::new();
         let mut icons = Vec::new();
         let mut spanned = Vec::new();
@@ -5158,8 +5160,8 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after) = match span.extras.take() {
-                None => (None, None, None, false, -1.),
+            let (hover, icon, menu, plain, room_after, boxed) = match span.extras.take() {
+                None => (None, None, None, false, -1., false),
                 Some(extras) => {
                     let extras = *extras;
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
@@ -5176,6 +5178,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         extras.menu,
                         extras.plain,
                         if apart { end } else { -1. },
+                        extras.boxed,
                     )
                 }
             };
@@ -5252,6 +5255,10 @@ fn paragraph_effect<const LOCATING: bool>(
             }
             if let Some(value) = spacing {
                 font.letter_spacing = value;
+            }
+            if boxed {
+                font.features = font.features.with_box_span();
+                box_spans = true;
             }
             // An underlined paragraph underlines its runs (CSS's
             // `text-decoration` reaches inline children).
@@ -5387,9 +5394,12 @@ fn paragraph_effect<const LOCATING: bool>(
         if LOCATING && let Some(kept) = &locating {
             *kept.borrow_mut() = spanned;
         }
-        let rich = crate::rich_text::RichText::new(content.as_str(), runs)
+        let mut rich = crate::rich_text::RichText::new(content.as_str(), runs)
             .expect("normalized inline spans")
             .with_options(base.display);
+        if box_spans {
+            rich = rich.with_box_spans();
+        }
         // Recomputed but unchanged (its inputs animate for a sibling):
         // nothing to lay out, paint, describe or relabel.
         if content_state.with_untracked(|current| {
