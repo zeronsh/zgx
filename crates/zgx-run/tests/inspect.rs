@@ -1114,3 +1114,47 @@ return ui.column {
     assert!(read.starts_with("text: \"hello\""), "{read}");
     std::fs::remove_file(png).unwrap();
 }
+
+/// A frame's writes to states no `ui.state` names say where the script made
+/// them, one line for each place however many rows made one there: forty
+/// rows' `ui.use_state`, `ui.computed` and `ui.tween` written, not "40
+/// unnamed" for each.
+#[test]
+fn frames_name_the_states_they_write_by_where_the_script_made_them() {
+    let _log = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    const ROWS: &str = r##"
+local on = ui.state("on", false)
+ui.command { id = "light", run = function() on:set(true) end }
+local Row = ui.component(function(props)
+    local lit = ui.use_state(false)
+    ui.effect(function() lit:set(on:get()) end)
+    local shift = ui.computed(function() return if on:get() then 10 else 0 end)
+    return ui.div { h = 10, x = ui.tween(shift),
+        bg = function() return if lit:get() then "#ffffff" else "#000000" end }
+end)
+local rows = {}
+for i = 1, 40 do rows[i] = Row { i = i } end
+return ui.column(rows)
+"##;
+    // The chunk's lines from 1, as Luau counts them.
+    let line = |of: &str| ROWS.lines().position(|l| l.contains(of)).unwrap() + 1;
+    // Named from the first frame, as a host serving devtools does.
+    zgx_script::inspect::prepare();
+    let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "rows", ROWS));
+    let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
+    app.frames(3);
+    text(&ask(&app, &session, r#"{"cmd":"mark","name":"lit"}"#));
+    assert!(app.host.run_command("light"));
+    app.frames(3);
+    let frames = text(&ask(&app, &session, r#"{"cmd":"frames","since":"lit"}"#));
+    for (made, what) in [
+        ("ui.use_state", "use_state"),
+        ("ui.computed", "computed"),
+        ("ui.tween", "tween"),
+    ] {
+        let site = format!("40 × rows:{} {what}", line(made));
+        assert!(frames.contains(&site), "{site} in {frames}");
+    }
+    // Every row's write named: what is left unnamed is the engine's own.
+    assert!(!frames.contains("40 unnamed"), "{frames}");
+}

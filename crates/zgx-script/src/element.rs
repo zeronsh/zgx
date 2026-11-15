@@ -147,13 +147,19 @@ impl Element {
         classes: Rc<[Rc<str>]>,
         tag: &'static str,
     ) -> Rc<Self> {
+        let revision = runtime.signal(0);
+        // Bumped as anime or a list's motion restyles it: named so in traces.
+        #[cfg(feature = "inspect")]
+        if zgx::trace::enabled() {
+            crate::node::name_kind(&revision, &format!("a {tag}'s restyle (anime, motion)"));
+        }
         Rc::new(Self {
             handle: OnceCell::new(),
             id,
             classes,
             tag,
             animated: RefCell::default(),
-            revision: runtime.signal(0),
+            revision,
             styles_changed: Cell::new(false),
             compositor_changed: Cell::new(false),
             #[cfg(target_os = "macos")]

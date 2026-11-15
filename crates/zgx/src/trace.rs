@@ -74,6 +74,10 @@ pub struct Frame {
     pub index: u64,
     /// Signals written (their addresses) and how many times each.
     pub writes: Vec<(usize, u32)>,
+    /// Where the signals written were made, those whose maker said
+    /// ([`name_signal`]: a script's line and what made it): kept as they
+    /// were written, the signals may be gone by the time the frame is read.
+    pub sites: Vec<(usize, Rc<str>)>,
     /// Effects run, in the order they ran.
     pub runs: Vec<Run>,
     /// Each phase that ran (`zgx::profile`'s: input, script, update, style,
@@ -145,6 +149,8 @@ struct Log {
     frames: VecDeque<Frame>,
     causes: HashMap<u64, usize>,
     names: HashMap<u64, Rc<str>>,
+    /// Signals' makers, by address ([`name_signal`]), until they drop.
+    sites: HashMap<usize, Rc<str>>,
 }
 thread_local! {
     static LOG: RefCell<Log> = RefCell::default();
@@ -170,6 +176,7 @@ pub fn memory(report: &mut crate::memory::Report) {
         for f in frames.clone() {
             held += size_of::<Frame>()
                 + f.writes.capacity() * size_of::<(usize, u32)>()
+                + f.sites.capacity() * size_of::<(usize, Rc<str>)>()
                 + f.runs.capacity() * size_of::<Run>()
                 + f.phases.capacity() * size_of::<(&'static str, u64, f32)>()
                 + f.notes.capacity() * size_of::<Rc<str>>()
@@ -181,6 +188,8 @@ pub fn memory(report: &mut crate::memory::Report) {
         let mut names = table(log.names.capacity(), size_of::<Rc<str>>())
             + table(log.causes.capacity(), size_of::<usize>());
         names += log.names.values().map(&mut text).sum::<usize>();
+        names += table(log.sites.capacity(), size_of::<Rc<str>>())
+            + log.sites.values().map(&mut text).sum::<usize>();
         for f in frames {
             names += f
                 .runs
@@ -217,12 +226,36 @@ pub(crate) fn forget(effect: u64) {
         }
     });
 }
+/// Name signal `signal` (its address, `Signal::addr`) for traces by where
+/// it was made (`app.luau:30 use_state`): a frame's writes say it, not
+/// "unnamed". Forgotten as the signal drops.
+pub fn name_signal(signal: usize, site: Rc<str>) {
+    if enabled() {
+        LOG.with_borrow_mut(|log| {
+            log.sites.insert(signal, site);
+        });
+    }
+}
+/// Signal `signal` dropped: its address may be another's next.
+pub(crate) fn forget_signal(signal: usize) {
+    // Dropped as the thread ends, the log may be gone already.
+    let _ = LOG.try_with(|log| {
+        if let Ok(mut log) = log.try_borrow_mut() {
+            log.sites.remove(&signal);
+        }
+    });
+}
 /// Signal `signal` was written, queueing `queued`.
 pub(crate) fn wrote(signal: usize, queued: &[u64]) {
     LOG.with_borrow_mut(|log| {
         match log.current.writes.iter_mut().find(|(s, _)| *s == signal) {
             Some((_, n)) => *n += 1,
-            None => log.current.writes.push((signal, 1)),
+            None => {
+                log.current.writes.push((signal, 1));
+                if let Some(site) = log.sites.get(&signal).cloned() {
+                    log.current.sites.push((signal, site));
+                }
+            }
         }
         for id in queued {
             log.causes.entry(*id).or_insert(signal);

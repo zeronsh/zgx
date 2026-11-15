@@ -1882,6 +1882,9 @@ pub(crate) struct Anim {
     pub curve: Curve,
     pub from: Option<Value>,
     pub to: Option<Value>,
+    /// Where the script made it, while tracing ([`made_at`]): its value's
+    /// writes are named so.
+    pub site: Option<Rc<str>>,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct SpringParams {
@@ -2424,6 +2427,46 @@ fn location(lua: &Lua) -> Option<Rc<str>> {
         Some(Rc::from(format!("{chunk}:{line}")))
     })
     .flatten()
+}
+/// Where the script made a state, and what made it (`app.luau:30
+/// use_state`), while tracing: devtools' frame log names its writes so.
+/// One text for each place, however many rows made one there.
+#[cfg(feature = "inspect")]
+pub(crate) fn made_at(lua: &Lua, what: &str) -> Option<Rc<str>> {
+    if !zgx::trace::enabled() {
+        return None;
+    }
+    Some(site(format!("{} {what}", location(lua)?)))
+}
+/// One text for each place or kind named, however many signals have it.
+#[cfg(feature = "inspect")]
+fn site(text: String) -> Rc<str> {
+    thread_local! {
+        static SITES: RefCell<std::collections::HashSet<Rc<str>>> = RefCell::default();
+    }
+    SITES.with_borrow_mut(|sites| match sites.get(text.as_str()) {
+        Some(kept) => kept.clone(),
+        None => {
+            let kept: Rc<str> = Rc::from(text);
+            sites.insert(kept.clone());
+            kept
+        }
+    })
+}
+/// Name a signal the engine made for traces by what it is (an element's
+/// restyles), where no script line made it.
+#[cfg(feature = "inspect")]
+pub(crate) fn name_kind<T: 'static>(signal: &Signal<T>, what: &str) {
+    if zgx::trace::enabled() {
+        zgx::trace::name_signal(signal.addr(), site(what.to_owned()));
+    }
+}
+/// Name `signal` for traces by where the script made it ([`made_at`]).
+#[cfg(feature = "inspect")]
+pub(crate) fn name_made<T: 'static>(lua: &Lua, signal: &Signal<T>, what: &str) {
+    if let Some(site) = made_at(lua, what) {
+        zgx::trace::name_signal(signal.addr(), site);
+    }
 }
 /// An overlay's `open` (a modal's, a popover's, a menu's): a state, written
 /// back as it closes; or, controlled, a function saying whether it shows,
@@ -6711,6 +6754,8 @@ end
             if let Some(meter) = &env.meter {
                 meter.set(&signal, signal.with_untracked(Value::weight));
             }
+            #[cfg(feature = "inspect")]
+            name_made(lua, &signal, "use_state");
             Ok(State::new(signal))
         })?,
     )?;
@@ -7239,11 +7284,23 @@ end
                 "give both `from` and `to`, or neither",
             ));
         }
+        #[cfg(feature = "inspect")]
+        let site = made_at(
+            lua,
+            match curve {
+                Curve::Tween { .. } => "tween",
+                Curve::Spring { .. } => "spring",
+                Curve::Loop { .. } => "loop",
+            },
+        );
+        #[cfg(not(feature = "inspect"))]
+        let site = None;
         lua.create_userdata(AnimUd(Rc::new(Anim {
             source,
             curve,
             from,
             to,
+            site,
         })))
     };
     use crate::anime::ease::{Base, Ease, Mode};
@@ -7519,8 +7576,14 @@ pub(crate) fn computed(lua: &Lua, env: &Env, f: Function) -> Signal<Value> {
 }
 /// `ui.computed`: the value `f` makes, kept current as what it reads
 /// changes, and brought up to date when a script reads it.
-pub(crate) fn computed_state(_: &Lua, env: &Env, f: Function) -> crate::value::State {
+pub(crate) fn computed_state(
+    #[allow(unused_variables)] lua: &Lua,
+    env: &Env,
+    f: Function,
+) -> crate::value::State {
     let signal = env.runtime.signal(Value::Nil);
+    #[cfg(feature = "inspect")]
+    name_made(lua, &signal, "computed");
     let (vm, out) = (env.vm.clone(), signal.clone());
     let meter = env.meter.clone();
     // Its value is there as soon as it is made, even while a component
