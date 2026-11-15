@@ -3772,8 +3772,15 @@ pub struct Scene {
     hit_walked: std::cell::Cell<u64>,
     cursor_styles: usize,
     /// Scroll content translated since the last flush: its transform before
-    /// the first move, and whether it moved again (see `resolve_moves`).
-    pending_moves: Vec<(NodeId, Transform, bool)>,
+    /// the first move, and how often it moved again (see `resolve_moves`).
+    pending_moves: Vec<(NodeId, Transform, u8)>,
+    /// Where scroll content that moved again sat between its first move and
+    /// its last, since the last flush, while nothing was transformed or
+    /// filtered: the damage taken there moves on with the copy
+    /// (`resolve_moved_again`). The first `moved_between_len` are kept;
+    /// past `BETWEEN_KEPT`, none are used.
+    moved_between: [(NodeId, Transform); BETWEEN_KEPT],
+    moved_between_len: u8,
     /// Device pixels a point (`set_pixel_scale`): scroll content moves by
     /// whole ones. 0 until a host says.
     pixel_scale: f32,
@@ -3840,6 +3847,11 @@ pub struct TextLine {
     /// It runs right to left.
     pub rtl: bool,
 }
+/// Places used for scroll content that moved again before a flush
+/// (`Scene::moved_between`); moved more often, it repaints all it shows.
+const BETWEEN_PLACES: usize = 3;
+/// Places kept for all scroll content moved again before a flush.
+const BETWEEN_KEPT: usize = 8;
 /// Scroll content that moved rigidly by `(dx, dy)` within `clip`. The flush
 /// damaged only what copying the old pixels cannot provide (`exposed`, plus
 /// every other change inside the clip at both positions). A renderer that
@@ -3952,6 +3964,14 @@ impl Scene {
             overflow_fades: Vec::new(),
             platform_nodes: Vec::new(),
             pending_moves: Vec::new(),
+            moved_between: [(
+                NodeId {
+                    index: 0,
+                    generation: 0,
+                },
+                Transform { x: 0., y: 0. },
+            ); BETWEEN_KEPT],
+            moved_between_len: 0,
             pixel_scale: 0.,
             off_grid_count: 0,
             moves: Vec::new(),
@@ -10359,8 +10379,15 @@ impl Scene {
         if scroll_copy {
             // Resolved at flush: a copy plus the exposed strip, or full damage.
             match self.pending_moves.iter_mut().find(|(node, ..)| *node == id) {
-                Some((.., again)) => *again = true,
-                None => self.pending_moves.push((id, from, false)),
+                Some((.., again)) => {
+                    *again = again.saturating_add(1);
+                    // Where nothing is transformed or filtered, a copy can
+                    // carry what changed here (`resolve_moved_again`).
+                    if self.transformed + self.filtered.get() == 0 {
+                        self.moved_again(id, from);
+                    }
+                }
+                None => self.pending_moves.push((id, from, 0)),
             }
             self.move_context = None;
             self.node_mut(id).transform = transform;
@@ -16774,15 +16801,96 @@ impl Scene {
         }
         Some(corners)
     }
+    /// Scroll content `id` moved again before a flush, from `at`: kept
+    /// (`moved_between`). Out of line: one move a frame is the common case.
+    #[cold]
+    #[inline(never)]
+    fn moved_again(&mut self, id: NodeId, at: Transform) {
+        let len = self.moved_between_len as usize;
+        if len < BETWEEN_KEPT {
+            self.moved_between[len] = (id, at);
+        }
+        self.moved_between_len = self.moved_between_len.saturating_add(1);
+    }
+    /// Scroll content that moved again before this flush (`moved_between`),
+    /// before `resolve_moves` turns the moves into copies: what changed
+    /// while it sat between its first move and its last (a measured list
+    /// re-anchoring between layout passes) was damaged there, and the copy by
+    /// the net move carries its old pixels where it ends, so that damage goes
+    /// there too, and the move resolves as one. Moved more often than places
+    /// are used (`BETWEEN_PLACES`), with a place not kept (a move made while
+    /// something was transformed or filtered, or past `BETWEEN_KEPT`), or
+    /// under transformed or filtered ancestors now, it stays a move made
+    /// again: it repaints all it shows.
+    #[cold]
+    #[inline(never)]
+    fn resolve_moved_again(&mut self, pending: &mut [(NodeId, Transform, u8)]) {
+        let kept = std::mem::take(&mut self.moved_between_len) as usize;
+        if kept > BETWEEN_KEPT || self.transformed + self.filtered.get() > 0 {
+            return;
+        }
+        let between = self.moved_between;
+        let between = &between[..kept];
+        for (id, _, again) in pending.iter_mut() {
+            let id = *id;
+            let places = between.iter().filter(|(node, _)| *node == id).count();
+            if *again == 0
+                || places != *again as usize
+                || places > BETWEEN_PLACES
+                || !self.contains(id)
+            {
+                continue;
+            }
+            let clip = self.world_clip(id).unwrap_or(self.viewport);
+            let to = self.node(id).transform;
+            self.damage_where_it_ends(id, clip, to, between);
+            *again = 0;
+        }
+    }
+    /// For scroll content `id` that ends at `to` within `clip`, having sat at
+    /// places between its first move and its last (`between`'s): this
+    /// frame's damage in `clip`, taken while it sat at one of them, also where
+    /// that ends (moved on by the rest of the way). Which damage came when is
+    /// not kept, so all of it, for each place: a few rects, a few times.
+    #[cold]
+    #[inline(never)]
+    fn damage_where_it_ends(
+        &mut self,
+        id: NodeId,
+        clip: Rect,
+        to: Transform,
+        between: &[(NodeId, Transform)],
+    ) {
+        let inside: Vec<Rect> = self
+            .damage
+            .iter()
+            .filter_map(|rect| Rect::from(*rect).intersection(clip))
+            .collect();
+        for &(_, at) in between.iter().filter(|(node, _)| *node == id) {
+            let rest = Transform {
+                x: to.x - at.x,
+                y: to.y - at.y,
+            };
+            for rect in &inside {
+                if let Some(rect) = rect.translated(rest).intersection(clip) {
+                    self.add_damage(rect);
+                }
+            }
+        }
+    }
     /// Turn this frame's scroll translations into moves: damage what a copy
     /// cannot supply, or everything the content painted where a copy is
     /// unsafe (isolated ancestors, backdrop filters over the clip, nested or
     /// overlapping moves, jumps past the viewport).
     fn resolve_moves(&mut self) {
         self.moves.clear();
-        let pending = std::mem::take(&mut self.pending_moves);
+        let mut pending = std::mem::take(&mut self.pending_moves);
+        if self.moved_between_len != 0 {
+            self.resolve_moved_again(&mut pending);
+        }
         let mut moves = Vec::new();
         for (id, from, again) in pending {
+            let again = again != 0;
             if !self.contains(id) {
                 continue;
             }
@@ -19103,6 +19211,102 @@ mod tests {
         check(&scene, true);
         scene.set_effects(levels[3], faint);
         check(&scene, false);
+    }
+    /// Two and three moves of scroll content before a flush copy once, by the
+    /// net move, damaging the strip that exposes, as one move a frame does; a
+    /// move back where it was copies nothing; one past the view repaints it;
+    /// and what changed while the content sat between two moves (a row
+    /// removed there) is damaged where the copy leaves its old pixels.
+    #[test]
+    fn moves_before_a_flush_copy_once_by_the_net_move() {
+        let boxed = |w: f32, h: f32, clip: bool| Style {
+            width: Some(w),
+            height: Some(h),
+            clip,
+            ..Style::default()
+        };
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+        let view = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            boxed(300., 200., true),
+        );
+        let content = scene.append(
+            view,
+            NodeKind::Container(Layout::Column),
+            boxed(280., 2000., false),
+        );
+        scene.set_scroll_copy(content, true);
+        let rows: Vec<NodeId> = (0..50)
+            .map(|i| {
+                scene.append(
+                    content,
+                    NodeKind::Rect(Color(i as u8 * 5, 9, 9, 255)),
+                    boxed(280., 40., false),
+                )
+            })
+            .collect();
+        scene.prepare_layout();
+        scene.flush();
+        let to = |y: f32| Transform { x: 0., y };
+        let covers = |damage: &[Rect], x: f32, y: f32| {
+            damage
+                .iter()
+                .any(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height)
+        };
+        let within = |damage: &[Rect], top: f32, bottom: f32| {
+            damage
+                .iter()
+                .all(|r| r.y >= top - 0.5 && r.y + r.height <= bottom + 0.5)
+        };
+        // One move a frame: the reference.
+        scene.set_transform(content, to(-10.));
+        let damage = scene.flush().damage;
+        assert_eq!(scene.scroll_moves().len(), 1);
+        assert_eq!(scene.scroll_moves()[0].dy, -10.);
+        assert!(
+            within(&damage, 190., 200.),
+            "the strip scrolled in: {damage:?}"
+        );
+        // Two moves, then three, before a flush: one copy by the net move.
+        scene.set_transform(content, to(-20.));
+        scene.set_transform(content, to(-30.));
+        let damage = scene.flush().damage;
+        assert_eq!(scene.scroll_moves().len(), 1, "{damage:?}");
+        assert_eq!(scene.scroll_moves()[0].dy, -20.);
+        assert!(within(&damage, 180., 200.), "two moves: {damage:?}");
+        for y in [-40., -45., -60.] {
+            scene.set_transform(content, to(y));
+        }
+        let damage = scene.flush().damage;
+        assert_eq!(scene.scroll_moves()[0].dy, -30.);
+        assert!(within(&damage, 170., 200.), "three moves: {damage:?}");
+        // Back where it was: no copy, nothing to repaint.
+        scene.set_transform(content, to(-70.));
+        scene.set_transform(content, to(-60.));
+        let damage = scene.flush().damage;
+        assert!(scene.scroll_moves().is_empty());
+        assert!(damage.is_empty(), "{damage:?}");
+        // Past the view: no copy, the view repaints.
+        scene.set_transform(content, to(-100.));
+        scene.set_transform(content, to(-500.));
+        let damage = scene.flush().damage;
+        assert!(scene.scroll_moves().is_empty());
+        assert!(covers(&damage, 150., 100.), "{damage:?}");
+        // A row removed while the content sat between two moves: shown at
+        // -500, row 13 painted at 20..60; removed at -450 (damaged at
+        // 70..110); the copy to -480 leaves its old pixels at 40..80.
+        scene.set_transform(content, to(-450.));
+        scene.remove(rows[13]);
+        scene.set_transform(content, to(-480.));
+        let damage = scene.flush().damage;
+        assert_eq!(scene.scroll_moves().len(), 1, "{damage:?}");
+        assert_eq!(scene.scroll_moves()[0].dy, 20.);
+        assert!(
+            covers(&damage, 150., 50.),
+            "its old pixels, copied: {damage:?}"
+        );
     }
     /// A row whose edge lands on its scroll view's within a rounding, as
     /// sums in another order could put it either side: `shows_within_kept`
