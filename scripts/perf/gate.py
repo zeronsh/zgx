@@ -215,6 +215,11 @@ SCENES = [
     ('layout-drag', 'zgx', 'layout_drag_bench', {}),
     # A pointer moving over a deep page with hover styles, undrawn.
     ('pointer-move', 'zgx', 'pointer_bench', {}),
+    # A sidebar of 500 rows beside it, one with a raised badge, the pointer
+    # moving down the rows: a raised node anywhere takes every hit test by the
+    # walk keeping paint order, which must search a long column of rows as
+    # the plain walk does, not look at each.
+    ('pointer-move-raised', 'zgx', 'pointer_bench', {'SIDEBAR': '500'}),
     # Effects' CPU work through the whole renderer, drawn by wgpu's no-op
     # backend: a scene of boxes as they are, then the same with an animated
     # layer shader painting past its box, and with one reading what's behind
