@@ -2872,6 +2872,41 @@ mod mac {
                 )
             });
         }
+        // The window's resize, posted once `setFrame:display:` has laid it out
+        // (its title bar's buttons too), before it returns: placed again there,
+        // where a frame change of the zoom button's, which comes while AppKit
+        // still sets its frame, can't, and where `place_again` comes too late
+        // for frame changes back to back with no turn of the run loop between.
+        let resized = block2::RcBlock::new(move |note: std::ptr::NonNull<NSNotification>| {
+            // SAFETY: AppKit passes a valid notification for the block's
+            // duration; a window notification's object is the window.
+            let note = unsafe { note.as_ref() };
+            let Some(window) = note.object().and_then(|o| o.downcast::<NSWindow>().ok()) else {
+                return;
+            };
+            let Some((zoom, position)) = PLACED.with_borrow(|placed| {
+                placed
+                    .get(&window.windowNumber())
+                    .map(|placed| (placed.zoom, placed.position))
+            }) else {
+                return;
+            };
+            if REPLACING.replace(true) {
+                return;
+            }
+            place(&window, zoom, position, false);
+            REPLACING.set(false);
+        });
+        let object: &objc2::runtime::AnyObject = window;
+        // SAFETY: as the views' observers; AppKit posts it on the main thread.
+        observers.push(unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWindowDidResizeNotification),
+                Some(object),
+                None,
+                &resized,
+            )
+        });
         PLACED.with_borrow_mut(|placed| {
             if let Some(placed) = placed.get_mut(&number) {
                 placed.observers = observers;

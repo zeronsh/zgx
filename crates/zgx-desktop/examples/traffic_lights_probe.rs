@@ -23,7 +23,13 @@
 //!
 //! After `resized` it resizes the window in 90 steps while counting, after each
 //! frame Core Animation commits, the frames where the close button was not at
-//! `--at`: `LIVE_RESIZE samples=<n> wrong=<n> first_wrong=<x,y>`.
+//! `--at`, and those where the three buttons were not in one row, evenly apart:
+//! `LIVE_RESIZE samples=<n> wrong=<n> first_wrong=<x,y> row_wrong=<n>
+//! first_row_wrong=<x:y,x:y,x:y>`. Then `BURST`: 30 `setFrame:display:`
+//! back to back, the run loop never turning between them, the buttons read
+//! after each (`steps=<n> row_wrong=<n> first=<…>`), and `TRACKING`: 30 steps
+//! in the event-tracking run loop mode a live resize's drag runs in, a loop
+//! pass each, read after each pass (`… in_live_resize=<bool>`).
 use std::time::Duration;
 use zgx::compose::prelude::*;
 use zgx_desktop::{Application, Titlebar, WindowOptions};
@@ -124,6 +130,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 pause(200).await;
                 println!("{}", state::watched());
+                println!("BURST {}", state::burst(30));
+                pause(300).await;
+                println!("TRACKING {}", state::tracking(30));
+                pause(300).await;
                 state::watch_frames(at);
                 for size in [(1000., 700.), (560., 360.), (900., 600.)] {
                     state::animate_resize(size);
@@ -247,6 +257,118 @@ mod state {
     static SAMPLES: AtomicUsize = AtomicUsize::new(0);
     static WRONG: AtomicUsize = AtomicUsize::new(0);
     static FIRST_WRONG: Mutex<String> = Mutex::new(String::new());
+    static ROW_WRONG: AtomicUsize = AtomicUsize::new(0);
+    static FIRST_ROW_WRONG: Mutex<String> = Mutex::new(String::new());
+
+    /// The three buttons' top lefts (`x:y`, the window's points from its top
+    /// left), and whether they stand in one row, evenly apart.
+    fn row() -> Option<(String, bool)> {
+        let window = ours()?;
+        let height = window.frame().size.height;
+        let at: Vec<(f64, f64)> = [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ]
+        .into_iter()
+        .filter_map(|kind| window.standardWindowButton(kind))
+        .map(|button| {
+            let frame = button.convertRect_toView(button.bounds(), None);
+            (
+                frame.origin.x,
+                height - (frame.origin.y + frame.size.height),
+            )
+        })
+        .collect();
+        let text = at
+            .iter()
+            .map(|(x, y)| format!("{x:.1}:{y:.1}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let even = at.len() == 3
+            && (at[1].1 - at[0].1).abs() <= 0.5
+            && (at[2].1 - at[0].1).abs() <= 0.5
+            && ((at[2].0 - at[1].0) - (at[1].0 - at[0].0)).abs() <= 0.5;
+        Some((text, even))
+    }
+
+    /// Counts a row read: whether it was wrong, the first wrong one kept.
+    fn count_row(wrong: &AtomicUsize, first: &Mutex<String>) {
+        if let Some((text, false)) = row()
+            && wrong.fetch_add(1, Ordering::Relaxed) == 0
+        {
+            *first.lock().unwrap() = text;
+        }
+    }
+
+    /// The window's frame for a content size, its top left kept.
+    fn frame_for(window: &NSWindow, size: (f64, f64)) -> objc2_foundation::NSRect {
+        let mut frame = window.frame();
+        let content = window.contentRectForFrameRect(frame);
+        let height = frame.size.height;
+        frame.size = objc2_foundation::NSSize::new(
+            frame.size.width - content.size.width + size.0,
+            frame.size.height - content.size.height + size.1,
+        );
+        frame.origin.y -= frame.size.height - height;
+        frame
+    }
+
+    /// `steps` frame changes back to back (`setFrame:display:`), the run loop
+    /// never turning between them, the buttons read after each.
+    pub fn burst(steps: usize) -> String {
+        let Some(window) = ours() else {
+            return "steps=0 row_wrong=0 first=".into();
+        };
+        let (wrong, first) = (AtomicUsize::new(0), Mutex::new(String::new()));
+        for step in 0..steps {
+            let grow = (step % 15) as f64;
+            window.setFrame_display(
+                frame_for(&window, (700. + grow * 6., 440. + grow * 3.)),
+                true,
+            );
+            count_row(&wrong, &first);
+        }
+        format!(
+            "steps={steps} row_wrong={} first={}",
+            wrong.load(Ordering::Relaxed),
+            first.lock().unwrap()
+        )
+    }
+
+    /// `steps` frame changes in the event-tracking run loop mode, as a live
+    /// resize's drag makes them: each in a loop pass of its own (its blocks
+    /// and Core Animation's commit run), the buttons read after it.
+    pub fn tracking(steps: usize) -> String {
+        let Some(window) = ours() else {
+            return "steps=0 row_wrong=0 first= in_live_resize=false".into();
+        };
+        let (wrong, first) = (AtomicUsize::new(0), Mutex::new(String::new()));
+        let mut live = false;
+        // SAFETY: NSRunLoop's +currentRunLoop and -runMode:beforeDate: on the
+        // main thread, with AppKit's tracking mode's name and a date now.
+        unsafe {
+            use objc2::{msg_send, runtime::AnyObject};
+            let run_loop: Retained<AnyObject> = msg_send![objc2::class!(NSRunLoop), currentRunLoop];
+            let mode = objc2_foundation::NSString::from_str("NSEventTrackingRunLoopMode");
+            for step in 0..steps {
+                let grow = (step % 15) as f64;
+                window.setFrame_display(
+                    frame_for(&window, (700. - grow * 6., 440. - grow * 3.)),
+                    true,
+                );
+                live |= window.inLiveResize();
+                let now: Retained<AnyObject> = msg_send![objc2::class!(NSDate), date];
+                let _: bool = msg_send![&*run_loop, runMode: &*mode, beforeDate: &*now];
+                count_row(&wrong, &first);
+            }
+        }
+        format!(
+            "steps={steps} row_wrong={} first={} in_live_resize={live}",
+            wrong.load(Ordering::Relaxed),
+            first.lock().unwrap()
+        )
+    }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
@@ -277,6 +399,7 @@ mod state {
             {
                 *FIRST_WRONG.lock().unwrap() = format!("{x:.1},{y:.1}");
             }
+            count_row(&ROW_WRONG, &FIRST_ROW_WRONG);
         });
         // kCFRunLoopBeforeWaiting, repeating, after Core Animation's commit (order 2000000).
         // SAFETY: CoreFoundation's observer API with a block that lives as long as the process.
@@ -297,14 +420,18 @@ mod state {
         SAMPLES.store(0, Ordering::Relaxed);
         WRONG.store(0, Ordering::Relaxed);
         FIRST_WRONG.lock().unwrap().clear();
+        ROW_WRONG.store(0, Ordering::Relaxed);
+        FIRST_ROW_WRONG.lock().unwrap().clear();
     }
 
     pub fn watched() -> String {
         format!(
-            "LIVE_RESIZE samples={} wrong={} first_wrong={}",
+            "LIVE_RESIZE samples={} wrong={} first_wrong={} row_wrong={} first_row_wrong={}",
             SAMPLES.load(Ordering::Relaxed),
             WRONG.load(Ordering::Relaxed),
-            FIRST_WRONG.lock().unwrap()
+            FIRST_WRONG.lock().unwrap(),
+            ROW_WRONG.load(Ordering::Relaxed),
+            FIRST_ROW_WRONG.lock().unwrap()
         )
     }
 
@@ -420,6 +547,12 @@ mod state {
     pub fn animate_resize(_: (f64, f64)) {}
     pub fn reset_counts() {}
     pub fn watched() -> String {
-        "LIVE_RESIZE samples=0 wrong=0 first_wrong=".into()
+        "LIVE_RESIZE samples=0 wrong=0 first_wrong= row_wrong=0 first_row_wrong=".into()
+    }
+    pub fn burst(_: usize) -> String {
+        "steps=0 row_wrong=0 first=".into()
+    }
+    pub fn tracking(_: usize) -> String {
+        "steps=0 row_wrong=0 first= in_live_resize=false".into()
     }
 }
