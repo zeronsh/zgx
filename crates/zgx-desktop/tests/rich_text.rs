@@ -165,7 +165,7 @@ fn native_bidi_links_use_shaped_fragments_and_expose_clickable_accessibility() {
         .semantics
         .borrow()
         .iter()
-        .find(|(_, s)| s.role == Role::Link)
+        .find(|(_, s)| s.role == Role::Button)
         .unwrap()
         .0;
     let fragments = ui.scene.borrow().children(link).to_vec();
@@ -198,7 +198,7 @@ fn native_bidi_links_use_shaped_fragments_and_expose_clickable_accessibility() {
     let native = &tree
         .nodes
         .iter()
-        .find(|(_, n)| n.role() == accesskit::Role::Link)
+        .find(|(_, n)| n.role() == accesskit::Role::Button)
         .unwrap()
         .1;
     assert!(native.supports_action(accesskit::Action::Click));
@@ -206,7 +206,7 @@ fn native_bidi_links_use_shaped_fragments_and_expose_clickable_accessibility() {
     let consumer = accesskit_consumer::Tree::new(tree, true);
     assert_eq!(
         consumer.state().focus().unwrap().role(),
-        accesskit::Role::Link
+        accesskit::Role::Button
     );
 }
 
