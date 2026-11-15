@@ -24,6 +24,8 @@ mod lifecycle_resources;
 mod native_views;
 #[path = "../panic_recovery.rs"]
 mod panic_recovery;
+#[path = "../pixel_snap.rs"]
+mod pixel_snap;
 #[path = "../reactive_dependencies.rs"]
 mod reactive_dependencies;
 #[path = "../shader_drive.rs"]

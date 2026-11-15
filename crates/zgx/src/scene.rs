@@ -2171,6 +2171,14 @@ struct ColdMaps {
     outside_fade: NodeMap<OutsideFade>,
     /// Nodes that stick in their scroll view (`set_sticky`).
     sticky: NodeMap<Sticky>,
+    /// Nodes whose translation rests on whole device pixels
+    /// (`set_pixel_snap`), put on the pixel grid once a frame as it flushes
+    /// (`snap_to_pixels`). Empty in most scenes, where that costs a length
+    /// check.
+    /// Each with whether it stays (`set_pixel_snap`) or is put there once,
+    /// at the next frame (`snap_once`: a finished animation's box). A node
+    /// gone is let go of as the pass runs: its id can't come back.
+    snapping: rustc_hash::FxHashMap<NodeId, bool>,
     /// Columns streamed into (`KEPT_COLUMN`).
     column_memos: NodeMap<ColumnMemo>,
     /// What columns resumed at their end keep aside while they are arranged
@@ -15296,6 +15304,15 @@ impl Scene {
     /// Lay out, paint and composite what changed since the last flush, and
     /// report the damage.
     pub fn flush(&mut self) -> FrameReport {
+        // Snapping nodes on the pixel grid, after this frame's writes and
+        // before it lays out and paints (`set_pixel_snap`, `snap_once`).
+        if self
+            .cold
+            .as_ref()
+            .is_some_and(|cold| !cold.snapping.is_empty())
+        {
+            self.snap_to_pixels();
+        }
         // (A subtree goes without each node being told: its loops go here.)
         #[cfg(target_os = "macos")]
         if !self.baked_loops.is_empty() {
@@ -15481,6 +15498,71 @@ impl Scene {
         // slots above it free to go at the next rest.
         self.free.sort_unstable_by(|a, b| b.cmp(a));
         self.free.shrink_to_fit();
+    }
+    /// Let `id`'s translation (a spring's, a tween's, a drag's) rest on
+    /// whole device pixels, as scroll content's does (`set_pixel_scale`),
+    /// so its edges and text don't land between them. Its writers set it
+    /// exactly; each frame, as it flushes, before layout and paint, the scene
+    /// puts it on the pixel grid (`snap_to_pixels`). `set_transform` itself stays as it is, so
+    /// nothing else pays for it. What paints is exact; what isn't:
+    ///
+    /// - Between a write and the next `flush`, `transform` (and a hit test)
+    ///   sees the writer's fractional place, under a device pixel from where
+    ///   it will show.
+    /// - A frame where it moves may damage up to a point more than one
+    ///   rounded write would: its writer's fractional place is damaged
+    ///   before the frame rounds it.
+    /// - A writer setting the same fractional place again re-damages it
+    ///   (the scene holds the rounded place, so the write is a move): only
+    ///   a writer that runs every frame with nothing changed, such as an
+    ///   app's own `anime` `onUpdate` setting the same `x` each frame.
+    ///   Springs, tweens and animations stop writing at rest, and a
+    ///   reactive style runs again only when what it reads changes.
+    ///
+    /// A box an `anime.animate` of `x` or `y` moved doesn't snap while it
+    /// moves (no frame pays for it); where it comes to rest it is put on the
+    /// pixel grid once (`snap_once`).
+    pub fn set_pixel_snap(&mut self, id: NodeId, enabled: bool) {
+        if enabled {
+            self.cold.get_or_insert_default().snapping.insert(id, true);
+        } else if let Some(cold) = &mut self.cold {
+            cold.snapping.remove(&id);
+        }
+    }
+    /// Each snapping node's translation (`set_pixel_snap`) on whole device
+    /// pixels, as its writers left it: once a frame, before layout. Nodes
+    /// gone since are let go of.
+    #[cold]
+    #[inline(never)]
+    fn snap_to_pixels(&mut self) {
+        let Some(cold) = &mut self.cold else {
+            return;
+        };
+        let mut snapping = std::mem::take(&mut cold.snapping);
+        snapping.retain(|id, _| self.contains(*id));
+        let ids: Vec<NodeId> = snapping.keys().copied().collect();
+        for id in ids {
+            let transform = self.node(id).transform;
+            let on = self.on_pixels(transform);
+            if on != transform {
+                self.set_transform(id, on);
+            }
+        }
+        // Those put there once are done.
+        snapping.retain(|_, stays| *stays);
+        if let Some(cold) = &mut self.cold {
+            cold.snapping = snapping;
+        }
+    }
+    /// Put `id`'s translation on whole device pixels once, at the next
+    /// frame, after its writers (a finished animation's box, where it rests):
+    /// not again unless asked.
+    pub fn snap_once(&mut self, id: NodeId) {
+        self.cold
+            .get_or_insert_default()
+            .snapping
+            .entry(id)
+            .or_insert(false);
     }
     /// Mark `id` as scroll content: translating it reports a `ScrollMove`
     /// instead of damaging everything it paints, and it moves by whole

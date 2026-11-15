@@ -517,6 +517,8 @@ pub fn resolve_keys(
 pub struct Look {
     base: &'static str,
     text: bool,
+    /// Its translation rests on whole device pixels (`View::pixel_snap`).
+    snap: bool,
     own: Styles,
     hover: Option<Box<Styles>>,
     active: Option<Box<Styles>>,
@@ -529,6 +531,7 @@ impl Look {
         Look {
             base: "",
             text: false,
+            snap: false,
             own: Styles::new(),
             hover: None,
             active: None,
@@ -553,7 +556,7 @@ impl Look {
     /// Its own declarations.
     pub fn css(&self) -> String {
         let mut css = self.base.to_owned();
-        styles_css(&self.own, self.text, &mut css);
+        styles_css_on(&self.own, self.text, self.snap, &mut css);
         css
     }
     /// Its hover, pressed, focus and disabled declarations.
@@ -561,7 +564,7 @@ impl Look {
         let css = |styles: &Option<Box<Styles>>| {
             styles.as_ref().map(|styles| {
                 let mut css = String::new();
-                styles_css(styles, self.text, &mut css);
+                styles_css_on(styles, self.text, self.snap, &mut css);
                 css
             })
         };
@@ -1806,6 +1809,8 @@ fn primitive(
         Some(false) => attrs.push(("tabindex", "-1".into())),
         None => {}
     }
+    // Read before its rare fields go: its translation on device pixels.
+    let snap = view.pixel_snaps();
     if let Some(rare) = view.rare.take() {
         let Rare {
             accessible_label,
@@ -1915,7 +1920,7 @@ fn primitive(
                 let mut css = String::new();
                 if let Some(mut patch) = patch {
                     crate::theme::resolve(&mut patch, &theme);
-                    styles_css(&patch, text_like, &mut css);
+                    styles_css_on(&patch, text_like, snap, &mut css);
                 }
                 css
             }) as Box<dyn FnMut() -> String>
@@ -1935,7 +1940,7 @@ fn primitive(
             }
             crate::theme::resolve(&mut resolved, &theme);
             let mut css = String::new();
-            styles_css(&resolved, text_like, &mut css);
+            styles_css_on(&resolved, text_like, snap, &mut css);
             css
         });
         (Styles::new(), Some(dynamic))
@@ -1959,6 +1964,7 @@ fn primitive(
     let look = Look {
         base,
         text: text_like,
+        snap,
         own,
         hover: variant(variants.hover, dh),
         active: variant(variants.active, da),
@@ -2149,6 +2155,12 @@ fn edges(css: &mut String, property: &str, insets: crate::scene::Insets, sides: 
 
 /// `styles` as CSS declarations, appended to `css`.
 pub fn styles_css(styles: &Styles, text: bool, css: &mut String) {
+    styles_css_on(styles, text, false, css);
+}
+/// `styles_css`, its translation on whole device pixels when `snap`
+/// (`View::pixel_snap`): rounded by the page to `--zgx-device-px`, one
+/// device pixel, which zgx-dom keeps as the window's resolution changes.
+pub fn styles_css_on(styles: &Styles, text: bool, snap: bool, css: &mut String) {
     let s: &crate::style::StylesFields = styles;
     if let Some(layout) = s.overflow().layout {
         css.push_str(match layout {
@@ -2324,7 +2336,16 @@ pub fn styles_css(styles: &Styles, text: bool, css: &mut String) {
     if let Some(t) = s.transform
         && (t.x != 0. || t.y != 0.)
     {
-        let _ = write!(transform, "translate({}px,{}px) ", num(t.x), num(t.y));
+        if snap {
+            let _ = write!(
+                transform,
+                "translate(round({}px,var(--zgx-device-px,1px)),round({}px,var(--zgx-device-px,1px))) ",
+                num(t.x),
+                num(t.y)
+            );
+        } else {
+            let _ = write!(transform, "translate({}px,{}px) ", num(t.x), num(t.y));
+        }
     }
     let local = s.local_transform;
     if local.set != 0 {

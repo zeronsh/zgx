@@ -20,6 +20,17 @@ let prevented = false;
 
 const TAGS = ["div", "span", "button", "input", "textarea", "progress", "label", "img", "canvas", "dialog", "a"];
 
+// One device pixel in CSS pixels, for a translation that rests on whole
+// device pixels (`View::pixel_snap`, its CSS rounded to it): kept as the
+// window moves to a screen of another resolution.
+function devicePixel() {
+  const ratio = window.devicePixelRatio || 1;
+  document.documentElement.style.setProperty("--zgx-device-px", 1 / ratio + "px");
+  if (typeof matchMedia === "function") {
+    matchMedia(`(resolution: ${ratio}dppx)`).addEventListener("change", devicePixel, { once: true });
+  }
+}
+
 // The page's sheet: base rules, then each class's as it is first used. A
 // constructed sheet, adopted by the document, applies under a strict
 // `style-src` that blocks a <style> element; where a browser can't adopt
@@ -48,6 +59,7 @@ export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   elementEvent = onEvent;
   resolveKeys = onKeys;
   sheet = adoptSheet(baseCss);
+  devicePixel();
   document.addEventListener("click", onClick);
   document.addEventListener("input", onInput);
   document.addEventListener("change", onChange);

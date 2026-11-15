@@ -314,6 +314,9 @@ pub(crate) struct Clip {
     pub timing: RefCell<Timing>,
     state: RefCell<State>,
     pub tracks: RefCell<Vec<Track>>,
+    /// It moves boxes with `x` or `y` (a script's `anime.animate`): where it
+    /// leaves them as it finishes rests on whole device pixels.
+    pub snaps: std::cell::Cell<bool>,
     pub marks: RefCell<Vec<(f64, Mark)>>,
     pub spans: RefCell<Vec<Span>>,
     pub labels: RefCell<HashMap<String, f64>>,
@@ -383,6 +386,7 @@ impl Clip {
             timing: RefCell::new(timing),
             state: RefCell::default(),
             tracks: RefCell::default(),
+            snaps: std::cell::Cell::new(false),
             marks: RefCell::default(),
             spans: RefCell::default(),
             labels: RefCell::default(),
@@ -721,6 +725,20 @@ impl Clip {
             for track in self.tracks.borrow().iter() {
                 if !matches!(track.target, Target::Element(_)) {
                     engine.release_finished(&track.target, &track.key, self.id);
+                }
+            }
+        }
+        // A box it moved with `x` or `y` rests on whole device pixels: put
+        // there once, at the next frame, after its last place is written
+        // (`Scene::snap_once`). Not while it moves: no frame pays for it,
+        // and a clip that moves none (a list's reorder) asks nothing.
+        if self.snaps.get() {
+            for track in self.tracks.borrow().iter() {
+                if matches!(track.key, Key::X | Key::Y)
+                    && let Target::Element(element) = &track.target
+                    && let (Some(scene), Some(node)) = (element.scene(), element.node())
+                {
+                    scene.borrow_mut().snap_once(node);
                 }
             }
         }
