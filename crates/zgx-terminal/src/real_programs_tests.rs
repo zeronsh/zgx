@@ -399,6 +399,20 @@ fn tmux_splits_and_shows_both_panes() {
     );
     run.shows("left side");
     run.until("the status line", |run| run.rows()[29].contains("[0]"));
+    // tmux reads the terminal's answers to its first questions from the
+    // same input as keys: a prefix typed before it has read them can be
+    // taken in with them (Linux CI, once: no `^B`, and the `%` reached the
+    // shell). It knows the client's terminal type once it has.
+    run.until("tmux to have the terminal's answers", |_| {
+        let clients = std::process::Command::new("tmux")
+            .env("PATH", path())
+            .arg("-S")
+            .arg(&socket)
+            .args(["list-clients", "-F", "#{client_termtype}"])
+            .output()
+            .unwrap();
+        !String::from_utf8_lossy(&clients.stdout).trim().is_empty()
+    });
     run.ctrl("b");
     run.type_text("%");
     run.until("a second pane", |run| run.screen().contains('│'));
