@@ -1359,6 +1359,55 @@ impl WebViewBackend for MacWebView {
             );
         }
     }
+    fn clear_site_data(&self, url: &str, done: Box<dyn FnOnce(Result<usize, String>)>) {
+        let Some(host) = zgx::web_view::site_host(url) else {
+            return done(Err(format!("{url} has no site")));
+        };
+        let mtm = MainThreadMarker::from(&*self.view);
+        let done = Rc::new(Cell::new(Some(done)));
+        // SAFETY: WKWebsiteDataStore's fetch and remove on the main thread,
+        // where WebKit calls both completions, with the records it passes;
+        // the store is the view's own (its profile's), retained by each
+        // block that uses it.
+        unsafe {
+            let store = self.view.configuration().websiteDataStore();
+            let types = WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+            let remover = store.clone();
+            let kinds = types.clone();
+            let fetched = block2::RcBlock::new(
+                move |records: std::ptr::NonNull<NSArray<objc2_web_kit::WKWebsiteDataRecord>>| {
+                    let records = records.as_ref();
+                    // WebKit names each record by its site's registrable
+                    // domain: the url's host or one it is under.
+                    let ours: Vec<_> = (0..records.count())
+                        .map(|i| records.objectAtIndex(i))
+                        .filter(|record| {
+                            zgx::web_view::site_matches(&host, &record.displayName().to_string())
+                        })
+                        .collect();
+                    let count = ours.len();
+                    if count == 0 {
+                        if let Some(done) = done.take() {
+                            done(Ok(0));
+                        }
+                        return;
+                    }
+                    let finished = done.clone();
+                    let removed = block2::RcBlock::new(move || {
+                        if let Some(done) = finished.take() {
+                            done(Ok(count));
+                        }
+                    });
+                    remover.removeDataOfTypes_forDataRecords_completionHandler(
+                        &kinds,
+                        &NSArray::from_retained_slice(&ours),
+                        &removed,
+                    );
+                },
+            );
+            store.fetchDataRecordsOfTypes_completionHandler(&types, &fetched);
+        }
+    }
     fn clear_find(&self) {
         // WebKit selects a match as it finds it, and has no call to stop.
         self.run(WebViewCommand::Evaluate {

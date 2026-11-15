@@ -1474,6 +1474,13 @@ declare extern type Web with
 	-- The script's value as Luau data (JSON's shape, whatever the page
 	-- returns: `any`), or nil and the error.
 	function eval(self, js: string, reply: ((value: any, err: string?) -> ...unknown)?): ()
+	-- Forget url's site, as a browser's "Remove site data": what this
+	-- page's profile keeps for its domain and those under it (cookies,
+	-- storage, caches, service workers), for every web on the profile.
+	-- How many of the platform's records went; open pages keep what they
+	-- hold until they reload. On Windows, storage of the site's other
+	-- subdomains stays.
+	function clear_site_data(self, url: string): Promise<number>
 	-- A page from `ui.web(id, opts)` leaves the host's registry: the next
 	-- `ui.web(id)` makes a new one.
 	function close(self): ()
