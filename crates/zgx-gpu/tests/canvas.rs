@@ -236,6 +236,114 @@ fn simple_shapes_draw_as_quads_and_look_as_their_raster_does() {
     }
 }
 
+/// A canvas's shadows of boxes, rounded or not, and of circles draw as
+/// quads, as a panel's box shadow does (blurred, sharp, grown, shrunk,
+/// moved, under what follows), no raster made, and look as their raster
+/// does: within a few levels where the blur is wide. Resized, it draws its
+/// quads again and still makes no raster.
+#[test]
+fn box_and_circle_shadows_draw_as_quads_and_look_as_their_raster_does() {
+    let shapes = |raster: bool, grow: f32| {
+        let mut canvas = Canvas::new();
+        let r = |x, y, w, h| Rect::new(x, y, w, h);
+        canvas.fill(
+            Path::rectangle(r(0., 0., 200., 160.)),
+            Color(240, 240, 240, 255),
+        );
+        let card = Path::rounded_rect(r(20., 20., 70. + grow, 50. + grow), 10.).unwrap();
+        canvas.shadow(card.clone(), Color(0, 0, 0, 90), Point::new(0., 4.), 6., 0.);
+        canvas.fill(card, Color(255, 255, 255, 255));
+        // Square, grown (its corners rounded by the spread) and moved.
+        canvas.shadow(
+            Path::rectangle(r(120., 20., 50., 40.)),
+            Color(30, 60, 200, 160),
+            Point::new(3., -2.),
+            3.,
+            4.,
+        );
+        // Shrunk.
+        canvas.shadow(
+            Path::rounded_rect(r(120., 90., 50., 40.), 12.).unwrap(),
+            Color(200, 30, 30, 200),
+            Point::new(0., 0.),
+            4.,
+            -5.,
+        );
+        // A circle's, and a sharp one.
+        canvas.shadow(
+            Path::ellipse(r(30., 95., 40., 40.)).unwrap(),
+            Color(0, 120, 60, 180),
+            Point::new(2., 2.),
+            5.,
+            0.,
+        );
+        canvas.shadow(
+            Path::rectangle(r(80., 100., 24., 24.)),
+            Color(0, 0, 0, 255),
+            Point::new(2., 2.),
+            0.,
+            0.,
+        );
+        if raster {
+            // Something no quad draws (an empty path): the whole canvas
+            // rasterizes, the reference.
+            canvas.fill(Path::builder().build().unwrap(), Color(0, 0, 0, 255));
+        }
+        canvas
+    };
+    for scale in [1., 2.] {
+        let render = |raster: bool| {
+            let mut scene = Scene::new(210., 170.);
+            scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+            let node = scene.append(
+                scene.root(),
+                NodeKind::Canvas(Arc::new(shapes(raster, 0.))),
+                Style {
+                    width: Some(200.),
+                    height: Some(160.),
+                    ..Default::default()
+                },
+            );
+            let mut gpu = GpuRenderer::new((210. * scale) as u32, (170. * scale) as u32).unwrap();
+            gpu.set_scale_factor(scale);
+            let report = scene.flush();
+            let stats = gpu.render(&scene, &report.damage).unwrap();
+            let pixels = gpu.readback().unwrap();
+            // Resized: its quads again, no raster.
+            scene.set_kind(node, NodeKind::Canvas(Arc::new(shapes(raster, 12.))));
+            let report = scene.flush();
+            let resized = gpu.render(&scene, &report.damage).unwrap();
+            (stats, resized, pixels)
+        };
+        let (quads, resized, drawn) = render(false);
+        let (rasters, _, reference) = render(true);
+        assert_eq!(quads.canvas_rasterizations, 0, "drawn as quads");
+        assert_eq!(resized.canvas_rasterizations, 0, "resized as quads");
+        assert!(quads.canvas_quads >= 7, "{}", quads.canvas_quads);
+        assert_eq!(rasters.canvas_rasterizations, 1);
+        let mut off = 0;
+        let mut worst = 0;
+        for (a, b) in drawn.chunks(4).zip(reference.chunks(4)) {
+            let d = a.iter().zip(b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            worst = worst.max(d);
+            if d > 6 {
+                off += 1;
+            }
+        }
+        // Along sides the quad's erf and the raster's blurred coverage agree
+        // within a level or two. Round corners differ more: the quad blurs
+        // the distance to the rounded box (as a panel's box shadow does),
+        // an approximation of the blurred shape that is a little off where
+        // the corner is tight for its blur (~20 levels at worst).
+        let pixels = drawn.len() / 4;
+        assert!(
+            off * 12 < pixels,
+            "scale {scale}: {off} of {pixels} pixels differ (worst {worst})"
+        );
+        assert!(worst <= 28, "scale {scale}: worst {worst}");
+    }
+}
+
 /// Strokes of straight lines running left to right (a sparkline's, a
 /// chart's) draw as polyline quads, no raster made, and look as their raster
 /// does: joins (miter, past its limit, bevel, round), caps, translucent
