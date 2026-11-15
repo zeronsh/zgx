@@ -304,3 +304,33 @@ fn rich_paragraphs_in_keyed_rows_each_keep_their_own() {
     mounted.unmount();
     host.remove();
 }
+
+/// A span that is a box of its own (`TextSpan::inline_box`) is CSS's
+/// `inline-flex`, its padding its box's, as the desktop lays it out; a plain
+/// padded span stays inline.
+#[wasm_bindgen_test]
+fn a_boxed_span_is_inline_flex() {
+    let runtime = Runtime::new();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            rich_text()
+                .child(text_span("See "))
+                .child(text_span("12").padding(4., 2.).inline_box())
+                .child(text_span(" and "))
+                .child(text_span("13").padding(4., 2.)),
+        ),
+    );
+    let p = paragraph(&host);
+    let nodes = p.child_nodes();
+    let boxed = element(nodes.item(1).unwrap());
+    assert_eq!(style(&boxed, "display"), "inline-flex");
+    assert_eq!(style(&boxed, "align-items"), "baseline");
+    assert_eq!(style(&boxed, "padding-top"), "2px");
+    let plain = element(nodes.item(3).unwrap());
+    assert_eq!(style(&plain, "display"), "inline");
+    mounted.unmount();
+    host.remove();
+}
