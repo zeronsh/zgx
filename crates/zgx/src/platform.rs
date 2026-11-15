@@ -195,6 +195,15 @@ pub trait Platform {
     fn clipboard_files(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
+    /// Put `files` on the clipboard, as a file manager's copy does: for a
+    /// test or a driven session (`zgx inspect clipboard set --files`) to
+    /// paste them. Whether it took them; a clipboard of the process's own
+    /// (`ZGX_CLIPBOARD=memory`) does, the system's does not.
+    #[doc(hidden)]
+    fn set_clipboard_files(&self, files: Vec<std::path::PathBuf>) -> bool {
+        let _ = files;
+        false
+    }
     /// The clipboard's HTML, its rich form (a browser's or a word
     /// processor's copy: `text/html`, macOS's `public.html`, Windows'
     /// `HTML Format` fragment), if it holds some; its text is
@@ -329,6 +338,7 @@ pub fn unforwarded(wrap: impl FnOnce(PlatformService) -> PlatformService) -> Vec
     let _ = w.looks_up();
     let _ = w.look_up("", (0., 0.), 0.);
     let _ = w.clipboard_files();
+    let _ = w.set_clipboard_files(Vec::new());
     let _ = w.clipboard_html();
     let _ = w.set_clipboard_rich_text(String::new(), String::new());
     drop(w.clipboard_image());
@@ -357,7 +367,7 @@ struct Probe {
 }
 impl Probe {
     /// Every `Platform` method, in the trait's order.
-    const METHODS: [&'static str; 28] = [
+    const METHODS: [&'static str; 29] = [
         "clipboard_text",
         "set_clipboard_text",
         "primary_text",
@@ -373,6 +383,7 @@ impl Probe {
         "looks_up",
         "look_up",
         "clipboard_files",
+        "set_clipboard_files",
         "clipboard_html",
         "set_clipboard_rich_text",
         "clipboard_image",
@@ -448,6 +459,10 @@ impl Platform for Probe {
     fn clipboard_files(&self) -> Vec<PathBuf> {
         self.heard("clipboard_files");
         Vec::new()
+    }
+    fn set_clipboard_files(&self, _: Vec<PathBuf>) -> bool {
+        self.heard("set_clipboard_files");
+        true
     }
     fn clipboard_html(&self) -> Option<String> {
         self.heard("clipboard_html");

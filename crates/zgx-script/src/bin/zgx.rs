@@ -467,6 +467,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   node <target>        find <target>
   state [name] [--full]                  set <name> <json>
   click <target>       type <target> <text>      key <keys>
+  type --no-click <text>                 where focus is, no click first
   hover <target|x,y>   right-click <target|x,y>  drag <from> <to|x,y>
   scroll <target> <dy> command <id>
   errors               lint
@@ -483,7 +484,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   search [query] [--next] [--prev] [--all] [--close]
                        find in page: count, current, the first matches
   zoom [in|out|reset|150%]               the window's zoom and its viewport
-  clipboard [set --text T | --html H | --image file.png]
+  clipboard [set --text T | --html H | --image file.png | --files PATH…]
                        the window's clipboard (its own under ZGX_CLIPBOARD=memory);
                        set it, then `key cmd+v` pastes it
   memory [--human]                       what the app holds, a line each, as JSON
@@ -504,6 +505,8 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let mut human = false;
     let mut words: Vec<String> = Vec::new();
     let mut flags: Vec<(String, Option<String>)> = Vec::new();
+    // `clipboard set --files`'s paths, absolute: the app may run elsewhere.
+    let mut files: Vec<String> = Vec::new();
     // Where `snapshot` copies its picture, or `record stop` writes its tape.
     let mut out: Option<String> = None;
     let mut args = args.into_iter();
@@ -531,6 +534,25 @@ fn inspect(args: Vec<String>) -> ExitCode {
             }
             "--all" | "--full" | "--gone" | "--next" | "--prev" | "--close" | "--summary" => {
                 flags.push((arg[2..].to_string(), None))
+            }
+            "--no-click" => flags.push(("no_click".into(), None)),
+            // Paths, up to the next flag.
+            "--files" => {
+                while args
+                    .as_slice()
+                    .first()
+                    .is_some_and(|a| !a.starts_with("--"))
+                {
+                    let path = args.next().unwrap_or_default();
+                    files.push(match std::path::absolute(&path) {
+                        Ok(path) => path.display().to_string(),
+                        Err(_) => path,
+                    });
+                }
+                if files.is_empty() {
+                    eprintln!("zgx inspect: --files takes one path or more");
+                    return ExitCode::from(2);
+                }
             }
             "--out" => match args.next() {
                 Some(path) => out = Some(path),
@@ -622,6 +644,15 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 }
             }
         }
+        "type" if flags.iter().any(|(name, _)| name == "no_click") => {
+            if words.len() > 2 {
+                eprintln!(
+                    "zgx inspect: type --no-click takes the text alone: it types where focus is"
+                );
+                return ExitCode::from(2);
+            }
+            put("text", arg(1));
+        }
         "type" => {
             put("target", arg(1));
             put("text", arg(2));
@@ -658,6 +689,10 @@ fn inspect(args: Vec<String>) -> ExitCode {
             }
         }
         _ => {}
+    }
+    if !files.is_empty() {
+        let files = files.iter().map(|f| Value::from(f.as_str())).collect();
+        fields.push(("files".into(), Value::List(files)));
     }
     for (name, value) in flags {
         let key = if name == "timeout" {
@@ -871,8 +906,12 @@ const TOOLS: &[Tool] = &[
     (
         "zgx_type",
         "type",
-        &[("target", "string", true), ("text", "string", true)],
-        "Click a node (an input), then type text into it.",
+        &[
+            ("target", "string", false),
+            ("text", "string", true),
+            ("no_click", "boolean", false),
+        ],
+        "Click a node (an input), then type text into it; with no_click (and no target), type where focus is, the caret and selection left as they are.",
     ),
     (
         "zgx_key",
@@ -973,8 +1012,9 @@ const TOOLS: &[Tool] = &[
             ("text", "string", false),
             ("html", "string", false),
             ("image", "string", false),
+            ("files", "array", false),
         ],
-        "The window's clipboard: what it holds (its text, HTML and image's size), or with action `set` put text, html (both: a rich copy) or the picture at image (a file) there. Then a key (cmd+v / ctrl+v) pastes it as a person's paste. An off-screen session (ZGX_CLIPBOARD=memory) has a clipboard of its own, so this never touches the person's.",
+        "The window's clipboard: what it holds (its text, HTML, image's size and files), or with action `set` put text, html (both: a rich copy), the picture at image (a file) or files (paths, as a file manager copies them; an app's own clipboard only) there. Then a key (cmd+v / ctrl+v) pastes it as a person's paste. An off-screen session (ZGX_CLIPBOARD=memory) has a clipboard of its own, so this never touches the person's.",
     ),
     (
         "zgx_record",
@@ -1067,6 +1107,8 @@ fn mcp() -> ExitCode {
                                 .map(|(arg, ty, _)| {
                                     let schema = if *ty == "any" {
                                         Value::record([("description", Value::from("any JSON value"))])
+                                    } else if *ty == "array" {
+                                        Value::record([("type", Value::from("array")), ("items", Value::record([("type", Value::from("string"))]))])
                                     } else {
                                         Value::record([("type", Value::from(*ty))])
                                     };

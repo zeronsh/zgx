@@ -171,6 +171,10 @@ impl zgx::platform::Platform for FakeDesktop {
     fn clipboard_files(&self) -> Vec<std::path::PathBuf> {
         self.files.borrow().clone()
     }
+    fn set_clipboard_files(&self, files: Vec<std::path::PathBuf>) -> bool {
+        self.copy_files(files);
+        true
+    }
     fn clipboard_text(&self) -> Option<String> {
         (!self.image_only.get()).then(|| self.clipboard.borrow().clone())
     }
