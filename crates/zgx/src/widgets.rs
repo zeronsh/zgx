@@ -4502,6 +4502,11 @@ impl Ui {
         } else {
             LAYOUT_PASSES
         };
+        // What the resting pointer is over, found once the passes settle (as a
+        // browser updates hover once a frame): asked in each pass that moved
+        // geometry, it walked the scene each time for what the next pass
+        // moved again (a scrolled list's rows mounting).
+        let mut hover_due = false;
         for _ in 0..passes {
             self.scene.borrow_mut().prepare_layout();
             self.input.validate_drag(&self.scene);
@@ -4519,6 +4524,12 @@ impl Ui {
                     || self.storage.bounds_geometry_revision.get()
                         != Some(geometry_revision | SEEN_AHEAD));
             if !layout_changed && !geometry_changed {
+                // Settled: hover found once, where things came to rest. A new
+                // hover's style can move layout: one more pass lays that out,
+                // hover not asked again for it.
+                if std::mem::take(&mut hover_due) && self.refresh_hover_moved() {
+                    continue;
+                }
                 if !self.run_after_layout() {
                     // Settled: a removed focused node's focus falls to its
                     // ancestor, unless something (a list revealing a row)
@@ -4553,7 +4564,7 @@ impl Ui {
                 if hidden_focus {
                     self.input.focus(&self.scene, None);
                 }
-                self.input.refresh_hover(&self.scene);
+                hover_due = true;
             }
             self.storage
                 .editor_layout_revision
@@ -4698,11 +4709,34 @@ impl Ui {
             // Internal geometry bindings are constrained by their viewport.
             // A second pass also prepares editors mounted by virtual rows.
         }
+        // Unsettled: hover where it came to, all the same.
+        if hover_due {
+            self.input.refresh_hover(&self.scene);
+        }
         if self.storage.contains_layout.get() {
             self.hold_layout(passes, held.is_some());
             return Ok(());
         }
         Err(LayoutFeedbackError { passes })
+    }
+    /// Hover what the resting pointer is over now (`refresh_hover`): whether
+    /// that changed layout, a hover style's restyle, which another pass lays
+    /// out.
+    /// Nothing without a pointer over the window (most layout passes: a
+    /// scene scrolled, typed into, animated with no pointer known).
+    #[inline(never)]
+    fn refresh_hover_moved(&self) -> bool {
+        if self.input.pointer().is_none() {
+            return false;
+        }
+        let before = self.input.hovered();
+        self.input.refresh_hover(&self.scene);
+        if self.input.hovered() == before {
+            return false;
+        }
+        let laid_out = self.scene.borrow().layout_revision();
+        self.scene.borrow_mut().prepare_layout();
+        self.scene.borrow().layout_revision() != laid_out
     }
     /// Whether layout held unsettled (`hold_layout`) stands: laid out, as a
     /// frame needs, it is as it was held.
@@ -9987,5 +10021,74 @@ impl WeakUi {
         WeakUi {
             storage: Weak::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod hover_once_tests {
+    use super::*;
+    use crate::compose::prelude::*;
+    use crate::input::InputEvent;
+
+    /// A 200-point scroll view of 20-point rows, each with a hover style,
+    /// built as the scroll view shows them (a list in its column, as a
+    /// transcript's groups are), and the pointer resting at (50, 50).
+    fn rows(ui: &mut Ui) -> (Signal<f32>, crate::compose::ViewHandle) {
+        let offset = ui.signal(0_f32);
+        let list = virtual_list(
+            ui.signal(0_f32),
+            20.,
+            1,
+            || 500,
+            |index| index,
+            |_, index, _| {
+                div()
+                    .id(format!("row-{index}"))
+                    .h(20.)
+                    .hover(|s| s.bg(crate::scene::Color(1, 2, 3, 255)))
+            },
+        )
+        .virtualize_in_ancestor()
+        .w_full();
+        let view = ui.mount(
+            scroll(offset.clone())
+                .size(200., 200.)
+                .child(column().w_full().child(list)),
+        );
+        ui.prepare_frame();
+        ui.dispatch(InputEvent::PointerMove { x: 50., y: 50. });
+        ui.prepare_frame();
+        (offset, view)
+    }
+    fn row(view: &crate::compose::ViewHandle, index: usize) -> Option<NodeId> {
+        view.find(&format!("row-{index}"))
+    }
+
+    #[test]
+    fn a_list_scrolling_under_a_resting_pointer_looks_for_hover_once_a_frame() {
+        let mut ui = Ui::new(400., 400.);
+        let (offset, view) = rows(&mut ui);
+        assert_eq!(ui.input.hovered(), row(&view, 2), "row 2 under (50, 50)");
+        for step in 1..=12 {
+            offset.set(step as f32 * 30.);
+            let before = ui.scene.borrow().hit_walks.get();
+            ui.prepare_frame();
+            let walks = ui.scene.borrow().hit_walks.get() - before;
+            assert!(
+                walks <= 1,
+                "step {step}: hover looked for {walks} times in one frame"
+            );
+            // And it is where the pointer rests: the row now under it.
+            let under = ((step as f32 * 30. + 50.) / 20.) as usize;
+            assert_eq!(ui.input.hovered(), row(&view, under), "step {step}");
+        }
+    }
+
+    #[test]
+    fn a_pointer_move_still_hovers_at_once() {
+        let mut ui = Ui::new(400., 400.);
+        let (_offset, view) = rows(&mut ui);
+        ui.dispatch(InputEvent::PointerMove { x: 50., y: 130. });
+        assert_eq!(ui.input.hovered(), row(&view, 6), "before any frame");
     }
 }

@@ -6,7 +6,9 @@
 //! 133 points), the list fading out over its last 61 points. With
 //! `OBSERVE=1` (the default) rows watch their size, bounds and visibility
 //! within a margin, as an app's `on_resize`, `ref.width` and `on_visible`
-//! do. Where scroll copies run, each frame paints the strip the scroll
+//! do. With `POINTER=1` the pointer rests over the list (moved there once
+//! before the scroll), as a person's does while they scroll: what it is over
+//! is found again as rows move under it. Where scroll copies run, each frame paints the strip the scroll
 //! brings in and the band (the composer lies in the fade's band, which
 //! repaints each frame); a renderer with no surface of its own on macOS
 //! copies nothing and paints the whole view.
@@ -186,6 +188,7 @@ fn main() {
     let rows = env("ROWS", 20);
     let depth = env("DEPTH", 28);
     let observe = env("OBSERVE", 1) == 1;
+    let pointer = env("POINTER", 0) == 1;
     let step = env("STEP", 24) as f32;
     let scale = env("SCALE", 2) as f32;
     let mut ui = Ui::new(WIDTH, HEIGHT);
@@ -233,6 +236,13 @@ fn main() {
             // layers are.
             .child(div().absolute().size(WIDTH, HEIGHT).child(composer)),
     );
+    if pointer {
+        ui.prepare_frame();
+        ui.dispatch(zgx::input::InputEvent::PointerMove {
+            x: WIDTH / 2.,
+            y: HEIGHT / 3.,
+        });
+    }
     let (mut damaged, mut items) = (0_u64, 0_usize);
     let mut at = 0_f32;
     let mut down = true;
