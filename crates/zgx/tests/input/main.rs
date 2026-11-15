@@ -54,6 +54,8 @@ mod observed_once_a_frame;
 mod pointer_drag_buttons;
 #[path = "../pointer_lock.rs"]
 mod pointer_lock;
+#[path = "../scroll_into_view.rs"]
+mod scroll_into_view;
 #[path = "../switch_keeping_focus.rs"]
 mod switch_keeping_focus;
 #[path = "../zoom.rs"]

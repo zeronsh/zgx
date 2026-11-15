@@ -601,6 +601,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
             (Tag::Dialog, "z zd")
         }
         ElementKind::Overlay(_) => (Tag::Div, "z zp"),
+        ElementKind::Scroll { .. } => (Tag::Div, "z zo"),
         _ => (Tag::Div, "z"),
     };
     let base = if el.contents { "z zc" } else { base };
@@ -865,6 +866,26 @@ impl __dom::Hooks for NodeHooks {
         if state.alive {
             state.retained.push(resource);
         }
+    }
+    fn scroll_into_view(&self, how: &zgx::compose::ScrollIntoView) -> bool {
+        use zgx::compose::RowAlign;
+        if !self.state.borrow().alive {
+            return false;
+        }
+        let name = |align: RowAlign| match align {
+            RowAlign::Start => "start",
+            RowAlign::Center => "center",
+            RowAlign::End => "end",
+            RowAlign::Nearest => "nearest",
+        };
+        // What was made since is in the document first.
+        flush();
+        let animate = match how.animate {
+            None => -1,
+            Some(false) => 0,
+            Some(true) => 1,
+        };
+        js::zgx_scroll_into_view(self.node, name(how.block), name(how.inline), animate)
     }
 }
 

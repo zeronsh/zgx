@@ -261,6 +261,94 @@ fn scroll_offsets_write_the_viewport() {
     assert_eq!(viewport.scroll_top(), 200);
 }
 
+/// A scroll view's rows keep their size, as on the desktop, where they lay
+/// out unbounded in its content: not shrunk to fit it as a flex container's
+/// children are, inside a keyed list's too.
+#[wasm_bindgen_test]
+fn a_scroll_views_rows_keep_their_size() {
+    let runtime = Runtime::new();
+    let offset = runtime.signal(0_f32);
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        scroll(offset.clone())
+            .h(100.)
+            .children((0..4).map(|i| column().h(40.).child(text(format!("row {i}")))))
+            .child(keyed(|| vec![1, 2], |_: i32, _| column().h(30.))),
+    );
+    zgx_dom::flush();
+    let heights = |parent: &web_sys::Element| {
+        let rows = parent.children();
+        (0..rows.length())
+            .map(|i| rows.item(i).unwrap().get_bounding_client_rect().height())
+            .collect::<Vec<_>>()
+    };
+    let viewport = first(&host);
+    assert_eq!(heights(&viewport)[..4], [40.; 4]);
+    let list = viewport.children().item(4).unwrap();
+    assert_eq!(heights(&list), [30.; 2]);
+    mounted.unmount();
+    host.remove();
+}
+
+/// `NodeHandle::scroll_into_view` by the browser's own `scrollIntoView`,
+/// at once: whether its scroll container moved, as on the desktop.
+#[wasm_bindgen_test]
+fn a_node_scrolls_into_view_by_the_browsers_own() {
+    use zgx::compose::{RowAlign, ScrollIntoView};
+    let runtime = Runtime::new();
+    let offset = runtime.signal(0_f32);
+    let host = host();
+    let handle = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let kept = handle.clone();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        scroll(offset.clone())
+            .h(100.)
+            .children((0..10).map(move |i| {
+                let kept = kept.clone();
+                // A block 40 high (a text alone lays out inline, its line's
+                // height).
+                let row = column().h(40.).child(text(format!("row {i}")));
+                if i == 5 {
+                    row.on_mount(move |node| *kept.borrow_mut() = Some(node))
+                } else {
+                    row
+                }
+            })),
+    );
+    zgx_dom::flush();
+    let viewport = first(&host);
+    let row5 = handle.borrow().clone().expect("row 5 mounted");
+    let row5_element = viewport.children().item(5).unwrap();
+    assert_eq!(row5_element.get_bounding_client_rect().height(), 40.);
+    let at_start = ScrollIntoView {
+        block: RowAlign::Start,
+        inline: RowAlign::Nearest,
+        animate: Some(false),
+    };
+    // Row 5, below what shows, comes to its top.
+    assert!(row5.scroll_into_view(at_start));
+    assert_eq!(
+        row5_element.get_bounding_client_rect().top(),
+        viewport.get_bounding_client_rect().top()
+    );
+    assert_eq!(viewport.scroll_top(), 200);
+    assert!(!row5.scroll_into_view(at_start), "already there");
+    assert!(
+        !row5.scroll_into_view(ScrollIntoView {
+            block: RowAlign::Nearest,
+            ..at_start
+        }),
+        "it shows: nearest leaves it"
+    );
+    // Gone, so it pushes no later test's host out of view.
+    mounted.unmount();
+    host.remove();
+}
+
 #[wasm_bindgen_test]
 fn virtual_lists_mount_what_shows() {
     let runtime = Runtime::new();

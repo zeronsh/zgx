@@ -1342,6 +1342,12 @@ declare extern type Element with
 	-- list of measured rows measures those around it as it lands, so it
 	-- ends where asked. False for elements that are not lists.
 	function scroll_to_row(self, i: number, options: { align: ("start" | "center" | "end" | "nearest")? }?): boolean
+	-- (Hidden until its API is settled.) The scroll views around it moved
+	-- so it shows, innermost first, as the web's scrollIntoView: `block`
+	-- down ("start" by default) and `inline` across ("nearest"), easing
+	-- there unless the system reduces motion (`animate` says otherwise).
+	-- Whether any moved.
+	function scroll_into_view(self, options: { block: ("start" | "center" | "end" | "nearest")?, inline: ("start" | "center" | "end" | "nearest")?, animate: boolean? }?): boolean
 	function has_class(self, class: string): boolean
 	-- An input's selection, in characters (Unicode code points from 0, as
 	-- `utf8.len` counts them). Each returns false (or nil) for elements
