@@ -20,16 +20,34 @@ let prevented = false;
 
 const TAGS = ["div", "span", "button", "input", "textarea", "progress", "label", "img", "canvas", "dialog", "a"];
 
+// The page's sheet: base rules, then each class's as it is first used. A
+// constructed sheet, adopted by the document, applies under a strict
+// `style-src` that blocks a <style> element; where a browser can't adopt
+// one, a <style> element holds the rules instead.
+function adoptSheet(css) {
+  if ("adoptedStyleSheets" in document && typeof CSSStyleSheet === "function") {
+    try {
+      const constructed = new CSSStyleSheet();
+      constructed.replaceSync(css);
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, constructed];
+      return constructed;
+    } catch (_) {
+      // A sheet this browser can't construct: the element below.
+    }
+  }
+  const style = document.createElement("style");
+  style.textContent = css;
+  document.head.appendChild(style);
+  return style.sheet;
+}
+
 export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   root = document;
   dispatch = onDispatch;
   flush = onFlush;
   elementEvent = onEvent;
   resolveKeys = onKeys;
-  const style = document.createElement("style");
-  style.textContent = baseCss;
-  document.head.appendChild(style);
-  sheet = style.sheet;
+  sheet = adoptSheet(baseCss);
   document.addEventListener("click", onClick);
   document.addEventListener("input", onInput);
   document.addEventListener("change", onChange);
