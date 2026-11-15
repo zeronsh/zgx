@@ -2493,6 +2493,29 @@ impl Host {
             self.dispatch(event)
         }
     }
+    /// A menu item was chosen (its shortcut, mostly): the frame it makes
+    /// answers input as a key's does. It draws at once rather than on the
+    /// refresh's tick or a later cadence, and the GPU wakes while it is built
+    /// (`GpuRenderer::warm_up`): AppKit takes a shortcut as the menu's before
+    /// the window sees a key, so none of the key's own path runs.
+    /// `ZGX_MENU_INPUT=0`: as before, to compare.
+    fn menu_chosen(&mut self) {
+        static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            zgx::env::var_os("ZGX_MENU_INPUT").is_none_or(|v| v != "0")
+        });
+        if !*ON {
+            return;
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            self.input_until = Some(std::time::Instant::now() + INPUT_FULL_RATE);
+            self.input_arrived = true;
+        }
+        self.context.ui.menu_acted();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.warm_up();
+        }
+    }
     fn dispatch_prevented(
         &mut self,
         event: InputEvent,
@@ -7820,6 +7843,7 @@ impl WindowManager {
             if host.context.window.is_closed() {
                 return;
             }
+            host.menu_chosen();
             // A standard edit item does what its shortcut does to what has
             // focus (an editor's copy, paste, undo); with nothing to take
             // it, it reaches the app.

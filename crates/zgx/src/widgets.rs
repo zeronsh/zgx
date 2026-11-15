@@ -4915,6 +4915,13 @@ impl Ui {
             .with(Cell::get)
             .and_then(|(by, at)| (by == ui).then_some(at))
     }
+    /// A menu item was chosen, by its shortcut or by the menu itself: input
+    /// that acts, as the key it stands for would be (`acted_at`). Renderer
+    /// plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn menu_acted(&self) {
+        self.mark_acted();
+    }
     /// Input that acts is being dispatched (`acted_at`). Cold and out of
     /// line: `route`'s inlined body stays as it was for every other event.
     #[cold]

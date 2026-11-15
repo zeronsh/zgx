@@ -47,3 +47,15 @@ fn acting_input_marks_when_it_was_dispatched() {
     ui.dispatch(InputEvent::Text("a".into()));
     assert!(ui.acted_at().expect("text acts") >= keyed);
 }
+
+/// A menu item chosen (its shortcut, mostly, which AppKit hands the menu
+/// before the window sees a key) acts as the key it stands for: the frame it
+/// makes draws at once, as a typed key's does.
+#[test]
+fn a_menu_item_chosen_acts() {
+    let ui = Ui::new(300., 200.);
+    assert_eq!(ui.acted_at(), None, "nothing chosen");
+    let before = std::time::Instant::now();
+    ui.menu_acted();
+    assert!(ui.acted_at().expect("a menu item acts") >= before);
+}
