@@ -338,8 +338,11 @@ fn select_all_and_presses_elsewhere() {
         ]),
     );
     ui.prepare_frame();
-    // Nothing selected or pressed yet: select-all has no region.
-    assert!(!ui.dispatch(shortcut("a")).default_prevented);
+    // Nothing selected or pressed yet: select-all takes the only region,
+    // as a page's does.
+    assert!(ui.dispatch(shortcut("a")).default_prevented);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "First\n\nLast");
     press(&mut ui, 4., 10., false);
     release(&mut ui, 4., 10.);
     assert!(ui.dispatch(shortcut("a")).default_prevented);
@@ -354,7 +357,10 @@ fn select_all_and_presses_elsewhere() {
     let outside = ui.scene.borrow().bounds(texts(&ui)[4]);
     press(&mut ui, outside.x + 2., outside.y + 2., false);
     assert!(!ui.has_text_selection());
-    assert!(!ui.dispatch(shortcut("a")).default_prevented);
+    // Select-all after, with no region pressed in: the only one again.
+    assert!(ui.dispatch(shortcut("a")).default_prevented);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "First\n\nLast");
 }
 
 #[test]
@@ -2235,4 +2241,42 @@ fn a_selection_parked_in_a_row_mounted_again_another_way_keeps_its_size() {
     ui.prepare_frame();
     assert_eq!(ui.selected_text(), "ow 1\nRow 2\nRow");
     assert_eq!(highlighted(&ui).len(), 3);
+}
+
+/// Select All with no region pressed in yet: the region under the
+/// pointer's last place, else the only region; with several and none under
+/// the pointer, nothing.
+#[test]
+fn select_all_with_no_region_pressed_takes_the_one_under_the_pointer_or_the_only_one() {
+    let two = |ui: &mut Ui| {
+        ui.mount(
+            column()
+                .w(300.)
+                .gap(20.)
+                .text_size(10.)
+                .line_height(20.)
+                .child(column().selectable(true).child(text("First region")))
+                .child(column().selectable(true).child(text("Second region"))),
+        );
+        ui.prepare_frame();
+    };
+    // The only region.
+    let mut ui = Ui::new(400., 300.);
+    document(&mut ui, vec![text("Only region")]);
+    ui.dispatch(shortcut("a"));
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "Only region");
+    // Two, the pointer last over the second.
+    let mut ui = Ui::new(400., 300.);
+    two(&mut ui);
+    move_to(&mut ui, 5., 50.);
+    ui.dispatch(shortcut("a"));
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "Second region");
+    // Two, the pointer never over either: nothing.
+    let mut ui = Ui::new(400., 300.);
+    two(&mut ui);
+    ui.dispatch(shortcut("a"));
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "");
 }
