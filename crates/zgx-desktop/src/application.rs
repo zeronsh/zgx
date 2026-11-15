@@ -1395,8 +1395,8 @@ fn answers_input(acted_at: Option<std::time::Instant>, now: std::time::Instant) 
     acted_at.is_some_and(|at| now.saturating_duration_since(at) < INPUT_LIVE)
 }
 /// Whether input acted after the frame last shown (`shown`): the next draws
-/// at once, not at the refresh's tick (`Host::process`).
-#[cfg(target_os = "macos")]
+/// at once, not at the refresh's tick (`Host::process`). Also whether a lone
+/// wake's queue rests at its trim (`queue_rests_at_trim`), on every platform.
 fn acted_since(acted_at: Option<std::time::Instant>, shown: Option<std::time::Instant>) -> bool {
     acted_at.is_some_and(|at| shown.is_none_or(|shown| at > shown))
 }
@@ -9745,7 +9745,6 @@ mod tests {
 
     /// Input acting after the frame last shown draws the next at once;
     /// input the shown frame already answered doesn't.
-    #[cfg(target_os = "macos")]
     #[test]
     fn input_since_the_frame_shown_draws_at_once() {
         use super::acted_since;
