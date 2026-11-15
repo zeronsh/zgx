@@ -135,6 +135,27 @@ def main():
                     (args.output/'timeout-tree.json').write_text(json.dumps(tree,indent=2))
                     subprocess.run(['grim',str(args.output.resolve()/'timeout.png')],env=env,check=False)
                     raise RuntimeError('Native portal dialog never appeared: '+title)
+                def settled(title,seconds=10):
+                    # The dialog as sway has it focused and placed: its box
+                    # unchanged over two looks, as a click at it needs (a
+                    # floating window is placed, and GTK lays out its header
+                    # bar, a while after it first shows on a loaded runner).
+                    deadline=time.monotonic()+seconds;last=None
+                    while True:
+                        node=find_dialog(title)
+                        if node.get('focused') and last is not None and node['rect']==last:return node
+                        last=node['rect'] if node.get('focused') else None
+                        if time.monotonic()>deadline:return node
+                        time.sleep(.15)
+                def gone(title,seconds=3):
+                    deadline=time.monotonic()+seconds
+                    while time.monotonic()<deadline:
+                        tree=json.loads(subprocess.check_output(['swaymsg','-t','get_tree','-r'],env=env,text=True));pending=[tree];names=[]
+                        while pending:
+                            node=pending.pop();pending.extend(node.get('nodes',[])+node.get('floating_nodes',[]));names.append(node.get('name'))
+                        if title not in names:return True
+                        time.sleep(.05)
+                    return False
                 wait_log('READY')
                 dialog=find_dialog()
                 (args.output/'dialog.json').write_text(json.dumps(dialog,indent=2)+'\n')
@@ -211,10 +232,18 @@ def main():
                     except RuntimeError:
                         if attempt==2: raise
                         xdo('key','--clearmodifiers','Escape'); time.sleep(.3)
-                time.sleep(.2)
-                if args.escape_cancel:xdo('key','--clearmodifiers','Escape')
+                if args.escape_cancel:
+                    time.sleep(.2);xdo('key','--clearmodifiers','Escape')
                 else:
-                    rect=cancel_dialog['rect'];xdo('mousemove','--window',window,rect['x']+45,rect['y']+24,'click',1)
+                    # Its Cancel, clicked once the dialog is placed and has the
+                    # focus; again, at where it is then, while it stays.
+                    for attempt in range(3):
+                        rect=settled('Open fixture')['rect']
+                        xdo('mousemove','--window',window,rect['x']+45,rect['y']+24,'click',1)
+                        if gone('Open fixture'):break
+                    else:
+                        (args.output/'dialog.json').write_text(json.dumps(find_dialog(),indent=2)+'\n')
+                        raise RuntimeError('The open dialog stayed through three clicks of its Cancel')
                 wait_log('DIALOG open Err(BackendUnavailable)' if args.escape_cancel else 'DIALOG open Ok(None)')
                 if args.tools_root or args.native_prompts:
                     time.sleep(.3)
