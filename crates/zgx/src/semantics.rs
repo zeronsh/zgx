@@ -273,6 +273,9 @@ pub struct SemanticRare {
     pub active_descendant: Option<NodeId>,
     /// Its place in a grid, or a grid's size (boxed: only grids have one).
     pub table: Option<Box<TablePlace>>,
+    /// A toggle button's state (`aria-pressed`): pressed, not pressed, or
+    /// `None` for not a toggle button.
+    pub pressed: Option<bool>,
 }
 /// None set, for a node with none to read as.
 static NO_RARE: SemanticRare = SemanticRare {
@@ -291,6 +294,7 @@ static NO_RARE: SemanticRare = SemanticRare {
     shortcut: None,
     active_descendant: None,
     table: None,
+    pressed: None,
 };
 /// A [`SemanticRare`] made as one is first assigned to. A node's copy shares
 /// it until one of them assigns ([`Semantics::update`] copies each node it

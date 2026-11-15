@@ -1588,6 +1588,18 @@ impl View {
         self.accessibility_mut().checked = Some(Box::new(checked));
         self
     }
+    /// Whether this toggle button is pressed, followed (`aria-pressed`): a
+    /// button that stays on or off, as a toolbar's bold. It reads as a
+    /// toggle button with its state.
+    #[doc(hidden)]
+    pub fn pressed_when(mut self, pressed: impl FnMut() -> bool + 'static) -> Self {
+        // `checked`'s closure, read as pressed (`toggle`): no field of its
+        // own in every element's accessibility.
+        let accessibility = self.accessibility_mut();
+        accessibility.checked = Some(Box::new(pressed));
+        accessibility.toggle = true;
+        self
+    }
     /// A checkable menu item (`Role::MenuItem` with `checked_when`) that is
     /// one of a group: a radio item, `menuitemradio`, rather than
     /// `menuitemcheckbox`.
@@ -9095,6 +9107,9 @@ pub(crate) struct Accessibility {
     has_popup: Option<crate::semantics::PopupKind>,
     /// Set by `View::context_menu` (`AXShowMenu`).
     pub(crate) context_menu: bool,
+    /// `View::pressed_when`: `checked` is whether it is pressed, a toggle
+    /// button's state (`aria-pressed`), not a checkbox's.
+    toggle: bool,
     value: Option<Box<dyn FnMut() -> String>>,
     numeric: Option<(f64, f64, NumericValue)>,
     live: Option<Live>,
@@ -9142,6 +9157,7 @@ impl Accessibility {
             inner.has_popup = outer.has_popup;
         }
         inner.context_menu |= outer.context_menu;
+        inner.toggle |= outer.toggle;
         if outer.value.is_some() {
             inner.value = outer.value;
         }
@@ -9217,8 +9233,9 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         role,
         level,
         selected,
-        checked,
+        mut checked,
         radio_item,
+        toggle,
         expanded,
         has_popup,
         context_menu,
@@ -9344,6 +9361,14 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             });
         });
     }
+    if let Some(mut pressed) = checked.take_if(|_| toggle) {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let pressed = pressed();
+            tree.borrow_mut()
+                .update(root, |node| node.pressed = Some(pressed));
+        });
+    }
     if let Some(mut checked) = checked {
         let tree = ui.semantics.clone();
         let weak = ui.downgrade();
@@ -9393,6 +9418,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
                 .update(root, |node| node.expanded = Some(expanded));
         });
     }
+
     if let Some((min, max, mut value)) = numeric {
         let tree = ui.semantics.clone();
         ui.bind(root, move || {

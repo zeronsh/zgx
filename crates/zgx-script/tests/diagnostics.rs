@@ -871,11 +871,11 @@ return ui.column { w = 400, h = 300,
     };
     let toggle = sem(&mut h, "toggle").unwrap();
     assert_eq!(toggle.role, zgx::semantics::Role::Button);
-    assert_eq!(toggle.checked, Some(false));
+    assert_eq!(toggle.pressed, Some(false));
     assert!(!sem(&mut h, "deco").is_some_and(|s| s.hidden));
     h.host.set_state("on", V::Bool(true)).unwrap();
     h.frames(3);
-    assert_eq!(sem(&mut h, "toggle").unwrap().checked, Some(true));
+    assert_eq!(sem(&mut h, "toggle").unwrap().pressed, Some(true));
     assert!(sem(&mut h, "deco").is_some_and(|s| s.hidden));
     let inside = node(&mut h, "inside");
     let off = node(&mut h, "off");

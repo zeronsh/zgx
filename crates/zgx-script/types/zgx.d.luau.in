@@ -1306,6 +1306,8 @@ export type Control = {
 	selected: boolean?,
 	checked: boolean?,
 	expanded: boolean?,
+	-- Pressed or not, a toggle button (`aria-pressed`); nil for any other.
+	pressed: boolean?,
 	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
 	haspopup: string?,
 	focused: boolean,
@@ -2452,7 +2454,8 @@ export type NodeProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: boolean?,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Reactive<boolean>?,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.

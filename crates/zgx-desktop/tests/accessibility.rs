@@ -223,6 +223,78 @@ fn disabled_container_marks_native_descendants_disabled() {
     let _consumer = Tree::new(update, true);
 }
 
+/// A button with `pressed_when` (`aria-pressed`) is a toggle button to
+/// assistive technology: a button with its state, which follows.
+#[test]
+fn a_pressed_button_is_a_toggle_button_whose_state_follows() {
+    use accesskit::Toggled;
+    use zgx::compose::prelude::*;
+    let mut ui = Ui::new(500., 200.);
+    let bold = ui.signal(false);
+    let (read, clicked) = (bold.clone(), bold.clone());
+    let mounted = ui.mount(
+        button()
+            .child("Bold")
+            .pressed_when(move || read.get())
+            .on_click(move || {
+                clicked.update(|on| *on = !*on);
+            })
+            .p(12.),
+    );
+    let root = mounted.node();
+    ui.prepare_frame();
+    let mut adapter = AccessibilityTree::new();
+    let initial = adapter.update(
+        &ui.scene.borrow(),
+        &ui.semantics.borrow(),
+        Some(root),
+        "Editor",
+        2.,
+    );
+    let native_id = initial.focus;
+    let native = |nodes: &[(accesskit::NodeId, accesskit::Node)]| {
+        nodes
+            .iter()
+            .find(|(id, _)| *id == native_id)
+            .map(|(_, node)| (node.role(), node.toggled()))
+            .unwrap()
+    };
+    assert_eq!(
+        native(&initial.nodes),
+        (NativeRole::Button, Some(Toggled::False))
+    );
+    let mut consumer = Tree::new(initial, true);
+    let target = adapter.scene_node(native_id).unwrap();
+    ui.input
+        .dispatch_to(&ui.scene, target, InputEvent::Activate);
+    assert!(bold.get());
+    let update = adapter.update(
+        &ui.scene.borrow(),
+        &ui.semantics.borrow(),
+        Some(root),
+        "Editor",
+        2.,
+    );
+    assert_eq!(
+        native(&update.nodes),
+        (NativeRole::Button, Some(Toggled::True))
+    );
+    consumer.update_and_process_changes(update, &mut Changes::default());
+    bold.set(false);
+    let update = adapter.update(
+        &ui.scene.borrow(),
+        &ui.semantics.borrow(),
+        Some(root),
+        "Editor",
+        2.,
+    );
+    assert_eq!(
+        native(&update.nodes),
+        (NativeRole::Button, Some(Toggled::False))
+    );
+    consumer.update_and_process_changes(update, &mut Changes::default());
+}
+
 #[test]
 fn composed_checkbox_exports_live_toggle_state_and_rejects_disabled_activation() {
     use accesskit::Toggled;

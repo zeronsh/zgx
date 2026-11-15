@@ -3481,6 +3481,8 @@ pub(crate) struct A11y {
     /// `role = "menuitemradio"`: one of a group of checkable menu items.
     pub radio_item: bool,
     pub expanded: Option<Source>,
+    /// `pressed`: a toggle button's state (`aria-pressed`).
+    pub pressed: Option<Source>,
     pub live: Option<zgx::semantics::Live>,
     pub description: Option<Rc<str>>,
     /// A `description` given as a state or function.
@@ -3899,6 +3901,11 @@ const LATE_FIELDS: &[&str] = &[
 #[inline(never)]
 fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlua::Result<()> {
     match name {
+        // A toggle button's state (`aria-pressed`): here, past the style
+        // keys, as few elements have one.
+        "pressed" => {
+            node.a11y.get_or_insert_default().pressed = Some(source(lua, Ty::Bool, name, value)?);
+        }
         // A theme scope of its own: what reads `$selection.radius` below it
         // (a selectable region's highlight, an editor's) follows it.
         "selection_radius" => {
@@ -4881,12 +4888,6 @@ fn fill_from(
             "inert" => {
                 node.a11y.get_or_insert_default().inert =
                     Some(source(lua, Ty::Bool, "inert", value)?);
-            }
-            // A toggle button's state (`aria-pressed`): read as `checked` is,
-            // on a button.
-            "pressed" => {
-                node.a11y.get_or_insert_default().checked =
-                    Some(source(lua, Ty::Bool, "pressed", value)?);
             }
             "aria_modal" => {
                 node.a11y.get_or_insert_default().modal = lua.unpack(value)?;

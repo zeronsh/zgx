@@ -4724,6 +4724,12 @@ fn styled(
                 resolve(&expanded, Ty::Bool, None, &vm) == Some(Lit::Bool(true))
             });
         }
+        if let Some(pressed) = &a11y.pressed {
+            let (pressed, vm) = (resolve_owned(pressed), vm.clone());
+            view = view.pressed_when(move || {
+                resolve(&pressed, Ty::Bool, None, &vm) == Some(Lit::Bool(true))
+            });
+        }
         if let Some(live) = a11y.live {
             view = view.live(live);
         }

@@ -1332,6 +1332,8 @@ export type Control = {
 	selected: boolean?,
 	checked: boolean?,
 	expanded: boolean?,
+	-- Pressed or not, a toggle button (`aria-pressed`); nil for any other.
+	pressed: boolean?,
 	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
 	haspopup: string?,
 	focused: boolean,
@@ -2529,7 +2531,8 @@ export type NodeProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: boolean?,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Reactive<boolean>?,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -2992,7 +2995,8 @@ export type Props = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -3715,7 +3719,8 @@ export type ContainerProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -4192,7 +4197,8 @@ export type GlassProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -4678,7 +4684,8 @@ export type ScrollProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -5181,7 +5188,8 @@ export type TextProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -5643,7 +5651,8 @@ export type MarkdownViewProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -6263,7 +6272,8 @@ export type RichProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -6719,7 +6729,8 @@ export type ImageProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -7192,7 +7203,8 @@ export type SvgProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -7776,7 +7788,8 @@ export type Scene3DProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -8255,7 +8268,8 @@ export type CanvasProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -8743,7 +8757,8 @@ export type CheckboxProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -9209,7 +9224,8 @@ export type InputProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -9810,7 +9826,8 @@ export type ProgressProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -10264,7 +10281,8 @@ export type SliderProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -10739,7 +10757,8 @@ export type SegmentedProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -11207,7 +11226,8 @@ export type StepperProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -11676,7 +11696,8 @@ export type DisclosureProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -12156,7 +12177,8 @@ export type AccordionProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -12610,7 +12632,8 @@ export type SectionProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -13089,7 +13112,8 @@ export type SeparatorProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -13551,7 +13575,8 @@ export type TabsProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -14035,7 +14060,8 @@ export type TreeProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -14515,7 +14541,8 @@ export type DataGridProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -14991,7 +15018,8 @@ export type CalendarProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -15460,7 +15488,8 @@ export type DatePickerProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -15927,7 +15956,8 @@ export type TimeFieldProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -16393,7 +16423,8 @@ export type ComboboxProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -16867,7 +16898,8 @@ export type CommandPaletteProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -17329,7 +17361,8 @@ export type SelectProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -17798,7 +17831,8 @@ export type SplitProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -18323,7 +18357,8 @@ export type ListProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -18882,7 +18917,8 @@ export type LayerProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -19358,7 +19394,8 @@ export type ModalProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -19883,7 +19920,8 @@ export type PopoverProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -20396,7 +20434,8 @@ export type MenuItemProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -20861,7 +20900,8 @@ export type SubmenuProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -21346,7 +21386,8 @@ export type WebViewProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -21828,7 +21869,8 @@ export type TerminalProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -22285,7 +22327,8 @@ export type HostViewProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -22742,7 +22785,8 @@ export type SlotProps = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -23250,7 +23294,8 @@ export type EachOptions = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
@@ -23722,7 +23767,8 @@ export type PresenceOptions = {
 	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
 	-- as a live region's text must be. `invisible` leaves the tree.
 	sr_only: Props_sr_only,
-	-- A toggle button's state (`aria-pressed`): read as `checked` is.
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
 	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.

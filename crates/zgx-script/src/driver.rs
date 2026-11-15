@@ -1176,6 +1176,11 @@ pub fn node(
         if s.expanded == Some(true) {
             flags.push("expanded");
         }
+        match s.pressed {
+            Some(true) => flags.push("pressed"),
+            Some(false) => flags.push("not-pressed"),
+            None => {}
+        }
         if !flags.is_empty() {
             out.push(("state".into(), flags.join(" ")));
         }
@@ -1299,6 +1304,8 @@ pub struct Control {
     pub checked: Option<bool>,
     /// Open, if it can be (a menu's trigger, a disclosure).
     pub expanded: Option<bool>,
+    /// Pressed, if it is a toggle button (`aria-pressed`).
+    pub pressed: Option<bool>,
     /// What it opens (`aria-haspopup`): "dialog", "menu", "listbox", "tree" or "grid".
     pub has_popup: Option<&'static str>,
     /// A menu's or list box's scroll view: `(offset, range)`, if it has one.
@@ -1365,6 +1372,7 @@ pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
             selected: s.selected,
             checked: s.checked,
             expanded: s.expanded,
+            pressed: s.pressed,
             has_popup: s.has_popup.map(popup_name),
             scroll: matches!(s.role, Role::Menu | Role::ListBox)
                 .then(|| ui.scroll_within(&scene, node))

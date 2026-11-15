@@ -186,6 +186,36 @@ fn controls_carry_checked_where_they_can_be_checked() {
     }
 }
 
+/// A toggle button's entry says whether it is pressed (`aria-pressed`); any other's says nil.
+#[test]
+fn controls_carry_pressed_where_they_are_toggle_buttons() {
+    let mut h = Harness::inline(
+        r##"
+local listing = ui.state("listing", "")
+local bold = ui.state("bold", true)
+ui.command { id = "scan", run = function()
+    local names = {}
+    for _, c in ui.controls() do
+        table.insert(names, c.role .. ":" .. c.name .. ":" .. tostring(c.pressed))
+    end
+    listing:set(table.concat(names, "|"))
+end }
+return ui.column { gap = 8, w_full = true, h_full = true,
+    ui.text { id = "listing", function() return listing:get() end },
+    ui.button { "Plain" },
+    ui.button { "Bold", pressed = bold },
+    ui.button { "Italic", pressed = false },
+}
+"##,
+    );
+    h.frames(3);
+    run(&mut h, "scan");
+    let listing = h.text("listing");
+    for want in ["button:Plain:nil", "button:Bold:true", "button:Italic:false"] {
+        assert!(listing.contains(want), "{want} in {listing}");
+    }
+}
+
 /// With the app at the back (another Space, behind other apps) a menu wanted open is held, not shown
 /// nor hit: its items are no controls on screen, and pressing one lands nowhere.
 #[test]
