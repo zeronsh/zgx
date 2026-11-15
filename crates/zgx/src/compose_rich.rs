@@ -429,6 +429,8 @@ impl TextSpan {
     }
     /// What assistive technology reads for this run in place of its text
     /// (`aria-label`): a citation badge's "Citation 1, Sleep study.pdf".
+    /// Hidden until the API is settled.
+    #[doc(hidden)]
     pub fn label(mut self, label: impl Into<Arc<str>>) -> Self {
         self.label = Some(label.into());
         self
