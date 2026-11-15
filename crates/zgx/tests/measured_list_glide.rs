@@ -211,3 +211,23 @@ fn a_row_growing_above_the_view_moves_nothing_in_it() {
     assert_eq!(chat.top(LAST), Some(bottom), "the last row where it was");
     assert!(chat.short().abs() < 0.5, "still at the end");
 }
+
+#[test]
+fn screens_from_the_end_it_jumps_to_a_screen_short_then_glides() {
+    let mut chat = Chat::new();
+    // 2,000 points more: five screens.
+    chat.tail.set(2060.);
+    chat.frame();
+    assert!(
+        (chat.short() - 400.).abs() < 1.,
+        "a screen short of the end: {}",
+        chat.short()
+    );
+    chat.run(1500);
+    assert!(
+        chat.short().abs() < 0.5,
+        "then glided there: {}",
+        chat.short()
+    );
+    assert!(chat.at_end());
+}

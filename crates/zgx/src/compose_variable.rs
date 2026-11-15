@@ -26,6 +26,9 @@ pub struct VariableHeights {
 }
 /// When a list following its end glides there (`VariableHeights::glide_end`).
 type GlideWhen = Rc<dyn Fn() -> bool>;
+/// How many screens from its end a list gliding there glides from: farther,
+/// it jumps to a screen short of the end first.
+const GLIDE_FARTHEST: f32 = 2.5;
 impl VariableHeights {
     /// `count` rows, each `estimate` tall until measured. Panics if `estimate`
     /// isn't finite and positive.
@@ -966,7 +969,13 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                                     .and_then(|index| anchored(previous, index))
                                     .unwrap_or(position)
                             };
+                            // (Screens from it, a screen short of it first:
+                            // what's between isn't read, and a glide that
+                            // long would crawl.)
                             position = from.min(limit);
+                            if limit - position > GLIDE_FARTHEST * height {
+                                position = limit - height;
+                            }
                             glide_to = Some((position, limit));
                             gliding = true;
                         } else {
