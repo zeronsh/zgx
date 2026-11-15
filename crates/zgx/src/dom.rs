@@ -1725,11 +1725,11 @@ fn inline(
         link,
         href,
         button,
-        label: span.label,
+        label: extras.link.as_ref().and_then(|link| link.label.clone()),
         action,
         icon,
         fade,
-        menu: extras.menu.map(|menu| {
+        menu: extras.link.and_then(|link| link.menu.clone()).map(|menu| {
             Box::new(move |event: &super::ContextMenuEvent| menu.build(event)) as SpanMenuBuild
         }),
     }

@@ -5221,7 +5221,7 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after, boxed) = match span.extras.take() {
+            let (hover, icon, rare, plain, room_after, boxed) = match span.extras.take() {
                 None => (None, None, None, false, -1., false),
                 Some(extras) => {
                     let extras = *extras;
@@ -5236,7 +5236,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     (
                         extras.hover,
                         extras.icon,
-                        extras.menu,
+                        extras.link,
                         extras.plain,
                         if apart { end } else { -1. },
                         extras.boxed,
@@ -5277,14 +5277,14 @@ fn paragraph_effect<const LOCATING: bool>(
                     href: span.href.clone(),
                 });
             }
-            if link || menu.is_some() {
+            // A link, or a run with a menu or a label of its own.
+            if link || rare.is_some() {
                 links.push(crate::compose_rich::Link {
                     range: start..content.len(),
                     action: span.action,
                     href: span.href,
-                    label: span.label,
                     styled_hover,
-                    menu,
+                    rare,
                 });
             }
             let mut font = base.font_in(Some(&theme));

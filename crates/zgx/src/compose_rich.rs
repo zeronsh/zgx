@@ -57,17 +57,31 @@ pub(crate) struct Link {
     /// Where it goes (`TextSpan::href`): a click opens it, its context menu
     /// opens or copies it.
     pub href: Option<Arc<str>>,
-    /// What assistive technology reads in place of its text (`TextSpan::label`).
-    pub label: Option<Arc<str>>,
     /// It restyles under the pointer, so no hover ring.
     pub styled_hover: bool,
+    /// What few runs have: its own menu, its label. One pointer, as the
+    /// menu alone took: most links have neither.
+    pub rare: Option<Rc<LinkRare>>,
+}
+/// A run's options few have, as its link takes them (`Link::rare`,
+/// `SpanExtras::link`): one pointer, shared from the span to its link.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LinkRare {
     /// Its own context menu, in place of a link's.
     pub menu: Option<SpanMenu>,
+    /// What assistive technology reads in place of its text (`TextSpan::label`).
+    pub label: Option<Arc<str>>,
 }
 impl Link {
     /// A link, not a run with only a menu: focusable, with a ring.
     fn is_link(&self) -> bool {
         self.action.is_some() || self.href.is_some()
+    }
+    fn menu(&self) -> Option<&SpanMenu> {
+        self.rare.as_ref()?.menu.as_ref()
+    }
+    fn label(&self) -> Option<&str> {
+        self.rare.as_ref()?.label.as_deref()
     }
 }
 /// A run of the paragraph, for a menu told which was asked on: where it
@@ -137,7 +151,6 @@ pub(crate) const ICON_PLACEHOLDER: &str = "\u{2060}";
 pub struct TextSpan {
     pub(crate) action: Option<InlineAction>,
     pub(crate) href: Option<Arc<str>>,
-    pub(crate) label: Option<Arc<str>>,
     pub(crate) text: Arc<str>,
     pub(crate) styles: Styles,
     pub(crate) background: Option<Color>,
@@ -156,7 +169,9 @@ pub struct TextSpan {
 pub(crate) struct SpanExtras {
     pub hover: Option<SpanHover>,
     pub icon: Option<SpanIcon>,
-    pub menu: Option<SpanMenu>,
+    /// Its own menu and its label (`TextSpan::context_menu`,
+    /// `TextSpan::label`): what its link takes, as it is.
+    pub link: Option<Rc<LinkRare>>,
     /// Not underlined, though a link (`TextSpan::no_underline`).
     pub plain: bool,
     /// Room after the text, where it isn't `padding`'s across
@@ -216,7 +231,6 @@ pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
     TextSpan {
         action: None,
         href: None,
-        label: None,
         text: text.into(),
         styles: Styles::new(),
         background: None,
@@ -322,7 +336,7 @@ impl TextSpan {
         mut self,
         build: impl FnMut(&crate::compose::ContextMenuEvent) -> Vec<View> + 'static,
     ) -> Self {
-        self.extras.get_or_insert_default().menu = Some(SpanMenu(Rc::new(RefCell::new(build))));
+        self.link_rare().menu = Some(SpanMenu(Rc::new(RefCell::new(build))));
         self
     }
     /// What assistive technology reads for this run in place of its text
@@ -330,8 +344,21 @@ impl TextSpan {
     /// Hidden until the API is settled.
     #[doc(hidden)]
     pub fn label(mut self, label: impl Into<Arc<str>>) -> Self {
-        self.label = Some(label.into());
+        self.link_rare().label = Some(label.into());
         self
+    }
+    /// Its link's rare options, made as the first is set: out of line, so
+    /// a span built with a menu or a label inlines no more than with
+    /// neither.
+    #[cold]
+    #[inline(never)]
+    fn link_rare(&mut self) -> &mut LinkRare {
+        let link = self
+            .extras
+            .get_or_insert_default()
+            .link
+            .get_or_insert_default();
+        Rc::make_mut(link)
     }
     /// A link to `url`: a click (after `on_click`'s, if it has one) opens it
     /// with the system's handler (`Platform::open_url`, a browser for
@@ -534,7 +561,7 @@ impl LinkTarget {
         Self {
             action: link.action.clone(),
             href: link.href.clone(),
-            menu: link.menu.clone(),
+            menu: link.menu().cloned(),
         }
     }
 }
@@ -1033,7 +1060,7 @@ pub(crate) fn mount_links(
             }
             // Its context menu, once it has an `href` to open or copy, or a
             // menu of its own.
-            if !entry.menu && (link.href.is_some() || link.menu.is_some()) {
+            if !entry.menu && (link.href.is_some() || link.menu().is_some()) {
                 entry.menu = true;
                 mount_link_menu(
                     &mut ui,
@@ -1052,15 +1079,14 @@ pub(crate) fn mount_links(
                     } else {
                         Role::Button
                     },
-                    link.label
-                        .as_deref()
+                    link.label()
                         .unwrap_or(&data.rich.text()[link.range.clone()]),
                 );
                 // Named apart from its text (a citation's "1"): read once,
                 // as the control, where it is in the paragraph, as a
                 // browser reads an inline link; its text goes from the
                 // paragraph's.
-                if link.label.is_some() {
+                if link.label().is_some() {
                     semantic.logical_parent = Some(paragraph);
                     semantic.inline_range = Some(link.range.clone());
                 }

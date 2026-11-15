@@ -275,12 +275,12 @@ static NO_RARE: SemanticRare = SemanticRare {
 struct RareFields(Option<Rc<SemanticRare>>);
 impl PartialEq for RareFields {
     fn eq(&self, other: &Self) -> bool {
-        if let (Some(a), Some(b)) = (&self.0, &other.0)
-            && Rc::ptr_eq(a, b)
-        {
-            return true;
+        match (&self.0, &other.0) {
+            // Neither made: most nodes, compared without reading a field.
+            (None, None) => true,
+            (Some(a), Some(b)) if Rc::ptr_eq(a, b) => true,
+            _ => self.0.as_deref().unwrap_or(&NO_RARE) == other.0.as_deref().unwrap_or(&NO_RARE),
         }
-        self.0.as_deref().unwrap_or(&NO_RARE) == other.0.as_deref().unwrap_or(&NO_RARE)
     }
 }
 impl std::ops::Deref for SemanticNode {
