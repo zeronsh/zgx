@@ -300,6 +300,11 @@ jobs:
             84682f4ad5a449d0a3ffbc8332200fe8651aee9dd91dcd8d87197ba6c2450dbc
           ZGX_TUI_PATH="$nvim/nvim-linux-x86_64/bin:$lazygit" \
             cargo test -p zgx-terminal --lib --locked real_programs -- --ignored
+      # The terminal's parser and screen forks, outside the workspace: their
+      # own tests (the random differentials of runs against characters one
+      # at a time, cells cleared and written, extras freed) on every change.
+      - run: cargo test --manifest-path vendor/vte/Cargo.toml --target-dir target --locked
+      - run: cargo test --manifest-path vendor/alacritty-terminal/Cargo.toml --target-dir target --locked
       # The optional effects package: every effect drawn, on each job's backend.
       - run: cargo test -p zgx-fx --locked
       # zgx-dom: views as browser DOM, on wasm32. Its lints (zgx's `dom`
