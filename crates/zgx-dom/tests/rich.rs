@@ -239,7 +239,7 @@ fn hover_styles_icons_and_fades_are_css() {
     assert!(!style(&hover, "text-decoration-line").contains("underline"));
     let class = hover.class_name();
     let sheets = js_sys::eval(&format!(
-        "[...document.styleSheets].flatMap(s => [...s.cssRules]).map(r => r.cssText).filter(t => t.startsWith('.{class}:hover')).join()"
+        "[...document.styleSheets, ...document.adoptedStyleSheets].flatMap(s => [...s.cssRules]).map(r => r.cssText).filter(t => t.startsWith('.{class}:hover')).join()"
     ))
     .unwrap()
     .as_string()
