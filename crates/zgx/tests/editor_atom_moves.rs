@@ -75,7 +75,11 @@ fn one_undo_puts_the_atoms_back_and_redo_moves_them_again() {
     assert!(editor.move_text(2..9, 11));
     assert!(editor.undo());
     assert_eq!(editor.text(), "a @chip b c");
-    assert_eq!(editor.atoms(), [chip.clone()], "as it was, the same atom");
+    assert_eq!(
+        editor.atoms(),
+        std::slice::from_ref(&chip),
+        "as it was, the same atom"
+    );
     assert!(
         editor.take_atom_changes().is_empty(),
         "no chip reported gone"
@@ -107,7 +111,7 @@ fn a_range_through_a_chip_takes_it_whole_and_a_drop_inside_one_leaves_it() {
     let (mut editor, chip) = chip_text();
     assert!(editor.move_text(10..11, 6));
     assert_eq!(editor.text(), "a @chipc b ");
-    assert_eq!(editor.atoms(), [chip.clone()]);
+    assert_eq!(editor.atoms(), std::slice::from_ref(&chip));
     assert!(editor.take_atom_changes().is_empty());
 }
 
