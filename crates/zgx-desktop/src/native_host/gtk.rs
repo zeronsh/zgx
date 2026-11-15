@@ -91,6 +91,8 @@ api! {
     fn g_free(Ptr);
     fn g_strdup(*const c_char) -> *mut c_char;
     fn g_list_free(*mut GList);
+    fn g_list_prepend(*mut GList, Ptr) -> *mut GList;
+    fn g_list_free_full(*mut GList, Option<unsafe extern "C" fn(Ptr)>);
     fn g_type_name_from_instance(Ptr) -> *const c_char;
     fn g_bytes_new(*const c_void, usize) -> Ptr;
     fn g_bytes_get_data(Ptr, *mut usize) -> *const c_void;
@@ -254,6 +256,13 @@ api! {
     fn webkit_web_view_download_uri(Ptr, *const c_char) -> Ptr;
     fn webkit_settings_set_enable_developer_extras(Ptr, gboolean);
     fn webkit_settings_set_user_agent(Ptr, *const c_char);
+    fn webkit_web_view_get_website_data_manager(Ptr) -> Ptr;
+    fn webkit_website_data_manager_fetch(Ptr, c_uint, Ptr, Option<unsafe extern "C" fn(Ptr, Ptr, Ptr)>, Ptr);
+    fn webkit_website_data_manager_fetch_finish(Ptr, Ptr, *mut *mut GError) -> *mut GList;
+    fn webkit_website_data_manager_remove(Ptr, c_uint, *mut GList, Ptr, Option<unsafe extern "C" fn(Ptr, Ptr, Ptr)>, Ptr);
+    fn webkit_website_data_manager_remove_finish(Ptr, Ptr, *mut *mut GError) -> gboolean;
+    fn webkit_website_data_get_name(Ptr) -> *const c_char;
+    fn webkit_website_data_unref(Ptr);
     fn webkit_settings_set_hardware_acceleration_policy(Ptr, c_int);
     fn webkit_web_view_load_uri(Ptr, *const c_char);
     fn webkit_web_view_load_html(Ptr, *const c_char, *const c_char);
@@ -473,6 +482,9 @@ pub const WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER: c_int = 2;
 pub const WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE: c_uint = 1 << 0;
 pub const WEBKIT_FIND_OPTIONS_BACKWARDS: c_uint = 1 << 3;
 pub const WEBKIT_FIND_OPTIONS_WRAP_AROUND: c_uint = 1 << 4;
+/// Every kind of website data (`WEBKIT_WEBSITE_DATA_ALL`: cookies, caches,
+/// storage, IndexedDB, service workers, …).
+pub const WEBKIT_WEBSITE_DATA_ALL: c_uint = (1 << 14) - 1;
 pub const GDK_MOTION_NOTIFY: c_int = 3;
 pub const GDK_BUTTON_PRESS: c_int = 4;
 pub const GDK_BUTTON_RELEASE: c_int = 7;

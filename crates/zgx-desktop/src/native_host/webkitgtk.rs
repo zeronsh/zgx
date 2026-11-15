@@ -1703,6 +1703,26 @@ impl Page {
                 Command::OpenDevtools => {
                     (api.webkit_web_inspector_show)((api.webkit_web_view_get_inspector)(view));
                 }
+                Command::ClearSiteData { host, reply } => {
+                    // The view's profile's manager, kept until it answers.
+                    let manager =
+                        (api.g_object_ref)((api.webkit_web_view_get_website_data_manager)(view));
+                    let clear = Box::new(SiteClear {
+                        page: self.id,
+                        reply,
+                        host,
+                        all: null_mut(),
+                        ours: null_mut(),
+                        count: 0,
+                    });
+                    (api.webkit_website_data_manager_fetch)(
+                        manager,
+                        gtk::WEBKIT_WEBSITE_DATA_ALL,
+                        null_mut(),
+                        Some(site_data_fetched),
+                        Box::into_raw(clear) as Ptr,
+                    );
+                }
                 Command::Find {
                     text,
                     backwards,
@@ -3411,6 +3431,103 @@ unsafe extern "C" fn evaluated(view: Ptr, result: Ptr, data: Ptr) {
         }
     });
 }
+/// A `clear_site_data` under way, on GTK's thread: whose answer it is, the
+/// site, and once fetched, every record (`all`, owned) and the site's
+/// (`ours`, borrowed from it).
+struct SiteClear {
+    page: u64,
+    reply: u64,
+    host: String,
+    all: *mut gtk::GList,
+    ours: *mut gtk::GList,
+    count: usize,
+}
+impl SiteClear {
+    /// Hand `result` to the page's `clear_site_data` caller, on the UI thread.
+    fn answer(&self, result: Result<usize, String>) {
+        let (page, reply) = (self.page, self.reply);
+        deliver(move || {
+            if let Some(page) = ui_page(page)
+                && let Some(done) = page.site_clears.borrow_mut().remove(&reply)
+            {
+                done(result);
+            }
+        });
+    }
+}
+/// What `finish` left in `error`, freed; `None` without one.
+unsafe fn take_error(api: &Api, error: *mut gtk::GError) -> Option<String> {
+    (!error.is_null()).then(|| {
+        // SAFETY: a GError WebKit set, read and freed once.
+        unsafe {
+            let message = string((*error).message);
+            (api.g_error_free)(error);
+            message
+        }
+    })
+}
+unsafe extern "C" fn site_data_fetched(manager: Ptr, result: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the box `Command::ClearSiteData` made, taken once; the result
+    // finished as WebKit's call requires; the list WebKit gives is ours
+    // (each record referenced), walked before it is freed.
+    unsafe {
+        let mut clear = Box::from_raw(data as *mut SiteClear);
+        let mut error = null_mut();
+        let all = (api.webkit_website_data_manager_fetch_finish)(manager, result, &mut error);
+        if let Some(message) = take_error(api, error) {
+            clear.answer(Err(message));
+            (api.g_object_unref)(manager);
+            return;
+        }
+        // WebKit names each record by its site's registrable domain: the
+        // host or one it is under.
+        let mut node = all;
+        while !node.is_null() {
+            let record = (*node).data;
+            let name = string((api.webkit_website_data_get_name)(record));
+            if zgx::web_view::site_matches(&clear.host, &name) {
+                clear.ours = (api.g_list_prepend)(clear.ours, record);
+                clear.count += 1;
+            }
+            node = (*node).next;
+        }
+        clear.all = all;
+        if clear.count == 0 {
+            clear.answer(Ok(0));
+            (api.g_list_free_full)(all, Some(api.webkit_website_data_unref));
+            (api.g_object_unref)(manager);
+            return;
+        }
+        let ours = clear.ours;
+        (api.webkit_website_data_manager_remove)(
+            manager,
+            gtk::WEBKIT_WEBSITE_DATA_ALL,
+            ours,
+            null_mut(),
+            Some(site_data_removed),
+            Box::into_raw(clear) as Ptr,
+        );
+    }
+}
+unsafe extern "C" fn site_data_removed(manager: Ptr, result: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the box `site_data_fetched` passed on, taken once; its lists
+    // freed once the removal finished, the records with the list that
+    // owns them; the manager's reference let go.
+    unsafe {
+        let clear = Box::from_raw(data as *mut SiteClear);
+        let mut error = null_mut();
+        (api.webkit_website_data_manager_remove_finish)(manager, result, &mut error);
+        match take_error(api, error) {
+            Some(message) => clear.answer(Err(message)),
+            None => clear.answer(Ok(clear.count)),
+        }
+        (api.g_list_free)(clear.ours);
+        (api.g_list_free_full)(clear.all, Some(api.webkit_website_data_unref));
+        (api.g_object_unref)(manager);
+    }
+}
 unsafe extern "C" fn serve_scheme(request: Ptr, _: Ptr) {
     let api = gtk::api().expect("GTK runs");
     GTK.with(|gtk| {
@@ -3801,6 +3918,12 @@ enum Command {
     Window(u64),
     /// `WebView::print`: GTK's print dialog for the page.
     Print,
+    /// `WebView::clear_site_data`: the records of `host`'s site, answered
+    /// under `reply` (`UiPage::site_clears`).
+    ClearSiteData {
+        host: String,
+        reply: u64,
+    },
     /// `WebView::find`, answered under `reply` (`UiPage::finds`).
     Find {
         text: String,
@@ -3919,6 +4042,7 @@ fn ui_page(id: u64) -> Option<Rc<UiPage>> {
 type Reply = Box<dyn FnOnce(ScriptResult)>;
 /// What gets a find's answer.
 type FindReply = Box<dyn FnOnce(FindResult)>;
+type SiteClearReply = Box<dyn FnOnce(Result<usize, String>)>;
 /// A page, on the UI thread: what its controller, box and painter share.
 struct UiPage {
     id: u64,
@@ -3928,6 +4052,8 @@ struct UiPage {
     replies: RefCell<HashMap<u64, Reply>>,
     /// What gets each find's answer, under the same ids as `replies`.
     finds: RefCell<HashMap<u64, FindReply>>,
+    /// What gets each `clear_site_data`'s answer, under the same ids.
+    site_clears: RefCell<HashMap<u64, SiteClearReply>>,
     next_reply: Cell<u64>,
     /// The box showing it, and its scene.
     node: Cell<Option<NodeId>>,
@@ -4383,6 +4509,16 @@ impl WebViewBackend for GtkWebView {
     fn clear_find(&self) {
         self.0.send(Command::ClearFind);
     }
+    fn clear_site_data(&self, url: &str, done: Box<dyn FnOnce(Result<usize, String>)>) {
+        let Some(host) = zgx::web_view::site_host(url) else {
+            return done(Err(format!("{url} has no site")));
+        };
+        let page = &self.0;
+        let id = page.next_reply.get() + 1;
+        page.next_reply.set(id);
+        page.site_clears.borrow_mut().insert(id, done);
+        page.send(Command::ClearSiteData { host, reply: id });
+    }
 }
 impl Drop for GtkWebView {
     fn drop(&mut self) {
@@ -4436,6 +4572,7 @@ fn backend(
         schemes: schemes.clone(),
         replies: RefCell::new(HashMap::new()),
         finds: RefCell::new(HashMap::new()),
+        site_clears: RefCell::new(HashMap::new()),
         next_reply: Cell::new(0),
         node: Cell::new(None),
         scene: RefCell::new(Weak::new()),
