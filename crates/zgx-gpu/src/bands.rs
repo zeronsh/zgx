@@ -211,14 +211,18 @@ impl GpuRenderer {
             return (items, Vec::new());
         };
         // Most frames with a fade have none to draw as one (rows apart):
-        // they go as they came, nothing moved or made.
-        if !self.needs_bands(scene, &items, damage, viewport) {
+        // they go as they came, nothing moved or made. The first run that
+        // does keeps its strips, not worked out again below.
+        let Some((first, found_first)) = self.first_band(scene, &items, reach, target) else {
             return (items, Vec::new());
-        }
+        };
+        let mut found_first = Some(found_first);
+        let total = items.len();
         let mut out: Vec<PaintItem<'a>> = Vec::with_capacity(items.len() + 4);
         let mut phases = Vec::new();
         let mut items = items.into_iter();
         while let Some(item) = items.next() {
+            let start = total - items.len() - 1;
             let Some(mask) = item.mask() else {
                 out.push(item);
                 continue;
@@ -231,7 +235,12 @@ impl GpuRenderer {
             let mut run = Vec::with_capacity(len + 1);
             run.push(item);
             run.extend(items.by_ref().take(len));
-            let found = self.band_strips(scene, &run, mask, reach, target);
+            // Runs before the first were found to need none.
+            let found = match start.cmp(&first) {
+                std::cmp::Ordering::Less => None,
+                std::cmp::Ordering::Equal => found_first.take(),
+                std::cmp::Ordering::Greater => self.band_strips(scene, &run, mask, reach, target),
+            };
             // Ids to key its textures: items of it that no layer, cached or
             // not, has (nor another band). Only for a run with bands to
             // draw, made once at the run's length.
@@ -331,6 +340,18 @@ impl GpuRenderer {
         else {
             return false;
         };
+        self.first_band(scene, items, reach, target).is_some()
+    }
+    /// The first run of `items` under one mask whose bands need drawing as
+    /// one, and its strips (`band_strips`), reaching `reach` in `target`:
+    /// where it starts in `items`. `None` where no run does.
+    fn first_band(
+        &self,
+        scene: &Scene,
+        items: &[PaintItem<'_>],
+        reach: Pixels,
+        target: Pixels,
+    ) -> Option<(usize, BandStrips)> {
         let mut at = 0;
         while at < items.len() {
             let Some(mask) = items[at].mask() else {
@@ -341,15 +362,12 @@ impl GpuRenderer {
                 .iter()
                 .position(|item| item.mask() != Some(mask))
                 .map_or(items.len(), |n| at + n);
-            if self
-                .band_strips(scene, &items[at..end], mask, reach, target)
-                .is_some()
-            {
-                return true;
+            if let Some(found) = self.band_strips(scene, &items[at..end], mask, reach, target) {
+                return Some((at, found));
             }
             at = end;
         }
-        false
+        None
     }
     /// Where `mask` shows (device pixels, in `target`) and where it is 1;
     /// `None` where it shows nowhere in `target`.
