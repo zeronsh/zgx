@@ -2540,7 +2540,7 @@ export type NodeProps = {
 	-- and HTML and, for each text node it spans in order, the id of the
 	-- element it is in (`false` for none); returns `{ text, html }`, or nil
 	-- for the selection's own.
-	on_copy: ((request: SelectionCopy) -> ClipboardContent?)?,
+	on_copy: ((request: SelectionCopy) -> ...ClipboardContent?)?,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: ((files: { File }, e: PointerEvent) -> ...unknown)?,
@@ -3286,7 +3286,7 @@ export type Props_on_release = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_aux_click = (((e: AuxClickEvent) -> ...unknown) | Action)?
 export type Props_on_double_click = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_navigate = (((e: NavigateEvent) -> ...unknown) | Action)?
-export type Props_on_copy = ((request: SelectionCopy) -> ClipboardContent?)?
+export type Props_on_copy = ((request: SelectionCopy) -> ...ClipboardContent?)?
 export type Props_on_file_drop = ((files: { File }, e: PointerEvent) -> ...unknown)?
 export type Props_on_file_hover = ((over: boolean) -> ...unknown)?
 export type Props_on_hover = (((inside: boolean) -> ...unknown) | Action)?
