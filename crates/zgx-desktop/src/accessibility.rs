@@ -179,6 +179,9 @@ struct Walk {
     /// Those nodes and the root.
     visible: HashSet<NodeId>,
     children: HashMap<NodeId, Vec<AccessibleId>>,
+    /// The controls inline in a paragraph's text (`SemanticNode::inline_range`),
+    /// by paragraph: most trees have none.
+    inline: HashMap<NodeId, Vec<(NodeId, AccessibleId)>>,
     list_items: HashMap<NodeId, (usize, usize)>,
     /// Nodes painted at no opacity: shown again, the tree has more in it.
     faded_out: HashSet<NodeId>,
@@ -697,6 +700,7 @@ impl AccessibilityTree {
             None => self.walk_scene(scene, semantics, scale),
         };
         let (visible, children, list_items) = (&walk.visible, &walk.children, &walk.list_items);
+        let inline = &walk.inline;
         // Fields saying what is wrong with them, and the text that shows it
         // (most trees have none: no node is looked up for one).
         let any_errors = semantics.has_errors();
@@ -738,6 +742,20 @@ impl AccessibilityTree {
             let revision = semantics
                 .node_revision(id)
                 .expect("projected semantic node");
+            // The controls inline in its text, where each stands in it:
+            // none but in a paragraph with a citation or the like.
+            let cuts: Vec<(std::ops::Range<usize>, AccessibleId)> = match inline.get(&id) {
+                None => Vec::new(),
+                Some(controls) => {
+                    let mut cuts: Vec<_> = (controls.iter())
+                        .filter_map(|(node, control)| {
+                            Some((semantics.get(*node)?.inline_range.clone()?, *control))
+                        })
+                        .collect();
+                    cuts.sort_by_key(|(range, _)| range.start);
+                    cuts
+                }
+            };
             // Names alone: a node as sent keeps what was sent, before its
             // geometry or text is looked at (moved, it goes with the next
             // full update, as geometry does for any client).
@@ -747,11 +765,19 @@ impl AccessibilityTree {
                 && self.cache.get(&native).is_some_and(|cached| {
                     let runs = self.text_runs.get(&id).map_or(&[][..], Vec::as_slice);
                     cached.is_disabled() == disabled
-                        && cached.children().iter().eq(children
-                            .get(&id)
-                            .into_iter()
-                            .flatten()
-                            .chain(runs))
+                        && if cuts.is_empty() {
+                            cached.children().iter().eq(children
+                                .get(&id)
+                                .into_iter()
+                                .flatten()
+                                .chain(runs))
+                        } else {
+                            {
+                                let kids = children.get(&id).map_or(&[][..], Vec::as_slice);
+                                cached.children()
+                                    == in_reading_order(kids, runs, &cuts, &self.text_positions)
+                            }
+                        }
                 })
             {
                 continue;
@@ -812,7 +838,12 @@ impl AccessibilityTree {
                         && cached.position_in_set()
                             == semantic.position_in_set.or(counted.map(|c| c.0))
                         && cached.size_of_set() == semantic.size_of_set.or(counted.map(|c| c.1))
-                        && cached.children().iter().eq(kids.iter().chain(runs))
+                        && if cuts.is_empty() {
+                            cached.children().iter().eq(kids.iter().chain(runs))
+                        } else {
+                            cached.children()
+                                == in_reading_order(kids, runs, &cuts, &self.text_positions)
+                        }
                 })
                 && runs.iter().all(|run| {
                     self.cache.contains_key(run) && self.text_positions.contains_key(run)
@@ -859,6 +890,12 @@ impl AccessibilityTree {
                     None => n.set_label(semantic.label.clone()),
                 }
                 value
+            };
+            // What it reads as: without the text of the controls inline in
+            // it, which read as themselves where they stand.
+            let read_value: Option<std::borrow::Cow<str>> = match text_value {
+                Some(value) if !cuts.is_empty() => Some(without_inline(value, &cuts).into()),
+                value => value.map(Into::into),
             };
             if let Some(active) = semantic.active_descendant.filter(|a| visible.contains(a)) {
                 n.set_active_descendant(self.id(active));
@@ -929,7 +966,7 @@ impl AccessibilityTree {
             // to the platform (its level, on macOS), or the document would
             // read it twice.
             let heading = semantic.role == Role::Heading;
-            if let Some(v) = text_value.filter(|_| !heading) {
+            if let Some(v) = read_value.as_deref().filter(|_| !heading) {
                 n.set_value(v);
             }
             if let Some(placeholder) = &semantic.placeholder {
@@ -1134,7 +1171,7 @@ impl AccessibilityTree {
                     .and_then(|native| self.cache.get(native))
                     .is_some_and(|cached| {
                         cached.role() == semantic_role(semantic)
-                            && cached.value() == text_value.filter(|_| !heading)
+                            && cached.value() == read_value.as_deref().filter(|_| !heading)
                     })
                     && self.blocks.contains(&id) == block
                     && self.text_runs.get(&id).is_none_or(|ids| {
@@ -1208,7 +1245,7 @@ impl AccessibilityTree {
                     let value = text_value.unwrap_or("");
                     let lines = shown_box.map(|rect| vec![estimated_line(value, rect)]);
                     if let Some(runs) = text_run_data_on(value, block, lines.as_deref(), scale) {
-                        self.push_runs(id, runs, &mut nodes);
+                        self.push_runs(id, cut_runs(runs, &cuts), &mut nodes);
                     }
                 } else if let Some((dx, dy, now)) = shifted {
                     self.run_boxes.insert(id, now);
@@ -1249,7 +1286,7 @@ impl AccessibilityTree {
                     if let Some(runs) =
                         text_run_data_on(text_value.unwrap_or(""), block, lines.as_deref(), scale)
                     {
-                        self.push_runs(id, runs, &mut nodes);
+                        self.push_runs(id, cut_runs(runs, &cuts), &mut nodes);
                     } else {
                         self.text_runs.remove(&id);
                     }
@@ -1266,7 +1303,11 @@ impl AccessibilityTree {
                     if !text {
                         n.add_action(Action::SetTextSelection);
                     }
-                    native_children.extend(ids.iter().copied());
+                    if cuts.is_empty() {
+                        native_children.extend(ids.iter().copied());
+                    } else {
+                        native_children = in_reading_order(kids, ids, &cuts, &self.text_positions);
+                    }
                 }
             } else {
                 self.text_runs.remove(&id);
@@ -1445,12 +1486,17 @@ impl AccessibilityTree {
                 parents.insert(*id, parent);
             }
         }
-        for (id, _) in &ordered {
+        let mut inline: HashMap<NodeId, Vec<(NodeId, AccessibleId)>> = HashMap::default();
+        for (id, semantic) in &ordered {
             if *id == scene.root() {
                 continue;
             }
             let child = self.id(*id);
-            children.entry(parents[id]).or_default().push(child);
+            let parent = parents[id];
+            children.entry(parent).or_default().push(child);
+            if semantic.inline_range.is_some() && semantic.logical_parent == Some(parent) {
+                inline.entry(parent).or_default().push((*id, child));
+            }
         }
         // Where each list's items are in it ("3 of 5", as a browser's
         // `<li>` reads), for items the app doesn't say it of: only a tree
@@ -1490,6 +1536,7 @@ impl AccessibilityTree {
                 nodes,
                 visible,
                 children,
+                inline,
                 list_items,
                 faded_out,
                 scale,
@@ -1546,6 +1593,108 @@ fn run_position(
             after.saturating_sub(1)
         },
     }
+}
+/// What a paragraph reads as, without the text of the controls inline in it
+/// (`cuts`, in order): each is read as itself, where it is.
+fn without_inline(value: &str, cuts: &[(std::ops::Range<usize>, AccessibleId)]) -> String {
+    let mut read = String::with_capacity(value.len());
+    let mut from = 0;
+    for (range, _) in cuts {
+        let start = range.start.clamp(from, value.len());
+        read.push_str(value.get(from..start).unwrap_or(""));
+        from = range.end.clamp(start, value.len());
+    }
+    read.push_str(value.get(from..).unwrap_or(""));
+    read
+}
+/// `runs` without the characters of the controls inline in their text
+/// (`cuts`): a run is split where one stands, its places kept, so the
+/// control's node goes between the halves (`in_reading_order`).
+fn cut_runs(
+    runs: Vec<TextRunData>,
+    cuts: &[(std::ops::Range<usize>, AccessibleId)],
+) -> Vec<TextRunData> {
+    if cuts.is_empty() {
+        return runs;
+    }
+    let cut = |offset: usize| cuts.iter().any(|(range, _)| range.contains(&offset));
+    let mut out = Vec::with_capacity(runs.len() + cuts.len());
+    for run in runs {
+        let count = run.lengths.len();
+        if !(0..count).any(|i| cut(run.offsets[i])) {
+            out.push(run);
+            continue;
+        }
+        // Each stretch of characters kept, as a run of its own.
+        let mut i = 0;
+        while i < count {
+            if cut(run.offsets[i]) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < count && !cut(run.offsets[i]) {
+                i += 1;
+            }
+            let (from, to) = (
+                run.offsets[start] - run.offsets[0],
+                run.offsets[i] - run.offsets[0],
+            );
+            let geometry = run.geometry.as_ref().map(|g| {
+                let (first, last) = (g.positions[start], g.positions[i - 1] + g.widths[i - 1]);
+                let (x0, x1) = if g.rtl {
+                    (g.bounds.x1 - last as f64, g.bounds.x1 - first as f64)
+                } else {
+                    (g.bounds.x0 + first as f64, g.bounds.x0 + last as f64)
+                };
+                RunGeometry {
+                    bounds: accesskit::Rect::new(x0, g.bounds.y0, x1, g.bounds.y1),
+                    positions: g.positions[start..i].iter().map(|p| p - first).collect(),
+                    widths: g.widths[start..i].to_vec(),
+                    rtl: g.rtl,
+                }
+            });
+            out.push(TextRunData {
+                value: run.value[from..to].to_owned(),
+                lengths: run.lengths[start..i].to_vec(),
+                offsets: run.offsets[start..=i].to_vec(),
+                words: (run.words.iter())
+                    .filter(|w| (start..i).contains(&(**w as usize)))
+                    .map(|w| w - start as u8)
+                    .collect(),
+                geometry,
+                wraps: run.wraps && i == count,
+            });
+        }
+    }
+    out
+}
+/// A text node's children as a reader goes through them: `kids`, then its
+/// `runs` with each control inline in its text (`cuts`) before the first
+/// run past where it stands.
+fn in_reading_order(
+    kids: &[AccessibleId],
+    runs: &[AccessibleId],
+    cuts: &[(std::ops::Range<usize>, AccessibleId)],
+    positions: &HashMap<AccessibleId, (NodeId, Vec<usize>)>,
+) -> Vec<AccessibleId> {
+    let mut out: Vec<AccessibleId> = (kids.iter().copied())
+        .filter(|kid| !cuts.iter().any(|(_, control)| control == kid))
+        .collect();
+    let mut cuts = cuts.iter().peekable();
+    for run in runs {
+        let at = positions
+            .get(run)
+            .and_then(|(_, offsets)| offsets.first().copied());
+        while let Some((_, control)) =
+            cuts.next_if(|(range, _)| at.is_some_and(|at| range.start <= at))
+        {
+            out.push(*control);
+        }
+        out.push(*run);
+    }
+    out.extend(cuts.map(|(_, control)| *control));
+    out
 }
 /// `value`'s runs; a `block`'s end with a line break (zero-width in
 /// `value`, at its end) unless its text already does.
