@@ -10436,6 +10436,12 @@ impl GpuRenderer {
                         // once no node shows them (a new source prunes).
                         let transform = image.paint_transform(bounds);
                         let transformed = image.transform() != zgx::affine::Affine::IDENTITY;
+                        // On whole device pixels where nothing transforms it,
+                        // as text's origin is (`snap_origin`).
+                        let fade = match transformed {
+                            true => fade,
+                            false => snap_origin(fade, self.scale),
+                        };
                         // Icon-sized rasters live in the glyph atlas and batch with
                         // text; larger ones keep a texture of their own.
                         let uv = if image.width() <= ATLAS_IMAGE_MAX
@@ -10594,6 +10600,12 @@ impl GpuRenderer {
                             let (opacity, edge) = (item.effects.opacity, item.effects.edge_fade);
                             push_image_slices(&mut quads, image, slice, fade, (opacity, edge));
                         } else {
+                            // On whole device pixels where nothing transforms
+                            // it, as text's origin is (`snap_origin`).
+                            let fade = match transformed {
+                                true => fade,
+                                false => snap_origin(fade, self.scale),
+                            };
                             // Images have no procedural border/shape. Reuse those
                             // attribute lanes rather than growing every glyph instance.
                             quads.push(Quad {
@@ -20306,6 +20318,16 @@ fn blit_group(
     })
 }
 /// `r` grown to whole physical pixels, as `scissor` rounds it.
+/// `rect` (x, y, width, height) moved so its origin lies on a whole device
+/// pixel, its size kept: as a text node's origin is where its glyphs are
+/// drawn, so an image or SVG beside text rounds as it does and the
+/// two move together, a half pixel going down as Blink's
+/// `ToPixelSnappedRect` takes it (an icon on a line whose top is a quarter
+/// point off at 2x is drawn whole, not straddling two rows).
+fn snap_origin(rect: [f32; 4], scale: f32) -> [f32; 4] {
+    let snap = |value: f32| (value * scale).round() / scale;
+    [snap(rect[0]), snap(rect[1]), rect[2], rect[3]]
+}
 fn snap_out(r: Rect, scale: f32) -> Rect {
     let x = (r.x * scale).floor() / scale;
     let y = (r.y * scale).floor() / scale;
