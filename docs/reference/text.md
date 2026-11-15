@@ -214,6 +214,28 @@ return ui.column {
 
 Text is not selectable unless asked, as in native apps. `selectable = true` on any node makes the text in it and everything it holds selectable as a web page's is: one selection runs across its texts, paragraphs, list rows and spans in document order. Drag to select; a double press selects a word and a triple press a paragraph, and dragging after either extends by words or paragraphs; Shift extends; ⌘A / Ctrl+A selects it all and ⌘C / Ctrl+C copies plain text (a tab between texts side by side, a blank line between blocks set apart). A secondary press on selected text offers Copy and Select All. Links and buttons inside still click; a drag that starts on one selects. Holding a drag past a scroll viewport's edge scrolls it, and a selection in `ui.list`'s rows outlives the rows it recycles. `selectable = false` keeps a part out (a toolbar, a timestamp). `ui.markdown_view` is selectable already; drawing `ui.markdown`'s blocks yourself, put `selectable = true` on the node you draw them in, as above. [crates/zgx-script/examples/selectable](../../crates/zgx-script/examples/selectable/app.luau) draws a whole document (`cargo run -p zgx-script --example selectable`). The highlight follows CSS's `::selection`. `selection_color` and `selected_text_color` on the selectable node set its background and the selected glyphs' colour (a colour, a `"$token"`, a state or a function). The tokens `$selection`, `$selection.inactive` (window at the back), `$selection.text` and `$selection.text.inactive` (transparent, the default, keeps the glyphs' colours) and `$selection.radius` style it per subtree through `theme`: `ui.column { selectable = true, theme = { ["selection.text"] = "#ffffff", ["selection.radius"] = 3 }, … }`. Prose the examples ship (the agent trace, the streaming transcript, the notes preview) is selectable, as a browser's would be; controls and chrome are not.
 
+`on_copy` on the selectable node says what a copy out of it puts on the clipboard, for ⌘C / Ctrl+C, the Edit menu and the selection's Copy alike: a quote copied with its source, say. It hears `{ text, html, leaves }`, the selection's plain text and HTML as they would go on the clipboard and, for each text node the selection spans in order, the id of the element it is in inside the region (`false` for none), and returns `{ text, html }` (a missing `text` keeps the selection's), or nil to copy as usual. A region without one is never asked and costs nothing. A leaf is known by an element's `id` only, not by a `ui.list` row's `key`: give the text in a row an `id` to know it.
+
+```lua
+local sources: { [string]: string } = { q1 = "Darwin, On the Origin of Species" }
+
+return ui.column {
+	selectable = true,
+	on_copy = function(request)
+		local first = request.leaves[1]
+		local source = if first then sources[first] else nil
+		if not source then
+			return nil
+		end
+		return {
+			text = `{request.text} ({source})`,
+			html = `<blockquote>{request.html}</blockquote><cite>{source}</cite>`,
+		}
+	end,
+	ui.text { "Endless forms most beautiful.", id = "q1" },
+}
+```
+
 On macOS a selection, or an input's, also answers the system's text services: the context menu offers Look Up “…” (⌃⌘D looks up without it), the Services menu takes it as plain text, and a service returning text replaces an editable selection. Selected text drags into inputs, where it moves (Option copies), and into other apps as plain text; a password's never leaves its field ([Rust: dragging text](../drag-drop.md#dragging-text)).
 
 ## Localized messages
