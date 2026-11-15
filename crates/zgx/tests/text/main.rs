@@ -14,6 +14,8 @@ mod inspect;
 mod links;
 #[path = "../selectable_text.rs"]
 mod selectable_text;
+#[path = "../selection_copy_hook.rs"]
+mod selection_copy_hook;
 #[path = "../system_preferences.rs"]
 mod system_preferences;
 #[path = "../text_balance.rs"]

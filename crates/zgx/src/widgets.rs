@@ -1514,6 +1514,24 @@ pub struct ClipboardContent {
 /// What `View::on_copy` gives an editor: what goes on the clipboard for a
 /// copy or a cut, or none for the selection's plain text.
 pub(crate) type CopyHook = Rc<dyn Fn(&CopyRequest) -> Option<ClipboardContent>>;
+/// A copy out of a selectable region (`View::selectable`), as its
+/// `View::on_selection_copy` hears it: the selection's text and HTML, as
+/// they would go on the clipboard, and the text nodes it spans, in order.
+/// (Pin line.)
+#[doc(hidden)]
+pub struct SelectionCopyRequest<'a> {
+    pub text: &'a str,
+    pub html: &'a str,
+    pub leaves: &'a [NodeId],
+    /// The region's node: the one `on_selection_copy` was given to.
+    pub region: NodeId,
+    /// The UI it is copied from, nothing of it borrowed: to read what the
+    /// leaves are in.
+    pub ui: &'a Ui,
+}
+/// What `View::on_selection_copy` gives a region: what goes on the
+/// clipboard, or none for the selection's own text and HTML.
+pub(crate) type SelectionCopyHook = Rc<dyn Fn(&SelectionCopyRequest) -> Option<ClipboardContent>>;
 /// `text` on `platform`'s clipboard, with `html` beside it where given.
 pub(crate) fn write_clipboard(
     platform: &crate::platform::PlatformService,
@@ -4030,7 +4048,10 @@ impl Ui {
             if k != "c" || !self.has_text_selection() {
                 return false;
             }
-            platform.set_clipboard_rich_text(self.selected_text(), self.selected_html());
+            self.copy_selection_from(|text, html| match html {
+                Some(html) => platform.set_clipboard_rich_text(text, html),
+                None => platform.set_clipboard_text(text),
+            });
             return true;
         };
         match k.as_str() {

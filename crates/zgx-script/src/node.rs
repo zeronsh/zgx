@@ -1008,6 +1008,10 @@ pub(crate) struct RareEvents {
     /// outside the window (Finder, Explorer, a file manager), each a
     /// `File`; the innermost node with one takes them.
     pub file_drop: Option<Handler>,
+    /// `fn({ text, html, leaves })` on a selectable region: what a copy out
+    /// of it puts on the clipboard, `{ text, html }`, or nil for the
+    /// selection's own (`View::on_selection_copy`).
+    pub copy: Option<Function>,
     /// `fn(over)`: files dragged from outside the window come over it
     /// (`true`), then leave it, are dropped or the drag ends (`false`).
     pub file_hover: Option<Handler>,
@@ -4098,6 +4102,14 @@ fn set_handler(
                 "on_drag_leave" => &mut events.drag_leave,
                 _ => &mut events.drag_spring,
             } = Some(f);
+            return Ok(None);
+        }
+        // A region's copy hook: no input handler, so no listener.
+        "on_copy" => {
+            let mlua::Value::Function(f) = value else {
+                return Err(mlua::Error::runtime("on_copy takes a function"));
+            };
+            events.rare.get_or_insert_default().copy = Some(f);
             return Ok(None);
         }
         _ => return Ok(Some(value)),

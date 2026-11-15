@@ -1883,6 +1883,17 @@ export type PinchEvent = {
 -- A step back or forward the platform's gesture for it takes: a trackpad's
 -- swipe between pages (macOS).
 export type NavigateEvent = { direction: "back" | "forward" }
+-- A copy out of a selectable region, as its `on_copy` hears it.
+export type SelectionCopy = {
+	text: string,
+	html: string,
+	leaves: { string | false },
+}
+-- What goes on the clipboard: text, and HTML beside it where given.
+export type ClipboardContent = {
+	text: string?,
+	html: string?,
+}
 -- What a drag carries to other apps (`drag_export`): text, a link, files
 -- (absolute paths).
 export type DragExport = { text: string?, url: string?, files: { string }? }
@@ -2538,6 +2549,12 @@ export type NodeProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: (((e: NavigateEvent) -> ...unknown) | Action)?,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: ((request: SelectionCopy) -> ClipboardContent?)?,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: ((files: { File }, e: PointerEvent) -> ...unknown)?,
@@ -2972,6 +2989,12 @@ export type Props = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -3277,6 +3300,7 @@ export type Props_on_release = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_aux_click = (((e: AuxClickEvent) -> ...unknown) | Action)?
 export type Props_on_double_click = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_navigate = (((e: NavigateEvent) -> ...unknown) | Action)?
+export type Props_on_copy = ((request: SelectionCopy) -> ClipboardContent?)?
 export type Props_on_file_drop = ((files: { File }, e: PointerEvent) -> ...unknown)?
 export type Props_on_file_hover = ((over: boolean) -> ...unknown)?
 export type Props_on_hover = (((inside: boolean) -> ...unknown) | Action)?
@@ -3656,6 +3680,12 @@ export type ContainerProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -4104,6 +4134,12 @@ export type GlassProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -4561,6 +4597,12 @@ export type ScrollProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -5035,6 +5077,12 @@ export type TextProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -5468,6 +5516,12 @@ export type MarkdownViewProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -5991,6 +6045,12 @@ export type RichProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -6418,6 +6478,12 @@ export type ImageProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -6862,6 +6928,12 @@ export type SvgProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -7417,6 +7489,12 @@ export type Scene3DProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -7867,6 +7945,12 @@ export type CanvasProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -8326,6 +8410,12 @@ export type CheckboxProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -8763,6 +8853,12 @@ export type InputProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -9301,6 +9397,12 @@ export type ProgressProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -9726,6 +9828,12 @@ export type SliderProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -10172,6 +10280,12 @@ export type SegmentedProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -10611,6 +10725,12 @@ export type StepperProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -11051,6 +11171,12 @@ export type DisclosureProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -11502,6 +11628,12 @@ export type AccordionProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -11927,6 +12059,12 @@ export type SectionProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -12377,6 +12515,12 @@ export type SeparatorProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -12810,6 +12954,12 @@ export type TabsProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -13265,6 +13415,12 @@ export type TreeProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -13716,6 +13872,12 @@ export type DataGridProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -14163,6 +14325,12 @@ export type CalendarProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -14603,6 +14771,12 @@ export type DatePickerProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -15041,6 +15215,12 @@ export type TimeFieldProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -15478,6 +15658,12 @@ export type ComboboxProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -15923,6 +16109,12 @@ export type CommandPaletteProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -16356,6 +16548,12 @@ export type SelectProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -16796,6 +16994,12 @@ export type SplitProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -17292,6 +17496,12 @@ export type ListProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -17819,6 +18029,12 @@ export type LayerProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -18266,6 +18482,12 @@ export type ModalProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -18731,6 +18953,12 @@ export type PopoverProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -19202,6 +19430,12 @@ export type MenuItemProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -19638,6 +19872,12 @@ export type SubmenuProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -20088,6 +20328,12 @@ export type WebViewProps = {
 	on_aux_click: Props_on_aux_click,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: Props_on_double_click,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -20544,6 +20790,12 @@ export type TerminalProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -20972,6 +21224,12 @@ export type SlotProps = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -21451,6 +21709,12 @@ export type EachOptions = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
@@ -21894,6 +22158,12 @@ export type PresenceOptions = {
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
 	-- between pages, where nothing under the fingers scrolls that way).
 	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
 	-- innermost node with one takes them.
 	on_file_drop: Props_on_file_drop,
