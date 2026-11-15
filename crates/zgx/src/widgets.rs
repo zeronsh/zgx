@@ -6802,7 +6802,9 @@ impl Ui {
                         }
                         let top = lines.top(i) + inset.above - scroll.1;
                         // To the bottom of its row: a cell's border is as tall as the tallest cell beside it.
-                        let tall = (lines.row_height(i) - inset.above).max(0.);
+                        let row_top = lines.top(lines.row_of(i).start);
+                        let tall =
+                            (row_top + lines.row_height(i) - lines.top(i) - inset.above).max(0.);
                         // A cell's marks end at the cell's right edge, not the area's.
                         let (right, scrolled) = match inset.width {
                             Some(width) => (inset.left + width, scroll.0),

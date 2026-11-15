@@ -4312,8 +4312,13 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
 /// Whether `node` holds the keyboard's focus or what is open from it: a row
 /// that does goes as it leaves, never written with another item.
 fn holds_focus(ui: &Ui, node: NodeId) -> bool {
-    ui.input.focused().is_some_and(|focused| ui.opened_from(focused, node))
-        || ui.input.focus_scope().is_some_and(|scope| ui.opened_from(scope, node))
+    ui.input
+        .focused()
+        .is_some_and(|focused| ui.opened_from(focused, node))
+        || ui
+            .input
+            .focus_scope()
+            .is_some_and(|scope| ui.opened_from(scope, node))
 }
 /// A pooled row's style: out of layout, paint, hit testing and assistive
 /// technology until a key takes it and places it again.

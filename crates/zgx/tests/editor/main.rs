@@ -78,6 +78,8 @@ mod editor_selection_theme;
 mod editor_shape_reuse;
 #[path = "../editor_spans.rs"]
 mod editor_spans;
+#[path = "../editor_stacked_cells.rs"]
+mod editor_stacked_cells;
 #[path = "../editor_streamed_value.rs"]
 mod editor_streamed_value;
 #[path = "../editor_streaming_history.rs"]

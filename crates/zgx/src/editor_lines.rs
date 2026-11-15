@@ -222,6 +222,9 @@ pub struct LineInset {
     /// This line and the next share a row (a table's cells, side by side): both start at the row's top, each at its
     /// own `left`, and the lines after the row start below its tallest line.
     pub joins_next: bool,
+    /// This line and the next are one cell of a row (a table cell's paragraphs): the next starts under this one, at
+    /// its own `left`, and the cell is as tall as its lines together.
+    pub stacks_next: bool,
     /// How its rows align in the width it wraps in (a centred caption); none: as the editor's text. Carets, hits and
     /// selection follow where its text shows. An unwrapped line without its own `width` has no width to align in.
     pub align: Option<crate::text_layout::TextAlign>,
@@ -245,6 +248,10 @@ pub struct GroupFrame {
     pub content: Option<f32>,
 }
 impl LineInset {
+    /// Whether the next line is in its row.
+    fn links(&self) -> bool {
+        self.joins_next || self.stacks_next
+    }
     /// The width the line wraps in when the text wraps at `wrap`: its own, or what its indent leaves.
     fn wrap(&self, wrap: Option<f32>) -> Option<f32> {
         match self.width {
@@ -1207,8 +1214,9 @@ struct Heights {
     own: Vec<f32>,
 }
 impl Heights {
-    /// Of lines `own` high, those at `joins` (in order) sharing a row with the next.
-    fn with_rows(own: Vec<f32>, joins: &[usize]) -> Self {
+    /// Of lines `own` high, those at `joins` (in order) sharing a row with the next, those at `stacks` (in order,
+    /// among `joins`) its cell.
+    fn with_rows(own: Vec<f32>, joins: &[usize], stacks: &[usize]) -> Self {
         if joins.is_empty() {
             return Self::new(own);
         }
@@ -1221,7 +1229,7 @@ impl Heights {
             }
             let last = (joins[k] + 1).min(own.len() - 1);
             k += 1;
-            let tallest = own[start..=last].iter().copied().fold(0., f32::max);
+            let tallest = tallest_cell(&own, start..last + 1, |j| stacks.binary_search(&j).is_ok());
             each[start..last].fill(0.);
             each[last] = tallest;
         }
@@ -1288,6 +1296,21 @@ impl Heights {
     fn total(&self) -> f64 {
         self.above(self.tree.len())
     }
+}
+
+/// The height of the row of lines `row`, `own` high: its tallest cell's, a cell's lines (`stacks`: the line and the
+/// next are one cell) together.
+fn tallest_cell(own: &[f32], row: Range<usize>, stacks: impl Fn(usize) -> bool) -> f32 {
+    let (mut tallest, mut cell) = (0f32, 0f32);
+    let last = row.end - 1;
+    for j in row {
+        cell += own[j];
+        if j == last || !stacks(j) {
+            tallest = tallest.max(cell);
+            cell = 0.;
+        }
+    }
+    tallest
 }
 
 /// A long text laid out by its lines (see the module).
@@ -1371,6 +1394,7 @@ impl LinesLayout {
             let width = wrap.unwrap_or(f32::INFINITY);
             let known = layout.cache.heights.borrow();
             let mut joins = Vec::new();
+            let mut stacks = Vec::new();
             let mut grouped = false;
             // Asked once, not each line's: without any, each line's is the default.
             let insets = layout.cache.insets.borrow().clone();
@@ -1384,15 +1408,18 @@ impl LinesLayout {
                         }
                         None => LineInset::default(),
                     };
-                    if inset.joins_next {
+                    if inset.joins_next || inset.stacks_next {
                         joins.push(i);
+                    }
+                    if inset.stacks_next {
+                        stacks.push(i);
                     }
                     layout.measured(i, &inset, &known, width)
                 })
                 .collect();
             drop(known);
             layout.grouped = grouped;
-            layout.heights = Some(RefCell::new(Heights::with_rows(each, &joins)));
+            layout.heights = Some(RefCell::new(Heights::with_rows(each, &joins, &stacks)));
         }
         layout
     }
@@ -1433,7 +1460,7 @@ impl LinesLayout {
             let mut measured = Vec::with_capacity(first_moved + 1 - kept);
             for i in kept - 1..first_moved {
                 let inset = layout.inset(i);
-                joined |= inset.joins_next;
+                joined |= inset.joins_next || inset.stacks_next;
                 layout.grouped |= inset.scroll_group.is_some();
                 measured.push(layout.measured(i, &inset, &known, width));
             }
@@ -1453,7 +1480,7 @@ impl LinesLayout {
                 } else {
                     spliced(&old.own)
                 };
-                let joins = |i: usize| i + 1 < count && layout.inset(i).joins_next;
+                let joins = |i: usize| i + 1 < count && layout.inset(i).links();
                 let mut start = kept - 1;
                 while start > 0 && joins(start - 1) {
                     start -= 1;
@@ -1468,7 +1495,8 @@ impl LinesLayout {
                     while joins(last) {
                         last += 1;
                     }
-                    let tallest = own[row..=last].iter().copied().fold(0., f32::max);
+                    let tallest =
+                        tallest_cell(&own, row..last + 1, |j| layout.inset(j).stacks_next);
                     each[row..last].fill(0.);
                     each[last] = tallest;
                     row = last + 1;
@@ -1547,9 +1575,25 @@ impl LinesLayout {
     /// Where line `i` starts down the layout.
     pub(crate) fn top(&self, i: usize) -> f32 {
         match &self.heights {
-            Some(heights) => heights.borrow().above(i) as f32,
+            Some(heights) => {
+                let row_top = heights.borrow().above(i) as f32;
+                row_top + self.cell_offset(i)
+            }
             None => i as f32 * self.row,
         }
+    }
+    /// How far line `i` starts below its row's top: the heights of its cell's lines above it.
+    fn cell_offset(&self, i: usize) -> f32 {
+        if !self.has_rows() {
+            return 0.;
+        }
+        let mut below = 0.;
+        let mut j = i;
+        while j > 0 && self.inset(j - 1).stacks_next {
+            j -= 1;
+            below += self.height(j);
+        }
+        below
     }
     /// Line `i`'s height (as shaped, or estimated if it is not yet): its own, in a row too.
     pub(crate) fn height(&self, i: usize) -> f32 {
@@ -1569,10 +1613,10 @@ impl LinesLayout {
         let (mut start, mut end) = (i, i + 1);
         if self.has_rows() {
             let count = self.line_count();
-            while start > 0 && self.inset(start - 1).joins_next {
+            while start > 0 && self.inset(start - 1).links() {
                 start -= 1;
             }
-            while end < count && self.inset(end - 1).joins_next {
+            while end < count && self.inset(end - 1).links() {
                 end += 1;
             }
         }
@@ -1627,7 +1671,14 @@ impl LinesLayout {
                 found = Some(j);
             }
         }
-        (found.unwrap_or(i), true)
+        let Some(mut found) = found else {
+            return (i, true);
+        };
+        // of a cell's stacked lines, the one at `y` (the last below them)
+        while found > 0 && self.inset(found - 1).stacks_next && self.top(found) > y {
+            found -= 1;
+        }
+        (found, true)
     }
     /// The lines that show between `top` and `bottom`, shaped: their
     /// numbers, the first and the last but one.
@@ -1720,7 +1771,8 @@ impl LinesLayout {
                 let row = self.row_of(i);
                 let mut heights = heights.borrow_mut();
                 heights.own[i] = height;
-                let tallest = heights.own[row.clone()].iter().copied().fold(0., f32::max);
+                let tallest =
+                    tallest_cell(&heights.own, row.clone(), |j| self.inset(j).stacks_next);
                 heights.set(row.end - 1, tallest);
                 if inset.width.is_none() {
                     self.cache.heights.borrow_mut().insert((*text).into(), bare);
@@ -2028,7 +2080,14 @@ impl TextLayout for LinesLayout {
         if to >= 0. && to < layout.size().1 {
             return None;
         }
-        let top = self.top(i);
+        // the next or the last of its cell's stacked lines
+        if down && self.inset(i).stacks_next {
+            return Some(self.hit_position(x, self.top(i + 1) + self.inset(i + 1).above + 0.5));
+        }
+        if !down && i > 0 && self.inset(i - 1).stacks_next {
+            return Some(self.hit_position(x, self.top(i) - 0.5));
+        }
+        let top = self.top(row.start);
         if down {
             let below = top + self.row_height(i);
             (row.end < self.line_count()).then(|| self.hit_position(x, below + 0.5))
