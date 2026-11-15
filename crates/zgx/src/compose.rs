@@ -753,6 +753,13 @@ impl View {
     pub(crate) fn rare_mut(&mut self) -> &mut Rare {
         self.rare.get_or_insert_default()
     }
+    /// Whether its translation rests on whole device pixels (`pixel_snap`).
+    #[cfg(feature = "dom")]
+    pub(crate) fn pixel_snaps(&self) -> bool {
+        self.rare
+            .as_ref()
+            .is_some_and(|rare| rare.mount_flags & PIXEL_SNAP != 0)
+    }
     /// What a slider moves by: an arrow key moves one step (Page Up and
     /// Down, or Shift with an arrow, ten), and dragging lands on steps from
     /// its start. Without one, an arrow moves a hundredth of its range.
@@ -1973,6 +1980,15 @@ impl View {
     /// `Ui::take_window_gesture`).
     pub fn window_drag(mut self) -> Self {
         self.rare_mut().mount_flags |= WINDOW_DRAG;
+        self
+    }
+    /// Its translation (a spring's, a tween's, a reactive style's, a drag
+    /// preview's) shows on whole device pixels, so its edges and text don't
+    /// land between them; zgx-script gives it to a box a tween or spring
+    /// drives `x` or `y` of. Its writers set it exactly, and the scene rounds
+    /// it once a frame as it flushes (`Scene::set_pixel_snap`).
+    pub fn pixel_snap(mut self) -> Self {
+        self.rare_mut().mount_flags |= PIXEL_SNAP;
         self
     }
     /// Let the pointer select the text in this view and everything it holds,
@@ -7166,6 +7182,9 @@ const CONTAINER: u8 = 16;
 /// `Rare::mount_flags`: a press on it leaves focus where it is
 /// (`View::focus_on_press`).
 const KEEPS_FOCUS: u8 = 32;
+/// `Rare::mount_flags`: its translation rests on whole device pixels
+/// (`View::pixel_snap`).
+const PIXEL_SNAP: u8 = 64;
 /// `View::window_drag`, `View::hollow`, `View::focus_on_press`,
 /// `View::container`, and an editor's `autocorrect` and `smart_punctuation`, rare: apart from the element's
 /// common path.
@@ -7212,6 +7231,9 @@ fn mount_flagged(
         ui.input
             .set_options(root, ui.input.options(root).unwrap_or_default());
         ui.input.set_keeps_focus(root);
+    }
+    if flags & PIXEL_SNAP != 0 {
+        ui.scene.borrow_mut().set_pixel_snap(root, true);
     }
 }
 /// `View::window_drag`: a primary press on `region`, or on a descendant

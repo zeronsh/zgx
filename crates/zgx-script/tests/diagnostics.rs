@@ -367,3 +367,22 @@ fn a_span_label_is_the_runs_accessible_name() {
             .collect();
     assert_eq!(names, vec!["Citation 1, Sleep study.pdf".to_string()]);
 }
+
+#[test]
+fn a_spring_moved_box_rests_on_a_whole_device_pixel() {
+    let mut h = Harness::inline(
+        r##"local go = ui.state("go", false)
+ui.on_mount(function() go:set(true) end)
+return ui.column { w = 200, h = 100,
+    ui.div { id = "b", w = 20, h = 20, x = ui.spring(go, { from = 0, to = 10.3 }) },
+}"##,
+    );
+    h.ui.scene.borrow_mut().set_pixel_scale(2.);
+    h.settle();
+    h.frames(200);
+    // The frame painted, as a renderer flushes it.
+    h.ui.scene.borrow_mut().flush();
+    let b = h.find("b").unwrap();
+    let x = h.ui.scene.borrow().bounds(b).x;
+    assert_eq!(x, 10.5, "rests on a half point at 2x, not at 10.3");
+}

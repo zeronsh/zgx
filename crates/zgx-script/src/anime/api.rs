@@ -186,6 +186,15 @@ pub(crate) fn animate(
         Ok(())
     });
     let clip = Clip::new(&ctx.engine, Rc::downgrade(&ctx.vm), timing, Some(builder));
+    // A box it moves with `x` or `y` rests on whole device pixels as it
+    // finishes (`Clip::finish`).
+    clip.snaps
+        .set(["x", "y", "translateX", "translateY"].iter().any(|key| {
+            !matches!(
+                params.raw_get::<mlua::Value>(*key),
+                Ok(mlua::Value::Nil) | Err(_)
+            )
+        }));
     *clip.callbacks.borrow_mut() = Rc::new(callbacks);
     if let mlua::Value::String(id) = id {
         *clip.label.borrow_mut() = Some(id.to_string_lossy());

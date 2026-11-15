@@ -63,6 +63,21 @@ fn animate_moves_with_the_default_ease_and_goes_idle() {
     );
 }
 
+/// A box an x/y animation moved rests on whole device pixels (a fractional
+/// target at 2x lands on a half point); in flight it moves exactly.
+#[test]
+fn an_animated_box_rests_on_whole_device_pixels() {
+    let mut h = Harness::inline(&script(
+        r##"anime.animate("#box", { x = 10.3, duration = 100, ease = "linear" })"##,
+    ));
+    h.ui.scene.borrow_mut().set_pixel_scale(2.);
+    h.frame();
+    h.run_ms(130.);
+    // The frame painted, as a renderer flushes it.
+    h.ui.scene.borrow_mut().flush();
+    assert_eq!(h.x("box"), 10.5, "rests on a half point at 2x, not at 10.3");
+}
+
 #[test]
 fn stagger_delays_hold_from_values_until_each_target_starts() {
     let mut h = Harness::inline(
