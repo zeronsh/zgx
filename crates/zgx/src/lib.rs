@@ -50,6 +50,7 @@ mod find_text;
 pub(crate) mod paging;
 pub mod rich_text;
 mod scroll_keys;
+pub(crate) mod scroll_reveal;
 pub mod selection;
 pub mod text_layout;
 pub mod text_wrap;
