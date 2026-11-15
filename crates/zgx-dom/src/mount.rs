@@ -601,6 +601,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
             (Tag::Dialog, "z zd")
         }
         ElementKind::Overlay(_) => (Tag::Div, "z zp"),
+        ElementKind::Scroll { .. } => (Tag::Div, "z zo"),
         _ => (Tag::Div, "z"),
     };
     let base = if el.contents { "z zc" } else { base };

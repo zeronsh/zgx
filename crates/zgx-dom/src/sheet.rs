@@ -12,10 +12,14 @@ use zgx::compose::__dom::Look;
 /// What every element starts from: zgx's layout defaults, which are mostly
 /// CSS flexbox's. `.z` is a box, `.zt` text; `.zb` a button, `.ze` an
 /// editor, their browser looks reset; `.zc` lays out as its child
-/// (`display: contents`); `.zr` holds absolute children.
+/// (`display: contents`); `.zr` holds absolute children. `.zo` is a scroll
+/// view, whose rows keep their size as on the desktop, where they lay out
+/// unbounded in its content, not shrunk to fit it (and a row's own `shrink`
+/// wins: the rule weighs nothing).
 pub(crate) const BASE_CSS: &str = "\
 .z{display:flex;flex-direction:column;box-sizing:border-box;}\
 .zr{position:relative;}\
+:where(.zo>*,.zo>.zc>*,.zo>.zc>.zc>*,.zo>.zc>.zc>.zc>*){flex-shrink:0;}\
 .zv{position:absolute;left:0;right:0;}\
 .zl{display:block;overflow:hidden auto;height:240px;}\
 .zb{font:inherit;color:inherit;background:none;text-align:inherit;cursor:default;margin:0;padding:0;border:0 solid transparent;}\
@@ -51,6 +55,7 @@ fn folded(base: &'static str) -> (&'static str, &'static str) {
         "z zc" => (Z, "zc "),
         "z zd" => (Z, "zd "),
         "z zp" => (Z, "zp "),
+        "z zo" => (Z, "zo "),
         _ => ("", ""),
     }
 }
