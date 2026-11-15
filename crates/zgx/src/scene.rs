@@ -7413,14 +7413,22 @@ impl Scene {
     /// for an input method asking where a range is (Windows'
     /// `GetTextExt`), not for every frame.
     pub fn text_range_area(&self, id: NodeId, range: std::ops::Range<usize>) -> Option<Rect> {
+        self.text_range_rects(id, range)
+            .into_iter()
+            .reduce(|area, piece| area.union(piece))
+    }
+    /// [`text_range_area`](Self::text_range_area) a line at a time: a box
+    /// for each line the range runs on, in order (an atom wrapped across
+    /// two lines, the one under the pointer). Empty where it has none.
+    pub fn text_range_rects(&self, id: NodeId, range: std::ops::Range<usize>) -> Vec<Rect> {
         use unicode_segmentation::UnicodeSegmentation;
         if !self.contains(id) {
-            return None;
+            return Vec::new();
         }
         let text = match self.kind(id) {
             NodeKind::Text { text, .. } => text.clone(),
             NodeKind::RichText { text } => text.text_arc(),
-            _ => return None,
+            _ => return Vec::new(),
         };
         let floor = |at: usize| {
             let mut at = at.min(text.len());
@@ -7430,7 +7438,9 @@ impl Scene {
             at
         };
         let (start, end) = (floor(range.start), floor(range.end.max(range.start)));
-        let lines = self.text_lines(id)?;
+        let Some(lines) = self.text_lines(id) else {
+            return Vec::new();
+        };
         // A caret's place across its line: past the graphemes before it.
         let x = |line: &TextLine, at: usize| {
             let at = at.clamp(line.range.start, line.range.end);
@@ -7441,7 +7451,7 @@ impl Scene {
                 .copied()
                 .unwrap_or(line.rect.x)
         };
-        let mut area: Option<Rect> = None;
+        let mut pieces = Vec::new();
         for line in &lines {
             let on = if start == end {
                 line.range.start <= start && start <= line.range.end
@@ -7455,12 +7465,12 @@ impl Scene {
             }
             let (a, b) = (x(line, start), x(line, end));
             let piece = Rect::new(a.min(b), line.rect.y, (a - b).abs(), line.rect.height);
-            area = Some(area.map_or(piece, |area| area.union(piece)));
+            pieces.push(piece);
             if start == end {
                 break;
             }
         }
-        area
+        pieces
     }
     /// Shape `text` at `size` in `font`, wrapped at `width` if given.
     pub fn shape_text_with_font(
