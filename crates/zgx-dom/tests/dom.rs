@@ -278,7 +278,8 @@ fn a_node_scrolls_into_view_by_the_browsers_own() {
             .h(100.)
             .children((0..10).map(move |i| {
                 let kept = kept.clone();
-                let row = text(format!("row {i}")).h(40.);
+                // A block 40 high (a text alone lays out inline, its line's height).
+                let row = column().h(40.).child(text(format!("row {i}")));
                 if i == 5 {
                     row.on_mount(move |node| *kept.borrow_mut() = Some(node))
                 } else {
