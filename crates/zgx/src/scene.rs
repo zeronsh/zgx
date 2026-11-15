@@ -4222,9 +4222,17 @@ impl Scene {
     pub fn is_empty(&self) -> bool {
         false
     } // A scene always retains its root.
+    /// `id`'s node, its slot found once: its generation and its node checked
+    /// there, a stale id the cold panic (`stale`).
     fn node(&self, id: NodeId) -> &Node {
-        assert!(self.contains(id), "stale scene node");
-        self.slots[id.index as usize].node.as_ref().unwrap()
+        match self.slots.get(id.index as usize) {
+            Some(Slot {
+                generation,
+                node: Some(node),
+                ..
+            }) if *generation == id.generation => node,
+            _ => stale(),
+        }
     }
     /// A node the tree itself led to (a live node's parent, an id checked
     /// just before): in the scene by the tree's invariant, so its
@@ -4243,9 +4251,16 @@ impl Scene {
         debug_assert!(slot.generation == id.generation, "stale scene node");
         slot.node.as_mut().unwrap_or_else(|| stale())
     }
+    /// `node`, to change.
     fn node_mut(&mut self, id: NodeId) -> &mut Node {
-        assert!(self.contains(id), "stale scene node");
-        self.slots[id.index as usize].node.as_mut().unwrap()
+        match self.slots.get_mut(id.index as usize) {
+            Some(Slot {
+                generation,
+                node: Some(node),
+                ..
+            }) if *generation == id.generation => node,
+            _ => stale(),
+        }
     }
     /// `id`'s box as laid out, translated by its own and its ancestors'
     /// translations, in window points.
@@ -6010,8 +6025,7 @@ impl Scene {
         if self.pending_children.get() != u32::MAX {
             return self.children_pending(id);
         }
-        assert!(self.contains(id), "stale scene node");
-        self.children_raw(self.tree_node(id))
+        self.children_raw(self.node(id))
     }
     #[cold]
     #[inline(never)]
