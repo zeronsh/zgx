@@ -539,6 +539,9 @@ struct CodeHint {
     line_marks: RefCell<Option<LineMarks>>,
     mark_layer: Cell<Option<NodeId>>,
     mark_nodes: RefCell<Vec<NodeId>>,
+    /// Some line or mark node was clipped to its scroll group's frame (`LineInset::scroll_group`): with no groups
+    /// left, their clips go once.
+    group_clipped: Cell<bool>,
     /// The lines last given assistive technology (`Semantics::set_text_lines`).
     told_lines: RefCell<Vec<(usize, NodeId)>>,
     /// Marks behind the selection (the current line, decorations), made
@@ -1077,6 +1080,52 @@ impl EditorHandle {
         }
         *self.hint.code_made().line_marks.borrow_mut() = marks;
         self.refresh();
+    }
+    /// Scroll the lines of scroll group `group` (`LineInset::scroll_group`) sideways to `x`: clamped to 0 through
+    /// how far its lines reach past its frame (`group_extent`). Its listener hears of a move (`on_group_scroll`).
+    pub fn set_group_scroll(&self, group: u32, x: f32) {
+        if !self.multiline {
+            return;
+        }
+        let lines = self.hint.line_cache();
+        let limit = lines
+            .last_layout()
+            .and_then(|layout| layout.group(group))
+            .map_or(f32::INFINITY, |frame| frame.limit());
+        let x = if x.is_finite() {
+            x.clamp(0., limit)
+        } else {
+            0.
+        };
+        if lines.set_group_scroll(group, x) {
+            self.refresh();
+        }
+    }
+    /// How far scroll group `group` is scrolled sideways (`set_group_scroll`).
+    pub fn group_scroll(&self, group: u32) -> f32 {
+        if !self.multiline {
+            return 0.;
+        }
+        self.hint.line_cache().group_scroll(group)
+    }
+    /// Scroll group `group`'s width shown and its lines' width, from its frame's left (for a scrollbar), once laid
+    /// out; none before, or with no line in it.
+    pub fn group_extent(&self, group: u32) -> Option<(f32, f32)> {
+        if !self.multiline {
+            return None;
+        }
+        let frame = self.hint.line_cache().last_layout()?.group(group)?;
+        Some((frame.view, frame.content))
+    }
+    /// Be told each time a scroll group moves (`set_group_scroll`, a sideways wheel over it, a caret revealed in
+    /// it): its id and new offset.
+    pub fn on_group_scroll(&self, listener: impl Fn(u32, f32) + 'static) {
+        if !self.multiline {
+            return;
+        }
+        self.hint
+            .line_cache()
+            .on_group_scroll(Some(Rc::new(listener)));
     }
     /// The caret's colour (`None`: the text's, as by default) and width in
     /// points (`None`: the app's, `Ui::set_caret_width`).
@@ -6215,7 +6264,22 @@ impl Ui {
                         affinity: TextAffinity::After,
                     }
                 };
-            let caret_rect = layout.caret_position(caret_position);
+            let mut caret_rect = layout.caret_position(caret_position);
+            // A caret moved into a cell its scroll group shows none of: the group moves to show it.
+            let mut caret_clipped = false;
+            if let Some(lines) = long_lines.as_ref().filter(|lines| lines.grouped()) {
+                let i = lines.line_of(caret_position.byte_offset.min(display_len));
+                if draw_reveal_caret.get()
+                    && draw_gesture.mode.get().is_none()
+                    && let Some((group, x)) = lines.reveal_in_group(i, caret_rect)
+                    && draw_hint.line_cache().set_group_scroll(group, x)
+                {
+                    caret_rect = layout.caret_position(caret_position);
+                }
+                caret_clipped = lines.group_of(i).is_some_and(|(_, frame)| {
+                    caret_rect.x < frame.left - 0.5 || caret_rect.x > frame.left + frame.view + 0.5
+                });
+            }
             let cx = caret_rect.x;
             let cy = caret_rect.y;
             let line_height = caret_rect.height;
@@ -6401,8 +6465,9 @@ impl Ui {
                     }
                     for (i, id) in pool.iter() {
                         let line = lines.line_text(*i);
+                        let inset = lines.inset(*i);
                         // An aligned line paints where its carets and hits are: in the font it was shaped in.
-                        let font = match lines.align(*i) {
+                        let font = match lines.align_in(*i, &inset) {
                             Some(align) => crate::text_layout::FontStyle {
                                 align,
                                 ..font.clone()
@@ -6439,8 +6504,9 @@ impl Ui {
                         }
                         s.set_font(*id, font);
                         let shaped = lines.line(*i).size();
-                        let width = lines.draw_width(*i, wrap_width).unwrap_or(shaped.0 + 2.);
-                        let inset = lines.inset(*i);
+                        let width =
+                            crate::editor_lines::LinesLayout::draw_width_in(&inset, wrap_width)
+                                .unwrap_or(shaped.0 + 2.);
                         let mut style = fixed(width, lines.height(*i));
                         // A cell wraps in its own width, in an editor that does not wrap too.
                         style.text_wrap = draw_wrap.get() || inset.width.is_some();
@@ -6462,14 +6528,28 @@ impl Ui {
                         if s.bounds(*id).width == 0. {
                             s.know_text_size(*id, Some(0.), shaped);
                         }
+                        let left = inset.left - lines.group_offset(&inset) - scroll.0;
                         s.set_transform(
                             *id,
                             Transform {
-                                x: inset.left - scroll.0,
+                                x: left,
                                 y: lines.top(*i) + inset.above - scroll.1,
                             },
                         );
+                        // In a scroll group: only what its frame shows.
+                        if lines.grouped() || code.group_clipped.get() {
+                            let clip = lines
+                                .group_of(*i)
+                                .and_then(|(_, frame)| {
+                                    lines.group_clip(*i, frame.left - scroll.0, left, width)
+                                })
+                                .map(|(cut_left, cut_right)| {
+                                    crate::scene::ClipInset::px(0., cut_right, 0., cut_left)
+                                });
+                            s.set_clip_inset(*id, clip);
+                        }
                     }
+                    code.group_clipped.set(lines.grouped());
                 }
                 for id in free {
                     s.remove(id);
@@ -6477,7 +6557,9 @@ impl Ui {
                 drop(pool);
                 // Each shown line's marks, under the text.
                 let marks_of = code.line_marks.borrow().clone();
-                let mut wanted: Vec<(Rect, LineMark)> = Vec::new();
+                // Each mark's box, and what of it its scroll group's frame cuts (left, right).
+                type Wanted = (Rect, LineMark, Option<(f32, f32)>);
+                let mut wanted: Vec<Wanted> = Vec::new();
                 if let (Some(lines), Some(marks_of)) = (&long_lines, marks_of) {
                     for i in shown_lines.clone() {
                         let inset = lines.inset(i);
@@ -6492,6 +6574,9 @@ impl Ui {
                             Some(width) => (inset.left + width, scroll.0),
                             None => (inner_width, 0.),
                         };
+                        let grouped = lines
+                            .group_of(i)
+                            .map(|(_, frame)| (lines.group_offset(&inset), frame.left - scroll.0));
                         for mark in marks_of(i) {
                             let width = if mark.width.is_finite() {
                                 mark.width
@@ -6517,7 +6602,15 @@ impl Ui {
                                 None if mark.from_right => right - mark.x - width - scrolled,
                                 None => mark.x - scroll.0,
                             };
-                            wanted.push((Rect::new(x, top + mark.y, width, height), mark));
+                            // In a scroll group: moved with its line, cut to the group's frame.
+                            let (x, clip) = match &grouped {
+                                Some((offset, shown_left)) => {
+                                    let x = x - offset;
+                                    (x, lines.group_clip(i, *shown_left, x, width))
+                                }
+                                None => (x, None),
+                            };
+                            wanted.push((Rect::new(x, top + mark.y, width, height), mark, clip));
                         }
                     }
                 }
@@ -6540,7 +6633,7 @@ impl Ui {
                 let mut mark_nodes = code.mark_nodes.borrow_mut();
                 let count: usize = wanted
                     .iter()
-                    .map(|(_, m)| 1 + usize::from(m.label.is_some()))
+                    .map(|(_, m, _)| 1 + usize::from(m.label.is_some()))
                     .sum();
                 while mark_nodes.len() > count {
                     s.remove(mark_nodes.pop().unwrap());
@@ -6554,8 +6647,10 @@ impl Ui {
                         ));
                     }
                     let mut ids = mark_nodes.iter().copied();
-                    for (rect, mark) in wanted {
+                    for (rect, mark, clip) in wanted {
                         let Some(id) = ids.next() else { break };
+                        let clip = clip.map(|(l, r)| crate::scene::ClipInset::px(0., r, 0., l));
+                        s.set_clip_inset(id, clip);
                         let quad = crate::scene::QuadStyle {
                             fill: mark.fill,
                             radius: mark.radius,
@@ -6667,6 +6762,7 @@ impl Ui {
                             }
                             s.set_font(id, label_font);
                             s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
+                            s.set_clip_inset(id, clip);
                             s.set_transform(
                                 id,
                                 Transform {
@@ -6693,6 +6789,7 @@ impl Ui {
             let mut effects = s.effects(caret);
             // Read-only text shows a selection but no caret.
             let caret_shown = *focus.borrow()
+                && !caret_clipped
                 && draw_window_active.get()
                 && !draw_read_only.get()
                 && e.preedit().is_none_or(|preedit| preedit.cursor.is_some());
@@ -7746,8 +7843,47 @@ impl Ui {
                     }
                 }
                 InputEvent::Scroll {
-                    delta_x, delta_y, ..
+                    x,
+                    y,
+                    mut delta_x,
+                    mut delta_y,
                 } => {
+                    // Sideways over a scroll group's line (a table wider than the note): the group takes it, at its
+                    // edges too, and the text area only what is left (a trackpad's motion down).
+                    let mut group_moved = false;
+                    let shifted_wheel = delta_x == 0. && crate::input::mouse_wheel_shift() == Some(true);
+                    let across = if shifted_wheel { delta_y } else { delta_x };
+                    if multiline
+                        && across.is_finite()
+                        && across != 0.
+                        && let Some(lines) = hint.line_cache().last_layout().filter(|lines| lines.grouped())
+                    {
+                        let s = scene.borrow();
+                        let bounds = s.bounds(viewport);
+                        let (px, py) = in_viewport(&s, viewport, x, y);
+                        drop(s);
+                        let at = *scroll.borrow();
+                        let (lx, ly) = (px - bounds.x + at.0, py - bounds.y + at.1);
+                        if let Some((group, frame)) = lines.group_of(lines.line_at(ly))
+                            && lx >= frame.left
+                            && lx <= frame.left + frame.view
+                        {
+                            let cache = hint.line_cache();
+                            let now = cache.group_scroll(group);
+                            let to = (now + across).clamp(0., frame.limit());
+                            group_moved = to != now && cache.set_group_scroll(group, to);
+                            if shifted_wheel {
+                                delta_y = 0.;
+                            } else {
+                                delta_x = 0.;
+                            }
+                            cx.prevent_default();
+                            cx.stop_propagation();
+                        }
+                    }
+                    if group_moved {
+                        reveal_caret.set(false);
+                    }
                     if delta_x.is_finite() && delta_y.is_finite() {
                         let mut offset = scroll.borrow_mut();
                         let previous = *offset;
@@ -7756,7 +7892,9 @@ impl Ui {
                         if multiline {
                             offset.1 = (offset.1 + delta_y).clamp(0., limit.1);
                         }
-                        if previous == *offset {
+                        let unmoved = previous == *offset;
+                        drop(offset);
+                        if unmoved {
                             // At its edge: contained, the gesture stays here
                             // (taken, so the scroll views around it don't
                             // move, and the rest of it latches here).
@@ -7764,12 +7902,14 @@ impl Ui {
                                 cx.prevent_default();
                                 cx.stop_propagation();
                             }
-                            return;
+                            if !group_moved {
+                                return;
+                            }
+                        } else {
+                            reveal_caret.set(false);
+                            cx.prevent_default();
+                            cx.stop_propagation();
                         }
-                        drop(offset);
-                        reveal_caret.set(false);
-                        cx.prevent_default();
-                        cx.stop_propagation();
                     }
                 }
                 InputEvent::Text(t) => {

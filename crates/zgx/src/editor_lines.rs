@@ -190,6 +190,13 @@ pub struct LineInset {
     /// How its rows align in the width it wraps in (a centred caption); none: as the editor's text. Carets, hits and
     /// selection follow where its text shows. An unwrapped line without its own `width` has no width to align in.
     pub align: Option<crate::text_layout::TextAlign>,
+    /// Lines sharing an id scroll sideways together (a table wider than the note): their text and marks move by the
+    /// group's offset (`EditorHandle::set_group_scroll`) and show only inside the group's frame, from its first
+    /// line's `left` across `group_width`. Carets, hits and selection follow; nothing moves vertically.
+    pub scroll_group: Option<u32>,
+    /// The width a scroll group shows, read from its first line; none: what the editor's width leaves right of
+    /// that line's `left`.
+    pub group_width: Option<f32>,
 }
 impl LineInset {
     /// The width the line wraps in when the text wraps at `wrap`: its own, or what its indent leaves.
@@ -509,6 +516,29 @@ pub(crate) struct LineCache {
     /// Highlighted lines, by their text and what the line before left.
     colored: RefCell<HashMap<(Box<str>, u32), Colored>>,
     insets: RefCell<Option<LineInsets>>,
+    /// Each scroll group's sideways offset (`LineInset::scroll_group`), by its id: read as carets, hits and
+    /// drawing are, so moving one lays nothing out again.
+    group_scroll: RefCell<HashMap<u32, f32>>,
+    /// Told of each group's new offset (`EditorHandle::on_group_scroll`).
+    on_group_scroll: RefCell<Option<GroupListener>>,
+}
+/// Told of a scroll group's id and new offset (`EditorHandle::on_group_scroll`).
+pub(crate) type GroupListener = Rc<dyn Fn(u32, f32)>;
+/// A scroll group's frame and extent (`LinesLayout::group`), in points from the area's left content edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Group {
+    /// Where it shows from: its first line's `left`.
+    pub(crate) left: f32,
+    /// How wide it shows.
+    pub(crate) view: f32,
+    /// How wide its lines are from `left`.
+    pub(crate) content: f32,
+}
+impl Group {
+    /// The furthest it scrolls: its content past its view.
+    pub(crate) fn limit(&self) -> f32 {
+        (self.content - self.view).max(0.)
+    }
 }
 /// What the lines below an edit left before it (`LineCache::edited`).
 struct Tail {
@@ -674,6 +704,30 @@ impl LineCache {
         self.styled.borrow_mut().clear();
         self.heights.borrow_mut().clear();
         self.forget_last();
+    }
+    /// Scroll group `group`'s offset (0 until set).
+    pub(crate) fn group_scroll(&self, group: u32) -> f32 {
+        self.group_scroll
+            .borrow()
+            .get(&group)
+            .copied()
+            .unwrap_or(0.)
+    }
+    /// Move scroll group `group` to `x` (clamped by the caller); whether it moved. Its listener hears of it.
+    pub(crate) fn set_group_scroll(&self, group: u32, x: f32) -> bool {
+        let x = if x.is_finite() { x.max(0.) } else { 0. };
+        let previous = self.group_scroll.borrow_mut().insert(group, x);
+        if previous.unwrap_or(0.) == x {
+            return false;
+        }
+        let listener = self.on_group_scroll.borrow().clone();
+        if let Some(listener) = listener {
+            listener(group, x);
+        }
+        true
+    }
+    pub(crate) fn on_group_scroll(&self, listener: Option<GroupListener>) {
+        *self.on_group_scroll.borrow_mut() = listener;
     }
     pub(crate) fn set_highlighter(&self, highlighter: Option<SpanHighlighter>) {
         *self.highlighter.borrow_mut() = highlighter;
@@ -1007,6 +1061,10 @@ pub(crate) struct LinesLayout {
     /// Lines across chunks, joined once (a long line's every draw would
     /// copy it): a few, by number.
     joined: RefCell<HashMap<usize, Arc<str>>>,
+    /// Whether any line is in a scroll group (`LineInset::scroll_group`): only then are the groups found.
+    grouped: bool,
+    /// Each scroll group's frame and extent, found once asked for.
+    groups: RefCell<Option<Rc<HashMap<u32, Group>>>>,
 }
 /// A line's text: in its chunk, or joined across chunks and kept.
 pub(crate) enum LineText<'a> {
@@ -1057,15 +1115,27 @@ impl LinesLayout {
             rich,
             cache,
             joined: RefCell::default(),
+            grouped: false,
+            groups: RefCell::default(),
         };
         // every line's own height, unwrapped too: a heading's taller pitch and a line's room push the lines below
         {
             let width = wrap.unwrap_or(f32::INFINITY);
             let known = layout.cache.heights.borrow();
             let mut joins = Vec::new();
+            let mut grouped = false;
+            // Asked once, not each line's: without any, each line's is the default.
+            let insets = layout.cache.insets.borrow().clone();
             let each = (0..layout.line_count())
                 .map(|i| {
-                    let inset = layout.inset(i);
+                    let inset = match &insets {
+                        Some(insets) => {
+                            let inset = insets(i);
+                            grouped |= inset.scroll_group.is_some();
+                            inset
+                        }
+                        None => LineInset::default(),
+                    };
                     if inset.joins_next {
                         joins.push(i);
                     }
@@ -1073,6 +1143,7 @@ impl LinesLayout {
                 })
                 .collect();
             drop(known);
+            layout.grouped = grouped;
             layout.heights = Some(RefCell::new(Heights::with_rows(each, &joins)));
         }
         layout
@@ -1098,6 +1169,8 @@ impl LinesLayout {
             rich: old.rich.clone(),
             cache: old.cache.clone(),
             joined: RefCell::default(),
+            grouped: old.grouped,
+            groups: RefCell::default(),
         };
         // The edited lines' lengths count for the longest.
         for i in kept - 1..first_moved.min(layout.line_count()) {
@@ -1113,6 +1186,7 @@ impl LinesLayout {
             for i in kept - 1..first_moved {
                 let inset = layout.inset(i);
                 joined |= inset.joins_next;
+                layout.grouped |= inset.scroll_group.is_some();
                 measured.push(layout.measured(i, &inset, &known, width));
             }
             drop(known);
@@ -1294,13 +1368,14 @@ impl LinesLayout {
         if row.len() == 1 {
             return (i, false);
         }
+        let x = self.within_group(row.start, x);
         let mut found = None;
         for j in row {
             let inset = self.inset(j);
             if inset.hidden {
                 continue;
             }
-            if found.is_none() || inset.left <= x {
+            if found.is_none() || self.left(&inset) <= x {
                 found = Some(j);
             }
         }
@@ -1321,18 +1396,25 @@ impl LinesLayout {
     }
     /// Line `i`, shaped.
     /// The width line `i` is drawn in when the text wraps at `wrap`: what its indent leaves, as it was wrapped.
+    #[cfg(test)]
     pub(crate) fn draw_width(&self, i: usize, wrap: Option<f32>) -> Option<f32> {
-        let inset = self.inset(i);
+        Self::draw_width_in(&self.inset(i), wrap)
+    }
+    /// `draw_width`, for a line whose room is already asked for.
+    pub(crate) fn draw_width_in(inset: &LineInset, wrap: Option<f32>) -> Option<f32> {
         inset
             .width
             .map(|w| w.max(1.))
             .or(wrap.map(|w| (w - inset.left).max(1.)))
     }
-    /// How line `i`'s rows align, where it has a width to align in (`LineInset::align`): shaped so for its carets
-    /// and hits (`line`), and drawn so.
-    pub(crate) fn align(&self, i: usize) -> Option<crate::text_layout::TextAlign> {
-        let inset = self.inset(i);
-        Self::aligned(&inset, inset.wrap(self.wrap), &self.line_text(i))
+    /// How line `i`'s rows align, where it has a width to align in (`LineInset::align`), given its room `inset`:
+    /// shaped so for its carets and hits (`line`), and drawn so.
+    pub(crate) fn align_in(
+        &self,
+        i: usize,
+        inset: &LineInset,
+    ) -> Option<crate::text_layout::TextAlign> {
+        Self::aligned(inset, inset.wrap(self.wrap), &self.line_text(i))
     }
     /// `align`, for a line whose room is already asked for: each asks it once.
     fn aligned(
@@ -1410,11 +1492,117 @@ impl LinesLayout {
     fn shift(&self, i: usize, rect: Rect) -> Rect {
         let inset = self.inset(i);
         Rect::new(
-            rect.x + inset.left,
+            rect.x + self.left(&inset),
             rect.y + self.top(i) + inset.above,
             rect.width,
             rect.height,
         )
+    }
+    /// Where a line with room `inset` starts across: its `left`, less its scroll group's offset.
+    #[inline]
+    fn left(&self, inset: &LineInset) -> f32 {
+        match inset.scroll_group {
+            Some(group) => inset.left - self.cache.group_scroll(group),
+            None => inset.left,
+        }
+    }
+    /// Whether any line is in a scroll group.
+    #[inline]
+    pub(crate) fn grouped(&self) -> bool {
+        self.grouped
+    }
+    /// The clip that keeps a box from `x` across `width` (where it shows, as line `i`'s) inside line `i`'s scroll
+    /// group frame shown from `shown_left`: how much to cut from its left and right. None outside a group.
+    pub(crate) fn group_clip(
+        &self,
+        i: usize,
+        shown_left: f32,
+        x: f32,
+        width: f32,
+    ) -> Option<(f32, f32)> {
+        let (_, group) = self.group_of(i)?;
+        let width = width.max(0.);
+        let left = (shown_left - x).clamp(0., width);
+        let right = (x + width - (shown_left + group.view)).clamp(0., width - left);
+        Some((left, right))
+    }
+    /// Line `i`'s scroll group offset (0 outside one).
+    pub(crate) fn group_offset(&self, inset: &LineInset) -> f32 {
+        inset
+            .scroll_group
+            .map_or(0., |group| self.cache.group_scroll(group))
+    }
+    /// Each scroll group's frame and extent; none without groups.
+    fn groups(&self) -> Option<Rc<HashMap<u32, Group>>> {
+        if !self.grouped {
+            return None;
+        }
+        if let Some(groups) = &*self.groups.borrow() {
+            return Some(groups.clone());
+        }
+        let mut groups: HashMap<u32, Group> = HashMap::new();
+        for i in 0..self.line_count() {
+            let inset = self.inset(i);
+            let Some(id) = inset.scroll_group else {
+                continue;
+            };
+            let group = groups.entry(id).or_insert_with(|| Group {
+                left: inset.left,
+                view: inset
+                    .group_width
+                    .or(self.wrap.map(|w| w - inset.left))
+                    .unwrap_or(f32::INFINITY)
+                    .max(1.),
+                content: 0.,
+            });
+            if inset.hidden {
+                continue;
+            }
+            let width = match inset.width.or(self.wrap.map(|w| w - inset.left)) {
+                Some(width) => width.max(1.),
+                None => self.line_range(i).len() as f32 * self.advance,
+            };
+            group.content = group.content.max(inset.left + width - group.left);
+        }
+        let groups = Rc::new(groups);
+        *self.groups.borrow_mut() = Some(groups.clone());
+        Some(groups)
+    }
+    /// Scroll group `id`'s frame and extent, if a line is in it.
+    pub(crate) fn group(&self, id: u32) -> Option<Group> {
+        self.groups()?.get(&id).copied()
+    }
+    /// Line `i`'s scroll group: its id and frame.
+    pub(crate) fn group_of(&self, i: usize) -> Option<(u32, Group)> {
+        if !self.grouped {
+            return None;
+        }
+        let id = self.inset(i).scroll_group?;
+        Some((id, self.group(id)?))
+    }
+    /// `x`, inside line `i`'s scroll group frame when it has one: what is clipped is not hit.
+    fn within_group(&self, i: usize, x: f32) -> f32 {
+        match self.group_of(i) {
+            Some((_, group)) => {
+                x.clamp(group.left, (group.left + group.view - 0.5).max(group.left))
+            }
+            None => x,
+        }
+    }
+    /// The offset scroll group `id` needs for `rect` (where it shows now) to show inside its frame, if it moves.
+    pub(crate) fn reveal_in_group(&self, i: usize, rect: Rect) -> Option<(u32, f32)> {
+        let (id, group) = self.group_of(i)?;
+        let now = self.cache.group_scroll(id);
+        let right = group.left + group.view;
+        let wanted = if rect.x < group.left {
+            now - (group.left - rect.x)
+        } else if rect.x + rect.width > right {
+            now + (rect.x + rect.width - right)
+        } else {
+            return None;
+        };
+        let wanted = wanted.clamp(0., group.limit());
+        (wanted != now).then_some((id, wanted))
     }
     /// The selection of `range`, only on the lines between `top` and
     /// `bottom`: what an editor draws of a selection of the whole file.
@@ -1445,19 +1633,40 @@ impl LinesLayout {
                     let row = self.line(i).caret_position(Default::default());
                     let width = crate::text_layout::empty_line_width(row.height);
                     let sliver = Rect::new(row.x, row.y, width, row.height);
+                    let at = rects.len();
                     rects.push(self.shift(i, sliver));
+                    self.clip_to_group(i, &mut rects, at);
                 }
                 continue;
             }
             let layout = self.line(i);
+            let at = rects.len();
             rects.extend(
                 layout
                     .selection(a - line.start..b - line.start)
                     .into_iter()
                     .map(|rect| self.shift(i, rect)),
             );
+            self.clip_to_group(i, &mut rects, at);
         }
         rects
+    }
+    /// `rects[from..]`, of line `i`, cut to its scroll group's frame: what is scrolled out of it shows nothing.
+    fn clip_to_group(&self, i: usize, rects: &mut Vec<Rect>, from: usize) {
+        let Some((_, group)) = self.group_of(i) else {
+            return;
+        };
+        let right = group.left + group.view;
+        let mut kept = from;
+        for k in from..rects.len() {
+            let r = rects[k];
+            let (l, r_edge) = (r.x.max(group.left), (r.x + r.width).min(right));
+            if r_edge > l {
+                rects[kept] = Rect::new(l, r.y, r_edge - l, r.height);
+                kept += 1;
+            }
+        }
+        rects.truncate(kept);
     }
 }
 impl TextLayout for LinesLayout {
@@ -1477,6 +1686,7 @@ impl TextLayout for LinesLayout {
     }
     fn hit_position(&self, x: f32, y: f32) -> TextPosition {
         let (i, cell) = self.line_at_point(x, y);
+        let x = self.within_group(i, x);
         let layout = self.line(i);
         let inset = self.inset(i);
         let mut down = y.max(0.) - self.top(i) - inset.above;
@@ -1484,7 +1694,7 @@ impl TextLayout for LinesLayout {
             // under a cell shorter than its row: its last row at x, as beside it
             down = down.min(layout.size().1 - 0.5);
         }
-        let local = layout.hit_position(x - inset.left, down);
+        let local = layout.hit_position(x - self.left(&inset), down);
         let range = self.line_range(i);
         TextPosition {
             byte_offset: range.start + local.byte_offset.min(range.len()),
@@ -1833,6 +2043,181 @@ mod tests {
             shaper,
         )
     }
+    /// A table four 300-point columns wide in a 680-point note, one scroll group (7) shown 680 wide: lines 1 to 4
+    /// are its cells, between ordinary lines.
+    const WIDE: &str = "before\nc1 one\nc2 two\nc3 three\nc4 four\nafter";
+    fn wide() -> (Rc<LineCache>, Rc<LinesLayout>) {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| match i {
+            1..=4 => LineInset {
+                left: 300. * (i - 1) as f32,
+                width: Some(300.),
+                joins_next: i < 4,
+                scroll_group: Some(7),
+                group_width: Some(680.),
+                ..LineInset::default()
+            },
+            _ => LineInset::default(),
+        })));
+        let layout = cache.layout(
+            || Text::new(WIDE),
+            None,
+            14.,
+            Some(680.),
+            &FontStyle::default(),
+            0,
+            shaper,
+        );
+        layout.lines_between(0., 10_000.);
+        (cache, layout)
+    }
+
+    /// A scroll group's frame is its first line's left across its width, its extent its cells'; its lines move
+    /// together by its offset, and the lines outside it don't.
+    #[test]
+    fn a_scroll_group_frames_its_lines_and_scrolls_them_together() {
+        let (cache, layout) = wide();
+        let frame = layout.group(7).unwrap();
+        assert_eq!((frame.left, frame.view, frame.content), (0., 680., 1200.));
+        assert_eq!(frame.limit(), 520.);
+        let at = |needle: &str| WIDE.find(needle).unwrap();
+        assert_eq!(layout.caret(at("c3")).x, 600.);
+        assert_eq!(layout.caret(at("c4")).x, 900.);
+        cache.set_group_scroll(7, 520.);
+        assert_eq!(layout.caret(at("c3")).x, 80.);
+        assert_eq!(layout.caret(at("c4")).x, 380.);
+        assert_eq!(
+            layout.caret(at("before")).x,
+            0.,
+            "a line outside the group stays"
+        );
+        assert_eq!(layout.caret(at("after")).x, 0.);
+    }
+
+    /// A click in the third column's text places the caret there however far the group is scrolled; the last
+    /// columns are reachable, and what the frame clips is not hit.
+    #[test]
+    fn a_click_in_a_scrolled_cell_places_the_caret_there() {
+        let (cache, layout) = wide();
+        let at = |needle: &str| WIDE.find(needle).unwrap();
+        let (c3, c4) = (layout.line_range(3), layout.line_range(4));
+        let y = layout.top(1) + 2.;
+        for offset in (0..=520).step_by(40) {
+            cache.set_group_scroll(7, offset as f32);
+            let x = 600. - offset as f32 + 1.;
+            let hit = layout.hit_test(x, y);
+            assert!(
+                c3.contains(&hit) || hit == c3.end,
+                "at {offset}: {hit} in column 3 ({c3:?})"
+            );
+            assert_eq!(
+                hit,
+                at("c3"),
+                "at {offset}: the caret at the column's start"
+            );
+        }
+        cache.set_group_scroll(7, 520.);
+        let hit = layout.hit_test(381., y);
+        assert_eq!(hit, at("c4"), "the last column, scrolled to");
+        cache.set_group_scroll(7, 0.);
+        let hit = layout.hit_test(700., y);
+        assert!(
+            c3.contains(&hit) || hit == c3.end,
+            "past the frame: its last column shown, not the clipped one"
+        );
+        assert!(!c4.contains(&hit));
+    }
+
+    /// A selection across the frame's edge shows only what the frame shows: none of a cell scrolled out of it.
+    #[test]
+    fn a_selection_across_the_clip_shows_only_what_the_frame_shows() {
+        let (cache, layout) = wide();
+        let range = WIDE.find("c3").unwrap()..WIDE.find("after").unwrap() - 1;
+        let shown = layout.selection(range.clone());
+        assert!(!shown.is_empty(), "the third column shows in part");
+        for rect in &shown {
+            assert!(
+                rect.x >= 0. && rect.x + rect.width <= 680. + 0.01,
+                "inside the frame: {rect:?}"
+            );
+            assert!(rect.x < 680., "{rect:?}");
+        }
+        let top_c4 = layout.top(4);
+        cache.set_group_scroll(7, 520.);
+        let scrolled = layout.selection(range);
+        assert!(
+            scrolled
+                .iter()
+                .any(|r| r.x >= 380. - 0.01 && r.y >= top_c4 - 0.01),
+            "scrolled, the last column's selection shows: {scrolled:?}"
+        );
+        for rect in &scrolled {
+            assert!(
+                rect.x >= 0. && rect.x + rect.width <= 680. + 0.01,
+                "{rect:?}"
+            );
+        }
+    }
+
+    /// A caret in a cell the frame clips asks the group to move just enough to show it, either way, within its
+    /// limit; one it shows asks nothing.
+    #[test]
+    fn a_caret_in_a_clipped_cell_is_revealed() {
+        let (cache, layout) = wide();
+        let at = |needle: &str| WIDE.find(needle).unwrap();
+        let caret = layout.caret(at("c4") + 2);
+        let (group, to) = layout
+            .reveal_in_group(4, caret)
+            .expect("the fourth column is clipped");
+        assert_eq!(group, 7);
+        assert!(
+            (to - (caret.x + caret.width - 680.)).abs() < 0.01,
+            "{to} for {caret:?}"
+        );
+        cache.set_group_scroll(7, to);
+        let shown = layout.caret(at("c4") + 2);
+        assert!(shown.x + shown.width <= 680. + 0.01, "{shown:?}");
+        assert_eq!(
+            layout.reveal_in_group(4, shown),
+            None,
+            "shown: nothing to move"
+        );
+        // Back to the first column: to 0.
+        cache.set_group_scroll(7, 520.);
+        let first = layout.caret(at("c1"));
+        assert_eq!(layout.reveal_in_group(1, first), Some((7, 0.)));
+        // A line outside the group asks nothing.
+        assert_eq!(layout.reveal_in_group(0, layout.caret(0)), None);
+    }
+
+    /// Lines in no scroll group lay out, hit and select as before whatever offsets are set, and finding groups
+    /// asks nothing of their insets.
+    #[test]
+    fn lines_without_a_scroll_group_ignore_group_offsets() {
+        let (cache, layout, _) = table(TABLE, 1);
+        layout.lines_between(0., 10_000.);
+        assert!(!layout.grouped());
+        assert_eq!(layout.group_of(2), None);
+        let carets: Vec<Rect> = (0..TABLE.len()).map(|i| layout.caret(i)).collect();
+        let hits: Vec<usize> = (0..40)
+            .map(|k| layout.hit_test(k as f32 * 6., layout.top(1) + 3.))
+            .collect();
+        cache.set_group_scroll(0, 50.);
+        cache.set_group_scroll(7, 120.);
+        assert_eq!(
+            carets,
+            (0..TABLE.len())
+                .map(|i| layout.caret(i))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits,
+            (0..40)
+                .map(|k| layout.hit_test(k as f32 * 6., layout.top(1) + 3.))
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// Every line's top, own height and row height, and the whole height, all shaped.
     fn geometry(layout: &LinesLayout) -> Vec<(f32, f32, f32)> {
         layout.lines_between(0., 10_000.);
