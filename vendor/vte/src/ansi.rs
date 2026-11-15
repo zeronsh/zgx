@@ -1170,13 +1170,33 @@ impl NamedColor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Color {
     Named(NamedColor),
     Spec(Rgb),
     Indexed(u8),
 }
+
+// zgx: by hand, each kind's value compared as a number (a named colour by
+// its index, an RGB by its three bytes at once): the derived compare went
+// through `NamedColor`'s and `Rgb`'s own, and a terminal row compares every
+// cell's two colours with its neighbour's.
+impl PartialEq for Color {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (Color::Named(a), Color::Named(b)) => a as u16 == b as u16,
+            (Color::Spec(a), Color::Spec(b)) => {
+                u32::from_le_bytes([a.r, a.g, a.b, 0]) == u32::from_le_bytes([b.r, b.g, b.b, 0])
+            },
+            (Color::Indexed(a), Color::Indexed(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Color {}
 
 /// Terminal character attributes.
 #[derive(Debug, Eq, PartialEq)]
