@@ -1081,6 +1081,10 @@ pub(crate) struct ListRare {
     pub(crate) estimate: Option<Rc<crate::estimate::Rule>>,
     /// `at_end = state`: kept saying whether it rests at its end.
     pub(crate) at_end: Option<Signal<Value>>,
+    /// `glide` (a boolean, or a state or function of one), with `follow`:
+    /// while it says true, the list glides to its end as it grows rather
+    /// than jumping there (`VariableHeights::glide_end`).
+    pub(crate) glide: Option<Source>,
     /// `overscroll = "contain"`: a wheel over it stays with it.
     pub(crate) contain: bool,
     /// `scroll_padding`: kept clear as a row's control scrolls into view.
@@ -3685,6 +3689,7 @@ const LATE_FIELDS: &[&str] = &[
     "start_distance",
     "ahead",
     "at_end",
+    "glide",
     "on_paste",
     "overscroll",
     "wheel_across",
@@ -3798,6 +3803,11 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                     "autocorrect" => rare.autocorrect = on,
                     _ => rare.smart_punctuation = on,
                 }
+            }
+        }
+        "glide" => {
+            if let Kind::List { rare, .. } = &mut node.kind {
+                rare.get_or_insert_default().glide = Some(source(lua, Ty::Bool, "glide", value)?);
             }
         }
         "on_start" | "start_distance" | "ahead" | "at_end" => {

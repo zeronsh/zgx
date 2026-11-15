@@ -17283,6 +17283,11 @@ export type ListProps = {
 	-- With `measured` or `heights`: resting at the end, it stays there as
 	-- rows are added and measured (a chat); scrolled up, it stays put.
 	follow: boolean?,
+	-- With `follow`: while it says true (a reply being written), the list
+	-- glides to its end on a spring as it grows rather than jumping a line
+	-- at a time. Rows growing above the view move nothing in it, a scroll
+	-- stops the glide, and `at_end` stays true while it catches up.
+	glide: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- "contain": a wheel or trackpad gesture over it stays with it at its
 	-- edges (CSS's overscroll-behavior), the scroll views around it never
 	-- moving; "auto" (the default) hands what it can't scroll on to them.
