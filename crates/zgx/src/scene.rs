@@ -6025,6 +6025,19 @@ impl Scene {
     pub fn kind(&self, id: NodeId) -> &NodeKind {
         &self.node(id).kind
     }
+    /// The width and height `style` would give `id`, read in place.
+    pub(crate) fn given_size(&self, id: NodeId) -> (Option<f32>, Option<f32>) {
+        let node = self.node(id);
+        let style = if node.contents() {
+            match self.contents_styles.get(&id) {
+                Some(style) => style,
+                None => return (None, None),
+            }
+        } else {
+            self.given_styles.get(&id).unwrap_or(&node.style)
+        };
+        (style.width, style.height)
+    }
     /// The style `id` was given (a contents node's own, not what it lays
     /// out as).
     pub fn style(&self, id: NodeId) -> Style {
@@ -17250,6 +17263,38 @@ impl<'a> Iterator for PaintIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// `given_size` reads the width and height `style` gives: a plain node's,
+    /// one laid out otherwise than given (right to left), and a contents
+    /// node's own.
+    #[test]
+    fn a_given_size_is_its_styles() {
+        let mut scene = Scene::new(400., 300.);
+        let root = scene.root();
+        let sized = |width, height| Style {
+            width: Some(width),
+            height: Some(height),
+            padding_edges: Some(Insets {
+                left: 3.,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plain = scene.append(root, NodeKind::Container(Layout::Column), sized(120., 40.));
+        let mirrored = scene.append(root, NodeKind::Container(Layout::Row), Style::default());
+        scene.set_direction(mirrored, Some(Direction::Rtl));
+        scene.set_style(mirrored, sized(90., 30.));
+        let contents = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_display_contents(contents, true);
+        scene.set_style(contents, sized(60., 20.));
+        let free = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.prepare_layout();
+        for id in [plain, mirrored, contents, free] {
+            let style = scene.style(id);
+            assert_eq!(scene.given_size(id), (style.width, style.height), "{id:?}");
+        }
+        assert_eq!(scene.given_size(mirrored), (Some(90.), Some(30.)));
+        assert_eq!(scene.given_size(contents), (Some(60.), Some(20.)));
+    }
     /// Taking a language again keeps a text's boxes.
     #[test]
     fn review_relayered_text_keeps_its_boxes() {

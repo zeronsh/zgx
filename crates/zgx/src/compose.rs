@@ -3704,9 +3704,7 @@ fn placed_as<K: Eq + std::hash::Hash>(
     keys: &[(K, usize)],
     width: f32,
 ) -> bool {
-    let style = scene.style(viewport);
-    style.width == Some(width)
-        && style.height == Some(height)
+    scene.given_size(viewport) == (Some(width), Some(height))
         && entries.len() == keys.len()
         && keys.iter().all(|(key, index)| {
             entries
