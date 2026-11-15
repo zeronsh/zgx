@@ -1503,8 +1503,6 @@ pub(crate) struct Span {
     pub click: Option<Handler>,
     /// Where it links (`href = "https://…"`): a click opens it.
     pub href: Option<std::sync::Arc<str>>,
-    /// What assistive technology reads for it instead of its text.
-    pub label: Option<std::sync::Arc<str>>,
     /// How far below the baseline its underline sits.
     pub underline_offset: Option<f32>,
     /// How its underline is drawn: a line style, a colour, a thickness.
@@ -1542,6 +1540,8 @@ pub(crate) struct SpanRare {
     /// line height and padding its line's (`TextSpan::inline_box`).
     /// Internal until its API is settled.
     pub boxed: bool,
+    /// What assistive technology reads for it instead of its text.
+    pub label: Option<std::sync::Arc<str>>,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -5014,7 +5014,6 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
         radius: 0.,
         click: None,
         href: None,
-        label: None,
         underline_offset: None,
         underline_style: None,
         underline_color: None,
@@ -5104,32 +5103,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         themed_color(&hover.get::<Value>("color")?),
                     ));
                 }
-                b"icon" => {
-                    let icon: Table = lua.unpack(given)?;
-                    let src = match (
-                        icon.get::<Option<String>>("src")?,
-                        icon.get::<Option<String>>("code")?,
-                    ) {
-                        (Some(src), _) => src,
-                        (None, Some(code)) => format!("code:{code}"),
-                        (None, None) => {
-                            return Err(mlua::Error::runtime(
-                                "a span's icon takes `src` or `code`",
-                            ));
-                        }
-                    };
-                    let tint = icon.get::<Value>("tint")?;
-                    let bg = icon.get::<Value>("bg")?;
-                    rare_mut(&mut span).icon = Some(SpanIcon {
-                        src,
-                        size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
-                        gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
-                        tint: (!matches!(tint, Value::Nil)).then_some(tint),
-                        bg: (!matches!(bg, Value::Nil)).then_some(bg),
-                        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
-                        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
-                    });
-                }
+                b"icon" => span_icon(lua, given, &mut span)?,
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
                 b"box" => {
                     if lua.unpack::<bool>(given)? {
@@ -5138,11 +5112,13 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 b"on_click" => span.click = Some(handler(given)?),
                 b"href" => span.href = Some(lua.unpack::<String>(given)?.into()),
-                b"label" => span.label = Some(lua.unpack::<String>(given)?.into()),
                 b"context_menu" => match given {
                     mlua::Value::Function(f) => rare_mut(&mut span).menu = Some(f),
                     _ => return Err(mlua::Error::runtime("context_menu takes a function")),
                 },
+                // Its name for assistive technology: a key no other arm
+                // takes is checked for it, a known key pays nothing.
+                b"label" => span_label(lua, given, &mut span)?,
                 _ => {}
             }
             Ok(())
@@ -5167,6 +5143,43 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
         }
     }
     Ok(span)
+}
+
+/// `label` on a span: what assistive technology reads for it.
+#[cold]
+#[inline(never)]
+fn span_label(lua: &Lua, given: mlua::Value, span: &mut Span) -> mlua::Result<()> {
+    rare_mut(span).label = Some(lua.unpack::<String>(given)?.into());
+    Ok(())
+}
+/// `icon = { src = …, size, gap, tint, bg, radius, pad }` on a span: out
+/// of the field loop, which most spans run without one.
+#[cold]
+#[inline(never)]
+fn span_icon(lua: &Lua, given: mlua::Value, span: &mut Span) -> mlua::Result<()> {
+    let icon: Table = lua.unpack(given)?;
+    let src = match (
+        icon.get::<Option<String>>("src")?,
+        icon.get::<Option<String>>("code")?,
+    ) {
+        (Some(src), _) => src,
+        (None, Some(code)) => format!("code:{code}"),
+        (None, None) => {
+            return Err(mlua::Error::runtime("a span's icon takes `src` or `code`"));
+        }
+    };
+    let tint = icon.get::<Value>("tint")?;
+    let bg = icon.get::<Value>("bg")?;
+    rare_mut(span).icon = Some(SpanIcon {
+        src,
+        size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
+        gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
+        tint: (!matches!(tint, Value::Nil)).then_some(tint),
+        bg: (!matches!(bg, Value::Nil)).then_some(bg),
+        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
+        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
+    });
+    Ok(())
 }
 
 /// Installs the read-only `ui` global.
