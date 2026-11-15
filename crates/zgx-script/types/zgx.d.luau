@@ -9196,14 +9196,27 @@ export type InputProps = {
 	-- it leaves; again when a scroll or a new layout moves it.
 	on_atom_hover: ((atom: AtomItem?, box: { x: number, y: number, width: number, height: number }?) -> ())?,
 	-- The wash behind atoms that have none of their own (`style.bg`).
-	atom_style: { bg: Color? }?,
+	-- Internal, subject to change: and how they show beyond it, as a
+	-- mention does (an atom's own `style` wins field by field).
+	atom_style: AtomLook?,
+}
+-- Internal, subject to change: how an atom shows. Its text's colour and
+-- weight, a line under it (the font's thickness, `offset` points below the
+-- baseline), and an icon in room before its text that stays with its first
+-- word as it wraps.
+export type AtomLook = {
+	bg: Color?,
+	color: Color?,
+	weight: number?,
+	underline: (boolean | { color: Color?, offset: number? })?,
+	icon: { src: string?, code: string?, size: number?, gap: number?, tint: Color? }?,
 }
 export type AtomItem = {
 	id: string?,
 	from: number,
 	to: number,
 	data: any?,
-	style: { bg: string? }?,
+	style: AtomLook?,
 	-- Only on a removed atom: the text it had.
 	label: string?,
 }

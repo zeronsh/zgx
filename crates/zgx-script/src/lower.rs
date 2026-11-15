@@ -3359,7 +3359,7 @@ fn kind_view(
                     Some(theme) => theme,
                     None => zgx::theme::Themes::of(&low.runtime).root().clone(),
                 };
-                view = code_editor(view, code, searched, vm, theme);
+                view = code_editor(view, code, searched, vm, low, theme);
             }
             view
         }
@@ -6463,6 +6463,7 @@ fn code_editor(
     code: &Rc<crate::node::CodeProps>,
     searched: Option<Signal<Value>>,
     vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
     theme: Rc<zgx::theme::ThemeScope>,
 ) -> View {
     // A colour as scripts write them (`"#ff8800"`, `"$accent"`), each
@@ -6742,11 +6743,20 @@ fn code_editor(
             view = view.atom_wash(color);
         }
     }
+    if let Some(look) = &code.atom_look {
+        view = view.atom_style(atom_style_of(look, vm, low, &theme));
+    }
     if let Some(state) = &code.atoms {
         let (state, color_of) = (state.clone(), color_of.clone());
+        let (vm, low, theme) = (vm.clone(), low.clone(), theme.clone());
+        // An atom's own `style` beyond its wash, made as its item is read.
+        let look_of = move |style: &Value| {
+            crate::node::atom_look_of(style)
+                .map(|look| Arc::new(atom_style_of(&look, &vm, &low, &theme)))
+        };
         view = view.atoms_when(move |handle| {
             let list = state.with(Clone::clone);
-            crate::atoms::from_list(&list, handle, &*color_of)
+            crate::atoms::from_list(&list, handle, &*color_of, &look_of)
         });
     }
     if code.atoms.is_some() || code.on_atoms.is_some() {
@@ -6871,6 +6881,48 @@ fn code_editor(
         });
     }
     view
+}
+/// A mention look (`atom_style`, an atom's `style`) as the text area shows
+/// it: its colours resolved in `theme`, its icon loaded (and tinted).
+fn atom_style_of(
+    look: &crate::node::AtomLook,
+    vm: &Rc<Vm>,
+    low: &Lowering,
+    theme: &zgx::theme::ThemeScope,
+) -> zgx::widgets::AtomStyle {
+    let color = |value: &Value| match crate::node::themed_color(value)? {
+        zgx::theme::Themed::Value(color) => Some(color),
+        zgx::theme::Themed::Token(token) => theme.get(token).color(),
+    };
+    let text = look.color.as_ref().and_then(color);
+    let icon = look.icon.as_ref().map(|icon| {
+        let data = load_svg(vm, low, &icon.src);
+        let tint = match &icon.tint {
+            Some(Value::Str(s)) if &**s == "currentColor" => text,
+            Some(tint) => color(tint),
+            None => None,
+        };
+        zgx::widgets::AtomIcon {
+            svg: match tint {
+                Some(tint) => Arc::new(data.tinted(tint)),
+                None => data,
+            },
+            size: icon.size,
+            gap: icon.gap,
+        }
+    });
+    zgx::widgets::AtomStyle {
+        color: text,
+        weight: look.weight,
+        underline: look
+            .underline
+            .as_ref()
+            .map(|(line, offset)| zgx::widgets::AtomUnderline {
+                color: line.as_ref().and_then(color),
+                offset: *offset,
+            }),
+        icon,
+    }
 }
 /// An atom as a script reads it (`{ id, from, to, data?, style? }`,
 /// characters from 0), from `text`, the text its range is in.
