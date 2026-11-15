@@ -3677,6 +3677,43 @@ fn merge_kept<K: Eq + std::hash::Hash + Clone>(
         )
     });
 }
+#[cfg(debug_assertions)]
+thread_local! {
+    static LIST_PASSES: Cell<u64> = const { Cell::new(0) };
+}
+/// How many times virtual lists have placed their rows so far on this
+/// thread: a test's measure of their work. Debug builds count; a release
+/// build says 0.
+#[doc(hidden)]
+pub fn virtual_list_passes() -> u64 {
+    #[cfg(debug_assertions)]
+    return LIST_PASSES.with(Cell::get);
+    #[cfg(not(debug_assertions))]
+    0
+}
+/// Whether a list's pass would place its rows as they are: its `viewport`
+/// already `width` by `height` (its rows' whole height), and `entries`
+/// holding `keys` alone (each a row already), each placed at its index and
+/// at `width`.
+#[inline(never)]
+fn placed_as<K: Eq + std::hash::Hash>(
+    scene: &crate::scene::Scene,
+    viewport: NodeId,
+    height: f32,
+    entries: &HashMap<K, (NodeId, Signal<usize>, Placed), rustc_hash::FxBuildHasher>,
+    keys: &[(K, usize)],
+    width: f32,
+) -> bool {
+    let style = scene.style(viewport);
+    style.width == Some(width)
+        && style.height == Some(height)
+        && entries.len() == keys.len()
+        && keys.iter().all(|(key, index)| {
+            entries
+                .get(key)
+                .is_some_and(|(.., placed)| placed.at == Some((*index, width.to_bits())))
+        })
+}
 /// Fixed-height keyed rows; only the visible range plus overscan is mounted.
 /// `count` and `key` track reactive reads. `build` runs once per mounted key;
 /// its index signal updates when that key moves. Offscreen rows are disposed,
@@ -3931,9 +3968,28 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let Some(mut ui) = weak.upgrade() else {
                     return;
                 };
-                if !ui.scene.borrow().contains(root) {
+                // Scrolled with the view around it, which runs this at each of
+                // its steps: where that shows the rows it placed, each where it
+                // placed it, at the same width and count, all below would be
+                // as it was (a row asked for went to that view, above; a list
+                // the keyboard moves through has its focus to follow).
+                if !ui.scene.borrow().contains(root)
+                    || (fresh == 0
+                        && navigation.is_none()
+                        && window.is_some()
+                        && placed_as(
+                            &ui.scene.borrow(),
+                            viewport,
+                            model.content_height(),
+                            &entries,
+                            &keys,
+                            width,
+                        ))
+                {
                     return;
                 }
+                #[cfg(debug_assertions)]
+                LIST_PASSES.with(|passes| passes.set(passes.get() + 1));
                 runtime.untracked(|| {
                     let _theme = ui.enter_theme(&environment.theme);
                     let mut transaction = MountTransaction::new(&ui, content);
