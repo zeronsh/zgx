@@ -13,8 +13,8 @@ use objc2::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, De
 use objc2_app_kit::{
     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
-    NSColor, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeString,
-    NSRequestUserAttentionType, NSScreen, NSView, NSWindowButton, NSWindowDelegate,
+    NSColor, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeHTML,
+    NSPasteboardTypeString, NSRequestUserAttentionType, NSScreen, NSView, NSWindowButton, NSWindowDelegate,
     NSWindowFullScreenButton, NSWindowLevel, NSWindowOcclusionState, NSWindowOrderingMode,
     NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
@@ -432,10 +432,19 @@ declare_class!(
             let pb: Retained<NSPasteboard> = unsafe { msg_send_id![sender, draggingPasteboard] };
             if self.ivars().text_drag.replace(false) {
                 let text = unsafe { pb.stringForType(NSPasteboardTypeString) };
+                // The same as HTML, where the source offered it (a browser's
+                // selection).
+                let html = unsafe { pb.stringForType(NSPasteboardTypeHTML) }.map(|h| h.to_string());
                 let (x, y) = self.drag_point(sender);
                 let drops = crate::platform::text_drop::text_drops();
                 let taken = match (text, &drops) {
-                    (Some(text), Some(drops)) => drops.dropped(self.public_id(), x, y, &text.to_string()),
+                    (Some(text), Some(drops)) => drops.dropped_with_html(
+                        self.public_id(),
+                        x,
+                        y,
+                        &text.to_string(),
+                        html.as_deref(),
+                    ),
                     _ => false,
                 };
                 if !taken {

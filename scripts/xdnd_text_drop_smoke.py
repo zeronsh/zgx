@@ -11,7 +11,9 @@ Checks that:
   point (the field's end) and the source hears it taken;
 - let go over the chip (no destination there), nothing is dropped and the
   source hears it refused;
-- Escape over the field cancels: nothing is dropped."""
+- Escape over the field cancels: nothing is dropped;
+- let go over a rich destination, it gets the text and the HTML the
+  source offered beside it (`text/html`, asked for after the text)."""
 import argparse
 import json
 import os
@@ -28,7 +30,10 @@ SCREEN = (1600, 1000)
 # end (its left 10, 240 wide; 104 down, 30 high).
 CHIP = (10 + 60, 10 + 14)
 FIELD_END = (10 + 230, 104 + 15)
+# Its rich destination under the field (144 down, 30 high).
+RICH = (10 + 120, 144 + 15)
 START = "drag these words"
+HTML = "<b> and more</b>"
 
 
 def main():
@@ -106,7 +111,7 @@ def main():
         until("the field's first value", lambda: words())
         wx, wy, _, wh = geometry(window)
         source, source_log = launch("source", ["python3", "scripts/text_drag_source.py", "Text source",
-                                               wx, wy + wh + 80, " and more"], env)
+                                               wx, wy + wh + 80, " and more", "--html", HTML], env)
         source_window = until("the source window", lambda: named("Text source"))[0]
         until("the source ready", lambda: "READY" in source_log.read_text())
         time.sleep(.5)
@@ -160,13 +165,27 @@ def main():
         run("xdotool", "mouseup", 1)
         time.sleep(.5)
         checks["escape: nothing dropped"] = len(words()) == 2
+
+        # Let go over the rich destination: the text, and its HTML with it.
+        time.sleep(.5)
+        rich = (wx + RICH[0], wy + RICH[1])
+        at = grab()
+        glide(at, rich)
+        time.sleep(.4)
+        assert over(window), "the pointer is not over the probe's window"
+        run("xdotool", "mouseup", 1)
+        until("the rich drop", lambda: re.search(r"^RICH ", app_log.read_text(), re.M))
+        until("the drag's end", lambda: lines(r"^END$") == 4)
+        checks["rich"] = re.search(r"^RICH .*$", app_log.read_text(), re.M).group(0)
+        checks["rich: the text and its HTML"] = checks["rich"] == 'RICH " and more" Some("<b> and more</b>")'
+        checks["asked for the HTML"] = lines(r"^SENT text/html$") >= 1
         checks["app alive"] = app.poll() is None
 
         (args.output / "result.json").write_text(json.dumps(checks, indent=2) + "\n")
         failed = [key for key, value in checks.items() if value is False]
         assert not failed, f"failed: {failed}\n{json.dumps(checks, indent=2)}"
         print("PASS: X11 text drops into zgx: a GTK source's text lands where it was let go over a field; "
-              "over the chip it is refused, and Escape drops nothing")
+              "over the chip it is refused, Escape drops nothing, and a rich destination gets its HTML too")
     finally:
         for process in reversed(processes):
             stop(process)

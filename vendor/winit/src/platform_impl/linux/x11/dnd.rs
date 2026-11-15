@@ -67,6 +67,12 @@ pub struct TextDrag {
     pub asked: bool,
     /// Its text, once it arrived (`None` inside: none could be had).
     pub text: Option<Option<String>>,
+    /// Its HTML, where the source offers `text/html`: asked for once its
+    /// text came, as one conversion at a time goes through the selection's
+    /// property (`None` inside: none could be had).
+    pub html: Option<Option<String>>,
+    /// The HTML was asked for and hasn't come.
+    pub asking_html: bool,
     /// Let go of before its text arrived: the source to finish with then.
     pub dropped: Option<xproto::Window>,
 }
@@ -104,6 +110,19 @@ impl Dnd {
         [atoms[TextPlainUtf8], atoms[UTF8_STRING], atoms[TextPlain]]
             .into_iter()
             .find(|target| types.contains(target))
+    }
+
+    /// zgx patch: the target a drag's text is asked for as HTML in, if it
+    /// offers `text/html`.
+    pub fn html_target(&self) -> Option<xproto::Atom> {
+        let html = self.xconn.atoms()[TextHtml];
+        self.type_list.as_ref()?.contains(&html).then_some(html)
+    }
+
+    /// zgx patch: whether the text drag's text, and its HTML where it was
+    /// asked for, came.
+    pub fn text_complete(&self) -> bool {
+        self.text.as_ref().is_some_and(|drag| drag.text.is_some() && !drag.asking_html)
     }
 
     /// zgx patch: whether the window would take the text drag, as a copy.
@@ -166,6 +185,18 @@ impl Dnd {
     /// zgx patch: the drag's text, as the source put it on `window`, of
     /// whatever type it names it (GTK the target's, others `UTF8_STRING`).
     pub unsafe fn read_text(&self, window: xproto::Window) -> Option<String> {
+        unsafe { self.read_bytes(window) }.map(|data| String::from_utf8_lossy(&data).into_owned())
+    }
+
+    /// zgx patch: the drag's HTML, as the source put it on `window`: UTF-8,
+    /// or UTF-16 after a byte order mark (as Firefox puts `text/html`).
+    pub unsafe fn read_html(&self, window: xproto::Window) -> Option<String> {
+        let data = unsafe { self.read_bytes(window) }?;
+        Some(html_text(&data))
+    }
+
+    /// zgx patch: the bytes the source put on `window` for a conversion.
+    unsafe fn read_bytes(&self, window: xproto::Window) -> Option<Vec<u8>> {
         let atoms = self.xconn.atoms();
         let conn = self.xconn.xcb_connection();
         let mut data = Vec::new();
@@ -192,7 +223,7 @@ impl Dnd {
             }
             offset += (reply.value.len() / 4) as u32;
         }
-        Some(String::from_utf8_lossy(&data).into_owned())
+        Some(data)
     }
 
     pub unsafe fn send_status(
@@ -304,5 +335,35 @@ impl Dnd {
         } else {
             Err(DndDataParseError::EmptyData)
         }
+    }
+}
+
+/// zgx patch: HTML's bytes as text: UTF-16 after a byte order mark, else
+/// UTF-8.
+fn html_text(data: &[u8]) -> String {
+    let units = |le: bool| {
+        data[2..]
+            .chunks_exact(2)
+            .map(|pair| if le { u16::from_le_bytes([pair[0], pair[1]]) } else { u16::from_be_bytes([pair[0], pair[1]]) })
+            .collect::<Vec<u16>>()
+    };
+    match data {
+        [0xff, 0xfe, ..] => String::from_utf16_lossy(&units(true)),
+        [0xfe, 0xff, ..] => String::from_utf16_lossy(&units(false)),
+        [0xef, 0xbb, 0xbf, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => String::from_utf8_lossy(data).into_owned(),
+    }
+}
+
+#[cfg(test)]
+mod html_tests {
+    #[test]
+    fn html_reads_as_utf8_or_utf16_by_its_mark() {
+        assert_eq!(super::html_text("<b>caf\u{e9}</b>".as_bytes()), "<b>caf\u{e9}</b>");
+        let utf16: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain("<i>\u{e9}</i>".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(super::html_text(&utf16), "<i>\u{e9}</i>");
     }
 }
