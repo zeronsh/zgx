@@ -46,6 +46,8 @@ mod editor_focus_snapshot;
 mod editor_hints;
 #[path = "../editor_ingress_normalization.rs"]
 mod editor_ingress_normalization;
+#[path = "../editor_inline_svgs.rs"]
+mod editor_inline_svgs;
 #[path = "../editor_input_mode.rs"]
 mod editor_input_mode;
 #[path = "../editor_line_images.rs"]

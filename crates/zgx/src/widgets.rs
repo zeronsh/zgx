@@ -6794,7 +6794,7 @@ impl Ui {
                 // Each mark's box, and what of it its scroll group's frame cuts (left, right).
                 type Wanted = (Rect, LineMark, Option<(f32, f32)>);
                 let mut wanted: Vec<Wanted> = Vec::new();
-                if let (Some(lines), Some(marks_of)) = (&long_lines, marks_of) {
+                if let Some(lines) = &long_lines {
                     for i in shown_lines.clone() {
                         let inset = lines.inset(i);
                         if inset.hidden {
@@ -6811,7 +6811,33 @@ impl Ui {
                         let grouped = lines
                             .group_of(i)
                             .map(|(_, frame)| (lines.group_offset(&inset), frame.left - scroll.0));
-                        for mark in marks_of(i) {
+                        let mut marks = marks_of.as_ref().map(|of| of(i)).unwrap_or_default();
+                        // Each inline SVG, where its line laid out its box.
+                        if let Some(spans) = draw_hint.line_cache().spans(lines, i)
+                            && spans.iter().any(|(_, style)| style.inline_svg.is_some())
+                        {
+                            let line = lines.line_text(i);
+                            let svgs = crate::editor_lines::inline_svgs(&line, &spans);
+                            if !svgs.is_empty() {
+                                let placed = lines.line(i).inline_boxes();
+                                for (at, svg, em) in svgs {
+                                    let Some(&(_, bx, by)) = placed.iter().find(|(p, ..)| *p == at)
+                                    else {
+                                        continue;
+                                    };
+                                    let em = em.unwrap_or(size);
+                                    marks.push(LineMark {
+                                        x: inset.left + bx,
+                                        y: by,
+                                        width: svg.width * em,
+                                        height: (svg.height + svg.depth) * em,
+                                        svg: Some(svg.svg),
+                                        ..LineMark::default()
+                                    });
+                                }
+                            }
+                        }
+                        for mark in marks {
                             let width = if mark.width.is_finite() {
                                 mark.width
                             } else {
@@ -6902,7 +6928,11 @@ impl Ui {
                         {
                             s.remove(picture);
                         }
-                        if mark.image.is_some() {
+                        if let Some(svg) = &mark.svg {
+                            if !matches!(s.kind(id), NodeKind::Svg(shown) if **shown == **svg) {
+                                s.set_kind(id, NodeKind::Svg(svg.clone()));
+                            }
+                        } else if mark.image.is_some() {
                             if !matches!(s.kind(id), NodeKind::Panel { quad: q, .. } if *q == quad)
                             {
                                 s.set_kind(

@@ -48,7 +48,7 @@ pub type Highlighter = Rc<dyn Fn(&str, u32) -> (LineColors, u32)>;
 /// Built from its default (or a colour) with its methods, so styles added
 /// later leave the code that builds these as it is:
 /// `SpanStyle::default().weight(600).italic()`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SpanStyle {
     /// Its text's colour (none: the editor's).
@@ -86,6 +86,10 @@ pub struct SpanStyle {
     /// equation's picture, `AtomStyle::svg`): as wide as that, the line as
     /// tall as it needs, its text kept for copy and search.
     pub boxed: Option<[f32; 3]>,
+    /// A picture standing for each [`INLINE_BOX_CHAR`](crate::rich_text::INLINE_BOX_CHAR) in its range, sized in ems
+    /// of its text, its baseline on the line's (a formula): one atom to carets and hits, its line grown to hold it.
+    /// Drawn as given, not tinted.
+    pub inline_svg: Option<crate::compose::InlineSvg>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -142,6 +146,11 @@ impl SpanStyle {
         self.radius = Some(radius);
         self
     }
+    /// `svg` in place of each inline box character in its range (`SpanStyle::inline_svg`).
+    pub fn inline_svg(mut self, svg: crate::compose::InlineSvg) -> Self {
+        self.inline_svg = Some(svg);
+        self
+    }
     /// Its text in the monospaced font.
     pub const fn mono(mut self) -> Self {
         self.mono = true;
@@ -163,6 +172,9 @@ impl SpanStyle {
         self.underline_offset = self.underline_offset.or(style.underline_offset);
         self.lead = self.lead.or(style.lead);
         self.boxed = self.boxed.or(style.boxed);
+        if self.inline_svg.is_none() {
+            self.inline_svg.clone_from(&style.inline_svg);
+        }
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
@@ -178,6 +190,7 @@ impl SpanStyle {
             && self.radius.is_none()
             && self.lead.is_none()
             && self.boxed.is_none()
+            && self.inline_svg.is_none()
     }
     /// Whether it changes how its text is shaped (and so its width or height).
     fn shapes(&self) -> bool {
@@ -189,6 +202,7 @@ impl SpanStyle {
             || self.padding.is_some()
             || self.lead.is_some()
             || self.boxed.is_some()
+            || self.inline_svg.is_some()
     }
 }
 /// Room around one line of a text area (`EditorHandle::set_line_insets`): a list item's indent, a heading's space
@@ -285,6 +299,8 @@ pub struct LineMark {
     /// Where it sits across the line's width (left, centre or right; `x` then offsets it); none: at `x` (or from the
     /// right edge with `from_right`).
     pub align: Option<crate::text_layout::TextAlign>,
+    /// A picture drawn as given in its box, in place of its fill and border.
+    pub svg: Option<std::sync::Arc<crate::svg::SvgData>>,
 }
 /// A line mark's picture (`LineMark::image`): decoded pixels and how they fit the mark's box. A file is decoded by
 /// the app, as an image view's is (`zgx_gpu::assets::decode_image_kept`), and kept in its `ImageCache`.
@@ -321,6 +337,7 @@ impl Default for LineMark {
             label: None,
             image: None,
             align: None,
+            svg: None,
         }
     }
 }
@@ -387,7 +404,7 @@ fn runs(line: &str, spans: &LineSpans) -> Vec<(Range<usize>, Option<SpanStyle>)>
             if range.start > at {
                 runs.push((at..range.start, None));
             }
-            runs.push((range.clone(), Some(*style)));
+            runs.push((range.clone(), Some(style.clone())));
             at = range.end;
         }
         if at < line.len() {
@@ -475,7 +492,7 @@ pub(crate) fn styled_line(
         }
         _ => false,
     });
-    let boxes: Vec<crate::rich_text::InlineBox> = styled
+    let mut boxes: Vec<crate::rich_text::InlineBox> = styled
         .iter()
         .filter_map(|(range, style)| {
             let [w, h, d] = style.as_ref()?.boxed?;
@@ -489,8 +506,20 @@ pub(crate) fn styled_line(
         .collect();
     let runs: Vec<_> = styled
         .into_iter()
+        .flat_map(|(range, style)| boxed_runs(line, range, style))
         .map(|(range, style)| {
             let style = style.unwrap_or_default();
+            if let Some(svg) = &style.inline_svg
+                && &line[range.clone()] == crate::rich_text::INLINE_BOX_TEXT
+            {
+                let em = style.size.unwrap_or(size);
+                boxes.push(crate::rich_text::InlineBox {
+                    width: svg.width * em,
+                    height: (svg.height + svg.depth) * em,
+                    baseline: svg.height * em,
+                    ..crate::rich_text::InlineBox::new(range.start)
+                });
+            }
             let mut font = font.clone();
             if let Some(weight) = style.weight {
                 font.weight = weight.clamp(1, 1000);
@@ -523,10 +552,16 @@ pub(crate) fn styled_line(
             }
         })
         .collect();
-    crate::rich_text::RichText::new(line, runs)
-        .ok()?
-        .with_inline_boxes(boxes)
-        .ok()
+    // An atom's box (`boxed`) and a span's pictures (`inline_svg`), in the
+    // text's order, as `with_inline_boxes` takes them.
+    boxes.sort_by_key(|b| b.at);
+    boxes.dedup_by_key(|b| b.at);
+    let rich = crate::rich_text::RichText::new(line, runs).ok()?;
+    if boxes.is_empty() {
+        Some(rich)
+    } else {
+        rich.with_inline_boxes(boxes).ok()
+    }
 }
 /// `style`'s underline: one point thick in its text's colour, or the
 /// font's thickness in its own colour and place when it says them.
@@ -542,6 +577,55 @@ fn underline(style: &SpanStyle) -> crate::rich_text::Decoration {
         line = line.offset(offset);
     }
     line
+}
+/// A run whose style has an inline SVG, cut so each inline box character in it is a run of its own.
+fn boxed_runs(
+    line: &str,
+    range: Range<usize>,
+    style: Option<SpanStyle>,
+) -> Vec<(Range<usize>, Option<SpanStyle>)> {
+    if style.as_ref().is_none_or(|s| s.inline_svg.is_none())
+        || !line[range.clone()].contains(crate::rich_text::INLINE_BOX_CHAR)
+    {
+        return vec![(range, style)];
+    }
+    let mut out = Vec::new();
+    let mut at = range.start;
+    for (i, _) in line[range.clone()].match_indices(crate::rich_text::INLINE_BOX_CHAR) {
+        let start = range.start + i;
+        let end = start + crate::rich_text::INLINE_BOX_TEXT.len();
+        if start > at {
+            out.push((at..start, style.clone()));
+        }
+        out.push((start..end, style.clone()));
+        at = end;
+    }
+    if at < range.end {
+        out.push((at..range.end, style));
+    }
+    out
+}
+/// Each inline SVG of a line (`SpanStyle::inline_svg`): its box character's byte offset, picture and text size.
+pub(crate) fn inline_svgs(
+    line: &str,
+    spans: &LineSpans,
+) -> Vec<(usize, crate::compose::InlineSvg, Option<f32>)> {
+    let mut out: Vec<(usize, crate::compose::InlineSvg, Option<f32>)> = Vec::new();
+    for (range, style) in spans {
+        let Some(svg) = &style.inline_svg else {
+            continue;
+        };
+        let Some(text) = line.get(range.clone()) else {
+            continue;
+        };
+        for (i, _) in text.match_indices(crate::rich_text::INLINE_BOX_CHAR) {
+            let at = range.start + i;
+            if !out.iter().any(|(seen, ..)| *seen == at) {
+                out.push((at, svg.clone(), style.size));
+            }
+        }
+    }
+    out
 }
 /// What shapes a styled line beyond its text: its runs' weights and
 /// slants (`None`: it shapes as its plain text does).
@@ -566,6 +650,13 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                         ^ s.boxed.map_or(0, |[w, h, d]| {
                             w.to_bits().rotate_left(7) ^ h.to_bits().rotate_left(17) ^ d.to_bits()
                         }),
+                    s.inline_svg.as_ref().map_or([0; 3], |svg| {
+                        [
+                            svg.width.to_bits(),
+                            svg.height.to_bits(),
+                            svg.depth.to_bits(),
+                        ]
+                    }),
                 )
             })
             .collect(),
@@ -679,7 +770,7 @@ struct Tail {
 /// A shaped line, and when it was last used.
 type Shaped = (Rc<dyn TextLayout>, u64);
 /// What shapes a styled line's runs: each one's range, weight and slant.
-type ShapeKey = Box<[(u32, u32, u16, bool, u32, u32, bool, u32)]>;
+type ShapeKey = Box<[(u32, u32, u16, bool, u32, u32, bool, u32, [u32; 3])]>;
 /// A styled line's text and what shapes its runs (`shape_key`).
 type StyledKey = (Box<str>, ShapeKey);
 /// A highlighted line: its colours, what it leaves the next, when used.
