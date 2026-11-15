@@ -257,3 +257,69 @@ fn software_display_ellipsis_clears_previous_lines_and_restores_full_text() {
     raster.render(&scene, &frame.damage);
     assert_eq!(raster.pixels, full);
 }
+
+/// A control inline in a paragraph and named apart from its text (a
+/// citation's "1", read as "Citation 1") is read once, as a browser reads an
+/// inline link: as the control, between the text around it, its own text
+/// gone from the paragraph's value and runs. Without a label, it reads as
+/// its text, beside the paragraph's.
+#[test]
+fn a_labelled_inline_control_reads_once_where_it_stands() {
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let tree_of = |labelled: bool| {
+        let mut ui = Ui::new(400., 100.);
+        let mut citation = text_span("1").on_click(|| {});
+        if labelled {
+            citation = citation.label("Citation 1");
+        }
+        ui.mount(
+            rich_text()
+                .w(300.)
+                .text_size(14.)
+                .child(text_span("step "))
+                .child(citation)
+                .child(text_span("."))
+                .into(),
+        );
+        ui.prepare_frame();
+        let mut adapter = zgx_desktop::accessibility::AccessibilityTree::new();
+        adapter.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Rich", 1.)
+    };
+    let tree = tree_of(true);
+    let node = |id: accesskit::NodeId| &tree.nodes.iter().find(|(n, _)| *n == id).unwrap().1;
+    let buttons: Vec<_> = (tree.nodes.iter())
+        .filter(|(_, n)| n.role() == accesskit::Role::Button)
+        .collect();
+    assert_eq!(buttons.len(), 1, "one control, nothing else for it");
+    assert_eq!(buttons[0].1.label(), Some("Citation 1"));
+    let (_, paragraph) = (tree.nodes.iter())
+        .find(|(_, n)| n.role() == accesskit::Role::Label)
+        .expect("the paragraph");
+    assert_eq!(paragraph.value(), Some("step ."));
+    // Its children in reading order: the text before, the control, the
+    // text after.
+    let read: Vec<String> = (paragraph.children().iter())
+        .map(|child| {
+            let child = node(*child);
+            match child.role() {
+                accesskit::Role::TextRun => child.value().unwrap_or("").to_owned(),
+                role => format!("[{role:?} {}]", child.label().unwrap_or("")),
+            }
+        })
+        .collect();
+    assert_eq!(read, ["step ", "[Button Citation 1]", "."]);
+    // Unlabelled, its text is the paragraph's, as before.
+    let tree = tree_of(false);
+    let (_, paragraph) = (tree.nodes.iter())
+        .find(|(_, n)| n.role() == accesskit::Role::Label)
+        .expect("the paragraph");
+    assert_eq!(paragraph.value(), Some("step 1."));
+    assert!(
+        !paragraph.children().iter().any(|child| {
+            tree.nodes
+                .iter()
+                .any(|(n, node)| n == child && node.role() == accesskit::Role::Button)
+        }),
+        "an unlabelled control stays where it was"
+    );
+}
