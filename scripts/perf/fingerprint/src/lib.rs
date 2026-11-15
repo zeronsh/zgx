@@ -146,11 +146,14 @@ impl std::fmt::Write for Fnv {
 
 /// A coordinate to 1/64 of a point.
 fn point(hash: &mut Fnv, value: f32) {
-    let quantized = match value.is_finite() {
+    hash.write_i64(quantized(value));
+}
+/// `value` in 1/64 of a point (non-finite ones as one value).
+fn quantized(value: f32) -> i64 {
+    match value.is_finite() {
         true => (f64::from(value) * 64.).round() as i64,
         false => i64::MIN,
-    };
-    hash.write_i64(quantized);
+    }
 }
 fn rect(hash: &mut Fnv, rect: Rect) {
     for value in [rect.x, rect.y, rect.width, rect.height] {
@@ -212,10 +215,20 @@ fn kind(hash: &mut Fnv, kind: &NodeKind) {
     }
 }
 
+/// The flush's repaint areas as a set: what is repainted is their union, so
+/// the order they were noted in (and a repeat) means nothing.
 fn damage(rects: &[Rect]) -> u64 {
+    let mut areas: Vec<[i64; 4]> = rects
+        .iter()
+        .map(|r| [r.x, r.y, r.width, r.height].map(quantized))
+        .collect();
+    areas.sort_unstable();
+    areas.dedup();
     let mut hash = Fnv::new();
-    for area in rects {
-        rect(&mut hash, *area);
+    for area in areas {
+        for value in area {
+            hash.write_i64(value);
+        }
     }
     hash.finish()
 }
@@ -269,6 +282,20 @@ mod tests {
         assert_eq!(painted, paint(&scene));
         assert_ne!(damage(&report.damage), damage(&[]));
         assert_eq!(damage(&[]), Fnv::new().finish());
+    }
+
+    #[test]
+    fn damage_is_its_areas_whatever_their_order() {
+        let a = Rect::new(600., 134., 490., 23.);
+        let b = Rect::new(750., 40., 92., 39.);
+        let c = Rect::new(211., 84., 360., 670.);
+        assert_eq!(
+            damage(&[a, b, c]),
+            damage(&[b, c, a]),
+            "noted in another order"
+        );
+        assert_eq!(damage(&[a, b]), damage(&[a, b, a]), "noted twice");
+        assert_ne!(damage(&[a, b]), damage(&[a, c]), "another area");
     }
 
     /// Each flush's line holds its two hashes, and the same frames give
