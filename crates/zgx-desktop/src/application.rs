@@ -3850,13 +3850,18 @@ impl Host {
             if !k.eq_ignore_ascii_case("c") || !self.context.ui.has_text_selection() {
                 return false;
             }
-            let (text, html) = (
-                self.context.ui.selected_text(),
-                self.context.ui.selected_html(),
-            );
-            if let Some(clipboard) = self.clipboard.borrow_mut().as_mut() {
-                let _ = clipboard.set_rich_text(text, html);
-            }
+            // Through the region's `View::on_selection_copy`, the clipboard
+            // taken only to write.
+            let clipboard = self.clipboard.clone();
+            self.context.ui.copy_selection_from(|text, html| {
+                clipboard
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|clipboard| match html {
+                        Some(html) => clipboard.set_rich_text(text, html).is_ok(),
+                        None => clipboard.set_text(text).is_ok(),
+                    })
+            });
             return true;
         };
         if !["c", "x", "v"].iter().any(|v| k.eq_ignore_ascii_case(v)) {

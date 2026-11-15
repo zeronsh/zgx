@@ -1105,6 +1105,24 @@ impl View {
             }
         })
     }
+    /// What a copy out of this selectable region (`View::selectable`) puts
+    /// on the clipboard (⌘C, the Edit menu, the selection's context menu,
+    /// `Ui::copy_selection`): `hook` is asked with the selection's text and
+    /// HTML and the text nodes it spans, in order, and gives text with HTML
+    /// beside it, or none for the selection's own. A region without one
+    /// asks nothing. (Pin line.)
+    #[doc(hidden)]
+    pub fn on_selection_copy(
+        self,
+        hook: impl Fn(&crate::widgets::SelectionCopyRequest) -> Option<crate::widgets::ClipboardContent>
+        + 'static,
+    ) -> Self {
+        self.on_mount(move |handle| {
+            if let Some(ui) = handle.ui.upgrade() {
+                ui.set_selection_copy_hook(handle.node, Rc::new(hook));
+            }
+        })
+    }
     /// The item this view is on while focus stays in it (`aria-activedescendant`):
     /// the id of a node, as `id()` names it, or `None`. An editor driving a
     /// list of suggestions (a mention's, `View::at_caret`) keeps focus and

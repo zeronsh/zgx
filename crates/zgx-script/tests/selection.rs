@@ -94,3 +94,67 @@ fn a_selection_radius_follows_state_beside_a_theme() {
     assert_eq!(look(&mut h, "first"), (5., green), "follows the state");
     assert_eq!(h.error(), None);
 }
+
+/// `on_copy` on a selectable region says what a copy out of it puts on
+/// the clipboard: it hears the selection's text, HTML and the ids of the
+/// text it spans in order (`false` for text without one); nil keeps the
+/// copy as it was.
+#[test]
+fn on_copy_decides_what_a_regions_copy_writes() {
+    let mut h = Harness::inline(
+        r##"local plain = ui.state("plain", false)
+        local heard = ui.state("heard", "")
+        return ui.column {
+            selectable = true,
+            id = "region",
+            on_copy = function(request)
+                local ids = {}
+                for _, leaf in request.leaves do
+                    table.insert(ids, if leaf then leaf else "-")
+                end
+                heard:set(table.concat(ids, " "))
+                if plain:get() then
+                    return nil
+                end
+                return { text = "[1] " .. request.text, html = "<cite>" .. request.text .. "</cite>" }
+            end,
+            ui.text { "Alpha", id = "a" },
+            ui.row { ui.text { "Beta", id = "b" }, ui.column { ui.text { "Gamma" } } },
+            ui.text { "Delta", id = "d" },
+        }"##,
+    );
+    h.settle();
+    h.ui.prepare_frame();
+    let region = h.find("region").unwrap();
+    assert!(h.ui.select_all_text(region));
+    let copy = |h: &mut Harness| {
+        let mut written = None;
+        assert!(h.ui.copy_selection_from(|text, html| {
+            written = Some((text, html));
+            true
+        }));
+        h.settle();
+        written.unwrap()
+    };
+    let selected = h.ui.selected_text();
+    assert!(selected.starts_with("Alpha") && selected.ends_with("Delta"));
+    let (text, html) = copy(&mut h);
+    assert_eq!(text, format!("[1] {selected}"));
+    assert_eq!(html, Some(format!("<cite>{selected}</cite>")));
+    let heard = h
+        .host
+        .states()
+        .into_iter()
+        .find(|(name, _)| name == "heard");
+    assert!(
+        matches!(&heard, Some((_, zgx_script::Value::Str(ids))) if &**ids == "a b - d"),
+        "{heard:?}"
+    );
+    h.host
+        .set_state("plain", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.settle();
+    let (text, html) = (h.ui.selected_text(), h.ui.selected_html());
+    assert_eq!(copy(&mut h), (text, Some(html)), "nil keeps the copy");
+    assert_eq!(h.error(), None);
+}
