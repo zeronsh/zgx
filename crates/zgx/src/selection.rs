@@ -202,8 +202,9 @@ pub(crate) struct State {
     /// focused window, and in one at the back).
     roots: HashMap<NodeId, Palette>,
     /// What decides a copy out of the few regions asked to
-    /// (`View::on_selection_copy`), by region.
-    copy_hooks: HashMap<NodeId, crate::widgets::SelectionCopyHook>,
+    /// (`View::on_selection_copy`), by region: a list, as few have one
+    /// (empty, it takes no allocation and less room than a map).
+    copy_hooks: Vec<(NodeId, crate::widgets::SelectionCopyHook)>,
     root: Option<NodeId>,
     anchor: Option<TextPoint>,
     focus: Option<TextPoint>,
@@ -437,7 +438,9 @@ impl Drop for RootGuard {
             && let Ok(mut state) = ui.selection_state().try_borrow_mut()
         {
             state.roots.remove(&self.root);
-            hook = state.copy_hooks.remove(&self.root);
+            if let Some(at) = state.copy_hooks.iter().position(|(r, _)| *r == self.root) {
+                hook = Some(state.copy_hooks.swap_remove(at).1);
+            }
             if state.active_root == Some(self.root) {
                 state.active_root = None;
             }
@@ -1546,10 +1549,17 @@ impl Ui {
         root: NodeId,
         hook: crate::widgets::SelectionCopyHook,
     ) {
-        self.selection_state()
-            .borrow_mut()
-            .copy_hooks
-            .insert(root, hook);
+        let mut state = self.selection_state().borrow_mut();
+        let was = match state.copy_hooks.iter_mut().find(|(r, _)| *r == root) {
+            Some((_, was)) => Some(std::mem::replace(was, hook)),
+            None => {
+                state.copy_hooks.push((root, hook));
+                None
+            }
+        };
+        // The old hook goes after the state is let go, as `RootGuard`'s.
+        drop(state);
+        drop(was);
     }
     /// The person copied the selected display text (⌘C, the Edit menu, the
     /// selection's context menu, `Ui::copy_selection`): its region's
@@ -1565,9 +1575,10 @@ impl Ui {
         let (text, html) = (self.selected_text(), self.selected_html());
         let hook = {
             let state = self.selection_state().borrow();
-            state
-                .root
-                .and_then(|root| Some((root, state.copy_hooks.get(&root).cloned()?)))
+            state.root.and_then(|root| {
+                let (_, hook) = state.copy_hooks.iter().find(|(r, _)| *r == root)?;
+                Some((root, hook.clone()))
+            })
         };
         // Nothing borrowed: the hook may read the selection or the scene.
         let content = hook.and_then(|(region, hook)| {
