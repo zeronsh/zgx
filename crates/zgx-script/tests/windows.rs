@@ -343,6 +343,53 @@ fn a_window_may_be_made_hidden() {
     assert!(error.contains("`visible` must be a boolean"), "{error}");
 }
 
+/// A declared window in full screen (`full_screen = true`), or as a state
+/// says, the host writing the state back; a `full_screen` that is neither
+/// is an error.
+#[test]
+fn a_window_may_ask_for_full_screen() {
+    let h = Harness::inline(
+        r##"ui.window { id = "show", open = ui.state("show", true), full_screen = true, ui.text("Show") }
+        local full = ui.state("full", false)
+        ui.window { id = "play", open = ui.state("play", true), full_screen = full, ui.text("Play") }
+        ui.window { id = "plain", open = ui.state("plain", true), ui.text("Plain") }
+        return ui.text { id = "said", function() return `full {full:get()}` end }"##,
+    );
+    let full = |id: &str| {
+        h.host
+            .window_extras(id)
+            .full_screen
+            .map(|v| v.with_untracked(|v| v.truthy()))
+    };
+    assert_eq!(full("show"), Some(true));
+    assert_eq!(full("play"), Some(false));
+    assert_eq!(full("plain"), None);
+    // The person entered full screen: the host sets the state, and the
+    // script reads it.
+    h.host
+        .window_extras("play")
+        .full_screen
+        .unwrap()
+        .set(zgx_script::Value::Bool(true));
+    h.settle();
+    assert!(
+        texts(&h.ui).contains(&"full true".to_owned()),
+        "{:?}",
+        texts(&h.ui)
+    );
+    let error = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r##"ui.window { id = "w", open = ui.state("w", true), full_screen = "yes", ui.text("w") }
+            return ui.text("main")"##,
+        )
+    })
+    .err()
+    .expect("it doesn't load");
+    assert!(error.contains("`full_screen` must be a boolean"), "{error}");
+}
+
 /// A window's smallest and largest size reach its host by id, each width
 /// with its height; one without the other is an error.
 #[test]
