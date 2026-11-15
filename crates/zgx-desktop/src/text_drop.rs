@@ -121,14 +121,21 @@ pub(crate) fn out(ui: &zgx::widgets::Ui) {
     }
 }
 
-/// The drag was let go of over `ui` at `(x, y)`, carrying `text`: whether
-/// it was taken.
-pub(crate) fn dropped(ui: &zgx::widgets::Ui, x: f32, y: f32, text: &str) -> bool {
+/// The drag was let go of over `ui` at `(x, y)`, carrying `text` and, where
+/// the source offered it, the same as HTML (`DraggedText::html`): whether it
+/// was taken.
+pub(crate) fn dropped(
+    ui: &zgx::widgets::Ui,
+    x: f32,
+    y: f32,
+    text: &str,
+    html: Option<&str>,
+) -> bool {
     if crate::native_drag::handed_off() {
         return false;
     }
     HOVER.with(|hover| hover.borrow_mut().take());
-    let text = Action::new(DraggedText::new(text));
+    let text = Action::new(DraggedText::with_html(text, html.map(str::to_owned)));
     ui.input.drag_drop(&ui.scene, &text, x, y)
 }
 
@@ -146,7 +153,17 @@ impl winit::platform::text_drop::TextDrops for Windows {
         });
     }
     fn dropped(&self, window: WindowId, x: f64, y: f64, text: &str) -> bool {
-        at(window, x, y, |ui, x, y| dropped(ui, x, y, text))
+        self.dropped_with_html(window, x, y, text, None)
+    }
+    fn dropped_with_html(
+        &self,
+        window: WindowId,
+        x: f64,
+        y: f64,
+        text: &str,
+        html: Option<&str>,
+    ) -> bool {
+        at(window, x, y, |ui, x, y| dropped(ui, x, y, text, html))
     }
 }
 
@@ -203,5 +220,50 @@ mod tests {
         assert_eq!(woken.get(), 6, "each wakes the loop to draw");
         remove(window);
         assert!(!drops.over(window, 150., 15.), "closed");
+    }
+
+    /// What another app offered as HTML beside its text (a browser's
+    /// selection) reaches a destination with it, `DraggedText::html`; a plain
+    /// text drag has none.
+    #[test]
+    fn text_dragged_in_carries_its_html() {
+        let mut ui = zgx::widgets::Ui::new(400., 300.);
+        // Each drop's text and HTML.
+        type Dropped = Vec<(String, Option<String>)>;
+        let got: std::rc::Rc<RefCell<Dropped>> = Default::default();
+        let into = got.clone();
+        ui.mount(
+            div()
+                .size(200., 100.)
+                .on_drop(move |text: &DraggedText, _| {
+                    into.borrow_mut()
+                        .push((text.text().to_owned(), text.html().map(str::to_owned)));
+                }),
+        );
+        ui.prepare_frame();
+        let window = WindowId::dummy();
+        WINDOWS.with(|windows| {
+            windows.borrow_mut().insert(
+                window,
+                Target {
+                    ui: ui.downgrade(),
+                    window: Weak::new(),
+                    wake: Box::new(|| {}),
+                },
+            );
+        });
+        let drops = Windows;
+        assert!(drops.over(window, 50., 50.));
+        assert!(drops.dropped_with_html(window, 50., 50., "bold", Some("<b>bold</b>")));
+        assert!(drops.over(window, 50., 50.));
+        assert!(drops.dropped(window, 50., 50., "plain"));
+        assert_eq!(
+            *got.borrow(),
+            [
+                ("bold".to_owned(), Some("<b>bold</b>".to_owned())),
+                ("plain".to_owned(), None)
+            ]
+        );
+        remove(window);
     }
 }

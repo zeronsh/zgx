@@ -8,7 +8,8 @@ use windows_sys::core::{IUnknown, GUID, HRESULT};
 use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINTL, S_OK};
 use windows_sys::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
-use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
+use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows_sys::Win32::System::Ole::{
     ReleaseStgMedium, CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_NONE,
 };
@@ -187,7 +188,10 @@ impl FileDropHandler {
             let drops = crate::platform::text_drop::text_drops();
             let (x, y) = unsafe { drop_handler.client_point(pt) };
             let taken = match (unsafe { Self::text(pDataObj) }, &drops) {
-                (Some(text), Some(drops)) => drops.dropped(drop_handler.id(), x, y, &text),
+                (Some(text), Some(drops)) => {
+                    let html = unsafe { Self::html(pDataObj) };
+                    drops.dropped_with_html(drop_handler.id(), x, y, &text, html.as_deref())
+                },
                 _ => false,
             };
             if !taken {
@@ -254,6 +258,41 @@ impl FileDropHandler {
         });
         unsafe { ReleaseStgMedium(&mut medium) };
         text
+    }
+
+    /// zgx patch: the data object's text as HTML, where it offers it
+    /// (`HTML Format`, `CF_HTML`): the fragment its header marks.
+    unsafe fn html(data_obj: *const IDataObject) -> Option<String> {
+        let name: Vec<u16> = "HTML Format\0".encode_utf16().collect();
+        let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
+        if format == 0 {
+            return None;
+        }
+        let query = FORMATETC {
+            cfFormat: format as u16,
+            ptd: ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL as u32,
+        };
+        let mut medium = unsafe { std::mem::zeroed() };
+        let get_data_fn = unsafe { (*(*data_obj).cast::<IDataObjectVtbl>()).GetData };
+        if unsafe { get_data_fn(data_obj as *mut _, &query, &mut medium) } < 0 {
+            return None;
+        }
+        let global = unsafe { medium.u.hGlobal };
+        let bytes = unsafe { GlobalLock(global) } as *const u8;
+        let html = (!bytes.is_null()).then(|| {
+            let size = unsafe { GlobalSize(global) };
+            let raw = unsafe { std::slice::from_raw_parts(bytes, size) };
+            // Up to its NUL, if the allocation runs past it.
+            let raw = &raw[..raw.iter().position(|&b| b == 0).unwrap_or(raw.len())];
+            let html = cf_html_fragment(raw);
+            unsafe { GlobalUnlock(global) };
+            html
+        });
+        unsafe { ReleaseStgMedium(&mut medium) };
+        html.flatten()
     }
 
     unsafe fn from_interface<'a, InterfaceT>(this: *mut InterfaceT) -> &'a mut FileDropHandlerData {
@@ -381,3 +420,32 @@ static DROP_TARGET_VTBL: IDropTargetVtbl = IDropTargetVtbl {
     DragLeave: FileDropHandler::DragLeave,
     Drop: FileDropHandler::Drop,
 };
+
+/// zgx patch: the fragment a `CF_HTML` buffer's header marks
+/// (`StartFragment:` and `EndFragment:`, byte offsets into the buffer), as
+/// UTF-8.
+fn cf_html_fragment(raw: &[u8]) -> Option<String> {
+    let header = String::from_utf8_lossy(&raw[..raw.len().min(1024)]);
+    let offset = |key: &str| {
+        header.lines().find_map(|line| line.strip_prefix(key)?.trim().parse::<usize>().ok())
+    };
+    let (start, end) = (offset("StartFragment:")?, offset("EndFragment:")?);
+    raw.get(start..end).map(|fragment| String::from_utf8_lossy(fragment).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_cf_html_buffer_gives_its_fragment() {
+        let body = "<html><body><!--StartFragment--><b>caf\u{e9}</b><!--EndFragment--></body></html>";
+        let header_len = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n".len();
+        let start = header_len + body.find("<b>").unwrap();
+        let end = header_len + body.find("<!--EndFragment").unwrap();
+        let raw = format!(
+            "Version:0.9\r\nStartHTML:{header_len:010}\r\nEndHTML:{:010}\r\nStartFragment:{start:010}\r\nEndFragment:{end:010}\r\n{body}",
+            header_len + body.len()
+        );
+        assert_eq!(super::cf_html_fragment(raw.as_bytes()).as_deref(), Some("<b>caf\u{e9}</b>"));
+        assert_eq!(super::cf_html_fragment(b"no header"), None);
+    }
+}

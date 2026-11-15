@@ -82,6 +82,10 @@ pub struct DragEvent {
 #[derive(Debug)]
 pub struct DraggedText {
     text: String,
+    /// The same as HTML, where another app offered it (a browser's
+    /// selection, a document's): a rich destination drops it as it pastes
+    /// HTML.
+    html: Option<String>,
     /// The editor it was selected in (its scene's `identity`, as node ids
     /// are each window's own, and its node), and where: a drop there moves
     /// it.
@@ -95,8 +99,18 @@ impl DraggedText {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            html: None,
             from: None,
             taken: std::cell::Cell::new(false),
+        }
+    }
+    /// Text dragged in from another app with its HTML (`public.html`,
+    /// `text/html`, `CF_HTML`'s fragment): copied wherever it is dropped.
+    #[doc(hidden)]
+    pub fn with_html(text: impl Into<String>, html: Option<String>) -> Self {
+        Self {
+            html,
+            ..Self::new(text)
         }
     }
     pub(crate) fn from_editor(
@@ -107,6 +121,7 @@ impl DraggedText {
     ) -> Self {
         Self {
             text,
+            html: None,
             from: Some((scene, editor, range)),
             taken: std::cell::Cell::new(false),
         }
@@ -135,6 +150,13 @@ impl DraggedText {
     /// The text.
     pub fn text(&self) -> &str {
         &self.text
+    }
+    /// The same as HTML, where the app it came from offered it: what a
+    /// rich destination drops, run through its paste of HTML. Known as it
+    /// drops, as the text is.
+    #[doc(hidden)]
+    pub fn html(&self) -> Option<&str> {
+        self.html.as_deref()
     }
 }
 /// What a drag carries to other apps, when a host hands it to the platform

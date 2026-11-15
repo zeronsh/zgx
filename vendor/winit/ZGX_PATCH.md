@@ -219,6 +219,17 @@ shows no copy badge and every release would look taken.
       `DragEnter`, `DragOver` and `Drop` get is a `POINTL` by value, as COM
       passes it (`definitions.rs` declared a pointer, never read before).
     Wayland's drags reach zgx's own data device, not winit.
+12. `TextDrops::dropped_with_html`: the same drop with the text as HTML too,
+    where the source offers it (a browser's selection), for a rich
+    destination; by default `dropped` with the text alone.
+    - macOS: the pasteboard's `NSPasteboardTypeHTML` (`public.html`).
+    - X11: `text/html` (atom `TextHtml`), converted after the text arrives
+      (one conversion at a time through `XdndSelection`), the drop waiting
+      for both (`Dnd::text_complete`); UTF-16 after a byte order mark reads
+      as UTF-16.
+    - Windows: the registered `HTML Format` (`CF_HTML`,
+      `RegisterClipboardFormatW`, `Win32_System_DataExchange`), the fragment
+      its header's `StartFragment`/`EndFragment` byte offsets mark.
 
 ## Where dragged files are (macOS, Windows, X11)
 
