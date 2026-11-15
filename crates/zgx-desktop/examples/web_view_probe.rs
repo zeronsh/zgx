@@ -1,7 +1,8 @@
 //! A web page under test (Linux, `--features webkitgtk`; run by
 //! `scripts/web_view_smoke.py`): a page in a box rounded by 24 points at
 //! (40, 40), 600 × 400, with a red zgx square drawn over its bottom right
-//! corner, and a zgx button before the page at (660, 40); on the page a
+//! corner, a zgx button before the page at (660, 40) and a zgx toggle
+//! button (`Bold`, `BOLD` on each change) at (660, 80); on the page a
 //! field at (20, 20), 300 × 40, a `<select>` at
 //! (360, 20), 200 × 30, a green target at (20, 100), 200 × 80 (a pointer
 //! cursor), a box with an image cursor (16 × 16 red, its hot spot at 4, 4)
@@ -155,6 +156,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ => {}
             });
+            // A toggle button of zgx's beside the page (`pressed_when`):
+            // `BOLD` says each change, which Orca reads as pressed or not.
+            let bold = cx.ui.signal(false);
+            let (read_bold, flip_bold) = (bold.clone(), bold.clone());
             cx.render(
                 div()
                     .w_full()
@@ -191,6 +196,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .on_drop(|text: &zgx::input::DraggedText, _| {
                                 println!("DROPPED {}", text.text())
                             }),
+                    )
+                    // A toggle button of zgx's, ahead of the button the page
+                    // follows in Tab's order.
+                    .child(
+                        button()
+                            .id("bold")
+                            .absolute()
+                            .left(660.)
+                            .top(80.)
+                            .w(90.)
+                            .h(30.)
+                            .accessible_label("Bold")
+                            .pressed_when(move || read_bold.get())
+                            .on_click(move || {
+                                flip_bold.update(|on| *on = !*on);
+                                println!("BOLD {}", flip_bold.get());
+                            })
+                            .child(text("Bold")),
                     )
                     // zgx content before the page in Tab's order.
                     .child(
