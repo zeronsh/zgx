@@ -8576,13 +8576,13 @@ impl Scene {
     /// returns their ids, `id` first, none of which the scene contains from
     /// now on (nothing reaches them: their generations have moved on, and
     /// the lists that name nodes no longer name them). For a large subtree:
-    /// the whole viewport repaints, rather than each node's ink. Panics for
-    /// the root.
+    /// what it showed repaints as one area, its ink (`damage_taken_out`),
+    /// rather than each node's. Panics for the root.
     pub(crate) fn kill(&mut self, id: NodeId) -> Vec<NodeId> {
         self.finish_pending_children();
         self.content_revision = self.content_revision.wrapping_add(1);
         assert_ne!(id, self.root, "cannot remove scene root");
-        self.add_damage(self.viewport);
+        self.damage_taken_out(id);
         let parent = self.node(id).parent.unwrap();
         self.node_mut(parent)
             .children
@@ -8628,6 +8628,43 @@ impl Scene {
         }
         self.children_changed(parent);
         ids
+    }
+    /// Damage what subtree `id`, about to be taken out whole (`kill`),
+    /// showed: its ink, the union of all it paints (each node's paint, its
+    /// shadows and blurs, cut by the clips inside it, as the paint walks
+    /// keep it), where its parent places it and within the clips round it.
+    /// One area, worked out from what the walks keep, not a walk of its
+    /// nodes: a page of thousands repaints the part of the window it was
+    /// on (a chat's transcript, not the sidebar and title bar beside it).
+    /// As `damage_subtree_with` damages: a subtree hidden or never laid out
+    /// damages nothing, and one in a popup root's window, nothing here.
+    fn damage_taken_out(&mut self, id: NodeId) {
+        let node = self.node(id);
+        let unplaced = node.measurement.is_none() && node.bounds == Rect::default();
+        if !own_visible(&node.style) || unplaced || self.damage_is_full() {
+            return;
+        }
+        let Some(parent) = node.parent else {
+            return self.add_damage(self.viewport);
+        };
+        if self.transformed + self.filtered.get() > 0 {
+            if self.filtered.get() & POPUPS_BIT != 0 && self.popup_holding(id).is_some() {
+                return;
+            }
+            if !self.shown(parent) {
+                return;
+            }
+            // Mapped through the layers round it, their blurs' spread too.
+            let ink = self.ink_alone(id);
+            let (transform, clip, placement) = self.context(parent);
+            self.damage_within_placed(ink.map(|ink| ink.translated(transform)), clip, placement);
+            return;
+        }
+        let Some((transform, clip)) = self.shown_context(parent) else {
+            return;
+        };
+        let ink = self.ink_alone(id);
+        self.damage_within(ink.map(|ink| ink.translated(transform)), clip);
     }
     /// Free the slot of `id`, a node `kill` took out (and not its subtree,
     /// whose nodes come in turn).
@@ -21247,6 +21284,186 @@ mod tests {
         assert!(ids.iter().any(|id| id.index == reused.index));
         assert!(ids.iter().all(|id| !scene.contains(*id)));
         scene.flush();
+    }
+    /// A page taken out whole (`kill`, as a chat's transcript is when
+    /// another is opened) repaints what it showed, not the whole window: the
+    /// sidebar beside its card stays as it was. Every pixel taking it out
+    /// node by node (`remove`) repaints is repainted (its shadows, a panel's
+    /// paint past its clip, a backdrop blur, rows running under the card's
+    /// clip), as the page stands plain, under a scroll's translation, a
+    /// content blur's spread and a scaled layer; under a hidden parent,
+    /// nothing is.
+    #[test]
+    fn a_killed_page_repaints_what_it_showed_alone() {
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Round {
+            Plain,
+            Scrolled,
+            Blurred,
+            Scaled,
+            Hidden,
+        }
+        let boxed = |w: f32, h: f32, clip: bool| Style {
+            width: Some(w),
+            height: Some(h),
+            clip,
+            ..Style::default()
+        };
+        // A 400 × 300 window: a sidebar at its left, a card clipping a page
+        // (a box, a clipping panel with a shadow over an overflowing child, a
+        // backdrop blur and a column of rows running past the card's foot)
+        // at its right. Then the page taken out, by `kill` or by `remove`.
+        let run = |round: Round, kill: bool| -> (Vec<Rect>, Rect, Rect) {
+            let mut scene = Scene::new(400., 300.);
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let sidebar = scene.append(
+                root,
+                NodeKind::Rect(Color(30, 30, 30, 255)),
+                boxed(100., 300., false),
+            );
+            let card = scene.append(
+                root,
+                NodeKind::Container(Layout::Overlay),
+                boxed(280., 280., true),
+            );
+            scene.set_transform(card, Transform { x: 110., y: 10. });
+            let holder = scene.append(
+                card,
+                NodeKind::Container(Layout::Column),
+                boxed(280., 600., false),
+            );
+            match round {
+                Round::Plain => {}
+                Round::Scrolled => scene.set_transform(holder, Transform { x: 0., y: -40. }),
+                Round::Blurred => scene.set_filter_blur(holder, 3.),
+                Round::Scaled => scene.set_local_transform(
+                    holder,
+                    LocalTransform {
+                        scale: (0.5, 0.5),
+                        origin: (0., 0.),
+                        ..LocalTransform::IDENTITY
+                    },
+                ),
+                Round::Hidden => scene.set_style(
+                    holder,
+                    Style {
+                        layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                            visible: Some(false),
+                            ..Default::default()
+                        })),
+                        ..boxed(280., 600., false)
+                    },
+                ),
+            }
+            let page = scene.append(
+                holder,
+                NodeKind::Container(Layout::Column),
+                boxed(200., 500., false),
+            );
+            scene.set_transform(page, Transform { x: 30., y: 20. });
+            scene.append(
+                page,
+                NodeKind::Rect(Color(200, 9, 9, 255)),
+                boxed(120., 20., false),
+            );
+            let panel = scene.append(
+                page,
+                NodeKind::Panel {
+                    layout: Layout::Overlay,
+                    quad: QuadStyle {
+                        fill: Color(9, 200, 9, 255),
+                        radius: 6.,
+                        shadow: Some(BoxShadow {
+                            color: Color(0, 0, 0, 128),
+                            offset: Transform { x: 3., y: 5. },
+                            blur_radius: 6.,
+                            spread: 1.,
+                        }),
+                        ..Default::default()
+                    },
+                },
+                boxed(100., 40., true),
+            );
+            scene.append(
+                panel,
+                NodeKind::Rect(Color(9, 9, 200, 255)),
+                boxed(160., 70., false),
+            );
+            let frost = scene.append(
+                page,
+                NodeKind::Container(Layout::Overlay),
+                boxed(90., 30., false),
+            );
+            scene.set_effects(
+                frost,
+                Effects {
+                    opacity: 1.,
+                    blur_radius: 8.,
+                    ..Effects::default()
+                },
+            );
+            let column = scene.append(
+                page,
+                NodeKind::Container(Layout::Column),
+                boxed(130., 400., false),
+            );
+            for n in 0..16 {
+                scene.append(
+                    column,
+                    NodeKind::Quad(QuadStyle {
+                        fill: Color(n * 15, 90, 90, 255),
+                        border_color: Color(255, 255, 255, 255),
+                        border_width: 1.,
+                        ..Default::default()
+                    }),
+                    boxed(110., 22., false),
+                );
+            }
+            scene.flush();
+            let sidebar_at = scene.world(sidebar).0;
+            let card_at = scene.world(card).0;
+            match kill {
+                true => drop(scene.kill(page)),
+                false => scene.remove(page),
+            }
+            (scene.flush().damage, sidebar_at, card_at)
+        };
+        for round in [
+            Round::Plain,
+            Round::Scrolled,
+            Round::Blurred,
+            Round::Scaled,
+            Round::Hidden,
+        ] {
+            let (killed, sidebar, card) = run(round, true);
+            let (removed, _, _) = run(round, false);
+            if round == Round::Hidden {
+                assert!(killed.is_empty(), "{round:?}: {killed:?}");
+                assert!(removed.is_empty(), "{round:?}: {removed:?}");
+                continue;
+            }
+            assert!(!removed.is_empty(), "{round:?}: taken out, it repaints");
+            let whole = killed.iter().copied().reduce(Rect::union).unwrap();
+            // What it showed, all of it.
+            for rect in &removed {
+                assert_eq!(
+                    rect.intersection(whole),
+                    Some(*rect),
+                    "{round:?}: {rect:?}, repainted taking it out node by node, isn't in {killed:?}"
+                );
+            }
+            // In its card: the sidebar stays as it was.
+            assert!(
+                !whole.intersects(sidebar),
+                "{round:?}: {killed:?} repaints the sidebar at {sidebar:?}"
+            );
+            assert_eq!(
+                whole.intersection(card),
+                Some(whole),
+                "{round:?}: {killed:?} runs past its card at {card:?}"
+            );
+        }
     }
     #[test]
     fn a_box_on_frosted_glass_is_plain_and_under_a_filter_is_not() {
