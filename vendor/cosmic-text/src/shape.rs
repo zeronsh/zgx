@@ -208,6 +208,18 @@ fn guess_script(buffer: &mut harfrust::UnicodeBuffer, run: &str) {
     }
 }
 
+/// zgx: a word's glyphs of spans raised off the baseline
+/// (`Attrs::baseline_shift`, flagged) raised by their spans' shift.
+#[cold]
+#[inline(never)]
+fn raise_glyphs(glyphs: &mut [ShapeGlyph], attrs_list: &AttrsList) {
+    for glyph in glyphs {
+        if glyph.cache_key_flags.contains(CacheKeyFlags::BASELINE_SHIFT) {
+            glyph.y_offset += attrs_list.get_span(glyph.start).baseline_shift_of();
+        }
+    }
+}
+
 fn shape_fallback(
     scratch: &mut ShapeBuffer,
     glyphs: &mut Vec<ShapeGlyph>,
@@ -2404,12 +2416,35 @@ impl ShapeLine {
         self.boxes = font_system.shape_buffer.boxes;
         self.spans = spans;
         self.metrics_opt = attrs_list.defaults_owned().metrics_opt.map(Into::into);
+        // zgx: a line marked as holding inline boxes may hold a span raised
+        // off the baseline (`Attrs::baseline_shift`): its words, apart.
+        if self.boxes {
+            self.raise(attrs_list);
+        }
 
         // Return the buffer for later reuse.
         font_system.shape_buffer.spans = cached_spans;
         #[cfg(feature = "shape-run-cache")]
         {
             font_system.shape_buffer.run_key_line = 0;
+        }
+    }
+
+    /// zgx: its words' glyphs of spans raised off the baseline raised
+    /// (`raise_glyphs`), if it has any such span.
+    #[cold]
+    #[inline(never)]
+    fn raise(&mut self, attrs_list: &AttrsList) {
+        let raised = |flags: CacheKeyFlags| flags.contains(CacheKeyFlags::BASELINE_SHIFT);
+        if !raised(attrs_list.defaults_owned().cache_key_flags)
+            && !attrs_list.spans_iter().any(|(_, attrs)| raised(attrs.cache_key_flags))
+        {
+            return;
+        }
+        for span in &mut self.spans {
+            for word in &mut span.words {
+                raise_glyphs(&mut word.glyphs, attrs_list);
+            }
         }
     }
 
@@ -3175,7 +3210,8 @@ impl ShapeLine {
 
     /// Returns the words for a given span index, handling the ellipsis sentinel.
     /// zgx: CSS's line box for `visual_line` (laid out as `glyphs`), if it
-    /// holds an inline box: how far it reaches above and below its baseline,
+    /// holds an inline box or a span raised off the baseline
+    /// (`Attrs::baseline_shift`): how far it reaches above and below its baseline,
     /// as the most any of its runs reaches (its ascent and descent, each with
     /// half its leading), any box's margin box, and each box's run font's
     /// strut; then the boxes at the line's top or bottom, growing it down
@@ -3190,10 +3226,8 @@ impl ShapeLine {
         font_size: f32,
         glyphs: &mut [LayoutGlyph],
     ) -> Option<(f32, f32)> {
-        if !glyphs
-            .iter()
-            .any(|g| g.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX))
-        {
+        let marks = CacheKeyFlags::INLINE_BOX | CacheKeyFlags::BASELINE_SHIFT;
+        if !glyphs.iter().any(|g| g.cache_key_flags.intersects(marks)) {
             return None;
         }
         let normal = self.metrics_opt.map(|m| m.line_height);
@@ -3232,6 +3266,13 @@ impl ShapeLine {
                             above = above.max(a);
                             below = below.max(d);
                         }
+                    } else if glyph.cache_key_flags.contains(CacheKeyFlags::BASELINE_SHIFT) {
+                        // Raised off the baseline (`Attrs::baseline_shift`):
+                        // its text, moved so, grows the line only where it
+                        // reaches past it (its leading is the line's).
+                        let raise = glyph.y_offset * size;
+                        above = above.max(a + raise);
+                        below = below.max(d - raise);
                     } else {
                         let half = (line_height - a - d) / 2.0;
                         above = above.max(a + half);

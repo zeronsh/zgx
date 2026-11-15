@@ -161,6 +161,11 @@ pub(crate) struct SpanExtras {
     pub padding_end: Option<f32>,
     /// Its text fading in (`TextSpan::fade_in`).
     pub fade: Option<TextFade>,
+    /// Raised this far off the baseline, in pixels
+    /// (`TextSpan::baseline_shift`).
+    pub baseline_shift: f32,
+    /// A superscript (`TextSpan::superscript`).
+    pub superscript: bool,
 }
 /// A run's text fading in (`TextSpan::fade_in`): from clear at `start`
 /// (milliseconds since the Unix epoch, as `ui.now()` says, on the thread's
@@ -257,6 +262,35 @@ impl TextSpan {
     pub fn padding_end(mut self, end: f32) -> Self {
         self.extras.get_or_insert_default().padding_end = Some(end.max(0.));
         self
+    }
+    /// Its text raised `shift` pixels off the baseline (lowered if
+    /// negative), as CSS's `vertical-align: <length>`: hits and selection
+    /// follow it, and its line grows only if it reaches past it.
+    #[doc(hidden)]
+    pub fn baseline_shift(mut self, shift: f32) -> Self {
+        let shift = if shift.is_finite() { shift } else { 0. };
+        self.extras.get_or_insert_default().baseline_shift = shift;
+        self
+    }
+    /// A superscript, as the web's `<sup>`: three quarters of the text's
+    /// size (unless the span sets its own), raised a third of it, on top of
+    /// any `baseline_shift` (a footnote's mark).
+    #[doc(hidden)]
+    pub fn superscript(mut self) -> Self {
+        self.extras.get_or_insert_default().superscript = true;
+        self
+    }
+    /// How it's raised off the baseline: whether it's a superscript
+    /// (`superscript`), and the points it's raised besides
+    /// (`baseline_shift`), positive up as CSS's `vertical-align`. A
+    /// superscript is three quarters of the text's size unless it sets its
+    /// own, raised a third of the text's size more: a host lowering spans
+    /// itself (`zgx-dom`) draws it so.
+    #[doc(hidden)]
+    pub fn raise(&self) -> (bool, f32) {
+        self.extras.as_deref().map_or((false, 0.), |extras| {
+            (extras.superscript, extras.baseline_shift)
+        })
     }
     /// The span background's corner radius.
     pub fn radius(mut self, radius: f32) -> Self {

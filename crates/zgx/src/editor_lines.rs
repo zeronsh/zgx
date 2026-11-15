@@ -61,6 +61,14 @@ pub struct SpanStyle {
     pub strike: bool,
     /// A wash behind it (inline code).
     pub background: Option<crate::scene::Color>,
+    /// How far it is raised off the baseline (lowered if negative), in EM
+    /// of the editor's font size: CSS's `vertical-align`, a `<sup>`'s. Its
+    /// line grows only if it reaches past it.
+    #[doc(hidden)]
+    pub baseline_shift: f32,
+    /// Its font size as a share of the editor's (`0.75`): none, the same.
+    #[doc(hidden)]
+    pub scale: Option<f32>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -96,20 +104,52 @@ impl SpanStyle {
         self.background = Some(color);
         self
     }
+    /// Its text raised `shift` EM off the baseline (lowered if negative),
+    /// as CSS's `vertical-align`: carets, hits and selection follow it, and
+    /// its line grows only if it reaches past it.
+    #[doc(hidden)]
+    pub const fn baseline_shift(mut self, shift: f32) -> Self {
+        self.baseline_shift = shift;
+        self
+    }
+    /// Its text at `scale` of the editor's font size (`0.75`).
+    #[doc(hidden)]
+    pub const fn scale(mut self, scale: f32) -> Self {
+        self.scale = Some(scale);
+        self
+    }
+    /// A superscript, as the web's `<sup>`: three quarters of the size,
+    /// raised a third of an EM (a footnote's mark).
+    #[doc(hidden)]
+    pub const fn superscript(self) -> Self {
+        self.scale(0.75).baseline_shift(0.33)
+    }
     fn merge(&mut self, style: &SpanStyle) {
         self.color = self.color.or(style.color);
         self.weight = self.weight.or(style.weight);
         self.italic |= style.italic;
         self.strike |= style.strike;
         self.background = self.background.or(style.background);
+        if self.baseline_shift == 0. {
+            self.baseline_shift = style.baseline_shift;
+        }
+        self.scale = self.scale.or(style.scale);
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
-        self.weight.is_none() && !self.italic && !self.strike && self.background.is_none()
+        self.weight.is_none()
+            && !self.italic
+            && !self.strike
+            && self.background.is_none()
+            && !self.places()
     }
     /// Whether it changes how its text is shaped (and so its width).
     fn shapes(&self) -> bool {
-        self.weight.is_some() || self.italic
+        self.weight.is_some() || self.italic || self.places()
+    }
+    /// Whether it sizes or raises its text (`scale`, `baseline_shift`).
+    fn places(&self) -> bool {
+        self.scale.is_some() || self.baseline_shift != 0.
     }
 }
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
@@ -219,6 +259,7 @@ pub(crate) fn styled_line(
         }
         return crate::rich_text::RichText::new(line, runs).ok();
     }
+    let mut raised = false;
     let runs: Vec<_> = runs(line, spans)
         .into_iter()
         .map(|(range, style)| {
@@ -228,10 +269,18 @@ pub(crate) fn styled_line(
                 font.weight = weight.clamp(1, 1000);
             }
             font.italic |= style.italic;
+            let font_size = size * style.scale.unwrap_or(1.);
+            // Raised: in its features, in EM of its own size.
+            if style.baseline_shift != 0. {
+                raised = true;
+                font.features = font
+                    .features
+                    .raised(style.baseline_shift * size / font_size.max(1.));
+            }
             crate::rich_text::TextRun {
                 range,
                 font,
-                font_size: size,
+                font_size,
                 color: style.color.unwrap_or(color),
                 background: style.background,
                 strikethrough: style.strike.then(|| crate::rich_text::Decoration::new(1.)),
@@ -239,10 +288,15 @@ pub(crate) fn styled_line(
             }
         })
         .collect();
-    crate::rich_text::RichText::new(line, runs).ok()
+    let rich = crate::rich_text::RichText::new(line, runs).ok();
+    if raised {
+        rich.map(|rich| rich.with_raised())
+    } else {
+        rich
+    }
 }
-/// What shapes a styled line beyond its text: its runs' weights and
-/// slants (`None`: it shapes as its plain text does).
+/// What shapes a styled line beyond its text: its runs' weights, slants,
+/// sizes and shifts (`None`: it shapes as its plain text does).
 fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
     if !spans.iter().any(|(_, s)| s.shapes()) {
         return None;
@@ -257,6 +311,8 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                     r.end as u32,
                     s.weight.unwrap_or(0),
                     s.italic,
+                    s.scale.map_or(0, f32::to_bits),
+                    s.baseline_shift.to_bits(),
                 )
             })
             .collect(),
@@ -331,7 +387,7 @@ struct Tail {
 /// A shaped line, and when it was last used.
 type Shaped = (Rc<dyn TextLayout>, u64);
 /// What shapes a styled line's runs: each one's range, weight and slant.
-type ShapeKey = Box<[(u32, u32, u16, bool)]>;
+type ShapeKey = Box<[(u32, u32, u16, bool, u32, u32)]>;
 /// A styled line's text and what shapes its runs (`shape_key`).
 type StyledKey = (Box<str>, ShapeKey);
 /// A highlighted line: its colours, what it leaves the next, when used.

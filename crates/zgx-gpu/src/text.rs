@@ -441,7 +441,14 @@ impl ShapedText {
                 } else {
                     glyph.x + glyph.w * fraction
                 };
-                let rect = Rect::new(x, run.line_top, 1., run.line_height);
+                let rect = if glyph
+                    .cache_key_flags
+                    .contains(cosmic_text::CacheKeyFlags::BASELINE_SHIFT)
+                {
+                    raised_caret(x, &run, glyph)
+                } else {
+                    Rect::new(x, run.line_top, 1., run.line_height)
+                };
                 if (cursor.byte_index == start && cursor.affinity == Affinity::After)
                     || (cursor.byte_index == end && cursor.affinity == Affinity::Before)
                     || (cursor.byte_index > start && cursor.byte_index < end)
@@ -2012,16 +2019,55 @@ pub(crate) fn rich_buffer_unshaped(
         ));
         index = end;
     }
+    // Runs raised off the baseline, few: their spans marked apart.
+    let raised = rich.has_raised();
+    if raised {
+        raise_spans(&mut spans, runs);
+    }
     buffer.set_rich_text(
         spans,
         &default_attrs,
         Shaping::Advanced,
         alignment(base.map_or(&default_font, |run| &run.font)),
     );
-    if boxes.is_some() {
+    if boxes.is_some() || raised {
         buffer.find_inline_boxes();
     }
     buffer
+}
+
+/// The spans of runs raised off the baseline (`FontFeatures::RAISE`, by the
+/// run each names in its metadata) raised so for cosmic-text, which marks
+/// their glyphs and lines (`Attrs::baseline_shift`).
+#[cold]
+#[inline(never)]
+fn raise_spans(spans: &mut [(&str, Attrs<'_>)], runs: &[zgx::rich_text::TextRun]) {
+    for (_, attrs) in spans.iter_mut() {
+        let Some(run) = runs.get(attrs.metadata) else {
+            continue;
+        };
+        let raise = run.font.features.raise();
+        if raise != 0. {
+            *attrs = attrs.clone().baseline_shift(raise);
+        }
+    }
+}
+
+/// The caret at `x` in a glyph raised off the baseline (`FontFeatures::
+/// RAISE`), as a browser draws one in a `<sup>`: as tall as its
+/// own text, on its raised baseline, within the line.
+#[cold]
+#[inline(never)]
+fn raised_caret(
+    x: f32,
+    run: &cosmic_text::LayoutRun<'_>,
+    glyph: &cosmic_text::LayoutGlyph,
+) -> Rect {
+    let baseline = run.line_y - glyph.y_offset * glyph.font_size;
+    let height = (glyph.font_size * 1.25).min(run.line_height);
+    let bottom = (baseline + height * 0.25).min(run.line_top + run.line_height);
+    let top = (bottom - height).max(run.line_top);
+    Rect::new(x, top, 1., (bottom - top).max(1.))
 }
 
 /// The box at byte `at` of `boxes` (`RichText::inline_boxes`, in order),
@@ -2897,5 +2943,101 @@ mod wash_tests {
         )
         .unwrap();
         assert_eq!(washes(&apart).len(), 2, "two spans side by side: two");
+    }
+}
+
+#[cfg(test)]
+mod baseline_shift_tests {
+    use super::*;
+    use zgx::rich_text::{RichText, TextRun};
+    use zgx::text_layout::{FontStyle, LineHeight};
+
+    /// "H2O" at 20 px on a 30 px pitch, its "2" at `size` raised `shift`.
+    fn shaped(fonts: &mut FontSystem, size: f32, shift: f32) -> ShapedText {
+        let font = FontStyle {
+            line_height: LineHeight::px(30.),
+            ..Default::default()
+        };
+        let run = |range, font_size: f32, shift: f32| TextRun {
+            range,
+            font: FontStyle {
+                features: font.features.raised(shift / font_size),
+                ..font.clone()
+            },
+            font_size,
+            ..Default::default()
+        };
+        let rich = RichText::new(
+            "H2O",
+            vec![
+                run(0..1, 20., 0.),
+                run(1..2, size, shift),
+                run(2..3, 20., 0.),
+            ],
+        )
+        .unwrap()
+        .with_raised();
+        ShapedText::with_runs(fonts, &rich, None)
+    }
+    fn glyph(text: &ShapedText, start: usize) -> (f32, f32, f32) {
+        let run = text.buffer.layout_runs().next().unwrap();
+        let glyph = run.glyphs.iter().find(|g| g.start == start).unwrap();
+        (
+            glyph.x + glyph.w / 2.,
+            glyph.y_offset * glyph.font_size,
+            run.line_y,
+        )
+    }
+
+    #[test]
+    fn a_raised_run_draws_higher_and_grows_its_line_only_past_it() {
+        let mut fonts = FontSystem::new();
+        let plain = shaped(&mut fonts, 20., 0.);
+        assert_eq!(plain.size().1, 30.);
+        // A small superscript raised a little fits in the line's leading.
+        let small = shaped(&mut fonts, 15., 1.);
+        assert_eq!(small.size().1, 30., "the line as it was");
+        assert!((glyph(&small, 1).1 - 1.).abs() < 0.01, "drawn 1 px up");
+        // Raised far, it reaches past the line: the line grows above, the
+        // baseline down by as much, and the rest of the text with it.
+        let big = shaped(&mut fonts, 15., 12.);
+        let grown = big.size().1 - 30.;
+        assert!(grown > 1. && grown <= 12., "grew {grown}");
+        let (_, raised, line_y) = glyph(&big, 1);
+        assert!((raised - 12.).abs() < 0.01, "drawn 12 px up: {raised}");
+        assert!((line_y - glyph(&plain, 0).2 - grown).abs() < 0.01);
+        assert_eq!(glyph(&big, 2).1, 0., "the O on the baseline");
+        // Raised where it's drawn, not in what's drawn: its bitmap is the
+        // one unraised text keeps in the atlas.
+        let run = big.buffer.layout_runs().next().unwrap();
+        let two = run.glyphs.iter().find(|g| g.start == 1).unwrap();
+        let raised = cosmic_text::CacheKeyFlags::BASELINE_SHIFT;
+        assert!(two.cache_key_flags.contains(raised));
+        assert!(!two.physical((0., 0.), 1.).cache_key.flags.contains(raised));
+    }
+
+    #[test]
+    fn a_raised_glyph_takes_its_hits_and_its_caret_is_raised() {
+        let mut fonts = FontSystem::new();
+        let big = shaped(&mut fonts, 15., 12.);
+        let (x, raised, line_y) = glyph(&big, 1);
+        // On the raised "2", above the baseline's glyphs.
+        let hit = big.hit_test(x, line_y - raised - 5.).expect("a hit");
+        assert!((1..=2).contains(&hit.byte_index), "{hit:?}");
+        let caret = |byte_index| {
+            big.caret(TextCursor {
+                byte_index,
+                affinity: Affinity::After,
+            })
+            .unwrap()
+        };
+        let (plain, up) = (caret(0), caret(1));
+        // Shorter, its foot lifted, within the line.
+        let foot = |r: Rect| r.y + r.height;
+        assert!(
+            foot(up) < foot(plain) - 5.,
+            "raised: {up:?} beside {plain:?}"
+        );
+        assert!(up.height < plain.height && up.y >= plain.y);
     }
 }

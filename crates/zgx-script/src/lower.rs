@@ -6500,6 +6500,16 @@ fn code_editor(
                         Some(b"italic") => style.italic = yes(&value),
                         Some(b"strike") => style.strike = yes(&value),
                         Some(b"bg") => style.background = value.as_str().and_then(&*color_of),
+                        // Raised off the baseline, in EM; a share of the size.
+                        Some(b"baseline_shift") => {
+                            style = style.baseline_shift(number(&value).unwrap_or(0.) as f32);
+                        }
+                        Some(b"scale") => {
+                            if let Some(scale) = number(&value).filter(|s| *s > 0.) {
+                                style = style.scale(scale as f32);
+                            }
+                        }
+                        Some(b"superscript") if yes(&value) => style = style.superscript(),
                         Some(_) => {}
                     }
                     Ok(())
@@ -8757,6 +8767,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
                         out = out.padding_end(end);
                     }
+                    if let Some(raise) = rare.raise {
+                        out = raised_span(out, raise);
+                    }
                     if let Some(build) = rare.menu.as_ref() {
                         let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
                         out = out
@@ -10008,4 +10021,20 @@ fn a_list_keeping_its_first_items_passes_over_the_rest_as_the_full_pass_does() {
             assert!(skipped > 0, "seed {seed}");
         }
     }
+}
+
+/// A span raised off the baseline (`ui.sup`): few are.
+#[cold]
+#[inline(never)]
+fn raised_span(
+    mut out: zgx::compose::TextSpan,
+    (superscript, shift): (bool, f32),
+) -> zgx::compose::TextSpan {
+    if shift != 0. {
+        out = out.baseline_shift(shift);
+    }
+    if superscript {
+        out = out.superscript();
+    }
+    out
 }

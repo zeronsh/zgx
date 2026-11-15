@@ -214,6 +214,32 @@ impl FontFeatures {
     /// and is never given to a font; it takes zgx's `hyphens` feature
     /// (`HYPHENATION`). Luau's `font_features = "hyphens"` sets it.
     pub const HYPHENS: [u8; 4] = *b"_hyp";
+    /// zgx's own tag for text raised off the baseline (lowered if
+    /// negative), its value how far, in EM of the run's size (`f32` bits):
+    /// CSS's `vertical-align: <length>`, a `<sup>`'s. cosmic-text's
+    /// `FontFeatures::BASELINE_SHIFT`, which the shaper reads: carried in
+    /// the features so a run is no bigger and compares nothing more for it.
+    #[doc(hidden)]
+    pub const RAISE: [u8; 4] = *b"_bsh";
+    /// These, with the text raised `em` off the baseline (`RAISE`; none at
+    /// 0).
+    #[doc(hidden)]
+    pub fn raised(&self, em: f32) -> Self {
+        let others = self
+            .settings()
+            .iter()
+            .copied()
+            .filter(|(tag, _)| *tag != Self::RAISE);
+        let raise = (em != 0. && em.is_finite()).then_some((Self::RAISE, em.to_bits()));
+        Self::settled(others.chain(raise))
+    }
+    /// How far these raise the text (`raised`), in EM.
+    #[doc(hidden)]
+    pub fn raise(&self) -> f32 {
+        (self.settings().iter())
+            .find(|(tag, _)| *tag == Self::RAISE)
+            .map_or(0., |(_, value)| f32::from_bits(*value))
+    }
     /// Whether words break at their hyphenation points (`HYPHENS`).
     pub fn hyphens(&self) -> bool {
         self.settings()

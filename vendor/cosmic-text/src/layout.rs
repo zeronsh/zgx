@@ -103,7 +103,9 @@ impl LayoutGlyph {
             ),
             self.font_weight,
             self.font_optical,
-            self.cache_key_flags,
+            // zgx: a raised glyph's bitmap is its unraised one's: its shift
+            // is where it's drawn, not what is drawn (`BASELINE_SHIFT`).
+            self.cache_key_flags - CacheKeyFlags::BASELINE_SHIFT,
         );
 
         PhysicalGlyph { cache_key, x, y }

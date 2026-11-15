@@ -19,6 +19,10 @@ bitflags::bitflags! {
         /// (`InlineAlign::Top`, `Bottom`), with `INLINE_BOX`.
         const INLINE_LINE_TOP = 16;
         const INLINE_LINE_BOTTOM = 32;
+        /// zgx: a glyph of a span raised or lowered off the baseline
+        /// (`Attrs::baseline_shift`): its `y_offset` holds the shift, and
+        /// its line takes CSS's line box (`BufferLine::set_inline_boxes`).
+        const BASELINE_SHIFT = 64;
     }
 }
 

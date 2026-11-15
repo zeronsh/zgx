@@ -587,6 +587,13 @@ export type HighlightSpan = {
 	strike: boolean?,
 	-- A wash behind it (inline code).
 	bg: Color?,
+	-- Raised this many EM off the baseline (lowered if negative), CSS's
+	-- `vertical-align`: its line grows only if it reaches past it.
+	baseline_shift: number?,
+	-- Its size as a share of the editor's (0.75).
+	scale: number?,
+	-- A superscript, as `<sup>`: 0.75 of the size, raised 0.33 EM.
+	superscript: boolean?,
 }
 -- A number, or a number token: a standard one (`"$radius.md"`, see
 -- `NumberToken`) or an app's (`"$terminal.inset"`), hence any string.
@@ -3759,6 +3766,13 @@ declare ui: {
 	scroll_x: (props: ScrollProps?) -> Node,
 	text: (content: Text | TextProps) -> Node,
 	span: (content: Text | SpanProps) -> Span,
+	-- Internal, subject to change (not yet in the reference).
+	-- A span raised off the baseline as a superscript, `<sup>` (a footnote's
+	-- mark): 0.75 of the text's size unless `text_size` sets one, raised a
+	-- third of it, and `baseline_shift` points more. `superscript = false`
+	-- raises a span of the text's size by `baseline_shift` alone. Its line
+	-- grows only where the raised text reaches past it.
+	sup: (content: Text | SpanProps & { superscript: boolean?, baseline_shift: number? }) -> Span,
 	rich: (props: RichProps) -> Node,
 	image: (props: ImageProps) -> Node,
 	-- A picture's size in pixels, read from its file's header (nothing is
