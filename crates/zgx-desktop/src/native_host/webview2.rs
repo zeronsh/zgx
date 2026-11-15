@@ -532,11 +532,7 @@ impl WebViewBackend for Backend {
     /// a request to the host would carry (its own and its parent domains',
     /// which a browser never sets on a public suffix) one by one. Another
     /// subdomain's storage, and cookies one set for itself alone, stay.
-    fn clear_site_data(
-        &self,
-        url: &str,
-        done: Box<dyn FnOnce(std::result::Result<usize, String>)>,
-    ) {
+    fn clear_site_data(&self, url: &str, done: SiteAnswer) {
         let Some(host) = zgx::web_view::site_host(url) else {
             return done(Err(format!("{url} has no site")));
         };
@@ -2223,6 +2219,9 @@ fn normalized(url: &str) -> String {
     )
 }
 
+/// Who hears what `clear_site_data` removed (`std`'s `Result`: this file's
+/// glob import has webview2_com's).
+type SiteAnswer = Box<dyn FnOnce(std::result::Result<usize, String>)>;
 /// A `clear_site_data` on WebView2: its calls answered and how many will
 /// (known once all have started), the records they removed, the first
 /// failure, and who gets the answer.
@@ -2231,7 +2230,7 @@ struct SiteClear {
     expected: Cell<Option<usize>>,
     removed: Cell<usize>,
     error: RefCell<Option<String>>,
-    done: Cell<Option<Box<dyn FnOnce(std::result::Result<usize, String>)>>>,
+    done: Cell<Option<SiteAnswer>>,
 }
 impl SiteClear {
     /// One call answered.
