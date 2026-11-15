@@ -198,6 +198,17 @@ pub struct LineInset {
     /// that line's `left`.
     pub group_width: Option<f32>,
 }
+/// A scroll group's frame set by the app (`EditorHandle::set_group_frame`): each part given overrides what its
+/// lines say (a table's cells, whose borders and fills sit outside their text). All `None`: as its lines say.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GroupFrame {
+    /// Where the frame starts, in points from the text area's left content edge; none: its first line's `left`.
+    pub left: Option<f32>,
+    /// How wide it shows; none: its first line's `group_width`, else what the editor's width leaves right of `left`.
+    pub width: Option<f32>,
+    /// How wide its lines reach from `left`, for how far it scrolls; none: as far as its lines reach.
+    pub content: Option<f32>,
+}
 impl LineInset {
     /// The width the line wraps in when the text wraps at `wrap`: its own, or what its indent leaves.
     fn wrap(&self, wrap: Option<f32>) -> Option<f32> {
@@ -521,6 +532,18 @@ pub(crate) struct LineCache {
     group_scroll: RefCell<HashMap<u32, f32>>,
     /// Told of each group's new offset (`EditorHandle::on_group_scroll`).
     on_group_scroll: RefCell<Option<GroupListener>>,
+    /// Frames the app set for groups (`EditorHandle::set_group_frame`), by id: read as each frame is asked for,
+    /// so setting one lays nothing out again.
+    group_frames: RefCell<HashMap<u32, GroupFrame>>,
+}
+/// What a scroll group's lines say of it (`LinesLayout::groups`), before the app's frame.
+#[derive(Clone, Copy, Debug)]
+struct GroupLines {
+    /// Its first line's `left` and `group_width`.
+    left: f32,
+    width: Option<f32>,
+    /// How far right its lines reach, from the area's left content edge.
+    right: f32,
 }
 /// Told of a scroll group's id and new offset (`EditorHandle::on_group_scroll`).
 pub(crate) type GroupListener = Rc<dyn Fn(u32, f32)>;
@@ -725,6 +748,15 @@ impl LineCache {
             listener(group, x);
         }
         true
+    }
+    /// Set scroll group `group`'s frame (an all-`None` one: as its lines say).
+    pub(crate) fn set_group_frame(&self, group: u32, frame: GroupFrame) {
+        let mut frames = self.group_frames.borrow_mut();
+        if frame == GroupFrame::default() {
+            frames.remove(&group);
+        } else {
+            frames.insert(group, frame);
+        }
     }
     pub(crate) fn on_group_scroll(&self, listener: Option<GroupListener>) {
         *self.on_group_scroll.borrow_mut() = listener;
@@ -1064,7 +1096,7 @@ pub(crate) struct LinesLayout {
     /// Whether any line is in a scroll group (`LineInset::scroll_group`): only then are the groups found.
     grouped: bool,
     /// Each scroll group's frame and extent, found once asked for.
-    groups: RefCell<Option<Rc<HashMap<u32, Group>>>>,
+    groups: RefCell<Option<Rc<HashMap<u32, GroupLines>>>>,
 }
 /// A line's text: in its chunk, or joined across chunks and kept.
 pub(crate) enum LineText<'a> {
@@ -1533,27 +1565,23 @@ impl LinesLayout {
             .map_or(0., |group| self.cache.group_scroll(group))
     }
     /// Each scroll group's frame and extent; none without groups.
-    fn groups(&self) -> Option<Rc<HashMap<u32, Group>>> {
+    fn groups(&self) -> Option<Rc<HashMap<u32, GroupLines>>> {
         if !self.grouped {
             return None;
         }
         if let Some(groups) = &*self.groups.borrow() {
             return Some(groups.clone());
         }
-        let mut groups: HashMap<u32, Group> = HashMap::new();
+        let mut groups: HashMap<u32, GroupLines> = HashMap::new();
         for i in 0..self.line_count() {
             let inset = self.inset(i);
             let Some(id) = inset.scroll_group else {
                 continue;
             };
-            let group = groups.entry(id).or_insert_with(|| Group {
+            let group = groups.entry(id).or_insert(GroupLines {
                 left: inset.left,
-                view: inset
-                    .group_width
-                    .or(self.wrap.map(|w| w - inset.left))
-                    .unwrap_or(f32::INFINITY)
-                    .max(1.),
-                content: 0.,
+                width: inset.group_width,
+                right: inset.left,
             });
             if inset.hidden {
                 continue;
@@ -1562,7 +1590,7 @@ impl LinesLayout {
                 Some(width) => width.max(1.),
                 None => self.line_range(i).len() as f32 * self.advance,
             };
-            group.content = group.content.max(inset.left + width - group.left);
+            group.right = group.right.max(inset.left + width);
         }
         let groups = Rc::new(groups);
         *self.groups.borrow_mut() = Some(groups.clone());
@@ -1570,7 +1598,27 @@ impl LinesLayout {
     }
     /// Scroll group `id`'s frame and extent, if a line is in it.
     pub(crate) fn group(&self, id: u32) -> Option<Group> {
-        self.groups()?.get(&id).copied()
+        let lines = *self.groups()?.get(&id)?;
+        let frame = self
+            .cache
+            .group_frames
+            .borrow()
+            .get(&id)
+            .copied()
+            .unwrap_or_default();
+        let left = frame.left.unwrap_or(lines.left);
+        let view = frame
+            .width
+            .or(lines.width)
+            .or(self.wrap.map(|w| w - left))
+            .unwrap_or(f32::INFINITY)
+            .max(1.);
+        let content = frame.content.unwrap_or(lines.right - left).max(0.);
+        Some(Group {
+            left,
+            view,
+            content,
+        })
     }
     /// Line `i`'s scroll group: its id and frame.
     pub(crate) fn group_of(&self, i: usize) -> Option<(u32, Group)> {

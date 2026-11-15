@@ -18,8 +18,8 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{
-    Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans, MarkImage,
-    SpanHighlighter, SpanStyle,
+    GroupFrame, Highlighter, LineColors, LineInset, LineInsets, LineMark, LineMarks, LineSpans,
+    MarkImage, SpanHighlighter, SpanStyle,
 };
 
 #[derive(Default)]
@@ -1100,6 +1100,26 @@ impl EditorHandle {
         if lines.set_group_scroll(group, x) {
             self.refresh();
         }
+    }
+    /// Set scroll group `group`'s frame: where it starts, how wide it shows and how far its lines reach (a table
+    /// whose cells' borders sit outside their text), each part `None` as its lines say; an all-`None` frame clears
+    /// it. It applies at once, no text changing: the next paint, `group_extent` and the clamp read it, and an
+    /// offset past the new limit is brought back to it (its listener hears).
+    pub fn set_group_frame(&self, group: u32, frame: GroupFrame) {
+        if !self.multiline {
+            return;
+        }
+        let lines = self.hint.line_cache();
+        lines.set_group_frame(group, frame);
+        if let Some(limit) = lines
+            .last_layout()
+            .and_then(|layout| layout.group(group))
+            .map(|frame| frame.limit())
+            && lines.group_scroll(group) > limit
+        {
+            lines.set_group_scroll(group, limit);
+        }
+        self.refresh();
     }
     /// How far scroll group `group` is scrolled sideways (`set_group_scroll`).
     pub fn group_scroll(&self, group: u32) -> f32 {

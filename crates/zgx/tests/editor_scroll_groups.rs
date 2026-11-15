@@ -5,7 +5,7 @@ use zgx::{
     compose::prelude::*,
     input::InputEvent,
     scene::{ClipInset, NodeId, NodeKind},
-    widgets::{EditorHandle, LineInset, LineMark, Ui},
+    widgets::{EditorHandle, GroupFrame, LineInset, LineMark, Ui},
 };
 
 /// Four 300-point columns (lines 1 to 4) in a 680-point note, between ordinary lines.
@@ -199,4 +199,75 @@ fn without_a_group_nothing_is_cut() {
     }
     assert_eq!(shown(&ui, &editor, "c3 three").0, 600.);
     assert!(borders(&ui, &editor).iter().all(|(_, clip)| clip.is_none()));
+}
+
+/// A frame the app sets (a table's cells' borders outside their text) applies at once, no text changing: the
+/// extent, the clip and the clamp read it; a narrower one brings the offset back to its limit, and an empty one
+/// clears it.
+#[test]
+fn a_frame_the_app_sets_applies_at_once() {
+    let (ui, editor) = note(true);
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let log = heard.clone();
+    editor.on_group_scroll(move |group, x| log.borrow_mut().push((group, x)));
+    editor.set_group_frame(
+        7,
+        GroupFrame {
+            left: Some(0.),
+            width: Some(600.),
+            content: Some(1250.),
+        },
+    );
+    assert_eq!(editor.group_extent(7), Some((600., 1250.)));
+    ui.prepare_frame();
+    // The third column starts where the frame ends: cut whole.
+    assert_eq!(
+        shown(&ui, &editor, "c3 three"),
+        (600., Some(ClipInset::px(0., 300., 0., 0.)))
+    );
+    editor.set_group_scroll(7, 10_000.);
+    assert_eq!(editor.group_scroll(7), 650.);
+    // The table narrows: the offset comes back to the new limit, and the listener hears.
+    editor.set_group_frame(
+        7,
+        GroupFrame {
+            left: Some(0.),
+            width: Some(600.),
+            content: Some(900.),
+        },
+    );
+    assert_eq!(editor.group_scroll(7), 300.);
+    assert_eq!(*heard.borrow(), vec![(7, 650.), (7, 300.)]);
+    // Cleared: as its lines say.
+    editor.set_group_frame(7, GroupFrame::default());
+    assert_eq!(editor.group_extent(7), Some((680., 1200.)));
+    assert_eq!(editor.group_scroll(7), 300.);
+}
+
+/// A frame starting right of the first cell's text cuts that text at its left edge; a wheel left of the frame
+/// isn't the group's.
+#[test]
+fn a_frames_left_edge_cuts_and_bounds_the_group() {
+    let (mut ui, editor) = note(true);
+    editor.set_group_frame(
+        7,
+        GroupFrame {
+            left: Some(50.),
+            ..GroupFrame::default()
+        },
+    );
+    ui.prepare_frame();
+    assert_eq!(editor.group_extent(7), Some((680., 1150.)));
+    assert_eq!(
+        shown(&ui, &editor, "c1 one"),
+        (0., Some(ClipInset::px(0., 0., 0., 50.)))
+    );
+    wheel(&mut ui, 20., ROW_Y, 40., 0., None);
+    assert_eq!(
+        editor.group_scroll(7),
+        0.,
+        "left of the frame: not the group's"
+    );
+    wheel(&mut ui, 100., ROW_Y, 40., 0., None);
+    assert_eq!(editor.group_scroll(7), 40.);
 }
