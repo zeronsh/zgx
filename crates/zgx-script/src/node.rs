@@ -1572,6 +1572,109 @@ pub(crate) struct Span {
     /// What few spans have (an icon, a menu), apart: most spans carry none.
     pub rare: Option<Rc<SpanRare>>,
 }
+/// How a textarea's atoms show beyond a wash (`atom_style = { color,
+/// weight, underline = { color, offset } | true, icon = { src, size, gap,
+/// tint } }`, or an atom's own `style`): colours as written, resolved where
+/// it is lowered.
+pub(crate) struct AtomLook {
+    pub color: Option<Value>,
+    pub weight: Option<u16>,
+    pub underline: Option<(Option<Value>, Option<f32>)>,
+    pub icon: Option<SpanIcon>,
+}
+/// `style`'s mention look, if it sets any of it.
+pub(crate) fn atom_look(style: &Table) -> mlua::Result<Option<AtomLook>> {
+    let color = style.raw_get::<Value>("color")?;
+    let weight = style.raw_get::<Option<f64>>("weight")?;
+    let underline = match style.raw_get::<mlua::Value>("underline")? {
+        mlua::Value::Nil | mlua::Value::Boolean(false) => None,
+        mlua::Value::Boolean(true) => Some((None, None)),
+        mlua::Value::Table(line) => {
+            let color = line.raw_get::<Value>("color")?;
+            Some((
+                (!matches!(color, Value::Nil)).then_some(color),
+                line.raw_get::<Option<f32>>("offset")?,
+            ))
+        }
+        _ => {
+            return Err(mlua::Error::runtime(
+                "an atom's `underline` is true or { color, offset }",
+            ));
+        }
+    };
+    let icon = match style.raw_get::<Option<Table>>("icon")? {
+        Some(icon) => Some(span_icon(&icon)?),
+        None => None,
+    };
+    let look = AtomLook {
+        color: (!matches!(color, Value::Nil)).then_some(color),
+        weight: weight.map(|w| w.clamp(1., 1000.) as u16),
+        underline,
+        icon,
+    };
+    Ok((look.color.is_some()
+        || look.weight.is_some()
+        || look.underline.is_some()
+        || look.icon.is_some())
+    .then_some(look))
+}
+/// An atom's own `style` (a value from its item) as a mention look, if it
+/// sets any of it: as `atom_look`, its icon `{ src | code, size, gap, tint }`.
+pub(crate) fn atom_look_of(style: &Value) -> Option<AtomLook> {
+    let field = |key: &str| {
+        style
+            .field(key)
+            .filter(|v| !matches!(v, Value::Nil))
+            .cloned()
+    };
+    let number = |value: Option<&Value>| match value {
+        Some(Value::Num(n)) if n.is_finite() => Some(*n),
+        _ => None,
+    };
+    let underline = match style.field("underline") {
+        Some(Value::Bool(true)) => Some((None, None)),
+        Some(line @ Value::Map(_)) => Some((
+            line.field("color")
+                .filter(|v| !matches!(v, Value::Nil))
+                .cloned(),
+            number(line.field("offset")).map(|n| n as f32),
+        )),
+        _ => None,
+    };
+    let icon = style.field("icon").and_then(|icon| {
+        let src = match (icon.field("src"), icon.field("code")) {
+            (Some(Value::Str(src)), _) => src.to_string(),
+            (None, Some(Value::Str(code))) => format!("code:{code}"),
+            _ => return None,
+        };
+        Some(SpanIcon {
+            src,
+            size: number(icon.field("size")).map_or(12., |n| n as f32),
+            gap: number(icon.field("gap")).map_or(4., |n| n as f32),
+            margin: 0.,
+            dy: 0.,
+            tint: icon
+                .field("tint")
+                .filter(|v| !matches!(v, Value::Nil))
+                .cloned(),
+            bg: None,
+            radius: 0.,
+            pad: 0.,
+            baseline: false,
+        })
+    });
+    let look = AtomLook {
+        color: field("color"),
+        weight: number(style.field("weight")).map(|w| w.clamp(1., 1000.) as u16),
+        underline,
+        icon,
+    };
+    (look.color.is_some()
+        || look.weight.is_some()
+        || look.underline.is_some()
+        || look.icon.is_some())
+    .then_some(look)
+}
 /// A span's `icon = { src | code, size, gap, … }`.
 fn span_icon(icon: &Table) -> mlua::Result<SpanIcon> {
     let src = match (
@@ -1755,6 +1858,8 @@ pub(crate) struct CodeProps {
     pub on_atom_hover: Option<Function>,
     /// `atom_style = { bg }`: the wash behind atoms with none of their own.
     pub atom_style: Option<Source>,
+    /// `atom_style`'s mention look: colour, weight, underline and icon.
+    pub atom_look: Option<Rc<AtomLook>>,
     /// `find = { query, case, current, limit, color, current_color }`: a
     /// search's matches marked behind the text, found where the text is
     /// held (no list of them made in the script).
@@ -6068,13 +6173,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         let on_atoms = table.raw_get::<Option<Function>>("on_atoms")?;
                         let on_atom_press = table.raw_get::<Option<Function>>("on_atom_press")?;
                         let on_atom_hover = table.raw_get::<Option<Function>>("on_atom_hover")?;
-                        let atom_style = match table.raw_get::<Option<Table>>("atom_style")? {
-                            None => None,
-                            Some(style) => match style.raw_get::<mlua::Value>("bg")? {
-                                mlua::Value::Nil => None,
-                                value => Some(source(lua, Ty::Color, "bg", value)?),
-                            },
-                        };
+                        let (atom_style, atom_look) =
+                            match table.raw_get::<Option<Table>>("atom_style")? {
+                                None => (None, None),
+                                Some(style) => (
+                                    match style.raw_get::<mlua::Value>("bg")? {
+                                        mlua::Value::Nil => None,
+                                        value => Some(source(lua, Ty::Color, "bg", value)?),
+                                    },
+                                    atom_look(&style)?.map(Rc::new),
+                                ),
+                            };
                         let find = match table.raw_get::<Option<Table>>("find")? {
                             None => None,
                             Some(find) => {
@@ -6110,6 +6219,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             || on_atom_press.is_some()
                             || on_atom_hover.is_some()
                             || atom_style.is_some()
+                            || atom_look.is_some()
                             || find.is_some())
                         .then(|| {
                             Rc::new(CodeProps {
@@ -6125,6 +6235,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                                 on_atom_press,
                                 on_atom_hover,
                                 atom_style,
+                                atom_look,
                                 find,
                             })
                         })

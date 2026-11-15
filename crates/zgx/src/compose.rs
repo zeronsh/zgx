@@ -544,6 +544,8 @@ pub(crate) struct CodeOptions {
     atoms_when: Option<AtomsFollow>,
     /// `on_atom_press`, `on_atom_hover`: its atoms under the pointer.
     atom_pointer: Option<Rc<crate::editor_atom_pointer::AtomPointer>>,
+    /// `atom_style`: how its atoms show beyond a wash.
+    atom_style: Option<crate::editor_atom_style::AtomStyle>,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -2092,6 +2094,13 @@ impl View {
     /// `EditorHandle::on_atoms`.
     pub fn on_atoms(mut self, told: impl FnMut(&crate::widgets::AtomEvent<'_>) + 'static) -> Self {
         self.code_mut().on_atoms = Some(Box::new(told));
+        self
+    }
+    /// How a text area's atoms show beyond a wash: a mention's colour,
+    /// weight, underline and leading icon (`EditorHandle::set_atom_style`).
+    #[doc(hidden)]
+    pub fn atom_style(mut self, style: crate::editor_atom_style::AtomStyle) -> Self {
+        self.code_mut().atom_style = Some(style);
         self
     }
     /// Call `told` when a primary press on one of a text area's atoms is let
@@ -7442,6 +7451,7 @@ fn open_element(
                 on_atoms,
                 atoms_when,
                 atom_pointer,
+                atom_style,
             } = *code;
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
@@ -7471,6 +7481,9 @@ fn open_element(
             }
             if let Some(pointer) = atom_pointer {
                 pointer.attach(editor.clone());
+            }
+            if atom_style.is_some() {
+                editor.set_atom_style(atom_style);
             }
             if let Some(mut atoms) = atoms_when {
                 let editor = editor.clone();

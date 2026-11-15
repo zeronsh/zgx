@@ -73,6 +73,15 @@ pub struct SpanStyle {
     pub padding: Option<[f32; 2]>,
     /// Its background's corner radius.
     pub radius: Option<f32>,
+    /// Its underline's colour, its thickness then the font's (a
+    /// mention's): an underline with neither this nor an offset is one
+    /// point thick in the text's colour.
+    pub underline_color: Option<crate::scene::Color>,
+    /// How far below the baseline its underline sits, in points.
+    pub underline_offset: Option<f32>,
+    /// Room before its text only, in points: where an atom's leading icon
+    /// draws (`AtomStyle::icon`); it moves with the text's first word.
+    pub lead: Option<f32>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -146,6 +155,9 @@ impl SpanStyle {
         self.mono |= style.mono;
         self.padding = self.padding.or(style.padding);
         self.radius = self.radius.or(style.radius);
+        self.underline_color = self.underline_color.or(style.underline_color);
+        self.underline_offset = self.underline_offset.or(style.underline_offset);
+        self.lead = self.lead.or(style.lead);
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
@@ -159,6 +171,7 @@ impl SpanStyle {
             && !self.mono
             && self.padding.is_none()
             && self.radius.is_none()
+            && self.lead.is_none()
     }
     /// Whether it changes how its text is shaped (and so its width or height).
     fn shapes(&self) -> bool {
@@ -168,6 +181,7 @@ impl SpanStyle {
             || self.line_height.is_some()
             || self.mono
             || self.padding.is_some()
+            || self.lead.is_some()
     }
 }
 /// Room around one line of a text area (`EditorHandle::set_line_insets`): a list item's indent, a heading's space
@@ -323,6 +337,37 @@ pub(crate) fn span_highlighter(highlighter: Highlighter) -> SpanHighlighter {
     })
 }
 
+/// The atoms' spans (`atoms`, over the whole text by start) a line over
+/// `line` holds, in its own bytes, before the highlighter's `colors` (so an
+/// atom's style wins where both set something), by start.
+#[inline(never)]
+fn atoms_on_line(
+    atoms: &LineSpans,
+    line: Range<usize>,
+    colors: Option<Rc<LineSpans>>,
+) -> Option<Rc<LineSpans>> {
+    let first = atoms.partition_point(|(range, _)| range.end <= line.start);
+    let mut spans: LineSpans = atoms[first..]
+        .iter()
+        .take_while(|(range, _)| range.start < line.end)
+        .filter(|(range, _)| range.end > line.start)
+        .map(|(range, style)| {
+            let start = range.start.max(line.start) - line.start;
+            let end = range.end.min(line.end) - line.start;
+            (start..end, *style)
+        })
+        .filter(|(range, _)| !range.is_empty())
+        .collect();
+    if spans.is_empty() {
+        return colors;
+    }
+    if let Some(colors) = colors {
+        spans.extend(colors.iter().cloned());
+        // Stable: at one start, the atom's first.
+        spans.sort_by_key(|(range, _)| range.start);
+    }
+    Some(Rc::new(spans))
+}
 /// `line`'s runs as `spans` (in order by start, on its character
 /// boundaries) style them, overlapping spans merged: each run's range, and
 /// its style (`None` for the editor's own).
@@ -427,23 +472,42 @@ pub(crate) fn styled_line(
             if let Some(line_height) = style.line_height {
                 font.line_height = crate::text_layout::LineHeight::px(line_height);
             }
+            // A lead is room before only: a negative padding across.
+            let padding = match (style.padding, style.lead) {
+                (Some(padding), _) => padding,
+                (None, Some(lead)) if lead > 0. => [-lead, 0.],
+                _ => [0.; 2],
+            };
             crate::rich_text::TextRun {
                 range,
                 font,
                 font_size: style.size.unwrap_or(size),
                 color: style.color.unwrap_or(color),
                 background: style.background,
-                padding: style.padding.unwrap_or_default(),
+                padding,
                 radius: style.radius.unwrap_or_default(),
-                underline: style
-                    .underline
-                    .then(|| crate::rich_text::Decoration::new(1.)),
+                underline: style.underline.then(|| underline(&style)),
                 strikethrough: style.strike.then(|| crate::rich_text::Decoration::new(1.)),
                 ..Default::default()
             }
         })
         .collect();
     crate::rich_text::RichText::new(line, runs).ok()
+}
+/// `style`'s underline: one point thick in its text's colour, or the
+/// font's thickness in its own colour and place when it says them.
+fn underline(style: &SpanStyle) -> crate::rich_text::Decoration {
+    if style.underline_color.is_none() && style.underline_offset.is_none() {
+        return crate::rich_text::Decoration::new(1.);
+    }
+    let mut line = crate::rich_text::Decoration::default();
+    if let Some(color) = style.underline_color {
+        line = line.color(color);
+    }
+    if let Some(offset) = style.underline_offset {
+        line = line.offset(offset);
+    }
+    line
 }
 /// What shapes a styled line beyond its text: its runs' weights and
 /// slants (`None`: it shapes as its plain text does).
@@ -464,6 +528,7 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                     s.size.map_or(0, f32::to_bits),
                     s.line_height.map_or(0, f32::to_bits),
                     s.mono,
+                    s.lead.map_or(0, f32::to_bits),
                 )
             })
             .collect(),
@@ -512,6 +577,9 @@ pub(crate) struct LineCache {
     /// The editor's text revision `last` is of, if it is its committed text.
     last_revision: Cell<Option<u64>>,
     highlighter: RefCell<Option<SpanHighlighter>>,
+    /// Spans its atoms' styles give (`AtomStyle`), over the whole text by
+    /// start: each line takes those it holds before the highlighter's.
+    atom_spans: RefCell<Option<Rc<LineSpans>>>,
     /// The highlighter has given a span that shapes its line (a weight,
     /// italics): only then is a line asked for its spans as it is shaped,
     /// so one that only colours costs what it did. `restyled`: it just
@@ -574,7 +642,7 @@ struct Tail {
 /// A shaped line, and when it was last used.
 type Shaped = (Rc<dyn TextLayout>, u64);
 /// What shapes a styled line's runs: each one's range, weight and slant.
-type ShapeKey = Box<[(u32, u32, u16, bool, u32, u32, bool)]>;
+type ShapeKey = Box<[(u32, u32, u16, bool, u32, u32, bool, u32)]>;
 /// A styled line's text and what shapes its runs (`shape_key`).
 type StyledKey = (Box<str>, ShapeKey);
 /// A highlighted line: its colours, what it leaves the next, when used.
@@ -774,7 +842,18 @@ impl LineCache {
         self.set_highlighter(highlighter);
     }
     pub(crate) fn highlighted(&self) -> bool {
-        self.highlighter.borrow().is_some()
+        self.highlighter.borrow().is_some() || self.atom_spans.borrow().is_some()
+    }
+    /// Its atoms' spans over the whole text, by start (none: no atom styled).
+    pub(crate) fn set_atom_spans(&self, spans: Option<LineSpans>) {
+        if let Some(spans) = &spans
+            && !self.shapes.get()
+            && spans.iter().any(|(_, style)| style.shapes())
+        {
+            self.shapes.set(true);
+            self.restyled.set(true);
+        }
+        *self.atom_spans.borrow_mut() = spans.map(Rc::new);
     }
     /// Whether a line's spans shape it now that did not before: what was
     /// laid out without them is laid out again.
@@ -784,6 +863,15 @@ impl LineCache {
     /// Line `i`'s spans, if it has a highlighter: what the lines above
     /// it leave found first (each once, until one changes).
     pub(crate) fn spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
+        let atoms = self.atom_spans.borrow().clone();
+        let colors = self.highlighted_spans(layout, i);
+        let Some(atoms) = atoms else {
+            return colors;
+        };
+        atoms_on_line(&atoms, layout.line_range(i), colors)
+    }
+    /// Line `i`'s highlighter spans, if it has one.
+    fn highlighted_spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
         let highlight = self.highlighter.borrow().clone()?;
         loop {
             let known = self.states.borrow().len();

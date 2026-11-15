@@ -168,7 +168,9 @@ pub struct TextRun {
     /// Room around the run, as CSS's inline padding: across, it is added
     /// before and after the run's text (it takes space in the line); both
     /// widen its background, which then hugs the text (its font's content
-    /// area) instead of filling the line: an inline code chip.
+    /// area) instead of filling the line: an inline code chip. Negative
+    /// across: that much room before its text only, and none after, its
+    /// background not widened (an editor atom's leading icon).
     pub padding: [f32; 2],
     /// The background's corner radius.
     pub radius: f32,
@@ -194,7 +196,12 @@ impl TextRun {
         };
         let first = (at == self.range.start) as u8 as f32;
         let last = (at + grapheme.len() == self.range.end) as u8 as f32;
-        (glyph + (first + last) * self.padding[0]).max(0.)
+        let room = if self.padding[0] < 0. {
+            -first * self.padding[0]
+        } else {
+            (first + last) * self.padding[0]
+        };
+        (glyph + room).max(0.)
     }
 }
 

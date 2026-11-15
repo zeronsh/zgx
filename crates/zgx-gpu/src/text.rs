@@ -2088,9 +2088,9 @@ pub(crate) fn rich_buffer_unshaped(
         if run.min_width > 0. {
             attributes = attributes.min_width(run.min_width / run.font_size.max(1.));
         }
-        if run.padding[0] > 0. {
+        if run.padding[0] != 0. {
             attributes = attributes.padding(run.padding[0] / run.font_size.max(1.));
-            if run.font.features.is_inline_box() {
+            if run.padding[0] > 0. && run.font.features.is_inline_box() {
                 let boxes = boxes.get_or_insert_with(|| rich.inline_boxes());
                 attributes = attributes.inline_box(box_at(boxes, run.range.start));
             }
