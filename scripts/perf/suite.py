@@ -65,6 +65,7 @@ SCENES = [
     ('fx-reader', 'zgx-3d', 'fx_bench', {'SCENE': 'reader'}),
     ('fx-passes', 'zgx-3d', 'passes_bench', {}),
     ('scroll-glass', 'zgx-3d', 'scroll_glass_bench', {}),
+    ('scroll-glass-pointer', 'zgx-3d', 'scroll_glass_bench', {'POINTER': '1'}),
     ('core', 'zgx', 'core_bench', {}, 'slow'),
     ('style', 'zgx', 'style_bench', {}),
     ('widgets', 'zgx', 'widget_bench', {}),

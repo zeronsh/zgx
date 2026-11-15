@@ -229,6 +229,10 @@ SCENES = [
     # size, bounds and visibility: the world geometry those observers and the
     # lists read, and the paint walk of the strip and band each frame draws.
     ('scroll-glass', 'zgx-3d', 'scroll_glass_bench', {'ZGX_GPU_NOOP': '1', 'FRAMES': '120'}),
+    # The same with the pointer resting over the list, as a person's does
+    # while they scroll: what it is over found again as rows move under it.
+    ('scroll-glass-pointer', 'zgx-3d', 'scroll_glass_bench',
+     {'ZGX_GPU_NOOP': '1', 'FRAMES': '120', 'POINTER': '1'}),
     # A video's frames (zgx-video's `examples/bench`): its script, animations,
     # timers and shader clock stepped on a virtual clock (`zgx::clock`), each
     # frame drawn whole by wgpu's no-op backend. What making video costs;
