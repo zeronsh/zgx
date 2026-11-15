@@ -356,6 +356,29 @@ impl UserData for WebUd {
             });
             Ok(())
         });
+        // `web:clear_site_data(url)`: a promise of how many of the
+        // platform's records for the url's site went (`WebView::clear_site_data`).
+        methods.add_method("clear_site_data", |lua, w, url: String| {
+            let (tell, mut heard) = zgx::task::latest::<Result<usize, String>>();
+            let promise = crate::calls::pending(lua, "web:clear_site_data".to_owned())?;
+            w.0.clear_site_data(&url, move |result| {
+                tell.send(result);
+            });
+            crate::calls::settle_failing(lua, &promise, async move {
+                match heard.recv().await {
+                    Some(Ok(count)) => Ok(Value::Num(count as f64)),
+                    Some(Err(message)) => Err(crate::errors::Failure::new(
+                        crate::errors::Kind::Io,
+                        message,
+                    )),
+                    None => Err(crate::errors::Failure::new(
+                        crate::errors::Kind::Io,
+                        "the web view went before it answered".to_owned(),
+                    )),
+                }
+            })?;
+            Ok(crate::calls::PromiseUd(promise))
+        });
     }
 }
 /// JSON as script data (objects as maps, arrays as lists).

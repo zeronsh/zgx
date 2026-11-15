@@ -563,6 +563,44 @@ pub trait WebViewBackend {
     }
     /// Stop finding: no match stays selected (see [`WebView::clear_find`]).
     fn clear_find(&self) {}
+    /// Remove what the page's profile keeps for `url`'s site (see
+    /// `WebView::clear_site_data`), calling `done` once, on the UI thread.
+    /// One that can't says so.
+    fn clear_site_data(&self, url: &str, done: Box<dyn FnOnce(Result<usize, String>)>) {
+        let _ = url;
+        done(Err(
+            "this platform's web view can't clear a site's data".into()
+        ));
+    }
+}
+
+/// The host a site's data is kept under for `url`: lowercase, without
+/// its user, port or an IPv6 address's brackets (`https://a@Mail.Example.com:8080/x`
+/// is `mail.example.com`). None for a URL without one (`about:blank`).
+#[doc(hidden)]
+pub fn site_host(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?,
+        None => host.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// Whether a data record named `record` (WebKit names each by its site's
+/// registrable domain, `example.com`) belongs to `host`'s site: the host
+/// itself or a domain it is under. A public suffix never names a record:
+/// a browser keeps nothing for `com` alone.
+#[doc(hidden)]
+pub fn site_matches(host: &str, record: &str) -> bool {
+    let record = record.trim_end_matches('.').to_ascii_lowercase();
+    !record.is_empty()
+        && (host == record
+            || host
+                .strip_suffix(record.as_str())
+                .is_some_and(|before| before.ends_with('.')))
 }
 
 type Listener = Rc<RefCell<dyn FnMut(&WebViewEvent)>>;
@@ -929,6 +967,24 @@ impl WebView {
             _ => reply(FindResult::default()),
         }
     }
+    /// Forget `url`'s site, as a browser's "Remove site data": everything
+    /// the page's profile keeps for its registrable domain and the
+    /// subdomains under it (cookies, local and session storage, IndexedDB,
+    /// caches, service workers), for every web view on that profile. `done`
+    /// gets how many of the platform's records went (on Windows, cookies
+    /// and the host's two origins: there, storage of another subdomain of
+    /// the same site, and cookies another subdomain set for itself alone,
+    /// stay), or why none could; on the UI thread. Pages open keep what
+    /// they hold in memory until they load again: reload them. A page not
+    /// showing yet clears nothing. (Hidden until its API is settled.)
+    #[doc(hidden)]
+    pub fn clear_site_data(&self, url: &str, done: impl FnOnce(Result<usize, String>) + 'static) {
+        match (self.backend(), site_host(url)) {
+            (_, None) => done(Err(format!("{url} has no site"))),
+            (None, _) => done(Err("the web view isn't showing yet".into())),
+            (Some(backend), Some(_)) => backend.clear_site_data(url, Box::new(done)),
+        }
+    }
     /// Stop finding: the match goes unselected and the platform's
     /// highlights of the others go.
     pub fn clear_find(&self) {
@@ -1213,6 +1269,29 @@ fn placeholder(content: NativeContent) -> View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sites_records_are_its_domain_and_those_it_is_under() {
+        assert_eq!(
+            site_host("https://a@Mail.Example.com:8080/x?q#f").as_deref(),
+            Some("mail.example.com")
+        );
+        assert_eq!(
+            site_host("http://127.0.0.1:9000/").as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(site_host("http://[::1]:9000/").as_deref(), Some("::1"));
+        assert_eq!(site_host("about:blank"), None);
+        assert_eq!(site_host("https:///x"), None);
+        let host = "mail.example.com";
+        assert!(site_matches(host, "example.com"));
+        assert!(site_matches(host, "Mail.Example.com."));
+        assert!(!site_matches(host, "ample.com"), "not a suffix of a label");
+        assert!(!site_matches(host, "other.com"));
+        assert!(!site_matches(host, ""));
+        assert!(site_matches("127.0.0.1", "127.0.0.1"));
+        assert!(!site_matches("127.0.0.1", "localhost"));
+    }
 
     #[test]
     fn an_app_scheme_is_its_own_and_well_formed() {
