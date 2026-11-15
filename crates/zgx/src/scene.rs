@@ -6128,7 +6128,10 @@ impl Scene {
         match (self.plain_walks(), self.long_lists) {
             (true, false) => self.hit_test_walk::<false, false>(x, y),
             (true, true) => self.hit_test_walk::<false, true>(x, y),
-            (false, _) => self.hit_test_walk::<true, false>(x, y),
+            (false, false) => self.hit_test_walk::<true, false>(x, y),
+            // A raised node or a popup anywhere takes this walk: its long
+            // columns are searched too, where they paint in document order.
+            (false, true) => self.hit_test_walk::<true, true>(x, y),
         }
     }
     /// Whether some node takes hits where it's going (`set_hit_target`).
@@ -6501,7 +6504,19 @@ impl Scene {
                 ));
             }
             siblings = match POPUPS {
-                true => self.paint_order(id, node).iter(),
+                true => match self.paint_order(id, node) {
+                    // Painted in document order (none of its children raised:
+                    // `paint_order` gave its children as they are), its rows
+                    // are searched as the plain walk's are; raised, each is
+                    // looked at, back to front.
+                    all if SEARCH
+                        && all.len() >= SEARCHED_CHILDREN
+                        && std::ptr::eq(all.as_ptr(), self.children_raw(node).as_ptr()) =>
+                    {
+                        self.hit_rows(all, transform, point).iter()
+                    }
+                    all => all.iter(),
+                },
                 false => match self.children_raw(node) {
                     all if SEARCH && all.len() >= SEARCHED_CHILDREN => {
                         self.hit_rows(all, transform, point).iter()
