@@ -694,6 +694,9 @@ mod tests {
     #[cfg(feature = "trace")]
     #[test]
     fn spare_time_is_an_entry_of_its_own_and_the_frame_under_way_goes_on() {
+        let _tracing = crate::trace::tests::TRACING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let frame = crate::trace::frame_index();
         crate::trace::set_enabled(true);
         crate::trace::input();

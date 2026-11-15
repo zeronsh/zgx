@@ -2787,6 +2787,7 @@ impl Ui {
         self.scene.borrow().root()
     }
     /// A signal holding `value`, on this document's runtime.
+    #[cfg_attr(feature = "trace", track_caller)]
     pub fn signal<T: 'static>(&self, value: T) -> Signal<T> {
         self.runtime.signal(value)
     }
