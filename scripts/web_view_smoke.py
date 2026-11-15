@@ -25,7 +25,8 @@ its box's yellow through it. `--orca` (X11): over a private AT-SPI bus, the
 page's own accessible tree is a child of its box (an internal frame) and
 has the box for its parent, and Orca reads the page's heading from browse
 mode, names its first field as Tab moves focus there from the app's own
-button, and follows the next Tab, within the page, to its select.
+button, follows the next Tab, within the page, to its select, and reads the
+app's toggle button as pressed and not pressed as Space flips it.
 `--media` (X11): a page served from localhost plays a VP8 WebM (GStreamer
 made it), and after a click an `AudioContext` runs. `--inspector`: on a
 page large enough for WebKit to dock Web Inspector in, Ctrl+I opens it in a
@@ -971,6 +972,22 @@ def read_page(session, output, buttons, checks):
     select = r"combo box\.?( Alpha)?"
     session.wait(lambda: heard(session, output, select, before), "Orca never followed Tab from the field to the select", 15)
     checks["tabbed within the page"] = heard(session, output, select, before).group(0)
+    # The app's toggle button (`pressed_when`): Orca names it a toggle
+    # button, and says each state Space gives it, pressed or not pressed.
+    before = len(spoken(output))
+    orca_click(session, buttons, 705, 95)
+    session.wait(lambda: heard(session, output, r"Bold\.? toggle button", before),
+                 "Orca never named the toggle button", 15)
+    states = []
+    for _ in range(2):
+        flips, before = len(session.lines("BOLD ")), len(spoken(output))
+        session.key("space")
+        now = session.wait(lambda: session.lines("BOLD ")[flips:], "the toggle never changed", 10)[-1]
+        said_state = r"(?<!not )pressed" if now == "true" else r"not pressed"
+        session.wait(lambda: heard(session, output, said_state, before),
+                     f"Orca never said the toggle is {'pressed' if now == 'true' else 'not pressed'}", 15)
+        states.append(heard(session, output, said_state, before).group(0))
+    checks["toggle button states"] = states
     return checks
 
 
