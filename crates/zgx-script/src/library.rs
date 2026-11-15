@@ -236,6 +236,7 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     )?;
     ui.set("controls", lua.create_function(controls)?)?;
     ui.set("press", lua.create_function(press)?)?;
+    ui.set("scroll_into_view", lua.create_function(scroll_into_view)?)?;
     ui.set("text_of", lua.create_function(text_of)?)?;
     ui.set(
         "tabs",
@@ -1662,6 +1663,24 @@ fn press(lua: &Lua, handle: f64) -> mlua::Result<bool> {
         return Ok(false);
     }
     Ok(crate::driver::press_control(&mut ui, handle as u64))
+}
+
+/// `ui.scroll_into_view(handle, options?)`: the scroll views around the
+/// control `handle` (from `ui.controls`) names moved so it shows, as
+/// `el:scroll_into_view(options)` moves them; whether any moved. False,
+/// moving nothing, for a stale or malformed handle.
+fn scroll_into_view(
+    lua: &Lua,
+    (handle, options): (f64, Option<mlua::Table>),
+) -> mlua::Result<bool> {
+    let how = crate::element::scroll_into_view_options(options)?;
+    let Some(ui) = control_window(lua, "ui.scroll_into_view")? else {
+        return Ok(false);
+    };
+    if !(handle.is_finite() && handle >= 0. && handle.fract() == 0.) {
+        return Ok(false);
+    }
+    Ok(ui.scroll_node_into_view(zgx::scene::NodeId::from_bits(handle as u64), how))
 }
 
 /// `ui.text_of(handle, cap?)`: the text a control (`ui.controls`' `handle`)

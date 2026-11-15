@@ -1,6 +1,7 @@
 //! `el:scroll_into_view(options)` from a script: a row of a scroll view
 //! brought into it where asked, whether anything moved, and a wrong
-//! alignment named.
+//! alignment named; `ui.scroll_into_view(handle)` the same for a control
+//! `ui.controls` listed.
 mod common;
 
 use common::Harness;
@@ -16,9 +17,25 @@ ui.command { id = "start", run = function() reveal { block = "start", animate = 
 ui.command { id = "nearest", run = function() reveal { block = "nearest", animate = false } end }
 ui.command { id = "center", run = function() reveal { block = "center", animate = false } end }
 ui.command { id = "wrong", run = function() reveal { block = "middle" } end }
+-- By a control's handle, as `ui.press` takes one: r1's button, its handle
+-- kept while it shows.
+local first = -1
+ui.command { id = "scan", run = function()
+    for _, c in ui.controls() do
+        if c.name == "First" then
+            first = c.handle
+        end
+    end
+end }
+ui.command { id = "down", run = function() offset:set(300) end }
+ui.command { id = "by_handle", run = function()
+    moved:set(tostring(ui.scroll_into_view(first, { block = "start", animate = false })))
+end }
+ui.command { id = "stale", run = function() moved:set(tostring(ui.scroll_into_view(1e15))) end }
 local rows = {}
 for i = 1, 10 do
-    rows[i] = ui.div { id = `r{i}`, h = 40, ref = if i == 6 then target else nil }
+    rows[i] = ui.div { id = `r{i}`, h = 40, ref = if i == 6 then target else nil,
+        if i == 1 then ui.button { "First", h = 40, on_click = function() end } else nil }
 end
 return ui.column {
     ui.text { id = "moved", "{moved}" },
@@ -44,6 +61,30 @@ fn a_script_scrolls_a_row_into_view_where_it_asks() {
     assert_eq!(
         (h.text("moved"), h.text("offset")),
         ("true".into(), "170".into())
+    );
+}
+
+#[test]
+fn ui_scrolls_a_controls_handle_into_view() {
+    let mut h = Harness::inline(APP);
+    h.frames(2);
+    assert!(h.host.run_command("scan"));
+    assert!(h.host.run_command("down"));
+    h.frames(2);
+    assert_eq!(h.text("offset"), "300");
+    // The button fills r1, at the top of the rows: back to it.
+    assert!(h.host.run_command("by_handle"));
+    h.frames(2);
+    assert_eq!(
+        (h.text("moved"), h.text("offset")),
+        ("true".into(), "0".into())
+    );
+    assert!(h.host.run_command("stale"));
+    h.frames(2);
+    assert_eq!(
+        h.text("moved"),
+        "false",
+        "a handle to nothing moves nothing"
     );
 }
 

@@ -282,6 +282,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "dismiss_toast",
     "controls",
     "press",
+    "scroll_into_view",
     "text_of",
     "shader",
     "layer_shader",

@@ -4452,6 +4452,10 @@ declare ui: {
 	-- `handle` names, as `zgx inspect click` does. False, doing nothing,
 	-- for a handle whose control is gone, hidden or covered.
 	press: (handle: number) -> boolean,
+	-- (Hidden until its API is settled.) The scroll views around the control
+	-- `handle` names moved so it shows, as `el:scroll_into_view(options)`
+	-- moves them. Whether any moved; false for a control that is gone.
+	scroll_into_view: (handle: number, options: { block: ("start" | "center" | "end" | "nearest")?, inline: ("start" | "center" | "end" | "nearest")?, animate: boolean? }?) -> boolean,
 	-- The text a control (`ui.controls`' `handle`) shows, a word apart, at most
 	-- `cap` (400) characters; "" once it is gone. A dialog's, for a notice.
 	text_of: (handle: number, cap: number?) -> string,

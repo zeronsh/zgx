@@ -1420,33 +1420,7 @@ impl UserData for ElementUd {
         // each "start", "center", "end" or "nearest", `animate` easing there
         // (by default, unless the system reduces motion). Whether any moved.
         methods.add_method("scroll_into_view", |_, e, options: Option<mlua::Table>| {
-            use zgx::compose::{RowAlign, ScrollIntoView};
-            let align = |options: &Option<mlua::Table>, key: &str, default: RowAlign| {
-                let named = match options {
-                    Some(options) => options.get::<Option<String>>(key)?,
-                    None => None,
-                };
-                Ok(match named.as_deref() {
-                    None => default,
-                    Some("nearest") => RowAlign::Nearest,
-                    Some("start") => RowAlign::Start,
-                    Some("center") => RowAlign::Center,
-                    Some("end") => RowAlign::End,
-                    Some(other) => {
-                        return Err(mlua::Error::runtime(format!(
-                            "scroll_into_view's {key} is \"start\", \"center\", \"end\" or \"nearest\", not {other:?}"
-                        )));
-                    }
-                })
-            };
-            let how = ScrollIntoView {
-                block: align(&options, "block", RowAlign::Start)?,
-                inline: align(&options, "inline", RowAlign::Nearest)?,
-                animate: match &options {
-                    Some(options) => options.get::<Option<bool>>("animate")?,
-                    None => None,
-                },
-            };
+            let how = scroll_into_view_options(options)?;
             Ok(e.0.handle.get().is_some_and(|h| h.scroll_into_view(how)))
         });
         // An input's selection, in characters (Unicode code points, from
@@ -1628,4 +1602,39 @@ impl UserData for ElementUd {
             Ok(())
         });
     }
+}
+
+/// `el:scroll_into_view`'s and `ui.scroll_into_view`'s options: `block`
+/// (down; "start" by default) and `inline` (across; "nearest") each
+/// "start", "center", "end" or "nearest", and `animate`.
+pub(crate) fn scroll_into_view_options(
+    options: Option<mlua::Table>,
+) -> mlua::Result<zgx::compose::ScrollIntoView> {
+    use zgx::compose::{RowAlign, ScrollIntoView};
+    let align = |key: &str, default: RowAlign| {
+        let named = match &options {
+            Some(options) => options.get::<Option<String>>(key)?,
+            None => None,
+        };
+        Ok(match named.as_deref() {
+            None => default,
+            Some("nearest") => RowAlign::Nearest,
+            Some("start") => RowAlign::Start,
+            Some("center") => RowAlign::Center,
+            Some("end") => RowAlign::End,
+            Some(other) => {
+                return Err(mlua::Error::runtime(format!(
+                    "scroll_into_view's {key} is \"start\", \"center\", \"end\" or \"nearest\", not {other:?}"
+                )));
+            }
+        })
+    };
+    Ok(ScrollIntoView {
+        block: align("block", RowAlign::Start)?,
+        inline: align("inline", RowAlign::Nearest)?,
+        animate: match &options {
+            Some(options) => options.get::<Option<bool>>("animate")?,
+            None => None,
+        },
+    })
 }
