@@ -37,6 +37,7 @@ export const internal = [
   'docs/performance-feature-audit.md',
   'docs/gpui-parity.md',
   'docs/design-3d.md',
+  'docs/design-audio.md',
 ];
 
 export const sets = [
