@@ -153,7 +153,7 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
    // `fwidth` (the slopes' sum) adds both axes' there when the pixel's 2×2
    // block reaches outside (a corner at an odd pixel), and shaded 3/4 what
    // the basic shader draws whole, so a box's pixels hung on its batch.
-   else {let dx=slope.x;let dy=slope.y;let aa=max(select(dx+dy,max(dx,dy),radius<=0.),0.5);let outer=clamp(0.5-distance/aa,0.,1.);let inner=clamp(0.5-(distance+v.shape.y)/aa,0.,1.);let alpha=color.a*inner+v.border.a*(outer-inner);let rgb=select(vec3(0.),(color.rgb*color.a*inner+v.border.rgb*v.border.a*(outer-inner))/max(alpha,0.00001),alpha>0.);color=vec4(rgb,alpha);}
+   else {let dx=slope.x;let dy=slope.y;let aa=max(select(dx+dy,max(dx,dy),radius<=0.),0.5);let outer=clamp(0.5-distance/aa,0.,1.);let inner=clamp(0.5-(distance+v.shape.y)/aa,0.,1.);let ba=v.border.a*(outer-inner);let fa=color.a*(outer-ba);let alpha=ba+fa;let rgb=select(vec3(0.),(v.border.rgb*ba+color.rgb*fa)/max(alpha,0.00001),alpha>0.);color=vec4(rgb,alpha);}
  }
 
  // Premultiplied texels carry their alpha already: the colour stays
