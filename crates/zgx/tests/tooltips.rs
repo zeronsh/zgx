@@ -408,3 +408,159 @@ fn a_tooltip_at_the_back_does_not_show_until_the_app_comes_forward() {
         Some(zgx::scene::PopupRole::Tooltip)
     );
 }
+
+/// A trigger with a tooltip that opens a popover (`popover`) or a menu
+/// (`menu`) as it is pressed, its popups in windows of their own, as a
+/// desktop host has them (on Windows, every popup).
+fn trigger_with_tooltip(
+    menu_trigger: bool,
+) -> (
+    Ui,
+    Rc<RefCell<LocalExecutor>>,
+    VirtualClock,
+    zgx::reactive::Signal<bool>,
+) {
+    let clock = VirtualClock::new();
+    let mut ui = Ui::new(400., 300.);
+    let open = ui.signal(false);
+    let state = open.clone();
+    ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 1000.)]);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    let trigger: View = if menu_trigger {
+        // A menu opens as its trigger is pressed.
+        let anchor = button().size(60., 24.).tooltip("Activity");
+        menu("Actions", open, anchor)
+            .w(100.)
+            .child(menu_item("Item"))
+    } else {
+        // A popover opens as the app says: its trigger's click toggles it
+        // (a chat header's Activity toggle).
+        let toggle = open.clone();
+        let anchor = button()
+            .size(60., 24.)
+            .on_click(move || {
+                toggle.update(|on| *on = !*on);
+            })
+            .tooltip("Activity");
+        popover("Activity card", open, anchor)
+            .w(200.)
+            .child(text("Card"))
+    };
+    ui.mount(provide(
+        TaskRunner::from_executor(executor.clone()),
+        column().p(20.).child(trigger),
+    ));
+    ui.prepare_frame();
+    (ui, executor, clock, state)
+}
+
+/// The roles of the popups showing.
+fn popup_roles(ui: &Ui) -> Vec<Option<zgx::scene::PopupRole>> {
+    let scene = ui.scene.borrow();
+    scene
+        .popups()
+        .iter()
+        .map(|p| scene.popup_role(*p))
+        .collect()
+}
+
+/// A press on a trigger closes its tooltip as what it opens shows, a
+/// popover's as a menu's, and it doesn't come back while that is open.
+#[test]
+fn pressing_a_trigger_closes_its_tooltip_as_its_popover_or_menu_opens() {
+    use zgx::input::PointerButton;
+    use zgx::scene::PopupRole;
+    for menu_trigger in [false, true] {
+        let (mut ui, executor, clock, open) = trigger_with_tooltip(menu_trigger);
+        hover(&mut ui, 40., 30.);
+        wait(&mut ui, &executor, &clock, Duration::from_millis(900));
+        assert_eq!(
+            popup_roles(&ui),
+            vec![Some(PopupRole::Tooltip)],
+            "menu {menu_trigger}: the tip shows over the trigger"
+        );
+        ui.dispatch(InputEvent::PointerDown {
+            x: 40.,
+            y: 30.,
+            button: PointerButton::Primary,
+        });
+        ui.prepare_frame();
+        ui.dispatch(InputEvent::PointerUp {
+            x: 40.,
+            y: 30.,
+            button: PointerButton::Primary,
+        });
+        ui.prepare_frame();
+        assert!(open.get(), "menu {menu_trigger}: it opens");
+        wait(&mut ui, &executor, &clock, FADE_OUT + STEP);
+        let roles = popup_roles(&ui);
+        assert!(
+            !roles.contains(&Some(PopupRole::Tooltip)),
+            "menu {menu_trigger}: the tip is gone as it opens: {roles:?}"
+        );
+        assert_eq!(
+            roles.len(),
+            1,
+            "menu {menu_trigger}: what it opened shows: {roles:?}"
+        );
+        // Resting there while it is open: the tip stays closed.
+        wait(&mut ui, &executor, &clock, Duration::from_millis(1500));
+        let roles = popup_roles(&ui);
+        assert!(
+            !roles.contains(&Some(PopupRole::Tooltip)),
+            "menu {menu_trigger}: and stays gone: {roles:?}"
+        );
+    }
+}
+
+/// A bare button opening a menu is a menu button (a press opens it), with a
+/// tooltip as without: the tip's wrapper is not the button, and the menu
+/// took its trigger for one with a handler of its own, which nothing opened.
+#[test]
+fn a_menu_button_with_a_tooltip_opens_as_it_is_pressed() {
+    use zgx::input::PointerButton;
+    for tip in [false, true] {
+        for windows in [false, true] {
+            let mut ui = Ui::new(400., 300.);
+            let open = ui.signal(false);
+            if windows {
+                ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 1000.)]);
+            }
+            let anchor = button().size(60., 24.);
+            let anchor = if tip {
+                anchor.tooltip("Activity")
+            } else {
+                anchor
+            };
+            ui.mount(
+                column().p(20.).child(
+                    menu("Actions", open.clone(), anchor)
+                        .w(100.)
+                        .child(menu_item("Item")),
+                ),
+            );
+            ui.prepare_frame();
+            hover(&mut ui, 40., 30.);
+            ui.dispatch(InputEvent::PointerDown {
+                x: 40.,
+                y: 30.,
+                button: PointerButton::Primary,
+            });
+            ui.prepare_frame();
+            assert!(
+                open.get(),
+                "tooltip {tip}, windows {windows}: open as pressed"
+            );
+            ui.dispatch(InputEvent::PointerUp {
+                x: 40.,
+                y: 30.,
+                button: PointerButton::Primary,
+            });
+            ui.prepare_frame();
+            assert!(
+                open.get(),
+                "tooltip {tip}, windows {windows}: and as released"
+            );
+        }
+    }
+}
