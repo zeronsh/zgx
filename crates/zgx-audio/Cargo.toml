@@ -1,8 +1,6 @@
 [package]
 name = "zgx-audio"
 autotests = false
-# Not on crates.io until it is decided whether it is published.
-publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
