@@ -1514,6 +1514,31 @@ pub(crate) struct Span {
     /// What few spans have (an icon, a menu), apart: most spans carry none.
     pub rare: Option<Rc<SpanRare>>,
 }
+/// A span's `icon = { src | code, size, gap, tint, bg, radius, pad }`
+/// (an atom's leading icon too).
+fn span_icon(icon: &Table) -> mlua::Result<SpanIcon> {
+    let src = match (
+        icon.get::<Option<String>>("src")?,
+        icon.get::<Option<String>>("code")?,
+    ) {
+        (Some(src), _) => src,
+        (None, Some(code)) => format!("code:{code}"),
+        (None, None) => {
+            return Err(mlua::Error::runtime("a span's icon takes `src` or `code`"));
+        }
+    };
+    let tint = icon.get::<Value>("tint")?;
+    let bg = icon.get::<Value>("bg")?;
+    Ok(SpanIcon {
+        src,
+        size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
+        gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
+        tint: (!matches!(tint, Value::Nil)).then_some(tint),
+        bg: (!matches!(bg, Value::Nil)).then_some(bg),
+        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
+        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
+    })
+}
 /// How a textarea's atoms show beyond a wash (`atom_style = { color,
 /// weight, underline = { color, offset } | true, icon = { src, size, gap,
 /// tint } }`, or an atom's own `style`): colours as written, resolved where
@@ -5252,29 +5277,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 b"icon" => {
                     let icon: Table = lua.unpack(given)?;
-                    let src = match (
-                        icon.get::<Option<String>>("src")?,
-                        icon.get::<Option<String>>("code")?,
-                    ) {
-                        (Some(src), _) => src,
-                        (None, Some(code)) => format!("code:{code}"),
-                        (None, None) => {
-                            return Err(mlua::Error::runtime(
-                                "a span's icon takes `src` or `code`",
-                            ));
-                        }
-                    };
-                    let tint = icon.get::<Value>("tint")?;
-                    let bg = icon.get::<Value>("bg")?;
-                    rare_mut(&mut span).icon = Some(SpanIcon {
-                        src,
-                        size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
-                        gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
-                        tint: (!matches!(tint, Value::Nil)).then_some(tint),
-                        bg: (!matches!(bg, Value::Nil)).then_some(bg),
-                        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
-                        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
-                    });
+                    rare_mut(&mut span).icon = Some(span_icon(&icon)?);
                 }
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
                 b"box" => {
