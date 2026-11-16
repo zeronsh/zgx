@@ -39,9 +39,14 @@ Examples: `hot_reload` (an app and two plugins), `frame_profiler` (a profiler wi
 {
     "luau-lsp.platform.type": "standard",
     "luau-lsp.types.definitionFiles": ["crates/zgx-script/types/zgx.d.luau"],
-    "luau-lsp.fflags.override": { "LuauSolverV2": "true" }
+    "luau-lsp.fflags.override": {
+        "LuauSolverV2": "true",
+        "LuauTypeInferIterationLimit": "100000"
+    }
 }
 ```
+
+The second flag is the solver's iteration budget, as `zgx check` sets it: a props type of your own made with `Merge` (`Merge<ContainerProps, { tone: string? }>`) and handed back to an element (`ui.column(props)`) is checked one property at a time, each a fresh copy (a type function's result), and needs more than the default's 20,000.
 
 In Zed, with the Luau extension, the repository's `.zed/settings.json` does the same; for a project elsewhere, copy it and point `definitions` at the file.
 
@@ -61,7 +66,7 @@ zgx check app.luau          # a file
 zgx check examples/notes    # every .luau file under a directory
 ```
 
-`zgx check` runs `luau-lsp analyze` with the definitions above built into the binary, the `standard` platform, the new solver (`--flag:LuauSolverV2=true`) and strict mode, unless a `.luaurc` (`languageMode`) or a `--!nonstrict` comment picks another mode (`--nonstrict` changes the default). The definitions, like `zgx lint`'s rules, are those of the features the `zgx` binary was built with, so a project using `audio` (or `audio-effects`, `audio-streams`) needs a CLI built with them (`cargo install --path crates/zgx-script --bin zgx --features audio-effects,audio-streams`). It prints `file:line:col: error[TypeError]: …` and lint warnings, and exits 1 when there are errors (2 for usage errors, 3 when luau-lsp is missing). It catches what otherwise appears only at run time, such as a local function used before its definition, which is `nil` until called:
+`zgx check` runs `luau-lsp analyze` with the definitions above built into the binary, the `standard` platform, the new solver (`--flag:LuauSolverV2=true`) with an iteration budget of 100,000 (`--flag:LuauTypeInferIterationLimit=100000`, five times the default) and strict mode, unless a `.luaurc` (`languageMode`) or a `--!nonstrict` comment picks another mode (`--nonstrict` changes the default). The definitions, like `zgx lint`'s rules, are those of the features the `zgx` binary was built with, so a project using `audio` (or `audio-effects`, `audio-streams`) needs a CLI built with them (`cargo install --path crates/zgx-script --bin zgx --features audio-effects,audio-streams`). It prints `file:line:col: error[TypeError]: …` and lint warnings, and exits 1 when there are errors (2 for usage errors, 3 when luau-lsp is missing). It catches what otherwise appears only at run time, such as a local function used before its definition, which is `nil` until called:
 
 ```lua
 local function render()

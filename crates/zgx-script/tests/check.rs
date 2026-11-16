@@ -484,3 +484,58 @@ fn plugin_targets_by_class_and_chain_type_check() {
     assert_eq!(stdout.trim(), "", "no findings");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A props type of the app's own made with `Merge` and handed back to an
+/// element checks (`check::ITERATION_LIMIT`): each property of a type
+/// function's result is a fresh copy, compared by its structure, and an
+/// element's props spend more than luau-lsp's default budget.
+///
+/// It also guards the budget itself. The same file, checked by luau-lsp
+/// with the default budget (20,000), is too complex, so `zgx check`
+/// passing it shows the raised budget took effect. A luau-lsp that renamed
+/// or dropped the flag, ignoring it, fails this test rather than passing it.
+#[test]
+fn a_merged_props_type_handed_to_an_element_checks() {
+    if !installed() {
+        return;
+    }
+    let code = "--!strict\n\
+        type PanelProps = Merge<ContainerProps, { keep_focus: boolean? }>\n\
+        local function panel(props: PanelProps): Node\n\
+        \tprops.keep_focus = nil\n\
+        \treturn ui.column(props)\n\
+        end\n\
+        return panel({ w = 10 })\n";
+    let dir = scripts("merged", &[("app.luau", code)]);
+    let app = dir.join("app.luau");
+    let out = zgx().arg("check").arg(&app).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.trim().is_empty(), "no errors: {stdout}");
+    // zgx's definitions (what `zgx check` gives an app with no tokens of
+    // its own), at luau-lsp's default budget: too complex, so the check
+    // above needed the raised one.
+    let definitions = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("types/zgx.d.luau");
+    let lsp = zgx_script::check::find_luau_lsp().unwrap();
+    let default = Command::new(lsp)
+        .arg("analyze")
+        .arg("--platform=standard")
+        .arg("--flag:LuauSolverV2=true")
+        .arg("--flag:LuauTypeInferIterationLimit=20000")
+        .arg(format!("--definitions={}", definitions.display()))
+        .arg("--formatter=gnu")
+        .arg(&app)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&default.stdout).into_owned()
+        + &String::from_utf8_lossy(&default.stderr);
+    assert!(
+        said.contains("too complex"),
+        "at the default budget the case must be too complex, or it no \
+         longer proves `zgx check`'s budget took effect: {said}"
+    );
+}
