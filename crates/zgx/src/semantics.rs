@@ -892,6 +892,19 @@ impl Semantics {
             self.revision = self.revision.wrapping_add(1);
         }
     }
+    /// The controls inline in `paragraph`'s text (`SemanticRare::inline_range`):
+    /// each one's range in its text and its node, in the text's order. It
+    /// looks at every node: for devtools and tests (what `heard` takes),
+    /// not for a frame.
+    pub fn inline_controls(&self, paragraph: NodeId) -> Vec<(std::ops::Range<usize>, NodeId)> {
+        let mut controls: Vec<_> = self
+            .iter()
+            .filter(|(_, s)| s.logical_parent == Some(paragraph))
+            .filter_map(|(id, s)| Some((s.inline_range.clone()?, id)))
+            .collect();
+        controls.sort_by_key(|(range, _)| range.start);
+        controls
+    }
     /// Every node's information, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = (NodeId, &SemanticNode)> {
         self.nodes
@@ -913,6 +926,50 @@ impl Semantics {
         self.revision
     }
 }
+
+/// A part of what a reader hears of a paragraph with controls inline in its
+/// text (`heard`): a stretch of its text, or a control, read where it stands
+/// by its own name.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Heard<T> {
+    Text(String),
+    Control(T),
+}
+
+/// What a reader hears of `value`, a paragraph's text, with `controls` (each
+/// one's range in it, in order) inline in it: the text between them, and each
+/// control in its place, its own text left out. What the desktop's
+/// accessibility tree says (`heard_value`, its runs and children) and what
+/// `zgx inspect node` prints, from one place so the two can't drift.
+pub fn heard<T: Clone>(value: &str, controls: &[(std::ops::Range<usize>, T)]) -> Vec<Heard<T>> {
+    let mut parts = Vec::with_capacity(controls.len() * 2 + 1);
+    let mut from = 0;
+    for (range, control) in controls {
+        let start = range.start.clamp(from, value.len());
+        if let Some(text) = value.get(from..start).filter(|t| !t.is_empty()) {
+            parts.push(Heard::Text(text.to_owned()));
+        }
+        parts.push(Heard::Control(control.clone()));
+        from = range.end.clamp(start, value.len());
+    }
+    if let Some(text) = value.get(from..).filter(|t| !t.is_empty()) {
+        parts.push(Heard::Text(text.to_owned()));
+    }
+    parts
+}
+
+/// A paragraph's value as a reader hears it with `controls` inline in it:
+/// its text without theirs (`heard`'s text, joined).
+pub fn heard_value<T: Clone>(value: &str, controls: &[(std::ops::Range<usize>, T)]) -> String {
+    heard(value, controls)
+        .into_iter()
+        .filter_map(|part| match part {
+            Heard::Text(text) => Some(text),
+            Heard::Control(_) => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

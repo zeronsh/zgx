@@ -1140,6 +1140,28 @@ fn lines_text(lines: &[(&Line, bool, Option<bool>)], hidden: usize) -> String {
 /// What there is to know of `node`: its number, kind, where the script made
 /// it and how it named it, its role, name, value and state, its box, its
 /// text, and how many children it has.
+/// What a reader hears of a paragraph whose text is `value` with `controls`
+/// inline in it (`zgx::semantics::heard`, as the desktop's accessibility tree
+/// says it): its text in quotes, each control as `[role "name"]` where it
+/// stands. `"step " [button "Citation 1"] "."`.
+fn reads(
+    semantics: &zgx::semantics::Semantics,
+    value: &str,
+    controls: &[(std::ops::Range<usize>, NodeId)],
+) -> String {
+    zgx::semantics::heard(value, controls)
+        .into_iter()
+        .map(|part| match part {
+            zgx::semantics::Heard::Text(text) => format!("{:?}", clip(&text, 120)),
+            zgx::semantics::Heard::Control(id) => match semantics.get(id) {
+                Some(s) => format!("[{} {:?}]", semantic_role_name(s), s.label),
+                None => "[control]".into(),
+            },
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn node(
     ui: &Ui,
     inspector: Option<&zgx::inspect::Inspector>,
@@ -1164,6 +1186,12 @@ pub fn node(
         }
         if let Some(value) = &s.value {
             out.push(("value".into(), clip(value, 200)));
+            // A paragraph with controls inline in it (a citation): what a
+            // reader hears, which the value alone doesn't say.
+            let controls = semantics.inline_controls(node);
+            if !controls.is_empty() {
+                out.push(("reads".into(), reads(&semantics, value, &controls)));
+            }
         }
         if let Some(placeholder) = &s.placeholder {
             out.push(("placeholder".into(), placeholder.clone()));
