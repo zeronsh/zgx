@@ -1768,11 +1768,23 @@ pub struct SelectionCopyRequest<'a> {
     pub text: &'a str,
     pub html: &'a str,
     pub leaves: &'a [NodeId],
+    /// The rows of each virtual list it spans (`ui.list`), mounted or not,
+    /// in document order: a Select All over rows scrolled away names them.
+    pub rows: &'a [SelectedRows],
     /// The region's node: the one `on_selection_copy` was given to.
     pub region: NodeId,
     /// The UI it is copied from, nothing of it borrowed: to read what the
     /// leaves are in.
     pub ui: &'a Ui,
+}
+/// A virtual list's rows a selection spans: the node holding its rows, and
+/// the first and last row's index (from 0).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectedRows {
+    pub list: NodeId,
+    pub first: usize,
+    pub last: usize,
 }
 /// What `View::on_selection_copy` gives a region: what goes on the
 /// clipboard, or none for the selection's own text and HTML.

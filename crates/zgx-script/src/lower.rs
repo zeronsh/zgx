@@ -8277,6 +8277,11 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
         Some(Lit::Num(n)) => n.max(0.) as usize,
         _ => 0,
     };
+    // How many rows it has, for a copy's hook.
+    let rows_count = {
+        let count = count.clone();
+        move || count()
+    };
     // What a row the list has not mounted copies as, when a selection
     // spans it: `row_text`'s, or what its row would show.
     let copy = {
@@ -8335,7 +8340,9 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
                 measured_rows(offset, rows, *overscan, keys, estimate, row)
             }
         };
-        return list.keyboard_navigation(keyboard).row_text(copy);
+        return list
+            .keyboard_navigation(keyboard)
+            .row_text_counted(rows_count, copy);
     }
     if let Some(heights) = heights {
         let cx = need(&mut cx);
@@ -8351,7 +8358,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
             }
         }
         .keyboard_navigation(keyboard)
-        .row_text(copy);
+        .row_text_counted(rows_count, copy);
         match sticky {
             None => list,
             Some(sticky) => {
@@ -8381,7 +8388,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
             Some(_) => virtual_list(offset, *height, *overscan, count, list_key, row),
         }
         .keyboard_navigation(keyboard)
-        .row_text(copy)
+        .row_text_counted(rows_count, copy)
     }
 }
 
@@ -8683,6 +8690,11 @@ fn lower_item_list(
             found
         }
     };
+    // How many rows it has, for a copy's hook.
+    let rows_count = {
+        let items = items.clone();
+        move || items.with_untracked(|l| l.items().len())
+    };
     // A row the list has not mounted copies as `row_text` says (given its
     // index), or as its row would show.
     let copy = {
@@ -8771,7 +8783,9 @@ fn lower_item_list(
                 }
             }
         };
-        return list.keyboard_navigation(keyboard).row_text(copy);
+        return list
+            .keyboard_navigation(keyboard)
+            .row_text_counted(rows_count, copy);
     }
     if let Some(heights) = heights {
         let cx = need(&mut cx);
@@ -8779,7 +8793,7 @@ fn lower_item_list(
         let (sticky_key, sticky_row) = (list_key.clone(), row.clone());
         let list = variable_virtual_list(offset.clone(), rows.clone(), *overscan, list_key, row)
             .keyboard_navigation(keyboard)
-            .row_text(copy);
+            .row_text_counted(rows_count, copy);
         let Some(sticky) = rare.as_ref().and_then(|rare| rare.sticky.as_ref()) else {
             return list;
         };
@@ -8791,7 +8805,7 @@ fn lower_item_list(
     }
     virtual_list(offset, *height, *overscan, count, list_key, row)
         .keyboard_navigation(keyboard)
-        .row_text(copy)
+        .row_text_counted(rows_count, copy)
 }
 
 /// A variable list with sticky rows: the list, and over it the sticky row
@@ -10559,6 +10573,20 @@ fn on_selection_copy(
                 }
             }
             event.set("leaves", leaves)?;
+            // Each list's rows it spans, mounted or not, from 1 as Luau
+            // counts: a Select All over rows scrolled away finds theirs.
+            let rows = lua.create_table()?;
+            for (i, span) in request.rows.iter().enumerate() {
+                let row = lua.create_table()?;
+                match leaf_id(&elements, request, span.list) {
+                    Some(id) => row.raw_set("list", id.as_ref())?,
+                    None => row.raw_set("list", false)?,
+                }
+                row.raw_set("first", span.first + 1)?;
+                row.raw_set("last", span.last + 1)?;
+                rows.raw_set(i + 1, row)?;
+            }
+            event.set("rows", rows)?;
             Ok(event)
         })();
         match event.and_then(|event| vm.call::<mlua::Value>(&hook, event)) {
@@ -10579,8 +10607,9 @@ fn on_selection_copy(
     })
 }
 
-/// The id of the element `leaf` (a text node) is in: its own, else the
-/// nearest element with one around it inside the region, else none.
+/// The id of the element `leaf` (a text node, or a list's rows) is in: its
+/// own, else the nearest element with one around it inside the region,
+/// else none.
 fn leaf_id(
     elements: &crate::element::Elements,
     request: &zgx::widgets::SelectionCopyRequest,
