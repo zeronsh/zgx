@@ -1793,6 +1793,9 @@ pub(crate) struct SpanRare {
     /// line height and padding its line's (`TextSpan::inline_box`).
     /// Internal until its API is settled.
     pub boxed: bool,
+    /// `line_height = 16`: its own line height, in points (a box span's
+    /// box is it and its padding). Internal until its API is settled.
+    pub line_height: Option<f32>,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -5534,6 +5537,11 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"box" => {
                     if lua.unpack::<bool>(given)? {
                         rare_mut(&mut span).boxed = true;
+                    }
+                }
+                b"line_height" => {
+                    if let Some(height) = number(given)? {
+                        rare_mut(&mut span).line_height = Some(height);
                     }
                 }
                 b"on_click" => span.click = Some(handler(given)?),

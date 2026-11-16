@@ -9234,6 +9234,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     if rare.boxed {
                         out = out.inline_box();
                     }
+                    if let Some(height) = rare.line_height {
+                        out = out.line_height(height);
+                    }
                     if let Some(build) = rare.menu.as_ref() {
                         let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
                         out = out
