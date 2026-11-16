@@ -143,7 +143,7 @@ impl AtomStyle {
                 .chars()
                 .next()
                 .map_or(range.end, |c| range.start + c.len_utf8());
-            let mut lead = style;
+            let mut lead = style.clone();
             lead.lead = Some(icon.room());
             out.push((range.start..first, lead));
         }

@@ -193,7 +193,7 @@ fn a_marks_decoration_gives_its_quad_per_corner_radii_and_per_side_borders() {
         }],
         _ => Vec::new(),
     })));
-    let mut ui = ui;
+    let ui = ui;
     ui.prepare_frame();
     let decorated: Vec<_> = nodes(&ui, editor.node, |kind| match kind {
         NodeKind::Quad(quad) if quad.border_color == BORDER => quad.decoration.clone(),

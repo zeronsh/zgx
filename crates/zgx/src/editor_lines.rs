@@ -388,7 +388,7 @@ fn atoms_on_line(
         .map(|(range, style)| {
             let start = range.start.max(line.start) - line.start;
             let end = range.end.min(line.end) - line.start;
-            (start..end, *style)
+            (start..end, style.clone())
         })
         .filter(|(range, _)| !range.is_empty())
         .collect();
