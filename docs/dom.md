@@ -51,6 +51,14 @@ script.reload()?;
 std::mem::forget(zgx_dom::mount_in_body(&runtime, script.view()));
 ```
 
+`zgx_dom::install_fetcher(&script)` gives the host the page's `fetch` for `ui.fetch`. Relative URLs resolve against the page's `document.baseURI` as it is when it's installed, and `install_fetcher_at(&script, base)` takes the URL the app is served under instead. Either way, a later navigation doesn't move them. The desktop's rules apply in the same places:
+
+- a plugin reaches it only with `Capability::Fetch`;
+- the app's `FetchPolicy` is asked of the URL and of each header the script set. With a policy, redirects are refused rather than followed, since a page can't show each hop to ask. `FetchPolicy::address` isn't asked, as the browser resolves names itself; the page's origin rules (CORS, `connect-src`) stand in for it;
+- a network failure, a refused CORS request or an abort rejects the script's promise as a `"network"` error, and an HTTP status is a response.
+
+The browser drops the request headers it forbids pages to set (`Host`, `Content-Length`, `Cookie` and the rest of its list) without saying so, where the desktop sends them. Credentials go to the page's own origin alone (`credentials: "same-origin"`). A fetch the script cancels, or a reload stops, is aborted. A page with a strict Content-Security-Policy needs `connect-src` for the hosts its app fetches from. The fetcher's JavaScript (`js/zgx-fetch.js`) is bound only with `luau`, so a Rust-only build carries none of it.
+
 Luau is C++, so it is built with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) (34 or later): source `crates/zgx-dom/luau-env.sh` with `WASI_SDK` naming it, and the wasm32 build compiles Luau against the wasi sysroot's libc and libc++, with WebAssembly exception handling (Luau throws on a script error; browsers have it: Chrome 137, Firefox 131, Safari 18.4 and later), and links them. Native builds read none of it. In the module, zgx-script answers wasi-libc's system calls itself (no environment, no files, the browser's clock) and runs C++'s static constructors before the first VM, so the page needs no WASI host. Without threads, a script call's time budget is checked by the VM's interrupt from the call's start, rather than by a watchdog thread setting it when the budget nears. zgx-script's renderer dependency (zgx-gpu, for image decoding and shader checks) isn't linked for wasm32.
 
 ## Layout and styles
@@ -94,7 +102,7 @@ zgx's layout defaults are CSS flexbox's, so styles map nearly one to one: a `col
 Shown as a labelled placeholder box, or left out:
 
 - **GPU content**: WGSL fills and layer shaders, `gpu_view`, zgx-3d scenes, native surfaces, terminals, web views and video export draw with a GPU or a platform view zgx-dom doesn't have. A `<canvas>` with WebGPU could host them later.
-- **Luau apps' host services**: `ui.fetch`, sockets, files, plugins from the disk, hot reload and `zgx check` need hosts zgx-dom doesn't have yet; images in Luau apps show their labels (zgx-script decodes them with zgx-gpu, which isn't linked in the browser).
+- **Luau apps' host services**: sockets, files, plugins from the disk, hot reload and `zgx check` need hosts zgx-dom doesn't have yet; images in Luau apps show their labels (zgx-script decodes them with zgx-gpu, which isn't linked in the browser).
 - **Overlays**: `at_caret`, `hoist` and `modal_placement` placement; menus have no typeahead; an arrow has no border on its outer edges.
 - **Rich text**: a link's middle click.
 - **Input**: `drag_preview` builders (a copy of the source stands for them), file drops, `drag_export` and pinch; text and IME stay the browser's own in `<input>` and `<textarea>`. `reactive_interaction` isn't applied.

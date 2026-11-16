@@ -22,6 +22,8 @@
 #![cfg(target_arch = "wasm32")]
 
 mod canvas;
+#[cfg(feature = "luau")]
+mod fetch;
 mod js;
 mod keyed;
 mod mount;
@@ -35,6 +37,10 @@ pub use mount::{Mounted, flush, live_nodes, mount, mount_in_body};
 #[doc(hidden)]
 pub use tasks::timer_armed;
 
+/// The page's `fetch` as a Luau app's transport (`ui.fetch`): relative
+/// URLs read against the app's base (`luau`).
+#[cfg(feature = "luau")]
+pub use fetch::{__fetches_pending, install_fetcher, install_fetcher_at};
 /// zgx-script, whose Luau apps zgx-dom mounts (`luau`): a host's `view()`
 /// mounts as any view does.
 #[cfg(feature = "luau")]
