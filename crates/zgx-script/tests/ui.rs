@@ -1895,6 +1895,103 @@ fn a_middle_click_reaches_the_innermost_on_aux_click() {
 }
 
 #[test]
+fn a_middle_drag_keeps_the_pointer_on_the_node_with_on_aux_press() {
+    use zgx::input::PointerButton;
+    let mut h = Harness::inline(
+        r##"local seen = ui.state("seen", "")
+        local function note(s) seen:set(seen:peek() .. s .. ";") end
+        local panning = false
+        return ui.column {
+            ui.row { id = "board", w = 200, h = 60,
+                on_aux_press = function(e)
+                    panning = true
+                    note("down " .. tostring(e.button) .. " " .. e.local_x)
+                end,
+                on_pointer_move = function(e)
+                    if panning then note("move " .. e.x) end
+                end,
+                on_aux_release = function(e)
+                    panning = false
+                    note("up " .. tostring(e.button) .. (if e.cancelled then " cancelled" else ""))
+                end,
+                on_aux_click = function() note("click") end,
+                on_press = function() note("primary") end,
+                ui.div { id = "child", w = 100, h = 40 } },
+            ui.div { id = "away", w = 50, h = 40 },
+            ui.text { "{seen}", id = "seen" } }"##,
+    );
+    h.frames(1);
+    let child = h.bounds("child");
+    let (x, y) = (child.x + 10., child.y + 10.);
+    let away = h.bounds("away");
+    let (ax, ay) = (away.x + 10., away.y + 10.);
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Middle,
+    });
+    h.ui.dispatch(InputEvent::PointerMove { x: x + 5., y });
+    // Off the node, the moves still come to it, and so does the release.
+    h.ui.dispatch(InputEvent::PointerMove { x: ax, y: ay });
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: ax,
+        y: ay,
+        button: PointerButton::Middle,
+    });
+    h.frames(1);
+    assert_eq!(
+        h.text("seen"),
+        format!("down middle 10;move {};move {ax};up middle;", x + 5.),
+        "a press over a child is the node's, held until release; released away it is no click"
+    );
+    // Over the node, it clicks after the release; the primary button is not it.
+    h.ui.dispatch(InputEvent::PointerMove { x, y });
+    h.ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Middle,
+    });
+    h.ui.dispatch(InputEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Middle,
+    });
+    h.ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    h.ui.dispatch(InputEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    h.frames(1);
+    assert!(
+        h.text("seen")
+            .ends_with(";down middle 10;up middle;click;primary;"),
+        "{}",
+        h.text("seen")
+    );
+    // A cancelled gesture releases it.
+    h.ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Middle,
+    });
+    h.ui.dispatch(InputEvent::PointerCancel);
+    h.ui.dispatch(InputEvent::PointerMove { x: ax, y: ay });
+    h.frames(1);
+    assert!(
+        h.text("seen")
+            .ends_with(";down middle 10;up middle cancelled;"),
+        "{}",
+        h.text("seen")
+    );
+}
+
+#[test]
 fn cleanups_run_when_a_component_unmounts() {
     let mut h = Harness::inline(
         r##"local shown = ui.state("shown", true)

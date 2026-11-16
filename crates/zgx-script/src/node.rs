@@ -1000,6 +1000,13 @@ pub(crate) struct RareEvents {
     /// extra) button pressed and released on the node, as the DOM's
     /// `auxclick`; the innermost node with one takes it.
     pub aux_click: Option<Handler>,
+    /// `fn({ button, x, y, local_x, local_y, … })`: that button going down
+    /// on the node; with `on_pointer_move` or `on_aux_release` too, the node
+    /// keeps the pointer until it comes up, as `on_press` does (a board
+    /// panned by the middle button). The innermost node with one takes it.
+    pub aux_press: Option<Handler>,
+    /// The same, as the button pressed on the node comes up, wherever.
+    pub aux_release: Option<Handler>,
     /// `fn({ direction })`: a step back or forward ("back", "forward") the
     /// platform's gesture for it takes over the node (a trackpad's swipe
     /// between pages, macOS); the nearest node with one takes it.
@@ -4034,6 +4041,8 @@ fn set_handler(
         "on_press" => &mut events.press,
         "on_release" => &mut events.release,
         "on_aux_click" => &mut events.rare.get_or_insert_default().aux_click,
+        "on_aux_press" => &mut events.rare.get_or_insert_default().aux_press,
+        "on_aux_release" => &mut events.rare.get_or_insert_default().aux_release,
         "on_double_click" => &mut events.rare.get_or_insert_default().double_click,
         "on_pointer_lock" => &mut events.rare.get_or_insert_default().pointer_lock,
         "on_navigate" => &mut events.rare.get_or_insert_default().navigate,

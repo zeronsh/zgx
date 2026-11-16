@@ -1798,8 +1798,10 @@ export type KeyEvent = {
 -- and the keys held: ⌘ or Ctrl with the wheel zooms, by convention.
 export type WheelEvent = Merge<PointerEvent, { dx: number, dy: number }>
 -- A middle (or other extra) button's click, as the DOM's `auxclick`:
--- `button` is "middle", or the platform's number for another button.
-export type AuxClickEvent = Merge<PointerEvent, { button: "middle" | number }>
+-- `button` is "middle", or the platform's number for another button. Also
+-- `on_aux_press`'s and `on_aux_release`'s: `cancelled` on a release that is
+-- the gesture cancelled rather than the button let go.
+export type AuxClickEvent = Merge<PointerEvent, { button: "middle" | number, cancelled: boolean? }>
 -- A trackpad pinch: the fingers' spread changed by `scale` (0.05: 5%
 -- larger, zoom in; negative, out), at the pointer.
 export type PinchEvent = Merge<PointerEvent, { scale: number }>
@@ -2473,6 +2475,11 @@ export type NodeProps = {
 	-- The middle (or another extra) button pressed and released on it: a
 	-- browser tab closes on it, a link opens in the background.
 	on_aux_click: (((e: AuxClickEvent) -> ...unknown) | Action)?,
+	-- The middle (or another extra) button down and up on it. With
+	-- `on_pointer_move` or `on_aux_release` too, it keeps the pointer from
+	-- press to release (a board panned by the middle button).
+	on_aux_press: (((e: AuxClickEvent) -> ...unknown) | Action)?,
+	on_aux_release: (((e: AuxClickEvent) -> ...unknown) | Action)?,
 	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
 	on_double_click: (((e: PointerEvent) -> ...unknown) | Action)?,
 	-- Back or forward on the platform's gesture over it (a trackpad's swipe
