@@ -600,6 +600,10 @@ pub(crate) struct Rare {
     /// An overlay's panel left out of the accessibility tree (a tooltip's,
     /// which describes its view instead).
     panel_hidden: bool,
+    /// A tooltip's wrapper (`View::tooltip`) around a bare button (one with
+    /// no click handler of its own): a menu opening from it takes it for a
+    /// menu button, as it would the button.
+    wraps_bare_button: bool,
     accessible_label: Option<String>,
     accessibility: Option<Box<Accessibility>>,
     placeholder: Option<Box<dyn FnMut() -> String>>,
@@ -772,6 +776,17 @@ impl Rare {
 }
 impl View {
     /// The fields few views set, made on first use.
+    /// A button with no click handler of its own (a menu button, opening a
+    /// menu as it is pressed).
+    pub(crate) fn is_bare_button(&self) -> bool {
+        self.click.is_none() && matches!(self.kind, Kind::Button)
+    }
+    /// Said to be a tooltip's wrapper around a bare button
+    /// (`is_bare_button`).
+    pub(crate) fn wrapping_bare_button(mut self) -> Self {
+        self.rare_mut().wraps_bare_button = true;
+        self
+    }
     pub(crate) fn rare_mut(&mut self) -> &mut Rare {
         self.rare.get_or_insert_default()
     }
@@ -4667,10 +4682,12 @@ fn mount_portal(
             }
         });
     }
-    // A button with no click handler of its own.
-    let bare = anchor
-        .as_ref()
-        .is_some_and(|a| a.click.is_none() && matches!(a.kind, Kind::Button));
+    // A button with no click handler of its own, or a tooltip's wrapper
+    // around one.
+    let bare = anchor.as_ref().is_some_and(|a| {
+        (a.click.is_none() && matches!(a.kind, Kind::Button))
+            || a.rare.as_ref().is_some_and(|r| r.wraps_bare_button)
+    });
     let anchor = anchor.map(|anchor| mount(ui, owner, *anchor, environment.clone()));
     if let Some(anchor) = anchor {
         ui.listen_popup_soon(anchor);
