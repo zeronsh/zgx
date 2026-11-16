@@ -46,6 +46,7 @@ mod fetch_policy;
 mod journal;
 mod json;
 pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
+mod atoms;
 mod errors;
 #[cfg(target_os = "macos")]
 mod file_events;
