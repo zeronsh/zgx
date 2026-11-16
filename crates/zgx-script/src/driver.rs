@@ -1085,9 +1085,6 @@ fn lines_text(lines: &[(&Line, bool, Option<bool>)], hidden: usize) -> String {
     out
 }
 
-/// What there is to know of `node`: its number, kind, where the script made
-/// it and how it named it, its role, name, value and state, its box, its
-/// text, and how many children it has.
 /// What a reader hears of a paragraph whose text is `value` with `controls`
 /// inline in it (`zgx::semantics::heard`, as the desktop's accessibility tree
 /// says it): its text in quotes, each control as `[role "name"]` where it
@@ -1110,6 +1107,9 @@ fn reads(
         .join(" ")
 }
 
+/// What there is to know of `node`: its number, kind, where the script made
+/// it and how it named it, its role, name, value and state, its box, its
+/// text, and how many children it has.
 pub fn node(
     ui: &Ui,
     inspector: Option<&zgx::inspect::Inspector>,
