@@ -9964,7 +9964,7 @@ impl GpuRenderer {
                                         color: rgba(fill, opacity),
                                         fade,
                                         options: [edge_fade, 0., 0., 1.],
-                                        shape: [0., 0., 0., 1.],
+                                        shape: [0., 0., 0., zgx::style::corner_shape()],
                                         border: decoration::shadow_corners(
                                             style,
                                             bounds.width,
@@ -10017,7 +10017,7 @@ impl GpuRenderer {
                                         color: [1., 1., 1., opacity],
                                         fade,
                                         options: [edge_fade, 0., 0., 1.],
-                                        shape: [0., 0., 0., 1.],
+                                        shape: [0., 0., 0., zgx::style::corner_shape()],
                                         border: decoration::shadow_corners(
                                             style,
                                             bounds.width,
@@ -10072,7 +10072,7 @@ impl GpuRenderer {
                                     color: [1., 1., 1., opacity],
                                     fade,
                                     options: [edge_fade, 2., 0., 1.],
-                                    shape: [0., 0., 0., 1.],
+                                    shape: [0., 0., 0., zgx::style::corner_shape()],
                                     border: decoration::shadow_corners(
                                         style,
                                         bounds.width,
@@ -18530,7 +18530,7 @@ fn background_quad(
         color: [1., 1., 1., opacity],
         fade,
         options: [edge_fade, 2., 0., 1.],
-        shape: [0., 0., 0., 1.],
+        shape: [0., 0., 0., zgx::style::corner_shape()],
         border: decoration::shadow_corners(style, bounds.width, bounds.height, 0.),
         mask: NO_MASK,
     })
