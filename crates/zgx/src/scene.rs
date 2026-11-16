@@ -7372,6 +7372,33 @@ impl Scene {
     pub fn font(&self, id: NodeId) -> &crate::text_layout::FontStyle {
         &self.node(id).font
     }
+    /// `set_font` from a font held elsewhere (a canvas's line): compared
+    /// where it is, cloned only when the node's changes, and compared once.
+    /// It returns early exactly where `set_font` would: a font it stores as
+    /// given (a weight in range, an alignment it keeps) equal to the node's,
+    /// in every field; such a font that differs is stored as `set_font`
+    /// stores it after its own compare.
+    pub(crate) fn set_font_from(&mut self, id: NodeId, font: &crate::text_layout::FontStyle) {
+        use crate::text_layout::TextAlign;
+        let node = self.node(id);
+        let kept = (1..=1000).contains(&font.weight)
+            && match font.align {
+                TextAlign::Start => !node.rtl,
+                TextAlign::End => false,
+                _ => true,
+            };
+        if !kept {
+            return self.set_font(id, font.clone());
+        }
+        let logical = (font.align == TextAlign::Start).then_some(TextAlign::Start);
+        if node.font == *font && node.align_logical == logical {
+            return;
+        }
+        if self.languages {
+            return self.set_font_in_language(id, font.clone(), logical);
+        }
+        self.store_font(id, font.clone(), logical);
+    }
     /// Font changes affect shaping, layout, paint and retained layer contents.
     pub fn set_font(&mut self, id: NodeId, mut font: crate::text_layout::FontStyle) {
         font.weight = font.weight.clamp(1, 1000);
@@ -22232,6 +22259,159 @@ mod line_height_tests {
             let shaped = scene.shape_text_with_font(text, 10., Some(6.), &font);
             assert_eq!(measured, shaped.size());
             assert_eq!(measured.1, 3. * line_height.resolve(10.));
+        }
+    }
+}
+
+#[cfg(test)]
+mod font_from_tests {
+    use super::*;
+    use crate::text_layout::{
+        FontFamily, FontFeatures, FontStyle, LetterSpacing, LineHeight, TextAlign, TextUnderline,
+    };
+
+    /// A font held elsewhere (a canvas's line) is taken by reference, and
+    /// cloned only when the node's changes: one differing from the node's in
+    /// any single field is the node's after, as `set_font` would store it;
+    /// one equal in every field (made again, its shared parts other
+    /// allocations) touches nothing.
+    #[test]
+    fn a_font_from_elsewhere_changes_the_node_only_when_a_field_differs() {
+        let base = FontStyle {
+            family: FontFamily::Named("Grid Mono".into()),
+            weight: 400,
+            features: FontFeatures::new([(*b"liga", 0)]),
+            fallbacks: std::sync::Arc::from(vec![FontFamily::SansSerif]),
+            letter_spacing: LetterSpacing::cells(8.25),
+            ..FontStyle::default()
+        };
+        // Each field of the font changed alone.
+        let changed: Vec<(&str, FontStyle)> = vec![
+            (
+                "family",
+                FontStyle {
+                    family: FontFamily::Named("Other Mono".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "weight",
+                FontStyle {
+                    weight: 700,
+                    ..base.clone()
+                },
+            ),
+            (
+                "italic",
+                FontStyle {
+                    italic: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "line_height",
+                FontStyle {
+                    line_height: LineHeight::px(20.),
+                    ..base.clone()
+                },
+            ),
+            (
+                "letter_spacing",
+                FontStyle {
+                    letter_spacing: LetterSpacing::cells(8.5),
+                    ..base.clone()
+                },
+            ),
+            (
+                "features",
+                FontStyle {
+                    features: FontFeatures::new([(*b"liga", 1)]),
+                    ..base.clone()
+                },
+            ),
+            (
+                "align",
+                FontStyle {
+                    align: TextAlign::Center,
+                    ..base.clone()
+                },
+            ),
+            (
+                "align end",
+                FontStyle {
+                    align: TextAlign::End,
+                    ..base.clone()
+                },
+            ),
+            (
+                "fallbacks",
+                FontStyle {
+                    fallbacks: std::sync::Arc::from(vec![FontFamily::Serif]),
+                    ..base.clone()
+                },
+            ),
+            (
+                "masked",
+                FontStyle {
+                    masked: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "underline",
+                FontStyle {
+                    underline: Some(TextUnderline::new(None)),
+                    ..base.clone()
+                },
+            ),
+            (
+                "weight out of range",
+                FontStyle {
+                    weight: 0,
+                    ..base.clone()
+                },
+            ),
+        ];
+        // The same font made again: equal in every field, each shared part
+        // a new allocation.
+        let again = FontStyle {
+            family: FontFamily::Named("Grid Mono".into()),
+            features: FontFeatures::new([(*b"liga", 0)]),
+            fallbacks: std::sync::Arc::from(vec![FontFamily::SansSerif]),
+            ..base.clone()
+        };
+        let mut scene = Scene::new(400., 100.);
+        let text = || NodeKind::Text {
+            text: "a run".into(),
+            font_size: 13.,
+            color: Color(1, 2, 3, 255),
+        };
+        // `from` takes fonts by reference; `stored` by value, as before.
+        let from = scene.append(scene.root(), text(), Style::default());
+        let stored = scene.append(scene.root(), text(), Style::default());
+        for (field, font) in &changed {
+            scene.set_font(from, base.clone());
+            scene.set_font(stored, base.clone());
+            scene.flush();
+            scene.set_font_from(from, &again);
+            assert!(
+                scene.flush().is_idle(),
+                "{field}: the same font again touches nothing"
+            );
+            scene.set_font_from(from, font);
+            scene.set_font(stored, font.clone());
+            assert_eq!(
+                scene.font(from),
+                scene.font(stored),
+                "{field}: stored as set_font stores it"
+            );
+            assert_ne!(scene.font(from), &base, "{field}: changed");
+            assert!(!scene.flush().is_idle(), "{field}: repainted");
+            scene.set_font_from(from, font);
+            assert!(
+                scene.flush().is_idle(),
+                "{field}: the same again touches nothing"
+            );
         }
     }
 }
