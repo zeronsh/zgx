@@ -896,7 +896,9 @@ impl Semantics {
 /// by its own name.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard<T> {
+    /// A stretch of the paragraph's own text.
     Text(String),
+    /// A control inline in it, read by its own name where it stands.
     Control(T),
 }
 
