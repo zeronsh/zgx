@@ -1506,6 +1506,87 @@ export function zgx_clipboard_write(text, html) {
   return true;
 }
 
+// A tag for each element a focus snapshot saw, to tell it from an element
+// made later in the slot it freed, however many snapshots came between.
+const focusTags = new WeakMap();
+let nextFocusTag = 0;
+const encoder = new TextEncoder();
+
+// A field whose value has a selection (text, search, a textarea…).
+function selects(el) {
+  return (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.selectionStart !== null;
+}
+
+// UTF-16 offset `at` of `text` in UTF-8 bytes, as Rust counts it.
+function utf8(text, at) {
+  return encoder.encode(text.slice(0, at)).length;
+}
+
+// UTF-8 offset `bytes` of `text` in UTF-16 units: -1 past its end or inside a
+// character.
+function utf16(text, bytes) {
+  let b = 0;
+  for (let i = 0; i < text.length; ) {
+    if (b === bytes) return i;
+    if (b > bytes) return -1;
+    const c = text.codePointAt(i);
+    b += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    i += c >= 0x10000 ? 2 : 1;
+  }
+  return b === bytes ? text.length : -1;
+}
+
+// `NodeHandle::focus_snapshot`: the node with the document's focus, its tag,
+// and a field's selection as anchor and focus in UTF-8 bytes; none if focus
+// is on no node of ours. Rare (a guide starting), so the node is looked up.
+export function zgx_focus_snapshot() {
+  const el = document.activeElement;
+  const id = el ? nodes.indexOf(el) : -1;
+  if (id < 0) return undefined;
+  let tag = focusTags.get(el);
+  if (tag === undefined) {
+    tag = nextFocusTag++;
+    focusTags.set(el, tag);
+  }
+  if (!selects(el)) return [id, tag];
+  const start = utf8(el.value, el.selectionStart);
+  const end = utf8(el.value, el.selectionEnd);
+  return el.selectionDirection === "backward" ? [id, tag, end, start] : [id, tag, start, end];
+}
+
+// `NodeHandle::restore_focus`: focus back on the snapshot's node, its
+// selection set, nothing scrolled (no container around it, the page or the
+// field's own text). False, and nothing changed, if the node is gone or its
+// value no longer holds the offsets (anchor -1: no selection to set).
+export function zgx_restore_focus(id, tag, anchor, focus) {
+  const el = nodes[id];
+  if (!(el instanceof HTMLElement) || !el.isConnected || focusTags.get(el) !== tag) return false;
+  let range = null;
+  if (anchor >= 0) {
+    if (!selects(el)) return false;
+    const a = utf16(el.value, anchor);
+    const f = utf16(el.value, focus);
+    if (a < 0 || f < 0) return false;
+    range = a <= f ? [a, f, "forward"] : [f, a, "backward"];
+  }
+  // Setting a selection scrolls an ancestor to it in some engines: every
+  // scroll position around it is put back as it was.
+  const kept = [];
+  for (let node = el; node; node = node.parentElement) {
+    kept.push([node, node.scrollLeft, node.scrollTop]);
+  }
+  const page = [window.scrollX, window.scrollY];
+  el.focus({ preventScroll: true });
+  if (document.activeElement !== el) return false;
+  if (range) el.setSelectionRange(...range);
+  for (const [node, left, top] of kept) {
+    if (node.scrollLeft !== left) node.scrollLeft = left;
+    if (node.scrollTop !== top) node.scrollTop = top;
+  }
+  if (window.scrollX !== page[0] || window.scrollY !== page[1]) window.scrollTo(page[0], page[1]);
+  return true;
+}
+
 // `NodeHandle::scroll_into_view`: the browser's own, at once, so a script
 // hears whether anything moved. Every scroll container around the node and
 // the page are read before and after an instant scroll; one asked to ease

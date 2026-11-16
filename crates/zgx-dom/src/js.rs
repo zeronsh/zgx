@@ -31,4 +31,6 @@ extern "C" {
     pub(crate) fn zgx_open_url(url: &str) -> bool;
     pub(crate) fn zgx_scroll_into_view(id: u32, block: &str, inline: &str, animate: i32) -> bool;
     pub(crate) fn zgx_measure(font: &str, text: &str) -> Box<[f64]>;
+    pub(crate) fn zgx_focus_snapshot() -> Option<Box<[f64]>>;
+    pub(crate) fn zgx_restore_focus(id: u32, tag: u32, anchor: f64, focus: f64) -> bool;
 }

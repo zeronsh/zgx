@@ -26040,4 +26040,16 @@ impl NodeId {
             generation: u32::MAX,
         }
     }
+    /// A DOM node as one moment saw it: `tag` tells it from a node made
+    /// later in the slot it freed (`NodeHandle::focus_snapshot`).
+    pub(crate) fn outside_tagged(index: u32, tag: u32) -> NodeId {
+        NodeId {
+            index,
+            generation: tag,
+        }
+    }
+    /// What [`NodeId::outside_tagged`] was given.
+    pub(crate) fn outside_tag(self) -> u32 {
+        self.generation
+    }
 }
