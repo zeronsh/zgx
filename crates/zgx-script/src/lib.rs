@@ -2140,6 +2140,12 @@ impl ScriptHost {
         );
         #[cfg(feature = "audio")]
         host.0.audio.set_timers(host.0.timers.clone());
+        // No files in the browser: a sound's are fetched, through the host's
+        // transport and under its policy.
+        #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+        host.0
+            .audio
+            .set_fetch(host.0.fetcher.clone(), host.0.fetch_policy.clone());
         host.trim_when_idle();
         host
     }

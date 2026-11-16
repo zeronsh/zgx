@@ -12,6 +12,7 @@ mod effects;
 
 use crate::Vm;
 use crate::node::{Anim, AnimUd, Curve};
+use crate::time::{Instant, SystemTime};
 use crate::timers::Timers;
 use crate::value::{ReadState, State, Value};
 use mlua::{Lua, MultiValue, Table, UserData, UserDataFields, UserDataMethods};
@@ -21,7 +22,7 @@ use std::future::poll_fn;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::task::{Poll, Waker};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
 use zgx::frame::FrameClock;
 use zgx::reactive::{Effect, Runtime, Signal};
 use zgx_audio::{Audio, Play, Ramp, Sound, Source, Time, Voice};
@@ -86,6 +87,15 @@ pub(crate) struct AudioHost {
     effects: RefCell<HashMap<u64, effects::LiveEffect>>,
     #[cfg(feature = "audio-effects")]
     next_effect: Cell<u64>,
+    /// The host's transport and policy (the browser's, where there are no
+    /// files to read).
+    #[cfg(target_arch = "wasm32")]
+    fetch: RefCell<
+        Option<(
+            crate::calls::SharedFetcher,
+            crate::fetch_policy::SharedPolicy,
+        )>,
+    >,
 }
 
 /// A bus's name and what of it is followed (`"gain"`, `"mute"`, `"solo"`).
@@ -125,7 +135,62 @@ impl AudioHost {
             effects: RefCell::default(),
             #[cfg(feature = "audio-effects")]
             next_effect: Cell::new(0),
+            #[cfg(target_arch = "wasm32")]
+            fetch: RefCell::default(),
         })
+    }
+
+    /// The host's transport and policy, which a sound's file is fetched
+    /// through in the browser.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_fetch(
+        &self,
+        fetcher: crate::calls::SharedFetcher,
+        policy: crate::fetch_policy::SharedPolicy,
+    ) {
+        *self.fetch.borrow_mut() = Some((fetcher, policy));
+    }
+
+    /// `path`'s bytes, fetched (a relative path against the app's base, as
+    /// the host's transport resolves it) for `caller` (a plugin, or the app)
+    /// under the app's policy. A plugin's path was confined to its
+    /// directory before it got here, as a file read is on the desktop:
+    /// asking for audio needs no fetch grant to reach the plugin's own files,
+    /// and reaches nothing else.
+    #[cfg(target_arch = "wasm32")]
+    fn fetch_bytes(
+        &self,
+        path: &std::path::Path,
+        caller: Option<Rc<str>>,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + 'static {
+        let url = path.to_string_lossy().replace('\\', "/");
+        let started = match &*self.fetch.borrow() {
+            Some((fetcher, policy)) => match fetcher.borrow().clone() {
+                Some(fetch) => {
+                    let body = crate::calls::Body::kept();
+                    body.asked_as(caller, policy);
+                    let request = crate::Request {
+                        url: url.clone(),
+                        method: "GET".into(),
+                        headers: Vec::new(),
+                        body: None,
+                    };
+                    Ok((fetch(request, body.clone()), body))
+                }
+                None => Err(format!(
+                    "{url}: no transport to fetch it with (`zgx_dom::install_fetcher`)"
+                )),
+            },
+            None => Err(format!("{url}: no transport to fetch it with")),
+        };
+        async move {
+            let (response, body) = started?;
+            let response = response.await?;
+            if !(200..300).contains(&response.status) {
+                return Err(format!("{url}: HTTP {}", response.status));
+            }
+            Ok(body.whole(response.body))
+        }
     }
 
     /// The engine scripts play through, made by `make` when a script first
@@ -958,6 +1023,10 @@ pub(crate) struct SoundSlot {
     /// When a script last asked for it, on the host's count: what `trim`
     /// keeps the most recent of.
     used: Cell<u64>,
+    /// The plugin that loaded it, if one did: who a fetch of its file is
+    /// for, in the browser.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    caller: Option<Rc<str>>,
 }
 struct Waiting {
     asked: Instant,
@@ -975,6 +1044,21 @@ impl SoundSlot {
         let Some(host) = self.host.upgrade() else {
             return;
         };
+        // No files or threads in the browser: fetched, then decoded here.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let fetched = host.fetch_bytes(&self.path, self.caller.clone());
+            let (slot, audio) = (self.clone(), audio.clone());
+            host.spawn(async move {
+                let loaded = match fetched.await {
+                    Ok(bytes) => audio.load(Source::bytes(bytes)).map_err(|e| e.to_string()),
+                    Err(error) => Err(error),
+                };
+                slot.loaded(loaded);
+            });
+            return;
+        }
+        #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
         let task = match host.decode(audio, self.path.clone()) {
             Ok(task) => task,
             Err(error) => {
@@ -1528,7 +1612,12 @@ fn call(
             let (src, opts): (String, Option<Table>) = unpack(lua, args, "audio.", name)?;
             let engine = host.engine()?;
             let path = resolve(lua, &src, plugin.is_some(), "audio.sound")?;
+            // When its file was written, so a changed one loads again. No
+            // files in the browser: fetched, it's kept as it came.
+            #[cfg(not(target_arch = "wasm32"))]
             let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            #[cfg(target_arch = "wasm32")]
+            let stamp: Option<SystemTime> = None;
             // The app's are shared and kept; a plugin's are its own.
             let cached = match plugin {
                 Some(_) => None,
@@ -1558,6 +1647,7 @@ fn call(
                         waiting: RefCell::default(),
                         meter,
                         used: Cell::new(0),
+                        caller: plugin.clone(),
                     });
                     host.slots.borrow_mut().push(Rc::downgrade(&slot));
                     if plugin.is_none() {
@@ -1656,10 +1746,38 @@ fn call(
                         playing: host.runtime.signal(Value::Bool(true)),
                         cancelled: Cell::new(false),
                     });
-                    let voice = audio
-                        .stream(Source::file(path), play)
-                        .map_err(|e| fail("audio.music", e))?;
-                    host.track(voice, &cell, spec, [gain, pan, pitch]);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let voice = audio
+                            .stream(Source::file(path), play)
+                            .map_err(|e| fail("audio.music", e))?;
+                        host.track(voice, &cell, spec, [gain, pan, pitch]);
+                    }
+                    // In the browser the file is fetched first, then
+                    // streamed from its bytes: it starts once they're here
+                    // (unless stopped meanwhile), its `playing` true until
+                    // then, as a sound still loading is.
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let fetched = host.fetch_bytes(&path, plugin.clone());
+                        let (owner, cell) = (host.clone(), cell.clone());
+                        host.spawn(async move {
+                            let streamed = match fetched.await {
+                                Ok(bytes) if !cell.cancelled.get() => audio
+                                    .stream(Source::bytes(bytes), play)
+                                    .map_err(|e| e.to_string()),
+                                Ok(_) => return,
+                                Err(error) => Err(error),
+                            };
+                            match streamed {
+                                Ok(voice) => owner.track(voice, &cell, spec, [gain, pan, pitch]),
+                                Err(error) => {
+                                    eprintln!("audio.music: {error}");
+                                    cell.playing.set(Value::Bool(false));
+                                }
+                            }
+                        });
+                    }
                     cell
                 }
             };
