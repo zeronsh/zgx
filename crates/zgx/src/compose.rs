@@ -511,6 +511,8 @@ enum Contents {
 type Decorations = Vec<(std::ops::Range<usize>, crate::scene::Color)>;
 /// Ranges of a text underlined (`View::underlines`).
 type Underlines = Vec<crate::widgets::EditorUnderline>;
+/// What gives a text area's atoms as the values it reads change.
+type AtomsFollow = Box<dyn FnMut(&crate::widgets::EditorHandle) -> Vec<crate::text_edit::Atom>>;
 /// What a code editor adds to a text area: its lines' colours, ranges
 /// marked behind its text, its current line and what Tab inserts.
 #[derive(Default)]
@@ -522,6 +524,9 @@ pub(crate) struct CodeOptions {
     indent: Option<String>,
     on_caret: Option<Box<dyn FnMut(crate::widgets::Caret)>>,
     on_top_line: Option<Box<dyn FnMut(usize)>>,
+    atom_wash: Option<crate::scene::Color>,
+    on_atoms: Option<crate::widgets::AtomListener>,
+    atoms_when: Option<AtomsFollow>,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -1956,6 +1961,27 @@ impl View {
     /// status bar's line and column); see `EditorHandle::on_caret`.
     pub fn on_caret(mut self, told: impl FnMut(crate::widgets::Caret) + 'static) -> Self {
         self.code_mut().on_caret = Some(Box::new(told));
+        self
+    }
+    /// The wash behind a text area's atoms that have none of their own.
+    pub fn atom_wash(mut self, color: crate::scene::Color) -> Self {
+        self.code_mut().atom_wash = Some(color);
+        self
+    }
+    /// Call `told` with what happened to a text area's atoms and all of them
+    /// as they are, whenever they are made, lost or moved; see
+    /// `EditorHandle::on_atoms`.
+    pub fn on_atoms(mut self, told: impl FnMut(&crate::widgets::AtomEvent<'_>) + 'static) -> Self {
+        self.code_mut().on_atoms = Some(Box::new(told));
+        self
+    }
+    /// A text area's atoms follow what `atoms` gives, as the reactive values
+    /// it reads change (a draft restored).
+    pub fn atoms_when(
+        mut self,
+        atoms: impl FnMut(&crate::widgets::EditorHandle) -> Vec<crate::text_edit::Atom> + 'static,
+    ) -> Self {
+        self.code_mut().atoms_when = Some(Box::new(atoms));
         self
     }
     /// Call `told` with a text area's first line in view, from 1, whenever
@@ -6822,6 +6848,9 @@ fn open_element(
                 indent,
                 on_caret,
                 on_top_line,
+                atom_wash,
+                on_atoms,
+                atoms_when,
             } = *code;
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
@@ -6842,6 +6871,19 @@ fn open_element(
             }
             if let Some(told) = on_top_line {
                 editor.on_top_line(told);
+            }
+            if let Some(color) = atom_wash {
+                editor.set_atom_wash(Some(color));
+            }
+            if let Some(told) = on_atoms {
+                editor.on_atoms(told);
+            }
+            if let Some(mut atoms) = atoms_when {
+                let editor = editor.clone();
+                ui.bind(root, move || {
+                    let next = atoms(&editor);
+                    editor.set_atoms(next)
+                });
             }
             editor.set_indent(indent.as_deref());
             if let Some(mut ranges) = decorations {
