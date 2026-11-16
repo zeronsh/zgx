@@ -894,7 +894,9 @@ impl AccessibilityTree {
             // What it reads as: without the text of the controls inline in
             // it, which read as themselves where they stand.
             let read_value: Option<std::borrow::Cow<str>> = match text_value {
-                Some(value) if !cuts.is_empty() => Some(without_inline(value, &cuts).into()),
+                Some(value) if !cuts.is_empty() => {
+                    Some(zgx::semantics::heard_value(value, &cuts).into())
+                }
                 value => value.map(Into::into),
             };
             if let Some(active) = semantic.active_descendant.filter(|a| visible.contains(a)) {
@@ -1593,19 +1595,6 @@ fn run_position(
             after.saturating_sub(1)
         },
     }
-}
-/// What a paragraph reads as, without the text of the controls inline in it
-/// (`cuts`, in order): each is read as itself, where it is.
-fn without_inline(value: &str, cuts: &[(std::ops::Range<usize>, AccessibleId)]) -> String {
-    let mut read = String::with_capacity(value.len());
-    let mut from = 0;
-    for (range, _) in cuts {
-        let start = range.start.clamp(from, value.len());
-        read.push_str(value.get(from..start).unwrap_or(""));
-        from = range.end.clamp(start, value.len());
-    }
-    read.push_str(value.get(from..).unwrap_or(""));
-    read
 }
 /// `runs` without the characters of the controls inline in their text
 /// (`cuts`): a run is split where one stands, its places kept, so the

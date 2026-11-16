@@ -35,6 +35,7 @@ A target matching several nodes is an error listing them (`@n role "name" box`, 
 zgx inspect tree                      # the whole view (200 lines at most; the rest counted)
 zgx inspect tree '#transcript' --depth 3
 zgx inspect node '"Copy"'             # kind, the script line that made it, role, name, value, state, box, text; a scroll view's offset of its range and stretch
+                                      # a paragraph with a citation in it: reads: "step " [button "Citation 1"] "." (what a screen reader hears)
 zgx inspect find '"Copy"'             # every node a target matches
 zgx inspect state                     # named states (ui.state, ui.persist, ui.shared) and their values
 zgx inspect state messages --full     # one state; long values are cut at 200 bytes unless --full

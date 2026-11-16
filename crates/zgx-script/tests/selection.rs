@@ -205,3 +205,83 @@ fn on_copy_hears_the_rows_of_the_lists_it_spans() {
     );
     assert_eq!(h.error(), None);
 }
+
+/// A `ui.list` that is itself the selectable region (Anara's transcript):
+/// the copy request names its rows by the list's own id, not `false`.
+#[test]
+fn a_list_that_is_the_region_names_its_rows_by_its_own_id() {
+    let mut h = Harness::inline(
+        r##"local heard = ui.state("heard", "")
+        return ui.column {
+            ui.list {
+                id = "transcript:scale",
+                selectable = true,
+                count = 180,
+                height = 20,
+                h = 100,
+                on_copy = function(request)
+                    local said = {}
+                    for _, rows in request.rows do
+                        table.insert(said, `{rows.list} {rows.first} {rows.last}`)
+                    end
+                    heard:set(table.concat(said, ", "))
+                    return nil
+                end,
+                row = function(i) return ui.text { "Row " .. i, literal = true } end,
+            },
+        }"##,
+    );
+    h.settle();
+    h.ui.prepare_frame();
+    let list = h.find("transcript:scale").unwrap();
+    assert!(h.ui.select_all_text(list));
+    h.ui.prepare_frame();
+    assert!(h.ui.copy_selection_from(|_, _| true));
+    h.settle();
+    let heard = h
+        .host
+        .states()
+        .into_iter()
+        .find(|(name, _)| name == "heard");
+    assert!(
+        matches!(&heard, Some((_, zgx_script::Value::Str(said))) if &**said == "transcript:scale 1 180"),
+        "{heard:?}"
+    );
+    assert_eq!(h.error(), None);
+}
+
+/// `zgx inspect node` on a paragraph with a citation in it says what a
+/// reader hears: its text, and the citation as its button where it stands.
+#[test]
+fn inspect_says_what_a_reader_hears_of_a_paragraph_with_a_citation() {
+    let h = Harness::inline(
+        r##"return ui.column { w = 400,
+            ui.rich {
+                ui.span { "step " },
+                ui.span { "1", label = "Citation 1", on_click = function() end },
+                ui.span { "." },
+            },
+        }"##,
+    );
+    h.settle();
+    h.frames(3);
+    let paragraph = {
+        let semantics = h.ui.semantics.borrow();
+        semantics
+            .iter()
+            .map(|(id, _)| id)
+            .find(|id| !semantics.inline_controls(*id).is_empty())
+            .expect("the paragraph, with its citation")
+    };
+    let fields = zgx_script::driver::node(&h.ui, None, paragraph);
+    let reads = fields
+        .iter()
+        .find(|(k, _)| k == "reads")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(reads, Some(r#""step " [button "Citation 1"] ".""#));
+    let value = fields
+        .iter()
+        .find(|(k, _)| k == "value")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(value, Some("step 1."), "its value is as zgx keeps it");
+}
