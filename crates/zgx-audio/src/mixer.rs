@@ -764,11 +764,15 @@ impl Voice {
                     gains.iter_mut().for_each(|g| *g *= value);
                 }
             }
+            // Each sample times one gain, its level and pan's together, as
+            // in the settled path above: the same product in the same order
+            // on every path, so where a block ends (a ramp ending inside it
+            // or at its edge) changes no sample.
             if self.pan.settled() {
                 let (pl, pr) = self.law.gains(self.pan.value());
                 for i in 0..got {
-                    left[i] += source_left[i] * gains[i] * pl;
-                    right[i] += source_right[i] * gains[i] * pr;
+                    left[i] += source_left[i] * (gains[i] * pl);
+                    right[i] += source_right[i] * (gains[i] * pr);
                 }
             } else {
                 let pans = &mut scratch.values[..n];
@@ -779,8 +783,8 @@ impl Voice {
                     PanLaw::Balance => {
                         for i in 0..got {
                             let (pl, pr) = pan_gains(pans[i]);
-                            left[i] += source_left[i] * gains[i] * pl;
-                            right[i] += source_right[i] * gains[i] * pr;
+                            left[i] += source_left[i] * (gains[i] * pl);
+                            right[i] += source_right[i] * (gains[i] * pr);
                         }
                     }
                     PanLaw::EqualPower => equal_power_into(
@@ -1043,8 +1047,8 @@ fn equal_power_into(
 ) {
     for i in 0..left.len().min(right.len()) {
         let (pl, pr) = equal_power(pans[i]);
-        left[i] += source_left[i] * gains[i] * pl;
-        right[i] += source_right[i] * gains[i] * pr;
+        left[i] += source_left[i] * (gains[i] * pl);
+        right[i] += source_right[i] * (gains[i] * pr);
     }
 }
 

@@ -362,6 +362,12 @@ jobs:
             cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --root "$root"
           fi
           cargo clippy -p zgx-dom --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+          # zgx-audio in the browser: a pulled engine, no threads and no
+          # clock, run there (in Node) so a thread or an Instant on its
+          # path fails here rather than in a page.
+          cargo clippy -p zgx-audio --target wasm32-unknown-unknown --features vorbis,mp3,opus,hrtf --lib --test web --locked -- -D warnings
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
+            cargo test -p zgx-audio --target wasm32-unknown-unknown --features vorbis,mp3,opus,hrtf --test web --locked
           cargo build -p zgx-dom --example bench --target wasm32-unknown-unknown --release --locked
           CHROMEDRIVER="$(command -v chromedriver || echo "$CHROMEWEBDRIVER/chromedriver")" \
             CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \

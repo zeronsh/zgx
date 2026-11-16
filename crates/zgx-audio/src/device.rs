@@ -111,6 +111,8 @@ impl Renderer {
 /// A clock read on the audio thread without a system call: on macOS
 /// `mach_absolute_time` (whose ticks CoreAudio's timestamps count), kept
 /// as ticks and made nanoseconds only when read out; elsewhere `Instant`.
+/// A browser (wasm32) has no clock without the page's: there it reads 0,
+/// and blocks' mixing times aren't counted.
 pub(crate) mod clock {
     #[cfg(target_os = "macos")]
     mod mach {
@@ -134,14 +136,16 @@ pub(crate) mod clock {
     #[derive(Clone, Copy)]
     pub struct Now(
         #[cfg(target_os = "macos")] u64,
-        #[cfg(not(target_os = "macos"))] std::time::Instant,
+        #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))] std::time::Instant,
     );
 
     pub fn now() -> Now {
         // SAFETY: reads the page the kernel shares with every process.
         #[cfg(target_os = "macos")]
         return Now(unsafe { mach::mach_absolute_time() });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_arch = "wasm32")]
+        return Now();
+        #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
         return Now(std::time::Instant::now());
     }
 
@@ -167,7 +171,12 @@ pub(crate) mod clock {
                 (self.0.saturating_sub(earlier.0) * u64::from(numer) / u64::from(denom) / 1000)
                     as usize
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = earlier;
+                0
+            }
+            #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
             {
                 self.0.duration_since(earlier.0).as_micros() as usize
             }
