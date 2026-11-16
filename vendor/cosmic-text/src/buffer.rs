@@ -1883,6 +1883,6 @@ thread_local! {
 pub fn set_baseline_scale(scale: f32) {
     BASELINE_SCALE.with(|s| s.set(if scale.is_finite() && scale >= 1. { scale } else { 1. }));
 }
-fn baseline_scale() -> f32 {
+pub(crate) fn baseline_scale() -> f32 {
     BASELINE_SCALE.with(core::cell::Cell::get)
 }
