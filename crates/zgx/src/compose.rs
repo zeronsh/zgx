@@ -2043,6 +2043,29 @@ impl View {
         self.rare_mut().row_text = Some(std::rc::Rc::new(text));
         self
     }
+    /// `row_text`, for a list that also says how many rows it has
+    /// (`count`): a copy's hook asked where a selection ends past them all
+    /// reads the count, building no row.
+    #[doc(hidden)]
+    pub fn row_text_counted(
+        mut self,
+        count: impl Fn() -> usize + 'static,
+        text: impl Fn(usize) -> Option<String> + 'static,
+    ) -> Self {
+        struct Counted<C, T>(C, T);
+        impl<C: Fn() -> usize, T: Fn(usize) -> Option<String>> crate::selection::ListRows
+            for Counted<C, T>
+        {
+            fn text(&self, index: usize) -> Option<String> {
+                (self.1)(index)
+            }
+            fn len(&self) -> Option<usize> {
+                Some((self.0)())
+            }
+        }
+        self.rare_mut().row_text = Some(std::rc::Rc::new(Counted(count, text)));
+        self
+    }
     /// A virtual list's rows for a selection: their text and its keys.
     pub(crate) fn list_rows(mut self, rows: crate::selection::RowText) -> Self {
         self.rare_mut().row_text = Some(rows);
@@ -3558,6 +3581,9 @@ impl<K: Eq + 'static, L: Fn() -> Option<usize>> SourceRows<K, L> {
     }
 }
 impl<K: Eq + 'static, L: Fn() -> Option<usize>> crate::selection::ListRows for SourceRows<K, L> {
+    fn len(&self) -> Option<usize> {
+        (self.len)()
+    }
     fn text(&self, index: usize) -> Option<String> {
         if index >= (self.len)().unwrap_or(0) {
             return None;

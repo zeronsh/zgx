@@ -245,3 +245,100 @@ fn the_hook_goes_with_its_region() {
     ui.prepare_frame();
     assert_eq!(Rc::strong_count(&kept), 1, "unmounted, the hook is let go");
 }
+
+/// The copy request names each virtual list's rows a selection spans,
+/// mounted or not: a Select All over a list of a thousand, of which a few
+/// are mounted, spans them all; a list that says its count is read by it,
+/// one that doesn't by its row text; a drag spans the rows it crosses.
+#[test]
+fn the_rows_are_each_lists_first_and_last_mounted_or_not() {
+    use zgx::widgets::SelectedRows;
+    let clipboard = Rc::new(Clipboard::default());
+    let heard: Rc<RefCell<Vec<Vec<SelectedRows>>>> = Rc::default();
+    let into = heard.clone();
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let list = |offset, rows: usize| {
+        virtual_list(
+            offset,
+            20.,
+            1,
+            move || rows,
+            |index| index,
+            |_, key, _| text(format!("Row {key}")),
+        )
+        .w(300.)
+        .h(100.)
+    };
+    let view = ui.mount(provide(
+        PlatformService(clipboard.clone()),
+        column()
+            .id("region")
+            .w(300.)
+            .text_size(10.)
+            .line_height(20.)
+            .selectable(true)
+            .on_selection_copy(move |request| {
+                into.borrow_mut().push(request.rows.to_vec());
+                None
+            })
+            .child(text("Header"))
+            // Its count unsaid: found from its row text.
+            .child(
+                list(offset.clone(), 1000)
+                    .id("first")
+                    .row_text(|index| (index < 1000).then(|| format!("Row {index}"))),
+            )
+            // Its count said.
+            .child(
+                list(ui.signal(0.), 30)
+                    .id("second")
+                    .row_text_counted(|| 30, |index| (index < 30).then(|| format!("Row {index}"))),
+            )
+            .child(text("Footer")),
+    ));
+    ui.prepare_frame();
+    let region = view.find("region").unwrap();
+    ui.select_all_text(region);
+    ui.prepare_frame();
+    assert!(ui.copy_selection(&PlatformService(clipboard.clone())));
+    let spans: Vec<(usize, usize)> = heard.borrow()[0]
+        .iter()
+        .map(|r| (r.first, r.last))
+        .collect();
+    assert_eq!(spans, [(0, 999), (0, 29)], "every row, in document order");
+    {
+        let scene = ui.scene.borrow();
+        let heard = heard.borrow();
+        let (first, second) = (view.find("first").unwrap(), view.find("second").unwrap());
+        let within =
+            |list: zgx::scene::NodeId, of| list == of || scene.ancestors(list).any(|at| at == of);
+        assert!(within(heard[0][0].list, first) && within(heard[0][1].list, second));
+    }
+    // A drag from row 1 to row 3 of the first list spans those rows alone.
+    press_at(&mut ui, 200., 290.);
+    drag(&mut ui, (6., 50.), (18., 90.));
+    assert!(ui.copy_selection(&PlatformService(clipboard.clone())));
+    let spans: Vec<(usize, usize)> = heard.borrow()[1]
+        .iter()
+        .map(|r| (r.first, r.last))
+        .collect();
+    assert_eq!(spans, [(1, 3)]);
+    // All of it again, the first list scrolled to its middle: every row
+    // still, mounted or not.
+    ui.select_all_text(region);
+    offset.set(10_000.);
+    ui.prepare_frame();
+    assert!(ui.copy_selection(&PlatformService(clipboard.clone())));
+    let spans: Vec<(usize, usize)> = heard.borrow()[2]
+        .iter()
+        .map(|r| (r.first, r.last))
+        .collect();
+    assert_eq!(spans, [(0, 999), (0, 29)]);
+}
+fn press_at(ui: &mut Ui, x: f32, y: f32) {
+    let button = PointerButton::Primary;
+    ui.dispatch(InputEvent::PointerDown { x, y, button });
+    ui.dispatch(InputEvent::PointerUp { x, y, button });
+    ui.prepare_frame();
+}
