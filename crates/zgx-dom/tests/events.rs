@@ -367,3 +367,85 @@ fn a_drag_from_a_listener_drops_on_what_takes_it() {
     mounted.unmount();
     host.remove();
 }
+
+/// Text dragged in from another app and given up over the page (Escape, or
+/// its app ending it: a dragleave inside the window, no drop) ends there:
+/// what took it hears it leave, and a drag of the page's own still drops.
+#[wasm_bindgen_test]
+fn a_drag_from_another_app_given_up_over_the_page_ends() {
+    use zgx::input::{DragPhase, DraggedText};
+    let runtime = Runtime::new();
+    let log: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (left, dropped) = (log.clone(), log.clone());
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column()
+            .gap(20.)
+            .child(
+                column()
+                    .id("rich")
+                    .w(120.)
+                    .h(40.)
+                    .on_drop::<DraggedText>(|_, _| {})
+                    .on_event(move |cx| {
+                        if let InputEvent::Drag(drag) = &cx.event
+                            && matches!(drag.phase, DragPhase::Leave)
+                        {
+                            left.borrow_mut().push("left".into());
+                        }
+                    }),
+            )
+            .child(
+                column()
+                    .id("card")
+                    .w(80.)
+                    .h(30.)
+                    .on_drag(|| Card(7))
+                    .child(text("Card")),
+            )
+            .child(
+                column()
+                    .id("bin")
+                    .w(120.)
+                    .h(60.)
+                    .on_drop::<Card>(move |card, _| {
+                        dropped.borrow_mut().push(format!("dropped {}", card.0));
+                    }),
+            ),
+    );
+    let rich = find(&host, "[data-id=rich]");
+    let r = rich.get_bounding_client_rect();
+    let (x, y) = ((r.left() + 20.) as i32, (r.top() + 20.) as i32);
+    let drag = |kind: &str| {
+        let data = web_sys::DataTransfer::new().unwrap();
+        data.set_data("text/plain", "words").unwrap();
+        let init = web_sys::DragEventInit::new();
+        init.set_bubbles(true);
+        init.set_cancelable(true);
+        init.set_client_x(x);
+        init.set_client_y(y);
+        init.set_data_transfer(Some(&data));
+        let event = web_sys::DragEvent::new_with_event_init_dict(kind, &init).unwrap();
+        rich.dispatch_event(&event).unwrap()
+    };
+    assert!(!drag("dragover"), "taken over it");
+    // Given up over the page: no element entered, no drop.
+    drag("dragleave");
+    assert_eq!(*log.borrow(), ["left"]);
+    let (card, bin) = (find(&host, "[data-id=card]"), find(&host, "[data-id=bin]"));
+    let (c, b) = (
+        card.get_bounding_client_rect(),
+        bin.get_bounding_client_rect(),
+    );
+    let (cx, cy) = (c.left() + 10., c.top() + 10.);
+    pointer_at(&card, "pointerdown", cx, cy);
+    pointer_at(&card, "pointermove", cx + 12., cy + 12.);
+    let (bx, by) = (b.left() + 30., b.top() + 30.);
+    pointer_at(&bin, "pointermove", bx, by);
+    pointer_at(&bin, "pointerup", bx, by);
+    assert_eq!(*log.borrow(), ["left", "dropped 7"]);
+    mounted.unmount();
+    host.remove();
+}

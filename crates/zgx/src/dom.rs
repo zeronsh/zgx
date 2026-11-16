@@ -395,6 +395,10 @@ fn drag_event(event: &DomEvent) -> Option<crate::input::DragEvent> {
                 // One of the document's own drags is under way.
                 (_, Some(_)) => return None,
             }
+        } else if drag.as_ref().is_some_and(|d| d.source == OUTSIDE) {
+            // One from another app left behind (given up where the page
+            // heard no end): the document's own drags aren't its.
+            *drag = None;
         }
         let drag = drag.as_mut()?;
         let phase = match event.kind {
