@@ -2395,10 +2395,13 @@ fn bordered(styles: &Styles) -> bool {
 #[derive(Default)]
 struct CanvasLabels {
     group: Option<NodeId>,
-    /// Each line's node, reused by position, and what it shows now: a line
-    /// drawn as it was touches nothing, so a chart redrawn every frame
-    /// costs what changed.
-    nodes: Vec<(NodeId, crate::canvas::CanvasText)>,
+    /// Each line's node, reused by position.
+    nodes: Vec<NodeId>,
+    /// The drawing they show now, line by line (the canvas's own, shared
+    /// with its node): a line drawn as it was touches nothing, so a chart
+    /// redrawn every frame costs what changed, and no line is copied to be
+    /// compared.
+    shown: Option<std::sync::Arc<crate::canvas::Canvas>>,
     size: (f32, f32),
     view: Option<crate::scene::CanvasView>,
 }
@@ -2407,9 +2410,10 @@ impl CanvasLabels {
         &mut self,
         scene: &mut crate::scene::Scene,
         root: NodeId,
-        texts: &[crate::canvas::CanvasText],
+        content: &std::sync::Arc<crate::canvas::Canvas>,
         (width, height): (f32, f32),
     ) {
+        let texts = content.texts();
         let group = match self.group {
             Some(group) => group,
             None => {
@@ -2442,15 +2446,13 @@ impl CanvasLabels {
         }
         // In and out of the group, a box of the canvas's size: the walk
         // stops there (`Scene::append_held`).
-        for (gone, _) in self.nodes.drain(texts.len().min(self.nodes.len())..) {
+        for gone in self.nodes.drain(texts.len().min(self.nodes.len())..) {
             scene.remove_held(gone);
         }
+        let was = self.shown.as_ref().map_or(&[][..], |shown| shown.texts());
         for (index, text) in texts.iter().enumerate() {
-            if self
-                .nodes
-                .get(index)
-                .is_some_and(|(_, shown)| shown == text)
-            {
+            // Each node shows the line at its place in the last drawing.
+            if index < self.nodes.len() && was.get(index) == Some(text) {
                 continue;
             }
             let kind = NodeKind::Text {
@@ -2458,11 +2460,10 @@ impl CanvasLabels {
                 color: text.color,
                 font_size: text.size,
             };
-            let node = match self.nodes.get_mut(index) {
-                Some((node, shown)) => {
-                    scene.set_kind(*node, kind);
-                    *shown = text.clone();
-                    *node
+            let node = match self.nodes.get(index) {
+                Some(&node) => {
+                    scene.set_kind(node, kind);
+                    node
                 }
                 None => {
                     let node = scene.append_held(
@@ -2473,7 +2474,7 @@ impl CanvasLabels {
                             ..Default::default()
                         },
                     );
-                    self.nodes.push((node, text.clone()));
+                    self.nodes.push(node);
                     node
                 }
             };
@@ -2491,6 +2492,9 @@ impl CanvasLabels {
             let (x, y) = text.origin(size);
             scene.set_transform(node, crate::scene::Transform { x, y });
         }
+        // One count more on the canvas its node holds, not a copy of each
+        // line.
+        self.shown = Some(content.clone());
     }
     /// Pans and zooms the text with its canvas's drawing.
     fn follow(&mut self, scene: &mut crate::scene::Scene, view: crate::scene::CanvasView) {
@@ -6750,18 +6754,18 @@ fn open_element(
             if width.is_nan() || height.is_nan() {
                 return;
             }
-            let content = if width > 0. && height > 0. {
+            let content = std::sync::Arc::new(if width > 0. && height > 0. {
                 crate::canvas::drawing_for(&scene, || draw((width, height)))
             } else {
                 crate::canvas::Canvas::new()
-            };
+            });
             let mut scene = scene.borrow_mut();
             if !content.texts().is_empty() || !shown.borrow().nodes.is_empty() {
                 shown
                     .borrow_mut()
-                    .show(&mut scene, root, content.texts(), (width, height));
+                    .show(&mut scene, root, &content, (width, height));
             }
-            scene.set_kind(drawing, NodeKind::Canvas(std::sync::Arc::new(content)));
+            scene.set_kind(drawing, NodeKind::Canvas(content));
             scene.set_style(
                 drawing,
                 crate::scene::Style {
@@ -9760,6 +9764,55 @@ mod canvas_label_tests {
             costs.push(cost);
         }
         assert_eq!(costs[0], costs[1], "flat as the screen grows: {costs:?}");
+    }
+    /// What a canvas's labels draw, in order, by node: their text and colour.
+    fn drawn(ui: &Ui, root: NodeId) -> Vec<(NodeId, String, Color)> {
+        let scene = ui.scene.borrow();
+        let mut texts = Vec::new();
+        let mut stack = vec![root];
+        while let Some(at) = stack.pop() {
+            if let NodeKind::Text { text, color, .. } = scene.kind(at) {
+                texts.push((at, text.to_string(), *color));
+            }
+            stack.extend(scene.children(at).iter().rev().copied());
+        }
+        texts
+    }
+    /// A canvas drawn again is a new drawing each time, and its labels are
+    /// held to the last one, not the first: a line changed and changed
+    /// back, or kept in its text and drawn in another colour, shows what
+    /// the drawing now has, each line keeping its node.
+    #[test]
+    fn labels_follow_the_last_drawing_not_the_first() {
+        let (red, green) = (Color(200, 0, 0, 255), Color(0, 200, 0, 255));
+        let (mut ui, runs, middle) = screen(9);
+        let frames: [Runs; 6] = [
+            vec![("same", red), ("first", red)],
+            vec![("same", red), ("second", red)],
+            // Back to the first drawing's line: drawn again, not taken as
+            // unchanged since the first.
+            vec![("same", red), ("first", red)],
+            // Its text kept, its colour not.
+            vec![("same", green), ("first", red)],
+            vec![("same", green), ("first", red), ("third", green)],
+            vec![("same", green)],
+        ];
+        let mut nodes: Vec<NodeId> = Vec::new();
+        for now in &frames {
+            runs.set(now.clone());
+            frame(&mut ui);
+            let shown = drawn(&ui, middle);
+            let texts: Vec<_> = shown.iter().map(|(_, t, c)| (t.clone(), *c)).collect();
+            let expected: Vec<_> = now.iter().map(|(t, c)| (t.to_string(), *c)).collect();
+            assert_eq!(texts, expected);
+            // Reused by place: the lines both drawings have keep their nodes.
+            for (at, (node, ..)) in shown.iter().enumerate() {
+                if let Some(was) = nodes.get(at) {
+                    assert_eq!(node, was, "line {at} kept its node");
+                }
+            }
+            nodes = shown.iter().map(|(node, ..)| *node).collect();
+        }
     }
 }
 #[cfg(test)]
