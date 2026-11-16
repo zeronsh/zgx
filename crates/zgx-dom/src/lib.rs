@@ -41,6 +41,14 @@ pub use tasks::{frame_asked, timer_armed};
 /// URLs read against the app's base (`luau`).
 #[cfg(feature = "luau")]
 pub use fetch::{__fetches_pending, install_fetcher, install_fetcher_at};
+
+/// Whether a frame is asked for a drag held near a scroll view's edge (for
+/// tests: none outside the band). Not API.
+#[doc(hidden)]
+pub fn drag_scroll_pending() -> bool {
+    js::zgx_drag_scroll_pending()
+}
+
 /// zgx-script, whose Luau apps zgx-dom mounts (`luau`): a host's `view()`
 /// mounts as any view does.
 #[cfg(feature = "luau")]
