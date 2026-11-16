@@ -9946,7 +9946,7 @@ fn on_selection_copy(
             event.set("html", request.html)?;
             let leaves = lua.create_table()?;
             for (i, leaf) in request.leaves.iter().enumerate() {
-                match leaf_id(&elements, request, *leaf) {
+                match leaf_id(&elements, request, *leaf, false) {
                     Some(id) => leaves.raw_set(i + 1, id.as_ref())?,
                     None => leaves.raw_set(i + 1, false)?,
                 }
@@ -9957,7 +9957,9 @@ fn on_selection_copy(
             let rows = lua.create_table()?;
             for (i, span) in request.rows.iter().enumerate() {
                 let row = lua.create_table()?;
-                match leaf_id(&elements, request, span.list) {
+                // The list may be the region itself (`ui.list { id = …,
+                // selectable = true }`): its own id names it.
+                match leaf_id(&elements, request, span.list, true) {
                     Some(id) => row.raw_set("list", id.as_ref())?,
                     None => row.raw_set("list", false)?,
                 }
@@ -9993,12 +9995,21 @@ fn leaf_id(
     elements: &crate::element::Elements,
     request: &zgx::widgets::SelectionCopyRequest,
     leaf: zgx::scene::NodeId,
+    // The region's own id counts too: for a list, which may be the region.
+    // Not for text, which the region's id would only mislabel.
+    with_region: bool,
 ) -> Option<Rc<str>> {
     let scene = request.ui.scene.borrow();
     let mut node = Some(leaf);
-    while let Some(at) = node.filter(|&at| at != request.region) {
+    while let Some(at) = node {
+        if at == request.region && !with_region {
+            break;
+        }
         if let Some(id) = elements.at(at).and_then(|element| element.id.clone()) {
             return Some(id);
+        }
+        if at == request.region {
+            break;
         }
         node = scene.parent(at);
     }
