@@ -12,6 +12,10 @@ extern "C" {
         keys: &Closure<dyn FnMut(String, String, String, u32) -> u32>,
     );
     pub(crate) fn zgx_schedule();
+    pub(crate) fn zgx_tasks_init(run: &Closure<dyn FnMut()>, fire: &Closure<dyn FnMut()>);
+    pub(crate) fn zgx_tasks_wake(yielded: bool);
+    pub(crate) fn zgx_timer_arm(ms: f64);
+    pub(crate) fn zgx_timer_armed() -> bool;
     pub(crate) fn zgx_adopt(id: u32, element: &web_sys::Element);
     pub(crate) fn zgx_apply(memory: &JsValue, ops: u32, ops_len: u32, text: u32, text_len: u32);
     pub(crate) fn zgx_live_nodes() -> u32;

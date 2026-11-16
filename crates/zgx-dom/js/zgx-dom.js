@@ -103,6 +103,56 @@ export function zgx_adopt(id, element) {
   nodes[id] = element;
 }
 
+// Rust's tasks (zgx's executor) and timers (zgx::timer), which the page's
+// event loop runs: it has no thread for them.
+let runTasks = null;
+let fireTimers = null;
+let tasksQueued = false;
+let tasksChannel = null;
+let timer = 0;
+
+export function zgx_tasks_init(onRun, onFire) {
+  runTasks = onRun;
+  fireTimers = onFire;
+}
+
+// A task woke: run the ready ones in a microtask, or, for one woken while they
+// ran (a task yielding), after the browser's next task, so input and paint
+// come between.
+export function zgx_tasks_wake(yielded) {
+  if (tasksQueued) return;
+  tasksQueued = true;
+  if (!yielded) {
+    queueMicrotask(drainTasks);
+    return;
+  }
+  if (!tasksChannel) {
+    tasksChannel = new MessageChannel();
+    tasksChannel.port1.onmessage = drainTasks;
+  }
+  tasksChannel.port2.postMessage(0);
+}
+
+function drainTasks() {
+  tasksQueued = false;
+  runTasks();
+}
+
+// The one timeout for zgx's earliest timer, `ms` from now; below zero, none.
+export function zgx_timer_arm(ms) {
+  if (timer) clearTimeout(timer);
+  timer = ms < 0 ? 0 : setTimeout(onTimer, ms);
+}
+
+function onTimer() {
+  timer = 0;
+  fireTimers();
+}
+
+export function zgx_timer_armed() {
+  return timer !== 0;
+}
+
 export function zgx_schedule() {
   if (scheduled) return;
   scheduled = true;

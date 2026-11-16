@@ -477,6 +477,8 @@ pub fn mount(runtime: &Runtime, parent: &web_sys::Element, view: View) -> Mounte
         zgx::platform::PlatformService(Rc::new(crate::platform::Browser)),
         view,
     );
+    // Its tasks and timers, run by the browser's event loop.
+    let view = zgx::compose::provide(crate::tasks::runner(), view);
     let scope = Scope::root(runtime);
     // Adopting writes the table at once, so what is pending (a free of the
     // id it reuses, say) goes first.
