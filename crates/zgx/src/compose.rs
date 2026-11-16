@@ -6633,6 +6633,7 @@ fn open_element(
             }
             let mut scene = scene.borrow_mut();
             scene.set_kind(child, NodeKind::Svg(data));
+            scene.mark_drawn_in_box(child);
             scene.set_style(
                 child,
                 crate::scene::Style {
@@ -7991,6 +7992,7 @@ fn mount_image(
         );
         let mut scene = scene.borrow_mut();
         scene.set_kind(bitmap, NodeKind::Image(data));
+        scene.mark_drawn_in_box(bitmap);
         // A crop is a picture past the box: its corners cut that too.
         scene.set_corners_clip(root, crop);
         scene.set_style(

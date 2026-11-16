@@ -1188,7 +1188,8 @@ pub(crate) fn mount_icons(
                         },
                         style.clone(),
                     );
-                    scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
+                    let drawn = scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
+                    scene.mark_drawn_in_box(drawn);
                     if index < mounted.len() {
                         let old = std::mem::replace(&mut mounted[index], node);
                         drop(scene);
@@ -1215,6 +1216,7 @@ pub(crate) fn mount_icons(
                 let inner = scene.children(node)[0];
                 if !matches!(scene.kind(inner), NodeKind::Svg(svg) if Arc::ptr_eq(svg, &icon.svg)) {
                     scene.set_kind(inner, NodeKind::Svg(icon.svg.clone()));
+                    scene.mark_drawn_in_box(inner);
                 }
                 if scene.style(inner) != glyph {
                     scene.set_style(inner, glyph);
@@ -1222,13 +1224,16 @@ pub(crate) fn mount_icons(
                 continue;
             }
             if index == mounted.len() {
-                mounted.push(scene.append(owner, NodeKind::Svg(icon.svg.clone()), style));
+                let drawn = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                scene.mark_drawn_in_box(drawn);
+                mounted.push(drawn);
             } else {
                 // Unchanged (the paragraph only moved): nothing to lay out.
                 let node = mounted[index];
                 if !matches!(scene.kind(node), NodeKind::Svg(_)) {
                     // (It had a well: the icon alone now.)
                     let fresh = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                    scene.mark_drawn_in_box(fresh);
                     drop(scene);
                     ui.remove(node);
                     mounted[index] = fresh;
@@ -1236,6 +1241,7 @@ pub(crate) fn mount_icons(
                 }
                 if !matches!(scene.kind(node), NodeKind::Svg(svg) if Arc::ptr_eq(svg, &icon.svg)) {
                     scene.set_kind(node, NodeKind::Svg(icon.svg.clone()));
+                    scene.mark_drawn_in_box(node);
                 }
                 if scene.style(node) != style {
                     scene.set_style(node, style);

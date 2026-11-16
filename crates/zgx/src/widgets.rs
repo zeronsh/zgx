@@ -8417,10 +8417,12 @@ impl Ui {
         alt: impl Into<String>,
         style: Style,
     ) -> NodeId {
-        let n = self
-            .scene
-            .borrow_mut()
-            .append(parent, NodeKind::Image(image), style);
+        let n = {
+            let mut scene = self.scene.borrow_mut();
+            let n = scene.append(parent, NodeKind::Image(image), style);
+            scene.mark_drawn_in_box(n);
+            n
+        };
         self.storage.owned.borrow_mut().entry(n).or_default();
         self.semantics
             .borrow_mut()
