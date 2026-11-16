@@ -318,7 +318,12 @@ fn a_boxed_span_is_inline_flex() {
         column().child(
             rich_text()
                 .child(text_span("See "))
-                .child(text_span("12").padding(4., 2.).inline_box())
+                .child(
+                    text_span("12")
+                        .padding(4., 2.)
+                        .line_height(16.)
+                        .inline_box(),
+                )
                 .child(text_span(" and "))
                 .child(text_span("13").padding(4., 2.)),
         ),
@@ -329,6 +334,8 @@ fn a_boxed_span_is_inline_flex() {
     assert_eq!(style(&boxed, "display"), "inline-flex");
     assert_eq!(style(&boxed, "align-items"), "baseline");
     assert_eq!(style(&boxed, "padding-top"), "2px");
+    // Its own line height: the box's, with its padding.
+    assert_eq!(style(&boxed, "line-height"), "16px");
     let plain = element(nodes.item(3).unwrap());
     assert_eq!(style(&plain, "display"), "inline");
     mounted.unmount();
