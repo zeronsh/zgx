@@ -2642,7 +2642,12 @@ fn rect_quad(color: Color, fade: [f32; 4], effects: zgx::scene::Effects) -> Quad
     }
 }
 /// A box's quad with no decoration: its fill, corner radius and border
-/// (none when drawn by its border pass, `later`), before `push_panel`.
+/// (none when drawn by its border pass, `later`), before `push_panel`. The
+/// quad shader draws its fill to its outer edge, under its border (CSS's
+/// `background-clip: border-box`), the border over it across its ring
+/// (draw.wgsl's last shape branch): a translucent border shows the fill
+/// under it, not what is under the box; an opaque one covers it, as when
+/// the fill stopped at the ring.
 #[inline(always)]
 fn plain_panel_quad(
     style: &zgx::scene::QuadStyle,
