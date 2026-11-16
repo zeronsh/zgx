@@ -5789,6 +5789,9 @@ export type SpanProps = {
 	-- inline-flex`), its line height and `padding` its box, which its
 	-- line's box holds (a badge taller than the text grows its line).
 	box: boolean?,
+	-- Internal, and may change: its own line height, in points (a `box`
+	-- span's box is it and its `padding`), where the paragraph's is not.
+	line_height: number?,
 	-- An icon before the text, in the line (a file chip's file type):
 	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
 	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,
