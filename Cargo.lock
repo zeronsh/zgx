@@ -5629,6 +5629,7 @@ dependencies = [
  "windows",
  "zgx",
  "zgx-3d",
+ "zgx-audio",
  "zgx-components",
  "zgx-desktop",
  "zgx-fingerprint",

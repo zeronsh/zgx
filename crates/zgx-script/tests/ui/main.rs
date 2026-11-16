@@ -3,6 +3,9 @@
 // Each file loads its own `common` (a Harness of its own, which files
 // add methods to), as it did as a binary of its own.
 #![allow(clippy::duplicate_mod)]
+#[cfg(feature = "audio")]
+#[path = "../audio.rs"]
+mod audio;
 #[path = "../components.rs"]
 mod components;
 #[path = "../container_queries.rs"]
