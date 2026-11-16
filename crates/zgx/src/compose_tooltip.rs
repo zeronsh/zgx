@@ -82,7 +82,14 @@ impl View {
     /// Show `tip` over this view while the pointer rests on it (see the
     /// module). Call it last: what follows styles the tooltip's panel.
     pub fn tooltip(self, tip: impl Into<Tooltip>) -> View {
-        wrap(self, tip.into())
+        // A bare button stays one for a menu opening from it.
+        let bare = self.is_bare_button();
+        let wrapped = wrap(self, tip.into());
+        if bare {
+            wrapped.wrapping_bare_button()
+        } else {
+            wrapped
+        }
     }
 }
 
