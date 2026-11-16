@@ -14,6 +14,8 @@ mod composition_popover;
 mod composition_submenu;
 #[path = "../context_menu.rs"]
 mod context_menu;
+#[path = "../context_menu_open.rs"]
+mod context_menu_open;
 #[path = "../dialog_keyboard.rs"]
 mod dialog_keyboard;
 #[path = "../modal_closes_popups.rs"]

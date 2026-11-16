@@ -191,3 +191,50 @@ fn rows_stamped_from_a_template_keep_their_context_menus() {
     mounted.unmount();
     host.remove();
 }
+
+/// `context_menu_open` in the DOM, as on the desktop: true as the menu
+/// opens, false as a pick or Escape closes it, and written false, it closes.
+#[wasm_bindgen_test]
+fn context_menu_open_says_whether_the_menu_shows() {
+    let runtime = Runtime::new();
+    let open = runtime.signal(false);
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            column()
+                .id("target")
+                .w(200.)
+                .h(60.)
+                .context_menu_open(open.clone())
+                .context_menu(|_| vec![menu_item("Copy"), menu_item("Paste")])
+                .child(text("Right-click me")),
+        ),
+    );
+    let target = find(&host, "[data-id=target]");
+    secondary_click(&target);
+    assert!(open.get(), "true as it opens");
+    let menu = open_menu().expect("a menu showing");
+    find(&menu, "[role=menuitem]").click();
+    assert!(open_menu().is_none());
+    assert!(!open.get(), "false as a pick closes it");
+    // Escape.
+    secondary_click(&target);
+    assert!(open.get());
+    let init = web_sys::KeyboardEventInit::new();
+    init.set_key("Escape");
+    init.set_bubbles(true);
+    init.set_cancelable(true);
+    let escape =
+        web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init).unwrap();
+    open_menu().unwrap().dispatch_event(&escape).unwrap();
+    assert!(!open.get(), "false as Escape closes it");
+    // Written false by the app, it closes.
+    secondary_click(&target);
+    assert!(open_menu().is_some());
+    open.set(false);
+    assert!(open_menu().is_none(), "written false, it closes");
+    mounted.unmount();
+    host.remove();
+}

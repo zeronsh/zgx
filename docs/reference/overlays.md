@@ -12,6 +12,7 @@ ui.submenu(props: SubmenuProps) -> Node
 context_menu: ((e: PointerEvent) -> ...{ Node }?)?
 context_menu_style: Styles?
 context_menu_below: boolean?
+context_menu_open: State<boolean>? -- internal, subject to change
 ```
 
 | Function | |
@@ -50,6 +51,7 @@ context_menu_below: boolean?
 | `context_menu` | `(e: PointerEvent) -> { Node }?` | none | `e` is `{ x, y, local_x, local_y }`; return the items, or nothing for no menu |
 | `context_menu_style` | `Styles` | the menu's own | the context menu panel's look, plain values |
 | `context_menu_below` | `boolean` | `false` | open under the node, from its left edge (a tab's), wherever the click was |
+| `context_menu_open` | `State<boolean>` | none | **Internal, subject to change.** Kept saying whether the node's context menu shows: true as it opens, false as it closes however it does (Escape, a pick, a click outside, Tab, the window losing focus, a newer menu, the node going). Writing it false closes the menu. For a floating panel that hides while the page's menu shows, as a browser's selection popover does |
 
 Panels start with 16 points of padding, the theme's surface color and rounded corners; a modal is 360 wide, a popover or menu 240, and each is as tall as its content, at most the window.
 

@@ -4370,6 +4370,12 @@ fn styled(
             }),
             _ => view.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None)),
         };
+        // `context_menu_open = state`: read only beside a context menu.
+        if let Some(open) =
+            (node.events().rare.as_ref()).and_then(|rare| rare.context_menu_open.as_ref())
+        {
+            view = view.context_menu_open(bridge(need(&mut cx), open, Value::truthy, Value::Bool));
+        }
     }
     // Input and drag handlers read the node's handle (local coordinates).
     if element.is_some() || node.events().any_input() || node.events().any_drag() {
