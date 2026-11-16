@@ -35,7 +35,7 @@ mod template;
 
 pub use mount::{Mounted, flush, live_nodes, mount, mount_in_body};
 #[doc(hidden)]
-pub use tasks::timer_armed;
+pub use tasks::{frame_asked, timer_armed};
 
 /// The page's `fetch` as a Luau app's transport (`ui.fetch`): relative
 /// URLs read against the app's base (`luau`).

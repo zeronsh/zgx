@@ -107,13 +107,32 @@ export function zgx_adopt(id, element) {
 // event loop runs: it has no thread for them.
 let runTasks = null;
 let fireTimers = null;
+let deliverFrame = null;
+let frameAsked = 0;
 let tasksQueued = false;
 let tasksChannel = null;
 let timer = 0;
 
-export function zgx_tasks_init(onRun, onFire) {
+export function zgx_tasks_init(onRun, onFire, onFrame) {
   runTasks = onRun;
   fireTimers = onFire;
+  deliverFrame = onFrame;
+}
+
+// An animation awaits the next display refresh: one frame asked for, however
+// many ask. A hidden tab's the browser holds back.
+export function zgx_frame_ask() {
+  if (frameAsked) return;
+  frameAsked = requestAnimationFrame(onFrame);
+}
+
+function onFrame(at) {
+  frameAsked = 0;
+  deliverFrame(at);
+}
+
+export function zgx_frame_asked() {
+  return frameAsked !== 0;
 }
 
 // A task woke: run the ready ones in a microtask, or, for one woken while they
