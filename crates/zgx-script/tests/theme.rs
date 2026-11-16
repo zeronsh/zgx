@@ -513,3 +513,58 @@ return ui.column {
         );
     }
 }
+
+#[test]
+fn ui_theme_scale_with_text_has_the_system_text_size_scale_app_tokens() {
+    let mut h = Harness::inline(
+        r##"ui.theme.tokens { app = { body = 15, gap = 8 } }
+        ui.theme.scale_with_text { "app.body", "$app.lead" }
+        ui.theme.tokens { app = { lead = 20 } }
+        local refused = {}
+        for _, bad in { "app.body", { app = "body" }, { 15 } } do
+            local ok, err = pcall(ui.theme.scale_with_text, bad)
+            table.insert(refused, if ok then "accepted" else tostring(err):match("takes a list of token names") or tostring(err))
+        end
+        return ui.column {
+            ui.text { "Body", id = "body", text_size = "$app.body" },
+            ui.text { "Interface", id = "interface", text_size = "$font.size.md" },
+            ui.text { function() return tostring(ui.theme.get("app.gap")) end, id = "gap" },
+            ui.text { "Lead", id = "lead", text_size = "$app.lead" },
+            ui.text { table.concat(refused, ","), id = "refused" },
+        }"##,
+    );
+    let size = |h: &mut Harness, id: &str| {
+        let node = h.find(id).unwrap_or_else(|| panic!("no node `{id}`"));
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if let NodeKind::Text { font_size, .. } = scene.kind(n) {
+                return *font_size;
+            }
+            stack.extend(scene.children(n).iter().rev());
+        }
+        panic!("no text in `{id}`")
+    };
+    let interface = size(&mut h, "interface");
+    assert_eq!(size(&mut h, "body"), 15.);
+    h.ui.theme().set_system_text_scale(1.2);
+    h.frame();
+    assert_eq!(size(&mut h, "interface"), interface * 1.2);
+    assert_eq!(
+        size(&mut h, "body"),
+        15. * 1.2,
+        "the app's text grows with the interface's"
+    );
+    assert_eq!(h.text("gap"), "8", "a token not named stays");
+    assert_eq!(
+        size(&mut h, "lead"),
+        20. * 1.2,
+        "named as \"$app.lead\", before its declaration"
+    );
+    let refused = "takes a list of token names";
+    assert_eq!(
+        h.text("refused"),
+        [refused; 3].join(","),
+        "a name alone, a map, a number"
+    );
+}
