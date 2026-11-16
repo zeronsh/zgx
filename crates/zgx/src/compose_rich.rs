@@ -1365,7 +1365,8 @@ pub(crate) fn mount_icons(
                         },
                         style.clone(),
                     );
-                    scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
+                    let drawn = scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
+                    scene.mark_drawn_in_box(drawn);
                     // drawn over the span's link box, it lets presses through to it
                     scene.set_inert(node, true);
                     if index < mounted.len() {
@@ -1394,6 +1395,7 @@ pub(crate) fn mount_icons(
                 let inner = scene.children(node)[0];
                 if !matches!(scene.kind(inner), NodeKind::Svg(svg) if Arc::ptr_eq(svg, &icon.svg)) {
                     scene.set_kind(inner, NodeKind::Svg(icon.svg.clone()));
+                    scene.mark_drawn_in_box(inner);
                 }
                 if scene.style(inner) != glyph {
                     scene.set_style(inner, glyph);
@@ -1402,6 +1404,7 @@ pub(crate) fn mount_icons(
             }
             if index == mounted.len() {
                 let node = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                scene.mark_drawn_in_box(node);
                 scene.set_inert(node, true);
                 mounted.push(node);
             } else {
@@ -1410,6 +1413,7 @@ pub(crate) fn mount_icons(
                 if !matches!(scene.kind(node), NodeKind::Svg(_)) {
                     // (It had a well: the icon alone now.)
                     let fresh = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                    scene.mark_drawn_in_box(fresh);
                     scene.set_inert(fresh, true);
                     drop(scene);
                     ui.remove(node);
@@ -1418,6 +1422,7 @@ pub(crate) fn mount_icons(
                 }
                 if !matches!(scene.kind(node), NodeKind::Svg(svg) if Arc::ptr_eq(svg, &icon.svg)) {
                     scene.set_kind(node, NodeKind::Svg(icon.svg.clone()));
+                    scene.mark_drawn_in_box(node);
                 }
                 if scene.style(node) != style {
                     scene.set_style(node, style);

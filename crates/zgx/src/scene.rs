@@ -1841,6 +1841,9 @@ fn repaint_flags(dirty: u8) -> u8 {
         | if paint_only { repaint::PAINT_ONLY } else { 0 }
         | if box_only { repaint::BOX_ONLY } else { 0 }
 }
+/// `Node::boxed`'s bits.
+const REPLACED: u8 = 1;
+const HIT_INSIDE: u8 = 2;
 /// Whether `new` differs from `old` in colour alone (`PAINT_ONLY`): a rect's
 /// colour, a text's colour, a box's fill or border colour (with no
 /// decoration, whose rasters are kept apart).
@@ -2033,9 +2036,14 @@ struct Node {
     /// that test for a contents node send a zoomed one aside as well, for no
     /// more work on the nodes with neither (`measure_uncached`, `restyle`).
     special: Special,
-    /// Draws an image, an icon or a canvas to its box (`Scene::set_replaced`):
-    /// a size it sets is also its least.
-    replaced: bool,
+    /// `REPLACED`: draws an image, an icon or a canvas to its box
+    /// (`Scene::set_replaced`), so a size it sets is also its least.
+    /// `HIT_INSIDE`: an image or SVG compose mounted drawn in its box (an
+    /// icon, `Scene::mark_drawn_in_box`), so hit within it and proved as any
+    /// box is. Unmarked (a raw `append`, or a kind set since), a picture may
+    /// be hit past its box, so no proof under it holds. One byte: a node is
+    /// no larger than a bool made it.
+    boxed: u8,
     /// Its lines run right to left (`Scene::set_direction`, its own or its
     /// parent's): `style` is then laid out mirrored (`laid_out_style`).
     rtl: bool,
@@ -3640,7 +3648,7 @@ impl Scene {
                     scroll_copy: false,
                     pixel_snap: false,
                     special: Special::None,
-                    replaced: false,
+                    boxed: 0,
                     rtl: false,
                     align_logical: None,
                     layer_revision: 0,
@@ -5298,7 +5306,7 @@ impl Scene {
         // An image or an icon that sets its size, or is sized by its
         // pixels, keeps it (CSS's replaced elements); its box holds no
         // content to measure.
-        if laid.replaced
+        if laid.boxed & REPLACED != 0
             && let Some(size) = if horizontal {
                 style.width
             } else {
@@ -5664,8 +5672,9 @@ impl Scene {
     /// (its box has no content of its own, which would let it shrink to
     /// nothing).
     pub fn set_replaced(&mut self, id: NodeId, replaced: bool) {
-        if self.node(id).replaced != replaced {
-            self.node_mut(id).replaced = replaced;
+        if (self.node(id).boxed & REPLACED != 0) != replaced {
+            let node = self.node_mut(id);
+            node.boxed = node.boxed & !REPLACED | if replaced { REPLACED } else { 0 };
             self.invalidate_layout(id);
         }
     }
@@ -6203,6 +6212,25 @@ impl Scene {
         }
         node.bounds_valid.get() & (HIT_DIRECTION << D) != 0
     }
+    /// Mark `id`, an image or SVG compose mounts, hit within its box as any
+    /// box is (`HIT_INSIDE`) if it is drawn there, its transform the
+    /// identity (an icon). Until then, and again once its kind is set, it
+    /// is hit wherever it may paint, past its box too: so a picture appended
+    /// raw stays unproved, and correct. Out of line: once per picture
+    /// mounted, not on every node made.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn mark_drawn_in_box(&mut self, id: NodeId) {
+        let node = self.node_mut(id);
+        let inside = match &node.kind {
+            NodeKind::Image(image) => image.transform() == crate::affine::Affine::IDENTITY,
+            NodeKind::Svg(svg) => svg.transform() == crate::affine::Affine::IDENTITY,
+            _ => false,
+        };
+        if inside {
+            node.boxed |= HIT_INSIDE;
+        }
+    }
     #[inline(always)]
     fn hit_projection<const D: usize>(
         &self,
@@ -6234,7 +6262,8 @@ impl Scene {
             return Some(own);
         }
         let safe = !node.transformed()
-            && !matches!(node.kind, NodeKind::Image(_) | NodeKind::Svg(_))
+            && (!matches!(node.kind, NodeKind::Image(_) | NodeKind::Svg(_))
+                || node.boxed & HIT_INSIDE != 0)
             && own.is_finite();
         if !safe {
             node.bounds_valid
@@ -7727,7 +7756,9 @@ impl Scene {
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
         let colour = paints_only(&self.node(id).kind, &kind);
-        self.node_mut(id).kind = kind;
+        let node = self.node_mut(id);
+        node.kind = kind;
+        node.boxed &= !HIT_INSIDE;
         self.invalidate(id, if colour { PAINT | PAINT_ONLY } else { PAINT });
         if !layout_unchanged {
             self.invalidate_layout(id);
@@ -7847,7 +7878,7 @@ impl Scene {
             scroll_copy: false,
             pixel_snap: false,
             special: Special::None,
-            replaced: false,
+            boxed: 0,
             rtl,
             align_logical: None,
             layer_revision: 0,
@@ -9996,7 +10027,9 @@ impl Scene {
             return self.set_kind(id, kind);
         }
         self.damage_subtree(id);
-        self.node_mut(id).kind = kind;
+        let node = self.node_mut(id);
+        node.kind = kind;
+        node.boxed &= !HIT_INSIDE;
         self.invalidate(id, PAINT);
         self.invalidate_content_layout(id);
     }
@@ -16419,6 +16452,85 @@ mod tests {
     /// Hit tests search a column's rows only in a scene where some list grew
     /// long (`long_lists`, set as `append` grows it): until then no node is
     /// asked, and once one is, its rows are searched.
+    /// A picture is hit within its box (`HIT_INSIDE`) only once compose
+    /// marks it drawn there: appended raw it is not, nor transformed past
+    /// its box, and setting its kind (to a box, or to another picture)
+    /// clears the mark.
+    #[test]
+    fn a_picture_is_hit_inside_its_box_only_once_marked_drawn_there() {
+        use crate::{affine::Affine, svg::SvgData};
+        let icon = Arc::new(
+            SvgData::new(&br#"<svg viewBox="0 0 16 16"><rect width="16" height="16"/></svg>"#[..])
+                .unwrap(),
+        );
+        let big = || NodeKind::Svg(Arc::new(icon.transformed(Affine::scale(3., 3.))));
+        let mut scene = Scene::new(200., 200.);
+        let root = scene.root();
+        let inside = |scene: &Scene, id| scene.node(id).boxed & HIT_INSIDE != 0;
+        let id = scene.append(root, NodeKind::Svg(icon.clone()), Style::default());
+        assert!(!inside(&scene, id), "appended raw");
+        scene.mark_drawn_in_box(id);
+        assert!(inside(&scene, id), "an icon marked");
+        scene.set_kind(id, NodeKind::Container(Layout::Column));
+        assert!(!inside(&scene, id), "set to a box");
+        scene.mark_drawn_in_box(id);
+        assert!(!inside(&scene, id), "a box marked");
+        scene.set_kind(id, NodeKind::Svg(icon.clone()));
+        assert!(!inside(&scene, id), "set to an icon, unmarked");
+        scene.mark_drawn_in_box(id);
+        scene.set_kind(id, big());
+        assert!(!inside(&scene, id), "an icon set to one drawn past it");
+        scene.mark_drawn_in_box(id);
+        assert!(!inside(&scene, id), "drawn past it, marked");
+    }
+
+    /// An SVG appended raw and drawn three times its size about its centre
+    /// is hit past its box, beside and below its parent's: nothing proves the
+    /// walk may skip it there, asked once or again.
+    #[test]
+    fn a_raw_appended_svg_drawn_past_its_box_is_hit_there() {
+        use crate::{affine::Affine, svg::SvgData};
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let icon =
+            SvgData::new(&br#"<svg viewBox="0 0 16 16"><rect width="16" height="16"/></svg>"#[..])
+                .unwrap();
+        let big = NodeKind::Svg(Arc::new(icon.transformed(Affine::scale(3., 3.))));
+        let mut scene = Scene::new(300., 300.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Column));
+        scene.append(
+            root,
+            NodeKind::Quad(QuadStyle::default()),
+            sized(300., 100.),
+        );
+        let line = scene.append(root, NodeKind::Container(Layout::Row), sized(300., 16.));
+        let holder = scene.append(line, NodeKind::Container(Layout::Row), sized(16., 16.));
+        let svg = scene.append(holder, big, sized(16., 16.));
+        scene.flush();
+        for _ in 0..2 {
+            // Inside its box; past it to the right (out of its parent's box);
+            // below (out of the line's too).
+            for (x, y) in [(8., 108.), (16. + 10., 108.), (8., 100. + 16. + 10.)] {
+                let hits = scene.hit_test_all(x, y);
+                assert!(hits.contains(&svg), "({x}, {y}): {hits:?}");
+            }
+            let far = scene.hit_test_all(16. + 30., 108.);
+            assert!(!far.contains(&svg), "past where it paints: {far:?}");
+        }
+    }
+
+    /// A node's size: every walk of the scene reads nodes, so one grown (a
+    /// field past the padding) costs everywhere. A field added changes this
+    /// only where it must: say so, measured.
+    #[test]
+    fn a_node_is_no_larger() {
+        assert_eq!(size_of::<Node>(), 720);
+    }
+
     #[test]
     fn hit_tests_search_rows_once_a_list_has_grown_long() {
         let sized = |w: f32, h: f32| Style {
