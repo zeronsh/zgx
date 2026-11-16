@@ -1,10 +1,14 @@
 //! The decode thread: one for every stream, filling each stream's ring
 //! about half a second ahead. With no stream open it sleeps until one is.
+//!
+//! Where there are no threads (a browser), or for an engine whose output
+//! the app pulls ([`Audio::pulled`](crate::Audio::pulled)), the same
+//! filling runs inline instead, as the mixer is asked for blocks.
 use crate::decode::Decode;
 use crate::ring::Writer;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -64,18 +68,32 @@ enum Order {
     Quit,
 }
 
-/// The decode thread, as the engine holds it.
+/// The decode thread, as the engine holds it, or its streams filled
+/// inline.
 pub(crate) struct Decoder {
-    orders: Sender<Order>,
-    thread: Option<JoinHandle<()>>,
-    /// Closed when the thread returns.
-    quit: Receiver<()>,
+    kind: Kind,
     /// Streams the thread is filling.
     pub open: Arc<AtomicUsize>,
 }
 
+enum Kind {
+    Thread {
+        orders: Sender<Order>,
+        thread: Option<JoinHandle<()>>,
+        /// Closed when the thread returns.
+        quit: Receiver<()>,
+    },
+    /// No thread: each `fill` tops the streams up on the caller's.
+    Inline(Mutex<Vec<Open>>),
+}
+
 impl Decoder {
+    /// A decode thread, or where there are none (wasm32), streams filled
+    /// inline.
     pub fn new() -> Decoder {
+        if cfg!(target_arch = "wasm32") {
+            return Decoder::inline();
+        }
         let (orders, inbox) = channel();
         let open = Arc::new(AtomicUsize::new(0));
         let counted = open.clone();
@@ -88,33 +106,70 @@ impl Decoder {
             })
             .expect("a thread to decode audio");
         Decoder {
-            orders,
-            thread: Some(thread),
-            quit,
+            kind: Kind::Thread {
+                orders,
+                thread: Some(thread),
+                quit,
+            },
             open,
         }
     }
 
-    pub fn open(&self, feeding: Feeding) {
-        let _ = self.orders.send(Order::Open(feeding));
+    /// Streams filled on the caller's thread, by [`fill`](Self::fill).
+    pub fn inline() -> Decoder {
+        Decoder {
+            kind: Kind::Inline(Mutex::new(Vec::new())),
+            open: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
-    /// Waits until every stream has been filled as far as it can be.
+    pub fn open(&self, feeding: Feeding) {
+        match &self.kind {
+            Kind::Thread { orders, .. } => {
+                let _ = orders.send(Order::Open(feeding));
+            }
+            Kind::Inline(open) => {
+                let mut open = open.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                open.push(Open::new(feeding));
+                self.open.store(open.len(), Ordering::Release);
+            }
+        }
+    }
+
+    /// Fills every stream as far as it can be: waits for the thread, or
+    /// does it here.
     pub fn fill(&self) {
-        let (done, wait) = channel();
-        if self.orders.send(Order::Fill(done)).is_ok() {
-            let _ = wait.recv();
+        match &self.kind {
+            Kind::Thread { orders, .. } => {
+                let (done, wait) = channel();
+                if orders.send(Order::Fill(done)).is_ok() {
+                    let _ = wait.recv();
+                }
+            }
+            Kind::Inline(open) => {
+                let mut open = open.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                open.retain_mut(fill);
+                self.open.store(open.len(), Ordering::Release);
+            }
         }
     }
 }
 
 impl Drop for Decoder {
     fn drop(&mut self) {
-        let _ = self.orders.send(Order::Quit);
+        let Kind::Thread {
+            orders,
+            thread,
+            quit,
+        } = &mut self.kind
+        else {
+            return;
+        };
+        let _ = orders.send(Order::Quit);
         // Joined once it has quit; a source stuck in its decoder isn't
         // waited on past `QUIT`: the thread is left to end by itself.
-        if let Err(RecvTimeoutError::Disconnected) = self.quit.recv_timeout(QUIT)
-            && let Some(thread) = self.thread.take()
+        if let Err(RecvTimeoutError::Disconnected) = quit.recv_timeout(QUIT)
+            && let Some(thread) = thread.take()
         {
             let _ = thread.join();
         }

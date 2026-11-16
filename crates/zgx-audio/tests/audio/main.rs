@@ -10,6 +10,8 @@ mod device;
 mod offline;
 #[path = "../platform_exact.rs"]
 mod platform_exact;
+#[path = "../pulled.rs"]
+mod pulled;
 #[path = "../spatial.rs"]
 mod spatial;
 #[path = "../stock_effects.rs"]

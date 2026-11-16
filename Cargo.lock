@@ -5381,6 +5381,7 @@ dependencies = [
  "lewton",
  "nanomp3",
  "opus-pure",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

@@ -47,6 +47,11 @@ path = "tests/audio/main.rs"
 
 # The audio thread's rules: a counting allocator, and no test harness, so
 # no other thread.
+# The pulled engine on wasm32 itself (wasm-bindgen-test): no threads, no
+# clock there. Empty elsewhere.
+[[test]]
+name = "web"
+
 [[test]]
 name = "realtime"
 harness = false
@@ -66,3 +71,6 @@ name = "rest_memory"
 [[example]]
 name = "device_probe"
 required-features = ["device"]
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "=0.3.77"

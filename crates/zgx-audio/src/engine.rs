@@ -1,7 +1,7 @@
 //! The main thread's side: [`Audio`] and the handles it gives out. Each
 //! call becomes a command stamped with a frame and goes on a fixed queue;
 //! a full queue is an error, never a wait.
-use crate::device::{Device, Host, Message, Renderer};
+use crate::device::{Device, Format, Host, Message, Renderer};
 use crate::effect::{Effect, Slot};
 use crate::mixer::Streamed;
 use crate::mixer::{
@@ -335,6 +335,23 @@ enum Hosting {
     /// renderer it will run, and its hold and grace when paused.
     Waiting(Box<dyn Device>, Box<Renderer>, (Duration, Duration)),
     Running(Host),
+    /// Pulled by the app (`Audio::pulled`): the renderer stays here, and the
+    /// app asks for blocks while it's `running`.
+    Pulled(Box<Pulled>),
+}
+
+/// An engine the app pulls blocks from, as [`Hosting`] holds it.
+struct Pulled {
+    renderer: Box<Renderer>,
+    /// Whether the app is asking for blocks.
+    running: bool,
+    hold: Duration,
+    /// Held from here, as if something had just been heard (a prewarm).
+    floor: u64,
+    /// Ended voices told so far.
+    told: u64,
+    /// Asks the app to start pulling again.
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Engines made so far: each takes the next as its identity, which its
@@ -352,6 +369,9 @@ struct Inner {
     hosting: Arc<Mutex<Hosting>>,
     /// The decode thread, made with the first stream.
     decoder: Mutex<Option<Decoder>>,
+    /// Streams filled inline as blocks are asked for, with no thread: a
+    /// pulled engine's, and every engine's where there are no threads.
+    inline_decode: std::sync::atomic::AtomicBool,
     /// The bytes streams hold now, and the most they may.
     streamed: Arc<std::sync::atomic::AtomicUsize>,
     stream_memory: usize,
@@ -406,6 +426,71 @@ impl Offline {
     }
 }
 
+/// The app's side of a pulled engine ([`Audio::pulled`]).
+pub struct Pull {
+    audio: Audio,
+    channels: usize,
+}
+
+impl Pull {
+    /// Mixes the next `out.len() / channels` frames into `out`, at the
+    /// rate [`set_rate`](Self::set_rate) gave, filling streams first.
+    /// Returns whether to go on asking: false once nothing has been heard
+    /// for the quiet hold and nothing waits, when the app stops asking
+    /// (and may suspend its output) until the engine wakes it again. Asked
+    /// while stopped, it fills silence and says false.
+    pub fn fill(&mut self, out: &mut [f32]) -> bool {
+        self.audio.settle();
+        let meter = self.audio.0.meter.clone();
+        let mut hosting = self.audio.hosting();
+        let Hosting::Pulled(pulled) = &mut *hosting else {
+            out.fill(0.);
+            return false;
+        };
+        if !pulled.running {
+            out.fill(0.);
+            return false;
+        }
+        pulled.renderer.render(out, None);
+        let ended = meter.ended.load(Ordering::Acquire);
+        let told = std::mem::replace(&mut pulled.told, ended) != ended;
+        let rate = meter.rate.load(Ordering::Acquire).max(1);
+        let now = meter.now.load(Ordering::Acquire);
+        let heard = meter.audible.load(Ordering::Acquire).max(pulled.floor);
+        let silent = Duration::from_secs_f64(now.saturating_sub(heard) as f64 / rate as f64);
+        let going = !(silent >= pulled.hold && !meter.pending());
+        if !going {
+            pulled.running = false;
+            meter.running.store(false, Ordering::SeqCst);
+            meter.stops.fetch_add(1, Ordering::Relaxed);
+        }
+        drop(hosting);
+        if told {
+            meter.notify();
+        }
+        going
+    }
+
+    /// The rate the app's output runs at (an `AudioContext`'s
+    /// `sampleRate`): blocks are mixed at it from now on. Allocates: call
+    /// it before the first block, or while stopped.
+    pub fn set_rate(&mut self, rate: u32) {
+        let channels = self.channels;
+        if let Hosting::Pulled(pulled) = &mut *self.audio.hosting() {
+            pulled.renderer.set_format(Format { rate, channels });
+        }
+    }
+
+    /// Whether the app is asked for blocks now.
+    pub fn running(&self) -> bool {
+        matches!(&*self.audio.hosting(), Hosting::Pulled(pulled) if pulled.running)
+    }
+
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+}
+
 impl Audio {
     /// An engine whose mixer the caller runs, with [`Offline::render`].
     /// Fails for a config [`Config::check`] refuses.
@@ -443,6 +528,32 @@ impl Audio {
         Ok(audio)
     }
 
+    /// An engine whose output the app pulls, with no thread of its own: a
+    /// browser's audio worklet asks [`Pull::fill`] for blocks as it needs
+    /// them. Nothing is asked for until the first sound: then `wake` is
+    /// called (on the thread that played it, after the engine's lock is let
+    /// go) and the app starts asking, until [`Pull::fill`] says the quiet
+    /// hold ([`Config::hold`]) has passed. Streams decode inline, as blocks
+    /// are filled. Fails for a config [`Config::check`] refuses.
+    pub fn pulled(
+        config: Config,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(Audio, Pull), Error> {
+        let channels = config.channels;
+        let (audio, mixer) = Audio::with_mixer(&config)?;
+        audio.0.inline_decode.store(true, Ordering::Release);
+        let renderer = Box::new(Renderer::new(mixer, channels, audio.0.meter.clone()));
+        *audio.hosting() = Hosting::Pulled(Box::new(Pulled {
+            renderer,
+            running: false,
+            hold: config.hold,
+            floor: 0,
+            told: 0,
+            wake: Arc::new(wake),
+        }));
+        Ok((audio.clone(), Pull { audio, channels }))
+    }
+
     fn hosting(&self) -> MutexGuard<'_, Hosting> {
         self.0
             .hosting
@@ -453,6 +564,30 @@ impl Audio {
     /// Tells the host a command waits, starting it the first time.
     fn wake(&self, message: Message) {
         let mut hosting = self.hosting();
+        if let Hosting::Pulled(pulled) = &mut *hosting {
+            if let Message::Prewarm = message {
+                pulled.floor = self.0.meter.now.load(Ordering::Acquire);
+            }
+            // Pulling: the next block hears it. Stopped: started again only
+            // for what sounds (a gain or a mute is applied here).
+            if pulled.running
+                || matches!(message, Message::Quit)
+                || (matches!(message, Message::Wake) && !pulled.renderer.idle())
+            {
+                return;
+            }
+            pulled.running = true;
+            pulled.floor = self.0.meter.now.load(Ordering::Acquire);
+            self.0.meter.restarted.store(true, Ordering::Release);
+            self.0.meter.starts.fetch_add(1, Ordering::Relaxed);
+            self.0.meter.running.store(true, Ordering::SeqCst);
+            let wake = pulled.wake.clone();
+            // Told after the lock is let go: the app may ask for a block
+            // at once.
+            drop(hosting);
+            wake();
+            return;
+        }
         // Before any sound, a command that makes none (a gain, a mute, a
         // bus) is applied here: no device, no thread, nothing of the
         // system's audio touched.
@@ -579,6 +714,7 @@ impl Audio {
             latency,
             hosting: Arc::new(Mutex::new(Hosting::None)),
             decoder: Mutex::new(None),
+            inline_decode: std::sync::atomic::AtomicBool::new(cfg!(target_arch = "wasm32")),
             streamed: Default::default(),
             stream_memory: config.stream_memory,
         }));
@@ -846,7 +982,10 @@ impl Audio {
             .decoder
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get_or_insert_with(Decoder::new)
+            .get_or_insert_with(|| match self.0.inline_decode.load(Ordering::Acquire) {
+                true => Decoder::inline(),
+                false => Decoder::new(),
+            })
             .open(Feeding {
                 decode,
                 writer,
