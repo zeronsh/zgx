@@ -1178,3 +1178,78 @@ fn filled_areas_draw_as_quads_and_look_as_their_raster_does() {
         assert!(worst <= 80, "scale {scale}: worst {worst}");
     }
 }
+
+/// A canvas past the raster budget beside an ordinary one: the frame still
+/// renders (the Control room froze on a 1044 × 6356 point chart, its window
+/// skipping every frame), the ordinary canvas draws, the tall one draws
+/// coarser rather than not at all, and frame after frame goes on.
+#[test]
+fn a_canvas_past_the_raster_budget_skips_nothing_else() {
+    // Raster only: a dashed stroke is no quad.
+    fn raster(width: f32, height: f32, color: Color) -> Canvas {
+        let mut canvas = Canvas::new();
+        let mut path = Path::builder();
+        path.move_to(0., 0.).line_to(width, height);
+        canvas.stroke(
+            path.build().unwrap(),
+            color,
+            Stroke {
+                width: 2.,
+                dash: vec![4., 2.],
+                ..Default::default()
+            },
+        );
+        canvas.fill(Path::rectangle(Rect::new(0., 0., width, height)), color);
+        canvas
+    }
+    let (w, h) = (1044., 6356.);
+    let mut scene = Scene::new(200., 200.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    scene.append(
+        scene.root(),
+        NodeKind::Canvas(Arc::new(raster(w, h, Color(0, 200, 0, 255)))),
+        Style {
+            width: Some(w),
+            height: Some(h),
+            ..Default::default()
+        },
+    );
+    let small = scene.append(
+        scene.root(),
+        NodeKind::Canvas(Arc::new(raster(40., 40., Color(220, 0, 0, 255)))),
+        Style {
+            width: Some(40.),
+            height: Some(40.),
+            ..Default::default()
+        },
+    );
+    // At 2× the tall canvas is 2088 × 12712 pixels: 101 MiB past 32.
+    let mut gpu = GpuRenderer::new(400, 400).unwrap();
+    gpu.set_scale_factor(2.);
+    let report = scene.flush();
+    gpu.render(&scene, &report.damage)
+        .expect("the frame renders with a canvas past the budget");
+    let bytes = gpu.readback().unwrap();
+    assert!(
+        rgb(&bytes, 400, 30, 30)[0] > 200,
+        "the ordinary canvas draws"
+    );
+    assert!(
+        rgb(&bytes, 400, 300, 300)[1] > 150,
+        "the tall one draws, coarser"
+    );
+    // Frame after frame: the ordinary canvas changes and each draws.
+    for frame in 0..5u8 {
+        let red = 100 + frame * 30;
+        scene.set_kind(
+            small,
+            NodeKind::Canvas(Arc::new(raster(40., 40., Color(red, 0, 0, 255)))),
+        );
+        let report = scene.flush();
+        gpu.render(&scene, &report.damage)
+            .expect("every frame renders");
+        let bytes = gpu.readback().unwrap();
+        let got = rgb(&bytes, 400, 30, 30)[0];
+        assert!(got.abs_diff(red) <= 2, "frame {frame}: {got} for {red}");
+    }
+}

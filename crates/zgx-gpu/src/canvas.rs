@@ -697,6 +697,31 @@ impl Panned {
         }
     }
 }
+/// How much coarser than the display a canvas past the budget may draw:
+/// past that it would draw nothing worth seeing.
+const MOST_COARSE: f64 = 8.;
+/// The scale, and `region` at it, a canvas region past the budget at `scale`
+/// is drawn at: the finest within `REGION_PIXELS`. `None`: none down to
+/// `MOST_COARSE` is.
+#[cold]
+fn coarser(scale: f32, region: [i32; 4]) -> Option<(f32, [i32; 4])> {
+    // (Whole pixels out, so a little less than the areas' ratio: a few tries.)
+    let mut by = (REGION_PIXELS as f64 / area(region) as f64).sqrt();
+    while by >= 1. / MOST_COARSE {
+        let [x0, y0, x1, y1] = region.map(|v| f64::from(v) * by);
+        let at = [
+            x0.floor() as i32,
+            y0.floor() as i32,
+            x1.ceil() as i32,
+            y1.ceil() as i32,
+        ];
+        if area(at) <= REGION_PIXELS {
+            return Some(((f64::from(scale) * by) as f32, at));
+        }
+        by *= 0.999;
+    }
+    None
+}
 /// The `region` (x0, y0, x1, y1, in its box's device pixels) of `canvas`
 /// under `view` at `scale`, its pixels where `old` (the region `pixels`
 /// hold) has them taken from there: only what is new is rasterized.
@@ -713,7 +738,11 @@ fn rasterize_region(
         return ImageData::new(1, 1, vec![0; 4]).map_err(|e| GpuError(e.into()));
     }
     if area(region) > REGION_PIXELS {
-        return Err(GpuError("canvas raster exceeds 32 MiB".into()));
+        // Past the budget it is drawn coarser (fewer pixels, stretched over
+        // its box) rather than not at all.
+        let (scale, region) = coarser(scale, region)
+            .ok_or_else(|| GpuError("canvas raster exceeds 32 MiB".into()))?;
+        return rasterize_region(canvas, view, scale, region, None, text);
     }
     let [x0, y0, x1, y1] = region;
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
@@ -766,7 +795,11 @@ fn rasterize_region(
             }
         }
     };
+    // (Drawn coarser, its pixels aren't `at`'s: none is kept.)
     let kept = old
+        .filter(|([ax, ay, bx, by], pixels)| {
+            (bx - ax) as u32 == pixels.width() && (by - ay) as u32 == pixels.height()
+        })
         .map(|(at, pixels)| (intersect(at, region), at, pixels))
         .filter(|(both, ..)| !is_empty(*both));
     let Some((both, at, pixels)) = kept else {
@@ -3376,5 +3409,25 @@ mod gradient_tests {
         let nan = Affine::translation(f32::NAN, 0.);
         assert!(Brush::conic(nan, stops(&[RED, BLUE])).is_err());
         assert!(Brush::radial(Affine::IDENTITY, stops(&[RED])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn a_region_past_the_budget_is_drawn_coarser_not_refused() {
+        // A long map (the canvas that skipped a window's frames): 1044 by
+        // 6356 points at 2x is 101 MiB of pixels.
+        let (scale, at) = coarser(2., [0, 0, 2088, 12712]).unwrap();
+        assert!(area(at) <= REGION_PIXELS, "{at:?}");
+        assert!(scale > 1., "as fine as fits: {scale}");
+        let ratio = (at[2] as f32 / at[3] as f32) / (2088. / 12712.);
+        assert!((ratio - 1.).abs() < 0.01, "keeps its shape: {at:?}");
+        // Not from its box's corner, and thin.
+        let (_, at) = coarser(1., [-3, 5, 7, 4_000_000]).unwrap();
+        assert!(area(at) <= REGION_PIXELS && at[0] < 0 && at[2] > at[0]);
+        // Coarser than an eighth of the display's scale: refused.
+        assert_eq!(coarser(1., [0, 0, 100_000, 100_000]), None);
     }
 }
