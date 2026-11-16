@@ -154,6 +154,7 @@ fn element_event(
                 repeat: bits >> 24 & 1 == 1,
                 key,
                 code,
+                from_outside: bits >> 25 & 1 == 1,
             };
             runtime.batch(|| listeners.run(&event))
         }
