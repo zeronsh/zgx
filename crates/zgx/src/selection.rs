@@ -269,6 +269,97 @@ pub(crate) struct State {
 /// Rows a copy takes from one list's row text at most.
 const MAX_PROVIDED_ROWS: usize = 1_000_000;
 
+/// The last row of `rows` at or after `from`, read from its text alone (a
+/// list that doesn't say its length): found in steps doubling, then halving.
+fn last_row(rows: &dyn ListRows, from: usize) -> Option<usize> {
+    rows.text(from)?;
+    let (mut known, mut step) = (from, 1usize);
+    while known
+        .checked_add(step)
+        .is_some_and(|at| rows.text(at).is_some())
+    {
+        known += step;
+        step = step.saturating_mul(2);
+    }
+    // Row `known` is there; `known + step` is not (or past usize).
+    let mut gone = known.saturating_add(step);
+    while gone - known > 1 {
+        let mid = known + (gone - known) / 2;
+        match rows.text(mid) {
+            Some(_) => known = mid,
+            None => gone = mid,
+        }
+    }
+    Some(known)
+}
+
+/// A virtual list a selection spans: its rows' node, its row text, and the
+/// first and last rows (`spanned_lists`).
+type SpannedList = (NodeId, RowText, usize, usize);
+
+/// The selection's ends, start first, and each virtual list with row text
+/// it spans: the node holding its rows, its row text, and the first and
+/// last rows it spans (the last `usize::MAX` where it runs on past the
+/// list's end). `None` with no selection.
+fn spanned_lists(state: &State, scene: &Scene) -> Option<(End, End, Vec<SpannedList>)> {
+    let rows = &state.rows;
+    let end = |point: Option<TextPoint>, row: &Option<RowAddress>| match point {
+        Some(point) => revive(rows, &state.row_texts, scene, point, row.as_ref()),
+        None => End::Gone,
+    };
+    let (anchor, focus) = (
+        end(state.anchor, &state.anchor_row),
+        end(state.focus, &state.focus_row),
+    );
+    if matches!(anchor, End::Gone) || matches!(focus, End::Gone) {
+        return None;
+    }
+    let (start, end) = match order_ends(rows, scene, &anchor, &focus).is_le() {
+        true => (anchor, focus),
+        false => (focus, anchor),
+    };
+    // Where an end lies against a list: its row there, or before (Less)
+    // or after (Greater) the whole list.
+    let place = |end: &End, content: NodeId| -> Result<usize, std::cmp::Ordering> {
+        match end {
+            End::Parked(row, _) if row.content == content => Ok(row.index),
+            End::Parked(row, _) => Err(scene.document_order(row.content, content)),
+            End::Live(point) => match row_of(rows, scene, point.node) {
+                Some((at, index)) if at == content => Ok(index),
+                _ => Err(scene.document_order(point.node, content)),
+            },
+            End::Gone => Err(std::cmp::Ordering::Equal),
+        }
+    };
+    let mut lists = Vec::new();
+    // All of a region: every row of its lists.
+    let all = state.root.filter(|_| state.all);
+    for (content, text) in &state.row_texts {
+        if !scene.contains(*content) {
+            continue;
+        }
+        let (lo, hi) = match all {
+            Some(root) if scene.ancestors(*content).any(|at| at == root) => (0, usize::MAX),
+            Some(_) => continue,
+            None => {
+                let lo = match place(&start, *content) {
+                    Ok(index) => index,
+                    Err(std::cmp::Ordering::Less) => 0,
+                    Err(_) => continue,
+                };
+                let hi = match place(&end, *content) {
+                    Ok(index) => index,
+                    Err(std::cmp::Ordering::Greater) => usize::MAX,
+                    Err(_) => continue,
+                };
+                (lo, hi)
+            }
+        };
+        lists.push((*content, text.clone(), lo, hi));
+    }
+    Some((start, end, lists))
+}
+
 /// A virtual list's rows as a selection reads them (`View::row_text`).
 pub(crate) type RowText = Rc<dyn ListRows>;
 
@@ -279,6 +370,10 @@ pub(crate) type RowText = Rc<dyn ListRows>;
 pub(crate) trait ListRows {
     /// Row `index`'s plain text, `None` past its end.
     fn text(&self, index: usize) -> Option<String>;
+    /// How many rows it has, where it knows without building them.
+    fn len(&self) -> Option<usize> {
+        None
+    }
     /// Row `index`'s key, if the list has keys.
     fn key(&self, _index: usize) -> Option<Rc<dyn Any>> {
         None
@@ -1583,10 +1678,12 @@ impl Ui {
         // Nothing borrowed: the hook may read the selection or the scene.
         let content = hook.and_then(|(region, hook)| {
             let leaves = self.selected_leaves();
+            let rows = self.selected_rows();
             hook(&crate::widgets::SelectionCopyRequest {
                 text: &text,
                 html: &html,
                 leaves: &leaves,
+                rows: &rows,
                 region,
                 ui: self,
             })
@@ -1602,6 +1699,36 @@ impl Ui {
     #[doc(hidden)]
     pub fn copy_selection(&self, platform: &crate::platform::PlatformService) -> bool {
         self.copy_selection_from(|text, html| crate::widgets::write_clipboard(platform, text, html))
+    }
+    /// The rows of each virtual list the selection spans, mounted or not,
+    /// in document order: what a Select All over rows scrolled away takes.
+    fn selected_rows(&self) -> Vec<crate::widgets::SelectedRows> {
+        let lists = {
+            let state = self.selection_state().borrow();
+            if state.row_texts.is_empty() {
+                return Vec::new();
+            }
+            let scene = self.scene.borrow();
+            match spanned_lists(&state, &scene) {
+                Some((_, _, lists)) => lists,
+                None => return Vec::new(),
+            }
+        };
+        // Nothing borrowed: a row's text may be built by the app's code.
+        let mut spans: Vec<_> = lists
+            .into_iter()
+            .filter_map(|(list, text, first, last)| {
+                let last = match text.len() {
+                    Some(len) => last.min(len.checked_sub(1)?),
+                    None if last == usize::MAX => last_row(&*text, first)?,
+                    None => last,
+                };
+                (first <= last).then_some(crate::widgets::SelectedRows { list, first, last })
+            })
+            .collect();
+        let scene = self.scene.borrow();
+        spans.sort_by(|a, b| scene.document_order(a.list, b.list));
+        spans
     }
     /// The text nodes the selection spans, in order, each once.
     fn selected_leaves(&self) -> Vec<NodeId> {
@@ -1798,58 +1925,12 @@ impl Ui {
         }
         let scene = self.scene.borrow();
         let rows = &state.rows;
-        let end = |point: Option<TextPoint>, row: &Option<RowAddress>| match point {
-            Some(point) => revive(rows, &state.row_texts, &scene, point, row.as_ref()),
-            None => End::Gone,
-        };
-        let (anchor, focus) = (
-            end(state.anchor, &state.anchor_row),
-            end(state.focus, &state.focus_row),
-        );
-        if matches!(anchor, End::Gone) || matches!(focus, End::Gone) {
+        let Some((start, end, lists)) = spanned_lists(&state, &scene) else {
             return Vec::new();
-        }
-        let (start, end) = match order_ends(rows, &scene, &anchor, &focus).is_le() {
-            true => (anchor, focus),
-            false => (focus, anchor),
-        };
-        // Where an end lies against a list: its row there, or before (Less)
-        // or after (Greater) the whole list.
-        let place = |end: &End, content: NodeId| -> Result<usize, std::cmp::Ordering> {
-            match end {
-                End::Parked(row, _) if row.content == content => Ok(row.index),
-                End::Parked(row, _) => Err(scene.document_order(row.content, content)),
-                End::Live(point) => match row_of(rows, &scene, point.node) {
-                    Some((at, index)) if at == content => Ok(index),
-                    _ => Err(scene.document_order(point.node, content)),
-                },
-                End::Gone => Err(std::cmp::Ordering::Equal),
-            }
         };
         let mut provided = Vec::new();
-        // All of a region: every row of its lists.
-        let all = state.root.filter(|_| state.all);
-        for (content, text) in &state.row_texts {
-            if !scene.contains(*content) {
-                continue;
-            }
-            let (lo, hi) = match all {
-                Some(root) if scene.ancestors(*content).any(|at| at == root) => (0, usize::MAX),
-                Some(_) => continue,
-                None => {
-                    let lo = match place(&start, *content) {
-                        Ok(index) => index,
-                        Err(std::cmp::Ordering::Less) => 0,
-                        Err(_) => continue,
-                    };
-                    let hi = match place(&end, *content) {
-                        Ok(index) => index,
-                        Err(std::cmp::Ordering::Greater) => usize::MAX,
-                        Err(_) => continue,
-                    };
-                    (lo, hi)
-                }
-            };
+        for (content, text, lo, hi) in lists {
+            let (content, text) = (&content, &text);
             // A mounted row an end lies in copies as it shows, which may be
             // none of it (the selection collapsed there, or ending at its
             // start); one between the ends that shows no text (drawn, not

@@ -158,3 +158,50 @@ fn on_copy_decides_what_a_regions_copy_writes() {
     assert_eq!(copy(&mut h), (text, Some(html)), "nil keeps the copy");
     assert_eq!(h.error(), None);
 }
+
+/// `on_copy` hears the rows of each `ui.list` the selection spans, from 1,
+/// mounted or not: a Select All over five hundred rows, a few mounted,
+/// names them all, by the list's id.
+#[test]
+fn on_copy_hears_the_rows_of_the_lists_it_spans() {
+    let mut h = Harness::inline(
+        r##"local heard = ui.state("heard", "")
+        return ui.column {
+            selectable = true,
+            id = "region",
+            on_copy = function(request)
+                local said = {}
+                for _, rows in request.rows do
+                    table.insert(said, `{rows.list} {rows.first} {rows.last}`)
+                end
+                heard:set(table.concat(said, ", "))
+                return nil
+            end,
+            ui.text { "Header" },
+            ui.list {
+                id = "items",
+                count = 500,
+                height = 20,
+                h = 100,
+                row = function(i) return ui.text { "Row " .. i, literal = true } end,
+            },
+        }"##,
+    );
+    h.settle();
+    h.ui.prepare_frame();
+    let region = h.find("region").unwrap();
+    assert!(h.ui.select_all_text(region));
+    h.ui.prepare_frame();
+    assert!(h.ui.copy_selection_from(|_, _| true));
+    h.settle();
+    let heard = h
+        .host
+        .states()
+        .into_iter()
+        .find(|(name, _)| name == "heard");
+    assert!(
+        matches!(&heard, Some((_, zgx_script::Value::Str(said))) if &**said == "items 1 500"),
+        "{heard:?}"
+    );
+    assert_eq!(h.error(), None);
+}

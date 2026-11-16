@@ -1978,12 +1978,18 @@ export type PinchEvent = {
 -- A step back or forward the platform's gesture for it takes: a trackpad's
 -- swipe between pages (macOS).
 export type NavigateEvent = { direction: "back" | "forward" }
--- A copy out of a selectable region, as its `on_copy` hears it.
-export type SelectionCopy = {
-	text: string,
-	html: string,
-	leaves: { string | false },
-}
+-- A copy out of a selectable region, as its `on_copy` hears it: made by
+-- the engine and read by the app, so checked by name, not by its shape
+-- (which keeps every props table that holds `on_copy` cheap to check).
+declare extern type SelectionCopy with
+	text: string
+	html: string
+	leaves: { string | false }
+	-- Each `ui.list` it spans, in order: the list's id (`false` for none)
+	-- and the first and last rows (from 1), mounted or not, so a Select All
+	-- over rows scrolled away still names them.
+	rows: { { list: string | false, first: number, last: number } }
+end
 -- What goes on the clipboard: text, and HTML beside it where given.
 export type ClipboardContent = {
 	text: string?,
