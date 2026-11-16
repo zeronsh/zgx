@@ -815,6 +815,16 @@ def start_orca(env, output, owned):
         time.sleep(.1)
     for name in ("IsEnabled", "ScreenReaderEnabled"):
         bus("org.freedesktop.DBus.Properties.Set", "org.a11y.Status", name, "<true>")
+    # What the session bus starts for the app (the desktop portal and its
+    # GTK backend, asked for settings as a window opens) stays off the
+    # accessibility bus: a portal that joined and then never answered held
+    # Orca, which handles one event at a time, for 15 s (its AT-SPI reply
+    # timeout), and the probe's wait for speech ran out behind the backlog.
+    quiet = subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus", "--object-path", "/org/freedesktop/DBus",
+                            "--method", "org.freedesktop.DBus.UpdateActivationEnvironment",
+                            "{'NO_AT_BRIDGE': '1', 'GTK_A11Y': 'none'}"], env=env, capture_output=True, text=True)
+    if quiet.returncode != 0:
+        raise RuntimeError("the session bus didn't take the activation environment: " + quiet.stderr)
     env["AT_SPI_BUS_ADDRESS"] = re.search(r"'([^']+)'", address.stdout).group(1)
     with (output / "orca.log").open("w") as log:
         # Its debug file written a line at a time (`orca_line_buffered.py`).
@@ -826,6 +836,20 @@ def start_orca(env, output, owned):
         if time.monotonic() > deadline or orca.poll() is not None:
             raise RuntimeError("Orca never started; see orca.log")
         time.sleep(.2)
+
+
+def orca_follows(output, window, seconds=60):
+    """Wait until Orca has made `window` (a frame's name) its active window:
+    it is handling that app's events as they come, not a backlog behind an
+    app that didn't answer. Typing before then was read late, if at all."""
+    path = output / "orca-debug.log"
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        text = path.read_text(errors="replace") if path.exists() else ""
+        if f"FOCUS MANAGER: Active window is [frame: '{window}'" in text:
+            return
+        time.sleep(.2)
+    raise AssertionError(f"Orca never made '{window}' its active window; see orca-debug.log")
 
 
 def spoken(output):
