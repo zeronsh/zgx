@@ -10174,22 +10174,35 @@ impl GpuRenderer {
                         } else {
                             let before = self.canvases.rasterizations();
                             let (width, height, scale) = (bounds.width, bounds.height, self.scale);
-                            let id = self.canvas_texture(item.id, &mut stats, |cache| {
+                            let drawn = self.canvas_texture(item.id, &mut stats, |cache| {
                                 cache.get_viewed(item.id, canvas, view, width, height, scale)
-                            })?;
+                            });
                             stats.canvas_rasterizations +=
                                 (self.canvases.rasterizations() - before) as usize;
-                            canvas_image = Some(id);
-                            quads.push(Quad {
-                                rect: fade,
-                                uv: [0., 0., 1., 1.],
-                                color: [1., 1., 1., item.effects.opacity],
-                                fade,
-                                options: [item.effects.edge_fade, 2., 0., 0.],
-                                shape: [0.; 4],
-                                border: [0.; 4],
-                                mask: NO_MASK,
-                            });
+                            // A canvas that won't draw (too many commands or
+                            // clips) shows nothing; it is the content's fault,
+                            // not the frame's, as an SVG's is.
+                            let id = match drawn {
+                                Ok(id) => Some(id),
+                                Err(error) if error.is_device_lost() => return Err(error),
+                                Err(error) => {
+                                    self.warn(&format!("a canvas doesn't draw: {}", error.0));
+                                    None
+                                }
+                            };
+                            canvas_image = id;
+                            if id.is_some() {
+                                quads.push(Quad {
+                                    rect: fade,
+                                    uv: [0., 0., 1., 1.],
+                                    color: [1., 1., 1., item.effects.opacity],
+                                    fade,
+                                    options: [item.effects.edge_fade, 2., 0., 0.],
+                                    shape: [0.; 4],
+                                    border: [0.; 4],
+                                    mask: NO_MASK,
+                                });
+                            }
                         }
                     }
                     NodeKind::Rect(color) => quads.push(rect_quad(*color, fade, item.effects)),
