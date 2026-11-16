@@ -1,14 +1,9 @@
-//! The system font past Medium and before Semibold draws on its weight axis
-//! alone, with no fake-bold stroke, as Anara's Electron app draws it (pin
-//! only: the pin's reference is that app). Two measurements of Chrome
-//! disagree, and what differs between them is not yet known:
-//!
-//! - Headless Chrome 157, 2x, `-webkit-font-smoothing: antialiased`,
-//!   "Accuracy drops more than speed": ink per inked column 500 2358, 501
-//!   3071, 550 3183, 599 3290, 600 2588 at 16 px, none at 18 px: 30-40% more
-//!   ink at 501 to 599 under 17.5 points, font synthesis' stroke.
-//! - Anara's Electron app: 550's ink equal to the unstroked draw (3088 and
-//!   3088), where the stroke drew about 35% heavier.
+//! The system font past Medium draws as Anara's Electron app draws it (the
+//! pin's reference): font synthesis' fake-bold stroke at 501 to 538 at any
+//! size and at 501 to 599 at exactly 14 px, the weight axis alone elsewhere.
+//! Measured in that app (Chromium, 2x, `-webkit-font-smoothing: antialiased`)
+//! at 11 to 30 px against the 500-600 interpolation: stroked 1.32 to 1.41 of
+//! it, unstroked 1.00; 539 and up, and 13.9 or 14.1 px, unstroked.
 #![cfg(target_os = "macos")]
 use zgx::{compose::prelude::*, scene::Color, widgets::Ui};
 use zgx_gpu::GpuRenderer;
@@ -52,30 +47,56 @@ fn column_ink(size: f32, weight: u16) -> Option<f64> {
     Some(total as f64 / columns.max(1) as f64)
 }
 
+// Ink against the axis's own interpolation between 500 and 600.
+fn against_axis(size: f32, weight: u16) -> Option<f64> {
+    let (w500, w600) = (column_ink(size, 500)?, column_ink(size, 600)?);
+    let ink = column_ink(size, weight)?;
+    Some(ink / (w500 + (w600 - w500) * f64::from(weight - 500) / 100.))
+}
+
 #[test]
-fn system_font_weights_501_to_599_draw_on_the_axis_alone() {
-    let Some(w500) = column_ink(16., 500) else {
+fn system_font_weights_501_to_538_draw_stroked_and_539_up_on_the_axis_alone() {
+    if column_ink(16., 500).is_none() {
         eprintln!("SF isn't here: nothing checked");
         return;
-    };
-    let w600 = column_ink(16., 600).unwrap();
-    // Between Medium and Semibold, as the axis goes: never past Semibold,
-    // as the stroke drew them (501 1.302 of 500's ink, 600 1.098).
-    let mut last = w500;
-    for weight in [501, 550, 599] {
-        let ink = column_ink(16., weight).unwrap();
-        assert!(
-            ink >= last * 0.99 && ink <= w600 * 1.01,
-            "{weight} at 16 px: {ink:.0}, between {last:.0} and 600's {w600:.0}"
-        );
-        last = ink;
     }
-    let w501 = column_ink(16., 501).unwrap();
+    for size in [12., 16., 24.] {
+        for weight in [501, 538] {
+            let r = against_axis(size, weight).unwrap();
+            assert!(
+                r > 1.2,
+                "{weight} at {size} px is stroked: {r:.3} of the axis's ink"
+            );
+        }
+        for weight in [539, 550, 599] {
+            let r = against_axis(size, weight).unwrap();
+            assert!(
+                (0.97..1.03).contains(&r),
+                "{weight} at {size} px is the axis alone: {r:.3}"
+            );
+        }
+    }
+}
+
+#[test]
+fn at_exactly_14_px_every_weight_past_medium_draws_stroked() {
+    if column_ink(14., 500).is_none() {
+        eprintln!("SF isn't here: nothing checked");
+        return;
+    }
+    for weight in [550, 599] {
+        let r = against_axis(14., weight).unwrap();
+        assert!(r > 1.2, "{weight} at 14 px is stroked: {r:.3}");
+        for size in [13.9, 14.1] {
+            let r = against_axis(size, weight).unwrap();
+            assert!(
+                (0.97..1.03).contains(&r),
+                "{weight} at {size} px is the axis alone: {r:.3}"
+            );
+        }
+    }
     assert!(
-        w501 / w500 < 1.03,
-        "501 at 16 px is 500's weight, not stroked: {:.3} of 500's ink",
-        w501 / w500
+        (0.97..1.03).contains(&against_axis(14., 600).unwrap()),
+        "600 at 14 px is Semibold itself"
     );
-    // And at 18 px, past where the stroke ever was, 550 lighter than 600.
-    assert!(column_ink(18., 550).unwrap() < column_ink(18., 600).unwrap());
 }
