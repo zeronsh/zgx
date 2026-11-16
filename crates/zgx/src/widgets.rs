@@ -786,6 +786,37 @@ impl EditorHint {
             .is_some_and(|lines| lines.highlighted())
     }
 }
+/// `hit`, where a pointer at `x` lands, out of any atom it falls inside to
+/// the edge nearer `x` on screen: a press on a picture's right half lands
+/// after it, whatever its text (the bytes inside an atom have no place).
+fn hit_out_of_atoms(
+    edit: &TextEditor,
+    layout: &dyn TextLayout,
+    hit: TextPosition,
+    x: f32,
+) -> TextPosition {
+    let at = hit.byte_offset;
+    let Some(atom) = edit
+        .atoms()
+        .iter()
+        .find(|atom| atom.range.start < at && at < atom.range.end)
+    else {
+        return hit;
+    };
+    let edge = |byte_offset| {
+        layout
+            .caret_position(TextPosition {
+                byte_offset,
+                affinity: TextAffinity::After,
+            })
+            .x
+    };
+    let after = (x - edge(atom.range.end)).abs() < (x - edge(atom.range.start)).abs();
+    TextPosition {
+        byte_offset: if after { atom.range.end } else { atom.range.start },
+        affinity: TextAffinity::After,
+    }
+}
 /// The line cache's atom spans (`AtomStyle`), made again when its atoms,
 /// its text or their style changed; none while no atom is styled.
 #[inline(never)]
@@ -806,9 +837,13 @@ fn follow_atom_styles(code: &CodeHint, hint: &EditorHint, e: &TextEditor) {
     let base = style.as_deref().cloned().unwrap_or_default();
     let text = e.text();
     let mut spans = Vec::new();
+    let lines = hint.line_cache();
+    let mut picture = |svg: &crate::editor_atom_style::AtomSvg| {
+        lines.picture(svg.svg.clone(), svg.extents())
+    };
     for atom in atoms {
         base.under(atom.style.as_deref())
-            .spans(&text, atom.range.clone(), &mut spans);
+            .spans(&text, atom.range.clone(), &mut spans, &mut picture);
     }
     spans.sort_by_key(|(range, _)| range.start);
     hint.line_cache()
@@ -1324,6 +1359,18 @@ impl EditorHandle {
         if self.editor.borrow_mut().set_atoms(atoms) {
             self.refresh();
         }
+    }
+    /// The name `svg` at `extents` (`[width, height, descent]` in EM) has as
+    /// a picture in its text (`SpanStyle::inline_svg`, set by a highlighter):
+    /// over U+FFFC characters each one its box, over other text the span one
+    /// box. The same picture at the same size has the same name.
+    #[doc(hidden)]
+    pub fn inline_svg(
+        &self,
+        svg: std::sync::Arc<crate::svg::SvgData>,
+        extents: [f32; 3],
+    ) -> std::num::NonZeroU32 {
+        self.hint.line_cache().picture(svg, extents)
     }
     /// How its atoms show beyond a wash (a mention's colour, weight,
     /// underline and leading icon), under each atom's own `Atom::style`.
@@ -6586,8 +6633,16 @@ impl Ui {
                     }
                     for (i, id) in pool.iter() {
                         let line = lines.line_text(*i);
-                        let colored = draw_hint.line_cache().spans(lines, *i).and_then(|spans| {
-                            crate::editor_lines::styled_line(&line, &spans, color, size, &font)
+                        let cache = draw_hint.line_cache();
+                        let colored = cache.spans(lines, *i).and_then(|spans| {
+                            crate::editor_lines::styled_line(
+                                &line,
+                                &spans,
+                                color,
+                                size,
+                                &font,
+                                &cache.pictures(),
+                            )
                         });
                         match colored {
                             Some(rich) => {
@@ -6806,38 +6861,32 @@ impl Ui {
                 }
                 drop(marked);
                 // Atoms' leading icons, in the room before each one's text.
-                if code.atom_spans_of.get().is_some() || !code.atom_icons.borrow().is_empty() {
+                // Pictures in their boxes (`SpanStyle::inline_svg`: an atom's,
+                // a highlighter's), and atoms' leading icons in their room.
+                let pictured = code
+                    .lines
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|lines| !lines.pictures().is_empty());
+                if pictured
+                    || code.atom_spans_of.get().is_some()
+                    || !code.atom_icons.borrow().is_empty()
+                {
                     let mut wanted: Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> = Vec::new();
+                    if pictured && let Some(lines) = &long_lines {
+                        let shown = draw_hint.line_cache().pictures_between(
+                            lines,
+                            scroll.1 - inner_height,
+                            scroll.1 + 2. * inner_height,
+                        );
+                        wanted.extend(shown.into_iter().map(|(r, svg)| {
+                            (Rect::new(r.x - scroll.0, r.y - scroll.1, r.width, r.height), svg)
+                        }));
+                    }
                     if code.atom_spans_of.get().is_some() {
                         let base = code.atom_style.borrow().clone();
                         let text = e.text();
-                        // Pictures in the boxes their atoms' text shows as.
-                        let boxes = long_lines.as_ref().map(|lines| {
-                            lines.inline_boxes_between(
-                                scroll.1 - inner_height,
-                                scroll.1 + 2. * inner_height,
-                            )
-                        });
                         for atom in e.atoms() {
-                            let picture = atom
-                                .style
-                                .as_deref()
-                                .and_then(|own| own.svg.clone())
-                                .or_else(|| base.as_deref().and_then(|b| b.svg.clone()));
-                            if let Some(picture) = picture {
-                                let at = boxes
-                                    .iter()
-                                    .flatten()
-                                    .find(|(at, ..)| *at == atom.range.start);
-                                if let Some((_, x, y)) = at {
-                                    let [w, h, _] = picture.extents();
-                                    wanted.push((
-                                        Rect::new(x - scroll.0, y - scroll.1, w * size, h * size),
-                                        picture.svg,
-                                    ));
-                                }
-                                continue;
-                            }
                             let icon = atom
                                 .style
                                 .as_deref()
@@ -7587,7 +7636,7 @@ impl Ui {
                 // Hit the visible edge, not an arbitrarily distant text row.
                 let x = (px - bounds.x).clamp(0., bounds.width.max(0.)) + offset.0;
                 let y = (py - bounds.y).clamp(0., (bounds.height - 0.01).max(0.)) + offset.1;
-                let hit = layout.hit_position(x, y);
+                let hit = hit_out_of_atoms(&edit, &*layout, layout.hit_position(x, y), x);
                 let (anchor, focus) = match mode {
                     EditorPointerSelection::Character(anchor) => (anchor, hit),
                     EditorPointerSelection::Unit { edges, line } => {
@@ -7900,7 +7949,7 @@ impl Ui {
                     let (x, y) = in_viewport(&s, viewport, x, y);
                     let x = x - bounds.x + scroll.0;
                     let y = y - bounds.y + scroll.1;
-                    let hit = layout.hit_position(x, y);
+                    let hit = hit_out_of_atoms(&edit, &*layout, layout.hit_position(x, y), x);
                     // A press on the selection may drag it (as AppKit's text
                     // views and browsers do): it stays until the pointer
                     // moves or lets go.

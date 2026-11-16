@@ -125,6 +125,7 @@ impl AtomStyle {
         text: &str,
         range: Range<usize>,
         out: &mut Vec<(Range<usize>, SpanStyle)>,
+        picture: &mut dyn FnMut(&AtomSvg) -> std::num::NonZeroU32,
     ) {
         if range.is_empty() || range.end > text.len() {
             return;
@@ -135,7 +136,7 @@ impl AtomStyle {
             underline: self.underline.is_some(),
             underline_color: self.underline.and_then(|line| line.color),
             underline_offset: self.underline.and_then(|line| line.offset),
-            boxed: self.svg.as_ref().map(AtomSvg::extents),
+            inline_svg: self.svg.as_ref().map(|svg| picture(svg)),
             ..SpanStyle::default()
         };
         if let Some(icon) = &self.icon {

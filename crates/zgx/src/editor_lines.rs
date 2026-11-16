@@ -72,10 +72,12 @@ pub struct SpanStyle {
     /// Room before its text only, in points: where an atom's leading icon
     /// draws (`AtomStyle::icon`); it moves with the text's first word.
     pub lead: Option<f32>,
-    /// Its text shown as one box `[width, height, descent]` in EM (an
-    /// equation's picture, `AtomStyle::svg`): as wide as that, the line as
-    /// tall as it needs, its text kept for copy and search.
-    pub boxed: Option<[f32; 3]>,
+    /// Its text shown as a picture (an equation, an atom's): an index into
+    /// its editor's pictures (`LineCache::picture`), each its SVG and its
+    /// `[width, height, descent]` in EM. Over U+FFFC characters, each one
+    /// that picture's box; over other text, the span's text one box, its text
+    /// kept for copy and search. Four bytes: plain text pays for no more.
+    pub inline_svg: Option<std::num::NonZeroU32>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -116,6 +118,13 @@ impl SpanStyle {
         self.underline = true;
         self
     }
+    /// Its text shown as picture `id` (`EditorHandle::inline_svg`): each
+    /// U+FFFC character in it that picture's box, or other text one box.
+    #[doc(hidden)]
+    pub const fn inline_svg(mut self, id: std::num::NonZeroU32) -> Self {
+        self.inline_svg = Some(id);
+        self
+    }
     fn merge(&mut self, style: &SpanStyle) {
         self.color = self.color.or(style.color);
         self.weight = self.weight.or(style.weight);
@@ -126,7 +135,7 @@ impl SpanStyle {
         self.underline_color = self.underline_color.or(style.underline_color);
         self.underline_offset = self.underline_offset.or(style.underline_offset);
         self.lead = self.lead.or(style.lead);
-        self.boxed = self.boxed.or(style.boxed);
+        self.inline_svg = self.inline_svg.or(style.inline_svg);
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
@@ -136,11 +145,11 @@ impl SpanStyle {
             && self.background.is_none()
             && !self.underline
             && self.lead.is_none()
-            && self.boxed.is_none()
+            && self.inline_svg.is_none()
     }
     /// Whether it changes how its text is shaped (and so its width).
     fn shapes(&self) -> bool {
-        self.weight.is_some() || self.italic || self.lead.is_some() || self.boxed.is_some()
+        self.weight.is_some() || self.italic || self.lead.is_some() || self.inline_svg.is_some()
     }
 }
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
@@ -249,6 +258,7 @@ pub(crate) fn styled_line(
     color: crate::scene::Color,
     size: f32,
     font: &crate::text_layout::FontStyle,
+    pictures: &[Picture],
 ) -> Option<crate::rich_text::RichText> {
     if line.is_empty() || spans.is_empty() {
         return None;
@@ -282,28 +292,11 @@ pub(crate) fn styled_line(
         return crate::rich_text::RichText::new(line, runs).ok();
     }
     let mut styled = runs(line, spans);
-    // A box is one run, whatever else styles parts of it.
-    styled.dedup_by(|next, run| match (&run.1, &next.1) {
-        (Some(a), Some(b))
-            if a.boxed.is_some() && a.boxed == b.boxed && run.0.end == next.0.start =>
-        {
-            run.0.end = next.0.end;
-            true
-        }
-        _ => false,
-    });
-    let boxes: Vec<crate::rich_text::InlineBox> = styled
-        .iter()
-        .filter_map(|(range, style)| {
-            let [w, h, d] = style.as_ref()?.boxed?;
-            Some(crate::rich_text::InlineBox {
-                width: w * size,
-                height: h * size,
-                baseline: (h - d) * size,
-                ..crate::rich_text::InlineBox::new(range.start)
-            })
-        })
-        .collect();
+    let boxes = if styled.iter().any(|(_, s)| s.is_some_and(|s| s.inline_svg.is_some())) {
+        picture_runs(line, &mut styled, pictures, size)
+    } else {
+        Vec::new()
+    };
     let runs: Vec<_> = styled
         .into_iter()
         .map(|(range, style)| {
@@ -337,6 +330,77 @@ pub(crate) fn styled_line(
         .with_inline_boxes(boxes)
         .ok()
 }
+/// One of an editor's pictures (`SpanStyle::inline_svg`): its SVG and its
+/// `[width, height, descent]` in EM.
+pub(crate) type Picture = (std::sync::Arc<crate::svg::SvgData>, [f32; 3]);
+/// The picture `id` names among `pictures`.
+fn picture(pictures: &[Picture], id: std::num::NonZeroU32) -> Option<&Picture> {
+    pictures.get(id.get() as usize - 1)
+}
+/// `styled`'s pictures (`SpanStyle::inline_svg`) as runs of their own and
+/// their boxes: each U+FFFC character a box of its own, other text the
+/// span's whole text one box. Rare, out of line.
+#[cold]
+#[inline(never)]
+fn picture_runs(
+    line: &str,
+    styled: &mut Vec<(Range<usize>, Option<SpanStyle>)>,
+    pictures: &[Picture],
+    size: f32,
+) -> Vec<crate::rich_text::InlineBox> {
+    use crate::rich_text::{INLINE_BOX_CHAR, INLINE_BOX_TEXT, InlineBox};
+    let mut out: Vec<(Range<usize>, Option<SpanStyle>)> = Vec::with_capacity(styled.len());
+    for (range, style) in styled.drain(..) {
+        let pictured = style.and_then(|s| s.inline_svg);
+        let starts_boxed = line[range.clone()].starts_with(INLINE_BOX_CHAR);
+        match (pictured, out.last_mut()) {
+            // A box over text: one run, whatever else styles parts of it.
+            (Some(id), Some((last, Some(before))))
+                if !starts_boxed && before.inline_svg == Some(id) && last.end == range.start =>
+            {
+                last.end = range.end;
+            }
+            // Over replacement characters: each one a run of its own.
+            (Some(_), _) if starts_boxed => {
+                // The text between them is the span's, but no picture.
+                let text = style.map(|mut s| {
+                    s.inline_svg = None;
+                    s
+                });
+                let mut at = range.start;
+                for (offset, c) in line[range.clone()].char_indices() {
+                    let here = range.start + offset;
+                    if c == INLINE_BOX_CHAR {
+                        if at < here {
+                            out.push((at..here, text));
+                        }
+                        out.push((here..here + INLINE_BOX_TEXT.len(), style));
+                        at = here + INLINE_BOX_TEXT.len();
+                    }
+                }
+                if at < range.end {
+                    out.push((at..range.end, text));
+                }
+            }
+            _ => out.push((range, style)),
+        }
+    }
+    *styled = out;
+    styled
+        .iter()
+        .filter_map(|(range, style)| {
+            let id = style.as_ref()?.inline_svg?;
+            let (_, [w, h, d]) = picture(pictures, id)?;
+            // Over replacement characters, only theirs; over text, its start.
+            Some(InlineBox {
+                width: w * size,
+                height: h * size,
+                baseline: (h - d) * size,
+                ..InlineBox::new(range.start)
+            })
+        })
+        .collect()
+}
 /// `style`'s underline: one point thick in its text's colour, or the
 /// font's thickness in its own colour and place when it says them.
 fn underline(style: &SpanStyle) -> crate::rich_text::Decoration {
@@ -369,9 +433,7 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                     s.weight.unwrap_or(0),
                     s.italic,
                     s.lead.map_or(0, f32::to_bits)
-                        ^ s.boxed.map_or(0, |[w, h, d]| {
-                            w.to_bits().rotate_left(7) ^ h.to_bits().rotate_left(17) ^ d.to_bits()
-                        }),
+                        ^ s.inline_svg.map_or(0, |id| id.get().rotate_left(16)),
                 )
             })
             .collect(),
@@ -423,6 +485,9 @@ pub(crate) struct LineCache {
     /// Spans its atoms' styles give (`AtomStyle`), over the whole text by
     /// start: each line takes those it holds before the highlighter's.
     atom_spans: RefCell<Option<Rc<LineSpans>>>,
+    /// Its pictures (`SpanStyle::inline_svg` names one by its place here,
+    /// from 1): an atom's, a highlighter's.
+    pictures: RefCell<Vec<Picture>>,
     /// The highlighter has given a span that shapes its line (a weight,
     /// italics): only then is a line asked for its spans as it is shaped,
     /// so one that only colours costs what it did. `restyled`: it just
@@ -611,6 +676,70 @@ impl LineCache {
     pub(crate) fn highlighted(&self) -> bool {
         self.highlighter.borrow().is_some() || self.atom_spans.borrow().is_some()
     }
+    /// The name a span gives `svg` at `extents` (`[width, height, descent]`
+    /// in EM) to show as a picture (`SpanStyle::inline_svg`): the same for
+    /// the same picture at the same size.
+    pub(crate) fn picture(
+        &self,
+        svg: std::sync::Arc<crate::svg::SvgData>,
+        extents: [f32; 3],
+    ) -> std::num::NonZeroU32 {
+        let mut pictures = self.pictures.borrow_mut();
+        let at = match pictures
+            .iter()
+            .position(|(known, size)| std::sync::Arc::ptr_eq(known, &svg) && *size == extents)
+        {
+            Some(at) => at,
+            None => {
+                pictures.push((svg, extents));
+                pictures.len() - 1
+            }
+        };
+        std::num::NonZeroU32::new(at as u32 + 1).expect("a picture's name")
+    }
+    /// Its pictures, as `SpanStyle::inline_svg` names them.
+    pub(crate) fn pictures(&self) -> std::cell::Ref<'_, Vec<Picture>> {
+        self.pictures.borrow()
+    }
+    /// Where the pictures on the lines between `top` and `bottom` show,
+    /// in the area's points, and what each is: every box a span's picture
+    /// holds (an atom's, a highlighter's).
+    pub(crate) fn pictures_between(
+        &self,
+        layout: &LinesLayout,
+        top: f32,
+        bottom: f32,
+    ) -> Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> {
+        if self.pictures.borrow().is_empty() {
+            return Vec::new();
+        }
+        let size = match self.shaping.borrow().as_ref() {
+            Some(shaping) => f32::from_bits(shaping.size),
+            None => return Vec::new(),
+        };
+        let mut shown = Vec::new();
+        for i in layout.lines_between(top, bottom) {
+            let Some(spans) = self.spans(layout, i) else {
+                continue;
+            };
+            for (at, x, y) in layout.line(i).inline_boxes() {
+                let Some(id) = spans
+                    .iter()
+                    .find(|(range, style)| style.inline_svg.is_some() && range.contains(&at))
+                    .and_then(|(_, style)| style.inline_svg)
+                else {
+                    continue;
+                };
+                let pictures = self.pictures.borrow();
+                let Some((svg, [w, h, _])) = picture(&pictures, id) else {
+                    continue;
+                };
+                let rect = layout.shift(i, Rect::new(x, y, w * size, h * size));
+                shown.push((rect, svg.clone()));
+            }
+        }
+        shown
+    }
     /// Its atoms' spans over the whole text, by start (none: no atom styled).
     pub(crate) fn set_atom_spans(&self, spans: Option<LineSpans>) {
         if let Some(spans) = &spans
@@ -731,7 +860,14 @@ impl LineCache {
             let shaping = shaping.as_ref()?;
             (f32::from_bits(shaping.size), shaping.font.clone())
         };
-        let rich = styled_line(text, &spans, crate::scene::Color(0, 0, 0, 255), size, &font)?;
+        let rich = styled_line(
+            text,
+            &spans,
+            crate::scene::Color(0, 0, 0, 255),
+            size,
+            &font,
+            &self.pictures.borrow(),
+        )?;
         let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, layout.wrap).into();
         let mut styled = self.styled.borrow_mut();
         evict(&mut styled);
@@ -1176,6 +1312,15 @@ impl TextLayout for LinesLayout {
 mod tests {
     use super::*;
 
+    /// A highlighted line's spans are this big and no bigger: its picture is a
+    /// four-byte name (`inline_svg`), its look beyond colours what a
+    /// mention's needs (`underline`, its colour and place, `lead`).
+    #[test]
+    fn span_style_stays_its_size() {
+        assert_eq!(std::mem::size_of::<Option<std::num::NonZeroU32>>(), 4);
+        assert_eq!(std::mem::size_of::<SpanStyle>(), 44);
+    }
+
     /// Spans that only colour give their runs as before styles: in order,
     /// an earlier span keeping what a later one overlaps, the rest the
     /// editor's colour.
@@ -1189,7 +1334,7 @@ mod tests {
         );
         let spans: LineSpans = vec![(1..4, red.into()), (2..6, blue.into())];
         let font = crate::text_layout::FontStyle::default();
-        let rich = styled_line("abcdefgh", &spans, ink, 14., &font).unwrap();
+        let rich = styled_line("abcdefgh", &spans, ink, 14., &font, &[]).unwrap();
         let runs: Vec<_> = rich
             .runs()
             .iter()

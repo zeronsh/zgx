@@ -143,3 +143,76 @@ fn a_tall_equation_makes_its_line_taller() {
         "the next line below it"
     );
 }
+
+#[test]
+fn a_press_on_a_pictures_right_half_lands_after_it() {
+    // Long source text: its bytes say nothing of where its box shows.
+    let text = r"see \frac{a+b}{c+d} now";
+    let (mut ui, editor) = field(text, (4, 19), [2., 1.5, 0.4]);
+    ui.input.focus(&ui.scene, Some(editor.node));
+    let shown: Vec<_> = editor
+        .range_boxes(4..19)
+        .into_iter()
+        .filter(|r| r.width > 0.)
+        .collect();
+    let press = |ui: &mut Ui, x: f32, y: f32| {
+        ui.dispatch(InputEvent::PointerDown {
+            x,
+            y,
+            button: zgx::input::PointerButton::Primary,
+        });
+        ui.dispatch(InputEvent::PointerUp {
+            x,
+            y,
+            button: zgx::input::PointerButton::Primary,
+        });
+        ui.prepare_frame();
+    };
+    let b = shown[0];
+    let y = b.y + b.height / 2.;
+    press(&mut ui, b.x + b.width * 0.75, y);
+    assert_eq!(editor.selection(), (19, 19), "its right half: after it");
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    press(&mut ui, b.x + b.width * 0.25, y);
+    assert_eq!(editor.selection(), (4, 4), "its left half: before it");
+}
+
+#[test]
+fn a_highlighters_picture_boxes_each_replacement_character() {
+    use std::{cell::Cell, rc::Rc};
+    use zgx::widgets::SpanStyle;
+    let text = "a \u{FFFC}\u{FFFC} b";
+    let mut ui = Ui::new(400., 300.);
+    let value = ui.signal(text.to_string());
+    let named: Rc<Cell<Option<std::num::NonZeroU32>>> = Rc::default();
+    let name = named.clone();
+    let root = ui.mount(
+        column().size(400., 300.).child(
+            text_area("Note", value)
+                .id("field")
+                .size(300., 200.)
+                .text_size(SIZE)
+                .line_height(20.)
+                .span_highlighter(move |line, open| {
+                    let spans = match (name.get(), line.find('\u{FFFC}')) {
+                        (Some(id), Some(at)) => {
+                            vec![(at..at + 6, SpanStyle::default().inline_svg(id))]
+                        }
+                        _ => Vec::new(),
+                    };
+                    (spans, open)
+                }),
+        ),
+    );
+    ui.prepare_frame();
+    let editor = ui.editor(root.find("field").unwrap()).unwrap();
+    named.set(Some(editor.inline_svg(picture(), [1., 1., 0.25])));
+    editor.rehighlight();
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    for range in [2..5, 5..8] {
+        let shown = editor.range_boxes(range.clone());
+        assert!((shown[0].width - SIZE).abs() < 0.5, "{range:?}: one EM: {shown:?}");
+    }
+    assert_eq!(pictures(&ui, &editor).len(), 2, "a picture in each");
+}
