@@ -129,7 +129,9 @@ fn a_mention_draws_its_colour_weight_underline_and_icon() {
     let line = run.underline.expect("underlined");
     assert_eq!(line.color, Some(LINE));
     assert_eq!(line.offset_px(), Some(2.));
-    assert!(line.is_auto(), "the font's thickness");
+    // One point here; the font's own thickness comes with the note editor's
+    // decorations (`Decoration::is_auto` on the Anara pin).
+    assert_eq!(line.thickness(), 1.);
     // The text before it is the field's own.
     let before = run_at(&ui, &editor, "ask");
     assert!(before.underline.is_none() && before.font.weight != 500);
