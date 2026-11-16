@@ -189,7 +189,14 @@ pub struct DomEvent<'a> {
     pub clicks: u8,
     pub key: &'a str,
     pub code: &'a str,
+    /// A drag from another app or the desktop (the browser's own drag and
+    /// drop), not one a listener started: over it carries text not yet
+    /// known; dropped, `code` is its text, a NUL, and its HTML (or none).
+    pub from_outside: bool,
 }
+
+/// The source of a drag from another app: no node of the document.
+const OUTSIDE: u32 = u32::MAX - 2;
 
 /// A node outside any scene (a DOM node), for an event's target that isn't
 /// the element itself.
@@ -355,9 +362,40 @@ struct Drag {
 /// (drop) at a destination, or 18 (start: `x`, `y` the source's top left),
 /// 15 (move) and 17 (end: `dx` 1 if accepted) at its source.
 fn drag_event(event: &DomEvent) -> Option<crate::input::DragEvent> {
-    use crate::input::{DragEvent, DragPhase};
+    use crate::input::{DragEvent, DragPhase, DraggedText};
     DRAG.with(|drag| {
         let mut drag = drag.borrow_mut();
+        // Text from another app (the browser's drag and drop): over, it
+        // carries text known only as it drops, as on the desktop; dropped,
+        // its text and HTML (`DraggedText::html`).
+        if event.from_outside {
+            let text = |plain: &str, html: Option<&str>| {
+                crate::actions::Action::new(DraggedText::with_html(
+                    plain,
+                    html.filter(|h| !h.is_empty()).map(str::to_owned),
+                ))
+            };
+            match (event.kind, drag.as_mut()) {
+                (16, Some(outside)) if outside.source == OUTSIDE => {
+                    let (plain, html) = match event.code.split_once('\0') {
+                        Some((plain, html)) => (plain, Some(html)),
+                        None => (event.code, None),
+                    };
+                    outside.payload = text(plain, html);
+                }
+                (_, Some(outside)) if outside.source == OUTSIDE => {}
+                (_, None) => {
+                    *drag = Some(Drag {
+                        payload: text("", None),
+                        source: OUTSIDE,
+                        pressed: (event.x, event.y),
+                        grab: (0., 0.),
+                    })
+                }
+                // One of the document's own drags is under way.
+                (_, Some(_)) => return None,
+            }
+        }
         let drag = drag.as_mut()?;
         let phase = match event.kind {
             13 => DragPhase::Over,
@@ -384,7 +422,7 @@ fn drag_event(event: &DomEvent) -> Option<crate::input::DragEvent> {
             grab_y: drag.grab.1,
             accepted: event.dx == 1.,
             outside: false,
-            visiting: false,
+            visiting: drag.source == OUTSIDE,
         })
     })
 }

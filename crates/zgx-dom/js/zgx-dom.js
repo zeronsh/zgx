@@ -69,6 +69,9 @@ export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   document.addEventListener("keydown", onGroupKey);
   document.addEventListener("focusin", onGroupFocus);
   document.addEventListener("keydown", onLinkKey);
+  document.addEventListener("dragover", onOutsideOver, true);
+  document.addEventListener("dragleave", onOutsideLeave, true);
+  document.addEventListener("drop", onOutsideDrop, true);
 }
 
 // A link with no href (`role=link`): Enter presses it, as it does a link.
@@ -999,6 +1002,74 @@ function dragUp(event) {
   };
   document.addEventListener("click", eat, { capture: true, once: true });
   setTimeout(() => document.removeEventListener("click", eat, { capture: true }), 0);
+}
+
+// Text dragged in from another app or the desktop (the browser's own drag
+// and drop): what's under it, from the innermost element with listeners out,
+// hears Over as an in-app drag's destination does (its text not yet known),
+// and the one that takes it (`accept_drag`) hears Drop with its text and
+// HTML. Elements that take none leave the browser's own drop alone (an input
+// takes text itself). Skipped while an in-app drag runs: it has the pointer.
+const OUTSIDE = 1 << 25;
+let outside = null;
+
+function carriesText(event) {
+  const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
+  return types.includes("text/plain") && !types.includes("Files");
+}
+
+function onOutsideOver(event) {
+  if (drag || !carriesText(event)) return;
+  if (!outside) outside = { over: null };
+  const x = event.clientX, y = event.clientY;
+  const path = event.composedPath();
+  let taken = null;
+  for (const n of path) {
+    if (n === document) break;
+    if (n.$$e === undefined) continue;
+    const self = n === path[0];
+    const outcome = elementEvent(n.$$e, 13 | ((self ? 1 : 2) << 8) | OUTSIDE, self ? 1 : 0, x, y, 0, 0, undefined);
+    if (outcome & 128) {
+      taken = n;
+      break;
+    }
+    if (outcome & 2) break;
+  }
+  if (outside.over && outside.over !== taken && outside.over.$$e !== undefined)
+    elementEvent(outside.over.$$e, 14 | (1 << 8) | OUTSIDE, 1, x, y, 0, 0, undefined);
+  outside.over = taken;
+  if (taken) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+}
+
+function endOutside(x, y) {
+  if (outside && outside.over && outside.over.$$e !== undefined)
+    elementEvent(outside.over.$$e, 14 | (1 << 8) | OUTSIDE, 1, x, y, 0, 0, undefined);
+  outside = null;
+  // No element's handler: the drag in the document ends.
+  elementEvent(-1 >>> 0, 17 | OUTSIDE, 0, x, y, 0, 0, undefined);
+}
+
+function onOutsideLeave(event) {
+  if (!outside) return;
+  const x = event.clientX, y = event.clientY;
+  // Left the window, not one element for another.
+  if (x <= 0 || y <= 0 || x >= innerWidth || y >= innerHeight) endOutside(x, y);
+}
+
+function onOutsideDrop(event) {
+  if (drag || !outside) return;
+  const over = outside.over;
+  const x = event.clientX, y = event.clientY;
+  if (over && over.$$e !== undefined) {
+    event.preventDefault();
+    const data = event.dataTransfer;
+    const text = "\n" + data.getData("text/plain") + "\u0000" + data.getData("text/html");
+    elementEvent(over.$$e, 16 | (1 << 8) | OUTSIDE, 1, x, y, 0, 0, text);
+  }
+  endOutside(x, y);
 }
 
 // Keymaps (`View::keymap`): a key down goes to the keymaps from the focused

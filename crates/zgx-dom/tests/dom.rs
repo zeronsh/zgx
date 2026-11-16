@@ -895,3 +895,62 @@ fn rows_observing_their_visibility_mount_whole() {
     mounted.unmount();
     host.remove();
 }
+
+/// Text dragged in from another app (the browser's own drag and drop) drops
+/// on a view that takes `DraggedText`, as on the desktop: its text, and its
+/// HTML where the source offered `text/html` (`DraggedText::html`); over it,
+/// the browser hears it taken (its default prevented, a copy).
+#[wasm_bindgen_test]
+fn text_dragged_in_from_another_app_drops_with_its_html() {
+    use std::{cell::RefCell, rc::Rc};
+    use zgx::{compose::div, input::DraggedText};
+    let runtime = Runtime::new();
+    let host = host();
+    // Each drop's text and HTML.
+    type Dropped = Vec<(String, Option<String>)>;
+    let got: Rc<RefCell<Dropped>> = Rc::default();
+    let into = got.clone();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        div()
+            .size(200., 100.)
+            .on_drop(move |text: &DraggedText, _| {
+                into.borrow_mut()
+                    .push((text.text().to_owned(), text.html().map(str::to_owned)));
+            }),
+    );
+    zgx_dom::flush();
+    let target = first(&host);
+    let r = target.get_bounding_client_rect();
+    let (x, y) = ((r.left() + 100.) as i32, (r.top() + 50.) as i32);
+    let drag = |kind: &str, html: Option<&str>| {
+        let data = web_sys::DataTransfer::new().unwrap();
+        data.set_data("text/plain", "bold").unwrap();
+        if let Some(html) = html {
+            data.set_data("text/html", html).unwrap();
+        }
+        let init = web_sys::DragEventInit::new();
+        init.set_bubbles(true);
+        init.set_cancelable(true);
+        init.set_client_x(x);
+        init.set_client_y(y);
+        init.set_data_transfer(Some(&data));
+        let event = web_sys::DragEvent::new_with_event_init_dict(kind, &init).unwrap();
+        // Whether nothing prevented its default.
+        target.dispatch_event(&event).unwrap()
+    };
+    assert!(!drag("dragover", Some("<b>bold</b>")), "taken over it");
+    assert!(!drag("drop", Some("<b>bold</b>")));
+    assert!(!drag("dragover", None));
+    assert!(!drag("drop", None));
+    assert_eq!(
+        *got.borrow(),
+        [
+            ("bold".to_owned(), Some("<b>bold</b>".to_owned())),
+            ("bold".to_owned(), None)
+        ]
+    );
+    mounted.unmount();
+    host.remove();
+}
