@@ -562,6 +562,9 @@ pub(crate) struct Rare {
     /// through each builder call.
     pub(crate) context_menu_style: Option<Box<Styles>>,
     pub(crate) context_menu_below: Option<bool>,
+    /// Whether its context menu shows (`View::context_menu_open`): written
+    /// as it opens and closes.
+    pub(crate) context_menu_open: Option<crate::reactive::Signal<bool>>,
     /// Whether the pointer stops at the view (`pointer_events`), followed.
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
     scrollbar: Option<bool>,
@@ -699,6 +702,9 @@ impl Rare {
         if self.context_menu.is_some() {
             inner.context_menu = self.context_menu;
             inner.context_menu_spans = self.context_menu_spans;
+        }
+        if self.context_menu_open.is_some() {
+            inner.context_menu_open = self.context_menu_open;
         }
         if self.context_menu_style.is_some() {
             inner.context_menu_style = self.context_menu_style;
@@ -7132,7 +7138,16 @@ fn open_element(
             .as_deref()
             .and_then(|r| r.context_menu_below)
             .unwrap_or(false);
-        crate::compose_context_menu::mount(ui, root, build, style, below, environment.clone());
+        let open = rare.as_deref_mut().and_then(|r| r.context_menu_open.take());
+        crate::compose_context_menu::mount(
+            ui,
+            root,
+            build,
+            style,
+            below,
+            open,
+            environment.clone(),
+        );
     }
     for callback in view.events.into_iter().rev() {
         let binding = ui.input.listen_first(root, callback);

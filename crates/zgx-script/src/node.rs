@@ -851,6 +851,10 @@ impl Node {
             _ => false,
         }) || self.kind.library_needs_context()
             || self.props.iter().any(|(_, s)| matches!(s, Source::Anim(_)))
+            // `context_menu_open`: its state bridged in the component.
+            || (self.events.as_ref())
+                .and_then(|events| events.rare.as_ref())
+                .is_some_and(|rare| rare.context_menu_open.is_some())
             // An icon's tint may be a theme token: it reads the scope.
             || matches!(self.kind, Kind::Svg { .. })
                 && self.props.iter().any(|(p, _)| *p == Prop::Tint)
@@ -1026,6 +1030,9 @@ pub(crate) struct RareEvents {
     /// of it puts on the clipboard, `{ text, html }`, or nil for the
     /// selection's own (`View::on_selection_copy`).
     pub copy: Option<Function>,
+    /// `context_menu_open = state`: kept saying whether its context menu
+    /// shows; written false, the menu closes.
+    pub context_menu_open: Option<Signal<Value>>,
     /// `fn(over)`: files dragged from outside the window come over it
     /// (`true`), then leave it, are dropped or the drag ends (`false`).
     pub file_hover: Option<Handler>,
@@ -4874,6 +4881,11 @@ fn fill_from(
             }
             "disabled" if !matches!(value, mlua::Value::Table(_)) => {
                 node.disabled = Some(source(lua, Ty::Bool, "disabled", value)?);
+            }
+            "context_menu_open" => {
+                let open = expect_state(&value, "`context_menu_open`")?;
+                let events = node.events.get_or_insert_default();
+                events.rare.get_or_insert_default().context_menu_open = Some(open);
             }
             "context_menu_below" => {
                 let mlua::Value::Boolean(below) = value else {

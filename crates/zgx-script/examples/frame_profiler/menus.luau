@@ -176,8 +176,11 @@ return function(S: Store, K: typeof(Kit), D: typeof(Data))
 				el:focus()
 			end
 		end
-		-- (The props table is large for the checker to match; it was checked above.)
-		return (ui.column :: (any) -> Node)(props)
+		-- Handed on unchecked: its callers' tables are checked as
+		-- `PanelProps` where they are written, and a merged table of every
+		-- container option checked against them whole again is past what
+		-- luau-lsp can check (any option more tips it over).
+		return ui.column(props :: any)
 	end
 	local function highlight(state: State<number>, offsets: { number }, h: number, inset: number?): Node
 		return ui.div {

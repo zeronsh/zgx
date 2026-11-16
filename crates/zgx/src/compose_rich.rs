@@ -731,6 +731,7 @@ fn mount_link_menu(
         }),
         None,
         false,
+        None,
         environment,
     );
 }

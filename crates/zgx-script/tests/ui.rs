@@ -6462,3 +6462,47 @@ fn a_span_takes_a_border_and_a_least_width() {
     let boxed = width(", border = { width = 1, color = \"#ff0000\" }, min_w = 20");
     assert!(boxed >= 0., "{boxed}");
 }
+
+/// `context_menu_open = state` on a node with a context menu: true as its
+/// menu opens, false as Escape closes it.
+#[test]
+fn context_menu_open_says_whether_the_menu_shows() {
+    let mut h = Harness::inline(
+        r##"local open = ui.state("menu_open", false)
+        return ui.column { w = 400, h = 300,
+            ui.div { id = "page", w = 400, h = 300, focusable = true,
+                context_menu_open = open,
+                context_menu = function()
+                    return { ui.menu_item { "Copy", id = "copy", on_click = function() end } }
+                end,
+            },
+        }"##,
+    );
+    h.settle();
+    h.ui.prepare_frame();
+    let read = |h: &Harness| {
+        h.host
+            .states()
+            .into_iter()
+            .find(|(name, _)| name == "menu_open")
+            .map(|(_, v)| v.truthy())
+    };
+    assert_eq!(read(&h), Some(false));
+    let button = zgx::input::PointerButton::Secondary;
+    h.ui.dispatch(zgx::input::InputEvent::PointerDown {
+        x: 100.,
+        y: 80.,
+        button,
+    });
+    h.ui.dispatch(zgx::input::InputEvent::PointerUp {
+        x: 100.,
+        y: 80.,
+        button,
+    });
+    h.settle();
+    assert!(h.find("copy").is_some(), "the menu shows");
+    assert_eq!(read(&h), Some(true), "true as it opens");
+    h.key(zgx::input::Key::Escape);
+    assert_eq!(read(&h), Some(false), "false as Escape closes it");
+    assert_eq!(h.error(), None);
+}
