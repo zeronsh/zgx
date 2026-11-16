@@ -33,6 +33,15 @@ use zgx::{
 };
 use zgx_gpu::{GpuContext, GpuRenderer};
 
+/// Native menu items chosen and not yet carried out, in order (macOS): AppKit
+/// calls muda's handler inside the dispatch of the key that chose one, and
+/// the event the handler posts to the loop (`Event::NativeMenuAction`) can
+/// arrive after input AppKit had queued behind that key. Every window event
+/// first carries these out (`WindowManager::window_event`).
+#[cfg(target_os = "macos")]
+static NATIVE_MENU_CHOSEN: std::sync::Mutex<std::collections::VecDeque<crate::MenuAction>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
 /// How a window is made: its title, size, chrome and placement.
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
@@ -180,8 +189,9 @@ enum Event {
     /// The desktop's appearance settings changed (`linux_appearance`).
     #[cfg(target_os = "linux")]
     AppearanceChanged,
+    /// Native menu items were chosen (`NATIVE_MENU_CHOSEN`): carry them out.
     #[cfg(target_os = "macos")]
-    NativeMenuAction(crate::MenuAction),
+    NativeMenuAction,
     /// AppKit said a window goes into or out of full screen, or is there
     /// (`window_chrome::watch_full_screen`).
     #[cfg(target_os = "macos")]
@@ -1155,7 +1165,10 @@ impl Application {
         {
             let wake = proxy.clone();
             muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
-                let _ = wake.send_event(Event::NativeMenuAction(crate::MenuAction(event.id.0)));
+                if let Ok(mut chosen) = NATIVE_MENU_CHOSEN.lock() {
+                    chosen.push_back(crate::MenuAction(event.id.0));
+                }
+                let _ = wake.send_event(Event::NativeMenuAction);
             }));
             // With none of the app's own, still the application and Window
             // menus every Mac app has: checked now, made once the first frame
@@ -7905,6 +7918,53 @@ impl WindowManager {
             crate::x11_startup::complete(&window, &token);
         }
     }
+    /// Carry out the native menu items chosen so far (`NATIVE_MENU_CHOSEN`),
+    /// in the order they were chosen, each in the key window.
+    #[cfg(target_os = "macos")]
+    fn native_menu_chosen(&mut self) {
+        loop {
+            let next = NATIVE_MENU_CHOSEN
+                .lock()
+                .ok()
+                .and_then(|mut chosen| chosen.pop_front());
+            let Some(action) = next else {
+                return;
+            };
+            self.native_menu_action(action);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    fn native_menu_action(&mut self, action: crate::MenuAction) {
+        // The key window: winit reports a window unfocused while a
+        // native view in it (a web page, a terminal) has first
+        // responder, so ask AppKit too.
+        let focused = self
+            .hosts
+            .iter()
+            .find(|(_, host)| host.native_focused && !host.context.window.is_closed())
+            .or_else(|| {
+                self.hosts.iter().find(|(_, host)| {
+                    !host.context.window.is_closed()
+                        && host.window.as_ref().is_some_and(|w| is_key_window(w))
+                })
+            })
+            .map(|(token, _)| *token)
+            // No key window (the app is in the background, a menu
+            // chosen through accessibility): its only window.
+            .or_else(|| {
+                let mut open = self
+                    .hosts
+                    .iter()
+                    .filter(|(_, host)| !host.context.window.is_closed());
+                match (open.next(), open.next()) {
+                    (Some((token, _)), None) => Some(*token),
+                    _ => None,
+                }
+            });
+        if let Some(token) = focused {
+            self.menu_action(token, action);
+        }
+    }
     fn menu_action(&mut self, token: u64, action: crate::MenuAction) {
         // The window's zoom items, which zgx puts in the View menu.
         if let Some(zoom) = crate::app_menu::zoom_action(&action) {
@@ -8347,37 +8407,7 @@ impl WindowManager {
                 }
             }
             #[cfg(target_os = "macos")]
-            Event::NativeMenuAction(action) => {
-                // The key window: winit reports a window unfocused while a
-                // native view in it (a web page, a terminal) has first
-                // responder, so ask AppKit too.
-                let focused = self
-                    .hosts
-                    .iter()
-                    .find(|(_, host)| host.native_focused && !host.context.window.is_closed())
-                    .or_else(|| {
-                        self.hosts.iter().find(|(_, host)| {
-                            !host.context.window.is_closed()
-                                && host.window.as_ref().is_some_and(|w| is_key_window(w))
-                        })
-                    })
-                    .map(|(token, _)| *token)
-                    // No key window (the app is in the background, a menu
-                    // chosen through accessibility): its only window.
-                    .or_else(|| {
-                        let mut open = self
-                            .hosts
-                            .iter()
-                            .filter(|(_, host)| !host.context.window.is_closed());
-                        match (open.next(), open.next()) {
-                            (Some((token, _)), None) => Some(*token),
-                            _ => None,
-                        }
-                    });
-                if let Some(token) = focused {
-                    self.menu_action(token, action);
-                }
-            }
+            Event::NativeMenuAction => self.native_menu_chosen(),
             Event::WindowCommand(token, command) => {
                 if let Some(host) = self.hosts.get_mut(&token) {
                     if !host.context.window.is_closed() {
@@ -8854,6 +8884,17 @@ impl ApplicationHandler<Event> for WindowManager {
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // A menu item chosen before this event (its shortcut, a key AppKit
+        // hands the menu first) acts before it: the event the item's handler
+        // posts can come after input queued behind its key (a key typed just
+        // after ⌘N), which would otherwise reach what had focus before.
+        #[cfg(target_os = "macos")]
+        if NATIVE_MENU_CHOSEN
+            .lock()
+            .is_ok_and(|chosen| !chosen.is_empty())
+        {
+            self.native_menu_chosen();
+        }
         // Motion before the press or key that came after it.
         self.flush_motion(event_loop);
         // Pointer moves come as often as the mouse reports them (Wayland
