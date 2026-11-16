@@ -860,6 +860,7 @@ impl Semantics {
     /// each one's range in its text and its node, in the text's order. It
     /// looks at every node: for devtools and tests (what `heard` takes),
     /// not for a frame.
+    #[doc(hidden)]
     pub fn inline_controls(&self, paragraph: NodeId) -> Vec<(std::ops::Range<usize>, NodeId)> {
         let mut controls: Vec<_> = self
             .iter()
@@ -894,6 +895,7 @@ impl Semantics {
 /// A part of what a reader hears of a paragraph with controls inline in its
 /// text (`heard`): a stretch of its text, or a control, read where it stands
 /// by its own name.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard<T> {
     /// A stretch of the paragraph's own text.
@@ -907,6 +909,7 @@ pub enum Heard<T> {
 /// control in its place, its own text left out. What the desktop's
 /// accessibility tree says (`heard_value`, its runs and children) and what
 /// `zgx inspect node` prints, from one place so the two can't drift.
+#[doc(hidden)]
 pub fn heard<T: Clone>(value: &str, controls: &[(std::ops::Range<usize>, T)]) -> Vec<Heard<T>> {
     let mut parts = Vec::with_capacity(controls.len() * 2 + 1);
     let mut from = 0;
@@ -926,6 +929,7 @@ pub fn heard<T: Clone>(value: &str, controls: &[(std::ops::Range<usize>, T)]) ->
 
 /// A paragraph's value as a reader hears it with `controls` inline in it:
 /// its text without theirs (`heard`'s text, joined).
+#[doc(hidden)]
 pub fn heard_value<T: Clone>(value: &str, controls: &[(std::ops::Range<usize>, T)]) -> String {
     heard(value, controls)
         .into_iter()
