@@ -16,6 +16,19 @@ description = "Run a zgx Luau script as a desktop app, with hot reload: `zgx-run
 # `--no-default-features` keeps the system's.
 default = ["mimalloc", "inspect", "fetch", "socket", "scene3d", "i18n", "gltf", "webkitgtk", "terminal"]
 mimalloc = ["zgx-desktop/mimalloc"]
+# Sound: the `audio` global and `sound =` on controls (zgx-script's
+# `audio`), played on the system's default output (zgx-desktop's `audio`),
+# opened at the first sound: WAV, voices and buses, the core a UI app's
+# clicks need. Off by default for now: without it, `audio` is nil.
+audio = ["zgx-desktop/audio", "zgx-script/audio"]
+# Effects on buses (`bus:add_effect`, `bus:duck`), Ogg Vorbis, MP3, Opus and
+# streamed music (`audio.music`), each on its own; `audio-all` is every part.
+audio-effects = ["audio", "zgx-script/audio-effects"]
+audio-vorbis = ["audio", "zgx-script/audio-vorbis"]
+audio-mp3 = ["audio", "zgx-script/audio-mp3"]
+audio-opus = ["audio", "zgx-script/audio-opus"]
+audio-streams = ["audio", "zgx-script/audio-streams"]
+audio-all = ["audio-effects", "audio-vorbis", "audio-mp3", "audio-opus", "audio-streams"]
 # Devtools for agents (`zgx run --inspect`, `zgx inspect`): a user-only
 # local socket a running app answers on, when asked. A build for shipping
 # leaves it out (`--no-default-features --features mimalloc`): then nothing

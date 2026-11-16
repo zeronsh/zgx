@@ -56,10 +56,17 @@ webkitgtk = []
 # 9%), for up to 3 MB more resident memory. A program has one allocator:
 # leave this off if yours declares a `#[global_allocator]`.
 mimalloc = ["dep:mimalloc"]
+# Sound (zgx-audio on the system's output): one engine for the app, made
+# when first asked for (`WindowFactory::audio`), voices ending waking the
+# event loop, and the `ui` bus following the user's interface-sound setting.
+# The default output opens at the first sound and closes after the quiet
+# hold. Off by default: an app that plays nothing carries none of it.
+audio = ["dep:zgx-audio", "zgx-audio/device"]
 
 [dependencies]
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 zgx-terminal = { path = "../zgx-terminal", version = "0.1.10", optional = true }
+zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 winit = "0.30.13"

@@ -111,7 +111,8 @@ fn app(base: &str) -> TestApp {
     let script = format!(
         r#"
 local base = "{base}"
-local UPLOAD = "{upload}"
+-- A long string: a Windows path's backslashes as they are, not escapes.
+local UPLOAD = [[{upload}]]
 local shown = ui.state("shown", "")
 local chunks = ui.state("chunks", "")
 local status = ui.state("status", "")

@@ -341,6 +341,12 @@ jobs:
       # opens a sound device, and `device` (cpal) needs ALSA headers.
       - run: cargo test -p zgx-audio --locked
       - run: cargo test -p zgx-audio --features vorbis,mp3,opus,aac,hrtf --locked
+      # zgx-desktop's `audio` (the default output opened at the first
+      # sound) and zgx-run's: built and linted, and their tests, none of
+      # which plays a sound or opens a device.
+      - run: cargo clippy -p zgx-desktop -p zgx-run --features zgx-desktop/audio,zgx-run/audio-all --all-targets --locked -- -D warnings
+      - run: "cargo test -p zgx-desktop --features audio --lib --locked -- audio::"
+      - run: cargo test -p zgx-run --features audio-all --locked
       # zgx-dom: views as browser DOM, on wasm32. Its lints (zgx's `dom`
       # plumbing with them), the table benchmark built, and its tests in
       # headless Chrome: the image's Chrome and chromedriver, and the
@@ -746,6 +752,12 @@ jobs:
       # device host, which builds CoreAudio's but opens no output.
       - run: cargo test -p zgx-audio --locked
       - run: cargo test -p zgx-audio --features device,vorbis,mp3,opus,aac,hrtf --locked
+      # zgx-desktop's `audio` (the default output opened at the first
+      # sound) and zgx-run's: built and linted, and their tests, none of
+      # which plays a sound or opens a device.
+      - run: cargo clippy -p zgx-desktop -p zgx-run --features zgx-desktop/audio,zgx-run/audio-all --all-targets --locked -- -D warnings
+      - run: "cargo test -p zgx-desktop --features audio --lib --locked -- audio::"
+      - run: cargo test -p zgx-run --features audio-all --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # HTML and its text through the system pasteboard (ignored locally:
@@ -848,6 +860,12 @@ jobs:
       - run: cargo test -p zgx-fx --locked
       - run: cargo test -p zgx-audio --locked
       - run: cargo test -p zgx-audio --features device,vorbis,mp3,opus,aac,hrtf --locked
+      # zgx-desktop's `audio` (the default output opened at the first
+      # sound) and zgx-run's: built and linted, and their tests, none of
+      # which plays a sound or opens a device.
+      - run: cargo clippy -p zgx-desktop -p zgx-run --features zgx-desktop/audio,zgx-run/audio-all --all-targets --locked -- -D warnings
+      - run: "cargo test -p zgx-desktop --features audio --lib --locked -- audio::"
+      - run: cargo test -p zgx-run --features audio-all --locked
       # Menus, popovers and tooltips in Windows' shapes there (WinUI's).
       - run: "cargo test -p zgx --test overlays --locked -- composition_menu::a_menu_takes_its_platforms_shape"
       # Focus drawn as Windows' focus visual there (outside the control,
