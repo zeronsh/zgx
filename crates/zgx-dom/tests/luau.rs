@@ -131,3 +131,69 @@ async fn luau_timers_and_promises_run_in_the_browser() {
     sleep(40).await;
     assert!(!zgx_dom::timer_armed(), "nothing waits once it's gone");
 }
+
+#[wasm_bindgen_test]
+async fn luau_tweens_springs_and_anime_run_in_the_browser() {
+    // `ui.tween`, `ui.spring_to` and `anime.animate` tick on the page's
+    // frame clock: none of them moved in the browser without one.
+    let runtime = Runtime::new();
+    let script = ScriptHost::inline(
+        &runtime,
+        "anime.luau",
+        r#"
+        local to = ui.state("to", 10)
+        local at = ui.state("at", 0)
+        local n = ui.state("n", 0)
+        local said = ui.state("said", "")
+        return ui.column {
+            ui.div { id = "box", h = 10, w = ui.tween(to, { duration = 80 }) },
+            ui.text { "at {at}" },
+            ui.text { "n {n}" },
+            ui.text { "said {said}" },
+            ui.button { "Go", on_click = function()
+                to:set(120)
+                ui.spring_to(at, 100, { stiffness = 600, damping = 48.99, done = function()
+                    said:set(said:get() .. "spring ")
+                end })
+                anime.animate(n, {
+                    value = 50,
+                    duration = 80,
+                    ease = "linear",
+                    modifier = anime.utils.round(0),
+                    onComplete = function()
+                        said:set(said:get() .. "anime ")
+                    end,
+                })
+            end },
+        }
+        "#,
+    );
+    script.reload().expect("the script loads");
+    let host = host();
+    let mounted = zgx_dom::mount(&runtime, &host, script.view());
+    sleep(50).await;
+    assert!(!zgx_dom::frame_asked(), "at rest: no frame asked");
+    let button: web_sys::HtmlElement = host
+        .query_selector("button")
+        .unwrap()
+        .expect("a button")
+        .dyn_into()
+        .unwrap();
+    button.click();
+    sleep(800).await;
+    zgx_dom::flush();
+    let text = host.text_content().unwrap_or_default();
+    assert!(text.contains("spring "), "the spring settled: {text}");
+    assert!(text.contains("anime "), "anime.animate finished: {text}");
+    assert!(text.contains("n 50"), "{text}");
+    assert!(text.contains("at 100"), "{text}");
+    let width = host
+        .query_selector("[data-id=box]")
+        .unwrap()
+        .map(|el| el.get_bounding_client_rect().width());
+    assert_eq!(width, Some(120.), "the tween reached its target");
+    sleep(50).await;
+    assert!(!zgx_dom::frame_asked(), "all settled: no frame asked");
+    assert!(!zgx_dom::timer_armed());
+    mounted.unmount();
+}

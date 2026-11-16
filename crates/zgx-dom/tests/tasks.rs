@@ -120,3 +120,41 @@ async fn yield_once() {
     })
     .await;
 }
+
+#[wasm_bindgen_test]
+async fn animation_frames_tick_while_awaited_and_stop_at_rest() {
+    let runtime = Runtime::new();
+    let ticks = runtime.signal(Vec::<(u64, f64)>::new());
+    let (shown, write) = (ticks.clone(), ticks.clone());
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        component(move |cx| {
+            // `cx.frames()` has a clock: it panicked without one before.
+            let frames = cx.frames();
+            cx.tasks().spawn(async move {
+                let start = frames.next().await.time;
+                for _ in 0..3 {
+                    let frame = frames.next().await;
+                    let at = (frame.time - start).as_secs_f64();
+                    write.update(|ticks| ticks.push((frame.index, at)));
+                }
+            });
+            text_signal(move || format!("{} frames", shown.get().len()))
+        }),
+    );
+    sleep(200).await;
+    let ticks = ticks.get();
+    assert_eq!(ticks.len(), 3, "three refreshes came: {ticks:?}");
+    assert!(
+        ticks.windows(2).all(|w| w[1].0 > w[0].0 && w[1].1 > w[0].1),
+        "each later than the last: {ticks:?}"
+    );
+    assert_eq!(host.text_content().unwrap_or_default(), "3 frames");
+    assert!(
+        !zgx_dom::frame_asked(),
+        "nothing awaits a frame: none asked"
+    );
+    mounted.unmount();
+}
