@@ -16528,7 +16528,8 @@ mod tests {
     /// only where it must: say so, measured.
     #[test]
     fn a_node_is_no_larger() {
-        assert_eq!(size_of::<Node>(), 720);
+        // 720 on main; the pin's own fields make it 736.
+        assert_eq!(size_of::<Node>(), 736);
     }
 
     #[test]
