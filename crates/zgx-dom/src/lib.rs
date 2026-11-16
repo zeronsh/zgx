@@ -28,9 +28,12 @@ mod mount;
 mod ops;
 mod platform;
 mod sheet;
+mod tasks;
 mod template;
 
 pub use mount::{Mounted, flush, live_nodes, mount, mount_in_body};
+#[doc(hidden)]
+pub use tasks::timer_armed;
 
 /// zgx-script, whose Luau apps zgx-dom mounts (`luau`): a host's `view()`
 /// mounts as any view does.
