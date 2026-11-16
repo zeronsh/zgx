@@ -104,15 +104,19 @@ fn text_a_fraction_short_of_its_cap_still_fills_it() {
     // chat bubble at 70% came out 401.549 where Chrome's is 401.8).
     let line = unwrapped("AAAA");
     assert_eq!(line, unwrapped("BBBB"), "the two lines are as wide");
-    for short in [0.1, 0.25, 0.45] {
-        let cap = line + short + 32.;
-        let parent = cap / 0.7;
-        let (bubble, text) = bubble(parent, "AAAA BBBB", None);
-        assert!(text.height > 22.5, "{short}: it wraps: {text:?}");
-        assert!(
-            (bubble.width - parent * 0.7).abs() <= 0.01,
-            "{short}: the cap {}, the bubble {bubble:?}",
-            parent * 0.7
-        );
+    // With no width, or `w = "fit-content"` (CSS's min(max-content, room)):
+    // the same cap, to a hundredth.
+    for width in [None, Some("fit-content")] {
+        for short in [0.1, 0.25, 0.45] {
+            let cap = line + short + 32.;
+            let parent = cap / 0.7;
+            let (bubble, text) = bubble(parent, "AAAA BBBB", width);
+            assert!(text.height > 22.5, "{width:?} {short}: it wraps: {text:?}");
+            assert!(
+                (bubble.width - parent * 0.7).abs() <= 0.01,
+                "{width:?} {short}: the cap {}, the bubble {bubble:?}",
+                parent * 0.7
+            );
+        }
     }
 }
