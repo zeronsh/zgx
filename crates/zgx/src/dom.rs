@@ -75,6 +75,10 @@ impl Scope {
     }
 }
 
+/// The DOM node with the document's focus, its tag, and a field's selection
+/// (`Hooks::focus_snapshot`).
+pub type FocusAt = (u32, u32, Option<(usize, usize)>);
+
 /// What a DOM host measures of a node it mounted, for `NodeHandle`'s
 /// observers (ResizeObserver, IntersectionObserver).
 pub trait Hooks {
@@ -87,6 +91,20 @@ pub trait Hooks {
     /// scroll view moved.
     fn scroll_into_view(&self, how: &crate::scroll_reveal::ScrollIntoView) -> bool {
         let _ = how;
+        false
+    }
+    /// `NodeHandle::focus_snapshot`, of the document: the DOM node with
+    /// focus, a tag telling that element from a later one in its slot, and
+    /// a field's selection as `(anchor, focus)` in UTF-8 bytes of its value.
+    fn focus_snapshot(&self) -> Option<FocusAt> {
+        None
+    }
+    /// `NodeHandle::restore_focus`: focus on `node` again, its selection
+    /// set, nothing scrolled; false, and nothing changed, if it's gone (its
+    /// slot holds no element tagged `tag`) or its value no longer holds the
+    /// offsets.
+    fn restore_focus(&self, node: u32, tag: u32, selection: Option<(usize, usize)>) -> bool {
+        let _ = (node, tag, selection);
         false
     }
 }

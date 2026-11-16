@@ -9103,12 +9103,26 @@ impl NodeHandle {
     /// selection (`Ui::focus_snapshot`).
     #[doc(hidden)]
     pub fn focus_snapshot(&self) -> Option<crate::widgets::FocusSnapshot> {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            let (node, tag, selection) = dom.focus_snapshot()?;
+            return Some(crate::widgets::FocusSnapshot {
+                node: NodeId::outside_tagged(node, tag),
+                selection,
+            });
+        }
         self.ui.upgrade()?.focus_snapshot()
     }
     /// Focus back where `snapshot` found it in its window
     /// (`Ui::restore_focus`).
     #[doc(hidden)]
     pub fn restore_focus(&self, snapshot: &crate::widgets::FocusSnapshot) -> bool {
+        #[cfg(feature = "dom")]
+        if let Some(dom) = &self.dom {
+            // A snapshot of the document's names a DOM node and its tag.
+            let node = snapshot.node;
+            return dom.restore_focus(node.number(), node.outside_tag(), snapshot.selection);
+        }
         self.ui
             .upgrade()
             .is_some_and(|mut ui| ui.restore_focus(snapshot))

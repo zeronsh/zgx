@@ -872,6 +872,28 @@ impl __dom::Hooks for NodeHooks {
             state.retained.push(resource);
         }
     }
+    fn focus_snapshot(&self) -> Option<__dom::FocusAt> {
+        if !self.state.borrow().alive {
+            return None;
+        }
+        let found = js::zgx_focus_snapshot()?;
+        match *found {
+            [node, tag] => Some((node as u32, tag as u32, None)),
+            [node, tag, anchor, focus] => Some((
+                node as u32,
+                tag as u32,
+                Some((anchor as usize, focus as usize)),
+            )),
+            _ => None,
+        }
+    }
+    fn restore_focus(&self, node: u32, tag: u32, selection: Option<(usize, usize)>) -> bool {
+        if !self.state.borrow().alive {
+            return false;
+        }
+        let (anchor, focus) = selection.map_or((-1., -1.), |(a, f)| (a as f64, f as f64));
+        js::zgx_restore_focus(node, tag, anchor, focus)
+    }
     fn scroll_into_view(&self, how: &zgx::compose::ScrollIntoView) -> bool {
         use zgx::compose::RowAlign;
         if !self.state.borrow().alive {

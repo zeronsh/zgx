@@ -197,3 +197,59 @@ async fn luau_tweens_springs_and_anime_run_in_the_browser() {
     assert!(!zgx_dom::timer_armed());
     mounted.unmount();
 }
+
+#[wasm_bindgen_test]
+fn luau_puts_focus_and_a_selection_back() {
+    // `ui.focus_snapshot()` and `:restore()` read and set the document's
+    // focus: a button's click (from script, as a tour's) moves none.
+    let runtime = Runtime::new();
+    let script = ScriptHost::inline(
+        &runtime,
+        "focus.luau",
+        r#"
+        local log = ui.state("log", "")
+        local text = ui.state("text", "hello wide world")
+        local snap = nil
+        return ui.column {
+            ui.input { label = "Field", value = text },
+            ui.button { id = "take", on_click = function()
+                snap = ui.focus_snapshot()
+                log:set(if snap then "taken" else "nil")
+            end, "Take" },
+            ui.button { id = "restore", on_click = function()
+                log:set(`{snap:restore()}`)
+            end, "Restore" },
+            ui.text { "log {log}" },
+        }
+        "#,
+    );
+    script.reload().expect("the script loads");
+    let host = host();
+    let _mounted = zgx_dom::mount(&runtime, &host, script.view());
+    let text = || host.text_content().unwrap_or_default();
+    let buttons = host.query_selector_all("button").unwrap();
+    let button = |i| -> web_sys::HtmlElement { buttons.item(i).unwrap().dyn_into().unwrap() };
+    let input: web_sys::HtmlInputElement = host
+        .query_selector("input")
+        .unwrap()
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    input.focus().unwrap();
+    input.set_selection_range(6, 10).unwrap();
+    button(0).click();
+    zgx_dom::flush();
+    assert!(text().contains("log taken"), "{}", text());
+    button(1).focus().unwrap();
+    input.set_selection_range(0, 0).unwrap();
+    button(1).click();
+    zgx_dom::flush();
+    assert!(text().contains("log true"), "{}", text());
+    let document = web_sys::window().unwrap().document().unwrap();
+    assert_eq!(
+        document.active_element().as_ref(),
+        Some(input.unchecked_ref::<web_sys::Element>())
+    );
+    assert_eq!(input.selection_start().unwrap(), Some(6));
+    assert_eq!(input.selection_end().unwrap(), Some(10));
+}
