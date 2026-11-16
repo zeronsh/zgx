@@ -158,6 +158,9 @@ pub struct Element {
     /// Its context menu (`View::context_menu`): entries for a secondary
     /// click, told the paragraph's span it was on, if any.
     pub context_menu: Option<DomMenu>,
+    /// Whether that menu shows (`View::context_menu_open`): written as it
+    /// opens and closes.
+    pub context_menu_open: Option<Signal<bool>>,
     /// A focus group (`View::focus_group`, or its role's): its arrows, and
     /// whether moving chooses (a radio group's).
     pub focus_group: Option<(crate::input::FocusGroup, bool)>,
@@ -1798,6 +1801,7 @@ fn primitive(
     let mut keymap = None;
     let mut focus_group = None;
     let mut context_menu = None;
+    let mut context_menu_open = None;
     let mut attrs = Vec::new();
     let mut bound_attrs: Vec<BoundAttr> = Vec::new();
     let mut conditional = Vec::new();
@@ -1819,9 +1823,11 @@ fn primitive(
             selectable,
             keymap: map,
             dom_menu,
+            context_menu_open: shows,
             ..
         } = *rare;
         context_menu = dom_menu;
+        context_menu_open = shows;
         conditional = dom_conditional;
         if !map.bindings.is_empty() || !map.contexts.is_empty() {
             keymap = Some(Box::new(map));
@@ -1990,6 +1996,7 @@ fn primitive(
         keymap,
         focus_group,
         context_menu,
+        context_menu_open,
     }
 }
 

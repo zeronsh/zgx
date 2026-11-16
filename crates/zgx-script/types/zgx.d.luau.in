@@ -2562,6 +2562,11 @@ export type NodeProps = {
 	-- Open the context menu under the node, from its left edge (a tab's),
 	-- rather than at the pointer.
 	context_menu_below: boolean?,
+	-- Internal, subject to change: kept saying whether its context menu
+	-- shows (true as it opens; false as it closes, however it does: Escape,
+	-- a pick, a click outside, Tab, the window losing focus). Written false,
+	-- the menu closes: a floating panel hides while the menu shows.
+	context_menu_open: State<boolean>?,
 }
 export type MaskOptions = { [number]: Bitmap, w: number?, h: number?, x: number?, y: number?, sweep: MaskSweep? }
 -- The mask moving `x`, `y` points from where it starts, over and over every

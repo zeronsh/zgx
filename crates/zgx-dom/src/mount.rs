@@ -456,7 +456,11 @@ impl Mounted {
             // Context menus mounted in it go with it.
             if MENU_HOST.with(|host| host.get()) == Some(block.root) {
                 MENU_HOST.with(|host| host.set(None));
-                drop(CONTEXT_MENU.with(|menu| menu.borrow_mut().take()));
+                drop(
+                    CONTEXT_MENU
+                        .with(|menu| menu.borrow_mut().take())
+                        .map(closed),
+                );
             }
             ops::with(|ops| ops.op(&[ops::REMOVE, block.root]));
             drop(block);
@@ -674,7 +678,11 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         block.on_click(id, runtime.clone(), click);
     }
     if let Some(menu) = el.context_menu.take() {
-        let id_handler = handler(menu_opener(scope.clone(), menu));
+        let id_handler = handler(menu_opener(
+            scope.clone(),
+            menu,
+            el.context_menu_open.take(),
+        ));
         block.handlers.push(id_handler);
         ops::with(|ops| {
             // Named, so a template's clone keeps it.
@@ -1289,7 +1297,7 @@ fn mount_rich(
             if let (Some(handler), Some(mut menu)) = (span.menu, inline.menu.take()) {
                 replace_handler(
                     handler,
-                    menu_opener(scope.clone(), move |event, _| menu(event)),
+                    menu_opener(scope.clone(), move |event, _| menu(event), None),
                 );
             }
         }
@@ -1312,6 +1320,7 @@ fn mount_rich(
                 let id = register(Handler::Event(Box::new(menu_opener(
                     scope.clone(),
                     move |event, _| menu(event),
+                    None,
                 ))));
                 ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::ON_MENU, id]));
                 id
@@ -1335,7 +1344,7 @@ fn mount_rich(
 thread_local! {
     /// The context menu showing (or last shown): its block and the node
     /// holding it, replaced by the next.
-    static CONTEXT_MENU: RefCell<Option<(Block, u32)>> = const { RefCell::new(None) };
+    static CONTEXT_MENU: RefCell<Option<OpenMenu>> = const { RefCell::new(None) };
     /// Where context menus mount: the first mounted view's root.
     static MENU_HOST: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
@@ -1343,6 +1352,20 @@ thread_local! {
 /// A context menu's handler: on a secondary click its entries are built;
 /// none lets the browser's own menu show, else the click's default is
 /// prevented and a menu of them opens at the pointer, replacing the last.
+/// The context menu showing: its block, its wrapper, and its view's
+/// `context_menu_open`, if it keeps one.
+type OpenMenu = (Block, u32, Option<zgx::reactive::Signal<bool>>);
+/// A context menu gone (a newer one opened, or its host went): the state its
+/// view keeps says so.
+fn closed(menu: OpenMenu) -> (Block, u32) {
+    if let Some(shows) = &menu.2
+        && shows.with_untracked(|shows| *shows)
+    {
+        shows.set(false);
+    }
+    (menu.0, menu.1)
+}
+
 fn menu_opener(
     scope: Scope,
     mut build: impl FnMut(
@@ -1350,6 +1373,9 @@ fn menu_opener(
         Option<&zgx::compose::ContextMenuSpan>,
     ) -> Vec<View>
     + 'static,
+    // The view's `context_menu_open`: true as its menu opens, and the
+    // menu's own open state, which its closing writes false.
+    shows: Option<zgx::reactive::Signal<bool>>,
 ) -> impl FnMut(Event) + 'static {
     move |event| {
         let Event::Menu(at, span) = event else {
@@ -1363,12 +1389,20 @@ fn menu_opener(
         let Some(host) = MENU_HOST.with(|host| host.get()) else {
             return;
         };
-        let last = CONTEXT_MENU.with(|menu| menu.borrow_mut().take());
+        let last = CONTEXT_MENU
+            .with(|menu| menu.borrow_mut().take())
+            .map(closed);
         if let Some((block, wrapper)) = last {
             ops::with(|ops| ops.op(&[ops::REMOVE, wrapper]));
             drop(block);
         }
-        let open = runtime.signal(true);
+        let open = match &shows {
+            Some(shows) => {
+                shows.set(true);
+                shows.clone()
+            }
+            None => runtime.signal(true),
+        };
         let view = __dom::context_menu_view(entries, open);
         let mut block = Block::default();
         let wrapper = runtime.batch(|| runtime.untracked(|| mount_view(view, &scope, &mut block)));
@@ -1378,7 +1412,7 @@ fn menu_opener(
             ops.op(&[ops::APPEND, host, wrapper]);
             ops.op(&[ops::MENU_AT, wrapper, at.x.to_bits(), at.y.to_bits()]);
         });
-        CONTEXT_MENU.with(|menu| *menu.borrow_mut() = Some((block, wrapper)));
+        CONTEXT_MENU.with(|menu| *menu.borrow_mut() = Some((block, wrapper, shows.clone())));
     }
 }
 
