@@ -747,6 +747,7 @@ fn group(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
 
 /// `ui.model { src, fit, position, rotation, scale, on_click, on_hover }`.
 fn model(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
+    crate::node::env(lua)?.may(crate::Capability::Scene3d, "ui.model")?;
     if !cfg!(feature = "gltf") {
         return Err(wrong(format_args!(
             "ui.model needs zgx-script's `gltf` feature (zgx-run has it)"
@@ -808,6 +809,7 @@ fn model(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
 
 /// `ui.scene3d { camera, orbit, background, label, …objects, …box props }`.
 fn scene3d(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
+    crate::node::env(lua)?.may(crate::Capability::Scene3d, "ui.scene3d")?;
     let camera: Option<Table> = table.get("camera")?;
     let (fov, position, target) = match &camera {
         Some(camera) => (

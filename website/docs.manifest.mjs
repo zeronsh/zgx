@@ -38,6 +38,10 @@ export const internal = [
   'docs/gpui-parity.md',
   'docs/design-3d.md',
   'docs/design-audio.md',
+  'docs/design-audio-luau.md',
+  // Until Wing makes the audio API public (with zgx-dom's): then a page
+  // beside reference/3d.
+  'docs/reference/audio.md',
 ];
 
 export const sets = [

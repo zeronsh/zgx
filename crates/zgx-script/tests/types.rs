@@ -11,6 +11,11 @@
 //! `ui` some 16,000 types for luau-lsp to walk, past the 10,000 it walks
 //! by default; named, about 200. `ZGX_BLESS=1 cargo test -p zgx-script
 //! --test tooling types::` writes it.
+//!
+//! A part only a feature's build has (`audio`'s) is marked for it, by a
+//! `--@if <feature>` … `--@end` block or a line ending `--@<feature>`; the
+//! marks are kept here, and a build embeds the file with the parts of
+//! features it is without left out (`src/definitions.rs`).
 
 const SOURCE: &str = include_str!("../types/zgx.d.luau.in");
 const DEFS: &str = include_str!("../types/zgx.d.luau");
@@ -186,7 +191,15 @@ fn with_named_types(name: &str, table: &[Entry]) -> (Vec<Entry>, String) {
                 .iter()
                 .position(|l| !l.trim_start().starts_with("--"))
                 .expect("a property line");
-            let property = lines[at..].join("\n");
+            let joined = lines[at..].join("\n");
+            // A property of one feature's (`sound: SoundProp?, --@audio`):
+            // its name and its line both keep the mark.
+            let (property, mark) = match joined.rsplit_once(" --@") {
+                Some((property, feature)) if !feature.is_empty() && !feature.contains(' ') => {
+                    (property, format!(" --@{feature}"))
+                }
+                _ => (joined.as_str(), String::new()),
+            };
             let key = &entry.key;
             let Some(ty) = property
                 .trim_start()
@@ -197,14 +210,14 @@ fn with_named_types(name: &str, table: &[Entry]) -> (Vec<Entry>, String) {
             };
             let alias = format!("{name}_{key}");
             aliases.push_str(&format!(
-                "export type {alias} = {}\n",
+                "export type {alias} = {}{mark}\n",
                 ty.trim_end().trim_end_matches(',')
             ));
             let mut text = lines[..at].join("\n");
             if !text.is_empty() {
                 text.push('\n');
             }
-            text.push_str(&format!("\t{key}: {alias},"));
+            text.push_str(&format!("\t{key}: {alias},{mark}"));
             Entry {
                 key: key.clone(),
                 text,

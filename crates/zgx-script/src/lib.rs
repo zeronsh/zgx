@@ -29,6 +29,8 @@ mod anim;
 mod anime;
 pub mod app_config;
 pub mod app_types;
+#[cfg(feature = "audio")]
+mod audio;
 mod bundle;
 mod calls;
 mod canvas;
@@ -110,6 +112,10 @@ pub use fetch_policy::{FetchPolicy, Url};
 pub use persist::app_data_dir;
 pub use socket::{Message, Socket, SocketRequest};
 pub use windows::WindowState;
+/// zgx-audio, as `ScriptHost::set_audio` takes its engine (the `audio`
+/// feature).
+#[cfg(feature = "audio")]
+pub use zgx_audio;
 /// A window's size as `ui.window.size` and `win.size` hold it.
 pub fn window_size_value(width: f32, height: f32) -> Value {
     windows::size(width, height)
@@ -996,6 +1002,14 @@ pub enum Capability {
     /// `ui.window`: windows of its own, which could pose as the app's or
     /// the system's (asking for a password).
     Windows,
+    /// `audio`: sounds played into a bus of the plugin's own (the `audio`
+    /// feature). It reaches no other bus and no device.
+    #[cfg(feature = "audio")]
+    Audio,
+    /// `ui.scene3d` and `ui.model`: 3D scenes, drawn on the GPU (the
+    /// `scene3d` feature).
+    #[cfg(feature = "scene3d")]
+    Scene3d,
     /// What the app defines (`expose_action`, `expose_shared`): a host
     /// action or shared state a plugin reaches only if granted it.
     Named(String),
@@ -1872,6 +1886,9 @@ struct Inner {
     theme_error: RefCell<Option<String>>,
     /// Collects the VMs' garbage as the host goes idle (`zgx::idle`).
     idle: RefCell<Option<zgx::idle::IdleTrim>>,
+    /// The scripts' `audio`: the host's engine, made at their first call.
+    #[cfg(feature = "audio")]
+    audio: Rc<audio::AudioHost>,
 }
 
 /// A wake-up for one waiting task: `notify` before or during the wait ends it.
@@ -2050,12 +2067,16 @@ impl ScriptHost {
             lint: runtime.signal(None),
             theme_error: RefCell::default(),
             idle: RefCell::default(),
+            #[cfg(feature = "audio")]
+            audio: audio::AudioHost::new(runtime),
         }));
         host.0.assets.connect(
             host.0.timers.clone(),
             host.0.fetcher.clone(),
             host.0.fetch_policy.clone(),
         );
+        #[cfg(feature = "audio")]
+        host.0.audio.set_timers(host.0.timers.clone());
         host.trim_when_idle();
         host
     }
@@ -3189,6 +3210,42 @@ impl ScriptHost {
             w.design = mode;
         }
     }
+    /// The engine scripts' `audio` plays through (the `audio` feature):
+    /// `make` is called the first time a script calls `audio`, so a script
+    /// that never does makes none. A desktop host hands every script host
+    /// the application's one engine; a headless one an offline engine,
+    /// whose renders it runs (`zgx_audio::Audio::offline`). Without it,
+    /// scripts' calls of `audio` are errors saying so.
+    #[cfg(feature = "audio")]
+    pub fn set_audio(&self, make: impl Fn() -> zgx_audio::Audio + 'static) {
+        self.0.audio.set_make(Rc::new(make));
+    }
+    /// The engine, if a script has called `audio` (`set_audio`'s).
+    #[cfg(feature = "audio")]
+    pub fn audio_engine(&self) -> Option<zgx_audio::Audio> {
+        self.0.audio.made()
+    }
+    /// Voices that ended (`zgx_audio::Audio::take_ended`'s ids): their
+    /// `playing` states turn false, and what followed state into them
+    /// stops. A desktop host calls it as the engine wakes it
+    /// (`Audio::on_voices_ended`); an offline one after rendering.
+    #[cfg(feature = "audio")]
+    pub fn voices_ended(&self, ids: &[u64]) {
+        self.0.audio.voices_ended(ids);
+    }
+    /// How many sounds the host keeps decoded for its app's scripts
+    /// (`audio.sound`): what a test reads to see a sound let go.
+    #[cfg(feature = "audio")]
+    pub fn sounds_held(&self) -> usize {
+        self.0.audio.sounds_held()
+    }
+    /// The user's interface-sound setting, as the host passes it to the
+    /// engine (`Audio::set_ui_sounds`): what `audio.ui_sounds_enabled`
+    /// reads.
+    #[cfg(feature = "audio")]
+    pub fn set_ui_sounds_enabled(&self, enabled: bool) {
+        self.0.audio.set_ui_sounds(enabled);
+    }
     /// How many times Rust has called into the scripts (a prop, an effect,
     /// a handler, a component built), counting from the host's start: what
     /// a test reads before and after an interaction to check that it runs
@@ -3587,6 +3644,8 @@ impl ScriptHost {
     /// Loads the scripts again: everything, or with `ran`, in the app's VM
     /// kept, those modules alone run again (`load_kept`).
     fn reload_with(&self, ran: Option<Vec<PathBuf>>) -> Result<(), String> {
+        #[cfg(feature = "audio")]
+        self.0.audio.begin_load();
         self.0.lent.borrow_mut().pending.clear();
         self.0.commands.begin();
         self.0.windows.begin();
@@ -3649,6 +3708,9 @@ impl ScriptHost {
                 });
                 // The replaced scripts' animations end with them.
                 self.0.engine.drop_orphans();
+                // And their sounds, with their fades.
+                #[cfg(feature = "audio")]
+                self.0.audio.end_load(true);
                 if let Some(rewatch) = &*self.0.rewatch.borrow() {
                     rewatch.send(());
                 }
@@ -3660,6 +3722,8 @@ impl ScriptHost {
                 self.0.focus.release();
                 eprintln!("{error}");
                 report(&self.0.error, error.clone());
+                #[cfg(feature = "audio")]
+                self.0.audio.end_load(false);
                 self.start_check();
                 Err(error)
             }
@@ -3980,6 +4044,9 @@ impl ScriptHost {
         let view = component(move |cx| {
             // One frame loop ticks every animation; it idles at rest.
             if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
+                // Bindings driving sound step on the same frames.
+                #[cfg(feature = "audio")]
+                host.0.audio.set_frames((*frames).clone());
                 cx.tasks().spawn(engine.run((*frames).clone()));
             }
             // `ui.persist` saves on a timer from here, and `ui.every` runs.
@@ -4749,6 +4816,13 @@ impl ScriptHost {
             opens::install(lua, ui, opens, plugin)
         });
         lazy.global(&["anime"], |lua, _| anime::api::install(lua));
+        #[cfg(feature = "audio")]
+        {
+            let (audio, plugin) = (self.0.audio.clone(), plugin.then(|| name.as_str().into()));
+            lazy.global(&["audio"], move |lua, globals| {
+                audio::install(lua, globals, audio, plugin)
+            });
+        }
         self.install_require(
             &lua,
             script.dir(),
@@ -4911,6 +4985,9 @@ fn collect_garbage(inner: &Inner) {
         collect_fully(&vm.lua);
         vm.interrupt.heap_settled(vm.lua.used_memory());
     }
+    // Sounds only the scripts' collected garbage held.
+    #[cfg(feature = "audio")]
+    inner.audio.trim(0);
 }
 /// Full collections until one frees nothing more: a collection finalizes
 /// the garbage's userdata, and what only they held goes in the next.
