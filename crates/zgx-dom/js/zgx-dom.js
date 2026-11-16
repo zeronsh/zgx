@@ -1020,8 +1020,19 @@ function carriesText(event) {
 
 function onOutsideOver(event) {
   if (drag || !carriesText(event)) return;
-  if (!outside) outside = { over: null };
   const x = event.clientX, y = event.clientY;
+  if (!outside) {
+    // Given up without a drop or a leave the page hears (the source app
+    // ending it): over a page, dragover comes every 350 ms at most, so a
+    // second without one ends it.
+    const watch = setInterval(() => {
+      if (outside && performance.now() - outside.last > 1000) endOutside(outside.x, outside.y);
+    }, 250);
+    outside = { over: null, watch, last: 0, x, y };
+  }
+  outside.last = performance.now();
+  outside.x = x;
+  outside.y = y;
   const path = event.composedPath();
   let taken = null;
   for (const n of path) {
@@ -1045,8 +1056,10 @@ function onOutsideOver(event) {
 }
 
 function endOutside(x, y) {
-  if (outside && outside.over && outside.over.$$e !== undefined)
+  if (!outside) return;
+  if (outside.over && outside.over.$$e !== undefined)
     elementEvent(outside.over.$$e, 14 | (1 << 8) | OUTSIDE, 1, x, y, 0, 0, undefined);
+  clearInterval(outside.watch);
   outside = null;
   // No element's handler: the drag in the document ends.
   elementEvent(-1 >>> 0, 17 | OUTSIDE, 0, x, y, 0, 0, undefined);
@@ -1055,8 +1068,11 @@ function endOutside(x, y) {
 function onOutsideLeave(event) {
   if (!outside) return;
   const x = event.clientX, y = event.clientY;
-  // Left the window, not one element for another.
-  if (x <= 0 || y <= 0 || x >= innerWidth || y >= innerHeight) endOutside(x, y);
+  // Left the document, or given up over it (Escape): no element entered.
+  // Else left one element for another; outside the window, ended all the
+  // same.
+  if (event.relatedTarget === null || x <= 0 || y <= 0 || x >= innerWidth || y >= innerHeight)
+    endOutside(x, y);
 }
 
 function onOutsideDrop(event) {
