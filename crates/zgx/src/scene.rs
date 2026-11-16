@@ -13618,7 +13618,7 @@ impl Scene {
             _ => false,
         };
         let limit = match available_w {
-            Some(limit) if wraps && limit > 0. && size.0 < limit - 0.5 => limit,
+            Some(limit) if wraps && limit > 0. && size.0 < limit => limit,
             _ => return size,
         };
         // Wrapped text fills the room it wrapped in, as CSS's does: a box
