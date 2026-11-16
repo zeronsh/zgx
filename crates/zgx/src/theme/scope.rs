@@ -103,6 +103,8 @@ struct State {
     system: Vec<(TokenId, Arc<Expr>)>,
     /// The system's text size (`Themes::set_system_text_scale`).
     text_scale: f32,
+    /// App tokens it scales as it does `font.*` (`Themes::scale_with_text`).
+    text_tokens: Rc<[TokenId]>,
 }
 impl State {
     /// Every token's expression under `name`: declarations, then the
@@ -212,14 +214,10 @@ impl Evaluator<'_> {
         value
     }
 }
-/// The font size and line height tokens, times the system's text size. A
-/// size set in points on a view stays as it is, as CSS's `px`.
-fn scale_text(values: &mut [TokenValue], scale: f32) {
-    if scale == 1. {
-        return;
-    }
+/// The tokens the system's text size scales whatever the app names.
+const FONT_TEXT: [NumberToken; 12] = {
     use super::tok;
-    for token in [
+    [
         tok::FONT_SIZE_XS,
         tok::FONT_SIZE_SM,
         tok::FONT_SIZE_MD,
@@ -232,8 +230,18 @@ fn scale_text(values: &mut [TokenValue], scale: f32) {
         tok::FONT_LINE_LG,
         tok::FONT_LINE_XL,
         tok::FONT_LINE_XXL,
-    ] {
-        if let Some(TokenValue::Number(n)) = values.get_mut(token.0.index()) {
+    ]
+};
+/// The font size and line height tokens, and the app's own text tokens
+/// (`Themes::scale_with_text`), times the system's text size. A size set in
+/// points on a view stays as it is, as CSS's `px`.
+fn scale_text(values: &mut [TokenValue], scale: f32, app: &[TokenId]) {
+    if scale == 1. {
+        return;
+    }
+    use super::tok;
+    for token in FONT_TEXT.iter().map(|t| t.0).chain(app.iter().copied()) {
+        if let Some(TokenValue::Number(n)) = values.get_mut(token.index()) {
             *n *= scale;
         }
     }
@@ -383,7 +391,7 @@ impl ThemeScope {
     /// Recompute this scope's values, notify what read changed tokens and do
     /// the same for its children. Call inside a batch.
     fn refresh(&self) {
-        let (name, exprs, text_scale) = {
+        let (name, exprs, text_scale, text_tokens) = {
             let state = self.shared.state.borrow();
             let spec = self.spec.borrow();
             let (name, base): (Arc<str>, Exprs) = match (&self.parent, &spec.theme) {
@@ -410,10 +418,15 @@ impl ThemeScope {
                 }
                 Rc::new(own)
             };
-            (name, exprs, self.text_scale(state.text_scale))
+            (
+                name,
+                exprs,
+                self.text_scale(state.text_scale),
+                state.text_tokens.clone(),
+            )
         };
         let mut values = evaluate(&exprs);
-        scale_text(&mut values, text_scale);
+        scale_text(&mut values, text_scale, &text_tokens);
         *self.exprs.borrow_mut() = exprs;
         *self.name.borrow_mut() = name;
         if *self.values.borrow() != values {
@@ -698,6 +711,7 @@ impl Themes {
                 reader: None,
                 system: Vec::new(),
                 text_scale: 1.,
+                text_tokens: Rc::from([]),
             }),
             current: runtime.signal(DARK.into()),
             preferences: runtime.signal(SystemPreferences::default()),
@@ -880,6 +894,33 @@ impl Themes {
     /// host sets one.
     pub fn system_text_scale(&self) -> f32 {
         self.shared.state.borrow().text_scale
+    }
+    /// Have the system's text size scale these app tokens too, as it does
+    /// `font.size.*` and `font.line.*`: an app's own type scale (a reading
+    /// column's body and headings) grows with the interface's rather than
+    /// staying behind it. Each token's value as the theme resolves it is
+    /// multiplied, so one derived from another (`"{app.body}"`) is named
+    /// too. Not under a scope with fixed text sizes. Adds to those named
+    /// before; `font.*` itself, scaled already, is passed over.
+    pub fn scale_with_text(&self, tokens: impl IntoIterator<Item = impl Into<TokenId>>) {
+        let scaled = {
+            let mut state = self.shared.state.borrow_mut();
+            let mut all = state.text_tokens.to_vec();
+            for id in tokens {
+                let id = id.into();
+                if !all.contains(&id) && !FONT_TEXT.iter().any(|t| t.0 == id) {
+                    all.push(id);
+                }
+            }
+            if all.len() == state.text_tokens.len() {
+                return;
+            }
+            state.text_tokens = all.into();
+            state.text_scale != 1.
+        };
+        if scaled {
+            self.refresh();
+        }
     }
     /// Values the platform gives tokens (the desktop host calls this): the
     /// system's selection colours on macOS. They apply over the built-in
