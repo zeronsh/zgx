@@ -2126,6 +2126,10 @@ struct Host {
     /// The window's frame's and the popup host's last contained panics,
     /// and the damaged frames tried (`contain::run`).
     render_fault: Option<crate::contain::Fault>,
+    /// The window's frame left undrawn by one (`render_fault`): when it is
+    /// tried again. Nothing else need wake the loop for it: a window with
+    /// no input or animation would sit on its last frame however long.
+    render_retry: Option<std::time::Instant>,
     popups_fault: Option<crate::contain::Fault>,
     _layout_issues: zgx::issues::IssueListener,
     /// What its listener heard, for its own banner (`show_issues`).
@@ -2625,6 +2629,7 @@ impl Host {
             renderer_retry: None,
             error_banner: None,
             render_fault: None,
+            render_retry: None,
             popups_fault: None,
             _layout_issues: layout_issues,
             issues: issues.clone(),
@@ -3583,6 +3588,13 @@ impl Host {
                     }
                 }
                 self.force = undrawn;
+                // Undrawn: tried again when the fault allows, the loop woken
+                // for it (`about_to_wait`); drawn: nothing owed.
+                self.render_retry = if undrawn {
+                    crate::contain::retry_at(self.render_fault.as_ref())
+                } else {
+                    None
+                };
                 self.held_damage.clear();
             }
         }
@@ -9204,6 +9216,7 @@ impl WindowManager {
             #[cfg(not(target_os = "macos"))]
             let plane_room = false;
             if (host.renderer_retry.is_some_and(|at| at <= now)
+                || host.render_retry.is_some_and(|at| at <= now)
                 || host.plane_retry.is_some_and(|at| at <= now)
                 || plane_room)
                 && let Some(window) = &host.window
@@ -9252,6 +9265,7 @@ impl WindowManager {
                     host.frame_deadline,
                     host.popups.deadline(),
                     host.renderer_retry,
+                    host.render_retry,
                     host.plane_retry,
                     host.frames_held,
                     host.touch.hold_deadline(),

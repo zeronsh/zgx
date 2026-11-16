@@ -69,6 +69,12 @@ pub(crate) fn run<R>(
     }
 }
 
+/// When a piece `fault` holds back may be tried again (`run` skips it
+/// until then): `None` for one with no fault.
+pub(crate) fn retry_at(fault: Option<&Fault>) -> Option<Instant> {
+    fault.map(|last| last.at + RETRY)
+}
+
 /// `run` for a frame: an error it returns skips it just as a panic does
 /// (`None`), but for a lost device, which the host answers with a new
 /// renderer. Its panics go to `report` (the banner); its errors are the
@@ -372,6 +378,45 @@ mod tests {
             degradations(),
             ["the window's frame was skipped: frame geometry"]
         );
+    }
+
+    /// A frame left undrawn says when it may be tried again: the host
+    /// wakes its loop then (`render_retry`), so a window nothing else
+    /// redraws isn't left on its last frame. Tried then, it runs; failing
+    /// again moves the retry a second on; drawn, nothing is owed.
+    #[test]
+    fn an_undrawn_frame_says_when_to_try_again() {
+        fn frame(fault: &mut Option<Fault>, revision: u64, at: Instant, broken: bool) -> bool {
+            let done = run_frame(
+                fault,
+                revision,
+                at,
+                "the window's frame",
+                |_| {},
+                || {
+                    if broken {
+                        Err(zgx_gpu::GpuError("canvas raster exceeds 32 MiB".into()))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            matches!(done, Some(Ok(())))
+        }
+        let (start, mut fault) = (Instant::now(), None);
+        assert!(!frame(&mut fault, 1, start, true));
+        let retry = retry_at(fault.as_ref()).expect("a retry is owed");
+        assert_eq!(retry, start + RETRY);
+        assert!(
+            !frame(&mut fault, 2, retry, true),
+            "tried at its retry, still failing"
+        );
+        assert_eq!(retry_at(fault.as_ref()), Some(retry + RETRY));
+        assert!(
+            frame(&mut fault, 3, retry + RETRY, false),
+            "drawn at the next retry"
+        );
+        assert_eq!(retry_at(fault.as_ref()), None, "drawn: nothing owed");
     }
 
     /// A popup's issue reaches the runtime's listeners, and only once.
