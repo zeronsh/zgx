@@ -449,3 +449,95 @@ fn a_drag_from_another_app_given_up_over_the_page_ends() {
     mounted.unmount();
     host.remove();
 }
+
+/// The next `n` animation frames.
+async fn frames(n: u32) {
+    for _ in 0..n {
+        let promise = js_sys::Promise::new(&mut |resolve, _| {
+            web_sys::window()
+                .unwrap()
+                .request_animation_frame(&resolve)
+                .unwrap();
+        });
+        wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+    }
+}
+
+/// A drag held near a scroll view's bottom edge scrolls it, as the core's
+/// does, and what is under it hears it over it again; a frame is asked for
+/// only while it is near the edge: none in the middle, none once it drops.
+#[wasm_bindgen_test]
+async fn a_drag_near_a_scroll_views_edge_scrolls_it_and_only_there() {
+    use zgx::compose::{div, scroll};
+    use zgx::input::DragPhase;
+    let runtime = Runtime::new();
+    let over = Rc::new(std::cell::Cell::new(0));
+    let heard = over.clone();
+    let host = host();
+    let offset = runtime.signal(0.);
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column()
+            .child(div().id("card").w(80.).h(30.).on_drag(|| Card(1)))
+            .child(scroll(offset).id("list").w(300.).h(200.).child(
+                column().w(300.).h(600.).on_event(move |cx| {
+                    if let InputEvent::Drag(drag) = &cx.event
+                        && drag.phase == DragPhase::Over
+                    {
+                        heard.set(heard.get() + 1);
+                    }
+                }),
+            )),
+    );
+    let (card, list) = (find(&host, "[data-id=card]"), find(&host, "[data-id=list]"));
+    let (c, l) = (
+        card.get_bounding_client_rect(),
+        list.get_bounding_client_rect(),
+    );
+    pointer_at(&card, "pointerdown", c.left() + 10., c.top() + 10.);
+    pointer_at(&card, "pointermove", c.left() + 30., c.top() + 20.);
+    // 10 in from its bottom edge.
+    let (x, near) = (l.left() + 150., l.bottom() - 10.);
+    pointer_at(&list, "pointermove", x, near);
+    assert!(zgx_dom::drag_scroll_pending());
+    let heard_then = over.get();
+    frames(4).await;
+    assert!(list.scroll_top() > 0, "it scrolled");
+    assert!(over.get() > heard_then, "over what came under it");
+    // In the middle: no frame asked for.
+    pointer_at(&list, "pointermove", x, l.top() + 100.);
+    assert!(!zgx_dom::drag_scroll_pending());
+    let top = list.scroll_top();
+    frames(2).await;
+    assert_eq!(list.scroll_top(), top);
+    // Near the edge again, then dropped: none.
+    pointer_at(&list, "pointermove", x, near);
+    assert!(zgx_dom::drag_scroll_pending());
+    pointer_at(&list, "pointerup", x, near);
+    assert!(!zgx_dom::drag_scroll_pending());
+    // Cancelled near the edge (the pointer taken away): none.
+    pointer_at(&card, "pointerdown", c.left() + 10., c.top() + 10.);
+    pointer_at(&card, "pointermove", c.left() + 30., c.top() + 20.);
+    pointer_at(&list, "pointermove", x, near);
+    assert!(zgx_dom::drag_scroll_pending());
+    pointer_at(&list, "pointercancel", x, near);
+    assert!(!zgx_dom::drag_scroll_pending());
+    // Unmounted mid-drag near the edge: the view gone, its frame asks for
+    // no other.
+    pointer_at(&card, "pointerdown", c.left() + 10., c.top() + 10.);
+    pointer_at(&card, "pointermove", c.left() + 30., c.top() + 20.);
+    pointer_at(&list, "pointermove", x, near);
+    assert!(zgx_dom::drag_scroll_pending());
+    mounted.unmount();
+    frames(2).await;
+    assert!(!zgx_dom::drag_scroll_pending());
+    let body = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .body()
+        .unwrap();
+    pointer_at(&body, "pointerup", x, near);
+    host.remove();
+}

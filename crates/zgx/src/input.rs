@@ -865,6 +865,10 @@ struct State {
     /// still in the scene, so a zone round a node made again meanwhile
     /// still hears it.
     file_hovered: Vec<NodeId>,
+    /// Where files dragged in from outside are, and the last of them, until
+    /// they leave or drop: a scroll view the drag holds near its edge
+    /// scrolls, then tells what is under them again (`drag_scroll`).
+    file_point: Option<(f32, f32, std::path::PathBuf)>,
     pressed: Option<NodeId>,
     /// What the last press landed on, as its listeners run and after: a
     /// popup opening from a press on its trigger counts it as focused, as a
@@ -3396,6 +3400,7 @@ impl InputDispatcher {
             | InputEvent::FilesDrop { .. }
             | InputEvent::FilesDropRejected { .. } => hit,
             InputEvent::FileHoverCancelled => {
+                self.state.borrow_mut().file_point = None;
                 let hovered = std::mem::take(&mut self.state.borrow_mut().file_hovered);
                 let scene = scene.borrow();
                 hovered.into_iter().find(|id| scene.contains(*id))
@@ -3443,14 +3448,20 @@ impl InputDispatcher {
                     .chain(scene.ancestors(target))
                     .collect()
             });
-            self.state.borrow_mut().file_hovered = hovered;
+            let mut state = self.state.borrow_mut();
+            state.file_hovered = hovered;
+            if let InputEvent::FileHover { x, y, path } = &event {
+                state.file_point = Some((*x, *y, path.clone()));
+            }
         } else if matches!(
             event,
             InputEvent::FileDrop { .. }
                 | InputEvent::FilesDrop { .. }
                 | InputEvent::FilesDropRejected { .. }
         ) {
-            self.state.borrow_mut().file_hovered.clear();
+            let mut state = self.state.borrow_mut();
+            state.file_hovered.clear();
+            state.file_point = None;
         }
         let click_count = if let InputEvent::PointerDown { x, y, button } = &event {
             if modifiers.is_some() {

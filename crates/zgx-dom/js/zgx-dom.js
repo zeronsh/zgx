@@ -1034,7 +1034,16 @@ function startDrag(node, handler, event) {
     ";position:fixed;margin:0;left:" + r.left + "px;top:" + r.top + "px;width:" + r.width + "px;height:" + r.height +
     "px;opacity:.8;pointer-events:none;z-index:2147483647;";
   document.body.appendChild(ghost);
-  drag = { source: node, handler, over: null, ghost, dx: event.clientX - r.left, dy: event.clientY - r.top };
+  drag = {
+    source: node,
+    handler,
+    over: null,
+    ghost,
+    dx: event.clientX - r.left,
+    dy: event.clientY - r.top,
+    x: event.clientX,
+    y: event.clientY,
+  };
   elementEvent(handler, 18 | (1 << 8), 1, r.left, r.top, 0, 0, undefined);
   document.addEventListener("pointermove", dragMove, true);
   document.addEventListener("pointerup", dragUp, true);
@@ -1057,6 +1066,7 @@ function dragOver(x, y) {
   if (drag.over && drag.over !== taken && drag.over.$$e !== undefined)
     elementEvent(drag.over.$$e, 14 | (1 << 8), 1, x, y, 0, 0, undefined);
   drag.over = taken;
+  return hit;
 }
 
 function dragMove(event) {
@@ -1065,7 +1075,9 @@ function dragMove(event) {
   drag.ghost.style.left = x - drag.dx + "px";
   drag.ghost.style.top = y - drag.dy + "px";
   elementEvent(drag.handler, 15 | (1 << 8), 1, x, y, 0, 0, undefined);
-  dragOver(x, y);
+  drag.x = x;
+  drag.y = y;
+  armDragScroll(dragOver(x, y));
   event.stopPropagation();
 }
 
@@ -1079,6 +1091,7 @@ function dragUp(event) {
     elementEvent(over.$$e, 14 | (1 << 8), 1, x, y, accepted, 0, undefined);
   }
   drag = null;
+  stopDragScroll();
   ghost.remove();
   document.removeEventListener("pointermove", dragMove, true);
   document.removeEventListener("pointerup", dragUp, true);
@@ -1091,6 +1104,84 @@ function dragUp(event) {
   };
   document.addEventListener("click", eat, { capture: true, once: true });
   setTimeout(() => document.removeEventListener("click", eat, { capture: true }), 0);
+}
+
+// A drag held near a scroll view's edge scrolls it, as the core's
+// (drag_scroll.rs): the innermost one under the pointer that can still move
+// toward that edge, up to 24 px a 16 ms frame within 48 px of it (full speed
+// from 12 in), per time, a stall making up for 50 ms at most; then what is
+// under the pointer hears the drag over it again. A frame is asked for only
+// while the pointer is in such a band: none in the middle, at the end of
+// what scrolls, or once the drag ends. (The browser scrolls for its own
+// drags, files and text from other apps.)
+const SCROLL_BAND = 48, SCROLL_FULL = 12, SCROLL_STEP = 24, SCROLL_FRAME = 16, SCROLL_STALL = 50;
+let dragScroll = null;
+
+function edgeSpeed(at, start, extent) {
+  if (!(at >= start && at <= start + extent)) return 0;
+  const ramp = (inside) => Math.min(Math.max((SCROLL_BAND - inside) / (SCROLL_BAND - SCROLL_FULL), 0), 1) * SCROLL_STEP;
+  const fromStart = at - start, fromEnd = start + extent - at;
+  if (fromEnd < SCROLL_BAND && fromEnd <= fromStart) return ramp(fromEnd);
+  if (fromStart < SCROLL_BAND) return -ramp(fromStart);
+  return 0;
+}
+
+// What the drag at x, y scrolls: { node, dx, dy } in px a frame, or null;
+// from `hit`, what is under it, if known (dragOver's).
+function dragScrollPlan(x, y, hit = document.elementFromPoint(x, y)) {
+  for (let n = hit; n && n.nodeType === 1; n = n.parentElement) {
+    const across = n.scrollWidth > n.clientWidth, down = n.scrollHeight > n.clientHeight;
+    if (!across && !down) continue;
+    const style = getComputedStyle(n);
+    const scrolls = (overflow) => overflow === "auto" || overflow === "scroll";
+    const r = n.getBoundingClientRect();
+    let dx = across && scrolls(style.overflowX) ? edgeSpeed(x, r.left + n.clientLeft, n.clientWidth) : 0;
+    let dy = down && scrolls(style.overflowY) ? edgeSpeed(y, r.top + n.clientTop, n.clientHeight) : 0;
+    if ((dx < 0 && n.scrollLeft <= 0) || (dx > 0 && n.scrollLeft >= n.scrollWidth - n.clientWidth - 0.5)) dx = 0;
+    if ((dy < 0 && n.scrollTop <= 0) || (dy > 0 && n.scrollTop >= n.scrollHeight - n.clientHeight - 0.5)) dy = 0;
+    if (dx || dy) return { node: n, dx, dy };
+  }
+  return null;
+}
+
+// Ask for a frame if the drag is in a band, and stop asking if it left one.
+function armDragScroll(hit) {
+  if (!drag || !dragScrollPlan(drag.x, drag.y, hit)) {
+    stopDragScroll();
+    return;
+  }
+  // Its first tick moves a frame's worth (rAF's time is its frame's start,
+  // before now).
+  if (!dragScroll) dragScroll = { frame: requestAnimationFrame(dragScrollTick), last: null };
+}
+
+function dragScrollTick(now) {
+  const last = dragScroll && dragScroll.last !== null ? dragScroll.last : now - SCROLL_FRAME;
+  dragScroll = null;
+  if (!drag) return;
+  const plan = dragScrollPlan(drag.x, drag.y);
+  if (!plan) return;
+  const frames = Math.min(Math.max(now - last, 0), SCROLL_STALL) / SCROLL_FRAME;
+  if (frames > 0) {
+    const { node } = plan, before = node.scrollLeft + "," + node.scrollTop;
+    node.scrollBy({ left: plan.dx * frames, top: plan.dy * frames, behavior: "instant" });
+    // It could not move (it scrolls along the other axis only): until the
+    // pointer moves.
+    if (node.scrollLeft + "," + node.scrollTop === before) return;
+    dragOver(drag.x, drag.y);
+  }
+  dragScroll = { frame: requestAnimationFrame(dragScrollTick), last: Math.max(now, last) };
+}
+
+function stopDragScroll() {
+  if (dragScroll) cancelAnimationFrame(dragScroll.frame);
+  dragScroll = null;
+}
+
+// Whether a frame is asked for a drag's autoscroll (for tests: none outside
+// a band).
+export function zgx_drag_scroll_pending() {
+  return dragScroll !== null;
 }
 
 // Text dragged in from another app or the desktop (the browser's own drag

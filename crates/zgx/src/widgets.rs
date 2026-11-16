@@ -2037,6 +2037,8 @@ pub(crate) struct UiStorage {
     paging: RefCell<crate::paging::State>,
     /// Scroll views easing to where `NodeHandle::scroll_into_view` asked.
     scroll_reveals: RefCell<crate::scroll_reveal::State>,
+    /// A scroll view a drag holds near its edge scrolling.
+    drag_scroll: RefCell<crate::drag_scroll::State>,
     /// Scrollbars hide until their view scrolls (`Ui::set_overlay_scrollbars`).
     overlay_scrollbars: Signal<bool>,
     /// Editors' caret width in points (`Ui::set_caret_width`).
@@ -2402,6 +2404,7 @@ impl Ui {
             elastic: Default::default(),
             paging: Default::default(),
             scroll_reveals: Default::default(),
+            drag_scroll: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
             scrollbar_styles: Default::default(),
             held_scrollbar_style: Default::default(),
@@ -3578,6 +3581,9 @@ impl Ui {
     }
     pub(crate) fn scroll_reveal_state(&self) -> &RefCell<crate::scroll_reveal::State> {
         &self.storage.scroll_reveals
+    }
+    pub(crate) fn drag_scroll_state(&self) -> &RefCell<crate::drag_scroll::State> {
+        &self.storage.drag_scroll
     }
     pub(crate) fn elastic_state(&self) -> &RefCell<crate::elastic::State> {
         &self.storage.elastic
@@ -5339,12 +5345,14 @@ impl Ui {
             && self.input.is_enabled(&self.scene.borrow(), job.owner)
     }
     /// Next deadline of a timed interaction: a key sequence waiting, a drag
-    /// resting on a destination toward springing it open, editor drag
-    /// autoscroll. Idle windows schedule nothing.
+    /// resting on a destination toward springing it open, or near a scroll
+    /// view's edge (`drag_scroll`), editor drag autoscroll. Idle windows
+    /// schedule nothing.
     pub fn next_interaction_deadline(&self) -> Option<Instant> {
         [
             self.input.next_key_deadline(),
             self.input.next_spring_deadline(),
+            crate::drag_scroll::next_step(self),
             self.next_editor_interaction_deadline(),
             self.next_selection_deadline(),
             crate::compose_scrollbar::next_fade(self),
@@ -5411,6 +5419,13 @@ impl Ui {
         };
         // A scroll view easing to where a reveal asked.
         let keys = if crate::scroll_reveal::advance(self, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // A drag held near a scroll view's edge.
+        let keys = if crate::drag_scroll::advance(self, now) {
             self.try_prepare_frame()?;
             true
         } else {
