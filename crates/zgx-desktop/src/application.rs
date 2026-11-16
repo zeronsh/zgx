@@ -33,14 +33,23 @@ use zgx::{
 };
 use zgx_gpu::{GpuContext, GpuRenderer};
 
+thread_local! {
+    /// Menu actions a window's keys chose (its shortcuts, bound in its input:
+    /// `bind_keys`) that nothing in the window took, in order, by window: the
+    /// app's to carry out. Carried out as soon as the window event that chose
+    /// them is handled (`WindowManager::window_event`), before the next; an
+    /// event posted to the loop (`Event::MenuFallback`) catches any chosen
+    /// outside a window event.
+    static MENU_FALLBACKS: RefCell<VecDeque<(u64, crate::MenuAction)>> = RefCell::default();
+}
 /// Native menu items chosen and not yet carried out, in order (macOS): AppKit
 /// calls muda's handler inside the dispatch of the key that chose one, and
 /// the event the handler posts to the loop (`Event::NativeMenuAction`) can
 /// arrive after input AppKit had queued behind that key. Every window event
 /// first carries these out (`WindowManager::window_event`).
 #[cfg(target_os = "macos")]
-static NATIVE_MENU_CHOSEN: std::sync::Mutex<std::collections::VecDeque<crate::MenuAction>> =
-    std::sync::Mutex::new(std::collections::VecDeque::new());
+static NATIVE_MENU_CHOSEN: std::sync::Mutex<VecDeque<crate::MenuAction>> =
+    std::sync::Mutex::new(VecDeque::new());
 
 /// How a window is made: its title, size, chrome and placement.
 #[derive(Clone, Debug)]
@@ -176,7 +185,9 @@ enum Event {
     /// An event, with the token of the launch that sent it (Linux).
     Application(crate::ApplicationEvent, Option<String>),
     MenuAction(u64, crate::MenuAction),
-    MenuFallback(u64, crate::MenuAction),
+    /// Menu actions a window's keys chose and nothing in it took
+    /// (`MENU_FALLBACKS`): carry them out.
+    MenuFallback,
     MenusChanged,
     /// A font was replaced (`WindowFactory::replace_font`): every window's
     /// text shapes and draws again.
@@ -2210,7 +2221,13 @@ impl Host {
                 && let Some(action) = action.downcast_ref::<crate::MenuAction>()
                 && crate::app_menu::enabled_action(&menus.borrow(), action)
             {
-                let _ = fallback.send_event(Event::MenuFallback(token, action.clone()));
+                // Carried out as soon as the event dispatching it is done
+                // (`WindowManager::window_event`), before the input after
+                // it: a key typed just after ⌘N is the new chat's. (Posted
+                // too, for an action dispatched outside a window event.)
+                MENU_FALLBACKS
+                    .with(|queued| queued.borrow_mut().push_back((token, action.clone())));
+                let _ = fallback.send_event(Event::MenuFallback);
                 event.prevent_default();
             }
         });
@@ -7965,6 +7982,21 @@ impl WindowManager {
             self.menu_action(token, action);
         }
     }
+    /// Carry out the menu actions windows' keys chose that nothing in them
+    /// took (`MENU_FALLBACKS`), in order, each in its window.
+    fn menu_fallbacks(&mut self) {
+        while let Some((token, action)) =
+            MENU_FALLBACKS.with(|queued| queued.borrow_mut().pop_front())
+        {
+            if crate::app_menu::enabled_action(&self.factory.menus.borrow(), &action)
+                && let Some(host) = self.hosts.get_mut(&token)
+                && !host.context.window.is_closed()
+                && let Some(callback) = &mut host.context.menu_action
+            {
+                callback(action);
+            }
+        }
+    }
     fn menu_action(&mut self, token: u64, action: crate::MenuAction) {
         // The window's zoom items, which zgx puts in the View menu.
         if let Some(zoom) = crate::app_menu::zoom_action(&action) {
@@ -8260,15 +8292,7 @@ impl WindowManager {
                 }
             }
             Event::MenuAction(token, action) => self.menu_action(token, action),
-            Event::MenuFallback(token, action) => {
-                if crate::app_menu::enabled_action(&self.factory.menus.borrow(), &action)
-                    && let Some(host) = self.hosts.get_mut(&token)
-                    && !host.context.window.is_closed()
-                    && let Some(callback) = &mut host.context.menu_action
-                {
-                    callback(action);
-                }
-            }
+            Event::MenuFallback => self.menu_fallbacks(),
             #[cfg(target_os = "linux")]
             Event::NativeFiles(token, event) => {
                 if let Some(host) = self.hosts.get_mut(&token)
@@ -8895,6 +8919,10 @@ impl ApplicationHandler<Event> for WindowManager {
         {
             self.native_menu_chosen();
         }
+        // So does a menu action an earlier event's keys chose (`MENU_FALLBACKS`).
+        if MENU_FALLBACKS.with(|queued| !queued.borrow().is_empty()) {
+            self.menu_fallbacks();
+        }
         // Motion before the press or key that came after it.
         self.flush_motion(event_loop);
         // Pointer moves come as often as the mouse reports them (Wayland
@@ -8919,6 +8947,12 @@ impl ApplicationHandler<Event> for WindowManager {
             self.flush_move(event_loop);
         }
         self.window_event_now(event_loop, id, event);
+        // A shortcut this event's key chose, that nothing in the window took:
+        // carried out now, before the next event (a key typed just after ⌘N
+        // reaches the new chat, not the old).
+        if MENU_FALLBACKS.with(|queued| !queued.borrow().is_empty()) {
+            self.menu_fallbacks();
+        }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
