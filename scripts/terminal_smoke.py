@@ -26,7 +26,11 @@ by colours the shell prints.
 in the window's accessible tree as a label with the text it shows, and
 Orca speaks a line of new output (a live region of the latest output)
 without reading back the shell's echo of the typed command, whole or a
-character at a time.
+character at a time. Nothing is typed until Orca has made the terminal its
+active window (`orca_follows`), and what the session bus starts (the
+desktop portals) stays off the accessibility bus (`start_orca`): a portal
+that joined it and never answered held Orca 15 s, and the speech came too
+late for the wait.
 
 Build with `cargo build -p zgx-desktop --features terminal --example
 terminal_pane` first."""
@@ -42,7 +46,7 @@ from PIL import Image, ImageChops, ImageGrab
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from platform_smoke import stop  # noqa: E402
-from web_view_smoke import spoken, start_orca  # noqa: E402
+from web_view_smoke import orca_follows, spoken, start_orca  # noqa: E402
 
 MAGENTA, GREEN, BLUE, ORANGE = (255, 0, 255), (0, 255, 0), (0, 0, 255), (255, 128, 0)
 CYAN, YELLOW = (0, 255, 255), (255, 255, 0)
@@ -297,7 +301,9 @@ def announced(output):
 def orca_checks(env, output, xdo, window, type_line):
     """A row in the accessible tree, and Orca speaking new output."""
     xdo("mousemove", "--window", window, 450, 300, "click", 1)
-    time.sleep(0.3)
+    # Nothing is typed until Orca follows the window: its wait for speech
+    # below then measures how long the terminal takes, not Orca's start.
+    orca_follows(output, xdo("getwindowname", window))
     typed = ["clear; echo zgx-tree-$((40+2))", "echo zgx-spoken-$((40+2))"]
     type_line(typed[0])
     deadline = time.monotonic() + 40
