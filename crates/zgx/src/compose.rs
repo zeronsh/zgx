@@ -2494,7 +2494,7 @@ impl CanvasLabels {
                     node
                 }
             };
-            scene.set_font(node, text.font.clone());
+            scene.set_font_from(node, &text.font);
             // A size its maker knows (a terminal's run on its grid) is
             // kept, for layout and damage not to measure the text again.
             if let Some(size) = text.known_size {
