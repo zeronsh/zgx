@@ -113,6 +113,22 @@ impl Body {
     pub(crate) fn kept() -> Self {
         Self::new(None)
     }
+    /// The request is `caller`'s (a plugin's name; `None` for the app's),
+    /// under `policy`: for one made with no script running (a sound's file,
+    /// fetched in the browser).
+    #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+    pub(crate) fn asked_as(
+        &self,
+        caller: Option<Rc<str>>,
+        policy: &crate::fetch_policy::SharedPolicy,
+    ) {
+        if let Some(caller) = caller {
+            let _ = self.0.caller.set(caller);
+        }
+        if let Some(policy) = policy.borrow().clone() {
+            let _ = self.0.policy.set(policy);
+        }
+    }
     /// Write the next piece of the body. Nothing hears it once the request
     /// is cancelled (`is_open` is false).
     pub fn write(&self, bytes: &[u8]) {

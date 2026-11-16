@@ -21,6 +21,8 @@
 //! See the crate's README for what maps, what doesn't, and the benchmark.
 #![cfg(target_arch = "wasm32")]
 
+#[cfg(feature = "audio")]
+mod audio;
 mod canvas;
 #[cfg(feature = "luau")]
 mod fetch;
@@ -40,6 +42,10 @@ pub use mount::{Mounted, flush, live_nodes, mount, mount_in_body};
 #[doc(hidden)]
 pub use tasks::{frame_asked, timer_armed};
 
+/// Sound for a Luau app's `audio`: zgx-audio pulled by an audio worklet
+/// (`audio`).
+#[cfg(feature = "audio")]
+pub use audio::{__audio_drain_and_wake, __audio_state, install_audio, install_audio_at};
 /// The page's `fetch` as a Luau app's transport (`ui.fetch`): relative
 /// URLs read against the app's base (`luau`).
 #[cfg(feature = "luau")]

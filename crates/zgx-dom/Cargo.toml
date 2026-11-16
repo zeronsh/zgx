@@ -18,6 +18,15 @@ crate-type = ["cdylib", "rlib"]
 # Luau apps (zgx-script) in the browser. Luau's C++ is built with wasi-sdk:
 # source `luau-env.sh` first.
 luau = ["dep:zgx-script", "dep:wasm-bindgen-futures"]
+# Sound for Luau apps (zgx-script's `audio`): zgx-audio's mixer pulled by an
+# audio worklet (js/zgx-audio.js), the AudioContext made at the first sound.
+# The parts as zgx-run has them.
+audio = ["luau", "zgx-script/audio"]
+audio-effects = ["audio", "zgx-script/audio-effects"]
+audio-vorbis = ["audio", "zgx-script/audio-vorbis"]
+audio-mp3 = ["audio", "zgx-script/audio-mp3"]
+audio-opus = ["audio", "zgx-script/audio-opus"]
+audio-streams = ["audio", "zgx-script/audio-streams"]
 
 # Built for wasm32 only: elsewhere the crate is empty, and zgx's `dom`
 # feature, enabled only here, stays off in every native build.
@@ -49,6 +58,11 @@ required-features = ["luau"]
 [[test]]
 name = "fetch"
 required-features = ["luau"]
+
+# A Luau app's `audio` through the audio worklet (`install_audio`).
+[[test]]
+name = "audio"
+required-features = ["audio"]
 
 [[example]]
 name = "bench"
