@@ -192,10 +192,35 @@ fn rows_stamped_from_a_template_keep_their_context_menus() {
     host.remove();
 }
 
+/// Let the browser's queued events (a popover's toggle) and timers run.
+async fn settle(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        web_sys::window()
+            .unwrap()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
+            .unwrap();
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+}
+
+/// Wait (up to a second) for `done`: what the browser reports of a popover
+/// closing comes in a task of its own.
+async fn until(mut done: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if done() {
+            return;
+        }
+        settle(10).await;
+    }
+    panic!("not reported in a second");
+}
+
 /// `context_menu_open` in the DOM, as on the desktop: true as the menu
-/// opens, false as a pick or Escape closes it, and written false, it closes.
+/// opens; false as a pick closes it, or as the browser does (Escape, a
+/// click outside: the popover's own closing, reported as it toggles); and
+/// written false, it closes.
 #[wasm_bindgen_test]
-fn context_menu_open_says_whether_the_menu_shows() {
+async fn context_menu_open_says_whether_the_menu_shows() {
     let runtime = Runtime::new();
     let open = runtime.signal(false);
     let host = host();
@@ -217,23 +242,24 @@ fn context_menu_open_says_whether_the_menu_shows() {
     assert!(open.get(), "true as it opens");
     let menu = open_menu().expect("a menu showing");
     find(&menu, "[role=menuitem]").click();
-    assert!(open_menu().is_none());
-    assert!(!open.get(), "false as a pick closes it");
-    // Escape.
+    until(|| !open.get()).await;
+    assert!(open_menu().is_none(), "false as a pick closes it");
+    // The browser closing it (what Escape or a click outside does).
     secondary_click(&target);
     assert!(open.get());
-    let init = web_sys::KeyboardEventInit::new();
-    init.set_key("Escape");
-    init.set_bubbles(true);
-    init.set_cancelable(true);
-    let escape =
-        web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init).unwrap();
-    open_menu().unwrap().dispatch_event(&escape).unwrap();
-    assert!(!open.get(), "false as Escape closes it");
+    let menu = open_menu().expect("a menu showing again");
+    let hide: js_sys::Function = js_sys::Reflect::get(&menu, &"hidePopover".into())
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    hide.call0(&menu).unwrap();
+    until(|| !open.get()).await;
     // Written false by the app, it closes.
     secondary_click(&target);
     assert!(open_menu().is_some());
     open.set(false);
+    zgx_dom::flush();
+    settle(20).await;
     assert!(open_menu().is_none(), "written false, it closes");
     mounted.unmount();
     host.remove();
