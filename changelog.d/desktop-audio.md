@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **Sound on the system's output** (zgx-desktop, zgx-run, `audio`): `WindowFactory::audio()` is the app's one zgx-audio engine. Making it opens nothing: the default output opens with the first sound and closes after the quiet hold. Voices ending wake the event loop, never polled, and `WindowFactory::on_audio` hears them. The `ui` bus follows macOS's "Play user interface sound effects", read as the engine is made and when the app comes forward. `Application::audio_config` sets the engine's config. zgx-run's `audio` features (`audio`, `audio-effects`, `audio-vorbis`, `audio-mp3`, `audio-opus`, `audio-streams`, `audio-all`) run a Luau app with sound (`cargo run -p zgx-run --features audio -- app/`), and `zgx_run::play_through` does the same for a Rust host's script host. Off by default.

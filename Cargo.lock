@@ -5477,6 +5477,7 @@ dependencies = [
  "x11-dl",
  "x11rb",
  "zgx",
+ "zgx-audio",
  "zgx-components",
  "zgx-cosmic-text",
  "zgx-fingerprint",

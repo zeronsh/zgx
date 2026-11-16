@@ -40,7 +40,29 @@ fn serve(status: u16, location: &str) -> Server {
                     _ => break,
                 }
             }
-            let head = String::from_utf8_lossy(&asked).into_owned();
+            // The request's body read too, all of it, before answering:
+            // closing a socket with what it was sent still unread resets
+            // the connection on Windows (os error 10053 at the client),
+            // whatever was answered.
+            let end = asked
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map_or(asked.len(), |at| at + 4);
+            let length = String::from_utf8_lossy(&asked[..end])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            while asked.len() < end + length {
+                match stream.read(&mut buffer) {
+                    Ok(n) if n > 0 => asked.extend_from_slice(&buffer[..n]),
+                    _ => break,
+                }
+            }
+            let head = String::from_utf8_lossy(&asked[..end]).into_owned();
             let first = head.lines().next().unwrap_or_default().to_owned();
             let path = first.split(' ').nth(1).unwrap_or_default();
             let method = first.split(' ').next().unwrap_or_default();
@@ -64,6 +86,12 @@ fn serve(status: u16, location: &str) -> Server {
                 )
             };
             let _ = stream.write_all(reply.as_bytes());
+            // Done sending: the client closes its side once it has read
+            // the reply, and this side closes after, so the socket ends
+            // with nothing unread either way.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            while matches!(stream.read(&mut buffer), Ok(n) if n > 0) {}
         }
     });
     Server {

@@ -480,6 +480,8 @@ pub fn run_hosting(
         fetch::install(&host);
         #[cfg(feature = "socket")]
         socket::install(&host);
+        #[cfg(feature = "audio")]
+        play_through(&host, cx);
         configure(&host);
         let _ = host.reload();
         cx.tasks.spawn(host.watch(Duration::from_millis(250)));
@@ -503,6 +505,25 @@ pub fn run_hosting(
         });
     })?;
     Ok(())
+}
+
+/// `host`'s scripts play through the application's engine
+/// (`WindowFactory::audio`), made at their first `audio` call: their
+/// `playing` states follow voices ending, and `audio.ui_sounds_enabled` the
+/// user's setting. For a Rust host that makes its own window. The listener
+/// it keeps lives with the host's engine, the app's lifetime.
+#[cfg(feature = "audio")]
+pub fn play_through(host: &ScriptHost, cx: &zgx_desktop::WindowContext) {
+    let heard = host.clone();
+    let listening = cx.windows.on_audio(move |event| match event {
+        zgx_desktop::AudioEvent::VoicesEnded(ids) => heard.voices_ended(ids),
+        zgx_desktop::AudioEvent::UiSounds(on) => heard.set_ui_sounds_enabled(*on),
+    });
+    let factory = cx.windows.clone();
+    host.set_audio(move || {
+        let _ = &listening;
+        factory.audio()
+    });
 }
 
 static INSPECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
