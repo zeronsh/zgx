@@ -2974,7 +2974,12 @@ mod wash_tests {
         let underline_left = |padding: [f32; 2]| {
             let rich = RichText::new(
                 text,
-                vec![run(0..4, None), lined(4..5, padding), lined(5..7, [0.; 2]), run(7..11, None)],
+                vec![
+                    run(0..4, None),
+                    lined(4..5, padding),
+                    lined(5..7, [0.; 2]),
+                    run(7..11, None),
+                ],
             )
             .unwrap();
             let mut fonts = FontSystem::new();
@@ -2987,7 +2992,10 @@ mod wash_tests {
         };
         let plain = underline_left([0.; 2]);
         let led = underline_left([10., -1.]);
-        assert!((led - plain - 20.).abs() < 0.5, "after the 20 point room: {plain} {led}");
+        assert!(
+            (led - plain - 20.).abs() < 0.5,
+            "after the 20 point room: {plain} {led}"
+        );
     }
 
     /// A chip with an icon is runs of its own (the icon's room, its text,

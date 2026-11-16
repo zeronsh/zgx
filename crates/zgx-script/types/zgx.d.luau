@@ -1200,6 +1200,12 @@ declare extern type Element with
 	-- there unless the system reduces motion (`animate` says otherwise).
 	-- Whether any moved.
 	function scroll_into_view(self, options: { block: ("start" | "center" | "end" | "nearest")?, inline: ("start" | "center" | "end" | "nearest")?, animate: boolean? }?): boolean
+	-- An editor's atoms (see a textarea's `atoms`): `label` made an atom at
+	-- the caret, over the selection, or over `replace`'s characters; one step
+	-- of undo, the caret after it. Its id, or nil for elements that are not
+	-- editors.
+	function insert_atom(self, label: string, options: InsertAtomOptions?): string?
+	function atoms(self): { AtomItem }?
 	function has_class(self, class: string): boolean
 	-- An input's selection, in characters (Unicode code points from 0, as
 	-- `utf8.len` counts them). Each returns false (or nil) for elements
@@ -9022,6 +9028,65 @@ export type InputProps = {
 	-- The first line in view, from 1, whenever it changes: an outline following
 	-- the text.
 	on_top_line: ((line: number) -> ())?,
+	-- Its atoms (chips): ranges of the text that edit as one unit, `{ id,
+	-- from, to, data?, style? }` each, `from` and `to` in characters from 0
+	-- (half-open), by `from`. Two-way, as `value` is: the editor writes it as
+	-- they are made, lost or moved, and setting it restores them (a draft's;
+	-- set the text first). The label stays in the text.
+	atoms: State<{ AtomItem }>?,
+	-- Told after atoms are made, lost or moved (an edit, an undo): what was
+	-- added and removed (a removed one with its `label` and the range it had),
+	-- all of them, and why: "edit", "undo", "redo" or "set".
+	on_atoms: ((change: AtomChange) -> ())?,
+	-- Internal, subject to change: an atom pressed and let go in place
+	-- (within 4 points, no text dragged over), with where, in the window's
+	-- points. True takes the press: the caret stays where it was, out of
+	-- the chip.
+	on_atom_press: ((atom: AtomItem, at: { x: number, y: number }) -> boolean?)?,
+	-- Internal, subject to change: the atom the pointer comes onto, with
+	-- its box on the line under the pointer (window points), and nil, nil as
+	-- it leaves; again when a scroll or a new layout moves it.
+	on_atom_hover: ((atom: AtomItem?, box: { x: number, y: number, width: number, height: number }?) -> ())?,
+	-- The wash behind atoms that have none of their own (`style.bg`).
+	-- Internal, subject to change: and how they show beyond it, as a
+	-- mention does (an atom's own `style` wins field by field).
+	atom_style: AtomLook?,
+}
+-- Internal, subject to change: how an atom shows. Its text's colour and
+-- weight, a line under it (the font's thickness, `offset` points below the
+-- baseline), and an icon in room before its text that stays with its first
+-- word as it wraps.
+export type AtomLook = {
+	bg: Color?,
+	color: Color?,
+	weight: number?,
+	underline: (boolean | { color: Color?, offset: number? })?,
+	icon: { src: string?, code: string?, size: number?, gap: number?, tint: Color? }?,
+	-- Its text shown as a picture instead (an equation), sized in EM of the
+	-- textarea's text: one caret unit, its text kept for copy and search.
+	svg: { src: string?, code: string?, width: number, height: number, descent: number? }?,
+}
+export type AtomItem = {
+	id: string?,
+	from: number,
+	to: number,
+	data: any?,
+	style: AtomLook?,
+	-- Only on a removed atom: the text it had.
+	label: string?,
+}
+export type AtomChange = {
+	reason: "edit" | "undo" | "redo" | "set",
+	atoms: { AtomItem },
+	added: { AtomItem },
+	removed: { AtomItem },
+}
+export type InsertAtomOptions = {
+	id: string?,
+	data: any?,
+	style: { bg: string? }?,
+	-- The characters it takes the place of (the `@que` typed to ask for it).
+	replace: { from: number, to: number }?,
 }
 -- `value` from 0 to 1, or nil: indeterminate (work of unknown size), a
 -- stretch of the bar sweeping across.

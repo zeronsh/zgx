@@ -6878,6 +6878,7 @@ impl Ui {
                             lines,
                             scroll.1 - inner_height,
                             scroll.1 + 2. * inner_height,
+                            size,
                         );
                         wanted.extend(shown.into_iter().map(|(r, svg)| {
                             (Rect::new(r.x - scroll.0, r.y - scroll.1, r.width, r.height), svg)

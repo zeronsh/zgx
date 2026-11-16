@@ -709,14 +709,11 @@ impl LineCache {
         layout: &LinesLayout,
         top: f32,
         bottom: f32,
+        size: f32,
     ) -> Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> {
         if self.pictures.borrow().is_empty() {
             return Vec::new();
         }
-        let size = match self.shaping.borrow().as_ref() {
-            Some(shaping) => f32::from_bits(shaping.size),
-            None => return Vec::new(),
-        };
         let mut shown = Vec::new();
         for i in layout.lines_between(top, bottom) {
             let Some(spans) = self.spans(layout, i) else {
@@ -1210,20 +1207,6 @@ impl LinesLayout {
         let shown = self.lines_between(top, bottom);
         let lines = shown.start.max(self.line_of(start))..shown.end.min(self.line_of(end) + 1);
         self.selection_on(start..end, lines)
-    }
-    /// Where the inline boxes on the lines between `top` and `bottom` are laid
-    /// out (an atom shown as a picture): each one's byte offset in the text,
-    /// and its left edge and top in the area's points.
-    pub(crate) fn inline_boxes_between(&self, top: f32, bottom: f32) -> Vec<(usize, f32, f32)> {
-        let mut boxes = Vec::new();
-        for i in self.lines_between(top, bottom) {
-            let start = self.line_range(i).start;
-            for (at, x, y) in self.line(i).inline_boxes() {
-                let shown = self.shift(i, Rect::new(x, y, 0., 0.));
-                boxes.push((start + at, shown.x, shown.y));
-            }
-        }
-        boxes
     }
     /// The selection of `range` on `lines`, each shaped.
     fn selection_on(&self, range: Range<usize>, lines: Range<usize>) -> Vec<Rect> {
