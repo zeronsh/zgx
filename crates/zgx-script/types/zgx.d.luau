@@ -6,7 +6,10 @@
 -- by path), put `"languageMode": "strict"` in the project's .luaurc, add
 -- this file to `luau-lsp.types.definitionFiles`, and turn on Luau's new
 -- type solver (`"luau-lsp.fflags.override": { "LuauSolverV2": "true" }`,
--- or `--flag:LuauSolverV2=true`): the types below need it.
+-- or `--flag:LuauSolverV2=true`): the types below need it. Give it the
+-- iteration budget `zgx check` does, too (`"LuauTypeInferIterationLimit":
+-- "100000"` beside it): a `Merge<…>` of an element's props handed back to
+-- the element needs more than the default's.
 --
 -- Edit zgx.d.luau.in: zgx.d.luau, what editors and `zgx check` read, is
 -- that file with each `export type X = Merge<…>` written out as its table

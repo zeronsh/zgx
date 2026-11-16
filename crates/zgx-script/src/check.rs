@@ -135,6 +135,23 @@ impl Default for Options {
     }
 }
 
+/// The type solver's iteration budget `zgx check` gives luau-lsp
+/// (`LuauTypeInferIterationLimit`, 20,000 by default): five times it.
+///
+/// An app's props type made with `Merge` (`Merge<ContainerProps, { … }>`),
+/// handed back to an element (`ui.column(props)`), is compared with the
+/// element's props one property at a time. `Merge` is a type function, and
+/// what a type function returns is built anew: each property's type a copy,
+/// not the one `ContainerProps` holds, so each is compared by its structure
+/// rather than found the same at once (a props table written out in full,
+/// sharing them, costs almost nothing). Each distinct property type costs a
+/// few dozen iterations; the default budget was spent by the frame
+/// profiler's menus at about 270 props, and every prop added tipped it over
+/// ("Code is too complex to typecheck"). Nothing in `Merge` can keep the
+/// copies the originals: the budget is what has room to grow. The tooling
+/// tests fail if luau-lsp stops honouring it.
+pub const ITERATION_LIMIT: u32 = 100_000;
+
 /// `LUAU_LSP`, or `luau-lsp` on the PATH.
 pub fn find_luau_lsp() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("LUAU_LSP").map(PathBuf::from)
@@ -284,6 +301,9 @@ fn check_with(
             .arg("analyze")
             .arg("--platform=standard")
             .arg("--flag:LuauSolverV2=true")
+            .arg(format!(
+                "--flag:LuauTypeInferIterationLimit={ITERATION_LIMIT}"
+            ))
             .arg(format!("--definitions={}", definitions.display()))
             .arg("--formatter=gnu");
         if tests {
