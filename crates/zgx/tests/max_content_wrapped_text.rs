@@ -95,3 +95,24 @@ fn text_that_fits_is_as_wide_as_its_line() {
         "{bubble:?} for a line of {line}"
     );
 }
+
+#[test]
+fn text_a_fraction_short_of_its_cap_still_fills_it() {
+    // Two lines as wide as each other: in a cap that leaves its content a
+    // quarter point more than one line, the text wraps, its widest line a
+    // quarter point short of the room. CSS fills the room all the same (a
+    // chat bubble at 70% came out 401.549 where Chrome's is 401.8).
+    let line = unwrapped("AAAA");
+    assert_eq!(line, unwrapped("BBBB"), "the two lines are as wide");
+    for short in [0.1, 0.25, 0.45] {
+        let cap = line + short + 32.;
+        let parent = cap / 0.7;
+        let (bubble, text) = bubble(parent, "AAAA BBBB", None);
+        assert!(text.height > 22.5, "{short}: it wraps: {text:?}");
+        assert!(
+            (bubble.width - parent * 0.7).abs() <= 0.01,
+            "{short}: the cap {}, the bubble {bubble:?}",
+            parent * 0.7
+        );
+    }
+}
