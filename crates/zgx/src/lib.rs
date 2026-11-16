@@ -42,6 +42,7 @@ pub mod trace;
 
 pub mod caret_blink;
 pub mod clock;
+pub(crate) mod drag_scroll;
 pub(crate) mod editor_atom_pointer;
 pub(crate) mod editor_atom_style;
 pub(crate) mod editor_autocorrect;
