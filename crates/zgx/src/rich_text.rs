@@ -953,6 +953,12 @@ mod tests {
         assert_eq!(boxed.1.width, 28.);
         assert_eq!(at(11).x, at(8).x + 28.);
         assert!(at(12).width > 0., "the text after it has its width");
+        // A layout of it lists its box where its cell is, as `inline_places`.
+        let laid = crate::text_layout::FallbackTextLayout::with_rich(&rich, None);
+        assert_eq!(
+            crate::text_layout::TextLayout::inline_boxes(&laid),
+            crate::text_layout::FallbackTextLayout::inline_places(&rich, None)
+        );
     }
     #[test]
     fn inline_boxes_are_validated() {

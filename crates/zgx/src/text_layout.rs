@@ -794,6 +794,9 @@ pub struct FallbackTextLayout {
     cells: Vec<(Range<usize>, Rect)>,
     end: Rect,
     size: (f32, f32),
+    /// Where its inline boxes are (`TextLayout::inline_boxes`): offset, left
+    /// and top. Empty, and no allocation, for text without.
+    places: Box<[(usize, f32, f32)]>,
 }
 impl FallbackTextLayout {
     /// Mixed-size approximate cells used when no native rich shaper is installed.
@@ -844,6 +847,7 @@ impl FallbackTextLayout {
             cells,
             end: Rect::new(x, y, 1., pitch),
             size: (max_x.max(x), y + pitch),
+            places: Box::default(),
         };
         layout.finished(rich, width)
     }
@@ -854,12 +858,29 @@ impl FallbackTextLayout {
         let boxes = crate::rich_text::fallback_boxes(rich, width);
         let (x, y, height) = boxes.end;
         let wide = boxes.rows.iter().fold(0_f32, |w, row| w.max(row.2));
-        Self {
+        // Each box's character, and its top, before its cells move.
+        let held: Vec<(usize, f32)> = boxes
+            .places
+            .iter()
+            .filter_map(|&(cell, top)| Some((boxes.cells.get(cell)?.0.start, top)))
+            .collect();
+        let mut layout = Self {
             cells: boxes.cells,
             end: Rect::new(x, y, 1., height),
             size: (wide, y + height),
+            places: Box::default(),
         }
-        .finished(rich, width)
+        .finished(rich, width);
+        // Each box where its cell ended up (aligned, kept by a clamp).
+        let mut kept = layout.cells.iter();
+        layout.places = held
+            .into_iter()
+            .filter_map(|(at, top)| {
+                let (_, rect) = kept.find(|(kept, _)| kept.start == at)?;
+                Some((at, rect.x, top))
+            })
+            .collect();
+        layout
     }
     /// Where each of `rich`'s inline boxes is at `width` (as
     /// `TextLayout::inline_boxes`): its character's offset, left and top.
@@ -1117,6 +1138,7 @@ impl FallbackTextLayout {
             cells: out,
             end,
             size,
+            places: Box::default(),
         };
         layout.align(max_width, font.align);
         layout
@@ -1295,6 +1317,9 @@ impl Iterator for AsciiClusters<'_> {
     }
 }
 impl TextLayout for FallbackTextLayout {
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        self.places.to_vec()
+    }
     fn cache_weight(&self) -> Option<usize> {
         Some(
             std::mem::size_of::<Self>().saturating_add(
