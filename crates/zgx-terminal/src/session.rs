@@ -365,6 +365,8 @@ impl Session {
             rx,
             poller,
             exited: exited.clone(),
+            #[cfg(target_os = "macos")]
+            pacing: Pacing::default(),
         };
         std::thread::Builder::new()
             .name("zgx terminal".into())
@@ -584,6 +586,76 @@ struct Io {
     rx: Receiver<Msg>,
     poller: Arc<Poller>,
     exited: Arc<Mutex<Option<i32>>>,
+    #[cfg(target_os = "macos")]
+    pacing: Pacing,
+}
+
+/// macOS: reading a stream that comes in small writes (`seq`, a build's
+/// log) a few bytes at a time made the program wait on the tty's lock at
+/// every write, as each read took it too: `seq 1 1000000` ran a third
+/// longer than with reads paced, and the reading cost three times the CPU.
+/// From the second short read in a row (less than the tty's queue holds),
+/// the session's thread lets go of the screen and sleeps a moment before
+/// reading on, so output gathers into fewer, larger reads. A keystroke's
+/// echo (one read, then nothing) and a stream that fills the queue never
+/// wait. Linux's ptys gain nothing from it (measured slower), and its
+/// sleeps run long, so there reads go on as they come.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct Pacing {
+    /// The last read cycle ended in a pause: the stream goes on.
+    streaming: bool,
+    /// Sleeps ran long (timer coalescing, a napping app): no pauses
+    /// until then, as a long one would hold up the program instead.
+    off_until: Option<Instant>,
+}
+
+#[cfg(target_os = "macos")]
+impl Pacing {
+    /// What macOS's tty output queue hands over at most in a read.
+    const QUEUE: usize = 1024;
+    /// The pause between a stream's reads.
+    const PAUSE: std::time::Duration = std::time::Duration::from_micros(2);
+    /// A pause taking longer than this (the sleep was coarsened) turns
+    /// pausing off for `OFF` (a stream then reads as it comes).
+    const LONG: std::time::Duration = std::time::Duration::from_micros(200);
+    const OFF: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// The `nth` read of a cycle brought `read` bytes: whether to pause
+    /// before the next.
+    fn after_read(&mut self, read: usize, nth: usize) -> bool {
+        if read >= Self::QUEUE || !(self.streaming || nth >= 2) {
+            return false;
+        }
+        if let Some(until) = self.off_until {
+            if Instant::now() < until {
+                return false;
+            }
+            self.off_until = None;
+        }
+        self.streaming = true;
+        true
+    }
+
+    /// Nothing more to read: the stream, if any, is over.
+    fn drained(&mut self) {
+        self.streaming = false;
+    }
+
+    /// A pause that took `slept`, ending at `now`.
+    fn slept(&mut self, slept: std::time::Duration, now: Instant) {
+        if slept > Self::LONG {
+            self.off_until = Some(now + Self::OFF);
+            self.streaming = false;
+        }
+    }
+
+    fn pause(&mut self) {
+        let started = Instant::now();
+        std::thread::sleep(Self::PAUSE);
+        let now = Instant::now();
+        self.slept(now - started, now);
+    }
 }
 /// The screen model's configuration: device attributes announce sixel
 /// only where pictures can arrive, and XTVERSION answers with the program
@@ -690,6 +762,8 @@ impl Io {
         }
         let mut events = Events::with_capacity(NonZeroUsize::new(16).unwrap());
         'run: loop {
+            // A read cycle stopped short in a stream of small writes.
+            let mut pace = false;
             let sync_until = parse.parser.sync_timeout().sync_timeout();
             let timeout = sync_until.map(|until| until.saturating_duration_since(Instant::now()));
             events.clear();
@@ -727,17 +801,20 @@ impl Io {
                         if event.is_interrupt() {
                             continue;
                         }
-                        if event.readable
-                            && let Err(error) = self.read(&mut parse, &mut buffer)
-                        {
-                            // Linux: reading a pty whose other side hung up
-                            // fails with EIO; the child's exit follows.
-                            #[cfg(target_os = "linux")]
-                            if error.raw_os_error() == Some(libc::EIO) {
-                                continue;
+                        if event.readable {
+                            match self.read(&mut parse, &mut buffer) {
+                                Ok(paced) => pace |= paced,
+                                Err(error) => {
+                                    // Linux: reading a pty whose other side hung up
+                                    // fails with EIO; the child's exit follows.
+                                    #[cfg(target_os = "linux")]
+                                    if error.raw_os_error() == Some(libc::EIO) {
+                                        continue;
+                                    }
+                                    let _ = error;
+                                    break 'run;
+                                }
                             }
-                            let _ = error;
-                            break 'run;
                         }
                         if event.writable && self.write(&mut writes, &mut written).is_err() {
                             break 'run;
@@ -761,6 +838,12 @@ impl Io {
                     break;
                 }
             }
+            #[cfg(target_os = "macos")]
+            if pace {
+                self.pacing.pause();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = pace;
         }
         let _ = self.pty.deregister(&self.poller);
         // Dropping the pty hangs up the program and reaps it.
@@ -798,20 +881,27 @@ impl Io {
         }
     }
 
-    fn read(&mut self, parse: &mut Parse, buffer: &mut [u8]) -> io::Result<()> {
+    /// Read what the program wrote into the screen: whether the cycle
+    /// stopped short to pace a stream of small writes (macOS, `Pacing`).
+    fn read(&mut self, parse: &mut Parse, buffer: &mut [u8]) -> io::Result<bool> {
         let _lease = self.term.lease();
         let mut term = None;
         let mut processed = 0;
         let mut failed = None;
+        #[cfg(target_os = "macos")]
+        let (mut paced, mut reads) = (false, 0);
+        #[cfg(not(target_os = "macos"))]
+        let paced = false;
         loop {
             let read = match self.pty.reader().read(buffer) {
                 Ok(0) => break,
                 Ok(read) => read,
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) =>
-                {
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    #[cfg(target_os = "macos")]
+                    self.pacing.drained();
                     break;
                 }
+                Err(error) if error.kind() == ErrorKind::Interrupted => break,
                 // (What was read before it is still answered.)
                 Err(error) => {
                     failed = Some(error);
@@ -825,6 +915,14 @@ impl Io {
             if processed >= MAX_LOCKED_READ {
                 break;
             }
+            #[cfg(target_os = "macos")]
+            {
+                reads += 1;
+                if self.pacing.after_read(read, reads) {
+                    paced = true;
+                    break;
+                }
+            }
         }
         if let Some(term) = &term {
             self.shared.answer(term);
@@ -837,7 +935,7 @@ impl Io {
         if processed > 0 && parse.parser.sync_bytes_count() < processed {
             self.shared.mark();
         }
-        Ok(())
+        Ok(paced)
     }
 
     fn write(
@@ -893,6 +991,64 @@ mod real_programs_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A keystroke's echo (one read, then nothing to read) never waits,
+    /// however often it comes.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_echo_is_never_paced() {
+        let mut pacing = Pacing::default();
+        for _ in 0..100 {
+            assert!(!pacing.after_read(1, 1));
+            pacing.drained();
+        }
+    }
+
+    /// Short reads in a row are paced from the second, the stream stays
+    /// paced across read cycles, and a read finding nothing ends it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stream_of_short_reads_is_paced_until_it_drains() {
+        let mut pacing = Pacing::default();
+        assert!(!pacing.after_read(8, 1));
+        assert!(pacing.after_read(8, 2));
+        // The next cycle: paced from its first read.
+        assert!(pacing.after_read(8, 1));
+        pacing.drained();
+        assert!(!pacing.after_read(8, 1));
+    }
+
+    /// Reads that fill the tty's queue (a stream outrunning the reader)
+    /// never wait: a pause there only holds the program up.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_filling_the_queue_are_never_paced() {
+        let mut pacing = Pacing::default();
+        assert!(pacing.after_read(8, 2));
+        for nth in 1..20 {
+            assert!(!pacing.after_read(Pacing::QUEUE, nth));
+        }
+    }
+
+    /// A sleep that ran long (coarsened timers) turns pacing off for a
+    /// while, so a stream reads as it comes rather than waiting out long
+    /// sleeps; then it is paced again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn long_sleeps_turn_pacing_off_for_a_while() {
+        let mut pacing = Pacing::default();
+        assert!(pacing.after_read(8, 2));
+        let now = Instant::now();
+        pacing.slept(Pacing::LONG / 2, now);
+        assert!(pacing.after_read(8, 2), "a short sleep keeps pacing on");
+        pacing.slept(Pacing::LONG * 10, now);
+        assert!(!pacing.after_read(8, 1));
+        assert!(!pacing.after_read(8, 5));
+        // Its time over: paced again.
+        pacing.off_until = Some(now);
+        assert!(pacing.after_read(8, 2));
+        assert_eq!(pacing.off_until, None);
+    }
 
     /// What a session writes back to its program for `output`.
     fn answers(pictures: bool, output: &[u8]) -> (Vec<String>, Session) {
