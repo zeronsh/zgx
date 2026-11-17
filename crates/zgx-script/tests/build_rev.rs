@@ -3,7 +3,7 @@
 //! made-up trees.
 #[path = "../src/build_rev.rs"]
 #[allow(dead_code)]
-mod build_rev;
+mod resolver;
 
 use std::path::{Path, PathBuf};
 
@@ -25,8 +25,8 @@ impl Tree {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
-    fn found(&self) -> build_rev::Found {
-        build_rev::find(&self.0.join("crates/zgx-script"))
+    fn found(&self) -> resolver::Found {
+        resolver::find(&self.0.join("crates/zgx-script"))
     }
     fn path(&self, path: &str) -> PathBuf {
         self.0.join(path)
@@ -59,7 +59,7 @@ fn a_path_build_reports_the_worktrees_head() {
     }
     let head = String::from_utf8(out.stdout).unwrap();
     assert_eq!(zgx_script::BUILD_REV, head.trim());
-    assert_eq!(build_rev::find(manifest).rev.as_deref(), Some(head.trim()));
+    assert_eq!(resolver::find(manifest).rev.as_deref(), Some(head.trim()));
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn a_tree_without_git_is_unknown() {
         .ancestors()
         .any(|d| d.join(".git").exists())
     {
-        assert_eq!(found, build_rev::Found::default());
+        assert_eq!(found, resolver::Found::default());
     }
 }
 
