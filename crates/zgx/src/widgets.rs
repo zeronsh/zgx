@@ -1981,7 +1981,10 @@ impl EditorHandle {
         if let Some(gap) = self.hint.gap()
             && let Some(at) = gap.at.get()
         {
-            gap.input(at, GapInput::Paste(normalize_text(text, self.multiline)));
+            gap.input(
+                at,
+                GapInput::Paste(normalize_text(text, self.multiline).into_owned()),
+            );
             return;
         }
         self.preferred_x.set(None);
