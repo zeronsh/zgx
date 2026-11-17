@@ -285,3 +285,59 @@ fn runaway_luau_is_stopped_by_its_budget_in_the_browser() {
         );
     }
 }
+
+#[wasm_bindgen_test]
+async fn a_cleared_list_is_collected_as_the_page_goes_idle() {
+    // The idle trim runs the host's full collection, as the desktop's does:
+    // rows a script let go of don't stay held until it next allocates.
+    let runtime = Runtime::new();
+    let script = ScriptHost::inline(
+        &runtime,
+        "rows.luau",
+        r#"
+        local rows = ui.state("rows", {})
+        return ui.column {
+            ui.button { "Fill", on_click = function()
+                local made = {}
+                for i = 1, 2000 do made[i] = { id = i, label = `row {i}` } end
+                rows:set(made)
+            end },
+            ui.button { "Clear", on_click = function() rows:set({}) end },
+            ui.each(rows, function(item) return ui.text { item.label } end, {
+                key = function(item) return item.id end,
+            }),
+        }
+        "#,
+    );
+    script.reload().expect("the script loads");
+    let host = host();
+    let mounted = zgx_dom::mount(&runtime, &host, script.view());
+    // What the script holds with no rows, collected.
+    let base = script.script_memory();
+    let buttons = host.query_selector_all("button").unwrap();
+    let press = |i| {
+        buttons
+            .item(i)
+            .unwrap()
+            .dyn_into::<web_sys::HtmlElement>()
+            .unwrap()
+            .click()
+    };
+    press(0);
+    zgx_dom::flush();
+    press(1);
+    zgx_dom::flush();
+    let held = script.script_heap();
+    let trims = zgx_dom::trims();
+    sleep(3200).await;
+    assert!(zgx_dom::trims() > trims, "the idle trim ran");
+    let after = script.script_heap();
+    // Most of what the rows left is gone: within a quarter of it of the
+    // collected baseline.
+    assert!(
+        held > base && after < base + (held - base) / 4,
+        "the cleared rows were collected: {base} bytes with none, {held} before \
+         the trim, {after} after"
+    );
+    mounted.unmount();
+}

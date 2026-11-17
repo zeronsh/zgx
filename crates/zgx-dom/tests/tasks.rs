@@ -158,3 +158,36 @@ async fn animation_frames_tick_while_awaited_and_stop_at_rest() {
     );
     mounted.unmount();
 }
+
+#[wasm_bindgen_test]
+async fn the_idle_trim_runs_once_the_dom_is_still_and_not_again() {
+    // As a desktop window's, 1.5 s after the last write (up to twice that,
+    // as writes are counted, not timed); then nothing is armed.
+    let runtime = Runtime::new();
+    let trimmed = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = trimmed.clone();
+    let _trim = zgx::idle::on_idle(&runtime, move || counted.set(counted.get() + 1));
+    let shown = runtime.signal(0);
+    let text = shown.clone();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        text_signal(move || format!("{}", text.get())),
+    );
+    // Writing every 400 ms for 2 s: still busy, no trim.
+    for i in 1..=5 {
+        sleep(400).await;
+        shown.set(i);
+        zgx_dom::flush();
+    }
+    assert_eq!(trimmed.get(), 0, "no trim while the DOM is written");
+    assert!(zgx_dom::trim_armed(), "one is armed meanwhile");
+    // Still: within 3 s it runs, once.
+    sleep(3200).await;
+    assert_eq!(trimmed.get(), 1, "trimmed once the DOM was still");
+    assert!(!zgx_dom::trim_armed(), "and nothing is armed after");
+    sleep(2000).await;
+    assert_eq!(trimmed.get(), 1, "nor run again at rest");
+    mounted.unmount();
+}

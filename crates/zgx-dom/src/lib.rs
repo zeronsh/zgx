@@ -24,6 +24,7 @@
 mod canvas;
 #[cfg(feature = "luau")]
 mod fetch;
+mod idle;
 mod js;
 mod keyed;
 mod mount;
@@ -33,6 +34,8 @@ mod sheet;
 mod tasks;
 mod template;
 
+#[doc(hidden)]
+pub use idle::{trim_armed, trims};
 pub use mount::{Mounted, flush, live_nodes, mount, mount_in_body};
 #[doc(hidden)]
 pub use tasks::{frame_asked, timer_armed};

@@ -486,6 +486,7 @@ pub fn mount(runtime: &Runtime, parent: &web_sys::Element, view: View) -> Mounte
     let (tasks, frames) = crate::tasks::services();
     let view = zgx::compose::provide(frames, zgx::compose::provide(tasks, view));
     let scope = Scope::root(runtime);
+    crate::idle::watch(runtime);
     // Adopting writes the table at once, so what is pending (a free of the
     // id it reuses, say) goes first.
     flush();
