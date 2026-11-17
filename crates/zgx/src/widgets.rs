@@ -3768,25 +3768,54 @@ impl Ui {
             }
             scene.bounds(node)
         };
-        if bounds.width <= 0. || bounds.height <= 0. {
+        self.snapshot_of(Some(node), take, bounds, max_width)
+    }
+    /// A picture of `rect` (in the window's points) as the window last
+    /// showed it, at most `max_width` pixels wide: only that area is read
+    /// and scaled, so a row's picture costs a row, not the window. What
+    /// lies past the window's edges is left out. `None` if the host takes
+    /// no pictures, or none of `rect` is in the window.
+    #[doc(hidden)]
+    pub fn snapshot_area(
+        &self,
+        rect: Rect,
+        max_width: u32,
+    ) -> Option<std::sync::Arc<crate::image::ImageData>> {
+        let take = self.storage.snapshotter.borrow().clone()?;
+        self.snapshot_of(None, take, rect, max_width)
+    }
+    /// `rect` (the window's points) of what shows `node`'s popup's surface
+    /// if it is in one that has a picture, else of the window's.
+    pub(crate) fn snapshot_of(
+        &self,
+        node: Option<NodeId>,
+        take: Snapshotter,
+        rect: Rect,
+        max_width: u32,
+    ) -> Option<std::sync::Arc<crate::image::ImageData>> {
+        if rect.width <= 0. || rect.height <= 0. {
             return None;
         }
         // In a popup past the window: what its own surface shows.
-        let root = {
+        let root = node.and_then(|node| {
             let scene = self.scene.borrow();
             scene
                 .popups()
                 .iter()
                 .copied()
                 .find(|root| scene.is_within(node, *root))
-        };
+        });
         let popup = self.storage.popup_snapshotter.borrow().clone();
         if let (Some(root), Some(popup)) = (root, popup)
-            && let Some(picture) = popup(root, bounds, max_width.max(1))
+            && let Some(picture) = popup(root, rect, max_width.max(1))
         {
             return Some(picture);
         }
-        take(bounds, max_width.max(1))
+        take(rect, max_width.max(1))
+    }
+    /// The host's picture taker (`on_snapshot`), if it has one.
+    pub(crate) fn snapshotter(&self) -> Option<Snapshotter> {
+        self.storage.snapshotter.borrow().clone()
     }
     /// The display's refresh period, as the host knows it (60 Hz until
     /// told): what the engine times itself steps by (a stretched view
