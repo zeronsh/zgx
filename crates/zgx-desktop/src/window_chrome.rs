@@ -2178,7 +2178,8 @@ pub(crate) fn may_show() -> bool {
     !*OFFSCREEN
 }
 
-/// A shown window's alpha: none while `OFFSCREEN`.
+/// A shown window's alpha: none while `OFFSCREEN` (macOS's popup panels).
+#[cfg(target_os = "macos")]
 pub(crate) fn shown_alpha() -> f64 {
     if *OFFSCREEN { 0. } else { 1. }
 }

@@ -4408,7 +4408,10 @@ impl Host {
         renderer.set_plane_waker(self.plane_waker());
         self.renderer = Some(renderer);
         self.adapter = adapter;
-        window.set_maximized(self.state.maximized);
+        // Off-screen (`ZGX_OFFSCREEN`), not zoomed either: it is never shown.
+        if crate::window_chrome::may_show() {
+            window.set_maximized(self.state.maximized);
+        }
         // Not shown yet, an X11 window's state is its own to set.
         #[cfg(target_os = "linux")]
         if self.state.maximized {
