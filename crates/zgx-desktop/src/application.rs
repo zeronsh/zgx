@@ -2210,7 +2210,7 @@ impl Host {
             ui.on_snapshot(move |rect, max_width| {
                 let shown = shown.borrow();
                 let (frame, scale) = shown.as_ref()?;
-                let (x, y, w, h) = snapshot_region(rect, *scale);
+                let (x, y, w, h) = zgx_gpu::pixel_region(rect, *scale);
                 let (w, h, bgra) = frame.read(x, y, w, h)?;
                 let (w, h) = (w as usize, h as usize);
                 crate::thumbnail::image(&bgra, w, h, w * 4, max_width as usize)
@@ -2226,7 +2226,7 @@ impl Host {
                     rect.width,
                     rect.height,
                 );
-                let (x, y, w, h) = snapshot_region(inside, f64::from(*scale));
+                let (x, y, w, h) = zgx_gpu::pixel_region(inside, f64::from(*scale));
                 let (w, h, bgra) = frame.read(x, y, w, h)?;
                 let (w, h) = (w as usize, h as usize);
                 crate::thumbnail::image(&bgra, w, h, w * 4, max_width as usize)
@@ -9517,21 +9517,6 @@ fn first_present_mark() -> String {
         None => "first frame presented".into(),
     }
 }
-/// The pixels of a window's frame at `scale` that `rect` (in points) covers:
-/// `(x, y, width, height)`, less any part off its left or top edge (the
-/// frame's reader cuts the right and bottom).
-#[cfg(any(target_os = "macos", test))]
-fn snapshot_region(rect: zgx::scene::Rect, scale: f64) -> (u32, u32, u32, u32) {
-    let span = |from: f32, length: f32| {
-        let start = (f64::from(from) * scale).round();
-        let end = (f64::from(from + length) * scale).round();
-        let start = start.max(0.);
-        (start as u32, (end - start).max(0.) as u32)
-    };
-    let (x, width) = span(rect.x, rect.width);
-    let (y, height) = span(rect.y, rect.height);
-    (x, y, width, height)
-}
 
 /// The system's spring-loading delay (Accessibility > Pointer Control), or
 /// `None` where it is turned off.
@@ -10084,26 +10069,6 @@ mod tests {
         assert!(!acts(&touch(winit::event::TouchPhase::Moved)));
     }
 
-    #[test]
-    fn a_snapshot_reads_only_what_its_node_covers_on_the_window() {
-        let rect = |x, y, width, height| zgx::scene::Rect {
-            x,
-            y,
-            width,
-            height,
-        };
-        assert_eq!(
-            snapshot_region(rect(10., 5., 30., 20.), 2.),
-            (20, 10, 60, 40)
-        );
-        // Partly off the left and top: what is left of it, from the edge.
-        assert_eq!(
-            snapshot_region(rect(-100., -10., 300., 40.), 1.),
-            (0, 0, 200, 30)
-        );
-        // Wholly off: nothing.
-        assert_eq!(snapshot_region(rect(-50., 0., 40., 40.), 2.).2, 0);
-    }
     #[test]
     fn only_early_frames_at_a_fast_refresh_wait_for_the_others_point() {
         let ms = |value: f64| std::time::Duration::from_secs_f64(value / 1e3);

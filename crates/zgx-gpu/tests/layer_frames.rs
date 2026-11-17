@@ -716,6 +716,106 @@ fn shown_frame_regions_are_the_whole_frames_rows() {
     );
 }
 
+/// An area's picture (`Ui::snapshot_area`, `NodeHandle::snapshot_area`)
+/// through the host's reader (`pixel_region`, `ShownFrame::read`), at 1x
+/// and 2x: the same pixels as that area cut from a picture of the whole
+/// window, an area over the window's edges what of it is inside them, one
+/// wholly outside none, and a node's area in its own points where the node
+/// shows.
+#[cfg(target_os = "macos")]
+fn area_snapshots_are_the_whole_windows_pixels_there() {
+    use std::{cell::RefCell, rc::Rc, sync::Arc};
+    use zgx::{image::ImageData, scene::Rect};
+    for scale in [1_f64, 2.] {
+        let host = objc2_quartz_core::CALayer::new();
+        let (w, h) = (
+            (SIZE.0 as f64 * scale) as u32,
+            (SIZE.1 as f64 * scale) as u32,
+        );
+        let mut gpu = GpuRenderer::debug_for_layer(host.clone(), w, h).unwrap();
+        gpu.set_scale_factor(scale as f32);
+        let mut ui = Ui::new(SIZE.0, SIZE.1);
+        gpu.install_text(&mut ui.scene.borrow_mut());
+        let live = ui.signal(3);
+        let row = Rc::new(RefCell::new(None));
+        let slot = row.clone();
+        ui.mount(
+            div().size(SIZE.0, SIZE.1).child(view(live)).child(
+                div()
+                    .absolute()
+                    .ml(101.)
+                    .mt(203.)
+                    .size(331., 21.)
+                    .bg(Color(210, 160, 40, 255))
+                    .on_mount(move |handle| *slot.borrow_mut() = Some(handle)),
+            ),
+        );
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        gpu.present().unwrap();
+        let shown = Rc::new(gpu.shown_frame().expect("a frame shown"));
+        let read = shown.clone();
+        ui.on_snapshot(move |rect, _| {
+            let (x, y, w, h) = zgx_gpu::pixel_region(rect, scale);
+            let (w, h, bgra) = read.read(x, y, w, h)?;
+            ImageData::new(w, h, bgra).ok().map(Arc::new)
+        });
+        let whole = ui
+            .snapshot_area(Rect::new(0., 0., SIZE.0, SIZE.1), u32::MAX)
+            .expect("the whole window");
+        assert_eq!((whole.width(), whole.height()), (w, h));
+        // The window's pixels of `rect` (points), clipped to it.
+        let cut = |rect: Rect| {
+            let x0 = (rect.x.max(0.) as f64 * scale).round() as usize;
+            let y0 = (rect.y.max(0.) as f64 * scale).round() as usize;
+            let x1 = (((rect.x + rect.width) as f64 * scale).round() as usize).min(w as usize);
+            let y1 = (((rect.y + rect.height) as f64 * scale).round() as usize).min(h as usize);
+            let mut pixels = Vec::new();
+            for y in y0..y1 {
+                pixels.extend_from_slice(
+                    &whole.pixels()[(y * w as usize + x0) * 4..][..(x1 - x0) * 4],
+                );
+            }
+            ((x1 - x0) as u32, (y1 - y0) as u32, pixels)
+        };
+        let areas = [
+            Rect::new(37., 11., 64., 9.),
+            // A row's worth, as a drag's preview.
+            Rect::new(101., 203., 331., 21.),
+            // Over the right and bottom edges, then the left and top.
+            Rect::new(SIZE.0 - 20., SIZE.1 - 7., 64., 30.),
+            Rect::new(-15., -9., 40., 25.),
+        ];
+        for rect in areas {
+            let area = ui.snapshot_area(rect, u32::MAX).expect("an area");
+            let (cw, ch, pixels) = cut(rect);
+            assert_eq!(
+                (area.width(), area.height()),
+                (cw, ch),
+                "{rect:?} at {scale}x"
+            );
+            assert!(
+                area.pixels() == &pixels[..],
+                "{rect:?} at {scale}x: other pixels"
+            );
+        }
+        assert!(
+            ui.snapshot_area(Rect::new(SIZE.0 + 5., 0., 40., 40.), u32::MAX)
+                .is_none(),
+            "an area outside the window"
+        );
+        // A node's area, in its own points: where it shows.
+        let row = row.borrow().clone().expect("mounted");
+        let inside = row
+            .snapshot_area(Rect::new(10., 2., 50., 15.), u32::MAX)
+            .expect("a row's area");
+        let (cw, ch, pixels) = cut(Rect::new(111., 205., 50., 15.));
+        assert_eq!((inside.width(), inside.height()), (cw, ch));
+        assert!(inside.pixels() == &pixels[..], "the row's area at {scale}x");
+    }
+}
+
 /// At the display's full rate frames are tiles too: no video layer (its
 /// CoreMedia thread never starts), one tile shown at a time, and at rest one
 /// tile left.
@@ -1115,6 +1215,8 @@ fn main() {
         println!("layer_frames: tiles fill the plain layer exactly after the host grows");
         shown_frame_regions_are_the_whole_frames_rows();
         println!("layer_frames: shown frame regions are the whole frame's rows");
+        area_snapshots_are_the_whole_windows_pixels_there();
+        println!("layer_frames: area snapshots are the whole window's pixels there");
         full_rate_frames_show_as_tiles_without_a_video_layer();
         println!("layer_frames: full-rate frames show as tiles without a video layer");
         input_after_idle_wakes_the_gpu_once();

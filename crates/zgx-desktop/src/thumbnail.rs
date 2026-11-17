@@ -13,6 +13,9 @@ pub(crate) fn shrink(
     max_width: usize,
 ) -> (usize, usize, Vec<u8>) {
     let factor = width.div_ceil(max_width.max(1)).max(1);
+    if factor == 1 {
+        return (width, height, straight_rgba(bytes, width, height, stride));
+    }
     let (w, h) = ((width / factor).max(1), (height / factor).max(1));
     let mut out = vec![0u8; w * h * 4];
     for y in 0..h {
@@ -39,6 +42,23 @@ pub(crate) fn shrink(
     (w, h, out)
 }
 
+/// `bytes` as they are, BGRA premultiplied to straight RGBA: `shrink` by a
+/// factor of 1 (a picture that fits already, a dragged row's), a pixel at a
+/// time, without its sums.
+fn straight_rgba(bytes: &[u8], width: usize, height: usize, stride: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(width * height * 4);
+    for y in 0..height {
+        for &[b, g, r, a] in bytes[y * stride..][..width * 4].as_chunks::<4>().0 {
+            let straight = |c: u8| match a {
+                0 => 0,
+                255 => c,
+                a => (u32::from(c) * 255 / u32::from(a)).min(255) as u8,
+            };
+            out.extend_from_slice(&[straight(r), straight(g), straight(b), a]);
+        }
+    }
+    out
+}
 /// `shrink`, as an image.
 #[allow(dead_code)]
 pub(crate) fn image(
@@ -80,5 +100,35 @@ mod tests {
         // Fitting already: as it is.
         let (w, h, _) = shrink(&bytes, 4, 2, 20, 8);
         assert_eq!((w, h), (4, 2));
+    }
+
+    /// Fitting already, a picture is each pixel straightened alone: the
+    /// same bytes the box filter gives at a factor of 1, sums of one.
+    #[test]
+    fn a_picture_that_fits_is_each_pixel_straightened() {
+        let (width, height, stride) = (7, 3, 32);
+        let mut bytes = vec![0u8; stride * height];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = (i * 37 % 251) as u8;
+        }
+        // Premultiplied: no channel past its alpha.
+        for px in bytes.as_chunks_mut::<4>().0 {
+            let a = px[3];
+            for c in &mut px[..3] {
+                *c = (*c).min(a);
+            }
+        }
+        let (w, h, fast) = shrink(&bytes, width, height, stride, width);
+        assert_eq!((w, h), (width, height));
+        let mut summed = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let px = &bytes[y * stride + x * 4..][..4];
+                let [b, g, r, a] = [px[0], px[1], px[2], px[3]].map(u32::from);
+                let straight = |c: u32| (c * 255).checked_div(a).map_or(0, |v| v.min(255) as u8);
+                summed.extend_from_slice(&[straight(r), straight(g), straight(b), a as u8]);
+            }
+        }
+        assert_eq!(fast, summed);
     }
 }

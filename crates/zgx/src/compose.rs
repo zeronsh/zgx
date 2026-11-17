@@ -9320,6 +9320,38 @@ impl NodeHandle {
     pub fn snapshot(&self, max_width: u32) -> Option<std::sync::Arc<crate::image::ImageData>> {
         self.ui.upgrade()?.snapshot(self.node, max_width)
     }
+    /// A picture of `rect` of the node, in its own points (0, 0 its top
+    /// left), as the window last showed it, at most `max_width` pixels wide
+    /// (see `Ui::snapshot_area`): a dragged row's picture out of an editor
+    /// that holds many, reading and scaling only the row. What lies past
+    /// the window's edges is left out. `None` if the host takes no
+    /// pictures, the node is not laid out or is hidden, or none of `rect`
+    /// is in the window.
+    #[doc(hidden)]
+    pub fn snapshot_area(
+        &self,
+        rect: crate::scene::Rect,
+        max_width: u32,
+    ) -> Option<std::sync::Arc<crate::image::ImageData>> {
+        let ui = self.ui.upgrade()?;
+        let take = ui.snapshotter()?;
+        let area = {
+            let scene = ui.scene.borrow();
+            if !scene.contains(self.node) || !scene.layout_visible(self.node) {
+                return None;
+            }
+            let bounds = scene.bounds(self.node);
+            let inside = crate::scene::Rect::new(
+                bounds.x + rect.x,
+                bounds.y + rect.y,
+                rect.width,
+                rect.height,
+            );
+            // Where it shows, as `window_bounds` says the node does.
+            scene.window_rect(self.node, inside)
+        };
+        ui.snapshot_of(Some(self.node), take, area, max_width)
+    }
     /// Scroll the scroll views around the node, innermost first, so it shows
     /// as `how` asks, as the web's `element.scrollIntoView` does: `block`
     /// down and `inline` across each `Nearest` (as little as shows it all;
