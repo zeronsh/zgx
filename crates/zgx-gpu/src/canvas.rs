@@ -335,6 +335,54 @@ impl HeadlessCanvases {
         counts
     }
 }
+/// The bytes a pixel of `canvas`'s raster takes at most while it draws: its
+/// pixmap's 4, or its deepest clip stack's masks (a byte each), whichever
+/// is more (what `rasterize_viewed` checks against `BUDGET`).
+fn bytes_per_pixel(canvas: &Canvas) -> u64 {
+    let (mut depth, mut deepest) = (0u64, 0u64);
+    for command in canvas.commands() {
+        match command {
+            Draw::Clip { .. } => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            Draw::Restore => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest.clamp(4, 16)
+}
+/// The pixel size of a raster of `width` by `height` logical points at
+/// `scale`: at `scale` while `bytes_per_pixel` of each fit `BUDGET`, and
+/// otherwise at the largest scale below it that fits. `None`: not even one
+/// pixel fits.
+/// How much coarser than the display a canvas past the budget may draw.
+const MOST_COARSE: f32 = 8.;
+fn raster_size(width: f32, height: f32, scale: f32, bytes_per_pixel: u64) -> Option<(u32, u32)> {
+    let most = BUDGET as u64 / bytes_per_pixel.max(1);
+    let size = |scale: f32| {
+        let w = ((width * scale).ceil() as u32).max(1);
+        let h = ((height * scale).ceil() as u32).max(1);
+        (w, h, u64::from(w) * u64::from(h))
+    };
+    // Coarser than an eighth of the display's scale it would draw nothing
+    // worth seeing: refused (that canvas alone, not the frame).
+    let least = scale / MOST_COARSE;
+    let mut scale = scale;
+    for _ in 0..64 {
+        let (w, h, pixels) = size(scale);
+        if pixels <= most {
+            return Some((w, h));
+        }
+        if (w == 1 && h == 1) || scale < least {
+            return None;
+        }
+        // Rounding up (and a side held at one pixel) can leave it just
+        // past: a little less each time, which a few tries settle.
+        scale *= (most as f32 / pixels as f32).sqrt().min(0.999);
+    }
+    None
+}
 /// Rasterize `canvas` at `width` by `height` logical points and `scale`
 /// into an image.
 pub fn rasterize(
@@ -364,16 +412,11 @@ pub fn rasterize_viewed(
             "invalid canvas dimensions or command count".into(),
         ));
     }
-    let w = (width * scale).ceil() as u32;
-    let h = (height * scale).ceil() as u32;
-    if w == 0
-        || h == 0
-        || (u64::from(w) * u64::from(h))
-            .checked_mul(4)
-            .is_none_or(|bytes| bytes > BUDGET as u64)
-    {
-        return Err(GpuError("canvas raster exceeds 32 MiB".into()));
-    }
+    // A raster past the budget is drawn coarser (fewer pixels, stretched over
+    // its box) rather than not at all: a large canvas (a long map) must not
+    // cost the window its frame.
+    let (w, h) = raster_size(width, height, scale, bytes_per_pixel(canvas))
+        .ok_or_else(|| GpuError("canvas raster exceeds 32 MiB".into()))?;
     let mut pixmap =
         sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
     // Exact scaling to rounded texture extents avoids a fractional final-pixel seam.
@@ -607,5 +650,73 @@ mod lifetime_tests {
         assert_eq!(cache.entries.len(), MAX_ENTRIES);
         assert_eq!(cache.bytes(), MAX_ENTRIES * 4);
         assert!(!cache.entries.contains_key(&first.unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    fn filled() -> Canvas {
+        let mut canvas = Canvas::new();
+        canvas.fill(
+            Path::rectangle(zgx::scene::Rect::new(0., 0., 10., 10.)),
+            zgx::scene::Color(255, 0, 0, 255),
+        );
+        canvas
+    }
+    #[test]
+    fn raster_within_budget_keeps_its_scale() {
+        assert_eq!(raster_size(100., 50., 2., 4), Some((200, 100)));
+        assert_eq!(raster_size(100.2, 50., 1., 4), Some((101, 50)));
+    }
+    #[test]
+    fn raster_past_budget_is_drawn_coarser_not_refused() {
+        // A long map (the canvas that skipped a window's frames): 1044 by
+        // 6356 points at 2x is 101 MiB of pixels.
+        let (w, h) = raster_size(1044., 6356., 2., 4).unwrap();
+        assert!(u64::from(w) * u64::from(h) * 4 <= BUDGET as u64);
+        assert!(w > 1044 && h > 6356, "as fine as fits: {w}x{h}");
+        let ratio = (w as f32 / h as f32) / (1044. / 6356.);
+        assert!((ratio - 1.).abs() < 0.01, "keeps its shape: {w}x{h}");
+        // Clip masks take a byte a pixel each.
+        let (w, h) = raster_size(1044., 6356., 2., 8).unwrap();
+        assert!(u64::from(w) * u64::from(h) * 8 <= BUDGET as u64);
+        // Thin and long: a side held at one pixel.
+        let (w, h) = raster_size(0.5, 4e6, 1., 4).unwrap();
+        assert_eq!(w, 1);
+        assert!(u64::from(h) * 4 <= BUDGET as u64);
+        // Coarser than an eighth of the display's scale: refused, that
+        // canvas alone (the frame goes on without it).
+        assert_eq!(raster_size(0.5, 1e9, 1., 4), None);
+        assert_eq!(raster_size(100_000., 100_000., 1., 4), None);
+
+        let image = rasterize(&filled(), 1044., 6356., 2.).unwrap();
+        assert!(image.pixels().len() <= BUDGET);
+        let mut cache = CanvasCache::default();
+        let mut scene = Scene::new(100., 100.);
+        let canvas = Arc::new(filled());
+        let node = scene.append(
+            scene.root(),
+            NodeKind::Canvas(canvas.clone()),
+            Default::default(),
+        );
+        let raster = cache.get(node, &canvas, 1044., 6356., 2.).unwrap();
+        assert!(raster.pixels.is_some());
+        assert!(cache.bytes() <= BUDGET);
+    }
+    #[test]
+    fn clip_depth_sets_bytes_per_pixel() {
+        assert_eq!(bytes_per_pixel(&filled()), 4);
+        let mut canvas = filled();
+        let rect = || Path::rectangle(zgx::scene::Rect::new(0., 0., 10., 10.));
+        for _ in 0..6 {
+            canvas.clip(rect(), FillRule::Winding);
+        }
+        for _ in 0..6 {
+            canvas.restore();
+        }
+        assert_eq!(bytes_per_pixel(&canvas), 6);
+        // Six masks of a raster as large as fits.
+        rasterize(&canvas, 1044., 6356., 2.).unwrap();
     }
 }

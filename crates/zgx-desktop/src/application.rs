@@ -1836,6 +1836,10 @@ struct Host {
     /// The window's frame's and the popup host's last contained panics,
     /// and the damaged frames tried (`contain::run`).
     render_fault: Option<crate::contain::Fault>,
+    /// The window's frame left undrawn by one (`render_fault`): when it is
+    /// tried again. Nothing else need wake the loop for it: a window with
+    /// no input or animation would sit on its last frame however long.
+    render_retry: Option<std::time::Instant>,
     popups_fault: Option<crate::contain::Fault>,
     _layout_issues: zgx::issues::IssueListener,
     /// What its listener heard, for its own banner (`show_issues`).
@@ -2007,6 +2011,11 @@ struct Host {
     frame_heartbeat: Option<std::time::Instant>,
     /// A Wayland redraw is pending on the compositor's frame callback.
     frame_redraw_requested: bool,
+    /// Wayland: the last frame granted presented nothing, so it asked for no
+    /// frame callback; the next is asked for at this time, when a waiting
+    /// animation next steps (`frame_source::unpresented_frame_retry`), not
+    /// at once.
+    frame_retry_at: Option<std::time::Instant>,
     focus_memory: crate::focus_memory::FocusMemory,
     last_accessibility: Option<(u64, Option<NodeId>)>,
     accessibility_geometry_dirty: bool,
@@ -2315,6 +2324,7 @@ impl Host {
             renderer_retry: None,
             error_banner: None,
             render_fault: None,
+            render_retry: None,
             popups_fault: None,
             _layout_issues: layout_issues,
             issues: issues.clone(),
@@ -2442,6 +2452,7 @@ impl Host {
             frame_deadline: None,
             frame_heartbeat: None,
             frame_redraw_requested: false,
+            frame_retry_at: None,
             focus_memory: crate::focus_memory::FocusMemory::default(),
             last_accessibility: None,
             accessibility_geometry_dirty: true,
@@ -3217,6 +3228,13 @@ impl Host {
                     }
                 }
                 self.force = undrawn;
+                // Undrawn: tried again when the fault allows, the loop woken
+                // for it (`about_to_wait`); drawn: nothing owed.
+                self.render_retry = if undrawn {
+                    crate::contain::retry_at(self.render_fault.as_ref())
+                } else {
+                    None
+                };
                 self.held_damage.clear();
             }
         }
@@ -5075,6 +5093,7 @@ impl Host {
         self.frame_deadline = None;
         self.frame_heartbeat = None;
         self.frame_redraw_requested = false;
+        self.frame_retry_at = None;
         self.native.suspend();
         // It redraws the window it was made with: the next one makes its own.
         self._background_effect = None;
@@ -5257,8 +5276,21 @@ impl Host {
                     if self.tasks.has_ready() {
                         self.tick_tasks();
                     }
+                    self.draw()?;
+                    // Nothing presented (no step was due, or none damaged
+                    // anything): no frame callback was asked for, so a redraw
+                    // asked for now would be granted at once.
+                    self.frame_retry_at = self.present_ready.then(|| {
+                        crate::frame_source::unpresented_frame_retry(
+                            &self.frames,
+                            &self.frame_timer,
+                            std::time::Instant::now(),
+                            self.frame_interval,
+                        )
+                    });
+                } else {
+                    self.draw()?;
                 }
-                self.draw()?;
             }
             WindowEvent::Resized(size) => {
                 #[cfg(target_os = "macos")]
@@ -7145,9 +7177,31 @@ impl Host {
             }
         }
         if !wanted {
+            self.frame_retry_at = None;
             return;
         }
         if self.frame_paced {
+            // A frame that presented nothing: the next is asked for at the
+            // refresh a waiting animation next takes, worked out again as
+            // animations start and stop (one input started steps at the
+            // next refresh). A scroll steps every refresh. Input draws
+            // without this (`draw` asks for its frame), and so do frames
+            // that present: their callback paces the next.
+            if let Some(at) = self.frame_retry_at {
+                self.frame_retry_at = (!scrolling && now < at)
+                    .then(|| {
+                        crate::frame_source::unpresented_frame_retry(
+                            &self.frames,
+                            &self.frame_timer,
+                            now,
+                            self.frame_interval,
+                        )
+                    })
+                    .map(|sooner| sooner.min(at));
+                if self.frame_retry_at.is_some() {
+                    return;
+                }
+            }
             if !self.frame_redraw_requested
                 && let Some(window) = &self.window
             {
@@ -8673,6 +8727,7 @@ impl WindowManager {
             #[cfg(not(target_os = "macos"))]
             let plane_room = false;
             if (host.renderer_retry.is_some_and(|at| at <= now)
+                || host.render_retry.is_some_and(|at| at <= now)
                 || host.plane_retry.is_some_and(|at| at <= now)
                 || plane_room)
                 && let Some(window) = &host.window
@@ -8719,8 +8774,10 @@ impl WindowManager {
                     host.presentation.deadline(),
                     host.context.ui.next_interaction_deadline(),
                     host.frame_deadline,
+                    host.frame_retry_at,
                     host.popups.deadline(),
                     host.renderer_retry,
+                    host.render_retry,
                     host.plane_retry,
                     host.touch.hold_deadline(),
                     host.trim_at,
