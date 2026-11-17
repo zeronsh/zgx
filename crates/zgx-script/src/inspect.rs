@@ -171,7 +171,7 @@ fn route_report(
             },
         ),
         ("why", Value::from(because.as_str())),
-        ("under", Value::List(under)),
+        ("under", Value::List(under.into())),
     ]);
     (lines.join("\n"), data)
 }
