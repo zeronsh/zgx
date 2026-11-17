@@ -14,6 +14,10 @@ use std::{
 /// Whether a gap may sit before line `n` (`n` the line count: after the
 /// last).
 pub(crate) type Gaps = Rc<dyn Fn(usize) -> bool>;
+/// Told the caret went into a gap or out of one.
+type GapListener = Box<dyn FnMut(Option<usize>)>;
+/// Told what was typed at a gap.
+type GapInputListener = Box<dyn FnMut(usize, GapInput)>;
 
 /// How long the bar a gap shows is, and how thick, in points.
 pub(crate) const BAR_WIDTH: f32 = 20.;
@@ -29,9 +33,9 @@ pub(crate) struct GapHint {
     pub at: Cell<Option<usize>>,
     /// Told the caret went into a gap (`Some`) or out of one (`None`); the
     /// slot is empty while it runs.
-    pub on_gap: RefCell<Option<Box<dyn FnMut(Option<usize>)>>>,
+    pub on_gap: RefCell<Option<GapListener>>,
     /// Told what was typed at a gap.
-    pub on_input: RefCell<Option<Box<dyn FnMut(usize, GapInput)>>>,
+    pub on_input: RefCell<Option<GapInputListener>>,
 }
 impl GapHint {
     /// Whether a gap may sit before line `n`.
