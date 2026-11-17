@@ -1939,6 +1939,8 @@ pub(crate) struct UiStorage {
     /// The host's way to picture what the window last showed (`Ui::on_snapshot`).
     snapshotter: RefCell<Option<Snapshotter>>,
     popup_snapshotter: RefCell<Option<PopupSnapshotter>>,
+    /// Until when the host shows no new frame (`Ui::hold_frames`).
+    pub(crate) frames_held: Cell<Option<std::time::Instant>>,
     /// The window's zoom (`zoom`), 1 at 100%.
     pub(crate) zoom: Cell<f64>,
     /// The app turned zoom off (`set_zoomable`).
@@ -2364,6 +2366,7 @@ impl Ui {
             popup_soon_sent: Cell::new(false),
             snapshotter: RefCell::new(None),
             popup_snapshotter: RefCell::new(None),
+            frames_held: Cell::new(None),
             zoom: Cell::new(1.),
             zoom_off: Cell::new(false),
             zoom_host: RefCell::new(Vec::new()),

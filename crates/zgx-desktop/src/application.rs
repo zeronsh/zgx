@@ -1893,6 +1893,9 @@ struct Host {
     /// When to draw again a plane's frame left for a tick (its last drawable
     /// not yet shown: `GpuRenderer::planes_owed`), though nothing else asks.
     plane_retry: Option<std::time::Instant>,
+    /// Until when the script holds the window's frame (`Ui::hold_frames`):
+    /// no frame is drawn before then unless it lets go.
+    frames_held: Option<std::time::Instant>,
     /// Until when input keeps frames at the display's full rate (`INPUT_FULL_RATE`).
     #[cfg(any(target_os = "macos", windows))]
     input_until: Option<std::time::Instant>,
@@ -2381,6 +2384,7 @@ impl Host {
             #[cfg(target_os = "macos")]
             planes_drawn_at: None,
             plane_retry: None,
+            frames_held: None,
             #[cfg(any(target_os = "macos", windows))]
             input_until: None,
             #[cfg(any(target_os = "macos", windows))]
@@ -3021,6 +3025,14 @@ impl Host {
             self.show_error(&message);
         }
         self.show_issues();
+        // The script holds the frame (`Ui::hold_frames`: a page waiting on
+        // its content): nothing drawn, what changed kept for the frame that
+        // shows as it lets go, or as the hold runs out (`about_to_wait`).
+        self.frames_held = self.context.ui.frames_held(std::time::Instant::now());
+        if self.frames_held.is_some() {
+            zgx_gpu::present_log::log(|| "frame held".into());
+            return Ok(());
+        }
         // A large removal's effects are freed a chunk per frame (`Ui::reclaim`,
         // as the frame is prepared): frames keep coming until they are.
         if self.context.ui.reclaiming() {
@@ -8664,6 +8676,7 @@ impl WindowManager {
             let plane_room = false;
             if (host.renderer_retry.is_some_and(|at| at <= now)
                 || host.plane_retry.is_some_and(|at| at <= now)
+                || host.frames_held.take_if(|until| *until <= now).is_some()
                 || plane_room)
                 && let Some(window) = &host.window
             {
@@ -8712,6 +8725,7 @@ impl WindowManager {
                     host.popups.deadline(),
                     host.renderer_retry,
                     host.plane_retry,
+                    host.frames_held,
                     host.touch.hold_deadline(),
                     host.trim_at,
                     host.release_images_at,

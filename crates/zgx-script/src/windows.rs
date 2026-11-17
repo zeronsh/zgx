@@ -567,6 +567,10 @@ pub(crate) const SIZE: &str = "zgx.window.size";
 /// (`ScriptHost::window_visible`): `ui.window.visible`, which a script reads
 /// and sets, to show a window that zgx.json opened hidden.
 pub(crate) const VISIBLE: &str = "zgx.window.visible";
+/// The shared key a script asks the app's window to hold its frame through
+/// (`ui.window.hold_frames`, `ui.window.release_frames`): `{ serial, ms }`,
+/// 0 ms letting it go (`ScriptHost::window_hold`).
+pub(crate) const HOLD: &str = "zgx.window.hold";
 
 /// A window's size as `ui.window.size` holds it.
 pub(crate) fn size(width: f32, height: f32) -> Value {
@@ -617,6 +621,37 @@ pub(crate) fn install(
             State::new(shared.state(TITLEBAR_AREA, Value::Nil)),
         )?;
         window.set("controls", State::new(shared.state(CONTROLS, Value::Nil)))?;
+        // `ui.window.hold_frames(ms)` and `ui.window.release_frames()`: the
+        // window keeps showing its frame while what it changes to comes
+        // (`ScriptHost::window_hold`, `Ui::hold_frames`). Each call is a
+        // new value, so asking twice holds twice.
+        let hold = shared.state(HOLD, Value::Nil);
+        let ask = move |ms: f64| {
+            let serial = hold.with_untracked(|was| match was {
+                Value::List(was) => match was.first() {
+                    Some(Value::Num(serial)) => serial + 1.,
+                    _ => 1.,
+                },
+                _ => 1.,
+            });
+            let ms = if ms.is_finite() { ms.max(0.) } else { 0. };
+            hold.set(Value::List(Rc::from([Value::Num(serial), Value::Num(ms)])));
+        };
+        let held = ask.clone();
+        window.set(
+            "hold_frames",
+            lua.create_function(move |_, ms: f64| {
+                held(ms);
+                Ok(())
+            })?,
+        )?;
+        window.set(
+            "release_frames",
+            lua.create_function(move |_, ()| {
+                ask(0.);
+                Ok(())
+            })?,
+        )?;
     }
     let meta = lua.create_table()?;
     // `zoom` and `zoomable` made as a script first reads them: a script that

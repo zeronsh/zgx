@@ -1873,6 +1873,7 @@ struct Inner {
     /// Keeps the window's zoom and `ui.window.zoom` the same (`window_zoom`).
     zoom: RefCell<Option<zgx::reactive::Effect>>,
     visible: RefCell<Option<zgx::reactive::Effect>>,
+    hold: RefCell<Option<zgx::reactive::Effect>>,
     /// What publishes the window's state: `window_maximized`'s (true) and
     /// `window_state`'s, each starting only its own anew.
     window_state: RefCell<Vec<(bool, zgx::reactive::Effect)>>,
@@ -2091,6 +2092,7 @@ impl ScriptHost {
             full_screen: RefCell::default(),
             zoom: RefCell::default(),
             visible: RefCell::default(),
+            hold: RefCell::default(),
             window_state: RefCell::default(),
             actions: Actions::default(),
             functions: Functions::default(),
@@ -3128,6 +3130,29 @@ impl ScriptHost {
             }
         });
         *self.0.zoom.borrow_mut() = Some(effect);
+    }
+    /// Hold the window's frame as its script asks (`ui.window.hold_frames`
+    /// and `ui.window.release_frames`, `Ui::hold_frames`): a page whose
+    /// content is on its way keeps the frame before it showing, and shows
+    /// whole once it has come.
+    pub fn window_hold(&self, ui: &zgx::widgets::Ui) {
+        let hold = self.0.shared.state(windows::HOLD, Value::Nil);
+        let weak = ui.downgrade();
+        let effect = self.0.runtime.effect_now(move || {
+            let asked = hold.get();
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if let Value::List(asked) = asked
+                && let Some(Value::Num(ms)) = asked.get(1)
+            {
+                match *ms > 0. {
+                    true => ui.hold_frames(std::time::Duration::from_secs_f64(ms / 1e3)),
+                    false => ui.release_frames(),
+                }
+            }
+        });
+        *self.0.hold.borrow_mut() = Some(effect);
     }
     /// Keep `ui.window.visible` as the app's window shows, `visible` at
     /// first (as it opened), and `show` it as a script sets it: an app that
