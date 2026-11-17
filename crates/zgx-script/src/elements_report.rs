@@ -162,7 +162,7 @@ fn walk(
             continue;
         }
         path.push(listed.clone());
-        if listed.provide.is_some() {
+        if listed.rare().provide.is_some() {
             let mut inherited = group.inherited.clone();
             inherited.extend(group.provides.iter().cloned());
             inherited.sort();
@@ -201,6 +201,7 @@ fn element(node: &Node) -> ListedElement {
 
 fn provided(node: &Node) -> Vec<String> {
     let mut names: Vec<String> = node
+        .rare()
         .provide
         .iter()
         .flat_map(|given| given.iter().map(|(name, _)| name.to_string()))

@@ -52,6 +52,28 @@ pub(crate) struct Node {
     /// Handlers, boxed: most nodes have none (read them with `events()`).
     pub events: Option<Box<Events>>,
     pub focusable: Option<bool>,
+    /// `bg_shader`, `shader_params`, `layer_shader` and `layer_params`
+    /// (boxed: few nodes have any).
+    pub shaders: Option<Box<Shaders>>,
+    /// `window_drag = true` (`WINDOW_DRAG`) and `focus_on_press = false`
+    /// (`KEEPS_FOCUS`): rare, tested together where the node is styled.
+    pub press_flags: u8,
+    /// `hook = false` or `private = true`: no plugin may target it
+    /// (`ui.contribute { target }`), whatever matches it.
+    pub private: bool,
+    /// `selectable = true`: the pointer selects the text in it (`false`
+    /// keeps a part of a selectable node out).
+    pub selectable: Option<bool>,
+    /// Where the script created it (`app.luau:12`), recorded only while the
+    /// layout inspector or layout warnings want it.
+    pub source: Option<Rc<str>>,
+    /// What few nodes set (`NodeRare`), boxed: read with `rare()`.
+    pub rare: Option<Box<NodeRare>>,
+}
+/// A node's fields few nodes set, boxed: they took nearly half of every
+/// node's bytes, and a script's rows make thousands of nodes.
+#[derive(Clone, Default)]
+pub(crate) struct NodeRare {
     /// `pointer_events = "none"`: the pointer passes through. A literal, a
     /// state or a function (true or `"auto"` stops it, false or `"none"`
     /// lets it through).
@@ -65,26 +87,6 @@ pub(crate) struct Node {
     /// `mask = { bitmap, w, h, x, y }`: the content shows through the
     /// bitmap's alpha, drawn at `w`×`h` from (`x`, `y`).
     pub mask: Option<Mask>,
-    /// `bg_shader`, `shader_params`, `layer_shader` and `layer_params`
-    /// (boxed: few nodes have any).
-    pub shaders: Option<Box<Shaders>>,
-    /// `window_drag = true` (`WINDOW_DRAG`) and `focus_on_press = false`
-    /// (`KEEPS_FOCUS`): rare, tested together where the node is styled.
-    pub press_flags: u8,
-    /// `hook = false` or `private = true`: no plugin may target it
-    /// (`ui.contribute { target }`), whatever matches it.
-    pub private: bool,
-    /// `selectable = true`: the pointer selects the text in it (`false`
-    /// keeps a part of a selectable node out).
-    pub selectable: Option<bool>,
-    /// `selection_color`, `selected_text_color`: few nodes have them.
-    pub selection_colors: Option<Box<[Option<Source>; 2]>>,
-    /// `tooltip = "text" | node`, `tooltip_placement`: shown over it while
-    /// the pointer rests on it. Boxed: few nodes have one.
-    pub tooltip: Option<Box<Tooltip>>,
-    /// Where the script created it (`app.luau:12`), recorded only while the
-    /// layout inspector or layout warnings want it.
-    pub source: Option<Rc<str>>,
     /// `theme = …`: the subtree's theme scope.
     pub theme: Option<ThemeSpec>,
     /// `provide = { name = value }`: values the components and rows built
@@ -93,6 +95,25 @@ pub(crate) struct Node {
     /// `variants = …` chosen by state, with interaction styles: they follow
     /// it (see `crate::variants`).
     pub variant_interaction: Option<Rc<crate::variants::Selection>>,
+    /// `selection_color`, `selected_text_color`: few nodes have them.
+    pub selection_colors: Option<Box<[Option<Source>; 2]>>,
+    /// `tooltip = "text" | node`, `tooltip_placement`: shown over it while
+    /// the pointer rests on it. Boxed: few nodes have one.
+    pub tooltip: Option<Box<Tooltip>>,
+}
+impl NodeRare {
+    pub(crate) const NONE: NodeRare = NodeRare {
+        pointer_events: None,
+        disabled: None,
+        layout: None,
+        layout_id: None,
+        mask: None,
+        theme: None,
+        provide: None,
+        variant_interaction: None,
+        selection_colors: None,
+        tooltip: None,
+    };
 }
 /// What `theme = …` gives a subtree: fixed, or a state or function that
 /// computes it (the scope follows).
@@ -755,21 +776,12 @@ impl Node {
             refs: Vec::new(),
             events: None,
             focusable: None,
-            pointer_events: None,
-            disabled: None,
-            layout: None,
-            layout_id: None,
-            mask: None,
             shaders: None,
             press_flags: 0,
             private: false,
             selectable: None,
-            selection_colors: None,
-            tooltip: None,
             source: None,
-            theme: None,
-            provide: None,
-            variant_interaction: None,
+            rare: None,
         }
     }
     /// How the layout inspector names it: its kind, `#id` and `.class`es.
@@ -795,11 +807,14 @@ impl Node {
     /// only those carry an element and its animated values.
     /// Whether layout moves animate: `layout = "position"` or a `layout_id`.
     pub fn tracks_layout(&self) -> bool {
-        self.layout_id.is_some() || self.layout.as_ref().is_some_and(|l| l.position)
+        self.rare().layout_id.is_some() || self.rare().layout.as_ref().is_some_and(|l| l.position)
     }
     /// Whether the node has a box whose size animates (`layout = "height"`).
     pub fn sizes_layout(&self) -> bool {
-        self.layout.as_ref().is_some_and(|l| l.width || l.height)
+        self.rare()
+            .layout
+            .as_ref()
+            .is_some_and(|l| l.width || l.height)
     }
     pub fn targetable(&self) -> bool {
         self.id.is_some()
@@ -811,6 +826,14 @@ impl Node {
     }
     pub fn events(&self) -> &Events {
         self.events.as_deref().unwrap_or(&Events::NONE)
+    }
+    /// What few nodes set, none if it has no box of them.
+    pub fn rare(&self) -> &NodeRare {
+        self.rare.as_deref().unwrap_or(&NodeRare::NONE)
+    }
+    /// What few nodes set, its box made if it had none.
+    pub fn rare_mut(&mut self) -> &mut NodeRare {
+        self.rare.get_or_insert_default()
     }
     /// Animations, scroll offsets, widget bindings and overlays need a
     /// component context.
@@ -846,7 +869,7 @@ impl Node {
             || matches!(self.kind, Kind::Svg { .. })
                 && self.props.iter().any(|(p, _)| *p == Prop::Tint)
             // A sweeping mask runs on the component's frame clock.
-            || self.mask.as_ref().is_some_and(|m| m.sweep.is_some())
+            || self.rare().mask.as_ref().is_some_and(|m| m.sweep.is_some())
             // So does a shader the engine keeps up.
             || self.shaders.as_ref().is_some_and(|s| s.drive.is_some())
     }
@@ -949,6 +972,32 @@ pub(crate) struct Events {
     /// it comes within that many points of it (an IntersectionObserver's
     /// `rootMargin`): for building what is about to scroll in.
     pub visible_margin: Option<f32>,
+    /// Drag and drop's handlers (`Drags`), boxed: most nodes have none
+    /// (read them with `drags()`).
+    pub drags: Option<Box<Drags>>,
+    /// `fn({ x, y, local_x, local_y }) -> { menu_item, … }`: a secondary
+    /// click (control-click on macOS) shows what it returns as a menu at
+    /// the pointer; nothing returned, no menu.
+    pub context_menu: Option<Function>,
+    /// `context_menu_style = { bg, rounded, p, backdrop_blur, … }`: the
+    /// menu panel's styles (plain values).
+    pub context_menu_style: Option<Styles>,
+    /// `context_menu_below = true`: the menu opens under the node (a tab's),
+    /// not at the pointer.
+    pub context_menu_below: bool,
+    /// `sound = click`: what plays on the `ui` bus as the node is
+    /// activated, before `on_click` (the `audio` feature).
+    #[cfg(feature = "audio")]
+    pub sound: Option<crate::audio::SoundProp>,
+    /// Whether any input handler is set (`any_input`): set with them, so
+    /// every node reads one flag rather than a dozen handlers.
+    pub input: bool,
+}
+/// A node's drag and drop handlers, boxed in its `Events`: the dozen of
+/// them took more than half of every handler's box, which a row with just
+/// an `on_click` paid for.
+#[derive(Default, Clone)]
+pub(crate) struct Drags {
     /// Drag and drop within the window (payloads are script values):
     /// `on_drag() -> payload` starts a drag after a 4-point move;
     /// `drag_preview(payload) -> node` follows the pointer;
@@ -982,23 +1031,23 @@ pub(crate) struct Events {
     /// platform's spring-loading delay, or Space was pressed (returning
     /// `false` declines: it does not spring open).
     pub drag_spring: Option<Function>,
-    /// `fn({ x, y, local_x, local_y }) -> { menu_item, … }`: a secondary
-    /// click (control-click on macOS) shows what it returns as a menu at
-    /// the pointer; nothing returned, no menu.
-    pub context_menu: Option<Function>,
-    /// `context_menu_style = { bg, rounded, p, backdrop_blur, … }`: the
-    /// menu panel's styles (plain values).
-    pub context_menu_style: Option<Styles>,
-    /// `context_menu_below = true`: the menu opens under the node (a tab's),
-    /// not at the pointer.
-    pub context_menu_below: bool,
-    /// `sound = click`: what plays on the `ui` bus as the node is
-    /// activated, before `on_click` (the `audio` feature).
-    #[cfg(feature = "audio")]
-    pub sound: Option<crate::audio::SoundProp>,
-    /// Whether any input handler is set (`any_input`): set with them, so
-    /// every node reads one flag rather than a dozen handlers.
-    pub input: bool,
+}
+impl Drags {
+    const NONE: Drags = Drags {
+        drag: None,
+        drag_preview: None,
+        drag_preview_anchor: None,
+        drag_preview_offset: None,
+        drag_end: None,
+        drag_export: None,
+        drag_outside: None,
+        drag_moves_window: None,
+        drop: None,
+        drop_when: None,
+        drag_over: None,
+        drag_leave: None,
+        drag_spring: None,
+    };
 }
 /// Handlers few nodes have, boxed: a node's `Events` stay small, and one
 /// check covers them all for a node with none (`with_rare`).
@@ -1065,19 +1114,7 @@ impl Events {
         resize: None,
         visible: None,
         visible_margin: None,
-        drag: None,
-        drag_preview: None,
-        drag_preview_anchor: None,
-        drag_preview_offset: None,
-        drag_end: None,
-        drag_export: None,
-        drag_outside: None,
-        drag_moves_window: None,
-        drop: None,
-        drop_when: None,
-        drag_over: None,
-        drag_leave: None,
-        drag_spring: None,
+        drags: None,
         context_menu: None,
         context_menu_style: None,
         context_menu_below: false,
@@ -1089,11 +1126,17 @@ impl Events {
         self.input
     }
     pub fn any_drag(&self) -> bool {
-        self.drag.is_some()
-            || self.drop.is_some()
-            || self.drag_over.is_some()
-            || self.drag_leave.is_some()
-            || self.drag_spring.is_some()
+        self.drags.as_deref().is_some_and(|d| {
+            d.drag.is_some()
+                || d.drop.is_some()
+                || d.drag_over.is_some()
+                || d.drag_leave.is_some()
+                || d.drag_spring.is_some()
+        })
+    }
+    /// Its drag and drop handlers, none if it has no box of them.
+    pub fn drags(&self) -> &Drags {
+        self.drags.as_deref().unwrap_or(&Drags::NONE)
     }
 }
 
@@ -3814,8 +3857,8 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
         // (a selectable region's highlight, an editor's) follows it.
         "selection_radius" => {
             let radius = source(lua, Ty::Num, name, value)?;
-            let given = node.theme.take();
-            node.theme = Some(ThemeSpec::SelectionRadius(Box::new((given, radius))));
+            let given = node.rare_mut().theme.take();
+            node.rare_mut().theme = Some(ThemeSpec::SelectionRadius(Box::new((given, radius))));
         }
         "caret_color" | "caret_width" => {
             let Kind::Input { rare, .. } = &mut node.kind else {
@@ -3837,7 +3880,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                     "`hit` takes \"target\" (where an animation is taking it) or \"shown\"",
                 ));
             }
-            let layout = node.layout.get_or_insert(LayoutAnim {
+            let layout = node.rare_mut().layout.get_or_insert(LayoutAnim {
                 width: false,
                 height: false,
                 position: false,
@@ -4041,9 +4084,9 @@ fn set_handler(
         };
         let point = Some((at(1, "x")?, at(2, "y")?));
         if key == "drag_preview_anchor" {
-            events.drag_preview_anchor = point;
+            events.drags.get_or_insert_default().drag_preview_anchor = point;
         } else {
-            events.drag_preview_offset = point;
+            events.drags.get_or_insert_default().drag_preview_offset = point;
         }
         return Ok(None);
     }
@@ -4112,18 +4155,19 @@ fn set_handler(
             let mlua::Value::Function(f) = value else {
                 return Err(mlua::Error::runtime(format!("{key} takes a function")));
             };
+            let drags = events.drags.get_or_insert_default();
             *match key {
-                "on_drag" => &mut events.drag,
-                "drag_preview" => &mut events.drag_preview,
-                "on_drag_end" => &mut events.drag_end,
-                "drag_export" => &mut events.drag_export,
-                "on_drag_outside" => &mut events.drag_outside,
-                "drag_moves_window" => &mut events.drag_moves_window,
-                "on_drop" => &mut events.drop,
-                "drop_when" => &mut events.drop_when,
-                "on_drag_over" => &mut events.drag_over,
-                "on_drag_leave" => &mut events.drag_leave,
-                _ => &mut events.drag_spring,
+                "on_drag" => &mut drags.drag,
+                "drag_preview" => &mut drags.drag_preview,
+                "on_drag_end" => &mut drags.drag_end,
+                "drag_export" => &mut drags.drag_export,
+                "on_drag_outside" => &mut drags.drag_outside,
+                "drag_moves_window" => &mut drags.drag_moves_window,
+                "on_drop" => &mut drags.drop,
+                "drop_when" => &mut drags.drop_when,
+                "on_drag_over" => &mut drags.drag_over,
+                "on_drag_leave" => &mut drags.drag_leave,
+                _ => &mut drags.drag_spring,
             } = Some(f);
             return Ok(None);
         }
@@ -4324,7 +4368,7 @@ fn fill_from(
             "selectable" => node.selectable = lua.unpack(value)?,
             "selection_color" | "selected_text_color" => {
                 let at = usize::from(key == "selected_text_color");
-                node.selection_colors.get_or_insert_default()[at] =
+                node.rare_mut().selection_colors.get_or_insert_default()[at] =
                     Some(source(lua, Ty::Color, key, value)?);
             }
             "tooltip" => {
@@ -4341,22 +4385,22 @@ fn fill_from(
                         )));
                     }
                 };
-                node.tooltip.get_or_insert_default().content = content;
+                node.rare_mut().tooltip.get_or_insert_default().content = content;
             }
             "tooltip_placement" => {
-                node.tooltip.get_or_insert_default().placement = placement_of(value)?;
+                node.rare_mut().tooltip.get_or_insert_default().placement = placement_of(value)?;
             }
             "tooltip_interactive" => {
-                node.tooltip.get_or_insert_default().interactive = lua.unpack(value)?;
+                node.rare_mut().tooltip.get_or_insert_default().interactive = lua.unpack(value)?;
             }
             // Milliseconds the pointer rests before it shows (300).
             "tooltip_delay" => {
                 let ms: f64 = lua.unpack(value)?;
-                node.tooltip.get_or_insert_default().delay =
+                node.rare_mut().tooltip.get_or_insert_default().delay =
                     Some(crate::duration_ms("tooltip_delay", ms)?);
             }
             "pointer_events" => {
-                node.pointer_events = Some(match &value {
+                node.rare_mut().pointer_events = Some(match &value {
                     mlua::Value::Boolean(_) | mlua::Value::String(_) => {
                         let Some(enabled) = pointer_events(&lua.unpack::<Value>(value)?) else {
                             return Err(mlua::Error::runtime(
@@ -4482,14 +4526,14 @@ fn fill_from(
                     },
                     None => None,
                 };
-                node.mask = Some(Mask {
+                node.rare_mut().mask = Some(Mask {
                     image: bitmap,
                     size,
                     offset,
                     sweep,
                 });
             }
-            "layout_id" => node.layout_id = Some(lua.unpack::<String>(value)?.into()),
+            "layout_id" => node.rare_mut().layout_id = Some(lua.unpack::<String>(value)?.into()),
             "layout" => {
                 layout_given = true;
                 let (width, height, position) = match &value {
@@ -4513,7 +4557,7 @@ fn fill_from(
                         )));
                     }
                 };
-                let layout = node.layout.get_or_insert(LayoutAnim {
+                let layout = node.rare_mut().layout.get_or_insert(LayoutAnim {
                     width,
                     height,
                     position,
@@ -4527,11 +4571,11 @@ fn fill_from(
                 layout.height = height;
                 layout.position = position;
                 if !width && !height && !position && !layout.hit {
-                    node.layout = None;
+                    node.rare_mut().layout = None;
                 }
             }
             "layout_duration" | "layout_ease" | "layout_enter" | "layout_clip" => {
-                let layout = node.layout.get_or_insert(LayoutAnim {
+                let layout = node.rare_mut().layout.get_or_insert(LayoutAnim {
                     width: false,
                     height: true,
                     position: false,
@@ -4568,7 +4612,7 @@ fn fill_from(
                 }
             }
             "disabled" if !matches!(value, mlua::Value::Table(_)) => {
-                node.disabled = Some(source(lua, Ty::Bool, "disabled", value)?);
+                node.rare_mut().disabled = Some(source(lua, Ty::Bool, "disabled", value)?);
             }
             "context_menu_open" => {
                 let open = expect_state(&value, "`context_menu_open`")?;
@@ -4604,7 +4648,7 @@ fn fill_from(
                 }
                 node.events.get_or_insert_default().context_menu_style = Some(lits.into());
             }
-            "provide" => node.provide = Some(provided(lua, value)?),
+            "provide" => node.rare_mut().provide = Some(provided(lua, value)?),
             "theme" => {
                 let spec = if let Some(state) = state_of(&value) {
                     ThemeSpec::State(state)
@@ -4617,7 +4661,7 @@ fn fill_from(
                     )
                 };
                 // Given after `selection_radius`: inside it.
-                match &mut node.theme {
+                match &mut node.rare_mut().theme {
                     Some(ThemeSpec::SelectionRadius(both)) => both.0 = Some(spec),
                     theme => *theme = Some(spec),
                 }
@@ -4794,9 +4838,9 @@ fn fill_from(
     })?;
     // With a `layout_id`, `layout_duration` and `layout_ease` alone time its
     // moves; they do not ask for a size box.
-    if node.layout_id.is_some()
+    if node.rare().layout_id.is_some()
         && !layout_given
-        && let Some(layout) = &mut node.layout
+        && let Some(layout) = &mut node.rare_mut().layout
     {
         layout.height = false;
         layout.position = true;
