@@ -747,6 +747,7 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
             anchor,
             baseline: TextBaseline::Top,
             known_size: cell.map(|cell| (grid_cells(&run.text) as f32 * cell, metrics.line_height)),
+            width: f32::INFINITY,
         });
     }
     canvas

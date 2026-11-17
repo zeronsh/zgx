@@ -25,7 +25,7 @@
 //! granted, never more than `expose` offers: `shared:<key>`,
 //! `action:<name>`, `override:<target or @app/module>` (`override:*` is every
 //! element), `override-module:*` (every module: trusts it with the app), and the sandbox's
-//! `fetch`, `clipboard`, `files`, `folders`, `terminals`, `web` and `windows`. A grant
+//! `fetch`, `clipboard`, `files`, `folders`, `fonts`, `terminals`, `web` and `windows`. A grant
 //! beyond what is exposed is an error as the app loads, naming the plugin
 //! and the grant.
 use crate::{Capability, Plugin, ScriptHost};
@@ -237,6 +237,7 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                         "clipboard" => Capability::Clipboard,
                         "files" => Capability::Files,
                         "folders" => Capability::Folders,
+                        "fonts" => Capability::Fonts,
                         "terminals" => Capability::Terminals,
                         "web" => Capability::Web,
                         "windows" => Capability::Windows,
@@ -245,7 +246,7 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                                 "plugin `{name}`: unknown grant `{grant}` (shared:<key>, \
                                  action:<name>, override:<target>, override-module:<@app/module \
                                  or *>, package:<name>, fetch, \
-                                 clipboard, files, terminals, web or windows)"
+                                 clipboard, files, fonts, terminals, web or windows)"
                             ));
                         }
                     },

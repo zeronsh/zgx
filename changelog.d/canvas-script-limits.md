@@ -1,0 +1,13 @@
+---
+section: fixed
+---
+- **A script's canvas values and calls stay within bounds** (zgx-text, zgx, zgx-gpu, zgx-script, zgx-desktop):
+  - A glyph past 2048 pixels (`size = 1e6`, or a canvas zoomed far in) is drawn by no renderer, as the GPU's already drew none. Before, the CPU's asked for its mask's memory, size squared.
+  - A canvas shadow blurred past where any pixel of it shows draws nothing, and a wide one averages down as far as its blur needs.
+  - A canvas with thousands of layers of text joins them in about a pass.
+  - Tiles cover at most 32 a side of a box's middle.
+  - Pans past a billion pixels clamp.
+  - `ui.render_canvas`, `ui.decode_image` and `ui.load_font` share 4 threads instead of starting one each.
+  - A plugin is shown only the pictures it may open itself, not those the app's cache holds. Its `ui.decode_image` pictures count against its memory.
+  - Loading the same font file again adds nothing.
+  - A zip's file being built has a name of its own, and what a dropped zip was asked is skipped.

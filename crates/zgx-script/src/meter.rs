@@ -16,7 +16,6 @@ use std::{
 use zgx::reactive::{Signal, WeakSignal};
 
 /// Something held in Rust: whether it's still alive, and what it holds.
-#[cfg(feature = "scene3d")]
 type Native = (Box<dyn Fn() -> bool>, usize);
 
 /// A plugin VM's meter.
@@ -29,8 +28,8 @@ pub(crate) struct Meter {
     total: Cell<usize>,
     /// Each state it counts, by address, with what it holds.
     held: RefCell<HashMap<usize, (WeakSignal<Value>, usize)>>,
-    /// What else it holds in Rust (a mesh's own triangles).
-    #[cfg(feature = "scene3d")]
+    /// What else it holds in Rust (a mesh's own triangles, a decoded
+    /// picture's file).
     native: RefCell<Vec<Native>>,
     /// States counted at the last sweep: the next is at twice as many.
     swept: Cell<usize>,
@@ -43,7 +42,6 @@ impl Meter {
             limit,
             total: Cell::new(0),
             held: RefCell::default(),
-            #[cfg(feature = "scene3d")]
             native: RefCell::default(),
             swept: Cell::new(64),
         })
@@ -107,7 +105,6 @@ impl Meter {
     }
     /// `bytes` held in Rust for as long as `alive` says, counted as a state's
     /// are. Asked first with `room`.
-    #[cfg(feature = "scene3d")]
     pub fn hold_native(&self, alive: impl Fn() -> bool + 'static, bytes: usize) {
         let mut native = self.native.borrow_mut();
         native.push((Box::new(alive), bytes));
@@ -122,7 +119,6 @@ impl Meter {
     }
     /// Forget the states that are gone (and what they held).
     fn sweep(&self) {
-        #[cfg(feature = "scene3d")]
         let freed_native = {
             let mut native = self.native.borrow_mut();
             let mut freed = 0;
@@ -135,8 +131,6 @@ impl Meter {
             });
             freed
         };
-        #[cfg(not(feature = "scene3d"))]
-        let freed_native = 0;
         let mut held = self.held.borrow_mut();
         let mut freed = 0;
         held.retain(|_, (signal, bytes)| {
@@ -146,10 +140,7 @@ impl Meter {
             }
             alive
         });
-        #[cfg(feature = "scene3d")]
         let most = held.len().max(self.native.borrow().len());
-        #[cfg(not(feature = "scene3d"))]
-        let most = held.len();
         self.swept.set((most * 2).max(64));
         drop(held);
         self.total.set(self.total.get() - freed - freed_native);

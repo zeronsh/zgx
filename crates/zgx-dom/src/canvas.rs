@@ -4,11 +4,16 @@
 //! layout matches `paint` in `js/zgx-dom.js`.
 
 use crate::ops::Ops;
+use std::sync::Arc;
 use zgx::{
+    affine::Affine,
     canvas::{
-        Brush, Draw, FillRule, LineCap, LineJoin, Path, Segment, Shape, TextAnchor, TextBaseline,
+        Brush, Draw, FillRule, GradientStop, LineCap, LineJoin, Path, Segment, Shape, TextAnchor,
+        TextBaseline,
     },
-    scene::Color,
+    image::ImageData,
+    scene::{Color, Rect},
+    style::ObjectFit,
 };
 
 const FILL: u32 = 1;
@@ -16,6 +21,8 @@ const STROKE: u32 = 2;
 const CLIP: u32 = 3;
 const RESTORE: u32 = 4;
 const TEXT: u32 = 5;
+const IMAGE: u32 = 6;
+const SHADOW: u32 = 7;
 
 /// `canvas`'s commands and text, after `PAINT canvas width height count`.
 pub(crate) fn encode(ops: &mut Ops, canvas: &zgx::canvas::Canvas) {
@@ -53,6 +60,30 @@ pub(crate) fn encode(ops: &mut Ops, canvas: &zgx::canvas::Canvas) {
                 path_words(ops, path);
             }
             Draw::Restore => ops.words.push(RESTORE),
+            Draw::Image {
+                image,
+                rect,
+                fit,
+                radius,
+                opacity,
+            } => image_words(ops, image, *rect, *fit, *radius, *opacity),
+            Draw::Shadow {
+                path,
+                color,
+                offset,
+                blur,
+                spread,
+            } => {
+                ops.words.extend_from_slice(&[
+                    SHADOW,
+                    rgba(*color),
+                    offset.x.to_bits(),
+                    offset.y.to_bits(),
+                    blur.to_bits(),
+                    spread.to_bits(),
+                ]);
+                path_words(ops, path);
+            }
         }
     }
     // Text goes over the shapes, whatever their order, unclipped.
@@ -111,6 +142,14 @@ fn brush_words(ops: &mut Ops, brush: &Brush) {
                     .extend_from_slice(&[stop.offset.to_bits(), rgba(stop.color)]);
             }
         }
+        Brush::Radial { transform, stops } => {
+            ops.words.push(3);
+            gradient_words(ops, transform, stops);
+        }
+        Brush::Conic { transform, stops } => {
+            ops.words.push(4);
+            gradient_words(ops, transform, stops);
+        }
         Brush::Slash {
             background,
             foreground,
@@ -124,6 +163,75 @@ fn brush_words(ops: &mut Ops, brush: &Brush) {
             width.to_bits(),
         ]),
     }
+}
+
+/// A radial or conic gradient's placement and stops: drawn in the unit
+/// space `transform` maps onto the canvas.
+fn gradient_words(ops: &mut Ops, transform: &Affine, stops: &[GradientStop]) {
+    let Affine { a, b, c, d, tx, ty } = *transform;
+    ops.words.extend([a, b, c, d, tx, ty].map(f32::to_bits));
+    ops.words.push(stops.len() as u32);
+    for stop in stops {
+        ops.words
+            .extend_from_slice(&[stop.offset.to_bits(), rgba(stop.color)]);
+    }
+}
+
+/// `IMAGE`: the picture's id (two words, for the JS side's copy of it),
+/// size and pixels' place in memory, kept alive until the frame is applied;
+/// then the box it is cut to, its radius and opacity, and the rect it is
+/// placed in as `fit` fills the box, as the desktop places it. A picture
+/// with no pixels to read (a GPU view's frame) has length 0 and draws
+/// nothing.
+fn image_words(
+    ops: &mut Ops,
+    image: &Arc<ImageData>,
+    rect: Rect,
+    fit: ObjectFit,
+    radius: f32,
+    opacity: f32,
+) {
+    let pixels = image.pixels();
+    let (source_w, source_h) = (image.width() as f32, image.height() as f32);
+    let (horizontal, vertical) = (rect.width / source_w, rect.height / source_h);
+    let (width, height) = match fit {
+        ObjectFit::Fill => (rect.width, rect.height),
+        ObjectFit::None => (source_w, source_h),
+        fit => {
+            let scale = match fit {
+                ObjectFit::Cover => horizontal.max(vertical),
+                ObjectFit::ScaleDown => horizontal.min(vertical).min(1.),
+                _ => horizontal.min(vertical),
+            };
+            (source_w * scale, source_h * scale)
+        }
+    };
+    let id = image.id();
+    ops.words.extend_from_slice(&[
+        IMAGE,
+        id as u32,
+        (id >> 32) as u32,
+        image.width(),
+        image.height(),
+        pixels.as_ptr() as u32,
+        pixels.len() as u32,
+    ]);
+    ops.words.extend(
+        [
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            radius,
+            opacity,
+            rect.x + (rect.width - width) / 2.,
+            rect.y + (rect.height - height) / 2.,
+            width,
+            height,
+        ]
+        .map(f32::to_bits),
+    );
+    ops.keep.push(image.clone());
 }
 
 fn path_words(ops: &mut Ops, path: &Path) {
@@ -203,6 +311,7 @@ mod tests {
             font: Default::default(),
             anchor,
             baseline: TextBaseline::Top,
+            width: f32::INFINITY,
             known_size,
         });
         let mut ops = Ops::default();

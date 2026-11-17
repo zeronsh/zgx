@@ -154,6 +154,11 @@ impl Assets {
             self.held.set(self.held.get() - old.bytes);
         }
         self.decoded.set(self.decoded.get() + 1);
+        // Past twice the budget (URLs that change with each version, none
+        // unmounting): what no node shows goes now, not at the next idle.
+        if self.held.get() > 2 * self.budget.get() {
+            self.sweep(self.budget.get());
+        }
     }
     fn keep_svg(&self, src: String, svg: Arc<SvgData>) {
         let bytes = svg.bytes().len();
@@ -274,6 +279,12 @@ impl Assets {
             match image {
                 true => drop(images.remove(&src)),
                 false => drop(svgs.remove(&src)),
+            }
+            // A remote one is fetched again if it shows again.
+            if is_remote(&src)
+                && let Ok(mut remote) = self.remote.try_borrow_mut()
+            {
+                remote.retain(|key, _| key != &src && !key.ends_with(&format!("\0{src}")));
             }
             freed += bytes;
         }
@@ -5153,6 +5164,15 @@ fn placeholder() -> Arc<ImageData> {
 /// own directory or below, as its modules do, not from anywhere the user
 /// can read.
 pub(crate) fn resolve_path(vm: &Vm, path: &str) -> Result<std::path::PathBuf, String> {
+    resolve_path_of(vm, path, "images")
+}
+/// A file's path as `resolve_path` finds an image's: `what` names what a
+/// plugin's come from its directory (`"fonts"`).
+pub(crate) fn resolve_path_of(
+    vm: &Vm,
+    path: &str,
+    what: &str,
+) -> Result<std::path::PathBuf, String> {
     let given = std::path::Path::new(path);
     let resolved = match (&vm.base, given.is_relative()) {
         (Some(base), true) => base.join(given),
@@ -5182,7 +5202,7 @@ pub(crate) fn resolve_path(vm: &Vm, path: &str) -> Result<std::path::PathBuf, St
             Ok(crate::normalize(&root.join(given)))
         }
         _ => Err(format!(
-            "{path}: a plugin's images come from its directory or below"
+            "{path}: a plugin's {what} come from its directory or below"
         )),
     }
 }
@@ -5194,6 +5214,10 @@ enum Decoded {
     Image(Arc<ImageData>),
     Svg(Arc<SvgData>),
 }
+/// The most pixels a remote picture decodes whole as it arrives (1024 by
+/// 1024); a larger one keeps its file and decodes as it is drawn.
+#[cfg(not(target_arch = "wasm32"))]
+const REMOTE_WHOLE: u64 = 1024 * 1024;
 const LOADING: u8 = 0;
 const READY: u8 = 1;
 const FAILED: u8 = 2;
@@ -5335,8 +5359,15 @@ fn remote_status_in(
                             .map(|svg| Decoded::Svg(Arc::new(svg)))
                             .map_err(|e| e.to_string())
                     } else {
-                        // Its file kept, its pixels decoded as it is drawn.
-                        crate::gpu::decode_image_kept(Arc::from(bytes))
+                        // Its file kept, its pixels decoded as it is drawn;
+                        // up to `REMOTE_WHOLE`, decoded whole here, so it
+                        // shows in the frame it arrives in, at any zoom (a
+                        // tile a program rewrites, fetched again and again).
+                        crate::gpu::decode_image_kept(Arc::from(&bytes[..]))
+                            .and_then(|kept| match kept.width() as u64 * kept.height() as u64 {
+                                n if n <= REMOTE_WHOLE => crate::gpu::decode_image(&bytes),
+                                _ => Ok(kept),
+                            })
                             .map(Decoded::Image)
                             .map_err(|e| e.to_string())
                     });
@@ -5395,7 +5426,16 @@ fn remote_status_in(
 /// gone or not a picture, a remote one that failed) is logged and draws
 /// nothing, never the script's error (`try_load_image` says why).
 fn load_image(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Option<Arc<ImageData>> {
-    try_load_image(vm, low, src).unwrap_or_else(|why| {
+    load_image_in(vm, &low.assets, &low.runtime, src)
+}
+/// `load_image`, given the assets and runtime (a canvas's `c:image`).
+pub(crate) fn load_image_in(
+    vm: &Rc<Vm>,
+    assets: &Rc<Assets>,
+    runtime: &zgx::reactive::Runtime,
+    src: &str,
+) -> Option<Arc<ImageData>> {
+    try_load_image_in(vm, assets, runtime, src).unwrap_or_else(|why| {
         // (A remote one's failure was logged as it failed.)
         if !is_remote(src) {
             unshown(vm, why);
@@ -5426,6 +5466,13 @@ pub(crate) fn try_load_image_in(
     if src.starts_with("host:") {
         assets.hosted(src, runtime).get();
         return Ok(assets.image(src));
+    }
+    if vm
+        .lua
+        .app_data_ref::<crate::node::Env>()
+        .is_some_and(|env| matches!(*env.grants, crate::Grants::Only(_)))
+    {
+        return try_load_plugin_image(vm, assets, runtime, src);
     }
     if let Some(image) = assets.image(src) {
         return Ok(Some(image));
@@ -5467,6 +5514,71 @@ pub(crate) fn try_load_image_in(
     match decoded {
         Ok(image) => {
             assets.keep_image(src.to_owned(), image.clone());
+            Ok(Some(image))
+        }
+        Err(e) => Err(match literal_site(vm, src) {
+            Some(site) => format!("{site}: {e}"),
+            None => e,
+        }),
+    }
+}
+/// `try_load_image_in` for a plugin: what it may reach is asked before the
+/// cache, which the app and every plugin share. Else a plugin would be
+/// shown (and with `c:image` and `ui.render_canvas`, read back) a picture
+/// the app fetched for a URL the plugin may not fetch, or the app's own
+/// file named by the same relative `src`. A file is kept by its path, a
+/// remote picture once the plugin's own request for it came.
+#[cold]
+#[inline(never)]
+fn try_load_plugin_image(
+    vm: &Rc<Vm>,
+    assets: &Rc<Assets>,
+    runtime: &zgx::reactive::Runtime,
+    src: &str,
+) -> Result<Option<Arc<ImageData>>, String> {
+    if src.is_empty() {
+        return Ok(None);
+    }
+    if is_remote(src) {
+        return match remote_status_in(vm, assets, runtime, src, false) {
+            READY => Ok(assets.image(src)),
+            FAILED => {
+                let key = remote_key(vm, src);
+                let why = assets
+                    .failed
+                    .borrow()
+                    .get(&*key)
+                    .map(|(.., why)| why.clone());
+                Err(format!(
+                    "{src} didn't load: {}",
+                    why.as_deref().unwrap_or("refused")
+                ))
+            }
+            _ => Ok(None),
+        };
+    }
+    let path = match resolve_path(vm, src) {
+        Ok(path) => path,
+        Err(refused) => {
+            vm.report(mlua::Error::runtime(refused));
+            return Ok(None);
+        }
+    };
+    // Its path is its key: an absolute path, never a relative `src` the
+    // app (or another plugin) names a file of its own by.
+    let key = path.to_string_lossy();
+    if let Some(image) = assets.image(&key) {
+        return Ok(Some(image));
+    }
+    let decoded = (assets.read(&key, &path))
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            crate::gpu::decode_image_kept(Arc::from(bytes)).map_err(|e| e.to_string())
+        })
+        .map_err(|e| format!("{}: {e}", path.display()));
+    match decoded {
+        Ok(image) => {
+            assets.keep_image(key.into_owned(), image.clone());
             Ok(Some(image))
         }
         Err(e) => Err(match literal_site(vm, src) {
@@ -7181,6 +7293,9 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         move || {
             let (src, vm2, low2) = (src.clone(), vm2.clone(), low2.clone());
             let (dither, characters, told) = (dither.clone(), characters.clone(), told.clone());
+            // The picture last shown, while a remote `src` it moved to loads
+            // (a tile rewritten under a new URL): never a blank between.
+            let mut last: Option<Arc<ImageData>> = None;
             image_signal(label.clone(), move || {
                 let image = match picture_of(&src, &vm2) {
                     Some(Picture::Image(image)) => {
@@ -7189,9 +7304,13 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                     Some(Picture::Path(path)) => match try_load_image(&vm2, &low2, &path) {
                         Ok(Some(image)) => {
+                            if is_remote(&path) {
+                                last = Some(image.clone());
+                            }
                             told.loaded(&vm2, path, &image);
                             image
                         }
+                        Ok(None) if is_remote(&path) => last.clone().unwrap_or_else(placeholder),
                         Ok(None) => placeholder(),
                         Err(why) => {
                             told.failed(&vm2, path, why);

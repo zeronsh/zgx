@@ -1,6 +1,7 @@
 //! Declarative, retained components and children. Construction runs once per mount;
 //! reactive properties update individual nodes without rebuilding their component.
 use crate::{
+    affine::Affine,
     compose_style::{Typography, Variants, mount_style_with_intrinsic},
     input::{EventContext, EventPhase, InputEvent, Navigation, PointerButton},
     reactive::{Runtime, ServiceScope, Signal},
@@ -2406,30 +2407,70 @@ fn bordered(styles: &Styles) -> bool {
 /// `overflow-x: auto` box: a tab strip, a row of chips.
 /// A canvas's text: a text node for each line, over its drawing and through
 /// the same paint as any text. Made when the first line is, in a box of
-/// their own that takes the canvas's pan and zoom. Scene nodes with no
-/// semantics: the canvas's `label` speaks for what it shows.
+/// their own that takes the canvas's pan and zoom. A line a clip of the
+/// canvas cuts goes in a box of its own, the clip's (`Canvas::text_clips`).
+/// Scene nodes with no semantics: the canvas's `label` speaks for what it
+/// shows.
 #[derive(Default)]
 struct CanvasLabels {
     group: Option<NodeId>,
     /// Each line's node, reused by position.
     nodes: Vec<NodeId>,
     /// The drawing they show now, line by line (the canvas's own, shared
-    /// with its node): a line drawn as it was touches nothing, so a chart
-    /// redrawn every frame costs what changed, and no line is copied to be
-    /// compared.
+    /// with its node), and which of its lines they show (a layer's): a line
+    /// drawn as it was touches nothing, so a chart redrawn every frame
+    /// costs what changed, and no line is copied to be compared.
     shown: Option<std::sync::Arc<crate::canvas::Canvas>>,
+    lines: std::ops::Range<usize>,
+    /// Each line's clip, where one cuts it: the box holding it, and the
+    /// clip. Empty until a line is cut, as most canvases' never are.
+    clips: Vec<Option<(NodeId, crate::canvas::TextClip)>>,
+    /// What each line is mapped by (`Canvas::text_transform`), as shown.
+    /// Empty until a line is transformed.
+    transforms: Vec<Affine>,
     size: (f32, f32),
     view: Option<crate::scene::CanvasView>,
 }
 impl CanvasLabels {
+    /// `content`'s `lines` shown, each cut by its clip in `clips` (none:
+    /// empty) and mapped by `transform` (none: `None`).
+    #[inline(never)]
     fn show(
         &mut self,
         scene: &mut crate::scene::Scene,
         root: NodeId,
         content: &std::sync::Arc<crate::canvas::Canvas>,
-        (width, height): (f32, f32),
+        lines: std::ops::Range<usize>,
+        clips: &[Option<crate::canvas::TextClip>],
+        transform: Option<&dyn Fn(usize) -> Affine>,
+        size: (f32, f32),
     ) {
-        let texts = content.texts();
+        if self.plain()
+            && clips.is_empty()
+            && transform.is_none()
+            && lines == (0..content.texts().len())
+        {
+            self.show_plain(scene, root, content, size);
+            return;
+        }
+        let group = self.group(scene, root, size);
+        self.show_cut(scene, group, content, lines, clips, transform);
+    }
+    /// Whether no line was cut or transformed: `show_plain` may show the
+    /// next, if none of them is either.
+    fn plain(&self) -> bool {
+        self.clips.is_empty() && self.transforms.is_empty()
+    }
+    /// The group its lines go in, made the first time, as big as the
+    /// canvas: in and out of it, a box of the canvas's size, where the
+    /// walk stops (`Scene::append_held`).
+    #[inline(always)]
+    fn group(
+        &mut self,
+        scene: &mut crate::scene::Scene,
+        root: NodeId,
+        (width, height): (f32, f32),
+    ) -> NodeId {
         let group = match self.group {
             Some(group) => group,
             None => {
@@ -2460,15 +2501,37 @@ impl CanvasLabels {
                 },
             );
         }
-        // In and out of the group, a box of the canvas's size: the walk
-        // stops there (`Scene::append_held`).
+        group
+    }
+    /// `show` of all of `content`'s lines where none is cut or transformed,
+    /// now or before (`plain`): a chart's labels, a terminal's rows. A line
+    /// costs what it did before paragraphs, inlined where the canvas's
+    /// drawing is shown; a paragraph, now or before, is out of line.
+    #[inline(always)]
+    fn show_plain(
+        &mut self,
+        scene: &mut crate::scene::Scene,
+        root: NodeId,
+        content: &std::sync::Arc<crate::canvas::Canvas>,
+        size: (f32, f32),
+    ) {
+        let texts = content.texts();
+        let group = self.group(scene, root, size);
         for gone in self.nodes.drain(texts.len().min(self.nodes.len())..) {
             scene.remove_held(gone);
         }
-        let was = self.shown.as_ref().map_or(&[][..], |shown| shown.texts());
+        let was = self
+            .shown
+            .as_ref()
+            .map_or(&[][..], |shown| &shown.texts()[self.lines.clone()]);
         for (index, text) in texts.iter().enumerate() {
             // Each node shows the line at its place in the last drawing.
-            if index < self.nodes.len() && was.get(index) == Some(text) {
+            let before = was.get(index).filter(|_| index < self.nodes.len());
+            if before == Some(text) {
+                continue;
+            }
+            if text.wrap().is_some() || before.is_some_and(|before| before.wrap().is_some()) {
+                Self::show_paragraph(scene, group, &mut self.nodes, index, text, before);
                 continue;
             }
             let kind = NodeKind::Text {
@@ -2494,23 +2557,265 @@ impl CanvasLabels {
                     node
                 }
             };
-            scene.set_font_from(node, &text.font);
-            // A size its maker knows (a terminal's run on its grid) is
-            // kept, for layout and damage not to measure the text again.
-            if let Some(size) = text.known_size {
-                scene.state_text_size(node, size);
-            }
-            let size = match (text.anchor, text.baseline, text.known_size) {
-                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top, _) => (0., 0.),
-                (_, _, Some(size)) => size,
-                _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
-            };
-            let (x, y) = text.origin(size);
-            scene.set_transform(node, crate::scene::Transform { x, y });
+            Self::place_line(scene, node, text);
         }
         // One count more on the canvas its node holds, not a copy of each
         // line.
         self.shown = Some(content.clone());
+        self.lines = 0..texts.len();
+    }
+    /// A line's font and place in the group (one that doesn't wrap).
+    #[inline(always)]
+    fn place_line(scene: &mut crate::scene::Scene, node: NodeId, text: &crate::canvas::CanvasText) {
+        scene.set_font_from(node, &text.font);
+        // A size its maker knows (a terminal's run on its grid) is kept,
+        // for layout and damage not to measure the text again.
+        if let Some(size) = text.known_size {
+            scene.state_text_size(node, size);
+        }
+        let size = match (text.anchor, text.baseline, text.known_size) {
+            (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top, _) => (0., 0.),
+            (_, _, Some(size)) => size,
+            _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
+        };
+        let (x, y) = text.origin(size);
+        scene.set_transform(node, crate::scene::Transform { x, y });
+    }
+    /// `show`'s line `index` where it wraps, or did (`before`, as last
+    /// shown): its box as wide as it wraps to.
+    #[cold]
+    #[inline(never)]
+    fn show_paragraph(
+        scene: &mut crate::scene::Scene,
+        group: NodeId,
+        nodes: &mut Vec<NodeId>,
+        index: usize,
+        text: &crate::canvas::CanvasText,
+        before: Option<&crate::canvas::CanvasText>,
+    ) {
+        let kind = NodeKind::Text {
+            text: text.text.clone(),
+            color: text.color,
+            font_size: text.size,
+        };
+        let node = match nodes.get(index) {
+            Some(&node) => {
+                scene.set_kind(node, kind);
+                if before.is_none_or(|before| before.width != text.width) {
+                    Self::rewrap(scene, node, text);
+                }
+                node
+            }
+            None => {
+                let node = Self::make(scene, group, kind, Self::wrapped(text).1, None).0;
+                nodes.push(node);
+                node
+            }
+        };
+        match text.wrap() {
+            Some(wrap) => Self::place(scene, node, text, Some(wrap), (0., 0.), Affine::IDENTITY),
+            None => Self::place_line(scene, node, text),
+        }
+    }
+    /// `show` where a line is cut by a clip or transformed, now or before,
+    /// or of a layer's lines: each line's clip and transform kept beside it.
+    #[cold]
+    #[inline(never)]
+    fn show_cut(
+        &mut self,
+        scene: &mut crate::scene::Scene,
+        group: NodeId,
+        content: &std::sync::Arc<crate::canvas::Canvas>,
+        lines: std::ops::Range<usize>,
+        clips: &[Option<crate::canvas::TextClip>],
+        transform: Option<&dyn Fn(usize) -> Affine>,
+    ) {
+        let texts = &content.texts()[lines.clone()];
+        let kept = texts.len().min(self.nodes.len());
+        if self.clips.len() < self.nodes.len() {
+            self.clips.resize(self.nodes.len(), None);
+        }
+        if self.transforms.len() < self.nodes.len() {
+            self.transforms.resize(self.nodes.len(), Affine::IDENTITY);
+        }
+        self.transforms.truncate(kept);
+        for (gone, clip) in self.nodes.drain(kept..).zip(self.clips.drain(kept..)) {
+            scene.remove_held(clip.map_or(gone, |(cut, _)| cut));
+        }
+        let shown = self.shown.take();
+        let was = shown
+            .as_ref()
+            .map_or(&[][..], |shown| &shown.texts()[self.lines.clone()]);
+        for (index, text) in texts.iter().enumerate() {
+            let clip = clips.get(index).copied().flatten();
+            let transform = transform.map_or(Affine::IDENTITY, |of| of(index));
+            let before = was.get(index).filter(|_| index < self.nodes.len());
+            if before == Some(text)
+                && self.clips[index].map(|(_, shown)| shown) == clip
+                && self.transforms[index] == transform
+            {
+                continue;
+            }
+            let kind = NodeKind::Text {
+                text: text.text.clone(),
+                color: text.color,
+                font_size: text.size,
+            };
+            let (wrap, style) = Self::wrapped(text);
+            let style = || style.clone();
+            // A line cut by a clip, or no longer, is made anew in its box
+            // or out of it.
+            if index < self.nodes.len() && self.clips[index].is_some() != clip.is_some() {
+                let old = self.clips[index].map_or(self.nodes[index], |(cut, _)| cut);
+                scene.remove_held(old);
+                let (node, cut) = Self::make(scene, group, kind.clone(), style(), clip);
+                self.nodes[index] = node;
+                self.clips[index] = cut.map(|cut| (cut, clip.unwrap()));
+                self.transforms[index] = Affine::IDENTITY;
+            }
+            let node = match self.nodes.get(index) {
+                Some(&node) => {
+                    scene.set_kind(node, kind);
+                    if before.is_none_or(|before| before.width != text.width) {
+                        scene.set_style(node, style());
+                    }
+                    node
+                }
+                None => {
+                    let (node, cut) = Self::make(scene, group, kind, style(), clip);
+                    self.nodes.push(node);
+                    self.clips.push(cut.map(|cut| (cut, clip.unwrap())));
+                    self.transforms.push(Affine::IDENTITY);
+                    node
+                }
+            };
+            let mut at = (0., 0.);
+            if let (Some((cut, shown)), Some(clip)) = (&mut self.clips[index], clip) {
+                if *shown != clip {
+                    *shown = clip;
+                    Self::place_clip(scene, *cut, clip);
+                }
+                at = (clip.rect.x, clip.rect.y);
+            }
+            Self::place(scene, node, text, wrap, at, transform);
+            if self.transforms[index] != transform {
+                self.transforms[index] = transform;
+                scene.set_local_transform(node, local_transform(transform));
+            }
+        }
+        drop(shown);
+        self.shown = Some(content.clone());
+        self.lines = lines;
+    }
+    /// A line that wraps now and didn't, or the other way, or to a new
+    /// width: its node's style.
+    #[cold]
+    #[inline(never)]
+    fn rewrap(scene: &mut crate::scene::Scene, node: NodeId, text: &crate::canvas::CanvasText) {
+        scene.set_style(node, Self::wrapped(text).1);
+    }
+    /// A line's wrap width, where it wraps, and its node's style: a
+    /// paragraph's box is as wide as it wraps to.
+    fn wrapped(text: &crate::canvas::CanvasText) -> (Option<f32>, crate::scene::Style) {
+        let wrap = text.wrap();
+        let style = crate::scene::Style {
+            absolute: true,
+            width: wrap,
+            text_wrap: wrap.is_some(),
+            ..Default::default()
+        };
+        (wrap, style)
+    }
+    /// A line's font and place, from `at` (its clip's corner, or the
+    /// canvas's), its top left moved by `transform`.
+    fn place(
+        scene: &mut crate::scene::Scene,
+        node: NodeId,
+        text: &crate::canvas::CanvasText,
+        wrap: Option<f32>,
+        at: (f32, f32),
+        transform: Affine,
+    ) {
+        scene.set_font_from(node, &text.font);
+        // A size its maker knows, for a line that doesn't wrap: kept.
+        let known = text.known_size.filter(|_| wrap.is_none());
+        if let Some(size) = known {
+            scene.state_text_size(node, size);
+        }
+        let size = match (text.anchor, text.baseline, wrap) {
+            (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top, _) => (0., 0.),
+            (_, crate::canvas::TextBaseline::Top, Some(width)) => (width, 0.),
+            _ if known.is_some() => known.unwrap_or_default(),
+            _ => {
+                let (width, height) =
+                    scene.measure_text_with_font(&text.text, text.size, wrap, &text.font);
+                (wrap.unwrap_or(width), height)
+            }
+        };
+        let (x, y) = text.origin(size);
+        // Turned (scaled, skewed) about its top left, which the transform
+        // moves.
+        let (x, y) = match transform == Affine::IDENTITY {
+            true => (x, y),
+            false => transform.point(x, y),
+        };
+        scene.set_transform(
+            node,
+            crate::scene::Transform {
+                x: x - at.0,
+                y: y - at.1,
+            },
+        );
+    }
+    /// A line's text node, in `group` or, cut by `clip`, in a box of its
+    /// own there: the node, and its box.
+    fn make(
+        scene: &mut crate::scene::Scene,
+        group: NodeId,
+        kind: NodeKind,
+        style: crate::scene::Style,
+        clip: Option<crate::canvas::TextClip>,
+    ) -> (NodeId, Option<NodeId>) {
+        let Some(clip) = clip else {
+            return (scene.append_held(group, kind, style), None);
+        };
+        let cut = scene.append_held(
+            group,
+            NodeKind::Container(Layout::Overlay),
+            Default::default(),
+        );
+        Self::place_clip(scene, cut, clip);
+        (scene.append_held(cut, kind, style), Some(cut))
+    }
+    /// A clip's box: where it is, its size and corners, cutting what it holds.
+    fn place_clip(scene: &mut crate::scene::Scene, cut: NodeId, clip: crate::canvas::TextClip) {
+        scene.set_kind(
+            cut,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: crate::scene::QuadStyle {
+                    radius: clip.radius,
+                    ..Default::default()
+                },
+            },
+        );
+        scene.set_style(
+            cut,
+            crate::scene::Style {
+                width: Some(clip.rect.width),
+                height: Some(clip.rect.height),
+                absolute: true,
+                clip: true,
+                ..Default::default()
+            },
+        );
+        scene.set_transform(
+            cut,
+            crate::scene::Transform {
+                x: clip.rect.x,
+                y: clip.rect.y,
+            },
+        );
     }
     /// Pans and zooms the text with its canvas's drawing.
     fn follow(&mut self, scene: &mut crate::scene::Scene, view: crate::scene::CanvasView) {
@@ -2531,6 +2836,198 @@ impl CanvasLabels {
                     ..crate::scene::LocalTransform::IDENTITY
                 },
             );
+        }
+    }
+}
+
+/// `transform`'s scale, skew and turn as a node's, about its top left (its
+/// translation left to the node's place): `LocalTransform::matrix` is
+/// rotate · skew · scale, so the skew is along x alone. A transform that
+/// flattens the text to a line scales it to nothing.
+fn local_transform(transform: Affine) -> crate::scene::LocalTransform {
+    let Affine { a, b, c, d, .. } = transform;
+    let across = a.hypot(b);
+    let det = a * d - b * c;
+    if !(across > 1e-6 && det.abs() > 1e-12) {
+        return crate::scene::LocalTransform {
+            scale: (0., 0.),
+            origin: (0., 0.),
+            ..crate::scene::LocalTransform::IDENTITY
+        };
+    }
+    let down = det / across;
+    crate::scene::LocalTransform {
+        scale: (across, down),
+        rotate: b.atan2(a),
+        skew: (((a * c + b * d) / (across * down)).atan(), 0.),
+        origin: (0., 0.),
+        ..crate::scene::LocalTransform::IDENTITY
+    }
+}
+
+/// A canvas's drawing in layers (`Canvas::layers`), where a shape drawn
+/// after a text covers it: the first layer's shapes in the canvas's own
+/// node with its text over them, and each further layer's shapes and text
+/// over those in a box of their own. A drawing whose shapes keep clear of
+/// its words is one layer, as before.
+#[derive(Default)]
+struct CanvasLayers {
+    /// The first layer's text.
+    labels: CanvasLabels,
+    /// The box holding the further layers, once there have been any.
+    stack: Option<NodeId>,
+    /// Each further layer's canvas node and text.
+    layers: Vec<(NodeId, CanvasLabels)>,
+    size: (f32, f32),
+    view: Option<crate::scene::CanvasView>,
+    /// A canvas that pans and zooms: its text drawn into its raster
+    /// (`Canvas::raster_text`), no node for any of it.
+    raster_text: bool,
+}
+impl CanvasLayers {
+    fn show(
+        &mut self,
+        scene: &mut crate::scene::Scene,
+        root: NodeId,
+        drawing: NodeId,
+        mut content: std::sync::Arc<crate::canvas::Canvas>,
+        size: (f32, f32),
+    ) {
+        use std::sync::Arc;
+        if self.raster_text {
+            // (Its own: the drawing was just made.)
+            Arc::make_mut(&mut content).raster_text();
+            scene.set_kind(drawing, NodeKind::Canvas(content));
+            return;
+        }
+        let texts = content.texts();
+        // The drawing, then its words over it (a chart's labels, a
+        // terminal's rows): one layer, nothing clipped, measured or
+        // allocated.
+        if content.texts_last() && self.layers.is_empty() {
+            if !texts.is_empty() || !self.labels.nodes.is_empty() {
+                match self.labels.plain() {
+                    true => self.labels.show_plain(scene, root, &content, size),
+                    false => {
+                        let all = 0..texts.len();
+                        self.labels.show(scene, root, &content, all, &[], None, size)
+                    }
+                }
+            }
+            scene.set_kind(drawing, NodeKind::Canvas(content));
+            return;
+        }
+        let clips = content.text_clips();
+        let transformed = content.texts_transformed();
+        // The transform of a layer's text at `index`, from the canvas's `from`.
+        let canvas = &content;
+        let transform_of = |from: usize| move |index: usize| canvas.text_transform(from + index);
+        let clips_of = |range: &std::ops::Range<usize>| match clips.is_empty() {
+            true => &[][..],
+            false => &clips[range.clone()],
+        };
+        // Text only after the last command (a chart's labels, a
+        // terminal's rows) is one layer: nothing measured or allocated.
+        let covered = !texts.is_empty() && content.text_after(0) < content.commands().len();
+        let layers = match covered {
+            false => Vec::new(),
+            true => content.layers(|text| {
+                scene.measure_text_with_font(&text.text, text.size, None, &text.font)
+            }),
+        };
+        if layers.len() <= 1 {
+            if !texts.is_empty() || !self.labels.nodes.is_empty() {
+                let all = transform_of(0);
+                let transform = transformed.then_some(&all as &dyn Fn(usize) -> Affine);
+                let lines = 0..texts.len();
+                self.labels
+                    .show(scene, root, &content, lines, &clips, transform, size);
+            }
+            self.keep(scene, 0);
+            scene.set_kind(drawing, NodeKind::Canvas(content.clone()));
+            return;
+        }
+        let first = &layers[0];
+        let of_first = transform_of(first.texts.start);
+        self.labels.show(
+            scene,
+            root,
+            &content,
+            first.texts.clone(),
+            clips_of(&first.texts),
+            transformed.then_some(&of_first as &dyn Fn(usize) -> Affine),
+            size,
+        );
+        let fills = crate::scene::Style {
+            width: Some(size.0),
+            height: Some(size.1),
+            absolute: true,
+            ..Default::default()
+        };
+        let stack = match self.stack {
+            Some(stack) => stack,
+            None => {
+                let stack = scene.append(root, NodeKind::Container(Layout::Overlay), fills.clone());
+                self.stack = Some(stack);
+                stack
+            }
+        };
+        if self.size != size {
+            self.size = size;
+            scene.set_style(stack, fills.clone());
+        }
+        for (index, layer) in layers[1..].iter().enumerate() {
+            if self.layers.len() == index {
+                let node = scene.append(stack, NodeKind::Canvas(Default::default()), fills.clone());
+                if let Some(view) = self.view {
+                    scene.set_canvas_view(node, Some(view));
+                }
+                let labels = CanvasLabels {
+                    view: self.view,
+                    ..Default::default()
+                };
+                self.layers.push((node, labels));
+            }
+            let (node, labels) = &mut self.layers[index];
+            scene.set_kind(*node, NodeKind::Canvas(Arc::new(content.layer(layer))));
+            scene.set_style(*node, fills.clone());
+            // Its group made now, before the next layer's canvas: over it.
+            let of_layer = transform_of(layer.texts.start);
+            labels.show(
+                scene,
+                stack,
+                &content,
+                layer.texts.clone(),
+                clips_of(&layer.texts),
+                transformed.then_some(&of_layer as &dyn Fn(usize) -> Affine),
+                size,
+            );
+        }
+        self.keep(scene, layers.len() - 1);
+        scene.set_kind(drawing, NodeKind::Canvas(Arc::new(content.layer(first))));
+    }
+    /// Keep the first `count` further layers, removing the rest.
+    fn keep(&mut self, scene: &mut crate::scene::Scene, count: usize) {
+        for (node, labels) in self.layers.drain(count.min(self.layers.len())..) {
+            scene.remove(node);
+            if let Some(group) = labels.group {
+                scene.remove(group);
+            }
+        }
+    }
+    /// Pans and zooms every layer with the canvas's view.
+    fn follow(
+        &mut self,
+        scene: &mut crate::scene::Scene,
+        drawing: NodeId,
+        view: crate::scene::CanvasView,
+    ) {
+        self.view = Some(view);
+        scene.set_canvas_view(drawing, Some(view));
+        self.labels.follow(scene, view);
+        for (node, labels) in &mut self.layers {
+            scene.set_canvas_view(*node, Some(view));
+            labels.follow(scene, view);
         }
     }
 }
@@ -6764,7 +7261,10 @@ fn open_element(
             },
         );
         let scene = ui.scene.clone();
-        let labels = Rc::new(RefCell::new(CanvasLabels::default()));
+        let labels = Rc::new(RefCell::new(CanvasLayers {
+            raster_text: canvas_view.is_some(),
+            ..Default::default()
+        }));
         let shown = labels.clone();
         ui.bind(root, move || {
             let (width, height) = size.get();
@@ -6777,12 +7277,9 @@ fn open_element(
                 crate::canvas::Canvas::new()
             });
             let mut scene = scene.borrow_mut();
-            if !content.texts().is_empty() || !shown.borrow().nodes.is_empty() {
-                shown
-                    .borrow_mut()
-                    .show(&mut scene, root, &content, (width, height));
-            }
-            scene.set_kind(drawing, NodeKind::Canvas(content));
+            shown
+                .borrow_mut()
+                .show(&mut scene, root, drawing, content, (width, height));
             scene.set_style(
                 drawing,
                 crate::scene::Style {
@@ -6800,8 +7297,7 @@ fn open_element(
             ui.bind(root, move || {
                 let view = view();
                 let mut scene = scene.borrow_mut();
-                scene.set_canvas_view(drawing, Some(view));
-                labels.borrow_mut().follow(&mut scene, view);
+                labels.borrow_mut().follow(&mut scene, drawing, view);
             });
         }
         if let Some(mut grid) = grid_fill {
@@ -9711,6 +10207,7 @@ mod canvas_label_tests {
                         anchor: TextAnchor::Start,
                         baseline: TextBaseline::Top,
                         known_size: None,
+                        width: f32::INFINITY,
                     });
                 }
                 canvas
