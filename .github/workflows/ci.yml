@@ -404,7 +404,7 @@ jobs:
           cargo clippy -p zgx-dom --features luau --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
           CHROMEDRIVER="$(command -v chromedriver || echo "$CHROMEWEBDRIVER/chromedriver")" \
             CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$HOME/.local/wasm-bindgen-$WASM_BINDGEN/bin/wasm-bindgen-test-runner" \
-            cargo test --release -p zgx-dom --features luau --test luau --test fetch --target wasm32-unknown-unknown --locked
+            cargo test --release -p zgx-dom --features luau --test luau --test fetch --test luau_memory --target wasm32-unknown-unknown --locked
           # Luau's `audio` on the audio worklet: clippy and its tests, with every
           # part on. A context runs only after a trusted press, and a test's
           # click() isn't one: Chrome is told to let it (no other args are

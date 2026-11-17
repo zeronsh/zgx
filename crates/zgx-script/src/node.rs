@@ -2501,9 +2501,56 @@ pub(crate) fn node_ud(lua: &Lua, mut node: Node) -> mlua::Result<mlua::AnyUserDa
     Rc::get_mut(&mut held).expect("just made").write(node);
     // SAFETY: written just above.
     let held = unsafe { held.assume_init() };
+    // In the browser, what the node holds in Rust steps Luau's collector,
+    // which doesn't see it: its userdata is a pointer. A script's rows make
+    // thousands of nodes, each garbage once lowered, and the collector paced
+    // by its own heap alone let them pile up until it next ran a while: a
+    // peak wasm memory keeps for good. The desktop gives its peaks back, and
+    // its idle trim collects them; stepping there cost every build.
+    #[cfg(target_arch = "wasm32")]
+    owe_collector(lua, node_bytes(&held));
     // Every `ui.*` call makes one: without the memory limit's protected
     // call around each (see vendor/mlua/ZGX_PATCH.md).
     lua.create_userdata_relaxed(NodeUd(held))
+}
+/// What a node keeps in Rust: itself in its `Rc`, its lists and boxes.
+#[cfg(target_arch = "wasm32")]
+fn node_bytes(node: &Node) -> usize {
+    size_of::<Node>()
+        + 2 * size_of::<usize>()
+        + node.props.capacity() * size_of::<(Prop, Source)>()
+        + node.children.capacity() * size_of::<Rc<Node>>()
+        + node.events.as_ref().map_or(0, |_| size_of::<Events>())
+        + node.rare.as_ref().map_or(0, |_| size_of::<NodeRare>())
+}
+/// How often the collector is stepped for Rust bytes (`owe_collector`), in
+/// kilobytes: one step every few dozen nodes.
+#[cfg(target_arch = "wasm32")]
+const COLLECTOR_DEBT_KB: usize = 64;
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// Rust bytes made for scripts since the collector was last stepped.
+    static COLLECTOR_DEBT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// `bytes` more in Rust for objects of `lua`'s: once they come to
+/// `COLLECTOR_DEBT_KB`, the collector does that much work.
+#[cfg(target_arch = "wasm32")]
+fn owe_collector(lua: &Lua, bytes: usize) {
+    let debt = COLLECTOR_DEBT.with(|debt| {
+        let owed = debt.get() + bytes;
+        let paid = owed >= COLLECTOR_DEBT_KB << 10;
+        debt.set(if paid {
+            owed - (COLLECTOR_DEBT_KB << 10)
+        } else {
+            owed
+        });
+        paid
+    });
+    if debt {
+        // Neither raises nor runs script: a step only frees (userdata drops
+        // run in Rust, as any allocation's step may run them).
+        let _ = lua.gc_step_kbytes(COLLECTOR_DEBT_KB as std::ffi::c_int);
+    }
 }
 /// The script line calling the `ui` function running now: `app.luau:12`.
 fn location(lua: &Lua) -> Option<Rc<str>> {

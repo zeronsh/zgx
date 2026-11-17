@@ -289,23 +289,22 @@ fn runaway_luau_is_stopped_by_its_budget_in_the_browser() {
 #[wasm_bindgen_test]
 async fn a_cleared_list_is_collected_as_the_page_goes_idle() {
     // The idle trim runs the host's full collection, as the desktop's does:
-    // rows a script let go of don't stay held until it next allocates.
+    // what a script let go of doesn't stay held until it next allocates.
+    // Its own tables, not nodes (whose Rust bytes step the collector as
+    // they're made): only Luau's own pacing, and the trim, collect them.
     let runtime = Runtime::new();
     let script = ScriptHost::inline(
         &runtime,
         "rows.luau",
         r#"
-        local rows = ui.state("rows", {})
+        local kept = nil
         return ui.column {
             ui.button { "Fill", on_click = function()
-                local made = {}
-                for i = 1, 2000 do made[i] = { id = i, label = `row {i}` } end
-                rows:set(made)
+                local made = table.create(20000)
+                for i = 1, 20000 do made[i] = { id = i, label = `row {i}` } end
+                kept = made
             end },
-            ui.button { "Clear", on_click = function() rows:set({}) end },
-            ui.each(rows, function(item) return ui.text { item.label } end, {
-                key = function(item) return item.id end,
-            }),
+            ui.button { "Clear", on_click = function() kept = nil end },
         }
         "#,
     );
@@ -338,6 +337,57 @@ async fn a_cleared_list_is_collected_as_the_page_goes_idle() {
         held > base && after < base + (held - base) / 4,
         "the cleared rows were collected: {base} bytes with none, {held} before \
          the trim, {after} after"
+    );
+    mounted.unmount();
+}
+
+#[wasm_bindgen_test]
+async fn a_cleared_list_of_rows_rests_near_where_it_began() {
+    // What a page rests at is the measure: 10,000 rows built and cleared,
+    // the page left still, end within a little of what the script held
+    // before them (their nodes' bytes step the collector as they're made,
+    // and the idle trim collects the rest).
+    let runtime = Runtime::new();
+    let script = ScriptHost::inline(
+        &runtime,
+        "rows.luau",
+        r#"
+        local rows = ui.state("rows", {})
+        return ui.column {
+            ui.button { "Fill", on_click = function()
+                local made = table.create(10000)
+                for i = 1, 10000 do made[i] = { id = i, label = `row {i}` } end
+                rows:set(made)
+            end },
+            ui.button { "Clear", on_click = function() rows:set({}) end },
+            ui.each(rows, function(item) return ui.text { item.label } end, {
+                key = function(item) return item.id end,
+            }),
+        }
+        "#,
+    );
+    script.reload().expect("the script loads");
+    let host = host();
+    let mounted = zgx_dom::mount(&runtime, &host, script.view());
+    let base = script.script_memory();
+    let buttons = host.query_selector_all("button").unwrap();
+    let press = |i| {
+        buttons
+            .item(i)
+            .unwrap()
+            .dyn_into::<web_sys::HtmlElement>()
+            .unwrap()
+            .click();
+        zgx_dom::flush();
+    };
+    press(0);
+    press(1);
+    sleep(3200).await;
+    let after = script.script_heap();
+    assert!(
+        after < base + (128 << 10),
+        "a cleared list of 10,000 rows rests {} KB over what the script held before it",
+        (after as isize - base as isize) >> 10
     );
     mounted.unmount();
 }

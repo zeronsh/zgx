@@ -1194,6 +1194,22 @@ impl Lua {
         }
     }
 
+    /// zgx patch: performs the collector's work for `kbytes` kilobytes as if
+    /// the VM had allocated them (Luau's `lua_gc(LUA_GCSTEP, kbytes)`): for
+    /// memory the VM's objects keep outside its heap, which its pacing
+    /// doesn't see. Returns `true` if this step has finished a cycle.
+    #[cfg(feature = "luau")]
+    pub fn gc_step_kbytes(&self, kbytes: c_int) -> Result<bool> {
+        let lua = self.lock();
+        let state = lua.main_state();
+        unsafe {
+            check_stack(state, 3)?;
+            protect_lua!(state, 0, 0, |state| {
+                ffi::lua_gc(state, ffi::LUA_GCSTEP, kbytes) != 0
+            })
+        }
+    }
+
     /// Switches the GC to the given mode with the provided parameters.
     ///
     /// Returns the previous [`GcMode`]. Only the collector *mode* is reported, the returned value's
