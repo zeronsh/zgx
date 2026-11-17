@@ -1996,6 +1996,8 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
     // Its inline boxes, found at the first: a box's run is a padded one,
     // which most text has none of.
     let mut boxes = None;
+    // A run with room before it only (an atom's lead, `TextRun::padding`).
+    let mut leads = false;
     let mut index = 0;
     while index < runs.len() {
         let run = &runs[index];
@@ -2017,6 +2019,7 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
             // Negative down: all of it before the text (`TextRun::padding`),
             // which the shaper takes as a negative padding.
             let across = if run.padding[1] < 0. {
+                leads = true;
                 -2. * run.padding[0]
             } else {
                 run.padding[0]
@@ -2056,6 +2059,10 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
     );
     if boxes.is_some() {
         buffer.find_inline_boxes();
+    }
+    // An atom's lead (its icon): its line may break before it.
+    if leads {
+        buffer.find_leads();
     }
     // Its lines take CSS's line box.
     if BOX_SPANS {
@@ -2995,6 +3002,56 @@ mod wash_tests {
         assert!(
             (led - plain - 20.).abs() < 0.5,
             "after the 20 point room: {plain} {led}"
+        );
+    }
+
+    /// An atom with a lead (its icon, an atomic inline box as the web's
+    /// inline-flex chip) right after text, no space between: a narrow line
+    /// breaks before it, the atom whole on the next. Text glued to text
+    /// still breaks only where it did.
+    #[test]
+    fn a_line_breaks_before_an_atoms_lead() {
+        let text = "see 2010.pdfAda";
+        let rich = |padding: [f32; 2]| {
+            let at = |range: std::ops::Range<usize>, padding: [f32; 2]| TextRun {
+                range,
+                padding,
+                font_size: 18.,
+                ..Default::default()
+            };
+            RichText::new(
+                text,
+                vec![at(0..12, [0.; 2]), at(12..13, padding), at(13..15, [0.; 2])],
+            )
+            .unwrap()
+        };
+        let mut fonts = FontSystem::new();
+        let line_of = |buffer: &Buffer, at: usize| {
+            buffer
+                .layout_runs()
+                .position(|line| line.glyphs.iter().any(|g| g.start == at))
+                .unwrap()
+        };
+        // As wide as "see 2010.pdf" and a little: no room for the atom too.
+        let whole = rich_buffer(&mut fonts, &rich([10., -1.]), None, None);
+        let pdf = whole
+            .layout_runs()
+            .flat_map(|line| line.glyphs.iter())
+            .find(|g| g.start == 11)
+            .map(|g| g.x + g.w)
+            .unwrap();
+        let led = rich_buffer(&mut fonts, &rich([10., -1.]), Some(pdf + 4.), None);
+        assert_eq!(line_of(&led, 4), 0, "the file name stays on the first line");
+        assert_eq!(
+            [12, 13, 14].map(|at| line_of(&led, at)),
+            [1; 3],
+            "the atom whole on the next"
+        );
+        let plain = rich_buffer(&mut fonts, &rich([0.; 2]), Some(pdf + 4.), None);
+        assert_eq!(
+            line_of(&plain, 4),
+            line_of(&plain, 12),
+            "text glued to text keeps together"
         );
     }
 
