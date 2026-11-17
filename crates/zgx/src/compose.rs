@@ -3790,6 +3790,17 @@ fn merge_kept<K: Eq + std::hash::Hash + Clone>(
 #[cfg(debug_assertions)]
 thread_local! {
     static LIST_PASSES: Cell<u64> = const { Cell::new(0) };
+    static LIST_RUNS: Cell<u64> = const { Cell::new(0) };
+}
+/// How many times virtual lists' rows bindings have run so far on this
+/// thread, whether or not they placed anything (`virtual_list_passes`).
+/// Debug builds count; a release build says 0.
+#[doc(hidden)]
+pub fn virtual_list_runs() -> u64 {
+    #[cfg(debug_assertions)]
+    return LIST_RUNS.with(Cell::get);
+    #[cfg(not(debug_assertions))]
+    0
 }
 /// How many times virtual lists have placed their rows so far on this
 /// thread: a test's measure of their work. Debug builds count; a release
@@ -3890,7 +3901,27 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             if !ancestor {
                 ui.scene.borrow_mut().set_scroll_copy(content, true);
             }
-            let window = ancestor.then(|| AncestorWindow::new(ui, root, viewport));
+            let window = ancestor.then(|| Rc::new(AncestorWindow::new(ui, root, viewport)));
+            // The part the view around it shows, worked out apart from the
+            // rows: the view's every step moves every list in it, and most
+            // (scrolled past) show nothing either side of it, so their rows
+            // aren't placed again (`Signal::set` keeps an equal value).
+            let shown = window.as_ref().map(|window| {
+                let shown = ui.signal((0_f32, 0_f32));
+                let read = (shown.clone(), Cell::new(false));
+                let (window, part, extent, weak) = (
+                    window.clone(),
+                    shown.clone(),
+                    extent.clone(),
+                    ui.downgrade(),
+                );
+                ui.bind(root, move || {
+                    if let Some(now) = window.shown(&weak, extent.get()) {
+                        part.set(now);
+                    }
+                });
+                read
+            });
             let stretch = ListStretch::new(
                 ui,
                 root,
@@ -3985,6 +4016,8 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             );
             let mut handled_reveal = 0;
             ui.bind(root, move || {
+                #[cfg(debug_assertions)]
+                LIST_RUNS.with(|runs| runs.set(runs.get() + 1));
                 let length = count();
                 let (width, mut height) = size.get();
                 let model = crate::virtual_list::VirtualList::new(length, row_height, overscan);
@@ -3998,10 +4031,13 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     requested.clamp(0.0, limit)
                 };
                 // The part the view around it shows.
-                if let Some(window) = &window
-                    && let Some(shown) = window.shown(&weak, model.content_height())
-                {
-                    (position, height) = shown;
+                // Subscribed once, for as long as the rows' binding lives, and
+                // read untracked: it reads the part on every run.
+                if let Some((shown, subscribed)) = &shown {
+                    if !subscribed.replace(true) {
+                        shown.subscribe();
+                    }
+                    (position, height) = shown.with_untracked(|part| *part);
                 }
                 let request = navigation
                     .as_ref()

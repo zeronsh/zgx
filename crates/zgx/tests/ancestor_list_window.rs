@@ -116,3 +116,33 @@ fn a_scroll_that_shows_the_same_rows_places_no_list_again() {
     // Ten rows shown where eleven were: those left behind are gone.
     assert!(rows(&ui) < before.1, "rows left behind are removed");
 }
+
+#[test]
+fn a_scroll_inside_one_list_runs_that_list_alone() {
+    let mut ui = Ui::new(400., 300.);
+    let (offset, built) = transcript(&mut ui);
+    // Into the third list; the others scrolled past or not reached.
+    offset.set(2500.);
+    ui.prepare_frame();
+    take(&built);
+    for step in 1..=4 {
+        let before = zgx::compose::virtual_list_runs();
+        offset.set(2500. + step as f32 * 3.);
+        ui.prepare_frame();
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                zgx::compose::virtual_list_runs() - before,
+                1,
+                "step {step}: only the third list's rows run"
+            );
+        }
+    }
+    // What shows is what it was: the third list's rows, and no others.
+    let rows = take(&built);
+    assert!(
+        rows.iter()
+            .enumerate()
+            .all(|(list, rows)| list == 2 || rows.is_empty()),
+        "{rows:?}"
+    );
+}
