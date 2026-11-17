@@ -16290,6 +16290,10 @@ impl Scene {
                 }
             }
         }
+        // (One move, the usual frame, asks nothing.)
+        if moves.len() > 1 {
+            self.merge_alike_moves(&mut moves);
+        }
         // Nested or overlapping moves: repaint instead.
         let overlapping: Vec<usize> = (0..moves.len())
             .filter(|&i| {
@@ -16325,6 +16329,31 @@ impl Scene {
                 self.add_damage(rect);
             }
             self.moves.push(scroll);
+        }
+    }
+    /// Content moved as one: layers in the same view moved the same way (a
+    /// text area's marks under its lines) are one copy of that view, the
+    /// first's, the others taken out of `moves` in place. Not one nested in
+    /// another: it moves by both there. The distance is compared first; a
+    /// move unlike those before it asks no more.
+    #[cold]
+    #[inline(never)]
+    fn merge_alike_moves(&self, moves: &mut Vec<ScrollMove>) {
+        let mut at = 1;
+        while at < moves.len() {
+            let scroll = &moves[at];
+            let same = moves[..at].iter().any(|other| {
+                other.dx == scroll.dx
+                    && other.dy == scroll.dy
+                    && other.clip == scroll.clip
+                    && !self.is_within(scroll.node, other.node)
+                    && !self.is_within(other.node, scroll.node)
+            });
+            if same {
+                moves.remove(at);
+            } else {
+                at += 1;
+            }
         }
     }
     /// For scroll content `id` that moved by `dx`, `dy` this frame and repaints
