@@ -2833,12 +2833,12 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
     let web = spec.web.clone();
     let view = match (&spec.src, &spec.html) {
         (Some(src), _) => {
-            let (src, vm) = (resolve_owned(src), vm.clone());
+            let (src, vm, id) = (resolve_owned(src), vm.clone(), spec.id.clone());
             // Refused, it stays where it is (blank, the first time).
             let mut shown = "about:blank".to_owned();
             web_view_src(&web, move || match resolve(&src, Ty::Str, None, &vm) {
                 Some(Lit::Str(url)) => {
-                    match crate::rules::guard(&vm.lua, crate::GuardKind::Web, &url) {
+                    match crate::rules::guard_web(&vm.lua, id.as_deref(), &url) {
                         Ok(()) => {
                             shown = url.to_string();
                             shown.clone()
@@ -2854,7 +2854,7 @@ fn web_view_of(spec: &crate::node::WebSpec, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
         }
         (None, Some((html, base))) => {
             let name = base.as_deref().unwrap_or("about:blank");
-            match crate::rules::guard(&vm.lua, crate::GuardKind::Web, name) {
+            match crate::rules::guard_web(&vm.lua, spec.id.as_deref(), name) {
                 Ok(()) => web.load_html(html.clone(), base.as_deref()),
                 Err(error) => vm.report(error),
             }
