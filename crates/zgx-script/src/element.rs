@@ -1317,6 +1317,72 @@ pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<
             Ok(editor_of(&e).and_then(|editor| editor.offset_at(x, y)))
         })?,
     )?;
+    // `ui.editor.insert_atom(el, label, { id, data, style = { bg }, replace =
+    // { from, to } })`: `label` made an atom at the caret (over the
+    // selection), or over the characters `replace` names (the `@que` typed to
+    // ask for it); one step of undo, the caret after it. Its id (the one
+    // given, or one made), or nil where the element is not an editor. Here,
+    // not a method of every element: a VM makes it only when a script names
+    // it (`lazy`).
+    table.set(
+        "insert_atom",
+        lua.create_function(
+            move |lua, (e, label, options): (El, String, Option<mlua::Table>)| {
+                settle(lua);
+                let Some(editor) = editor_of(&e) else {
+                    return Ok(None);
+                };
+                let (mut key, mut data, mut bg, mut range) =
+                    (None, crate::value::Value::Nil, None, None);
+                if let Some(options) = &options {
+                    key = options.get::<Option<String>>("id")?;
+                    data = options
+                        .get::<Option<crate::value::Value>>("data")?
+                        .unwrap_or_default();
+                    if let Some(style) = options.get::<Option<mlua::Table>>("style")? {
+                        bg = style.get::<Option<String>>("bg")?;
+                    }
+                    if let Some(replace) = options.get::<Option<mlua::Table>>("replace")? {
+                        let text = editor.editor.borrow().text().into_owned();
+                        let from = replace.get::<Option<usize>>("from")?;
+                        let to = replace.get::<Option<usize>>("to")?;
+                        range = match (from, to) {
+                            (Some(from), Some(to)) if from <= to => {
+                                crate::atoms::byte_of_char(&text, from)
+                                    .zip(crate::atoms::byte_of_char(&text, to))
+                                    .map(|(from, to)| from..to)
+                            }
+                            _ => return Ok(None),
+                        };
+                    }
+                }
+                let key = key.unwrap_or_else(crate::atoms::fresh_key);
+                let wash = bg.as_deref().and_then(crate::node::parse_color);
+                let payload = crate::atoms::payload(key.clone(), &data, bg);
+                let made = off_clock(lua, |_| {
+                    editor.insert_atom(&label, range, wash, Some(payload))
+                })
+                .flatten();
+                settle(lua);
+                Ok(made.map(|_| key))
+            },
+        )?,
+    )?;
+    // `ui.editor.atoms(el)`: its atoms, `{ id, from, to, data?, style? }`
+    // each, characters from 0.
+    table.set(
+        "atoms",
+        lua.create_function(move |lua, e: El| {
+            let Some(editor) = editor_of(&e) else {
+                return Ok(None);
+            };
+            let text = editor.editor.borrow().text().into_owned();
+            let list = crate::atoms::list(&editor.atoms(), |byte| {
+                crate::atoms::char_of_byte(&text, byte)
+            });
+            crate::value::to_lua(&list, lua, false).map(Some)
+        })?,
+    )?;
     // `ui.editor.scroll_to_line(el, n, { align })`: line `n` from 1 at that
     // place in the view, its caret left where it is.
     table.set(
@@ -1504,65 +1570,6 @@ impl UserData for ElementUd {
             // The state it is bound to holds the new text when this returns.
             settle(lua);
             Ok(true)
-        });
-        // `el:insert_atom(label, { id, data, style = { bg }, replace = { from,
-        // to } })`: `label` made an atom at the caret (over the selection), or
-        // over the characters `replace` names (the `@que` typed to ask for
-        // it); one step of undo, the caret after it. Its id (the one given, or
-        // one made), or nil where the element is not an editor.
-        methods.add_method(
-            "insert_atom",
-            |lua, e, (label, options): (String, Option<mlua::Table>)| {
-                settle(lua);
-                let Some(editor) = e.0.handle.get().and_then(NodeHandle::editor) else {
-                    return Ok(None);
-                };
-                let (mut key, mut data, mut bg, mut range) =
-                    (None, crate::value::Value::Nil, None, None);
-                if let Some(options) = &options {
-                    key = options.get::<Option<String>>("id")?;
-                    data = options
-                        .get::<Option<crate::value::Value>>("data")?
-                        .unwrap_or_default();
-                    if let Some(style) = options.get::<Option<mlua::Table>>("style")? {
-                        bg = style.get::<Option<String>>("bg")?;
-                    }
-                    if let Some(replace) = options.get::<Option<mlua::Table>>("replace")? {
-                        let text = editor.editor.borrow().text().into_owned();
-                        let from = replace.get::<Option<usize>>("from")?;
-                        let to = replace.get::<Option<usize>>("to")?;
-                        range = match (from, to) {
-                            (Some(from), Some(to)) if from <= to => {
-                                crate::atoms::byte_of_char(&text, from)
-                                    .zip(crate::atoms::byte_of_char(&text, to))
-                                    .map(|(from, to)| from..to)
-                            }
-                            _ => return Ok(None),
-                        };
-                    }
-                }
-                let key = key.unwrap_or_else(crate::atoms::fresh_key);
-                let wash = bg.as_deref().and_then(crate::node::parse_color);
-                let payload = crate::atoms::payload(key.clone(), &data, bg);
-                let made = off_clock(lua, |_| {
-                    editor.insert_atom(&label, range, wash, Some(payload))
-                })
-                .flatten();
-                settle(lua);
-                Ok(made.map(|_| key))
-            },
-        );
-        // `el:atoms()`: its atoms, `{ id, from, to, data?, style? }` each,
-        // characters from 0.
-        methods.add_method("atoms", |lua, e, ()| {
-            let Some(editor) = e.0.handle.get().and_then(NodeHandle::editor) else {
-                return Ok(None);
-            };
-            let text = editor.editor.borrow().text().into_owned();
-            let list = crate::atoms::list(&editor.atoms(), |byte| {
-                crate::atoms::char_of_byte(&text, byte)
-            });
-            crate::value::to_lua(&list, lua, false).map(Some)
         });
         // A picture of the element as the window last showed it, at most
         // `max_width` pixels wide (480 if not given): the `src` of an image
