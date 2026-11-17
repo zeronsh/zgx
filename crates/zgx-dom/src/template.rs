@@ -9,6 +9,7 @@
 use crate::ops::{self, Captured, Ops};
 use rustc_hash::FxHashMap as HashMap;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// What each word of an operation is: an id or number, or a string (two
 /// words: its UTF-16 offset and length).
@@ -100,7 +101,7 @@ struct Template {
 #[derive(Default)]
 struct Entry {
     seen: u32,
-    template: Option<Template>,
+    template: Option<Rc<Template>>,
 }
 
 #[derive(Default)]
@@ -116,6 +117,10 @@ struct Templates {
     /// Spare buffers for capturing and reading.
     spare: Vec<Captured>,
     parsed: Parsed,
+    /// The last block stamped: its shape's key and template. A list's rows
+    /// mostly share one shape, so the next block is checked against it
+    /// first, as it's read: no key built, hashed or looked up for it.
+    last: Option<(Vec<u32>, Rc<Template>)>,
 }
 
 thread_local! {
@@ -166,8 +171,25 @@ pub(crate) fn stamp(
         let mut templates = templates.borrow_mut();
         let templates = &mut *templates;
         let mut parsed = std::mem::take(&mut templates.parsed);
+        // The last block's shape, compared as this one is read.
+        let same = match &templates.last {
+            Some((key, template)) if !templates.disabled => {
+                shape(&captured, ids, &mut templates.names, &mut parsed, Some(key))
+                    .map(|()| template.clone())
+            }
+            _ => None,
+        };
+        if let Some(template) = same {
+            clone(ops, &template, &parsed, &captured, ids, used, unused);
+            templates.parsed = parsed;
+            let mut captured = captured;
+            captured.words.clear();
+            captured.text.clear();
+            templates.spare.push(captured);
+            return;
+        }
         let found = (!templates.disabled)
-            .then(|| shape(&captured, ids, &mut templates.names, &mut parsed))
+            .then(|| shape(&captured, ids, &mut templates.names, &mut parsed, None))
             .flatten();
         match found {
             Some(()) => {
@@ -182,10 +204,11 @@ pub(crate) fn stamp(
                     Some(entry) => {
                         entry.seen += 1;
                         if entry.template.is_none() && entry.seen >= 2 {
-                            entry.template = make(ops, &captured, &parsed, ids.len());
+                            entry.template = make(ops, &captured, &parsed, ids.len()).map(Rc::new);
                         }
                         match &entry.template {
                             Some(template) => {
+                                templates.last = Some((parsed.key.clone(), template.clone()));
                                 clone(ops, template, &parsed, &captured, ids, used, unused)
                             }
                             None => replay(ops, &captured),
@@ -217,11 +240,14 @@ struct Parsed {
     appends: Vec<(u32, u32)>,
 }
 
+/// Read `captured` as a shape into `parsed`: its key, or with `expect`, only
+/// whether its key is that one (none if not), compared part by part.
 fn shape(
     captured: &Captured,
     ids: &[u32],
     names: &mut HashMap<String, u32>,
     parsed: &mut Parsed,
+    expect: Option<&[u32]>,
 ) -> Option<()> {
     if ids.len() < 2 || ids.len() > NODES {
         return None;
@@ -240,6 +266,19 @@ fn shape(
         (start as u32, (start + s.len()) as u32)
     };
     let words = &captured.words;
+    // The key's parts so far: built, or checked against `expect`.
+    let mut at = 0;
+    let mut key = |key: &mut Vec<u32>, part: &[u32]| -> Option<()> {
+        match expect {
+            Some(expect) => {
+                let end = at + part.len();
+                (expect.get(at..end)? == part).then_some(())?;
+                at = end;
+            }
+            None => key.extend_from_slice(part),
+        }
+        Some(())
+    };
     parsed.key.clear();
     parsed.values.clear();
     parsed.handlers.clear();
@@ -250,18 +289,18 @@ fn shape(
         let w = &words[i + 1..];
         match code {
             ops::CREATE | ops::CLASS | ops::CLASS_ADD => {
-                parsed.key.extend([code, local(w[0])?, w[1]]);
+                key(&mut parsed.key, &[code, local(w[0])?, w[1]])?;
                 i += 3;
             }
             ops::APPEND => {
                 let (p, c) = (local(w[0])?, local(w[1])?);
-                parsed.key.extend([code, p, c]);
+                key(&mut parsed.key, &[code, p, c])?;
                 parsed.appends.push((p, c));
                 i += 3;
             }
             ops::TEXT | ops::STYLE => {
                 let node = local(w[0])?;
-                parsed.key.extend([code, node]);
+                key(&mut parsed.key, &[code, node])?;
                 let (start, end) = range(w[1], w[2]);
                 let slot = if code == ops::TEXT {
                     Slot::Text
@@ -284,21 +323,26 @@ fn shape(
                         number
                     }
                 };
-                parsed.key.extend([code, node, number]);
+                key(&mut parsed.key, &[code, node, number])?;
                 parsed
                     .values
                     .push((w[0], Slot::Attr(name_start, name_end), start, end));
                 i += 6;
             }
             ops::HANDLER => {
-                parsed.key.extend([code, local(w[0])?, w[1]]);
+                key(&mut parsed.key, &[code, local(w[0])?, w[1]])?;
                 parsed.handlers.push([w[0], w[1], w[2]]);
                 i += 4;
             }
             _ => return None,
         }
     }
-    Some(())
+    drop(key);
+    // Compared whole: a block that is the last's start and more is not it.
+    match expect {
+        Some(expect) if at != expect.len() => None,
+        _ => Some(()),
+    }
 }
 
 /// Build a template of `parsed`'s shape from `captured`, if its nodes form
