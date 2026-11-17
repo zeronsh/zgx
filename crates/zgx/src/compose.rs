@@ -585,6 +585,8 @@ pub(crate) struct Rare {
     input_mode: Option<crate::text_edit::InputMode>,
     spellcheck: Option<Box<dyn FnMut() -> bool>>,
     line_numbers: Option<bool>,
+    /// `View::drop_caret`: whether dragged text moves a text area's caret.
+    drop_caret: Option<bool>,
     /// What a code editor adds to a text area (`View::highlighter`, …).
     code: Option<Box<CodeOptions>>,
     /// `WINDOW_DRAG` (`View::window_drag`), `HOLLOW` (`View::hollow`),
@@ -1895,6 +1897,15 @@ impl View {
     /// accept this.
     pub fn line_numbers(mut self, numbered: bool) -> Self {
         self.rare_mut().line_numbers = Some(numbered);
+        self
+    }
+    /// Whether text dragged over a text area moves its caret to where it
+    /// would drop (on by default). Off, the drag is still taken and drops
+    /// where it is let go, the caret and selection staying where they were
+    /// meanwhile: the app shows where it would drop. (Pin line.)
+    #[doc(hidden)]
+    pub fn drop_caret(mut self, shows: bool) -> Self {
+        self.rare_mut().drop_caret = Some(shows);
         self
     }
     fn code_mut(&mut self) -> &mut CodeOptions {
@@ -6095,8 +6106,10 @@ fn open_element(
         "select_on_focus is only supported on editor views"
     );
     assert!(
-        rare.as_deref().is_none_or(|r| r.line_numbers.is_none()) || is_editor,
-        "line_numbers is only supported on editor views"
+        rare.as_deref()
+            .is_none_or(|r| r.line_numbers.is_none() && r.drop_caret.is_none())
+            || is_editor,
+        "line_numbers and drop_caret are only supported on editor views"
     );
     assert!(
         rare.as_deref().is_none_or(|r| r.code.is_none()) || is_editor,
@@ -6866,6 +6879,9 @@ fn open_element(
         }
         if let Some(numbered) = rare.as_deref().and_then(|r| r.line_numbers) {
             editor.set_line_numbers(numbered);
+        }
+        if let Some(shows) = rare.as_deref().and_then(|r| r.drop_caret) {
+            editor.set_drop_caret(shows);
         }
         if let Some(code) = rare.as_deref_mut().and_then(|r| r.code.take()) {
             let CodeOptions {

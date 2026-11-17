@@ -3329,6 +3329,13 @@ fn kind_view(
             if rare.as_deref().is_some_and(|rare| rare.contain) {
                 view = view.overscroll_contain();
             }
+            // A test, not a closure: one more closure here would renumber
+            // the arm's, and the inline-scopes check names them by number.
+            if let Some(rare) = rare.as_deref()
+                && rare.no_drop_caret
+            {
+                view = without_drop_caret(view);
+            }
             match rare.as_deref().and_then(|rare| rare.read_only.as_ref()) {
                 None | Some(Source::Lit(Lit::Bool(false))) => {}
                 Some(Source::Lit(Lit::Bool(true))) => view = view.read_only(true),
@@ -10025,6 +10032,14 @@ fn leaf_id(
 fn substitutions(view: View, rare: &crate::node::InputRare) -> View {
     view.autocorrect(rare.autocorrect)
         .smart_punctuation(rare.smart_punctuation)
+}
+
+/// `drop_caret = false` (internal): few textareas ask. Out of line: the
+/// element's builder inlines its common fields.
+#[cold]
+#[inline(never)]
+fn without_drop_caret(view: View) -> View {
+    view.drop_caret(false)
 }
 
 fn active_descendant(view: View, active: &Source, vm: &Rc<Vm>) -> View {

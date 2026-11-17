@@ -400,6 +400,9 @@ struct EditorHint {
     lines: bool,
     /// A wheel over it stays with it at its edges (`View::overscroll_contain`).
     contain: Cell<bool>,
+    /// Text dragged over it leaves its caret and selection where they are
+    /// (`View::drop_caret(false)`): the app shows where it would drop.
+    no_drop_caret: Cell<bool>,
     /// A password field: its text shows masked and never leaves it.
     secure: Cell<bool>,
     /// What kind of text it takes (`View::input_mode`).
@@ -626,6 +629,7 @@ impl EditorHint {
             select_on_focus: Cell::default(),
             lines,
             contain: Cell::default(),
+            no_drop_caret: Cell::default(),
             secure: Cell::default(),
             input_mode: Cell::default(),
             misspelled: RefCell::default(),
@@ -1107,6 +1111,19 @@ impl EditorHandle {
     /// take what it can't scroll (`View::overscroll_contain`).
     pub fn set_overscroll_contain(&self, contain: bool) {
         self.hint.contain.set(contain);
+    }
+    /// Whether text dragged over it moves its caret to where it would drop
+    /// (on until set). Off, the drag is still taken and drops where it is
+    /// let go, its caret and selection staying where they were meanwhile:
+    /// the app shows where it would drop. (Pin line.)
+    #[doc(hidden)]
+    pub fn set_drop_caret(&self, shows: bool) {
+        self.hint.no_drop_caret.set(!shows);
+    }
+    /// `set_drop_caret`'s. (Pin line.)
+    #[doc(hidden)]
+    pub fn shows_drop_caret(&self) -> bool {
+        !self.hint.no_drop_caret.get()
     }
     /// Change editing policy without moving focus or changing committed text/history.
     /// Entering read-only mode cancels an existing composition.
@@ -7760,9 +7777,13 @@ impl Ui {
                                 text.text().to_owned(),
                             )]);
                         }
-                        // Over it: the caret where it would drop.
+                        // Over it: the caret where it would drop, unless the
+                        // app shows that itself (`drop_caret(false)`).
                         (crate::input::DragPhase::Over, Some(_)) if !read_only.get() => {
                             cx.accept_drag();
+                            if tab_indent.no_drop_caret.get() {
+                                return;
+                            }
                             let at = tab_indent.point.get().map_or(0, |point| point(drag.x, drag.y));
                             let mut edit = editor.borrow_mut();
                             if gesture.drop_restore.get().is_none() {

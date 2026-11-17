@@ -238,3 +238,22 @@ fn autocorrect_and_smart_punctuation_substitute_what_is_typed() {
     assert_eq!(h.text("b"), "teh “x”", "quotes alone");
     assert_eq!(h.text("c"), "teh \"x\"", "neither");
 }
+
+/// `drop_caret = false` (internal): text dragged over a textarea leaves its
+/// caret where it is; unset, it moves there as before.
+#[test]
+fn a_textarea_can_leave_its_caret_where_it_is_as_text_is_dragged_over_it() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.textarea { id = "kept", value = ui.state("a", ""), w = 200, h = 60, drop_caret = false },
+            ui.textarea { id = "moved", value = ui.state("b", ""), w = 200, h = 60 },
+        }"##,
+    );
+    h.frames(1);
+    let shows = |h: &mut Harness, id: &str| {
+        let node = h.find(id).unwrap();
+        h.ui.editor(node).unwrap().shows_drop_caret()
+    };
+    assert!(!shows(&mut h, "kept"));
+    assert!(shows(&mut h, "moved"));
+}
