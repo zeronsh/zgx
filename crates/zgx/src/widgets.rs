@@ -1234,15 +1234,19 @@ impl EditorHandle {
         *self.hint.misspelled.borrow_mut() = ranges;
         self.refresh();
     }
-    /// The misspelled word the selection is in (or the caret touches).
+    /// The misspelled word the selection is in (or the caret touches), not
+    /// one in an atom (which is not marked).
     pub(crate) fn misspelling_at_selection(&self) -> Option<std::ops::Range<usize>> {
         let (anchor, focus) = self.selection();
         let (start, end) = (anchor.min(focus), anchor.max(focus));
+        let editor = self.editor.borrow();
         self.hint
             .misspelled
             .borrow()
             .iter()
-            .find(|range| range.start <= start && end <= range.end)
+            .find(|range| {
+                range.start <= start && end <= range.end && !in_an_atom(editor.atoms(), range)
+            })
             .cloned()
     }
     pub(crate) fn misspellings(&self) -> Vec<std::ops::Range<usize>> {
@@ -7444,7 +7448,8 @@ impl Ui {
             }
             drop(underline);
             // Misspelled words: a dotted line under each, but not under the
-            // word the caret of a focused editor is in (it is being typed).
+            // word the caret of a focused editor is in (it is being typed),
+            // nor in an atom (a chip's label, which the web's leaves out).
             let caret_at =
                 (*focus.borrow() && selection.anchor == selection.focus).then_some(selection.focus);
             let marks: Vec<_> = draw_hint
@@ -7453,6 +7458,7 @@ impl Ui {
                 .iter()
                 .filter(|range| range.end <= e.len())
                 .filter(|range| caret_at.is_none_or(|at| at < range.start || at > range.end))
+                .filter(|range| !in_an_atom(e.atoms(), range))
                 .flat_map(|range| {
                     layout.selection_within(range.clone(), scroll.1, scroll.1 + inner_height)
                 })
@@ -9081,6 +9087,13 @@ impl Ui {
             }
         });
     }
+}
+/// Whether `range` overlaps one of `atoms`: a misspelling there is not
+/// marked, as a chip's label (`contentEditable=false`) is not on the web.
+fn in_an_atom(atoms: &[crate::text_edit::Atom], range: &std::ops::Range<usize>) -> bool {
+    atoms
+        .iter()
+        .any(|atom| atom.range.start < range.end && range.start < atom.range.end)
 }
 /// A misspelled word's mark: a dotted line, as macOS draws one.
 fn spelling_mark(color: Color) -> NodeKind {
