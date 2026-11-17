@@ -9138,6 +9138,10 @@ export type InputProps = {
 	active_descendant: (string | Readable<string?> | (() -> string?))?,
 	-- Several lines only: numbered in a gutter at the left (a code editor).
 	line_numbers: boolean?,
+	-- Internal, subject to change: false, text dragged over it leaves its
+	-- caret and selection where they are (the app shows where it would
+	-- drop); it still takes the drop where it is let go.
+	drop_caret: boolean?,
 	-- Several lines only: a line's styles, asked for the lines in view and
 	-- again only for one that changes. Given the line and what the line
 	-- before left (0 before the first), it returns spans `{ from, to,

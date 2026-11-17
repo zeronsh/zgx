@@ -281,3 +281,56 @@ fn a_read_only_editor_takes_no_drop_and_a_password_drags_nothing() {
     );
     assert!(!ui.input.is_dragging(), "a password never leaves its field");
 }
+
+/// A text area with `drop_caret(false)` takes dragged text as any does, and
+/// drops it where it is let go, but its caret and selection stay where they
+/// were while the drag is over it: the app shows where it would drop. One
+/// without moves its caret there, as before.
+#[test]
+fn a_text_area_without_a_drop_caret_keeps_its_selection_while_text_is_over_it() {
+    for shows in [false, true] {
+        let mut ui = Ui::new(400., 300.);
+        let ended = std::rc::Rc::new(std::cell::Cell::new(None));
+        let told = ended.clone();
+        let source = div()
+            .size(100., 30.)
+            .on_drag(|| DraggedText::new("XY"))
+            .on_drag_end(move |_: &DraggedText, accepted| told.set(Some(accepted)));
+        let b = field(&ui, "b", "one two three").drop_caret(shows);
+        let view = ui.mount(column().child(source).child(b));
+        ui.prepare_frame();
+        let b = editor(&ui, &view, "b");
+        select(&b, 0..3);
+        let button = PointerButton::Primary;
+        let at = (x_of(8), 50.);
+        for event in [
+            InputEvent::PointerDown {
+                x: 10.,
+                y: 10.,
+                button,
+            },
+            InputEvent::PointerMove { x: 30., y: 10. },
+            InputEvent::PointerMove { x: at.0, y: at.1 },
+        ] {
+            pointer(&mut ui, event, Modifiers::default());
+        }
+        let selection = b.selection();
+        if shows {
+            assert_eq!(selection, (8, 8), "the caret where it drops");
+        } else {
+            assert_eq!(selection, (0, 3), "kept while it is over it");
+        }
+        assert_eq!(b.offset_at(at.0, at.1), Some(8));
+        pointer(
+            &mut ui,
+            InputEvent::PointerUp {
+                x: at.0,
+                y: at.1,
+                button,
+            },
+            Modifiers::default(),
+        );
+        assert_eq!(b.value().get(), "one two XYthree", "dropped where let go");
+        assert_eq!(ended.get(), Some(true), "taken");
+    }
+}
