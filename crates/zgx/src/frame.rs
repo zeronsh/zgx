@@ -156,6 +156,31 @@ impl FrameClock {
         }
         resolved
     }
+    /// The first refresh after `index` (one just delivered) that some waiting
+    /// request takes, at `refresh` hertz; `None` with none waiting. A host
+    /// whose source ticks only on demand (Wayland's frame callbacks) waits
+    /// for it rather than asking for every refresh in between: a refresh a
+    /// rate-limited request skips draws nothing, and on Wayland a frame that
+    /// presents nothing asks the compositor for no callback, so the next
+    /// request is granted at once, again and again.
+    pub fn next_due(&self, index: u64, refresh: f64) -> Option<u64> {
+        let waiters = self.0.waiters.borrow();
+        let cadence = self.0.cadence.borrow();
+        let after = index.saturating_add(1);
+        waiters
+            .values()
+            .filter(|waiter| waiter.frame.is_none())
+            .map(|waiter| {
+                let divisor = self.divisor(waiter.max_rate, refresh);
+                match cadence.get(&divisor) {
+                    // As `deliver` decides: a restarted source (a lower
+                    // index) or a divisor not yet ticked takes the next.
+                    Some(&last) if last <= index => last.saturating_add(divisor).max(after),
+                    _ => after,
+                }
+            })
+            .min()
+    }
     /// Refreshes between frames for a request, combining its rate with the cap.
     fn divisor(&self, max_rate: Option<f64>, refresh: f64) -> u64 {
         [max_rate, self.0.max_rate.get()]
@@ -398,6 +423,35 @@ mod tests {
         clock.set_max_rate(Some(f64::NAN));
         assert_eq!(clock.max_rate(), None);
         assert_eq!(run(&clock, || clock.next(), 20..23, 120.), vec![20, 21, 22]);
+    }
+
+    #[test]
+    fn next_due_is_the_refresh_a_waiting_request_takes() {
+        let clock = FrameClock::new();
+        let start = Instant::now();
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(clock.next_due(0, 120.), None, "nothing waiting");
+        let mut spinner = Box::pin(clock.next().max_rate(30.));
+        assert!(spinner.as_mut().poll(&mut cx).is_pending());
+        // Never ticked at this rate: the next refresh.
+        assert_eq!(clock.next_due(10, 120.), Some(11));
+        assert_eq!(clock.deliver(frame(start, 10, 120.)), 1);
+        assert!(spinner.as_mut().poll(&mut cx).is_ready());
+        // Re-armed after its step: every fourth refresh at 120 Hz.
+        let mut spinner = Box::pin(clock.next().max_rate(30.));
+        assert!(spinner.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(clock.next_due(10, 120.), Some(14));
+        // A refresh it skips: still due at 14.
+        assert_eq!(clock.deliver(frame(start, 11, 120.)), 0);
+        assert_eq!(clock.next_due(11, 120.), Some(14));
+        // Late (refreshes missed): the next one.
+        assert_eq!(clock.next_due(20, 120.), Some(21));
+        // A restarted source (lower indices): the next one.
+        assert_eq!(clock.next_due(2, 120.), Some(3));
+        // A full-rate request waiting too: the soonest wins.
+        let mut full = Box::pin(clock.next());
+        assert!(full.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(clock.next_due(11, 120.), Some(12));
     }
 
     #[test]
