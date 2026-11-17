@@ -15135,6 +15135,12 @@ impl Scene {
     pub(crate) fn geometry_revision(&self) -> u64 {
         self.geometry_revision.wrapping_add(self.unmoved)
     }
+    /// Whether anything was damaged since the last flush took the damage:
+    /// what the window shows may change at the next frame. Nothing pending,
+    /// what was worked out from the scene at the last frame still holds.
+    pub(crate) fn damage_pending(&self) -> bool {
+        self.damage_grid.is_some() || !self.damage.is_empty()
+    }
     pub(crate) fn layout_revision(&self) -> u64 {
         self.layout_revision
     }

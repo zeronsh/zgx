@@ -99,6 +99,12 @@ pub(crate) struct Blink {
     drawn: Cell<Option<NativeCaret>>,
     /// Counts changes of `drawn`, for the host to apply them once.
     serial: Cell<u64>,
+    /// Whether anything is painted over the caret, as last worked out
+    /// (`Scene::painted_over`, a walk of what paints after it): for that
+    /// caret and box, at that layout (`Scene::layout_revision`), with no
+    /// damage since. A blink changes nothing in the scene, so it doesn't
+    /// walk it again.
+    over: Cell<Option<(NodeId, Rect, u64, bool)>>,
 }
 
 impl Blink {
@@ -240,7 +246,23 @@ pub(crate) fn settle(ui: &Ui) {
             return None;
         }
         let rect = scene.plain_box(caret)?;
-        if rect.width <= 0. || rect.height <= 0. || scene.painted_over(caret, rect) {
+        if rect.width <= 0. || rect.height <= 0. {
+            return None;
+        }
+        let revision = scene.layout_revision();
+        let over = match blink.over.get() {
+            Some((at, was, laid, over))
+                if at == caret && was == rect && laid == revision && !scene.damage_pending() =>
+            {
+                over
+            }
+            _ => {
+                let over = scene.painted_over(caret, rect);
+                blink.over.set(Some((caret, rect, revision, over)));
+                over
+            }
+        };
+        if over {
             return None;
         }
         // Shown from its blink's start; flipped since only by `advance`.
