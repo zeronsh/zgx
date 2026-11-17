@@ -737,3 +737,217 @@ return ui.column {
     assert_eq!(answers.borrow()[3], None);
     assert_eq!(h.host.error().get(), None);
 }
+
+/// A host whose page downloads may go, with no dialog, into `downloads`
+/// (`ScriptHost::download_dir`, unless `None`), and a plugin `peek.luau`
+/// with `grants`.
+fn downloads_app(
+    dir: &std::path::Path,
+    downloads: Option<PathBuf>,
+    code: &'static str,
+    plugin: Option<(&'static str, Vec<zgx_script::Capability>)>,
+) -> Harness {
+    let fake = Rc::new(Fake {
+        clipboard: RefCell::new(String::new()),
+        html: RefCell::new(None),
+        image: RefCell::new(None),
+        opens: dir.join("in.txt"),
+        saves: dir.join("out.txt"),
+    });
+    Harness::wrapped(
+        move |runtime| {
+            let mut host = ScriptHost::inline(runtime, "app", code);
+            if let Some(downloads) = downloads {
+                host = host.download_dir(downloads);
+            }
+            if let Some((code, grants)) = plugin {
+                host = host.plugin("peek.luau", code);
+                for grant in grants {
+                    host = host.grant("peek.luau", grant);
+                }
+            }
+            host
+        },
+        move |view| zgx::compose::provide(PlatformService(fake), view),
+    )
+}
+
+/// Starts a download of `name` in the web view `id`, keeping where it was
+/// told to save (`None`, cancelled) and what hears it.
+fn download_into(
+    h: &Harness,
+    id: &str,
+    name: &str,
+    answers: &Rc<RefCell<Vec<Option<PathBuf>>>>,
+    statuses: &Rc<RefCell<Vec<zgx::web_view::DownloadStatusFn>>>,
+) {
+    use zgx::{
+        native_view::NativeContent,
+        web_view::{DownloadRequest, DownloadResponder},
+    };
+    let node = h.find(id).unwrap();
+    let Some(NativeContent::Web(web)) = h.natives.content(node) else {
+        panic!("no page {id}")
+    };
+    let (answers, statuses) = (answers.clone(), statuses.clone());
+    web.download(
+        DownloadRequest::new(format!("https://page.test/{name}"), name, "application/pdf"),
+        DownloadResponder::new(move |answer| {
+            answers.borrow_mut().push(answer.map(|(path, status)| {
+                statuses.borrow_mut().push(status);
+                path
+            }))
+        }),
+    );
+}
+
+fn settle_until(h: &mut Harness, until: &dyn Fn(&str) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !until(&h.text("label")) {
+        assert!(
+            Instant::now() < deadline,
+            "label reads {:?} ({:?})",
+            h.text("label"),
+            h.host.error().get()
+        );
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+const SAVE_TEMP: &str = r#"
+local shown = ui.state("shown", "")
+local function note(s) shown:set(shown:get() .. s .. ";") end
+return ui.column {
+    ui.text { id = "label", function() return shown:get() end },
+    ui.webview { id = "page", w = 100, h = 60, on_download = function(d)
+        ui.task(function()
+            local ok, file = pcall(function()
+                return d:save_temp({
+                    on_progress = function(got) note(`{d.name} got {got}`) end,
+                    on_finish = function(ok, err) note(`{d.name} finished {ok} {err}`) end,
+                }):await()
+            end)
+            if not ok then
+                note(`refused {file}`)
+                d:cancel()
+            elseif file then
+                note(`saved {file.name} {file.size} {ui.read_file(file):await()}`)
+            else
+                note(`stopped {d.name}`)
+            end
+        end)
+    end },
+}
+"#;
+
+/// `d:save_temp()`: no dialog; the download goes into the host's folder for
+/// them under its name, made unique while another of that name is going or
+/// a file has it, and the promise gives the file, the script's to read, once
+/// it's whole (nil if it stopped). Its callbacks hear it as `save_to`'s do.
+#[test]
+fn a_download_saves_into_the_hosts_folder_with_no_dialog() {
+    use zgx::web_view::DownloadStatus;
+    let dir = dir("save-temp");
+    let downloads = dir.join("downloads");
+    let _ = std::fs::remove_dir_all(&downloads);
+    let mut h = downloads_app(&dir, Some(downloads.clone()), SAVE_TEMP, None);
+    h.ui.prepare_frame();
+    let answers: Rc<RefCell<Vec<Option<PathBuf>>>> = Rc::default();
+    let statuses: Rc<RefCell<Vec<zgx::web_view::DownloadStatusFn>>> = Rc::default();
+    // Two of one name at once, and a third of it after a file has it.
+    download_into(&h, "page", "paper.pdf", &answers, &statuses);
+    download_into(&h, "page", "paper.pdf", &answers, &statuses);
+    settle_until(&mut h, &|_| answers.borrow().len() == 2);
+    assert_eq!(
+        *answers.borrow(),
+        [
+            Some(downloads.join("paper.pdf")),
+            Some(downloads.join("paper (1).pdf"))
+        ]
+    );
+    // The backend writes the bytes, then says it's done.
+    std::fs::write(downloads.join("paper.pdf"), "%PDF-1").unwrap();
+    (statuses.borrow_mut()[0])(DownloadStatus::Progress {
+        received: 6,
+        total: Some(6),
+    });
+    (statuses.borrow_mut()[0])(DownloadStatus::Finished);
+    settle_until(&mut h, &|label| label.contains("saved paper.pdf"));
+    let label = h.text("label");
+    assert!(
+        label.contains("paper.pdf got 6;paper.pdf finished true nil;saved paper.pdf 6 %PDF-1;"),
+        "{label}"
+    );
+    // Stopped: nil, and on_finish hears why.
+    (statuses.borrow_mut()[1])(DownloadStatus::Failed("cancelled".into()));
+    settle_until(&mut h, &|label| label.contains("stopped paper.pdf"));
+    assert!(h.text("label").contains("finished false cancelled"));
+    // A file has the name now; the stopped one's is free again.
+    download_into(&h, "page", "paper.pdf", &answers, &statuses);
+    settle_until(&mut h, &|_| answers.borrow().len() == 3);
+    assert_eq!(answers.borrow()[2], Some(downloads.join("paper (1).pdf")));
+    // A name with folders in it stays in the folder.
+    download_into(&h, "page", "../../up.pdf", &answers, &statuses);
+    settle_until(&mut h, &|_| answers.borrow().len() == 4);
+    assert_eq!(answers.borrow()[3], Some(downloads.join(".._.._up.pdf")));
+    assert!(!dir.join("out.txt").exists(), "a dialog was asked");
+    assert_eq!(h.host.error().get(), None);
+}
+
+/// It's off unless the host names a folder, and a plugin needs the Files
+/// grant: either way the script hears an error and nothing is saved.
+#[test]
+fn a_download_saves_with_no_dialog_only_where_the_host_allows() {
+    use zgx_script::Capability;
+    let dir = dir("save-temp-refused");
+    let answers: Rc<RefCell<Vec<Option<PathBuf>>>> = Rc::default();
+    let statuses: Rc<RefCell<Vec<zgx::web_view::DownloadStatusFn>>> = Rc::default();
+    // No folder named.
+    let mut h = downloads_app(&dir, None, SAVE_TEMP, None);
+    h.ui.prepare_frame();
+    download_into(&h, "page", "paper.pdf", &answers, &statuses);
+    settle_until(&mut h, &|label| label.contains("refused"));
+    assert!(
+        h.text("label").contains("ScriptHost::download_dir"),
+        "{}",
+        h.text("label")
+    );
+    settle_until(&mut h, &|_| answers.borrow().len() == 1);
+    assert_eq!(answers.borrow()[0], None);
+    // A plugin with its pages but not the Files grant.
+    const PLUGIN: &str = r#"
+local said = ui.state("said", "")
+ui.contribute("bar", ui.column {
+    ui.text { id = "said", function() return said:get() end },
+    ui.webview { id = "theirs", w = 100, h = 60, on_download = function(d)
+        local ok, err = pcall(function() d:save_temp() end)
+        said:set(`{ok} {err}`)
+        d:cancel()
+    end },
+})
+"#;
+    const APP: &str = r#"
+return ui.column { ui.text { id = "label", "" }, ui.slot("bar") }
+"#;
+    let mut h = downloads_app(
+        &dir,
+        Some(dir.join("downloads")),
+        APP,
+        Some((PLUGIN, vec![Capability::Web])),
+    );
+    h.ui.prepare_frame();
+    download_into(&h, "theirs", "paper.pdf", &answers, &statuses);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !h.text("said").contains("Capability::Files") {
+        assert!(Instant::now() < deadline, "said {:?}", h.text("said"));
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(h.text("said").starts_with("false"), "{}", h.text("said"));
+    settle_until(&mut h, &|_| answers.borrow().len() == 2);
+    assert_eq!(answers.borrow()[1], None);
+    assert!(!dir.join("downloads").exists());
+}
