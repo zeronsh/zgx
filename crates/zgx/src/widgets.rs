@@ -289,6 +289,175 @@ pub struct EditorHandle {
     scroll: Rc<RefCell<(f32, f32)>>,
     scroll_limit: Rc<Cell<(f32, f32)>>,
 }
+/// A line mark to draw: its box, the mark, and what of it its scroll group's frame cuts (left, right).
+type WantedMark = (Rect, LineMark, Option<(f32, f32)>);
+/// A text area's line marks `wanted` drawn in `layer`'s nodes (`nodes`, made and let go as their count changes): a
+/// layer of the viewport's, just under `text` (its text node), or `over` it (`LineMark::over_text`: then `text` is
+/// the layer its long text's lines show in, if it has one).
+#[allow(clippy::too_many_arguments)]
+fn paint_marks(
+    s: &mut Scene,
+    viewport: NodeId,
+    text: NodeId,
+    layer: &Cell<Option<NodeId>>,
+    nodes: &RefCell<Vec<NodeId>>,
+    wanted: Vec<WantedMark>,
+    font: &crate::text_layout::FontStyle,
+    over: bool,
+) {
+    if !wanted.is_empty() && layer.get().is_none_or(|layer| !s.contains(layer)) {
+        let made = s.append(
+            viewport,
+            NodeKind::Container(Layout::Overlay),
+            Style::default(),
+        );
+        let mut order = s.children(viewport).to_vec();
+        order.retain(|id| *id != made);
+        // Under the text, or over it (`LineMark::over_text`).
+        let at = order.iter().position(|id| *id == text).unwrap_or(0);
+        order.insert(at + usize::from(over), made);
+        s.reorder_children(viewport, &order);
+        layer.set(Some(made));
+        nodes.borrow_mut().clear();
+    }
+    let mut mark_nodes = nodes.borrow_mut();
+    let count: usize = wanted
+        .iter()
+        .map(|(_, m, _)| 1 + usize::from(m.label.is_some()))
+        .sum();
+    while mark_nodes.len() > count {
+        s.remove(mark_nodes.pop().unwrap());
+    }
+    if let Some(layer) = layer.get() {
+        while mark_nodes.len() < count {
+            mark_nodes.push(s.append(layer, NodeKind::Rect(Color(0, 0, 0, 0)), Style::default()));
+        }
+        let mut ids = mark_nodes.iter().copied();
+        for (rect, mark, clip) in wanted {
+            let Some(id) = ids.next() else { return };
+            let clip = clip.map(|(l, r)| crate::scene::ClipInset::px(0., r, 0., l));
+            s.set_clip_inset(id, clip);
+            let quad = crate::scene::QuadStyle {
+                fill: mark.fill,
+                radius: mark.radius,
+                border_color: mark.border_color,
+                border_width: mark.border_width,
+                shadow: None,
+                decoration: mark.decoration.clone(),
+                border_over: false,
+                outline: None,
+            };
+            // A picture's box lays it out (a panel: its quad and a child), clipped to its corners; a box
+            // without one is a quad, its picture gone first.
+            if mark.image.is_none()
+                && let Some(picture) = s.children(id).first().copied()
+            {
+                s.remove(picture);
+            }
+            if let Some(svg) = &mark.svg {
+                if !matches!(s.kind(id), NodeKind::Svg(shown) if **shown == **svg) {
+                    s.set_kind(id, NodeKind::Svg(svg.clone()));
+                }
+            } else if mark.image.is_some() {
+                if !matches!(s.kind(id), NodeKind::Panel { quad: q, .. } if *q == quad) {
+                    s.set_kind(
+                        id,
+                        NodeKind::Panel {
+                            layout: Layout::Overlay,
+                            quad,
+                        },
+                    );
+                }
+            } else if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
+                s.set_kind(id, NodeKind::Quad(quad));
+            }
+            // A picture: in the box, clipped to its rounded corners.
+            let picture = s.children(id).first().copied();
+            match &mark.image {
+                Some(image) => {
+                    s.set_style(
+                        id,
+                        Style {
+                            clip: true,
+                            ..fixed(rect.width, rect.height)
+                        },
+                    );
+                    let picture = picture.unwrap_or_else(|| {
+                        s.append(id, NodeKind::Rect(Color(0, 0, 0, 0)), Style::default())
+                    });
+                    let (w, h) = crate::compose::fitted_image_size(
+                        rect.width,
+                        rect.height,
+                        image.image.width() as f32,
+                        image.image.height() as f32,
+                        image.fit,
+                    );
+                    if !matches!(s.kind(picture), NodeKind::Image(shown) if *shown == image.image) {
+                        s.set_kind(picture, NodeKind::Image(image.image.clone()));
+                    }
+                    s.set_style(
+                        picture,
+                        Style {
+                            absolute: true,
+                            ..fixed(w, h)
+                        },
+                    );
+                    s.set_transform(
+                        picture,
+                        Transform {
+                            x: (rect.width - w) / 2.,
+                            y: (rect.height - h) / 2.,
+                        },
+                    );
+                }
+                None => s.set_style(id, fixed(rect.width, rect.height)),
+            }
+            s.set_transform(
+                id,
+                Transform {
+                    x: rect.x,
+                    y: rect.y,
+                },
+            );
+            if let Some((label, label_color, label_size)) = mark.label {
+                let Some(id) = ids.next() else { return };
+                let unchanged = matches!(
+                    s.kind(id),
+                    NodeKind::Text { text, color: c, font_size }
+                        if **text == *label && *c == label_color && *font_size == label_size
+                );
+                if !unchanged {
+                    s.set_kind(
+                        id,
+                        NodeKind::Text {
+                            text: label,
+                            color: label_color,
+                            font_size: label_size,
+                        },
+                    );
+                }
+                let mut label_font = font.clone();
+                if mark.mono {
+                    label_font.family = crate::text_layout::FontFamily::Monospace;
+                }
+                if mark.height.is_finite() && mark.height > 0. {
+                    label_font.line_height = crate::text_layout::LineHeight::px(mark.height);
+                }
+                s.set_font(id, label_font);
+                s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
+                s.set_clip_inset(id, clip);
+                s.set_transform(
+                    id,
+                    Transform {
+                        x: rect.x,
+                        y: rect.y,
+                    },
+                );
+            }
+        }
+    }
+    drop(mark_nodes);
+}
 /// A text area's scrollbar (`View::scrollbar`): what `compose_scrollbar` reads and writes, set as the editor draws.
 struct EditorScrollbar {
     /// How far down the text is scrolled: the bar's drag writes it.
@@ -300,6 +469,20 @@ struct EditorScrollbar {
     /// The bar's corner, moved from the editor's content corner to its box's.
     holder: NodeId,
     origin: Cell<(f32, f32)>,
+}
+/// A text area's scroll groups' scrollbar (`View::group_scrollbar`): the one scroll views show, across the bottom
+/// edge of the group that moved last (a code block's), following and moving its offset.
+struct GroupScrollbar {
+    /// How far the group is scrolled across: the bar's drag writes it.
+    offset: Signal<f32>,
+    /// The group's frame: as wide as it shows, as tall as its lines; the bar at its bottom.
+    size: Signal<(f32, f32)>,
+    /// How wide its lines reach.
+    extent: Signal<f32>,
+    holder: NodeId,
+    /// The group it shows, and where its frame was placed.
+    group: Cell<Option<u32>>,
+    placed: Cell<(f32, f32)>,
 }
 /// What an editor's last draw scrolled: how far down, in a viewport how high, a text how high; its box's size and
 /// its content's corner in it.
@@ -326,6 +509,8 @@ struct EditorHint {
     /// it touched alone (a single line is shaped whole either way).
     lines: bool,
     scrollbar: RefCell<Option<EditorScrollbar>>,
+    /// Its scroll groups' scrollbar (`View::group_scrollbar`): one, at the bottom edge of the group that moved last.
+    group_bar: RefCell<Option<Box<GroupScrollbar>>>,
     scroll_drawn: Cell<ScrollDrawn>,
     /// A wheel over it stays with it at its edges (`View::overscroll_contain`).
     contain: Cell<bool>,
@@ -561,6 +746,9 @@ struct CodeHint {
     line_marks: RefCell<Option<LineMarks>>,
     mark_layer: Cell<Option<NodeId>>,
     mark_nodes: RefCell<Vec<NodeId>>,
+    /// Its marks over the text (`LineMark::over_text`): a layer above it, made as the first is.
+    mark_layer_over: Cell<Option<NodeId>>,
+    mark_nodes_over: RefCell<Vec<NodeId>>,
     /// Some line or mark node was clipped to its scroll group's frame (`LineInset::scroll_group`): with no groups
     /// left, their clips go once.
     group_clipped: Cell<bool>,
@@ -626,6 +814,7 @@ impl EditorHint {
             select_on_focus: Cell::default(),
             lines,
             scrollbar: RefCell::default(),
+            group_bar: RefCell::default(),
             scroll_drawn: Cell::default(),
             contain: Cell::default(),
             no_drop_caret: Cell::default(),
@@ -644,6 +833,61 @@ impl EditorHint {
             code: std::cell::OnceCell::default(),
             themed: Cell::default(),
             theme_watch: Cell::default(),
+        }
+    }
+    /// Tell its group scrollbar where the group that moved last shows (after the draw, as `publish_scroll`): its
+    /// frame in the viewport, how far its lines reach, and its offset; nothing to show while no group moved, or the
+    /// group is out of view.
+    fn publish_group_bar(&self, scene: &RefCell<Scene>) {
+        let (offset, size, extent, shown) = {
+            let bar = self.group_bar.borrow();
+            let Some(bar) = bar.as_deref() else {
+                return;
+            };
+            let cache = self.line_cache();
+            let drawn = self.scroll_drawn.get();
+            let shown = cache.last_scrolled_group().and_then(|id| {
+                let lines = cache.last_layout()?;
+                let group = lines.group(id)?;
+                let top = lines.top(group.first) - drawn.offset;
+                let bottom = lines.top(group.last) + lines.height(group.last) - drawn.offset;
+                (bottom > 0. && top < drawn.view).then(|| {
+                    let at = (group.left, top);
+                    (
+                        id,
+                        at,
+                        (group.view, bottom - top),
+                        group.content,
+                        cache.group_scroll(id),
+                    )
+                })
+            });
+            bar.group.set(shown.map(|(id, ..)| id));
+            if let Some((_, at, ..)) = shown
+                && bar.placed.replace(at) != at
+            {
+                let mut scene = scene.borrow_mut();
+                if scene.contains(bar.holder) {
+                    scene.set_transform(bar.holder, Transform { x: at.0, y: at.1 });
+                }
+            }
+            (
+                bar.offset.clone(),
+                bar.size.clone(),
+                bar.extent.clone(),
+                shown,
+            )
+        };
+        match shown {
+            Some((_, _, frame, content, at)) => {
+                size.set(frame);
+                extent.set(content.max(frame.0));
+                offset.set(at);
+            }
+            // Nothing to scroll: no bar.
+            None => {
+                extent.set(0.);
+            }
         }
     }
     /// Tell its scrollbar what the last draw scrolled (after the draw: nothing is borrowed, and what follows the
@@ -1443,6 +1687,49 @@ impl EditorHandle {
         }
         self.scroll.borrow_mut().1 = y;
         self.hint.hold.set(true);
+        self.refresh();
+    }
+    /// Show its scroll groups' scrollbar (`View::group_scrollbar`): the one scroll views show, across the bottom edge
+    /// of the group that moved last (a code block's), over its lines; its drag scrolls the group.
+    pub(crate) fn mount_group_scrollbar(&self, ui: &mut Ui) {
+        if !self.multiline || self.hint.group_bar.borrow().is_some() {
+            return;
+        }
+        let mut style = fixed(0., 0.);
+        style.absolute = true;
+        let holder = ui.container(self.node, Layout::Overlay, style);
+        let (offset, size, extent) = (
+            ui.signal(0_f32),
+            ui.signal((0_f32, 0_f32)),
+            ui.signal(0_f32),
+        );
+        *self.hint.group_bar.borrow_mut() = Some(Box::new(GroupScrollbar {
+            offset: offset.clone(),
+            size: size.clone(),
+            extent: extent.clone(),
+            holder,
+            group: Cell::new(None),
+            placed: Cell::new((0., 0.)),
+        }));
+        crate::compose_scrollbar::mount(ui, holder, offset.clone(), size, extent, true);
+        // The bar's drag, its track's press and its keys write the offset: the group follows.
+        let (editor, runtime) = (self.clone(), ui.runtime.clone());
+        ui.bind(self.node, move || {
+            let wanted = offset.get();
+            runtime.untracked(|| {
+                let group = editor
+                    .hint
+                    .group_bar
+                    .borrow()
+                    .as_ref()
+                    .and_then(|bar| bar.group.get());
+                if let Some(group) = group
+                    && editor.group_scroll(group) != wanted
+                {
+                    editor.set_group_scroll(group, wanted);
+                }
+            });
+        });
         self.refresh();
     }
     /// Show a scrollbar at its right edge (`View::scrollbar` on a text area): the one scroll views show, over its
@@ -6849,16 +7136,20 @@ impl Ui {
                                 .unwrap_or(shaped.0 + 2.);
                         let mut style = fixed(width, lines.height(*i));
                         // A cell wraps in its own width, in an editor that does not wrap too.
-                        style.text_wrap = draw_wrap.get() || inset.width.is_some();
+                        style.text_wrap =
+                            !inset.nowrap && (draw_wrap.get() || inset.width.is_some());
                         s.set_style(*id, style);
                         // The size its line was shaped to here: showing it,
                         // or moving it, shapes it no more. A node just made is
                         // asked for its ink in the empty box it had (where it
                         // painted nothing; a line's box is never empty).
-                        // A cell's node is as wide as the cell: its size is known at that width.
+                        // A cell's node is as wide as the cell: its size is known at that width. A line that
+                        // never wraps (a code block's) is known unwrapped.
                         s.know_text_size(
                             *id,
-                            if inset.width.is_some() {
+                            if inset.nowrap {
+                                None
+                            } else if inset.width.is_some() {
                                 Some(width)
                             } else {
                                 wrap_width
@@ -6897,9 +7188,7 @@ impl Ui {
                 drop(pool);
                 // Each shown line's marks, under the text.
                 let marks_of = code.line_marks.borrow().clone();
-                // Each mark's box, and what of it its scroll group's frame cuts (left, right).
-                type Wanted = (Rect, LineMark, Option<(f32, f32)>);
-                let mut wanted: Vec<Wanted> = Vec::new();
+                let mut wanted: Vec<WantedMark> = Vec::new();
                 if let Some(lines) = &long_lines {
                     for i in shown_lines.clone() {
                         let inset = lines.inset(i);
@@ -6970,182 +7259,46 @@ impl Ui {
                                 None if mark.from_right => right - mark.x - width - scrolled,
                                 None => mark.x - scroll.0,
                             };
-                            // In a scroll group: moved with its line, cut to the group's frame.
+                            // In a scroll group: moved with its line, cut to the group's frame; a pinned one (a
+                            // code block's gutter and surface) stays where it is.
                             let (x, clip) = match &grouped {
-                                Some((offset, shown_left)) => {
+                                Some((offset, shown_left)) if !mark.pinned => {
                                     let x = x - offset;
                                     (x, lines.group_clip(i, *shown_left, x, width))
                                 }
-                                None => (x, None),
+                                _ => (x, None),
                             };
                             wanted.push((Rect::new(x, top + mark.y, width, height), mark, clip));
                         }
                     }
                 }
-                if !wanted.is_empty()
-                    && code.mark_layer.get().is_none_or(|layer| !s.contains(layer))
-                {
-                    let layer = s.append(
+                // Those over the text apart, in a layer of their own above it.
+                let (over, under): (Vec<_>, Vec<_>) =
+                    wanted.into_iter().partition(|(_, mark, _)| mark.over_text);
+                paint_marks(
+                    &mut s,
+                    viewport,
+                    text,
+                    &code.mark_layer,
+                    &code.mark_nodes,
+                    under,
+                    &font,
+                    false,
+                );
+                if !over.is_empty() || code.mark_layer_over.get().is_some() {
+                    // Above the long text's lines, which show in a layer of their own after the text node.
+                    let lines_shown = code.line_layer.get().filter(|layer| s.contains(*layer));
+                    paint_marks(
+                        &mut s,
                         viewport,
-                        NodeKind::Container(Layout::Overlay),
-                        Style::default(),
+                        lines_shown.unwrap_or(text),
+                        &code.mark_layer_over,
+                        &code.mark_nodes_over,
+                        over,
+                        &font,
+                        true,
                     );
-                    let mut order = s.children(viewport).to_vec();
-                    order.retain(|id| *id != layer);
-                    let at = order.iter().position(|id| *id == text).unwrap_or(0);
-                    order.insert(at, layer);
-                    s.reorder_children(viewport, &order);
-                    code.mark_layer.set(Some(layer));
-                    code.mark_nodes.borrow_mut().clear();
                 }
-                let mut mark_nodes = code.mark_nodes.borrow_mut();
-                let count: usize = wanted
-                    .iter()
-                    .map(|(_, m, _)| 1 + usize::from(m.label.is_some()))
-                    .sum();
-                while mark_nodes.len() > count {
-                    s.remove(mark_nodes.pop().unwrap());
-                }
-                if let Some(layer) = code.mark_layer.get() {
-                    while mark_nodes.len() < count {
-                        mark_nodes.push(s.append(
-                            layer,
-                            NodeKind::Rect(Color(0, 0, 0, 0)),
-                            Style::default(),
-                        ));
-                    }
-                    let mut ids = mark_nodes.iter().copied();
-                    for (rect, mark, clip) in wanted {
-                        let Some(id) = ids.next() else { break };
-                        let clip = clip.map(|(l, r)| crate::scene::ClipInset::px(0., r, 0., l));
-                        s.set_clip_inset(id, clip);
-                        let quad = crate::scene::QuadStyle {
-                            fill: mark.fill,
-                            radius: mark.radius,
-                            border_color: mark.border_color,
-                            border_width: mark.border_width,
-                            shadow: None,
-                            decoration: mark.decoration.clone(),
-                            border_over: false,
-                            outline: None,
-                        };
-                        // A picture's box lays it out (a panel: its quad and a child), clipped to its corners; a box
-                        // without one is a quad, its picture gone first.
-                        if mark.image.is_none()
-                            && let Some(picture) = s.children(id).first().copied()
-                        {
-                            s.remove(picture);
-                        }
-                        if let Some(svg) = &mark.svg {
-                            if !matches!(s.kind(id), NodeKind::Svg(shown) if **shown == **svg) {
-                                s.set_kind(id, NodeKind::Svg(svg.clone()));
-                            }
-                        } else if mark.image.is_some() {
-                            if !matches!(s.kind(id), NodeKind::Panel { quad: q, .. } if *q == quad)
-                            {
-                                s.set_kind(
-                                    id,
-                                    NodeKind::Panel {
-                                        layout: Layout::Overlay,
-                                        quad,
-                                    },
-                                );
-                            }
-                        } else if !matches!(s.kind(id), NodeKind::Quad(q) if *q == quad) {
-                            s.set_kind(id, NodeKind::Quad(quad));
-                        }
-                        // A picture: in the box, clipped to its rounded corners.
-                        let picture = s.children(id).first().copied();
-                        match &mark.image {
-                            Some(image) => {
-                                s.set_style(
-                                    id,
-                                    Style {
-                                        clip: true,
-                                        ..fixed(rect.width, rect.height)
-                                    },
-                                );
-                                let picture = picture.unwrap_or_else(|| {
-                                    s.append(
-                                        id,
-                                        NodeKind::Rect(Color(0, 0, 0, 0)),
-                                        Style::default(),
-                                    )
-                                });
-                                let (w, h) = crate::compose::fitted_image_size(
-                                    rect.width,
-                                    rect.height,
-                                    image.image.width() as f32,
-                                    image.image.height() as f32,
-                                    image.fit,
-                                );
-                                if !matches!(s.kind(picture), NodeKind::Image(shown) if *shown == image.image)
-                                {
-                                    s.set_kind(picture, NodeKind::Image(image.image.clone()));
-                                }
-                                s.set_style(
-                                    picture,
-                                    Style {
-                                        absolute: true,
-                                        ..fixed(w, h)
-                                    },
-                                );
-                                s.set_transform(
-                                    picture,
-                                    Transform {
-                                        x: (rect.width - w) / 2.,
-                                        y: (rect.height - h) / 2.,
-                                    },
-                                );
-                            }
-                            None => s.set_style(id, fixed(rect.width, rect.height)),
-                        }
-                        s.set_transform(
-                            id,
-                            Transform {
-                                x: rect.x,
-                                y: rect.y,
-                            },
-                        );
-                        if let Some((label, label_color, label_size)) = mark.label {
-                            let Some(id) = ids.next() else { break };
-                            let unchanged = matches!(
-                                s.kind(id),
-                                NodeKind::Text { text, color: c, font_size }
-                                    if **text == *label && *c == label_color && *font_size == label_size
-                            );
-                            if !unchanged {
-                                s.set_kind(
-                                    id,
-                                    NodeKind::Text {
-                                        text: label,
-                                        color: label_color,
-                                        font_size: label_size,
-                                    },
-                                );
-                            }
-                            let mut label_font = font.clone();
-                            if mark.mono {
-                                label_font.family = crate::text_layout::FontFamily::Monospace;
-                            }
-                            if mark.height.is_finite() && mark.height > 0. {
-                                label_font.line_height =
-                                    crate::text_layout::LineHeight::px(mark.height);
-                            }
-                            s.set_font(id, label_font);
-                            s.set_style(id, fixed(rect.width.max(1.), rect.height.max(1.)));
-                            s.set_clip_inset(id, clip);
-                            s.set_transform(
-                                id,
-                                Transform {
-                                    x: rect.x,
-                                    y: rect.y,
-                                },
-                            );
-                        }
-                    }
-                }
-                drop(mark_nodes);
             }
             s.set_transform(
                 caret,
@@ -7842,6 +7995,9 @@ impl Ui {
                     refresh();
                 }
                 told.publish_scroll(&told_scene);
+                if told.group_bar.borrow().is_some() {
+                    told.publish_group_bar(&told_scene);
+                }
                 EditorHint::watch_theme(&told, &storage, root, &watched_theme);
                 // Where the caret is, told once drawn (nothing borrowed),
                 // if it moved. The callback is out while it runs: a refresh
