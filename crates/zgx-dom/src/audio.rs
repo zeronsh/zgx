@@ -57,6 +57,9 @@ struct Page {
     engine: Option<(Audio, Pull)>,
     hosts: Vec<ScriptHost>,
     worklet: Option<String>,
+    /// The quiet hold tests set (`__audio_set_hold`), for the engine made or
+    /// still to be.
+    hold: Option<std::time::Duration>,
 }
 
 thread_local! {
@@ -95,6 +98,25 @@ pub fn __audio_stall_next_answer(frames: u32) {
     zgx_audio_stall(f64::from(frames));
 }
 
+/// How long the page's sound goes on with nothing to hear before it stops
+/// and its context is suspended (zgx-audio's `Config::hold`, a second, until
+/// set), for the engine made or still to be. For tests only, which would
+/// otherwise wait out a second of silence between them; never call it from
+/// an app.
+#[doc(hidden)]
+pub fn __audio_set_hold(seconds: f64) {
+    let hold = std::time::Duration::from_secs_f64(seconds);
+    PAGE.with_borrow_mut(|page| {
+        let Some(page) = page.as_mut() else {
+            return;
+        };
+        page.hold = Some(hold);
+        if let Some((_, pull)) = page.engine.as_mut() {
+            pull.set_hold(hold);
+        }
+    });
+}
+
 /// The worklet's drained message handled, as if the hold had passed, and a
 /// sound waking in the same task, the suspend that drain asks for taking
 /// `slow_suspend_ms`. For tests only, of the suspend and the resume keeping
@@ -112,8 +134,11 @@ fn engine() -> Audio {
         if let Some((audio, _)) = &page.engine {
             return audio.clone();
         }
-        let (audio, pull) = Audio::pulled(Config::default(), zgx_audio_wake)
+        let (audio, mut pull) = Audio::pulled(Config::default(), zgx_audio_wake)
             .expect("zgx-audio's defaults are a config it runs");
+        if let Some(hold) = page.hold {
+            pull.set_hold(hold);
+        }
         page.engine = Some((audio.clone(), pull));
         audio
     })
@@ -168,6 +193,7 @@ fn install(host: &ScriptHost, worklet: Option<String>) {
                 engine: None,
                 hosts: vec![host.clone()],
                 worklet: worklet.clone(),
+                hold: None,
             });
             true
         }

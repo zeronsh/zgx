@@ -46,8 +46,8 @@ pub use tasks::{frame_asked, timer_armed};
 /// (`audio`).
 #[cfg(feature = "audio")]
 pub use audio::{
-    __audio_drain_and_wake, __audio_stall_next_answer, __audio_state, install_audio,
-    install_audio_at,
+    __audio_drain_and_wake, __audio_set_hold, __audio_stall_next_answer, __audio_state,
+    install_audio, install_audio_at,
 };
 /// The page's `fetch` as a Luau app's transport (`ui.fetch`): relative
 /// URLs read against the app's base (`luau`).

@@ -481,6 +481,16 @@ impl Pull {
         }
     }
 
+    /// How long it goes on being asked for blocks with nothing to hear
+    /// before it says stop (`Config::hold` until set). For tests that would
+    /// otherwise wait out a second of silence each time; not for apps.
+    #[doc(hidden)]
+    pub fn set_hold(&mut self, hold: Duration) {
+        if let Hosting::Pulled(pulled) = &mut *self.audio.hosting() {
+            pulled.hold = hold;
+        }
+    }
+
     /// Whether the app is asked for blocks now.
     pub fn running(&self) -> bool {
         matches!(&*self.audio.hosting(), Hosting::Pulled(pulled) if pulled.running)
