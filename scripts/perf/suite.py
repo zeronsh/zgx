@@ -51,6 +51,7 @@ SCENES = [
     ('micro-state', 'zgx-desktop', 'micro_bench', {'SCENE': 'state'}),
     ('micro-vscroll-fixed', 'zgx-desktop', 'micro_bench', {'SCENE': 'vscroll-fixed'}),
     ('micro-vscroll-variable', 'zgx-desktop', 'micro_bench', {'SCENE': 'vscroll-variable'}),
+    ('editor-scroll', 'zgx-desktop', 'editor_scroll_bench', {}),
     ('mount', 'zgx-script', 'mount_bench', {}),
     ('script-update', 'zgx-script', 'update_bench', {}),
     ('anime', 'zgx-script', 'anime_bench', {}),
