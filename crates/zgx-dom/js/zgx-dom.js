@@ -131,6 +131,11 @@ function onFrame(at) {
   deliverFrame(at);
 }
 
+// The idle trim's one timeout (src/idle.rs): armed at most once at a time.
+export function zgx_trim_arm(fire, ms) {
+  setTimeout(fire, ms);
+}
+
 export function zgx_frame_asked() {
   return frameAsked !== 0;
 }

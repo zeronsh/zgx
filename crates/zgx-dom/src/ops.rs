@@ -160,6 +160,7 @@ impl Ops {
     /// wait for its end).
     pub(crate) fn apply(&mut self) {
         if !self.words.is_empty() {
+            crate::idle::wrote();
             crate::js::zgx_apply(
                 &wasm_bindgen::memory(),
                 self.words.as_ptr() as u32,

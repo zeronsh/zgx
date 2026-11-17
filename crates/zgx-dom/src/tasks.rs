@@ -98,6 +98,7 @@ fn run() {
         DRAINING.with(|draining| draining.set(false));
         host.arm();
         host.ask_frame();
+        crate::idle::take_requests();
         Some(polled)
     });
     // What they wrote shows before the browser paints.

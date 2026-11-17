@@ -21,6 +21,7 @@ extern "C" {
     pub(crate) fn zgx_timer_arm(ms: f64);
     pub(crate) fn zgx_timer_armed() -> bool;
     pub(crate) fn zgx_frame_ask();
+    pub(crate) fn zgx_trim_arm(fire: &Closure<dyn FnMut()>, ms: f64);
     pub(crate) fn zgx_frame_asked() -> bool;
     pub(crate) fn zgx_adopt(id: u32, element: &web_sys::Element);
     pub(crate) fn zgx_apply(memory: &JsValue, ops: u32, ops_len: u32, text: u32, text_len: u32);
