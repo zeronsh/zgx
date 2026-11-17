@@ -8,7 +8,6 @@ use std::sync::{Arc, atomic::AtomicU64, atomic::Ordering};
 use zgx::{
     scene::Color,
     text_edit::{Atom, AtomPayload},
-    widgets::EditorHandle,
 };
 
 /// What a script keeps with an atom: its name, its `data` as JSON, and the
@@ -183,15 +182,15 @@ pub(crate) fn list(atoms: &[Atom], char_of: impl Fn(usize) -> usize) -> Value {
 /// from the editor changes nothing.
 pub(crate) fn from_list(
     value: &Value,
-    handle: &EditorHandle,
+    editor: &mut zgx::text_edit::TextEditor,
     color_of: &dyn Fn(&str) -> Option<Color>,
     look_of: &dyn Fn(&Value) -> Option<Arc<zgx::widgets::AtomStyle>>,
 ) -> Vec<Atom> {
     let Value::List(items) = value else {
         return Vec::new();
     };
-    let text = handle.editor.borrow().text().into_owned();
-    let current = handle.atoms();
+    let text = editor.text().into_owned();
+    let current = editor.atoms().to_vec();
     let mut out = Vec::with_capacity(items.len());
     for item in items.iter() {
         let number = |key: &str| match item.field(key) {
@@ -233,7 +232,7 @@ pub(crate) fn from_list(
                 let id = current
                     .iter()
                     .find(|atom| script_atom(atom).is_some_and(|s| s.key == key))
-                    .map_or_else(|| handle.new_atom_id(), |atom| atom.id);
+                    .map_or_else(|| editor.new_atom_id(), |atom| atom.id);
                 Atom {
                     id,
                     range: start..end,

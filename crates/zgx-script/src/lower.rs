@@ -6920,9 +6920,9 @@ fn code_editor(
             crate::node::atom_look_of(style)
                 .map(|look| Arc::new(atom_style_of(&look, &vm, &low, &theme)))
         };
-        view = view.atoms_when(move |handle| {
+        view = view.atoms_when(move |editor| {
             let list = state.with(Clone::clone);
-            crate::atoms::from_list(&list, handle, &*color_of, &look_of)
+            crate::atoms::from_list(&list, editor, &*color_of, &look_of)
         });
     }
     if code.atoms.is_some() || code.on_atoms.is_some() {
