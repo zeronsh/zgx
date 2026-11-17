@@ -167,6 +167,11 @@ zgx-script = { path = "../zgx-script", version = "0.1.10", optional = true }
 name = "menu_services"
 harness = false
 
+# `ZGX_OFFSCREEN`, read once: a process of its own.
+[[test]]
+name = "offscreen"
+harness = false
+
 [dev-dependencies]
 # The perf gate's output check, called by the gate benches each frame.
 zgx-fingerprint = { path = "../../scripts/perf/fingerprint" }

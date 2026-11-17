@@ -1352,8 +1352,11 @@ mod macos {
         panel
             .window
             .setFrameOrigin(NSPoint::new(-10_000., -10_000.));
-        panel.window.orderFront(None);
-        panel.window.orderOut(None);
+        // Off-screen (`ZGX_OFFSCREEN`), not even there.
+        if crate::window_chrome::may_show() {
+            panel.window.orderFront(None);
+            panel.window.orderOut(None);
+        }
         panel
             .window
             .setAlphaValue(crate::window_chrome::shown_alpha());
@@ -1379,7 +1382,10 @@ mod macos {
     /// `ZGX_POPUP_WINDOWS=0` (inside their window, as elsewhere).
     pub(crate) fn enabled() -> bool {
         thread_local! {
-            static ON: bool = zgx::env::var_os("ZGX_POPUP_WINDOWS").is_none_or(|v| v != "0");
+            // Off-screen (`ZGX_OFFSCREEN`) too: inside their window, which
+            // draws them in its own frames.
+            static ON: bool = zgx::env::var_os("ZGX_POPUP_WINDOWS").is_none_or(|v| v != "0")
+                && crate::window_chrome::may_show();
         }
         ON.with(|on| *on)
     }
@@ -1556,7 +1562,9 @@ mod macos {
                     Some((ended, ((dx, dy), rect))) => {
                         let source = scene.bounds(ended.source);
                         panel.sync();
-                        panel.window.orderFront(None);
+                        if crate::window_chrome::may_show() {
+                            panel.window.orderFront(None);
+                        }
                         slide_back(
                             panel,
                             &parent,
@@ -1725,7 +1733,9 @@ mod macos {
                             _ => panel.window.setLevel(NSPopUpMenuWindowLevel),
                         }
                     }
-                    panel.window.orderFront(None);
+                    if crate::window_chrome::may_show() {
+                        panel.window.orderFront(None);
+                    }
                 }
                 if new || moved {
                     // Its rim (macOS 26 menus have no drop shadow, only a
@@ -1822,7 +1832,9 @@ mod macos {
                     let grab = (drag.x - rect.x, drag.y - rect.y);
                     let frame = Rect::new(x - grab.0, y - grab.1, rect.width, rect.height);
                     panel.place(&parent, &content, frame);
-                    panel.window.orderFront(None);
+                    if crate::window_chrome::may_show() {
+                        panel.window.orderFront(None);
+                    }
                 }
             }
         }
@@ -2101,7 +2113,8 @@ mod x11 {
         /// thread of its own until it is home and hidden.
         static SLIDING: RefCell<Vec<(std::thread::JoinHandle<()>, Popup)>> =
             const { RefCell::new(Vec::new()) };
-        static ON: bool = zgx::env::var_os("ZGX_POPUP_WINDOWS").is_none_or(|v| v != "0");
+        static ON: bool = zgx::env::var_os("ZGX_POPUP_WINDOWS").is_none_or(|v| v != "0")
+            && crate::window_chrome::may_show();
     }
 
     pub(crate) fn enabled() -> bool {
@@ -2726,7 +2739,7 @@ mod x11 {
                         continue;
                     };
                     // Mapped off screen, to take its first frame.
-                    popup.window.set_visible(true);
+                    popup.window.set_visible(crate::window_chrome::may_show());
                     transient_for(&popup.window, parent);
                     self.shown.push((root, popup));
                 }

@@ -193,6 +193,10 @@ impl FileDialogs {
         if self.owner.is_closed() {
             return Err(FileDialogError::WindowClosed);
         }
+        // Off-screen (`ZGX_OFFSCREEN`): no panel shows; it is as if cancelled.
+        if !crate::window_chrome::may_show() {
+            return Ok(None);
+        }
         let parent = self
             .native
             .borrow()
@@ -231,6 +235,10 @@ impl FileDialogs {
         options.validate()?;
         if self.owner.is_closed() {
             return Err(FileDialogError::WindowClosed);
+        }
+        // Off-screen: no alert shows; it is as if cancelled.
+        if !crate::window_chrome::may_show() {
+            return Ok(crate::PromptResponse::Cancel);
         }
         let parent = self
             .native
