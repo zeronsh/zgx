@@ -42,6 +42,17 @@ pub enum NativeContent {
     Glass(crate::glass::GlassPane),
 }
 impl NativeContent {
+    /// Whether `other` is this same content (the same page, terminal, view
+    /// or pane), not an equal one: what one node shows another may too.
+    pub fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Web(a), Self::Web(b)) => a == b,
+            (Self::Terminal(a), Self::Terminal(b)) => a == b,
+            (Self::Platform(a), Self::Platform(b)) => Rc::ptr_eq(a, b),
+            (Self::Glass(a), Self::Glass(b)) => Rc::ptr_eq(&a.0, &b.0),
+            _ => false,
+        }
+    }
     /// A short description for placeholders and diagnostics.
     pub fn label(&self) -> String {
         match self {
@@ -334,6 +345,37 @@ pub enum PointerRoute {
     Native(NodeId),
     /// zgx (its own hit testing decides the target, if any).
     Ui,
+}
+
+/// Why pointer input at a point goes where it does
+/// ([`PlaneSplit::route_explained`]): the step of `route`'s walk that
+/// decided, and the node it decided at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteWhy {
+    /// The window shows no native views: everything is zgx's.
+    NoNativeViews,
+    /// The input state was held (mid-dispatch): zgx's, as `route` answers.
+    Busy,
+    /// Nothing hit there took it: zgx's.
+    NothingHit,
+    /// Overlay paint (zgx's, drawn over the native view) is first there.
+    Overlay(NodeId),
+    /// A node in front with listeners, or interactive, takes it.
+    Listener(NodeId),
+    /// A disabled node takes it (and ignores it).
+    Disabled(NodeId),
+    /// The native view isn't shown (not laid out visible, or transparent).
+    NotShown(NodeId),
+    /// The native view is outside the active modal scope (a dialog's, a
+    /// menu's), which `scope` roots: zgx's, which ignores it.
+    OutsideScope {
+        /// The native view's node.
+        native: NodeId,
+        /// The active scope's root.
+        scope: NodeId,
+    },
+    /// The native view takes it.
+    Native(NodeId),
 }
 
 /// What zgx hears of a pointer move, by where it went (see [`NativePointer`]).
@@ -1122,5 +1164,71 @@ impl PlaneSplit {
             }
         }
         PointerRoute::Ui
+    }
+    /// `route`, and why ([`RouteWhy`]): the same walk, saying which step
+    /// decided, for diagnostics (`zgx inspect route`). Apart from `route`,
+    /// which hit testing calls on every pointer event.
+    pub fn route_explained(
+        &self,
+        scene: &Scene,
+        input: &InputDispatcher,
+        x: f32,
+        y: f32,
+    ) -> (PointerRoute, RouteWhy) {
+        if self.natives.is_empty() {
+            return (PointerRoute::Ui, RouteWhy::NoNativeViews);
+        }
+        let root = scene.root();
+        'hits: for hit in scene.hit_test_all(x, y) {
+            if input.boxless(scene, hit) {
+                continue;
+            }
+            let mut node = Some(hit);
+            while let Some(id) = node {
+                match input.try_options(id) {
+                    None => return (PointerRoute::Ui, RouteWhy::Busy),
+                    Some(Some(options)) if input.passes(scene, id, &options) => continue 'hits,
+                    _ => {}
+                }
+                if id == root || self.native_nodes.contains(&id) {
+                    break;
+                }
+                match input.try_has_listeners(id) {
+                    Some(false) => node = scene.parent(id),
+                    _ => break,
+                }
+            }
+            if self.overlay.contains_key(&hit) {
+                return (PointerRoute::Ui, RouteWhy::Overlay(hit));
+            }
+            let mut node = Some(hit);
+            while let Some(id) = node {
+                if self.native_nodes.contains(&id) {
+                    return match input.try_is_enabled(scene, id) {
+                        Some(true) => (PointerRoute::Native(id), RouteWhy::Native(id)),
+                        None => (PointerRoute::Ui, RouteWhy::Busy),
+                        Some(false) => (PointerRoute::Ui, input.why_not_enabled(scene, id)),
+                    };
+                }
+                match input.try_options(id) {
+                    None => return (PointerRoute::Ui, RouteWhy::Busy),
+                    Some(Some(options)) if options.disabled => {
+                        return (PointerRoute::Ui, RouteWhy::Disabled(id));
+                    }
+                    _ => {}
+                }
+                if id != root {
+                    match input.try_has_listeners(id) {
+                        Some(false) => {}
+                        Some(true) => return (PointerRoute::Ui, RouteWhy::Listener(id)),
+                        None => return (PointerRoute::Ui, RouteWhy::Busy),
+                    }
+                } else {
+                    break;
+                }
+                node = scene.parent(id);
+            }
+        }
+        (PointerRoute::Ui, RouteWhy::NothingHit)
     }
 }
