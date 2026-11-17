@@ -7199,10 +7199,10 @@ fn open_element(
         }
         _ => unreachable!(),
     };
-    if view.contents != Contents::Own
+    let as_child = view.contents != Contents::Own
         && (view.contents == Contents::Child
-            || (view.styles.set_bits() == 0 && view.reactive_style.is_none()))
-    {
+            || (view.styles.set_bits() == 0 && view.reactive_style.is_none()));
+    if as_child {
         ui.scene.borrow_mut().set_contents(root, true);
     }
     if let Some(active) = rare.as_deref_mut().and_then(|r| r.active_descendant.take()) {
@@ -7404,6 +7404,7 @@ fn open_element(
         image_fit.clone(),
         Some(environment.theme.clone()),
         leaf,
+        as_child,
     );
     if let Some(compute) = rich_compute {
         mount_rich(
