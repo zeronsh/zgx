@@ -547,6 +547,8 @@ pub(crate) struct CodeOptions {
     atom_pointer: Option<Rc<crate::editor_atom_pointer::AtomPointer>>,
     /// `atom_style`: how its atoms show beyond a wash.
     atom_style: Option<crate::editor_atom_style::AtomStyle>,
+    /// `group_scrollbar`: its scroll groups' scrollbar.
+    group_scrollbar: bool,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -2134,6 +2136,13 @@ impl View {
     /// `EditorHandle::on_atoms`.
     pub fn on_atoms(mut self, told: impl FnMut(&crate::widgets::AtomEvent<'_>) + 'static) -> Self {
         self.code_mut().on_atoms = Some(Box::new(told));
+        self
+    }
+    /// A text area's scroll groups (`LineInset::scroll_group`, a code block's) get the scrollbar scroll views show:
+    /// one, across the bottom edge of the group that moved last, shown as it scrolls; its drag scrolls the group.
+    #[doc(hidden)]
+    pub fn group_scrollbar(mut self) -> Self {
+        self.code_mut().group_scrollbar = true;
         self
     }
     /// How a text area's atoms show beyond a wash: a mention's colour,
@@ -7556,7 +7565,11 @@ fn open_element(
                 atoms_when,
                 atom_pointer,
                 atom_style,
+                group_scrollbar,
             } = *code;
+            if group_scrollbar {
+                editor.mount_group_scrollbar(ui);
+            }
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
                 // Colours may be theme tokens: a new theme colours the lines

@@ -32,6 +32,8 @@ mod editor_caret_blink;
 mod editor_caret_width;
 #[path = "../editor_code.rs"]
 mod editor_code;
+#[path = "../editor_code_blocks.rs"]
+mod editor_code_blocks;
 #[path = "../editor_context_menu.rs"]
 mod editor_context_menu;
 #[path = "../editor_copy_hook.rs"]

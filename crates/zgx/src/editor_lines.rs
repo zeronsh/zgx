@@ -235,6 +235,10 @@ pub struct LineInset {
     /// The width a scroll group shows, read from its first line; none: what the editor's width leaves right of
     /// that line's `left`.
     pub group_width: Option<f32>,
+    /// It never wraps (a code block's line, the web's `white-space: pre`): shaped once at its full width, it shows
+    /// as far as its scroll group's frame and scrolls sideways with the group (`scroll_group`), which it belongs in.
+    #[doc(hidden)]
+    pub nowrap: bool,
 }
 /// A scroll group's frame set by the app (`EditorHandle::set_group_frame`): each part given overrides what its
 /// lines say (a table's cells, whose borders and fills sit outside their text). All `None`: as its lines say.
@@ -254,6 +258,9 @@ impl LineInset {
     }
     /// The width the line wraps in when the text wraps at `wrap`: its own, or what its indent leaves.
     fn wrap(&self, wrap: Option<f32>) -> Option<f32> {
+        if self.nowrap {
+            return None;
+        }
         match self.width {
             Some(width) => Some(width.max(1.)),
             None if self.left > 0. => wrap.map(|w| (w - self.left).max(1.)),
@@ -310,6 +317,14 @@ pub struct LineMark {
     pub svg: Option<std::sync::Arc<crate::svg::SvgData>>,
     /// Per-side borders and per-corner radii (a table's outer cells), over `radius` and `border_width`.
     pub decoration: Option<std::sync::Arc<crate::decoration::Decoration>>,
+    /// It stays where it is as its line's scroll group scrolls sideways (a code block's surface and line numbers):
+    /// only the text, and the marks not pinned, move.
+    #[doc(hidden)]
+    pub pinned: bool,
+    /// Drawn over the text, not under it (a code block's actions, which cover the code beneath): its fill's alpha
+    /// is how much it covers.
+    #[doc(hidden)]
+    pub over_text: bool,
 }
 /// A line mark's picture (`LineMark::image`): decoded pixels and how they fit the mark's box. A file is decoded by
 /// the app, as an image view's is (`zgx_gpu::assets::decode_image_kept`), and kept in its `ImageCache`.
@@ -348,6 +363,8 @@ impl Default for LineMark {
             align: None,
             svg: None,
             decoration: None,
+            pinned: false,
+            over_text: false,
         }
     }
 }
@@ -736,6 +753,8 @@ pub(crate) struct LineCache {
     /// Each scroll group's sideways offset (`LineInset::scroll_group`), by its id: read as carets, hits and
     /// drawing are, so moving one lays nothing out again.
     group_scroll: RefCell<HashMap<u32, f32>>,
+    /// The scroll group that moved last: the one a text area's group scrollbar shows (`View::group_scrollbar`).
+    last_scrolled: Cell<Option<u32>>,
     /// Told of each group's new offset (`EditorHandle::on_group_scroll`).
     on_group_scroll: RefCell<Option<GroupListener>>,
     /// Frames the app set for groups (`EditorHandle::set_group_frame`), by id: read as each frame is asked for,
@@ -750,6 +769,9 @@ struct GroupLines {
     width: Option<f32>,
     /// How far right its lines reach, from the area's left content edge.
     right: f32,
+    /// Its first and last lines shown (for its scrollbar, at its bottom edge).
+    first: usize,
+    last: usize,
 }
 /// Told of a scroll group's id and new offset (`EditorHandle::on_group_scroll`).
 pub(crate) type GroupListener = Rc<dyn Fn(u32, f32)>;
@@ -762,6 +784,9 @@ pub(crate) struct Group {
     pub(crate) view: f32,
     /// How wide its lines are from `left`.
     pub(crate) content: f32,
+    /// Its first and last lines shown.
+    pub(crate) first: usize,
+    pub(crate) last: usize,
 }
 impl Group {
     /// The furthest it scrolls: its content past its view.
@@ -942,6 +967,10 @@ impl LineCache {
             .copied()
             .unwrap_or(0.)
     }
+    /// The scroll group that moved last, if one has.
+    pub(crate) fn last_scrolled_group(&self) -> Option<u32> {
+        self.last_scrolled.get()
+    }
     /// Move scroll group `group` to `x` (clamped by the caller); whether it moved. Its listener hears of it.
     pub(crate) fn set_group_scroll(&self, group: u32, x: f32) -> bool {
         let x = if x.is_finite() { x.max(0.) } else { 0. };
@@ -949,6 +978,7 @@ impl LineCache {
         if previous.unwrap_or(0.) == x {
             return false;
         }
+        self.last_scrolled.set(Some(group));
         let listener = self.on_group_scroll.borrow().clone();
         if let Some(listener) = listener {
             listener(group, x);
@@ -1339,6 +1369,9 @@ pub(crate) struct LinesLayout {
     grouped: bool,
     /// Each scroll group's frame and extent, found once asked for.
     groups: RefCell<Option<Rc<HashMap<u32, GroupLines>>>>,
+    /// How far each scroll group's unwrapped lines reach (`LineInset::nowrap`), as far as they are shaped: past
+    /// its estimate, a group scrolls that far.
+    group_reach: RefCell<HashMap<u32, f32>>,
 }
 /// A line's text: in its chunk, or joined across chunks and kept.
 pub(crate) enum LineText<'a> {
@@ -1391,6 +1424,7 @@ impl LinesLayout {
             joined: RefCell::default(),
             grouped: false,
             groups: RefCell::default(),
+            group_reach: RefCell::default(),
         };
         // every line's own height, unwrapped too: a heading's taller pitch and a line's room push the lines below
         {
@@ -1449,6 +1483,7 @@ impl LinesLayout {
             joined: RefCell::default(),
             grouped: old.grouped,
             groups: RefCell::default(),
+            group_reach: RefCell::default(),
         };
         // The edited lines' lengths count for the longest.
         for i in kept - 1..first_moved.min(layout.line_count()) {
@@ -1527,8 +1562,9 @@ impl LinesLayout {
             return 0.;
         }
         let line = self.line_text(i);
-        // a cell wraps in its own width: its text's height elsewhere is not its
+        // a cell wraps in its own width: its text's height elsewhere is not its; a line that never wraps is a row
         let bare = match inset.width {
+            _ if inset.nowrap => self.row,
             Some(own) => self.estimate(&line, own),
             None => known
                 .get(&*line)
@@ -1704,6 +1740,9 @@ impl LinesLayout {
     }
     /// `draw_width`, for a line whose room is already asked for.
     pub(crate) fn draw_width_in(inset: &LineInset, wrap: Option<f32>) -> Option<f32> {
+        if inset.nowrap {
+            return None;
+        }
         inset
             .width
             .map(|w| w.max(1.))
@@ -1740,7 +1779,10 @@ impl LinesLayout {
         let inset = self.inset(i);
         // an indented line wraps narrower: kept apart from the same text unindented
         let wrap = inset.wrap(self.wrap);
-        let key = if let Some(width) = inset.width {
+        let key = if inset.nowrap {
+            // unwrapped: kept apart from the same text wrapped
+            std::borrow::Cow::Owned(format!("{}\u{2}{}", inset.left.to_bits(), &*text))
+        } else if let Some(width) = inset.width {
             std::borrow::Cow::Owned(format!("{}\u{1}{}", width.to_bits(), &*text))
         } else if inset.left > 0. {
             std::borrow::Cow::Owned(format!("{}\u{0}{}", inset.left.to_bits(), &*text))
@@ -1759,6 +1801,13 @@ impl LinesLayout {
         let (width, height) = layout.size();
         if width > self.widest.get() {
             self.widest.set(width);
+        }
+        if inset.nowrap
+            && let Some(group) = inset.scroll_group
+        {
+            let mut reach = self.group_reach.borrow_mut();
+            let far = reach.entry(group).or_insert(0.);
+            *far = far.max(inset.left + width);
         }
         if let Some(heights) = &self.heights {
             // cached without its room: the same text elsewhere (or once its block changes) has its own
@@ -1853,13 +1902,16 @@ impl LinesLayout {
                 left: inset.left,
                 width: inset.group_width,
                 right: inset.left,
+                first: i,
+                last: i,
             });
             if inset.hidden {
                 continue;
             }
+            group.last = i;
             let width = match inset.width.or(self.wrap.map(|w| w - inset.left)) {
-                Some(width) => width.max(1.),
-                None => self.line_range(i).len() as f32 * self.advance,
+                Some(width) if !inset.nowrap => width.max(1.),
+                _ => self.line_range(i).len() as f32 * self.advance,
             };
             group.right = group.right.max(inset.left + width);
         }
@@ -1884,11 +1936,17 @@ impl LinesLayout {
             .or(self.wrap.map(|w| w - left))
             .unwrap_or(f32::INFINITY)
             .max(1.);
-        let content = frame.content.unwrap_or(lines.right - left).max(0.);
+        let reach = self.group_reach.borrow().get(&id).copied().unwrap_or(0.);
+        let content = frame
+            .content
+            .unwrap_or(lines.right.max(reach) - left)
+            .max(0.);
         Some(Group {
             left,
             view,
             content,
+            first: lines.first,
+            last: lines.last,
         })
     }
     /// Line `i`'s scroll group: its id and frame.
