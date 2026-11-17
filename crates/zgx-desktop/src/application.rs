@@ -3209,6 +3209,8 @@ impl Host {
                             result?;
                             first_mark(&FIRST_RENDER, "first frame rendered");
                             self.native.render(&scene, damage)?;
+                            // Drawn and shown at once: presented.
+                            note_first_present();
                             // Shown: the next waits for the compositor's
                             // frame, as a GPU present's does.
                             self.present_ready = false;
@@ -3385,15 +3387,7 @@ impl Host {
                     self.scale_factor,
                 );
                 self.native.apply();
-                FIRST_PRESENT.call_once(|| {
-                    let mark = first_present_mark();
-                    zgx::profile::mark(&mark);
-                    // `ZGX_SHADER_LOG=1`: the same line alone, for a probe
-                    // timing starts (ZGX_PROFILE's spans would slow them).
-                    if zgx::env::var_os("ZGX_SHADER_LOG").is_some_and(|v| v != "0") {
-                        eprintln!("zgx: {mark}");
-                    }
-                });
+                note_first_present();
                 // Commits the transaction (macOS; elsewhere there is none).
                 #[allow(dropping_copy_types)]
                 drop(transaction);
@@ -9501,6 +9495,20 @@ const MENU_BAR_LATEST: std::time::Duration = std::time::Duration::from_secs(1);
 /// A `zgx::profile::mark` the first time only (the process's first frame).
 fn first_mark(once: &std::sync::Once, what: &str) {
     once.call_once(|| zgx::profile::mark(what));
+}
+/// The process's first present, marked (`zgx::profile::mark`) and, with
+/// `ZGX_SHADER_LOG=1`, written alone to stderr: what a probe times a start
+/// by, or waits on before reading the window's pixels (ZGX_PROFILE's spans
+/// would slow them). The GPU renderer's present and the raster window's
+/// (drawn and shown at once) alike.
+fn note_first_present() {
+    FIRST_PRESENT.call_once(|| {
+        let mark = first_present_mark();
+        zgx::profile::mark(&mark);
+        if zgx::env::var_os("ZGX_SHADER_LOG").is_some_and(|v| v != "0") {
+            eprintln!("zgx: {mark}");
+        }
+    });
 }
 /// The first present's mark, with what the shaders kept between launches
 /// did by then (Windows): a start that compiled them says so.

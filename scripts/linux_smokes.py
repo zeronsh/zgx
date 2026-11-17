@@ -30,7 +30,7 @@ SMOKES = [
     ("window-controls", "timeout 30s {bin}/window_controls --smoke-test", True),
     ("standard-menu-items", "timeout 30s {bin}/standard_menu_items --smoke-test", True),
     ("form", "python3 scripts/form_smoke.py {bin}/form", True),
-    ("form-raster", "env ZGX_RENDERER=raster ZGX_PRESENT_LOG=1 python3 scripts/form_smoke.py {bin}/form --log {out}/form.log", True),
+    ("form-raster", "env ZGX_RENDERER=raster ZGX_PRESENT_LOG=1 ZGX_SHADER_LOG=1 python3 scripts/form_smoke.py {bin}/form --log {out}/form.log", True),
     ("terminal", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --output {out}", True),
     ("terminal-2x", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --scale 2 --output {out}", True),
     ("terminal-orca", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --orca --output {out}", True),
@@ -39,7 +39,7 @@ SMOKES = [
     ("progress", "python3 scripts/progress_smoke.py {bin}/progress --output {out}", True),
     ("images", "python3 scripts/images_smoke.py {bin}/images --output {out}", True),
     ("scroll", "python3 scripts/scroll_smoke.py {bin}/scroll --output {out}", True),
-    ("scroll-raster", "env ZGX_RENDERER=raster ZGX_PRESENT_LOG=1 python3 scripts/scroll_smoke.py {bin}/scroll --output {out}", True),
+    ("scroll-raster", "env ZGX_RENDERER=raster ZGX_PRESENT_LOG=1 ZGX_SHADER_LOG=1 python3 scripts/scroll_smoke.py {bin}/scroll --output {out}", True),
     ("raster-window", "python3 scripts/raster_window_smoke.py {bin}/scroll --viewport {bin}/viewport --menus {bin}/menus --output {out}", False),
     ("focus-scroll", "python3 scripts/focus_scroll_smoke.py {bin}/focus_scroll --output {out}", True),
     ("horizontal-scroll", "python3 scripts/horizontal_scroll_smoke.py {bin}/horizontal_scroll --output {out}", True),
@@ -269,20 +269,26 @@ def run(smoke, args):
                 except subprocess.TimeoutExpired:
                     helper.kill()
     if status == 0 and "ZGX_RENDERER=raster" in command:
-        status = drew_on_raster(output, probe_log)
+        status = drew_on_raster(output, probe_log, "ZGX_SHADER_LOG=1" in command)
     return name, status, time.monotonic() - started, probe_log
 
 
-def drew_on_raster(output, probe_log):
+def drew_on_raster(output, probe_log, logs_present=False):
     """A probe run on the raster (`ZGX_RENDERER=raster`, with its present
     log on) proves it: its logs show raster presents and no GPU render,
-    else it passed on the GPU. 0, or a status saying why."""
+    else it passed on the GPU. With `ZGX_SHADER_LOG=1` (`logs_present`)
+    they show its first present marked too (`zgx: first frame presented`),
+    as a GPU window's is: what a probe waits on before reading pixels, and
+    the menu bar's wait on macOS. 0, or a status saying why."""
     logs = [probe_log, *(p for p in output.rglob("*.log") if p.is_file())] if output.exists() else [probe_log]
     text = "\n".join(p.read_text(errors="replace") for p in logs)
     raster, gpu = text.count("raster present"), text.count("render forced=")
+    marked = "zgx: first frame presented" in text
     with probe_log.open("a") as log:
-        print(f"raster check: {raster} raster presents, {gpu} GPU renders", file=log)
-    return 0 if raster and not gpu else "not on the raster"
+        print(f"raster check: {raster} raster presents, {gpu} GPU renders, first present marked: {marked}", file=log)
+    if not (raster and not gpu):
+        return "not on the raster"
+    return 0 if marked or not logs_present else "the raster window never marked its first present"
 
 
 def main():

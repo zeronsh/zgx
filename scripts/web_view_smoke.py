@@ -80,6 +80,7 @@ class Session:
         # warning). The `WEB_` diagnostics are written to stderr in one go.
         self.log = output / "application.log"
         self.stderr = output / "stderr.log"
+        self.presented = False
 
     def xdo(self, *parts):
         subprocess.run(["xdotool", *map(str, parts)], env=self.env, check=True)
@@ -96,8 +97,40 @@ class Session:
         self.xdo("type", "--clearmodifiers", "--delay", 90, text)
         time.sleep(.5)
 
+    def first_frame(self, seconds=60):
+        """Wait (once) until the window has shown a frame: the app's own line
+        for its first present (`ZGX_SHADER_LOG=1`, set as it launches) and,
+        under Sway, Sway showing the window. A capture before then holds no
+        window, and a pixel check's ten seconds started then were spent on a
+        loaded runner's start (#2291's web-view-wayland-ime: the page loaded,
+        and no frame of zgx's, not even its own paint, had reached Sway)."""
+        if self.presented:
+            return
+        deadline = time.monotonic() + seconds
+        while "zgx: first frame presented" not in (self.stderr.read_text(errors="replace") if self.stderr.exists() else ""):
+            if time.monotonic() > deadline:
+                raise AssertionError("the window never presented a frame; see stderr.log")
+            time.sleep(.1)
+        if self.wayland:
+            sway = dict(self.wayland, SWAYSOCK=str(next(pathlib.Path(self.wayland["XDG_RUNTIME_DIR"]).glob("sway-ipc*.sock"))))
+            def shown():
+                tree = json.loads(subprocess.run(["swaymsg", "-t", "get_tree", "-r"], env=sway, capture_output=True, text=True).stdout or "{}")
+                pending = [tree]
+                while pending:
+                    node = pending.pop()
+                    pending.extend(node.get("nodes", []) + node.get("floating_nodes", []))
+                    if node.get("name") == "Web view probe" and node.get("visible"):
+                        return True
+                return False
+            while not shown():
+                if time.monotonic() > deadline:
+                    raise AssertionError("Sway never showed the window; see sway.log")
+                time.sleep(.1)
+        self.presented = True
+
     def grab(self):
         from PIL import Image, ImageGrab
+        self.first_frame()
         if self.wayland:
             # What Sway composed (wlr-screencopy), the window at its output's
             # top left: its X11 host window is no record of it (all black
@@ -1122,7 +1155,9 @@ def x11(args, output, private):
             extra.append("--unaccelerated")
             env["ZGX_WEB_DAMAGE"] = "1"
         with (output / "application.log").open("w") as log, (output / "stderr.log").open("w") as errors:
-            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=env, stdout=log, stderr=errors)
+            # Its first present, logged (`Session.first_frame`).
+            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=dict(env, ZGX_SHADER_LOG="1"), stdout=log,
+                                   stderr=errors)
         owned.append(app)
         deadline = time.monotonic() + 20
         while True:
@@ -1246,7 +1281,9 @@ def wayland(args, output, private):
             if args.unaccelerated:
                 extra.append("--unaccelerated")
                 native["ZGX_WEB_DAMAGE"] = "1"
-            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=native, stdout=log, stderr=errors)
+            # Its first present, logged (`Session.first_frame`).
+            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=dict(native, ZGX_SHADER_LOG="1"), stdout=log,
+                                   stderr=errors)
         owned.append(app)
         subprocess.run(["xdotool", "windowfocus", "--sync", window], env=env, check=False)
         info = subprocess.check_output(["xwininfo", "-id", str(window)], env=env, text=True)
