@@ -6694,6 +6694,14 @@ fn mount_element(
         keep_scrollbar_style(ui, opened.root);
     }
     ui.open_element(opened.root);
+    // Its children's nodes, made one by one below: room for them at once
+    // (a dynamic child, a list or `each`, takes one place; its rows grow
+    // its own).
+    if !opened.children.is_empty() {
+        ui.scene
+            .borrow_mut()
+            .reserve_children(opened.child_parent, opened.children.len());
+    }
     for child in std::mem::take(&mut opened.children) {
         mount(ui, opened.child_parent, child, opened.environment.clone());
     }
