@@ -94,6 +94,9 @@ struct Inner {
     /// Full screen asked of the window by devtools (`request_full_screen`):
     /// on, off, or (`None`) the other way.
     full_screen: Cell<Option<Option<bool>>>,
+    /// The window's native views (pages, terminals), as its host shows them:
+    /// where devtools ask where a point's input goes (`zgx inspect route`).
+    natives: RefCell<Option<crate::native_view::NativeViews>>,
 }
 type Hook = Rc<dyn Fn(bool)>;
 /// Layout and geometry revisions, the pointer and the viewport.
@@ -172,7 +175,16 @@ impl Inspector {
             wake: RefCell::default(),
             full_screen: Cell::new(None),
             state: RefCell::default(),
+            natives: RefCell::default(),
         }))
+    }
+    /// The window's native views (`NativeViews`), set by its host.
+    pub fn set_native_views(&self, natives: crate::native_view::NativeViews) {
+        *self.0.natives.borrow_mut() = Some(natives);
+    }
+    /// The window's native views, if its host set them.
+    pub fn native_views(&self) -> Option<crate::native_view::NativeViews> {
+        self.0.natives.borrow().clone()
     }
     /// Whether the host must call [`Inspector::update`] each frame. Off,
     /// this flag is all an inspector costs.

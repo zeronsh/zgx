@@ -965,3 +965,209 @@ fn downloads_go_to_the_apps_handler_and_are_cancelled_without_one() {
         "saved where it says; a dropped responder cancels"
     );
 }
+
+/// A help menu's item opening a page in a new split (Anara's "What's new"):
+/// once the menu closes, its scope is gone and clicks on the page go to the
+/// page, whether the item is chosen from the keyboard or by a press and
+/// release, and whether the page opens beside the menu or the menu's own
+/// pane is mounted again by the action.
+#[test]
+fn a_page_a_menu_item_opens_takes_clicks_once_the_menu_closes() {
+    use zgx::input::{InputEvent, PointerButton};
+    for (remount, pointer) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut ui = Ui::new(1000., 600.);
+        let natives = supported();
+        let web = WebView::new(&ui.runtime, WebViewOptions::default());
+        let open = ui.signal(false);
+        let opened = ui.signal(false);
+        let help = {
+            let (open, opened) = (open.clone(), opened.clone());
+            move || {
+                let opened = opened.clone();
+                menu(
+                    "Help",
+                    open.clone(),
+                    button().id("help").size(80., 28.).child("Help"),
+                )
+                .w(160.)
+                .p(0.)
+                .child(
+                    menu_item("What's new")
+                        .id("whats-new")
+                        .h(24.)
+                        .on_click(move || {
+                            opened.set(true);
+                        }),
+                )
+            }
+        };
+        let page = {
+            let web = web.clone();
+            move || web_view(&web).id("page").w(500.).h_full()
+        };
+        let toolbar_menu = (!remount).then(&help);
+        let shown = opened.clone();
+        let body = switch(
+            move || shown.get(),
+            move |showing, _| {
+                let pane = div().id("pane").w(500.).h_full();
+                let pane = match remount {
+                    // The menu lives in the pane the action mounts again.
+                    true => pane.child(help()),
+                    false => pane,
+                };
+                match showing {
+                    false => row().w_full().h(560.).child(pane),
+                    true => row().w_full().h(560.).child(pane).child(page()),
+                }
+            },
+        );
+        let mut toolbar = row().w_full().h(40.);
+        if let Some(menu) = toolbar_menu {
+            toolbar = toolbar.child(menu);
+        }
+        let view = ui.mount(provide(
+            natives.clone(),
+            column().w(1000.).h(600.).child(toolbar).child(body),
+        ));
+        ui.prepare_frame();
+        let center = |ui: &Ui, id: &str| {
+            let bounds = ui.scene.borrow().bounds(view.find(id).unwrap());
+            (bounds.x + bounds.width / 2., bounds.y + bounds.height / 2.)
+        };
+        let case = format!("remount {remount}, pointer {pointer}");
+        if pointer {
+            let button = PointerButton::Primary;
+            let (x, y) = center(&ui, "help");
+            ui.dispatch(InputEvent::PointerDown { x, y, button });
+            ui.dispatch(InputEvent::PointerUp { x, y, button });
+            ui.prepare_frame();
+            assert!(open.get(), "{case}: open");
+            assert!(ui.input.focus_scope().is_some(), "{case}: its scope pushed");
+            let (x, y) = center(&ui, "whats-new");
+            ui.dispatch(InputEvent::PointerMove { x, y });
+            ui.dispatch(InputEvent::PointerDown { x, y, button });
+            ui.dispatch(InputEvent::PointerUp { x, y, button });
+        } else {
+            ui.input.focus(&ui.scene, view.find("help"));
+            open.set(true);
+            ui.prepare_frame();
+            assert!(ui.input.focus_scope().is_some(), "{case}: its scope pushed");
+            ui.input.dispatch_to(
+                &ui.scene,
+                view.find("whats-new").unwrap(),
+                InputEvent::Activate,
+            );
+        }
+        ui.prepare_frame();
+        ui.prepare_frame();
+        assert!(opened.get(), "{case}: the action ran");
+        assert!(!open.get(), "{case}: the menu closed");
+        assert_eq!(ui.input.focus_scope(), None, "{case}: no scope left");
+        let page = view.find("page").expect("the page mounted");
+        let (split, _) = split(&ui, &natives, &PlaneSplit::default());
+        let scene = ui.scene.borrow();
+        let bounds = scene.bounds(page);
+        let (x, y) = (bounds.x + bounds.width / 2., bounds.y + bounds.height / 2.);
+        assert_eq!(
+            split.route(&scene, &ui.input, x, y),
+            PointerRoute::Native(page),
+            "{case}"
+        );
+    }
+}
+
+/// `route_explained` routes as `route` does at every point, and says why:
+/// the page itself, paint or a listener over it, or a modal scope it is
+/// outside of (named by its root).
+#[test]
+fn route_explained_routes_as_route_and_names_what_decided() {
+    use zgx::native_view::RouteWhy;
+    let mut ui = Ui::new(1000., 600.);
+    let natives = supported();
+    let web = WebView::new(&ui.runtime, WebViewOptions::default());
+    let open = ui.signal(false);
+    let view = ui.mount(provide(
+        natives.clone(),
+        browser(&web, true)
+            // A clickable box over the page that paints nothing: a listener
+            // in front, not overlay paint.
+            .child(
+                div()
+                    .id("catcher")
+                    .absolute()
+                    .left(700.)
+                    .top(150.)
+                    .w(50.)
+                    .h(50.)
+                    .on_click(|| {}),
+            )
+            .child(
+                modal("Dialog", open.clone())
+                    .id("dialog")
+                    .w(200.)
+                    .h(100.)
+                    .bg(rgb(0x333333)),
+            ),
+    ));
+    ui.prepare_frame();
+    let page = view.find("page").unwrap();
+    let agree = |ui: &Ui| {
+        let (split, _) = split(ui, &natives, &PlaneSplit::default());
+        let scene = ui.scene.borrow();
+        for x in (5..1000).step_by(45) {
+            for y in (5..600).step_by(45) {
+                let (x, y) = (x as f32, y as f32);
+                assert_eq!(
+                    split.route_explained(&scene, &ui.input, x, y).0,
+                    split.route(&scene, &ui.input, x, y),
+                    "at {x},{y}"
+                );
+            }
+        }
+    };
+    agree(&ui);
+    let why = |ui: &Ui, x: f32, y: f32| {
+        let (split, _) = split(ui, &natives, &PlaneSplit::default());
+        let scene = ui.scene.borrow();
+        split.route_explained(&scene, &ui.input, x, y).1
+    };
+    assert_eq!(why(&ui, 500., 350.), RouteWhy::Native(page));
+    // The popover and the glass composer are drawn over the page: overlay
+    // paint, which `route` asks about before listeners.
+    let popover = view.find("popover").unwrap();
+    assert_eq!(why(&ui, 250., 200.), RouteWhy::Overlay(popover));
+    assert_eq!(
+        why(&ui, 500., 550.),
+        RouteWhy::Overlay(view.find("composer").unwrap())
+    );
+    // A box that paints nothing but listens takes it as a listener.
+    assert_eq!(
+        why(&ui, 725., 175.),
+        RouteWhy::Listener(view.find("catcher").unwrap())
+    );
+    open.set(true);
+    ui.prepare_frame();
+    agree(&ui);
+    // The dialog's backdrop, in front of the page everywhere for its
+    // dismissal, takes the click: drawn there or listening.
+    assert!(matches!(
+        why(&ui, 500., 350.),
+        RouteWhy::Overlay(_) | RouteWhy::Listener(_)
+    ));
+    open.set(false);
+    ui.prepare_frame();
+    assert_eq!(why(&ui, 500., 350.), RouteWhy::Native(page));
+    // A scope left on the stack with nothing drawn in front (a menu's that
+    // was never closed): the page is outside it, and the answer names it.
+    let sidebar = view.find("sidebar").unwrap();
+    assert!(ui.input.push_focus_scope(&ui.scene, sidebar));
+    agree(&ui);
+    assert_eq!(
+        why(&ui, 500., 350.),
+        RouteWhy::OutsideScope {
+            native: page,
+            scope: sidebar
+        }
+    );
+}

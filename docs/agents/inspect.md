@@ -37,6 +37,9 @@ zgx inspect tree '#transcript' --depth 3
 zgx inspect node '"Copy"'             # kind, the script line that made it, role, name, value, state, box, text; a scroll view's offset of its range and stretch
                                       # a paragraph with a citation in it: reads: "step " [button "Citation 1"] "." (what a screen reader hears)
 zgx inspect find '"Copy"'             # every node a target matches
+zgx inspect route 500,320             # where a click there goes, a native view (a page) or the interface, and
+                                      # what decided it: overlay paint, a listener in front, a modal scope left open;
+                                      # each page under the point with every node it is registered at
 zgx inspect state                     # named states (ui.state, ui.persist, ui.shared) and their values
 zgx inspect state messages --full     # one state; long values are cut at 200 bytes unless --full
 zgx inspect errors                    # the script error, type errors, lint findings, layout warnings ("none")

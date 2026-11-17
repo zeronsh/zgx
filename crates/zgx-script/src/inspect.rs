@@ -50,6 +50,132 @@ struct Parts {
     marks: std::cell::RefCell<std::collections::HashMap<String, u64>>,
 }
 
+/// `route`'s answer: where pointer input at `(x, y)` goes, a native view
+/// (a page, a terminal) or zgx's interface, the step that decided it
+/// (`PlaneSplit::route_explained`), and the native views under the point
+/// with every node each is registered at and whether that node shows: one
+/// page registered at two nodes is shown by only one of them.
+fn route_report(
+    ui: &Ui,
+    natives: Option<&zgx::native_view::NativeViews>,
+    x: f32,
+    y: f32,
+) -> (String, Value) {
+    use zgx::native_view::{PointerRoute, RouteWhy};
+    let at = format!("{x:.0},{y:.0}");
+    let Some(natives) = natives else {
+        return (
+            format!("{at}: the interface (this window has no native views)"),
+            Value::record([
+                ("route", Value::from("ui")),
+                ("why", Value::from("no native views")),
+            ]),
+        );
+    };
+    let n = |node: zgx::scene::NodeId| format!("@{}", driver::number(node));
+    let split = natives.split();
+    let scene = ui.scene.borrow();
+    let (route, why) = split.route_explained(&scene, &ui.input, x, y);
+    let because = match why {
+        RouteWhy::NoNativeViews => "this window shows no native views".to_string(),
+        RouteWhy::Busy => "the input state was busy (mid-dispatch)".to_string(),
+        RouteWhy::NothingHit => "nothing there takes input".to_string(),
+        RouteWhy::Overlay(node) => format!("{} is drawn over the native view there", n(node)),
+        RouteWhy::Listener(node) => format!("{} in front listens for it", n(node)),
+        RouteWhy::Disabled(node) => format!("{} is disabled", n(node)),
+        RouteWhy::NotShown(node) => format!("{} isn't shown", n(node)),
+        RouteWhy::OutsideScope { native, scope } => format!(
+            "{} is outside the active modal scope, {} (a dialog or menu still open, or one never closed)",
+            n(native),
+            n(scope)
+        ),
+        RouteWhy::Native(node) => format!("{} takes it", n(node)),
+    };
+    let goes = match route {
+        PointerRoute::Native(node) => format!("the native view {}", n(node)),
+        PointerRoute::Ui => "the interface".to_string(),
+    };
+    let mut lines = vec![format!("{at}: {goes}: {because}")];
+    // The native views whose box holds the point, and where each is registered.
+    let views = natives.views();
+    let mut under = Vec::new();
+    for placement in split.natives() {
+        let Some(r) = placement.visible() else {
+            continue;
+        };
+        if !(x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height) {
+            continue;
+        }
+        let Some((_, content)) = views.iter().find(|(node, _)| *node == placement.node) else {
+            continue;
+        };
+        let at: Vec<(zgx::scene::NodeId, bool)> = views
+            .iter()
+            .filter(|(_, other)| other.same(content))
+            .map(|(node, _)| (*node, scene.contains(*node) && scene.layout_visible(*node)))
+            .collect();
+        let listed = at
+            .iter()
+            .map(|(node, shown)| {
+                format!(
+                    "{} ({})",
+                    n(*node),
+                    if *shown { "shown" } else { "not shown" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "  {} {}: registered at {listed}",
+            content.label(),
+            n(placement.node)
+        ));
+        if at.len() > 1 {
+            lines.push(format!(
+                "  one {} registered at {} nodes: its host shows it in one of them, so clicks on the others reach nothing",
+                content.label(),
+                at.len()
+            ));
+        }
+        under.push(Value::record([
+            ("node", Value::Num(driver::number(placement.node) as f64)),
+            ("content", Value::from(content.label().as_str())),
+            (
+                "registered",
+                Value::List(
+                    at.iter()
+                        .map(|(node, shown)| {
+                            Value::record([
+                                ("node", Value::Num(driver::number(*node) as f64)),
+                                ("shown", Value::Bool(*shown)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]));
+    }
+    let data = Value::record([
+        (
+            "route",
+            Value::from(match route {
+                PointerRoute::Native(_) => "native",
+                PointerRoute::Ui => "ui",
+            }),
+        ),
+        (
+            "node",
+            match route {
+                PointerRoute::Native(node) => Value::Num(driver::number(node) as f64),
+                PointerRoute::Ui => Value::Nil,
+            },
+        ),
+        ("why", Value::from(because.as_str())),
+        ("under", Value::List(under)),
+    ]);
+    (lines.join("\n"), data)
+}
+
 fn ok(text: String, data: Value) -> String {
     Value::record([
         ("ok", Value::Bool(true)),
@@ -661,6 +787,8 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   set     name value                             set a named state (value is JSON)
   click   target                                 press and release at its middle
   hover   target|x,y                             move the pointer there, as a hand does
+  route   target|x,y                             where a click there goes, a native view (a page) or the
+                                                 UI, and what decided it (an overlay, a listener, a scope)
   right-click target|x,y                         click the context button there (a context menu opens)
   drag    target|x,y to                          drag with the primary button; `to` is a target or x,y
   type    target text                            click it, then type text
@@ -1126,6 +1254,10 @@ impl Session {
             "click" => reach(&ui).map(|(node, b)| {
                 driver::click_at(&mut ui, b);
                 (format!("clicked @{}", driver::number(node)), Value::Nil)
+            }),
+            "route" => point_of(&ui, "target").map(|(x, y)| {
+                let natives = self.0.inspector.as_ref().and_then(|i| i.native_views());
+                route_report(&ui, natives.as_ref(), x, y)
             }),
             "hover" => point_of(&ui, "target").map(|at| {
                 driver::hover_at(&mut ui, at);
