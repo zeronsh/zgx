@@ -45,7 +45,10 @@ pub use tasks::{frame_asked, timer_armed};
 /// Sound for a Luau app's `audio`: zgx-audio pulled by an audio worklet
 /// (`audio`).
 #[cfg(feature = "audio")]
-pub use audio::{__audio_drain_and_wake, __audio_state, install_audio, install_audio_at};
+pub use audio::{
+    __audio_drain_and_wake, __audio_stall_next_answer, __audio_state, install_audio,
+    install_audio_at,
+};
 /// The page's `fetch` as a Luau app's transport (`ui.fetch`): relative
 /// URLs read against the app's base (`luau`).
 #[cfg(feature = "luau")]
