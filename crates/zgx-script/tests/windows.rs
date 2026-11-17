@@ -249,6 +249,37 @@ fn the_window_zoom_is_a_state_a_script_reads_and_sets() {
     assert!(!h.ui.zoomable());
 }
 
+/// `ui.window.scale`: how many device pixels a point is, followed as the
+/// display or the zoom changes it, read-only; 1 until the window has one.
+#[test]
+fn the_window_scale_is_followed_and_read_only() {
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.text { id = "scale", function() return `scale {ui.window.scale:get()}` end },
+            ui.button { id = "set", w = 20, h = 20, on_click = function() ui.window.scale:set(3) end },
+        }"##,
+    );
+    h.host.window_zoom(&h.ui);
+    h.frames(1);
+    assert_eq!(h.text("scale"), "scale 1");
+    // A display at 150%, as the host draws it.
+    h.ui.scene.borrow_mut().set_pixel_scale(1.5);
+    h.frames(2);
+    assert_eq!(h.text("scale"), "scale 1.5");
+    // Moved to a 2× display.
+    h.ui.scene.borrow_mut().set_pixel_scale(2.);
+    h.frames(2);
+    assert_eq!(h.text("scale"), "scale 2");
+    assert_eq!(h.error(), None);
+    // The system's to say, not the script's.
+    h.click("set");
+    assert!(
+        h.error().is_some_and(|e| e.contains("scale")),
+        "{:?}",
+        h.error()
+    );
+}
+
 /// A script that never reads `ui.window.zoom` makes no state for it.
 #[test]
 fn the_window_zoom_is_made_on_first_read() {
