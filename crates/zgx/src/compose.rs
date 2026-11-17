@@ -4676,20 +4676,12 @@ fn mount_portal(
             .as_ref()
             .and_then(|r| r.portal.as_ref())
             .is_some_and(|p| p.anchor_fill);
-    // Filling its share of the row, the slot is the flex item: it takes its
-    // anchor's smallest width (CSS's `min-width: 0` on a field that may
-    // shrink below its text), or it would stop at what the anchor holds.
-    let fill_min_width = anchor
-        .as_ref()
-        .filter(|_| fill)
-        .and_then(|a| a.styles.rare().min_width);
     let owner = ui.container(
         parent,
         Layout::Overlay,
         crate::scene::Style {
             absolute: !anchored,
             flex_grow: if fill { 1. } else { 0. },
-            min_width: fill_min_width,
             align: if is_submenu || fill {
                 crate::scene::Align::Stretch
             } else {
@@ -4721,6 +4713,30 @@ fn mount_portal(
             || a.rare.as_ref().is_some_and(|r| r.wraps_bare_button)
     });
     let anchor = anchor.map(|anchor| mount(ui, owner, *anchor, environment.clone()));
+    // Filling its share of the row, the slot is the flex item: it takes the
+    // smallest width of what its anchor lays out as (CSS's `min-width: 0`
+    // on a field that may shrink below its text), or it would stop at what
+    // the anchor holds. Read once the anchor's style is in the scene: its
+    // binding, made before this one, runs first (a component, a script's
+    // field, has its styles only once built).
+    if fill && let Some(anchor) = anchor {
+        let weak = ui.downgrade();
+        ui.bind(owner, move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut scene = ui.scene.borrow_mut();
+            if !scene.contains(anchor) {
+                return;
+            }
+            let min_width = scene.style(scene.laid_out_as(anchor)).min_width;
+            let mut style = scene.style(owner);
+            if style.min_width != min_width {
+                style.min_width = min_width;
+                scene.set_style(owner, style);
+            }
+        });
+    }
     if let Some(anchor) = anchor {
         ui.listen_popup_soon(anchor);
         // What the trigger opens, from the start (a lazy panel isn't built
