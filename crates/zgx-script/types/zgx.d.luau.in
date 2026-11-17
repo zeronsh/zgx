@@ -2411,6 +2411,11 @@ export type NodeProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: number?,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: (number | Readable<number> | (() -> number))?,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- Whether a switch, checkbox or radio of the app's own is on

@@ -9,6 +9,7 @@ use zgx::{
     scene::NodeId,
     semantics::{Role, SemanticNode},
 };
+use zgx_script::Value;
 
 fn node(h: &mut Harness, id: &str) -> SemanticNode {
     let n = h.find(id).unwrap_or_else(|| panic!("no node `{id}`"));
@@ -1460,4 +1461,41 @@ fn a_dialog_an_app_builds_itself_is_modal_when_it_says_so() {
     assert_eq!(h.error(), None);
     assert!(node(&mut h, "sheet").modal);
     assert!(!node(&mut h, "panel").modal, "only when it says so");
+}
+
+/// `level`: a tree item's depth (`aria-level`). A number is kept as it is;
+/// a state or function is followed, so a row whose depth changes in place is
+/// read at its new depth by the same node, without a rebuild.
+#[test]
+fn a_tree_items_level_is_a_number_or_follows_its_depth() {
+    let mut h = Harness::inline(
+        r#"local depth = ui.state("depth", 1)
+return ui.column {
+    ui.row { id = "fixed", role = "treeitem", label = "Fixed", level = 2, ui.text "Fixed" },
+    ui.row { id = "moved", role = "treeitem", label = "Moved", level = depth, ui.text "Moved" },
+    ui.row { id = "worked", role = "treeitem", label = "Worked out",
+        level = function() return depth:get() + 1 end, ui.text "Worked out" },
+}"#,
+    );
+    h.frames(1);
+    assert_eq!(node(&mut h, "fixed").level, Some(2));
+    assert_eq!(node(&mut h, "moved").level, Some(1));
+    assert_eq!(node(&mut h, "worked").level, Some(2));
+    let (moved, worked) = (h.find("moved"), h.find("worked"));
+    h.host.set_state("depth", Value::Num(3.)).unwrap();
+    h.frames(1);
+    assert_eq!(node(&mut h, "moved").level, Some(3));
+    assert_eq!(node(&mut h, "worked").level, Some(4));
+    assert_eq!(node(&mut h, "fixed").level, Some(2));
+    assert_eq!(
+        (h.find("moved"), h.find("worked")),
+        (moved, worked),
+        "the same nodes: nothing was rebuilt"
+    );
+}
+
+#[test]
+#[should_panic(expected = "`level` is a depth from 1 to 255, not 0")]
+fn a_level_out_of_range_says_so() {
+    Harness::inline(r#"return ui.row { role = "treeitem", level = 0, ui.text "Row" }"#);
 }
