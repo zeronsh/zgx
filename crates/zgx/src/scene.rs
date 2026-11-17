@@ -8361,6 +8361,16 @@ impl Scene {
         node.kind = NodeKind::Image(image);
         crate::gpu_view::count_plane_frame();
     }
+    /// Room for `count` more children of `parent`, as many as mounting is
+    /// about to append (`compose::mount_element`): one allocation of the
+    /// size they take, not one each time the list doubles. A list that will
+    /// be long grows as ever, so that its outgrowing is seen (`append_as`).
+    pub(crate) fn reserve_children(&mut self, parent: NodeId, count: usize) {
+        let children = self.node_mut(parent).children.get_mut();
+        if children.len() + count < COLUMN_KEPT_FROM {
+            children.reserve_exact(count);
+        }
+    }
     /// Append a node of `kind` with `style` as `parent`'s last child.
     pub fn append(&mut self, parent: NodeId, kind: NodeKind, style: Style) -> NodeId {
         self.append_as::<false>(parent, kind, style)
@@ -18530,6 +18540,27 @@ mod tests {
         // Past an `i32`'s pixels, as it is.
         let huge = Rect::new(-1e12, -1e12, 2e12, 2e12);
         assert_eq!(snap_box(huge, 2.), huge);
+    }
+    /// Children reserved for before they are appended take one allocation of
+    /// their size; a list that will be long grows as ever, so that its
+    /// outgrowing is seen (`long_lists`).
+    #[test]
+    fn reserved_children_take_their_room_at_once_unless_long() {
+        let mut scene = Scene::new(200., 200.);
+        let root = scene.root();
+        let short = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.reserve_children(short, 5);
+        for _ in 0..5 {
+            scene.append(short, NodeKind::Container(Layout::Row), Style::default());
+        }
+        assert_eq!(scene.node_mut(short).children.get_mut().capacity(), 5);
+        let long = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.reserve_children(long, 100);
+        assert_eq!(scene.node_mut(long).children.get_mut().capacity(), 0);
+        for _ in 0..100 {
+            scene.append(long, NodeKind::Container(Layout::Row), Style::default());
+        }
+        assert!(scene.long_lists, "a long list's outgrowing is seen");
     }
     /// `given_size` reads the width and height `style` gives: a plain node's,
     /// one laid out otherwise than given (right to left), and a contents
