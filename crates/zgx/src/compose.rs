@@ -4658,12 +4658,20 @@ fn mount_portal(
             .as_ref()
             .and_then(|r| r.portal.as_ref())
             .is_some_and(|p| p.anchor_fill);
+    // Filling its share of the row, the slot is the flex item: it takes its
+    // anchor's smallest width (CSS's `min-width: 0` on a field that may
+    // shrink below its text), or it would stop at what the anchor holds.
+    let fill_min_width = anchor
+        .as_ref()
+        .filter(|_| fill)
+        .and_then(|a| a.styles.rare().min_width);
     let owner = ui.container(
         parent,
         Layout::Overlay,
         crate::scene::Style {
             absolute: !anchored,
             flex_grow: if fill { 1. } else { 0. },
+            min_width: fill_min_width,
             align: if is_submenu || fill {
                 crate::scene::Align::Stretch
             } else {
