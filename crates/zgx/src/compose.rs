@@ -7571,25 +7571,22 @@ fn open_element(
         );
     }
     if let Some(mut source) = svg_compute {
+        // The artwork fills its box from the start: laid out with it, in
+        // the frame's one pass (a size given it once the box had one was
+        // a second).
         let child = ui.container(
             root,
             Layout::Overlay,
             crate::scene::Style {
                 absolute: true,
+                width_percent: Some(1.),
+                height_percent: Some(1.),
                 ..Default::default()
             },
         );
-        // Its size arrives with the frame's layout (deferred: an icon
-        // mounting forces no layout of its own, so a thread of hundreds
-        // lays out once).
-        let size = ui.observe_content_size_deferred(root);
         let scene = ui.scene.clone();
         let (typography, theme) = (environment.typography.clone(), environment.theme.clone());
         ui.bind(root, move || {
-            let (width, height) = size.get();
-            if width.is_nan() || height.is_nan() {
-                return;
-            }
             let mut data = source();
             // `currentColor`: the text colour here, as it changes.
             if data.follows_text_color() {
@@ -7598,15 +7595,6 @@ fn open_element(
             let mut scene = scene.borrow_mut();
             scene.set_kind(child, NodeKind::Svg(data));
             scene.mark_drawn_in_box(child);
-            scene.set_style(
-                child,
-                crate::scene::Style {
-                    width: Some(width),
-                    height: Some(height),
-                    absolute: true,
-                    ..Default::default()
-                },
-            );
         });
     }
     let pictured = canvas_compute.is_some();
