@@ -1,0 +1,30 @@
+[package]
+name = "zgx-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "zgx's text shaping and measuring with no renderer: the fonts, shaped text and prepared lines zgx-gpu draws from."
+keywords = ["gui", "text", "shaping", "fonts"]
+categories = ["gui", "text-processing"]
+
+[features]
+# Words break at their hyphenation points where text asks (zgx's `hyphens`):
+# typst's `hypher`, all its 48 languages' patterns, about 1.2 MB of a release
+# binary, read in place (no heap). The system's language picks them.
+hyphens = ["zgx/hyphens", "dep:hypher"]
+
+[dependencies]
+hypher = { version = "0.1.8", optional = true }
+smallvec = "1.16"
+zgx = { path = "../zgx", version = "0.1.10", default-features = false }
+cosmic-text = { package = "zgx-cosmic-text", version = "0.19.14", path = "../../vendor/cosmic-text", features = ["shape-run-cache"] }
+unicode-segmentation = "1.12"
+rustc-hash = "2.1"
+
+# fontconfig's configuration, read as fontdb reads it, for what the system
+# font cache watches (font_cache.rs); fontdb's own, already in the tree.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+fontconfig-parser = { version = "0.5.8", default-features = false }

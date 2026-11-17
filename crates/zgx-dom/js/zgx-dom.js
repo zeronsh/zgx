@@ -530,7 +530,7 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         const width = floats[i++];
         const height = floats[i++];
         const count = ops[i++];
-        const reader = { next: () => ops[i++], num: () => floats[i++], str };
+        const reader = { next: () => ops[i++], num: () => floats[i++], str, memory };
         paint(node, width, height, count, reader);
         break;
       }
@@ -1400,6 +1400,25 @@ function rgba(word) {
   return "rgba(" + (word >>> 24) + "," + ((word >>> 16) & 255) + "," + ((word >>> 8) & 255) + "," + (word & 255) / 255 + ")";
 }
 
+// Canvas pictures by image id (`Draw::Image`), the most recent kept.
+const pictures = new Map();
+
+function picture(r, lo, hi, w, h, ptr, len) {
+  const key = hi * 4294967296 + lo;
+  let canvas = pictures.get(key);
+  if (canvas) pictures.delete(key);
+  else {
+    canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const pixels = new Uint8ClampedArray(r.memory.buffer, ptr, len).slice();
+    canvas.getContext("2d").putImageData(new ImageData(pixels, w, h), 0, 0);
+    if (pictures.size >= 64) pictures.delete(pictures.keys().next().value);
+  }
+  pictures.set(key, canvas);
+  return canvas;
+}
+
 function paint(node, width, height, count, r) {
   const ratio = devicePixelRatio || 1;
   const w = Math.max(1, Math.round(width * ratio));
@@ -1453,7 +1472,8 @@ function paint(node, width, height, count, r) {
     return p;
   };
   const brush = () => {
-    switch (r.next()) {
+    const kind = r.next();
+    switch (kind) {
       case 0:
         return rgba(r.next());
       case 1: {
@@ -1461,6 +1481,16 @@ function paint(node, width, height, count, r) {
         const n = r.next();
         for (let k = 0; k < n; k++) g.addColorStop(r.num(), rgba(r.next()));
         return g;
+      }
+      case 3:
+      case 4: {
+        // Radial or conic, drawn in the unit space `matrix` maps onto the
+        // canvas (`cover`): Canvas 2D's gradients take no matrix of their own.
+        const matrix = [r.num(), r.num(), r.num(), r.num(), r.num(), r.num()];
+        const g = kind === 3 ? ctx.createRadialGradient(0, 0, 0, 0, 0, 1) : ctx.createConicGradient(0, 0, 0);
+        const n = r.next();
+        for (let k = 0; k < n; k++) g.addColorStop(r.num(), rgba(r.next()));
+        return { g, matrix };
       }
       default: {
         // Diagonal stripes: a tile of one, repeated.
@@ -1486,6 +1516,39 @@ function paint(node, width, height, count, r) {
       }
     }
   };
+  // Fills `to` (its clip or what it is drawn into) with a radial or conic
+  // brush: the canvas's bounds taken into the brush's unit space and filled.
+  const cover = (to, { g, matrix }) => {
+    const back = new DOMMatrix(matrix).inverse();
+    const corners = [[0, 0], [width, 0], [0, height], [width, height]].map(([x, y]) => back.transformPoint({ x, y }));
+    const xs = corners.map((p) => p.x), ys = corners.map((p) => p.y);
+    const x = Math.min(...xs), y = Math.min(...ys);
+    to.transform(...matrix);
+    to.fillStyle = g;
+    to.fillRect(x, y, Math.max(...xs) - x, Math.max(...ys) - y);
+  };
+  // A second canvas the canvas's size, cleared, drawn in CSS pixels: where a
+  // gradient stroke or a shadow's shape is made before it is drawn here.
+  let spare = null;
+  const scratch = () => {
+    if (!spare) {
+      spare = document.createElement("canvas");
+      spare.width = w;
+      spare.height = h;
+    }
+    const s = spare.getContext("2d");
+    s.setTransform(1, 0, 0, 1, 0, 0);
+    s.globalCompositeOperation = "source-over";
+    s.clearRect(0, 0, w, h);
+    s.setTransform(ratio, 0, 0, ratio, 0, 0);
+    return s;
+  };
+  const unscaled = (draw) => {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    draw();
+    ctx.restore();
+  };
   const caps = ["butt", "round", "square"];
   const joins = ["miter", "round", "bevel"];
   let depth = 0;
@@ -1494,8 +1557,17 @@ function paint(node, width, height, count, r) {
     switch (r.next()) {
       case 1: {
         const rule = r.next() === 1 ? "evenodd" : "nonzero";
-        ctx.fillStyle = brush();
-        ctx.fill(path(), rule);
+        const style = brush();
+        const shape = path();
+        if (style.matrix) {
+          ctx.save();
+          ctx.clip(shape, rule);
+          cover(ctx, style);
+          ctx.restore();
+        } else {
+          ctx.fillStyle = style;
+          ctx.fill(shape, rule);
+        }
         break;
       }
       case 2: {
@@ -1507,8 +1579,25 @@ function paint(node, width, height, count, r) {
         for (let n = r.next(); n > 0; n--) dashes.push(r.num());
         ctx.setLineDash(dashes);
         ctx.lineDashOffset = r.num();
-        ctx.strokeStyle = brush();
-        ctx.stroke(path());
+        const style = brush();
+        const shape = path();
+        if (style.matrix) {
+          // The line drawn alone, then the gradient kept only where it is.
+          const s = scratch();
+          s.lineWidth = ctx.lineWidth;
+          s.lineCap = ctx.lineCap;
+          s.lineJoin = ctx.lineJoin;
+          s.miterLimit = ctx.miterLimit;
+          s.setLineDash(ctx.getLineDash());
+          s.lineDashOffset = ctx.lineDashOffset;
+          s.stroke(shape);
+          s.globalCompositeOperation = "source-in";
+          cover(s, style);
+          unscaled(() => ctx.drawImage(spare, 0, 0));
+        } else {
+          ctx.strokeStyle = style;
+          ctx.stroke(shape);
+        }
         break;
       }
       case 3: {
@@ -1524,6 +1613,47 @@ function paint(node, width, height, count, r) {
           depth--;
         }
         break;
+      case 6: {
+        // A picture placed by `fit` in its box, cut to the box's corners.
+        const at = [r.next(), r.next(), r.next(), r.next(), r.next(), r.next()];
+        const [x, y, bw, bh, radius, opacity, px, py, pw, ph] = Array.from({ length: 10 }, r.num);
+        if (at[5] === 0 || !(bw > 0 && bh > 0 && opacity > 0)) break;
+        const box = new Path2D();
+        if (radius > 0) box.roundRect(x, y, bw, bh, radius);
+        else box.rect(x, y, bw, bh);
+        ctx.save();
+        ctx.clip(box);
+        ctx.globalAlpha = Math.min(1, opacity);
+        ctx.drawImage(picture(r, ...at), px, py, pw, ph);
+        ctx.restore();
+        break;
+      }
+      case 7: {
+        // A shadow: its shape (grown or shrunk by `spread`) made alone, then
+        // drawn far off the canvas with Canvas 2D's shadow brought back over
+        // it, blurred (`shadowBlur` is twice the sigma, in device pixels).
+        const color = rgba(r.next()), dx = r.num(), dy = r.num(), blur = r.num(), spread = r.num();
+        const s = scratch();
+        const shape = path();
+        s.fillStyle = s.strokeStyle = "#000";
+        s.setLineDash([]);
+        s.fill(shape);
+        if (spread !== 0) {
+          s.lineWidth = Math.abs(spread) * 2;
+          s.lineJoin = "round";
+          if (spread < 0) s.globalCompositeOperation = "destination-out";
+          s.stroke(shape);
+        }
+        unscaled(() => {
+          const far = 2 * w + 2 * h;
+          ctx.shadowColor = color;
+          ctx.shadowBlur = Math.max(0, blur) * 2 * ratio;
+          ctx.shadowOffsetX = dx * ratio + far;
+          ctx.shadowOffsetY = dy * ratio;
+          ctx.drawImage(spare, -far, 0);
+        });
+        break;
+      }
       default:
         texts.push([r.str(), r.str(), r.num(), r.num(), r.next(), r.next(), r.next()]);
     }
