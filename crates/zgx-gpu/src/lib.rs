@@ -3993,6 +3993,22 @@ pub struct ShaderCacheCounts {
     /// launch.
     pub unwritten: u32,
 }
+/// The pixels of a frame at `scale` that `rect` (in points) covers: `(x, y,
+/// width, height)`, less any part off its left or top edge
+/// (`ShownFrame::read` cuts the right and bottom). How a window's host reads
+/// a picture of an area of what it showed (`Ui::on_snapshot`).
+#[doc(hidden)]
+pub fn pixel_region(rect: zgx::scene::Rect, scale: f64) -> (u32, u32, u32, u32) {
+    let span = |from: f32, length: f32| {
+        let start = (f64::from(from) * scale).round();
+        let end = (f64::from(from + length) * scale).round();
+        let start = start.max(0.);
+        (start as u32, (end - start).max(0.) as u32)
+    };
+    let (x, width) = span(rect.x, rect.width);
+    let (y, height) = span(rect.y, rect.height);
+    (x, y, width, height)
+}
 /// What the shaders kept between launches did so far in this process, so a
 /// start's marks say whether it compiled them: `None` where none are kept
 /// (other platforms, or crates.io's wgpu-hal).
@@ -23152,5 +23168,28 @@ mod copy_refusal_tests {
             },
         );
         assert_eq!(refused, None);
+    }
+}
+
+#[cfg(test)]
+mod pixel_region_tests {
+    use super::pixel_region;
+
+    #[test]
+    fn a_snapshot_reads_only_the_pixels_its_points_cover() {
+        let rect = |x, y, width, height| zgx::scene::Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert_eq!(pixel_region(rect(10., 5., 30., 20.), 2.), (20, 10, 60, 40));
+        // Partly off the left and top: what is left of it, from the edge.
+        assert_eq!(
+            pixel_region(rect(-100., -10., 300., 40.), 1.),
+            (0, 0, 200, 30)
+        );
+        // Wholly off: nothing.
+        assert_eq!(pixel_region(rect(-50., 0., 40., 40.), 2.).2, 0);
     }
 }
