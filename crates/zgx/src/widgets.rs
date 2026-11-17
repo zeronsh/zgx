@@ -1503,6 +1503,20 @@ pub struct CopyRequest<'a> {
     /// What is selected.
     pub text: &'a str,
 }
+/// An Edit menu item that works on what has focus or is selected
+/// (`Ui::edit_command`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditCommand {
+    /// Copy the selection.
+    Copy,
+    /// Copy the selection, then delete it.
+    Cut,
+    /// Paste the clipboard's text in place of the selection.
+    Paste,
+    /// Select all the text there is to select.
+    SelectAll,
+}
 /// What goes on the clipboard: text, and HTML beside it where given.
 /// (Pin line.)
 #[doc(hidden)]
@@ -4037,11 +4051,9 @@ impl Ui {
         true
     }
     /// What a desktop window does with ⌘C, ⌘X and ⌘V (Ctrl elsewhere) that
-    /// nothing in the view took: copy, cut or paste in the focused editor
-    /// through `platform` (its `View::on_paste` hearing a paste first), or
-    /// copy the selected display text, with its HTML. For what sends keys
-    /// straight to the view (`zgx inspect key`, tests) to reach the paths a
-    /// window's keys do. Whether it took the key.
+    /// nothing in the view took: [`Ui::edit_command`]'s copy, cut or paste.
+    /// For what sends keys straight to the view (`zgx inspect key`, tests)
+    /// to reach the paths a window's keys do. Whether it took the key.
     #[doc(hidden)]
     pub fn clipboard_shortcut(
         &self,
@@ -4055,29 +4067,50 @@ impl Ui {
         if !modifiers.primary_shortcut() || modifiers.alt {
             return false;
         }
-        let k = k.to_ascii_lowercase();
+        let command = match k.to_ascii_lowercase().as_str() {
+            "c" => EditCommand::Copy,
+            "x" => EditCommand::Cut,
+            "v" => EditCommand::Paste,
+            _ => return false,
+        };
+        self.edit_command(command, platform)
+    }
+    /// What the Edit menu's item does, as its shortcut does it, through
+    /// `platform`'s clipboard. In the focused editor: copy and cut through
+    /// its `View::on_copy` (`Ui::copy_from`), paste with its `View::on_paste`
+    /// hearing it first, Select All of its text. With none focused: copy the
+    /// selected display text, through its region's `View::on_selection_copy`,
+    /// with its HTML, and Select All of the region last selected in
+    /// ([`Ui::select_all`]). Whether anything took it.
+    #[doc(hidden)]
+    pub fn edit_command(
+        &self,
+        command: EditCommand,
+        platform: &dyn crate::platform::Platform,
+    ) -> bool {
+        let write = |text: String, html: Option<String>| match html {
+            Some(html) => platform.set_clipboard_rich_text(text, html),
+            None => platform.set_clipboard_text(text),
+        };
+        if command == EditCommand::SelectAll {
+            return self.select_all();
+        }
         let Some(editor) = self.focused_editor() else {
-            if k != "c" || !self.has_text_selection() {
+            if command != EditCommand::Copy || !self.has_text_selection() {
                 return false;
             }
-            self.copy_selection_from(|text, html| match html {
-                Some(html) => platform.set_clipboard_rich_text(text, html),
-                None => platform.set_clipboard_text(text),
-            });
+            self.copy_selection_from(write);
             return true;
         };
-        match k.as_str() {
-            "v" => {
+        match command {
+            EditCommand::Paste => {
                 let text = platform.clipboard_text();
                 self.paste_into(&editor, text.as_deref());
             }
-            "c" | "x" => {
-                let text = editor.copy();
-                if !text.is_empty() && platform.set_clipboard_text(text) && k == "x" {
-                    editor.cut();
-                }
+            EditCommand::Copy | EditCommand::Cut => {
+                self.copy_from(&editor, command == EditCommand::Cut, write);
             }
-            _ => return false,
+            EditCommand::SelectAll => {}
         }
         true
     }

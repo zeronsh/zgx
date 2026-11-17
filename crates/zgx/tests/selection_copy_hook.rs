@@ -9,7 +9,7 @@ use zgx::{
     input::{InputEvent, Key, Modifiers, PointerButton},
     platform::{FilePicker, Pending, Platform, PlatformService},
     scene::NodeId,
-    widgets::{ClipboardContent, SelectionCopyRequest, Ui},
+    widgets::{ClipboardContent, EditCommand, SelectionCopyRequest, Ui},
 };
 
 /// A clipboard in memory: what was written, text and HTML.
@@ -341,4 +341,50 @@ fn press_at(ui: &mut Ui, x: f32, y: f32) {
     ui.dispatch(InputEvent::PointerDown { x, y, button });
     ui.dispatch(InputEvent::PointerUp { x, y, button });
     ui.prepare_frame();
+}
+
+/// The Edit menu's Select All and Copy (`Ui::edit_command`), as a host's
+/// menu runs them: with no field focused, Select All takes the region last
+/// pressed in, and Copy goes through its hook, as ⌘A and ⌘C do.
+#[test]
+fn the_edit_menus_select_all_and_copy_take_the_region_last_pressed_in() {
+    let clipboard = Rc::new(Clipboard::default());
+    let heard = Heard::default();
+    let mut ui = Ui::new(400., 300.);
+    region(
+        &mut ui,
+        &clipboard,
+        vec![text("Alpha").id("a"), text("Beta").id("b")],
+        Some(upper(&heard)),
+    );
+    // Nothing selected or pressed in: nothing to select, nothing copies.
+    assert!(!ui.edit_command(EditCommand::Copy, clipboard.as_ref()));
+    let button = PointerButton::Primary;
+    ui.dispatch(InputEvent::PointerDown {
+        x: 2.,
+        y: 10.,
+        button,
+    });
+    ui.dispatch(InputEvent::PointerUp {
+        x: 2.,
+        y: 10.,
+        button,
+    });
+    ui.prepare_frame();
+    assert!(ui.edit_command(EditCommand::SelectAll, clipboard.as_ref()));
+    ui.prepare_frame();
+    let selected = ui.selected_text();
+    assert!(
+        selected.starts_with("Alpha") && selected.ends_with("Beta"),
+        "{selected}"
+    );
+    assert!(ui.edit_command(EditCommand::Copy, clipboard.as_ref()));
+    assert_eq!(
+        clipboard.last().map(|(text, _)| text),
+        Some(selected.to_uppercase())
+    );
+    assert_eq!(heard.borrow().len(), 1, "through the region's hook");
+    // Cut and paste with no field focused do nothing.
+    assert!(!ui.edit_command(EditCommand::Cut, clipboard.as_ref()));
+    assert!(!ui.edit_command(EditCommand::Paste, clipboard.as_ref()));
 }
