@@ -56,6 +56,8 @@ mod editor_input_mode;
 mod editor_line_images;
 #[path = "../editor_long_documents.rs"]
 mod editor_long_documents;
+#[path = "../editor_mark_turn.rs"]
+mod editor_mark_turn;
 #[path = "../editor_model_normalization.rs"]
 mod editor_model_normalization;
 #[path = "../editor_native_caret.rs"]

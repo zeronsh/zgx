@@ -325,6 +325,11 @@ pub struct LineMark {
     /// is how much it covers.
     #[doc(hidden)]
     pub over_text: bool,
+    /// Turned this far clockwise about its centre, in degrees (a toggle's
+    /// chevron, 90 open): a change eases there over `motion.duration.fast`,
+    /// easing out, unless the system reduces motion.
+    #[doc(hidden)]
+    pub rotate: f32,
 }
 /// A line mark's picture (`LineMark::image`): decoded pixels and how they fit the mark's box. A file is decoded by
 /// the app, as an image view's is (`zgx_gpu::assets::decode_image_kept`), and kept in its `ImageCache`.
@@ -365,6 +370,7 @@ impl Default for LineMark {
             decoration: None,
             pinned: false,
             over_text: false,
+            rotate: 0.,
         }
     }
 }

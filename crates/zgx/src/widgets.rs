@@ -304,6 +304,7 @@ fn paint_marks(
     wanted: Vec<WantedMark>,
     font: &crate::text_layout::FontStyle,
     over: bool,
+    turned: bool,
 ) {
     if !wanted.is_empty() && layer.get().is_none_or(|layer| !s.contains(layer)) {
         let made = s.append(
@@ -337,6 +338,17 @@ fn paint_marks(
             let Some(id) = ids.next() else { return };
             let clip = clip.map(|(l, r)| crate::scene::ClipInset::px(0., r, 0., l));
             s.set_clip_inset(id, clip);
+            // Turned about its centre (`LineMark::rotate`); a node a turned mark held is set back. Asked only once a
+            // mark has turned.
+            if turned {
+                s.set_local_transform(
+                    id,
+                    crate::scene::LocalTransform {
+                        rotate: mark.rotate.to_radians(),
+                        ..crate::scene::LocalTransform::IDENTITY
+                    },
+                );
+            }
             let quad = crate::scene::QuadStyle {
                 fill: mark.fill,
                 radius: mark.radius,
@@ -748,6 +760,11 @@ struct CodeHint {
     mark_nodes: RefCell<Vec<NodeId>>,
     /// Its marks over the text (`LineMark::over_text`): a layer above it, made as the first is.
     mark_layer_over: Cell<Option<NodeId>>,
+    /// Its marks' turns (`LineMark::rotate`), by line and place among its marks: made as the first mark turns.
+    mark_turns: RefCell<Option<Box<crate::mark_turn::Turns>>>,
+    /// The lines whose marks the last draw showed: a mark turned on one of them was showing unturned, and eases
+    /// from there; one first shown turned (scrolled to, or at the first draw) shows at its angle.
+    marks_shown: Cell<(usize, usize)>,
     mark_nodes_over: RefCell<Vec<NodeId>>,
     /// Some line or mark node was clipped to its scroll group's frame (`LineInset::scroll_group`): with no groups
     /// left, their clips go once.
@@ -2600,6 +2617,8 @@ pub(crate) struct UiStorage {
     paging: RefCell<crate::paging::State>,
     /// Scroll views easing to where `NodeHandle::scroll_into_view` asked.
     scroll_reveals: RefCell<crate::scroll_reveal::State>,
+    /// Text areas with a line mark turning (`LineMark::rotate`).
+    mark_turns: RefCell<crate::mark_turn::State>,
     /// A scroll view a drag holds near its edge scrolling.
     drag_scroll: RefCell<crate::drag_scroll::State>,
     /// Scrollbars hide until their view scrolls (`Ui::set_overlay_scrollbars`).
@@ -2973,6 +2992,7 @@ impl Ui {
             elastic: Default::default(),
             paging: Default::default(),
             scroll_reveals: Default::default(),
+            mark_turns: Default::default(),
             drag_scroll: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
             scrollbar_styles: Default::default(),
@@ -4246,6 +4266,9 @@ impl Ui {
     }
     pub(crate) fn paging_state(&self) -> &RefCell<crate::paging::State> {
         &self.storage.paging
+    }
+    pub(crate) fn mark_turn_state(&self) -> &RefCell<crate::mark_turn::State> {
+        &self.storage.mark_turns
     }
     pub(crate) fn scroll_reveal_state(&self) -> &RefCell<crate::scroll_reveal::State> {
         &self.storage.scroll_reveals
@@ -5957,6 +5980,7 @@ impl Ui {
             crate::elastic::next_step(self),
             crate::paging::next_step(self),
             crate::scroll_reveal::next_step(self),
+            crate::mark_turn::next_step(self),
             crate::caret_blink::next(self),
             crate::find::next_step(self),
         ]
@@ -6017,6 +6041,13 @@ impl Ui {
         };
         // A scroll view easing to where a reveal asked.
         let keys = if crate::scroll_reveal::advance(self, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // A text area's line marks turning.
+        let keys = if crate::mark_turn::advance(self, now) {
             self.try_prepare_frame()?;
             true
         } else {
@@ -7193,6 +7224,15 @@ impl Ui {
                 // Each shown line's marks, under the text.
                 let marks_of = code.line_marks.borrow().clone();
                 let mut wanted: Vec<WantedMark> = Vec::new();
+                // Marks' turns: read only once a mark has turned.
+                let mut turns = code.mark_turns.borrow_mut().take();
+                let shown_before = code.marks_shown.get();
+                let turned = turns.is_some();
+                let mut still_turning = false;
+                let now = crate::clock::now();
+                let turn_time = std::time::Duration::from_secs_f32(
+                    (theme.number_untracked(tok::MOTION_DURATION_FAST) / 1000.).max(0.),
+                );
                 if let Some(lines) = &long_lines {
                     for i in shown_lines.clone() {
                         let inset = lines.inset(i);
@@ -7238,7 +7278,22 @@ impl Ui {
                                 }
                             }
                         }
-                        for mark in marks {
+                        for (k, mut mark) in marks.into_iter().enumerate() {
+                            // Turned (`LineMark::rotate`): where its turn stands now.
+                            if mark.rotate != 0. || turns.is_some() {
+                                let turns = turns.get_or_insert_with(Box::default);
+                                let was_shown = (shown_before.0..shown_before.1).contains(&i);
+                                let turn = turns.entry((i, k)).or_insert_with(|| {
+                                    crate::mark_turn::Turn::at(
+                                        if was_shown { 0. } else { mark.rotate },
+                                        now,
+                                    )
+                                });
+                                turn.toward(mark.rotate, now, turn_time);
+                                let (angle, moving) = turn.angle(now, turn_time);
+                                mark.rotate = angle;
+                                still_turning |= moving;
+                            }
                             let width = if mark.width.is_finite() {
                                 mark.width
                             } else {
@@ -7276,6 +7331,16 @@ impl Ui {
                         }
                     }
                 }
+                let turned = turned || turns.is_some();
+                *code.mark_turns.borrow_mut() = turns;
+                if marks_of.is_some() {
+                    code.marks_shown
+                        .set((shown_lines.start, shown_lines.end));
+                }
+                // Still turning: drawn again a step on, as an interaction deadline.
+                if still_turning && let Some(storage) = draw_storage.upgrade() {
+                    crate::mark_turn::turning(&storage.mark_turns, root, now);
+                }
                 // Those over the text apart, in a layer of their own above it.
                 let (over, under): (Vec<_>, Vec<_>) =
                     wanted.into_iter().partition(|(_, mark, _)| mark.over_text);
@@ -7288,6 +7353,7 @@ impl Ui {
                     under,
                     &font,
                     false,
+                    turned,
                 );
                 if !over.is_empty() || code.mark_layer_over.get().is_some() {
                     // Above the long text's lines, which show in a layer of their own after the text node.
@@ -7301,6 +7367,7 @@ impl Ui {
                         over,
                         &font,
                         true,
+                        turned,
                     );
                 }
             }
