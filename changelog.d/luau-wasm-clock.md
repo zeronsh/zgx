@@ -1,4 +1,4 @@
 ---
 section: performance
 ---
-- **Luau reads the clock far less in the browser** (zgx-script): with no watchdog thread there, every safepoint checked a call's time budget, reading `performance.now` twice. One check in 1,024 looks now, and every check once a call is out of time, so a runaway script is still stopped just past its budget. That's about a third fewer clock reads across a Luau table's 10,000 rows. The desktop is unchanged.
+- **Luau no longer reads the clock per call in the browser** (zgx-script): with no watchdog thread there, every safepoint checked a call's time budget, reading `performance.now`. Now one check in 1,024 looks, and a call's budget starts at that first look, so a short call reads no clock at all. Once a call is out of time, every check looks again, so a runaway script is still stopped just past its budget. A Luau table's create of 10,000 rows takes 2.5% less script time. The desktop is unchanged.
