@@ -768,6 +768,15 @@ impl AttrsList {
         }
     }
 
+    /// zgx: whether a span has room before it only (a negative padding, an
+    /// editor atom's leading icon): a line may break before it.
+    #[cold]
+    #[inline(never)]
+    pub fn holds_leads(&self) -> bool {
+        self.spans_iter()
+            .any(|(_, attrs)| attrs.padding_opt.is_some_and(|padding| padding.0 < 0.))
+    }
+
     /// zgx: whether a span is an inline box (`Attrs::inline_box`).
     #[cold]
     #[inline(never)]
