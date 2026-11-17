@@ -8,10 +8,10 @@ zgx	45	1177	scene::<impl in crates/zgx/src/scene.rs>::arrange
 zgx	41	587	scene::<impl in crates/zgx/src/scene.rs>::store_measurement
 zgx	45	841	scene::<impl in crates/zgx/src/scene.rs>::invalidate_layout_with
 zgx	168	3009	scene::<impl in crates/zgx/src/scene.rs>::column_end
-zgx	539	5874	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
-zgx	273	2269	scene::<impl in crates/zgx/src/scene.rs>::flush
-zgx	117	1213	scene::<impl in crates/zgx/src/scene.rs>::ink
-zgx	90	1502	scene::<impl in crates/zgx/src/scene.rs>::set_kind
+zgx	539	5896	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
+zgx	275	2327	scene::<impl in crates/zgx/src/scene.rs>::flush
+zgx	0	21	scene::<impl in crates/zgx/src/scene.rs>::ink
+zgx	90	1495	scene::<impl in crates/zgx/src/scene.rs>::set_kind
 zgx	114	1189	scene::<impl in crates/zgx/src/scene.rs>::append_as
 zgx	20	378	advanced_layout::<impl in crates/zgx/src/scene_layout.rs>::resolved_leaf_style
 zgx	180	1263	reactive::<impl in crates/zgx/src/reactive.rs>::flush
@@ -21,7 +21,7 @@ zgx	193	2414	mount_style_with_intrinsic
 zgx	371	9710	mount_style_with_intrinsic::{closure#10}
 zgx	97	1723	mount_element
 zgx	61	768	compose::<impl in crates/zgx/src/compose.rs>::mount
-zgx-gpu	299	3524	<impl in crates/zgx-gpu/src/lib.rs>::prepare
+zgx-gpu	299	3531	<impl in crates/zgx-gpu/src/lib.rs>::prepare
 zgx-gpu	23	727	<impl in crates/zgx-gpu/src/lib.rs>::prepare_layer
 zgx-gpu	322	6301	<impl in crates/zgx-gpu/src/lib.rs>::prepare_layer_planned
 zgx-gpu	182	1494	<impl in crates/zgx-gpu/src/lib.rs>::encode_damage
@@ -33,12 +33,12 @@ zgx-gpu	380	4467	effects::<impl in crates/zgx-gpu/src/effects.rs>::prepare_effec
 zgx-gpu	159	1785	effects::<impl in crates/zgx-gpu/src/effects.rs>::encode_effects
 zgx-gpu	166	1237	upload::<impl in crates/zgx-gpu/src/upload.rs>::encode
 zgx-gpu	132	1133	passes::<impl in crates/zgx-gpu/src/passes.rs>::prepare_inputs
-zgx-script	1533	13054	kind_view
+zgx-script	1538	13140	kind_view
 zgx-script	310	2303	kind_view::{closure#27}::{closure#0}
 zgx-script	553	8910	lower::apply
-zgx-script	352	3238	lower_list
-zgx-script	467	4017	lower_item_list
-zgx-script	339	3739	lower_rich::{closure#1}::{closure#0}
+zgx-script	352	3286	lower_list
+zgx-script	490	4164	lower_item_list
+zgx-script	357	3943	lower_rich::{closure#1}::{closure#0}
 zgx-script	261	3001	to_lua
 zgx-script	171	1428	value::<impl in crates/zgx-script/src/value.rs>::reconcile
 zgx-script	166	1211	<impl in crates/zgx-script/src/lib.rs>::set_state

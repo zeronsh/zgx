@@ -12158,9 +12158,17 @@ impl Scene {
     }
     /// See `Node::ink`. Computed on demand and cached until invalidated.
     fn ink(&self, id: NodeId) -> Option<Rect> {
+        self.ink_of(id, self.node(id))
+    }
+    /// `ink` of a node reached through the tree (a child, as the ink and
+    /// paint walks find them): looked up unchecked (`tree_node`).
+    #[inline]
+    fn child_ink(&self, id: NodeId) -> Option<Rect> {
+        self.ink_of(id, self.tree_node(id))
+    }
+    fn ink_of(&self, id: NodeId, node: &Node) -> Option<Rect> {
         #[cfg(test)]
         self.inks_asked.set(self.inks_asked.get() + 1);
-        let node = self.node(id);
         if node.bounds_valid.get() & INK_VALID != 0 {
             return node.ink.get();
         }
@@ -12177,7 +12185,7 @@ impl Scene {
             false => {
                 let mut held: Option<Rect> = None;
                 for child in children {
-                    if let Some(child) = crate::deep(0, || self.ink(*child)) {
+                    if let Some(child) = crate::deep(0, || self.child_ink(*child)) {
                         held = Some(held.map_or(child, |ink| ink.union(child)));
                     }
                 }
@@ -12284,7 +12292,7 @@ impl Scene {
                     -1.
                 };
             }
-            let ink = crate::deep(0, || self.ink(*child));
+            let ink = crate::deep(0, || self.child_ink(*child));
             if let Some(child) = ink {
                 match kept {
                     true => {
@@ -12383,7 +12391,7 @@ impl Scene {
                 // since but not worked out again (that would have dropped the
                 // union).
                 let was = node.ink.get().map(ink_edges);
-                let ink = crate::deep(0, || self.ink(child));
+                let ink = crate::deep(0, || self.child_ink(child));
                 if let Some(was) = was {
                     let now = ink.map(ink_edges)?;
                     if now[0] > was[0] || now[1] > was[1] || now[2] < was[2] || now[3] < was[3] {
@@ -12410,7 +12418,7 @@ impl Scene {
         let count = children.len().saturating_sub(KEPT_TAIL).max(entry.count);
         let (mut tail, mut reach) = (None, prefix_reach);
         for (index, &child) in children.iter().enumerate().skip(entry.count) {
-            let ink = crate::deep(0, || self.ink(child));
+            let ink = crate::deep(0, || self.child_ink(child));
             if reach >= 0. {
                 let at = shown(child);
                 reach = match in_order(index, at) {
@@ -16666,7 +16674,7 @@ impl Scene {
                 children
                     .iter()
                     .filter(|child| {
-                        self.ink(**child)
+                        self.child_ink(**child)
                             .is_some_and(|ink| ink.translated(transform).intersects(clip))
                     })
                     .map(|child| (*child, transform)),
@@ -16945,7 +16953,8 @@ impl Scene {
                 return false;
             };
             let ink = ink.translated(transform);
-            ink.intersects(reach) && damage.iter().any(|d| d.intersects(ink))
+            // One rect (a scroll's frame, most): `reach` is it.
+            ink.intersects(reach) && (damage.len() == 1 || damage.iter().any(|d| d.intersects(ink)))
         };
         // Whether ink (its parent's space, at `transform`) shows within
         // `clip`: children of a layer are walked in its own space, so a
@@ -16965,6 +16974,9 @@ impl Scene {
         }
         if self.kept_any.get() {
             self.walk_starts(start);
+        }
+        if let Some((id, _)) = from {
+            self.node(id);
         }
         let mut transform = Transform::default();
         let mut parent = self.node(start).parent;
@@ -17012,7 +17024,9 @@ impl Scene {
             stack.pop()
         {
             self.visit(id);
-            let node = self.node(id);
+            // `start` and `from` looked up checked before the walk; the rest
+            // its children, reached through the tree.
+            let node = self.tree_node(id);
             let is_root = root == Some(id);
             // A popup window draws it (`set_popup`).
             if POPUPS && !is_root && self.popups.contains(&id) {
@@ -17240,7 +17254,7 @@ impl Scene {
                         // reaches it through a splice of an ancestor that
                         // changed (`Scene::ink_may_show`).
                         .filter(|child| {
-                            let ink = self.ink(**child);
+                            let ink = self.child_ink(**child);
                             touches(ink, transform) && (!CLIPS || within(ink, transform, clip))
                         })
                         .map(|child| {
@@ -17375,11 +17389,18 @@ fn image_with_effect(kind: &NodeKind) -> bool {
 }
 /// Whether `style` fades any edge (`fade_mask` makes a mask of its own).
 fn fades(style: &Style) -> bool {
-    style
-        .fade_edges
-        .iter()
-        .chain(&style.fade_edges_x)
-        .any(|band| band.is_finite() && *band > 0.)
+    // No band's bits set (+0.0 each, nearly every style): none fades,
+    // without the loop below.
+    (style.fade_edges[0].to_bits()
+        | style.fade_edges[1].to_bits()
+        | style.fade_edges_x[0].to_bits()
+        | style.fade_edges_x[1].to_bits())
+        != 0
+        && style
+            .fade_edges
+            .iter()
+            .chain(&style.fade_edges_x)
+            .any(|band| band.is_finite() && *band > 0.)
 }
 /// The mask a node passes to its children: its own when it fades its edges
 /// (over its clip, less `fade_insets`), otherwise the one it inherited.
