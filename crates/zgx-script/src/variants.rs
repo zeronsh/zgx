@@ -501,6 +501,6 @@ pub(crate) fn apply(node: &mut node::Node, selection: Rc<Selection>) {
         }
     }
     if selection.interacts() {
-        node.variant_interaction = Some(selection);
+        node.rare_mut().variant_interaction = Some(selection);
     }
 }
