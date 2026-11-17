@@ -38,6 +38,7 @@ fn mention() -> AtomStyle {
             size: 16.,
             gap: 4.,
         }),
+        svg: None,
     }
 }
 

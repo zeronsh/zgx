@@ -8031,11 +8031,7 @@ impl Scene {
     pub(crate) fn rich_line_shaper(&self) -> crate::editor_lines::RichLineShaper {
         match self.rich_shaper.clone() {
             Some(shaper) => std::rc::Rc::new(move |rich, width| shaper(rich, width)),
-            None => std::rc::Rc::new(|rich, width| {
-                Box::new(crate::text_layout::FallbackTextLayout::with_rich(
-                    rich, width,
-                ))
-            }),
+            None => std::rc::Rc::new(crate::text_layout::FallbackTextLayout::rich_layout),
         }
     }
     /// The size of `text` at `size` in `font`, wrapped at `width` if given.
