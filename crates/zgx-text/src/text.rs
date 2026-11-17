@@ -2,12 +2,13 @@
 pub use cosmic_text::Affinity;
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 
-/// `key`'s glyph image: swash's, or for a face whose shapes swash can't
-/// draw (macOS 26's PingFang, `hvgl` only) Core Text's. Asked only where
-/// swash gave none: a glyph cache miss with nothing to show. None past
-/// `MAX_GLYPH_SIZE` pixels: its mask grows with the size squared, so a
-/// script's `size = 1e6` (or a canvas zoomed far in) would ask for more
-/// memory than there is.
+/// `key`'s glyph image. On macOS, Core Text's, as macOS draws its own text
+/// (and the only one for a face whose shapes swash can't draw: macOS 26's
+/// PingFang, `hvgl` only), thickened as `key`'s `SMOOTHING` says; swash's
+/// for colour glyphs, and everywhere else. Asked only on a glyph cache
+/// miss. None past `MAX_GLYPH_SIZE` pixels: its mask grows with the size
+/// squared, so a script's `size = 1e6` (or a canvas zoomed far in) would
+/// ask for more memory than there is.
 #[doc(hidden)]
 pub fn glyph_image(
     swash: &mut cosmic_text::SwashCache,
@@ -18,15 +19,73 @@ pub fn glyph_image(
     if size.is_nan() || size > MAX_GLYPH_SIZE {
         return None;
     }
-    let image = swash.get_image_uncached(fonts, key);
     #[cfg(target_os = "macos")]
-    if image
-        .as_ref()
-        .is_none_or(|image| image.placement.width == 0 || image.placement.height == 0)
-    {
-        return crate::core_text_glyphs::glyph_image(fonts, key).or(image);
+    if let Some(image) = crate::core_text_glyphs::glyph_image(fonts, key) {
+        return Some(image);
     }
-    image
+    swash.get_image_uncached(fonts, key)
+}
+/// How macOS's font smoothing thickens text of colour `color` (its alpha
+/// aside), for `smoothed`: 0 not at all (off macOS, and where the user
+/// turned smoothing off), else 1 to 5, its luminance in the four steps Core
+/// Graphics takes, plus one. macOS thickens all text, light text most: a
+/// line of Geist at 2x gains 17% coverage in black and 30% in white.
+pub fn smoothing(color: zgx::scene::Color) -> u8 {
+    #[cfg(target_os = "macos")]
+    if font_smoothing() {
+        let luminance = (0.2126 * f32::from(color.0)
+            + 0.7152 * f32::from(color.1)
+            + 0.0722 * f32::from(color.2))
+            / 255.;
+        return 1 + (4. * luminance + 0.5).floor().clamp(0., 4.) as u8;
+    }
+    let _ = color;
+    0
+}
+/// What `set_font_smoothing` was last given: 0 the system's, 1 on, 2 off.
+static FONT_SMOOTHING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// How many times `set_font_smoothing` changed it.
+static FONT_SMOOTHING_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Whether macOS text is thickened as macOS's font smoothing thickens it
+/// (`smoothing`): `None` as the user's macOS setting says (on unless they
+/// turned it off), `Some(false)` never (lighter text, as Core Text draws its
+/// outlines alone), `Some(true)` always. For every window: each draws all
+/// its text again on its next frame (`GpuRenderer::render`), which a host
+/// asks for (a window's redraw). Nothing changes off macOS.
+pub fn set_font_smoothing(on: Option<bool>) {
+    use std::sync::atomic::Ordering;
+    let value = match on {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    };
+    if FONT_SMOOTHING.swap(value, Ordering::Relaxed) != value {
+        FONT_SMOOTHING_EPOCH.fetch_add(1, Ordering::Relaxed);
+    }
+}
+/// How many times `set_font_smoothing` has changed what text is drawn at:
+/// a renderer that drew at another draws all its text again.
+#[doc(hidden)]
+pub fn font_smoothing_epoch() -> u64 {
+    FONT_SMOOTHING_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Whether text is thickened now: as `set_font_smoothing` says, else as
+/// the user's macOS setting does.
+#[cfg(target_os = "macos")]
+fn font_smoothing() -> bool {
+    match FONT_SMOOTHING.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => crate::core_text_glyphs::font_smoothing_allowed(),
+    }
+}
+/// `key` for its glyph drawn thickened as `smoothing` says.
+pub fn smoothed(key: cosmic_text::CacheKey, smoothing: u8) -> cosmic_text::CacheKey {
+    use cosmic_text::CacheKeyFlags;
+    let mut key = key;
+    key.flags = (key.flags - CacheKeyFlags::SMOOTHING)
+        | CacheKeyFlags::from_bits_retain(u32::from(smoothing.min(5)) << 6);
+    key
 }
 /// The largest glyph `glyph_image` draws, in pixels: the GPU renderer's
 /// atlas side, past which it draws none either.

@@ -100,3 +100,51 @@ fn core_texts_glyphs_match_swashs() {
         }
     }
 }
+
+/// Font smoothing (`SMOOTHING` on its key, `text::smoothing` of its colour)
+/// thickens a glyph's strokes as macOS's own text: black text's, white
+/// text's more; 0 draws it as before. Unless the user turned smoothing off.
+#[test]
+fn smoothing_thickens_glyphs() {
+    let white = zgx_gpu::text::smoothing(zgx::scene::Color(255, 255, 255, 255));
+    let black = zgx_gpu::text::smoothing(zgx::scene::Color(0, 0, 0, 255));
+    if white == 0 {
+        assert_eq!(black, 0);
+        return;
+    }
+    assert_eq!((black, white), (1, 5));
+    let mut db = fontdb::Database::new();
+    db.load_font_data(DEJAVU.to_vec());
+    let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
+    let id = fonts.db().faces().next().expect("DejaVu Sans").id;
+    let font = fonts.get_font(id, fontdb::Weight::NORMAL).expect("a font");
+    let charmap = font.as_swash().charmap();
+    for size in [13., 26.] {
+        for c in ['a', 'l', 'W'] {
+            let (key, _, _) = CacheKey::new(
+                id,
+                charmap.map(c),
+                size,
+                (0., 0.),
+                fontdb::Weight::NORMAL,
+                0,
+                CacheKeyFlags::empty(),
+            );
+            let mut ink = |key| -> f32 {
+                let image = zgx_gpu::core_text_glyph(&mut fonts, key).expect("Core Text draws it");
+                image.data.iter().map(|a| f32::from(*a) / 255.).sum()
+            };
+            let plain = ink(key);
+            let dark = ink(zgx_gpu::text::smoothed(key, black));
+            let light = ink(zgx_gpu::text::smoothed(key, white));
+            assert!(
+                dark > plain * 1.03,
+                "{c:?} at {size} px: {dark} black, {plain} not smoothed"
+            );
+            assert!(
+                light > dark * 1.03,
+                "{c:?} at {size} px: {light} white, {dark} black"
+            );
+        }
+    }
+}

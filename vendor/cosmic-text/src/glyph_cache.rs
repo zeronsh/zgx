@@ -19,6 +19,12 @@ bitflags::bitflags! {
         /// (`InlineAlign::Top`, `Bottom`), with `INLINE_BOX`.
         const INLINE_LINE_TOP = 16;
         const INLINE_LINE_BOTTOM = 32;
+        /// zgx: how macOS's font smoothing thickens the glyph's strokes
+        /// (three bits): 0 not at all, else 1 to 5 by the text's colour, as
+        /// Core Text thickens it (light text most). Set after shaping, by
+        /// the renderer, for Core Text to draw the glyph at; swash ignores
+        /// it.
+        const SMOOTHING = 0b111 << 6;
     }
 }
 
