@@ -295,6 +295,19 @@ struct Watchdog {
 /// budget is spent. Only a call running almost its whole budget runs its
 /// last moments with the interrupt set.
 const EARLY: u64 = 5_000_000;
+/// In the browser, how many interrupt checks one in looks (`check`).
+#[cfg(target_arch = "wasm32")]
+const WASM_CHECK_EVERY: u32 = 1024;
+/// In the browser, a call found out of time: every check looks until the
+/// next call starts (`check`).
+#[cfg(target_arch = "wasm32")]
+const OUT_OF_TIME: u32 = u32::MAX;
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// Checks since the last that looked (`WASM_CHECK_EVERY`), or
+    /// `OUT_OF_TIME`.
+    static WASM_CHECKS: Cell<u32> = const { Cell::new(0) };
+}
 impl Watchdog {
     /// The process's watchdog.
     fn get() -> &'static Watchdog {
@@ -630,9 +643,11 @@ impl Installed {
                 #[cfg(target_arch = "wasm32")]
                 {
                     alarm.due.store(due | FIRED, Ordering::SeqCst);
-                    alarm
-                        .fired_at
-                        .store(nanos(Instant::now()), Ordering::SeqCst);
+                    // Set as it starts, fired at its due time as far as a
+                    // stop's report goes: no clock read for it.
+                    alarm.fired_at.store(due, Ordering::SeqCst);
+                    // A new call's first safepoint looks.
+                    WASM_CHECKS.with(|checks| checks.set(0));
                     alarm.set(true);
                 }
             }
@@ -861,6 +876,27 @@ unsafe extern "C-unwind" fn every_64th(state: *mut ffi::lua_State) {
 ///
 /// `state` is the running thread of a VM Luau is executing, at a safepoint.
 unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
+    // No watchdog in the browser: a call runs with its interrupt set from
+    // its start (`publish`), so every safepoint lands here, and reading the
+    // clock there (`performance.now`, through JS) cost more than the short
+    // calls it watched. One check in `WASM_CHECK_EVERY` looks: a runaway loop
+    // is still stopped a few microseconds after its budget, and a collection
+    // the allocator asked for waits as long. Once a call is out of time every
+    // check looks, as on the desktop: the safepoint after a `pcall` that
+    // caught the stop raises it again, outside it.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let skip = WASM_CHECKS.with(|checks| match checks.get() {
+            OUT_OF_TIME => false,
+            n => {
+                checks.set(if n + 1 >= WASM_CHECK_EVERY { 0 } else { n + 1 });
+                n != 0
+            }
+        });
+        if skip {
+            return Verdict::Continue;
+        }
+    }
     // SAFETY: reads the thread's VM's main thread.
     let main = unsafe { ffi::lua_mainthread(state) } as usize;
     let watch = WATCHES
@@ -902,6 +938,8 @@ unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
     match watch.deadline.get() {
         Some(d) if d.exceeded() => {
             record_stop(&watch.alarm, &d);
+            #[cfg(target_arch = "wasm32")]
+            WASM_CHECKS.with(|checks| checks.set(OUT_OF_TIME));
             Verdict::OutOfTime
         }
         // Nothing to collect and the call not yet fired: until the watchdog

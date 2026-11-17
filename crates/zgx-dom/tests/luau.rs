@@ -253,3 +253,35 @@ fn luau_puts_focus_and_a_selection_back() {
     assert_eq!(input.selection_start().unwrap(), Some(6));
     assert_eq!(input.selection_end().unwrap(), Some(10));
 }
+
+#[wasm_bindgen_test]
+fn runaway_luau_is_stopped_by_its_budget_in_the_browser() {
+    // No watchdog thread here: the interrupt check counts the budget out,
+    // reading the clock at one safepoint in many. A spinning script is
+    // still stopped soon after its budget, in each of the desktop's cases.
+    let runtime = Runtime::new();
+    let limits = zgx_script::Limits {
+        load: std::time::Duration::from_millis(30),
+        ..zgx_script::Limits::default()
+    };
+    let now = || web_sys::window().unwrap().performance().unwrap().now();
+    for code in [
+        "while true do end",
+        "coroutine.wrap(function() while true do end end)()",
+        "local n = ui.state('n', 0) while true do n:set(n:peek() + 1) end",
+        "while true do pcall(function() while true do end end) end",
+    ] {
+        let host = ScriptHost::inline(&runtime, "spin", code).limits(limits);
+        let started = now();
+        let error = host.reload().expect_err("the script is stopped");
+        let took = now() - started;
+        assert!(
+            format!("{error:?}").contains("time budget"),
+            "{code}: {error:?}"
+        );
+        assert!(
+            took < 300.,
+            "{code}: stopped after {took} ms of a 30 ms budget"
+        );
+    }
+}
