@@ -4942,6 +4942,12 @@ impl Ui {
                             observed.kept.set(kept);
                             let signal = &observed.signal;
                             if signal.with_untracked(|told| moved(*told, now)) {
+                                // Room for all at the first that moved: a
+                                // scroll moves most, and grown from empty
+                                // the list took some seven allocations.
+                                if bounds.capacity() == 0 {
+                                    bounds.reserve(self.storage.observed_bounds.borrow().len());
+                                }
                                 bounds.push((*node, signal.clone(), now));
                             }
                         }
