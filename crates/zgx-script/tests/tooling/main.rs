@@ -5,6 +5,8 @@
 #![allow(clippy::duplicate_mod)]
 #[path = "../app_plugins.rs"]
 mod app_plugins;
+#[path = "../build_rev.rs"]
+mod build_rev;
 #[path = "../check.rs"]
 mod check;
 #[path = "../diagnostics.rs"]
