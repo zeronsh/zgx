@@ -192,6 +192,28 @@ pub(crate) struct Variants {
     /// them.
     pub reactive: Option<InteractionStyles>,
 }
+/// What a box laid out as its child with nothing to style passes on: the
+/// typography around it (`mount_style_with_intrinsic`), its own work kept
+/// off the path every other node's mount takes.
+#[cold]
+#[inline(never)]
+fn unstyled<Unused>(inherited: Signal<Typography>, unused: Unused) -> Signal<Typography> {
+    // What it was given to style with (all empty), dropped here.
+    drop(unused);
+    inherited
+}
+impl Variants {
+    /// No interaction style of any kind: nothing for hover, press, focus
+    /// or disabled to change.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hover.is_none()
+            && self.active.is_none()
+            && self.focus.is_none()
+            && self.disabled.is_none()
+            && self.defaults.iter().all(Option::is_none)
+            && self.reactive.is_none()
+    }
+}
 /// Run in a node's style effect, so it follows what it reads: the hover,
 /// active, focus and disabled styles when they changed since its last call,
 /// or `None` to keep them.
@@ -247,6 +269,7 @@ pub(crate) fn mount_style(
         None,
         None,
         None,
+        false,
         false,
     )
 }
@@ -743,7 +766,38 @@ pub(crate) fn mount_style_with_intrinsic(
     object_fit: Option<Signal<crate::style::ImagePlacement>>,
     theme: Option<std::rc::Rc<crate::theme::ThemeScope>>,
     leaf: bool,
+    // Laid out as its child (`View::contents`, a `switch`'s region).
+    as_child: bool,
 ) -> Signal<Typography> {
+    // A box laid out as its child (a `switch`'s or `show`'s region) with
+    // nothing to style keeps no style effect: there is nothing for one to
+    // apply, and what it shows reads the typography around it as it is.
+    // One bit for every other node; the rest is read for these alone.
+    if as_child
+        && base.set_bits() == 0
+        && !base.has_tokens()
+        && dynamic.is_none()
+        && variants.is_empty()
+        && disabled.is_none()
+        && !interactive
+        && intrinsic.is_none()
+        && layout_target.is_none()
+        && object_fit.is_none()
+    {
+        return unstyled(
+            inherited,
+            (
+                base,
+                dynamic,
+                variants,
+                disabled,
+                intrinsic,
+                layout_target,
+                object_fit,
+                theme,
+            ),
+        );
+    }
     let mut base = base;
     let mut reactive = variants.reactive;
     // A node setting no typography (nor through a variant or a dynamic
