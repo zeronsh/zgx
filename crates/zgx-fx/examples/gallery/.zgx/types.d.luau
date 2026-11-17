@@ -1208,12 +1208,6 @@ declare extern type Element with
 	-- there unless the system reduces motion (`animate` says otherwise).
 	-- Whether any moved.
 	function scroll_into_view(self, options: { block: ("start" | "center" | "end" | "nearest")?, inline: ("start" | "center" | "end" | "nearest")?, animate: boolean? }?): boolean
-	-- An editor's atoms (see a textarea's `atoms`): `label` made an atom at
-	-- the caret, over the selection, or over `replace`'s characters; one step
-	-- of undo, the caret after it. Its id, or nil for elements that are not
-	-- editors.
-	function insert_atom(self, label: string, options: InsertAtomOptions?): string?
-	function atoms(self): { AtomItem }?
 	function has_class(self, class: string): boolean
 	-- An input's selection, in characters (Unicode code points from 0, as
 	-- `utf8.len` counts them). Each returns false (or nil) for elements
@@ -23083,6 +23077,12 @@ declare ui: {
 		-- The byte, from 0, a click at `x`, `y` (the window's points, as a drop's)
 		-- would put the caret at.
 		offset_at: (el: Element, x: number, y: number) -> number?,
+		-- Internal, subject to change: an editor's atoms (see a textarea's
+		-- `atoms`). `label` made an atom at the caret, over the selection, or
+		-- over `replace`'s characters; one step of undo, the caret after it.
+		-- Its id, or nil for elements that are not editors.
+		insert_atom: (el: Element, label: string, options: InsertAtomOptions?) -> string?,
+		atoms: (el: Element) -> { AtomItem }?,
 		-- A textarea's line, from 1, at that place in its view; its caret stays.
 		scroll_to_line: (el: Element, line: number, options: { align: ("start" | "center" | "end" | "nearest")? }?) -> boolean,
 	},

@@ -1810,7 +1810,8 @@ pub(crate) enum Heights {
 }
 
 /// What a code editor adds to a textarea: `highlight`, `decorations`,
-/// `current_line` and `tab`.
+/// `current_line` and `tab`; its atoms' (`late_field`).
+#[derive(Default)]
 pub(crate) struct CodeProps {
     /// `highlight = function(line, state) return spans, state end`: a
     /// line's colours, `{ { from, to, color }, … }` (bytes, as
@@ -3933,11 +3934,6 @@ const WIDGET_FIELDS: &[&str] = &[
     "tab",
     "on_caret",
     "on_top_line",
-    "atoms",
-    "on_atoms",
-    "on_atom_press",
-    "on_atom_hover",
-    "atom_style",
     "animate",
     "size",
     "vertical",
@@ -4013,8 +4009,47 @@ const LATE_FIELDS: &[&str] = &[
     "drop_caret",
     "container",
     "queries",
+    "atoms",
+    "on_atoms",
+    "on_atom_press",
+    "on_atom_hover",
+    "atom_style",
 ];
 
+/// A textarea's atom key (`late_field`), into its code props: made as the
+/// first such key is, and still its constructor's alone while the walk runs.
+fn atom_field(
+    lua: &Lua,
+    code: &mut Option<Rc<CodeProps>>,
+    name: &str,
+    value: mlua::Value,
+) -> mlua::Result<()> {
+    let Some(code) = Rc::get_mut(code.get_or_insert_default()) else {
+        return Ok(());
+    };
+    match name {
+        "atoms" if !matches!(value, mlua::Value::Nil) => {
+            code.atoms =
+                Some(state_of(&value).ok_or_else(|| {
+                    mlua::Error::runtime("a textarea's `atoms` must be a ui.state")
+                })?);
+        }
+        "on_atoms" => code.on_atoms = lua.unpack(value)?,
+        "on_atom_press" => code.on_atom_press = lua.unpack(value)?,
+        "on_atom_hover" => code.on_atom_hover = lua.unpack(value)?,
+        "atom_style" => {
+            if let Some(style) = lua.unpack::<Option<Table>>(value)? {
+                code.atom_style = match style.raw_get::<mlua::Value>("bg")? {
+                    mlua::Value::Nil => None,
+                    bg => Some(source(lua, Ty::Color, "bg", bg)?),
+                };
+                code.atom_look = atom_look(&style)?.map(Rc::new);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 /// A key no style property names, taken where it lies once the walk finds
 /// it, so no style key compares against it: an input's caret (few set it,
 /// read only from those that do), whether plugins may target the node
@@ -4098,6 +4133,13 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
             if let Kind::Input { rare, .. } = &mut node.kind {
                 let active = source(lua, Ty::Str, name, value)?;
                 rare.get_or_insert_default().active_descendant = Some(active);
+            }
+        }
+        // A textarea's atoms, their look and what they tell: here, past the
+        // style keys, as few editors have them.
+        "atoms" | "on_atoms" | "on_atom_press" | "on_atom_hover" | "atom_style" => {
+            if let Kind::Input { code, .. } = &mut node.kind {
+                atom_field(lua, code, name, value)?;
             }
         }
         "on_paste" => {
@@ -5985,26 +6027,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         let tab = table.raw_get::<Option<String>>("tab")?;
                         let on_caret = table.raw_get::<Option<Function>>("on_caret")?;
                         let on_top_line = table.raw_get::<Option<Function>>("on_top_line")?;
-                        let atoms = match table.raw_get::<mlua::Value>("atoms")? {
-                            mlua::Value::Nil => None,
-                            v => Some(state_of(&v).ok_or_else(|| {
-                                mlua::Error::runtime("a textarea's `atoms` must be a ui.state")
-                            })?),
-                        };
-                        let on_atoms = table.raw_get::<Option<Function>>("on_atoms")?;
-                        let on_atom_press = table.raw_get::<Option<Function>>("on_atom_press")?;
-                        let on_atom_hover = table.raw_get::<Option<Function>>("on_atom_hover")?;
-                        let (atom_style, atom_look) =
-                            match table.raw_get::<Option<Table>>("atom_style")? {
-                                None => (None, None),
-                                Some(style) => (
-                                    match style.raw_get::<mlua::Value>("bg")? {
-                                        mlua::Value::Nil => None,
-                                        value => Some(source(lua, Ty::Color, "bg", value)?),
-                                    },
-                                    atom_look(&style)?.map(Rc::new),
-                                ),
-                            };
                         let find = match table.raw_get::<Option<Table>>("find")? {
                             None => None,
                             Some(find) => {
@@ -6035,12 +6057,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             || tab.is_some()
                             || on_caret.is_some()
                             || on_top_line.is_some()
-                            || atoms.is_some()
-                            || on_atoms.is_some()
-                            || on_atom_press.is_some()
-                            || on_atom_hover.is_some()
-                            || atom_style.is_some()
-                            || atom_look.is_some()
                             || find.is_some())
                         .then(|| {
                             Rc::new(CodeProps {
@@ -6051,13 +6067,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                                 tab,
                                 on_caret,
                                 on_top_line,
-                                atoms,
-                                on_atoms,
-                                on_atom_press,
-                                on_atom_hover,
-                                atom_style,
-                                atom_look,
                                 find,
+                                ..CodeProps::default()
                             })
                         })
                     },

@@ -638,6 +638,18 @@ struct CodeHint {
     /// Where it was last drawn, and last told.
     caret_drawn: Cell<Option<Caret>>,
     caret_told: Cell<Option<Caret>>,
+    /// What its atoms need (`CodeAtoms`): made as the first is set or listened to; most text areas never do.
+    atoms: std::cell::OnceCell<Box<CodeAtoms>>,
+    /// Told the first line in view when it changes
+    /// (`EditorHandle::on_top_line`), as `on_caret`.
+    on_top_line: RefCell<Option<TopLineListener>>,
+    top_line_listened: Cell<bool>,
+    top_line_drawn: Cell<Option<usize>>,
+    top_line_told: Cell<Option<usize>>,
+}
+/// What a text area's atoms need (`CodeHint::atoms`).
+#[derive(Default)]
+struct CodeAtoms {
     /// The wash behind atoms (`EditorHandle::set_atom_wash`) that have none of
     /// their own.
     atom_wash: Cell<Option<Color>>,
@@ -645,12 +657,6 @@ struct CodeHint {
     /// as `on_caret`, and the revision of them it last told.
     on_atoms: RefCell<Option<AtomListener>>,
     atoms_told: Cell<u64>,
-    /// Told the first line in view when it changes
-    /// (`EditorHandle::on_top_line`), as `on_caret`.
-    on_top_line: RefCell<Option<TopLineListener>>,
-    top_line_listened: Cell<bool>,
-    top_line_drawn: Cell<Option<usize>>,
-    top_line_told: Cell<Option<usize>>,
     /// Called after each draw (`EditorHandle::on_drawn`): what follows its
     /// atoms under the pointer as a scroll or a new layout moves them.
     on_drawn: RefCell<Option<Box<dyn FnMut()>>>,
@@ -660,6 +666,16 @@ struct CodeHint {
     atom_spans_of: Cell<Option<(u64, u64)>>,
     /// Its atoms' icons, shown: each node and what it shows.
     atom_icons: RefCell<Vec<(NodeId, std::sync::Arc<crate::svg::SvgData>)>>,
+}
+impl CodeHint {
+    /// What its atoms need, if any has been set.
+    fn atoms(&self) -> Option<&CodeAtoms> {
+        self.atoms.get().map(|atoms| &**atoms)
+    }
+    /// What its atoms need, made the first time.
+    fn atoms_made(&self) -> &CodeAtoms {
+        self.atoms.get_or_init(Box::default)
+    }
 }
 impl Drop for CodeHint {
     /// A long text's last layout and its line cache hold each other.
@@ -825,10 +841,85 @@ fn hit_out_of_atoms(
         affinity: TextAffinity::After,
     }
 }
+/// `plain` decorations with `e`'s atoms' washes among them, by start (the
+/// text area's `wash` for those with none of their own).
+#[cold]
+#[inline(never)]
+fn washed_atoms<'a>(
+    e: &TextEditor,
+    wash: Option<Color>,
+    plain: &'a [(std::ops::Range<usize>, Color)],
+) -> std::borrow::Cow<'a, [(std::ops::Range<usize>, Color)]> {
+    let mut marked: Vec<(std::ops::Range<usize>, Color)> = e
+        .atoms()
+        .iter()
+        .filter_map(|atom| atom.wash.or(wash).map(|color| (atom.range.clone(), color)))
+        .collect();
+    if marked.is_empty() {
+        return std::borrow::Cow::Borrowed(plain);
+    }
+    marked.extend(plain.iter().cloned());
+    marked.sort_by_key(|(range, _)| range.start);
+    std::borrow::Cow::Owned(marked)
+}
+/// After a text area's draw: what happened to its atoms told to its
+/// `on_atoms` (or let go, with none to tell), then its `on_drawn`. Asked
+/// only of one that has either, or changes waiting.
+#[cold]
+#[inline(never)]
+fn tell_atoms(code: &CodeHint, editor: &Rc<RefCell<TextEditor>>) {
+    let code = code.atoms_made();
+    for _ in 0..4 {
+        let revision = editor.borrow().atoms_revision();
+        let listening = code.on_atoms.borrow().is_some();
+        if !listening {
+            // Nothing to tell: what happened is not kept.
+            editor.borrow_mut().take_atom_changes();
+            break;
+        }
+        let idle = !editor.borrow().atom_changes_pending();
+        if revision == code.atoms_told.get() && idle {
+            break;
+        }
+        let Some(mut callback) = code.on_atoms.borrow_mut().take() else {
+            break;
+        };
+        let (changes, atoms, reason, text) = {
+            let mut e = editor.borrow_mut();
+            (
+                e.take_atom_changes(),
+                e.atoms().to_vec(),
+                e.atom_reason(),
+                e.text().into_owned(),
+            )
+        };
+        code.atoms_told.set(revision);
+        callback(&AtomEvent {
+            changes: &changes,
+            atoms: &atoms,
+            reason,
+            text: &text,
+        });
+        let mut slot = code.on_atoms.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(callback);
+        }
+    }
+    // Taken while it runs: one it draws again skips it.
+    let drawn = code.on_drawn.borrow_mut().take();
+    if let Some(mut drawn) = drawn {
+        drawn();
+        let mut slot = code.on_drawn.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(drawn);
+        }
+    }
+}
 /// The line cache's atom spans (`AtomStyle`), made again when its atoms,
 /// its text or their style changed; none while no atom is styled.
 #[inline(never)]
 fn follow_atom_styles(code: &CodeHint, hint: &EditorHint, e: &TextEditor) {
+    let code = code.atoms_made();
     let style = code.atom_style.borrow().clone();
     let atoms = e.atoms();
     if style.is_none() && !atoms.iter().any(|atom| atom.style.is_some()) {
@@ -1395,14 +1486,14 @@ impl EditorHandle {
     /// underline and leading icon), under each atom's own `Atom::style`.
     #[doc(hidden)]
     pub fn set_atom_style(&self, style: Option<crate::editor_atom_style::AtomStyle>) {
-        let code = self.hint.code_made();
+        let code = self.hint.code_made().atoms_made();
         *code.atom_style.borrow_mut() = style.filter(|s| !s.is_empty()).map(std::sync::Arc::new);
         code.atom_spans_of.set(None);
         self.refresh();
     }
     /// The wash behind atoms that have none of their own (`Atom::wash`).
     pub fn set_atom_wash(&self, color: Option<Color>) {
-        self.hint.code_made().atom_wash.set(color);
+        self.hint.code_made().atoms_made().atom_wash.set(color);
         self.refresh();
     }
     /// A new atom's id, for one made by `set_atoms`.
@@ -1453,13 +1544,13 @@ impl EditorHandle {
     /// Call `drawn` after each time it is drawn: a scroll, a new layout or
     /// an edit (what is under the pointer may have moved).
     pub fn on_drawn(&self, drawn: impl FnMut() + 'static) {
-        *self.hint.code_made().on_drawn.borrow_mut() = Some(Box::new(drawn));
+        *self.hint.code_made().atoms_made().on_drawn.borrow_mut() = Some(Box::new(drawn));
     }
     /// Call `told` with what happened to its atoms, and all of them as they
     /// are, whenever they are made, lost or moved (an edit, an undo): after
     /// the editor is drawn, so it may change what it likes.
     pub fn on_atoms(&self, told: impl FnMut(&AtomEvent<'_>) + 'static) {
-        let code = self.hint.code_made();
+        let code = self.hint.code_made().atoms_made();
         *code.on_atoms.borrow_mut() = Some(Box::new(told));
         code.atoms_told.set(self.editor.borrow().atoms_revision());
         self.refresh();
@@ -6375,7 +6466,12 @@ impl Ui {
             // least, so the text does not move at line 10), and a gap.
             let numbered = draw_numbers.get();
             // Atoms styled beyond a wash show through the styled lines.
-            if let Some(code) = draw_hint.code() {
+            if let Some(code) = draw_hint.code()
+                && (e.has_atoms()
+                    || code.atoms().is_some_and(|atoms| {
+                        atoms.atom_spans_of.get().is_some() || atoms.atom_style.borrow().is_some()
+                    }))
+            {
                 follow_atom_styles(code, &draw_hint, &e);
             }
             // Long, or coloured a line at a time: laid out by its lines.
@@ -6714,14 +6810,17 @@ impl Ui {
                         let line = lines.line_text(*i);
                         let cache = draw_hint.line_cache();
                         let colored = cache.spans(lines, *i).and_then(|spans| {
-                            crate::editor_lines::styled_line(
-                                &line,
-                                &spans,
-                                color,
-                                size,
-                                &font,
-                                &cache.looks(),
-                            )
+                            // Looks are read only where it has any.
+                            let style = |looks: &[crate::editor_lines::SpanLook]| {
+                                crate::editor_lines::styled_line(
+                                    &line, &spans, color, size, &font, looks,
+                                )
+                            };
+                            if cache.has_rare() {
+                                style(&cache.looks())
+                            } else {
+                                style(&[])
+                            }
                         });
                         match colored {
                             Some(rich) => {
@@ -6850,21 +6949,15 @@ impl Ui {
                 {
                     let plain = code.decorations.borrow();
                     // Atoms wash their label, among the decorations by start.
-                    let wash = code.atom_wash.get();
-                    let mut marked: Vec<(std::ops::Range<usize>, Color)> = e
-                        .atoms()
-                        .iter()
-                        .filter_map(|atom| {
-                            atom.wash.or(wash).map(|color| (atom.range.clone(), color))
-                        })
-                        .collect();
                     let decorations: std::borrow::Cow<'_, [(std::ops::Range<usize>, Color)]> =
-                        if marked.is_empty() {
-                            std::borrow::Cow::Borrowed(&plain[..])
+                        if e.has_atoms() {
+                            washed_atoms(
+                                &e,
+                                code.atoms().and_then(|atoms| atoms.atom_wash.get()),
+                                &plain,
+                            )
                         } else {
-                            marked.extend(plain.iter().cloned());
-                            marked.sort_by_key(|(range, _)| range.start);
-                            std::borrow::Cow::Owned(marked)
+                            std::borrow::Cow::Borrowed(&plain[..])
                         };
                     // Those in the text in view: from where the first line
                     // shown starts (all of them, if it is short).
@@ -6948,9 +7041,11 @@ impl Ui {
                     .as_ref()
                     .is_some_and(|lines| lines.pictured());
                 if pictured
-                    || code.atom_spans_of.get().is_some()
-                    || !code.atom_icons.borrow().is_empty()
+                    || code.atoms().is_some_and(|atoms| {
+                        atoms.atom_spans_of.get().is_some() || !atoms.atom_icons.borrow().is_empty()
+                    })
                 {
+                    let atoms = code.atoms_made();
                     let mut wanted: Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> = Vec::new();
                     if pictured && let Some(lines) = &long_lines {
                         let shown = draw_hint.line_cache().pictures_between(
@@ -6966,8 +7061,8 @@ impl Ui {
                             )
                         }));
                     }
-                    if code.atom_spans_of.get().is_some() {
-                        let base = code.atom_style.borrow().clone();
+                    if atoms.atom_spans_of.get().is_some() {
+                        let base = atoms.atom_style.borrow().clone();
                         let text = e.text();
                         for atom in e.atoms() {
                             let icon = atom
@@ -7008,7 +7103,7 @@ impl Ui {
                             ));
                         }
                     }
-                    let mut shown = code.atom_icons.borrow_mut();
+                    let mut shown = atoms.atom_icons.borrow_mut();
                     while shown.len() > wanted.len() {
                         s.remove(shown.pop().unwrap().0);
                     }
@@ -7449,7 +7544,6 @@ impl Ui {
             let metric_editor = editor.clone();
             let metric_scene = self.scene.clone();
             let metric_typography = typography.clone();
-            let told_editor = editor.clone();
             let storage = Rc::downgrade(&self.storage);
             Rc::new(move || {
                 let held = told.hold.get();
@@ -7523,42 +7617,6 @@ impl Ui {
                         }
                     }
                     for _ in 0..4 {
-                        let revision = told_editor.borrow().atoms_revision();
-                        let listening = code.on_atoms.borrow().is_some();
-                        if !listening {
-                            // Nothing to tell: what happened is not kept.
-                            told_editor.borrow_mut().take_atom_changes();
-                            break;
-                        }
-                        let idle = !told_editor.borrow().atom_changes_pending();
-                        if revision == code.atoms_told.get() && idle {
-                            break;
-                        }
-                        let Some(mut callback) = code.on_atoms.borrow_mut().take() else {
-                            break;
-                        };
-                        let (changes, atoms, reason, text) = {
-                            let mut e = told_editor.borrow_mut();
-                            (
-                                e.take_atom_changes(),
-                                e.atoms().to_vec(),
-                                e.atom_reason(),
-                                e.text().into_owned(),
-                            )
-                        };
-                        code.atoms_told.set(revision);
-                        callback(&AtomEvent {
-                            changes: &changes,
-                            atoms: &atoms,
-                            reason,
-                            text: &text,
-                        });
-                        let mut slot = code.on_atoms.borrow_mut();
-                        if slot.is_none() {
-                            *slot = Some(callback);
-                        }
-                    }
-                    for _ in 0..4 {
                         let line = code.top_line_drawn.get();
                         if line.is_none() || line == code.top_line_told.get() {
                             break;
@@ -7573,14 +7631,12 @@ impl Ui {
                             *slot = Some(callback);
                         }
                     }
-                    // Taken while it runs: one it draws again skips it.
-                    let drawn = code.on_drawn.borrow_mut().take();
-                    if let Some(mut drawn) = drawn {
-                        drawn();
-                        let mut slot = code.on_drawn.borrow_mut();
-                        if slot.is_none() {
-                            *slot = Some(drawn);
-                        }
+                    // Its atoms' listeners: none, and nothing to do, for most.
+                    if code.atoms().is_some_and(|atoms| {
+                        atoms.on_atoms.borrow().is_some() || atoms.on_drawn.borrow().is_some()
+                    }) || metric_editor.borrow().atom_changes_pending()
+                    {
+                        tell_atoms(code, &metric_editor);
                     }
                 }
                 let arm = hook.borrow().as_ref().and_then(Weak::upgrade);

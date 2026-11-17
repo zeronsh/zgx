@@ -516,14 +516,12 @@ pub(crate) struct LineCache {
     /// The editor's text revision `last` is of, if it is its committed text.
     last_revision: Cell<Option<u64>>,
     highlighter: RefCell<Option<SpanHighlighter>>,
-    /// Spans its atoms' styles give (`AtomStyle`), over the whole text by
-    /// start: each line takes those it holds before the highlighter's.
-    atom_spans: RefCell<Option<Rc<LineSpans>>>,
-    /// Its spans' looks (`SpanStyle::look` names one by its place here,
-    /// from 1): an atom's, a highlighter's picture. Only added to, so a
-    /// name stays the look's; `pictured`: one holds a picture.
-    looks: RefCell<Vec<SpanLook>>,
-    pictured: Cell<bool>,
+    /// Its atoms' spans and its spans' looks (`RareLines`): one pointer
+    /// until it has any.
+    rare: RefCell<crate::text_edit::RareBox<RareLines>>,
+    /// Whether `rare` holds anything: asked first, so a line of an editor
+    /// without atoms or looks reads no `RefCell` for them.
+    rare_set: Cell<bool>,
     /// The highlighter has given a span that shapes its line (a weight,
     /// italics): only then is a line asked for its spans as it is shaped,
     /// so one that only colours costs what it did. `restyled`: it just
@@ -538,6 +536,19 @@ pub(crate) struct LineCache {
     tail: RefCell<Option<Tail>>,
     /// Highlighted lines, by their text and what the line before left.
     colored: RefCell<HashMap<(Box<str>, u32), Colored>>,
+}
+/// What few editors' lines have (`LineCache::rare`): their atoms' spans
+/// and their spans' looks.
+#[derive(Default)]
+struct RareLines {
+    /// Spans its atoms' styles give (`AtomStyle`), over the whole text by
+    /// start: each line takes those it holds before the highlighter's.
+    atom_spans: Option<Rc<LineSpans>>,
+    /// Its spans' looks (`SpanStyle::look` names one by its place here,
+    /// from 1): an atom's, a highlighter's picture. Only added to, so a
+    /// name stays the look's; `pictured`: one holds a picture.
+    looks: Vec<SpanLook>,
+    pictured: bool,
 }
 /// What the lines below an edit left before it (`LineCache::edited`).
 struct Tail {
@@ -710,19 +721,22 @@ impl LineCache {
         self.set_highlighter(highlighter);
     }
     pub(crate) fn highlighted(&self) -> bool {
-        self.highlighter.borrow().is_some() || self.atom_spans.borrow().is_some()
+        self.highlighter.borrow().is_some()
+            || (self.rare_set.get()
+                && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.atom_spans.is_some()))
     }
     /// The name a span gives `look` (`SpanStyle::look`): the same for the
     /// same look.
     pub(crate) fn look(&self, look: SpanLook) -> std::num::NonZeroU32 {
-        let mut looks = self.looks.borrow_mut();
-        let at = match looks.iter().position(|known| known.same(&look)) {
+        let mut rare = self.rare.borrow_mut();
+        let rare = rare.get_or_insert_default();
+        self.rare_set.set(true);
+        let at = match rare.looks.iter().position(|known| known.same(&look)) {
             Some(at) => at,
             None => {
-                self.pictured
-                    .set(self.pictured.get() || look.picture.is_some());
-                looks.push(look);
-                looks.len() - 1
+                rare.pictured |= look.picture.is_some();
+                rare.looks.push(look);
+                rare.looks.len() - 1
             }
         };
         std::num::NonZeroU32::new(at as u32 + 1).expect("a look's name")
@@ -741,12 +755,18 @@ impl LineCache {
         })
     }
     /// Its spans' looks, as `SpanStyle::look` names them.
-    pub(crate) fn looks(&self) -> std::cell::Ref<'_, Vec<SpanLook>> {
-        self.looks.borrow()
+    pub(crate) fn looks(&self) -> std::cell::Ref<'_, [SpanLook]> {
+        std::cell::Ref::map(self.rare.borrow(), |rare| {
+            rare.as_ref().map_or(&[][..], |rare| &rare.looks[..])
+        })
     }
     /// Whether one of its looks is a picture.
     pub(crate) fn pictured(&self) -> bool {
-        self.pictured.get()
+        self.rare_set.get() && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.pictured)
+    }
+    /// Whether it has looks or atom spans at all (`looks` is empty without).
+    pub(crate) fn has_rare(&self) -> bool {
+        self.rare_set.get()
     }
     /// Where the pictures on the lines between `top` and `bottom` show,
     /// in the area's points, and what each is: every box a span's picture
@@ -758,7 +778,7 @@ impl LineCache {
         bottom: f32,
         size: f32,
     ) -> Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> {
-        if !self.pictured.get() {
+        if !self.pictured() {
             return Vec::new();
         }
         let mut shown = Vec::new();
@@ -767,7 +787,7 @@ impl LineCache {
                 continue;
             };
             for (at, x, y) in layout.line(i).inline_boxes() {
-                let looks = self.looks.borrow();
+                let looks = self.looks();
                 let Some((svg, [w, h, _])) = spans
                     .iter()
                     .filter(|(range, _)| range.contains(&at))
@@ -790,7 +810,11 @@ impl LineCache {
             self.shapes.set(true);
             self.restyled.set(true);
         }
-        *self.atom_spans.borrow_mut() = spans.map(Rc::new);
+        let mut rare = self.rare.borrow_mut();
+        if spans.is_some() || rare.is_some() {
+            rare.get_or_insert_default().atom_spans = spans.map(Rc::new);
+            self.rare_set.set(true);
+        }
     }
     /// Whether a line's spans shape it now that did not before: what was
     /// laid out without them is laid out again.
@@ -800,14 +824,26 @@ impl LineCache {
     /// Line `i`'s spans, if it has a highlighter: what the lines above
     /// it leave found first (each once, until one changes).
     pub(crate) fn spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
-        let atoms = self.atom_spans.borrow().clone();
+        if self.rare_set.get() {
+            return self.spans_with_atoms(layout, i);
+        }
+        self.highlighted_spans(layout, i)
+    }
+    /// `spans` of an editor whose atoms have spans: its atoms' before its
+    /// highlighter's. Rare, out of line.
+    #[cold]
+    #[inline(never)]
+    fn spans_with_atoms(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
+        let atoms = (self.rare.borrow().as_ref()).and_then(|rare| rare.atom_spans.clone());
         let colors = self.highlighted_spans(layout, i);
         let Some(atoms) = atoms else {
             return colors;
         };
         atoms_on_line(&atoms, layout.line_range(i), colors)
     }
-    /// Line `i`'s highlighter spans, if it has one.
+    /// Line `i`'s highlighter spans, if it has one. In `spans` itself, as
+    /// before atoms: a call of its own cost every line drawn.
+    #[inline(always)]
     fn highlighted_spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
         let highlight = self.highlighter.borrow().clone()?;
         loop {
@@ -907,7 +943,7 @@ impl LineCache {
             crate::scene::Color(0, 0, 0, 255),
             size,
             &font,
-            &self.looks.borrow(),
+            &self.looks(),
         )?;
         let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, layout.wrap).into();
         let mut styled = self.styled.borrow_mut();
