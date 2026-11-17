@@ -718,6 +718,9 @@ pub(crate) struct LineCache {
     /// Spans its atoms' styles give (`AtomStyle`), over the whole text by
     /// start: each line takes those it holds before the highlighter's.
     atom_spans: RefCell<Option<Rc<LineSpans>>>,
+    /// Whether `atom_spans` holds any: asked first, so a line of an editor
+    /// without atoms reads no `RefCell` for them.
+    has_atom_spans: Cell<bool>,
     /// The highlighter has given a span that shapes its line (a weight,
     /// italics): only then is a line asked for its spans as it is shaped,
     /// so one that only colours costs what it did. `restyled`: it just
@@ -980,7 +983,7 @@ impl LineCache {
         self.set_highlighter(highlighter);
     }
     pub(crate) fn highlighted(&self) -> bool {
-        self.highlighter.borrow().is_some() || self.atom_spans.borrow().is_some()
+        self.highlighter.borrow().is_some() || self.has_atom_spans.get()
     }
     /// Its atoms' spans over the whole text, by start (none: no atom styled).
     pub(crate) fn set_atom_spans(&self, spans: Option<LineSpans>) {
@@ -991,6 +994,7 @@ impl LineCache {
             self.shapes.set(true);
             self.restyled.set(true);
         }
+        self.has_atom_spans.set(spans.is_some());
         *self.atom_spans.borrow_mut() = spans.map(Rc::new);
     }
     /// Whether a line's spans shape it now that did not before: what was
@@ -1001,6 +1005,16 @@ impl LineCache {
     /// Line `i`'s spans, if it has a highlighter: what the lines above
     /// it leave found first (each once, until one changes).
     pub(crate) fn spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
+        if self.has_atom_spans.get() {
+            return self.spans_with_atoms(layout, i);
+        }
+        self.highlighted_spans(layout, i)
+    }
+    /// `spans` of an editor whose atoms have spans: its atoms' before its
+    /// highlighter's. Rare, out of line.
+    #[cold]
+    #[inline(never)]
+    fn spans_with_atoms(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
         let atoms = self.atom_spans.borrow().clone();
         let colors = self.highlighted_spans(layout, i);
         let Some(atoms) = atoms else {
@@ -1008,7 +1022,9 @@ impl LineCache {
         };
         atoms_on_line(&atoms, layout.line_range(i), colors)
     }
-    /// Line `i`'s highlighter spans, if it has one.
+    /// Line `i`'s highlighter spans, if it has one. In `spans` itself, as
+    /// before atoms: a call of its own cost every line drawn.
+    #[inline(always)]
     fn highlighted_spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
         let highlight = self.highlighter.borrow().clone()?;
         loop {

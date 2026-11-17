@@ -6712,6 +6712,9 @@ fn code_editor(
                 // styles read only where it has them.
                 let (mut from, mut to) = (f64::NAN, f64::NAN);
                 let mut style = zgx::widgets::SpanStyle::default();
+                // Whether it names a style: one with none is no span, known
+                // without comparing the style with the default.
+                let mut styled = false;
                 let number = |value: &mlua::StackValue| {
                     (value.type_name() == "number")
                         .then(|| value.get::<f64>().ok())
@@ -6725,23 +6728,44 @@ fn code_editor(
                         None => match number(&key) {
                             Some(1.) => from = number(&value).unwrap_or(f64::NAN),
                             Some(2.) => to = number(&value).unwrap_or(f64::NAN),
-                            Some(3.) => style.color = value.as_str().and_then(&*color_of),
+                            Some(3.) => {
+                                style.color = value.as_str().and_then(&*color_of);
+                                styled |= style.color.is_some();
+                            }
                             _ => {}
                         },
                         Some(b"weight") => {
                             style.weight = number(&value).map(|w| w.clamp(1., 1000.) as u16);
+                            styled |= style.weight.is_some();
                         }
-                        Some(b"italic") => style.italic = yes(&value),
-                        Some(b"strike") => style.strike = yes(&value),
-                        Some(b"bg") => style.background = value.as_str().and_then(&*color_of),
+                        Some(b"italic") => {
+                            style.italic = yes(&value);
+                            styled |= style.italic;
+                        }
+                        Some(b"strike") => {
+                            style.strike = yes(&value);
+                            styled |= style.strike;
+                        }
+                        Some(b"bg") => {
+                            style.background = value.as_str().and_then(&*color_of);
+                            styled |= style.background.is_some();
+                        }
                         Some(b"size") => {
-                            style.size = number(&value).map(|v| v.clamp(1., 512.) as f32)
+                            style.size = number(&value).map(|v| v.clamp(1., 512.) as f32);
+                            styled |= style.size.is_some();
                         }
                         Some(b"line_height") => {
                             style.line_height = number(&value).map(|v| v.clamp(1., 1024.) as f32);
+                            styled |= style.line_height.is_some();
                         }
-                        Some(b"underline") => style.underline = yes(&value),
-                        Some(b"font") => style.mono = value.as_str().is_some_and(|f| f == "mono"),
+                        Some(b"underline") => {
+                            style.underline = yes(&value);
+                            styled |= style.underline;
+                        }
+                        Some(b"font") => {
+                            style.mono = value.as_str().is_some_and(|f| f == "mono");
+                            styled |= style.mono;
+                        }
                         Some(_) => {}
                     }
                     Ok(())
@@ -6749,7 +6773,7 @@ fn code_editor(
                 if walked.is_err() || !(from >= 1. && to >= from) {
                     continue;
                 }
-                if style != zgx::widgets::SpanStyle::default() {
+                if styled {
                     out.push((from as usize - 1..to as usize, style));
                 }
             }

@@ -1050,7 +1050,7 @@ local heard = ui.state("heard", "")
 local box = ui.ref()
 ui.command { id = "add", run = function()
     box:get():set_selection(4, 4)
-    box:get():insert_atom("@file.pdf", { id = "file-1", data = { path = "a/b.pdf" } })
+    ui.editor.insert_atom(box:get(), "@file.pdf", { id = "file-1", data = { path = "a/b.pdf" } })
 end }
 return ui.column { w = 400, h = 200,
     ui.textarea { ref = box, id = "ta", value = draft, atoms = atoms, w = 300, h = 80,
@@ -1098,7 +1098,7 @@ local atoms = ui.state("atoms", {})
 local heard = ui.state("heard", "")
 local box = ui.ref()
 ui.command { id = "read", run = function()
-    local list = box:get():atoms()
+    local list = ui.editor.atoms(box:get())
     heard:set(`{#list}:{list[1].id}:{list[1].from}-{list[1].to}:{list[2].id}:{list[2].from}-{list[2].to}`)
 end }
 return ui.column { w = 400, h = 200,
