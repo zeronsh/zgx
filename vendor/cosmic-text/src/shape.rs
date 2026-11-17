@@ -145,6 +145,11 @@ pub struct ShapeBuffer {
     /// (`BufferLine::set_inline_boxes`), for its words: false outside
     /// `BufferLine::shape`.
     pub(crate) boxes: bool,
+
+    /// zgx: whether the line being shaped has a span with room before it
+    /// only (`BufferLine::set_leads`), for its words: false outside
+    /// `BufferLine::shape`.
+    pub(crate) leads: bool,
 }
 
 impl ShapeBuffer {
@@ -1818,6 +1823,22 @@ fn box_glyphs(
 /// text of its own (not a replacement character): an editor atom shown as a
 /// picture, its text kept for copy and search. Asked only on lines holding
 /// boxes.
+/// zgx: where in `span_range` (from its start) spans with room before them
+/// only start (a negative padding, an editor atom's leading icon), in order.
+#[cold]
+#[inline(never)]
+fn lead_starts(attrs_list: &AttrsList, span_range: &Range<usize>) -> Vec<usize> {
+    attrs_list
+        .spans_iter()
+        .filter(|(range, attrs)| {
+            span_range.start < range.start
+                && range.start < span_range.end
+                && attrs.as_attrs().padding_opt.is_some_and(|padding| padding.0 < 0.)
+        })
+        .map(|(range, _)| range.start - span_range.start)
+        .collect()
+}
+
 #[cold]
 #[inline(never)]
 fn in_text_box(line: &str, attrs_list: &AttrsList, word_range: &Range<usize>) -> bool {
@@ -1985,8 +2006,36 @@ impl ShapeSpan {
             cached_words.extend(words.drain(..).rev());
         }
 
+        // zgx: where spans with room before them only start (an editor atom's
+        // leading icon, an atomic inline box as the web's inline-flex chip):
+        // a line may break there too, as before a box. Asked only of a line
+        // said to have them (`BufferLine::set_leads`).
+        let mut leads = if font_system.shape_buffer.leads {
+            lead_starts(attrs_list, &span_range)
+        } else {
+            Vec::new()
+        }
+        .into_iter()
+        .peekable();
         let mut start_word = 0;
         for (end_lb, _) in unicode_linebreak::linebreaks(span) {
+            // A word before an atom's lead ends there.
+            while let Some(at) = leads.next_if(|&at| at < end_lb) {
+                if at > start_word {
+                    let mut word = cached_words.pop().unwrap_or_else(ShapeWord::empty);
+                    word.build(
+                        font_system,
+                        line,
+                        attrs_list,
+                        (span_range.start + start_word)..(span_range.start + at),
+                        level,
+                        false,
+                        shaping,
+                    );
+                    words.push(word);
+                    start_word = at;
+                }
+            }
             // Check if this break opportunity splits a likely ligature (e.g. "|>" or "!=")
             if end_lb > 0 && end_lb < span.len() {
                 let start_idx = span_range.start;
