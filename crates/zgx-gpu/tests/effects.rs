@@ -380,6 +380,61 @@ fn erf(x: f32) -> f32 {
     (1. - poly * (-x * x).exp()).copysign(x)
 }
 
+/// A gradient mask in a popup's window lies over its node there too: the
+/// popup's renderer draws its items from the popup's corner, and the mask
+/// is placed from the same one, not from the window's.
+#[test]
+fn a_gradient_mask_in_a_popups_window_lies_over_its_node() {
+    use zgx::canvas::GradientStop;
+    use zgx::decoration::Gradient;
+    let _gpu_fixture = gpu_fixture();
+    let mut scene = Scene::new(400., 400.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let popup = scene.append(
+        scene.root(),
+        NodeKind::Container(Layout::Overlay),
+        Style {
+            width: Some(120.),
+            height: Some(120.),
+            ..Default::default()
+        },
+    );
+    scene.set_transform(popup, Transform { x: 240., y: 260. });
+    scene.set_popup(popup, true);
+    let node = scene.append(
+        popup,
+        NodeKind::Rect(Color(255, 255, 255, 255)),
+        Style {
+            width: Some(100.),
+            height: Some(100.),
+            ..Default::default()
+        },
+    );
+    scene.set_transform(node, Transform { x: 10., y: 10. });
+    let stop = |offset, alpha| GradientStop {
+        offset,
+        color: Color(0, 0, 0, alpha),
+    };
+    scene.set_mask_gradient(
+        node,
+        Some(Gradient::Linear {
+            angle: 0.,
+            stops: vec![stop(0., 0), stop(1., 255)].into(),
+        }),
+    );
+    let damage = scene.flush().damage;
+    let mut gpu = GpuRenderer::new(120, 120).unwrap();
+    gpu.set_popup(popup, Rect::new(240., 260., 120., 120.));
+    gpu.render(&scene, &damage).unwrap();
+    let pixels = gpu.readback().unwrap();
+    let row: Vec<u8> = (10..110)
+        .step_by(10)
+        .map(|x| pixels[(60 * 120 + x) * 4 + 3])
+        .collect();
+    assert!(row.windows(2).all(|w| w[0] <= w[1]), "brightening: {row:?}");
+    assert!(row[0] < 20 && row[9] > 220, "{row:?}");
+}
+
 /// A gradient mask (`Scene::set_mask_gradient`) shows a white box over
 /// black through the gradient's alpha: left to right, it brightens across
 /// the box; radial, it's brightest in the middle and dark at the corners.
