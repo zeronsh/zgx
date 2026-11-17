@@ -23185,8 +23185,12 @@ declare ui: {
 	submenu: (props: SubmenuProps) -> Node,
 	list: (props: ListProps) -> Node,
 	-- `node` while `cond` is truthy, else `otherwise` (or nothing).
-	show: (cond: boolean | Readable<unknown> | (() -> unknown), node: Node, otherwise: Node?) -> Node,
-	switch: (value: string | Readable<unknown> | (() -> unknown), cases: { [CaseKey]: Node }, default: Node?) -> Node,
+	-- Internal, subject to change: a branch (`node`, `otherwise`, a case, the
+	-- default) may be a function returning the node, built only when it
+	-- shows, in a scope of its own: a row's branches that never show are
+	-- never built.
+	show: (cond: boolean | Readable<unknown> | (() -> unknown), node: Node | (() -> Node), otherwise: (Node | (() -> Node))?) -> Node,
+	switch: (value: string | Readable<unknown> | (() -> unknown), cases: { [CaseKey]: Node | (() -> Node) }, default: (Node | (() -> Node))?) -> Node,
 	-- A row per item of a list state; `build` gets the item and its index
 	-- (from 1). The item is `any`: annotate it to check it,
 	-- `function(tab: Tab, i)` (Luau infers a generic callback's parameter

@@ -264,6 +264,9 @@ SCENES = [
     # view mount (Luau builders, each `ui.switch`/`ui.show`'s shown branch,
     # styles, layout, text), as an app's library of papers does.
     ('library-scroll', 'zgx-script', 'library_scroll_bench', {}),
+    # The same table with its branches as functions (`ui.switch`'s cases,
+    # `ui.show`'s rarely shown content): built only when they show.
+    ('library-scroll-lazy', 'zgx-script', 'library_scroll_lazy_bench', {}),
     # New text mounting, cold: a word's first shape.
     ('mount-text', 'zgx-script', 'mount_text_bench', {}),
     # An app's cold start: a chat feed decoded from the script's source into

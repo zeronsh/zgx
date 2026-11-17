@@ -89,6 +89,7 @@ zgx lint --rules            # what it looks for
 
 | Rule | What it finds | Instead |
 | --- | --- | --- |
+| `eager-branch` | a `ui.show` or `ui.switch` branch built straight in a row's builder (`ui.switch(r.kind, { row = Paper(r), placeholder = Placeholder() })`): every row builds every branch, shown or not | a function returning it (`row = function() return Paper(r) end`, or `placeholder = Placeholder`), built only when it shows (internal for now: [dynamic content](reference/dynamic.md)) |
 | `untracked-get` | `state:get()` while an element is built (`ui.text { "n: " .. n:get() }`, `ui.show(open:get(), …)`): the interface is built once, untracked, so it shows that moment's value forever | the state itself, a template (`"n: {n}"`) or a function (`function() return n:get() end`) |
 | `state-in-builder` | `ui.state("key", …)` inside a component, `each` row or `list` row: one script-wide state that every instance shares | `ui.use_state(initial)`, or a key naming the instance (`` `file:{pane}` ``) when sharing by key is the point |
 | `timer-interval` | `ui.every(ms)` under 16 ms: more script calls than display frames | `anime` or `ui.tween` (Rust, paced by the display), or the rate the value really changes |

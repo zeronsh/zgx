@@ -64,6 +64,8 @@ mod layout_gaps;
 mod layout_motion;
 #[path = "../layout_unsettled.rs"]
 mod layout_unsettled;
+#[path = "../lazy_branches.rs"]
+mod lazy_branches;
 #[path = "../lazy_ui.rs"]
 mod lazy_ui;
 #[path = "../list_drag_keeps_row.rs"]

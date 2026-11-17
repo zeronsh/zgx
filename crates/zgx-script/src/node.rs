@@ -2976,6 +2976,22 @@ fn hook_filter(env: &Env, table: &Table, owner: Rc<str>) -> mlua::Result<HookCon
     })
 }
 
+/// A branch of `ui.show` or `ui.switch`: a node, or a function returning one,
+/// called only when the branch shows (each time it does) and in a scope of
+/// its own, as a component's builder is: a row's branches that never show
+/// are never built.
+fn expect_branch(lua: &Lua, value: mlua::Value, what: &str) -> mlua::Result<Rc<Node>> {
+    match value {
+        mlua::Value::Function(build) => Ok(Rc::new(Node::new(
+            owner(lua)?,
+            Kind::Component {
+                build,
+                props: lua.create_table()?,
+            },
+        ))),
+        other => expect_node(other, what),
+    }
+}
 pub(crate) fn expect_node(value: mlua::Value, what: &str) -> mlua::Result<Rc<Node>> {
     match value {
         mlua::Value::UserData(ud) if ud.is::<NodeUd>() => Ok(ud.borrow::<NodeUd>()?.0.clone()),
@@ -6240,9 +6256,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(
             |lua, (when, then, otherwise): (mlua::Value, mlua::Value, mlua::Value)| {
                 let when = source(lua, Ty::Bool, "show condition", when)?;
-                let then = expect_node(then, "ui.show's content")?;
+                let then = expect_branch(lua, then, "ui.show's content")?;
                 let otherwise = (!otherwise.is_nil())
-                    .then(|| expect_node(otherwise, "ui.show's alternative"))
+                    .then(|| expect_branch(lua, otherwise, "ui.show's alternative"))
                     .transpose()?;
                 node_ud(
                     lua,
@@ -6511,10 +6527,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut list = Vec::new();
                 for pair in cases.pairs::<Value, mlua::Value>() {
                     let (key, node) = pair?;
-                    list.push((key, expect_node(node, "a switch case")?));
+                    list.push((key, expect_branch(lua, node, "a switch case")?));
                 }
                 let default = (!default.is_nil())
-                    .then(|| expect_node(default, "a switch default"))
+                    .then(|| expect_branch(lua, default, "a switch default"))
                     .transpose()?;
                 node_ud(
                     lua,
