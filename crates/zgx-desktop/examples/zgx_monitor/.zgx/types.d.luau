@@ -23107,6 +23107,11 @@ export type HostViewProps = {
 	-- Open the context menu under the node, from its left edge (a tab's),
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
+	-- Internal, subject to change: kept saying whether its context menu
+	-- shows (true as it opens; false as it closes, however it does: Escape,
+	-- a pick, a click outside, Tab, the window losing focus). Written false,
+	-- the menu closes: a floating panel hides while the menu shows.
+	context_menu_open: Props_context_menu_open,
 	[number]: never,
 	name: string,
 }
