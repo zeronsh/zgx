@@ -3930,6 +3930,15 @@ fn press_flagged(mut view: View, flags: u8) -> View {
     view
 }
 
+/// `list`, with room for one if it has none: a first push takes room for
+/// four, and a node's dynamic styles are most often one.
+#[inline]
+fn fitted<T>(list: &mut Vec<T>) -> &mut Vec<T> {
+    if list.capacity() == 0 {
+        list.reserve_exact(1);
+    }
+    list
+}
 /// What a node sets on its view, after its children: styles, handlers,
 /// observers. Apart from `build` for its frame, as `kind_view`.
 #[cfg_attr(debug_assertions, inline(never))]
@@ -3944,6 +3953,8 @@ fn styled(
     // Literal styles apply once. Anything that can change, and an element's
     // animated values, share one reactive style.
     let mut statics: smallvec::SmallVec<[(Prop, Lit); 8]> = smallvec::SmallVec::new();
+    // Kept by the node's reactive style for its life. Its first entry takes
+    // room for one (`fitted`), not four: most have one.
     let mut dynamic = Vec::new();
     for (prop, source) in &node.props {
         match source {
@@ -3953,9 +3964,9 @@ fn styled(
                     view = view.pixel_snap();
                 }
                 let scalar = anim::drive(need(&mut cx), spec);
-                dynamic.push((*prop, resolve_owned(source), Some(scalar)));
+                fitted(&mut dynamic).push((*prop, resolve_owned(source), Some(scalar)));
             }
-            _ => dynamic.push((*prop, resolve_owned(source), None)),
+            _ => fitted(&mut dynamic).push((*prop, resolve_owned(source), None)),
         }
     }
     // A dynamic part of a translation or transform carries its literal
@@ -4083,6 +4094,17 @@ fn styled(
         || params_only.is_some()
         || layer.is_some()
     {
+        // A background image and a shader's fill and parameters, boxed
+        // together: the style closure below keeps what it captures for the
+        // node's life, and these were most of it (a shader's parameters
+        // are 64 bytes each) on the many nodes with none.
+        // An `if`, not `bool::then`: its closure would take the three by
+        // value (a shader's parameters are 64 bytes) on every node.
+        let extras = if bg_image.is_some() || shader.is_some() || params_only.is_some() {
+            Some(Box::new((bg_image, shader, params_only)))
+        } else {
+            None
+        };
         let vm = vm.clone();
         let element = element.clone();
         let mut apart: Option<Box<StylesApart>> = None;
@@ -4134,16 +4156,6 @@ fn styled(
                     }
                 }
             };
-            let image = bg_image.as_ref().and_then(|(src, fit, low)| {
-                match resolve(src, Ty::Str, None, &vm) {
-                    Some(Lit::Str(path)) => load_image(&vm, low, &path).map(|image| (image, *fit)),
-                    _ => None,
-                }
-            });
-            let styles = match image {
-                Some((image, fit)) => styles.bg_image(image, fit),
-                None => styles,
-            };
             let styles = match layer.as_deref() {
                 Some((shader, params, bleed, reach)) => {
                     let animated = element
@@ -4160,8 +4172,23 @@ fn styled(
                 }
                 None => styles,
             };
+            // An image and a shader, from their box: a node with neither
+            // takes this one branch.
+            let Some((bg_image, shader, params_only)) = extras.as_deref() else {
+                return styles;
+            };
+            let image = bg_image.as_ref().and_then(|(src, fit, low)| {
+                match resolve(src, Ty::Str, None, &vm) {
+                    Some(Lit::Str(path)) => load_image(&vm, low, &path).map(|image| (image, *fit)),
+                    _ => None,
+                }
+            });
+            let styles = match image {
+                Some((image, fit)) => styles.bg_image(image, fit),
+                None => styles,
+            };
             // A shader fill, with its literal parameters unless animated.
-            match &shader {
+            match shader {
                 Some((fill, params, tokens, driven)) => {
                     let animated = element.as_ref().and_then(|e| e.animated.borrow().shader);
                     let uniforms = animated.unwrap_or(zgx::decoration::ShaderUniforms {
@@ -4186,7 +4213,7 @@ fn styled(
                         false => styles.bg_shader(fill.clone()).shader_uniforms(uniforms),
                     }
                 }
-                None => match params_only {
+                None => match *params_only {
                     Some(params) => styles.shader_uniforms(
                         element
                             .as_ref()
