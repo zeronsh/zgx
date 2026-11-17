@@ -1661,7 +1661,8 @@ const FIRM_GLYPH: f32 = 1.25;
 /// A glyph's `options.y`: straight alpha, firmed below `SHARP_TEXT_BELOW` if a
 /// mask (a colour glyph's own colours stay as they are).
 fn glyph_texture(color: bool, scale: f32) -> f32 {
-    if !color && scale < SHARP_TEXT_BELOW {
+    // On macOS Core Text has thickened it already, as macOS's own text.
+    if !color && scale < SHARP_TEXT_BELOW && !cfg!(target_os = "macos") {
         FIRM_GLYPH
     } else {
         1.
@@ -2034,6 +2035,10 @@ struct Shaped {
     quads: Vec<TextQuad>,
     /// Whether `quads` hold colour glyphs (`COLOR_GLYPH`).
     colored: bool,
+    /// How much its glyphs' keys are thickened (`text::smoothing`, macOS):
+    /// its colour's level, `PER_RUN` for rich text's (each glyph its run's),
+    /// none until keyed for its colours (`smooth_glyphs`).
+    smoothing: Option<u8>,
     atlas_epoch: u64,
     last_used: u64,
     /// The prepared text these glyphs were laid out from, kept while drawn.
@@ -2051,6 +2056,39 @@ impl Shaped {
             // as many shapes as when it held those.)
             + self.quads.capacity() * std::mem::size_of::<Quad>()
     }
+}
+/// `Shaped::smoothing` of rich text: each glyph's key thickened by its
+/// run's colour.
+const PER_RUN: u8 = u8::MAX;
+/// Key `shaped`'s glyphs for macOS's font smoothing (`text::smoothing`) by
+/// its colour, `color`, or each rich run's, unless they are already: its
+/// quads then hold other glyphs, placed again from the new ones.
+fn smooth_glyphs(shaped: &mut Shaped, color: zgx::scene::Color) {
+    let want = match shaped.rich {
+        Some(_) => PER_RUN,
+        None => text::smoothing(color),
+    };
+    if shaped.smoothing == Some(want) {
+        return;
+    }
+    match &shaped.rich {
+        Some(rich) => {
+            let runs = rich.runs();
+            for glyph in &mut shaped.glyphs {
+                let level = runs
+                    .get(glyph.run)
+                    .map_or(0, |run| text::smoothing(run.color));
+                glyph.key = text::smoothed(glyph.key, level);
+            }
+        }
+        None => {
+            for glyph in &mut shaped.glyphs {
+                glyph.key = text::smoothed(glyph.key, want);
+            }
+        }
+    }
+    shaped.smoothing = Some(want);
+    shaped.atlas_epoch = u64::MAX;
 }
 /// The atlas's key: cosmic-text's, losslessly, with its scalar fields
 /// packed into words so it hashes and compares in a few operations.
@@ -5228,6 +5266,9 @@ pub struct GpuRenderer {
     shaped_like: FxHashMap<u64, NodeId>,
     shaped_bytes: usize,
     fresh: bool,
+    /// `text::font_smoothing_epoch` its text was drawn at: another, and its
+    /// next frame draws all of it again (`text::set_font_smoothing`).
+    smoothing_epoch: u64,
     /// Consecutive presented frames whose damage covered the window.
     whole_frames: u32,
     /// The scene flush the retained target was last rendered from.
@@ -6083,6 +6124,7 @@ impl GpuRenderer {
             shaped_like: FxHashMap::default(),
             shaped_bytes: 0,
             fresh: true,
+            smoothing_epoch: text::font_smoothing_epoch(),
             whole_frames: 0,
             rendered_serial: None,
             copies: Vec::new(),
@@ -6998,6 +7040,15 @@ impl GpuRenderer {
             if let Some(views) = &mut self.views {
                 views.owed = false;
             }
+        }
+        // Text drawn thicker or lighter since (`text::set_font_smoothing`):
+        // every text's glyphs again, its layers' too.
+        let smoothing = text::font_smoothing_epoch();
+        if smoothing != self.smoothing_epoch {
+            self.smoothing_epoch = smoothing;
+            self.flush_pending();
+            self.layers.clear();
+            self.fresh = true;
         }
         let presented = std::mem::take(&mut self.present_stats);
         if compile::declared() + zgx::decoration::layer_shaders_declared() != self.fills_declared {
@@ -11090,6 +11141,7 @@ impl GpuRenderer {
                                     decoration.color = decoration.color_in(new);
                                 }
                                 shaped.rich = Some(new.clone());
+                                shaped.smoothing = None;
                                 shaped.atlas_epoch = self.atlas_epoch.wrapping_sub(1);
                             }
                             shaped.rich != rich
@@ -11136,8 +11188,10 @@ impl GpuRenderer {
                                 bounds.height.to_bits().hash(&mut hasher);
                                 hasher.finish()
                             });
-                            // (A twin's quads come with whether they hold colour glyphs.)
+                            // (A twin's quads come with whether they hold colour glyphs,
+                            // and its glyphs with how they are thickened.)
                             let mut twin_colored = false;
+                            let mut twin_smoothing = None;
                             let twin = content
                                 .and_then(|content| self.shaped_like.get(&content))
                                 .and_then(|id| self.shapes.get(id))
@@ -11153,6 +11207,7 @@ impl GpuRenderer {
                                 })
                                 .map(|twin| {
                                     spare_glyphs.extend_from_slice(&twin.glyphs);
+                                    twin_smoothing = twin.smoothing;
                                     let placed = twin.atlas_epoch == self.atlas_epoch;
                                     if placed {
                                         spare_quads.extend_from_slice(&twin.quads);
@@ -11275,6 +11330,7 @@ impl GpuRenderer {
                                 glyphs,
                                 quads: spare_quads,
                                 colored: twin_colored,
+                                smoothing: twin_smoothing,
                                 atlas_epoch: epoch.unwrap_or(0),
                                 last_used: self.frame,
                                 prepared,
@@ -11286,6 +11342,17 @@ impl GpuRenderer {
                                     self.shaped_like.clear();
                                 }
                                 insert_in::<MODE, _, _>(&mut self.shaped_like, content, item.id);
+                            }
+                        }
+                        // On macOS, its glyphs thickened as its colour has macOS's
+                        // own text thickened: a new colour, new glyphs.
+                        if cfg!(target_os = "macos") {
+                            let held = match fresh.as_mut() {
+                                Some(shaped) => Some(shaped),
+                                None => self.shapes.get_mut(&item.id),
+                            };
+                            if let Some(shaped) = held {
+                                smooth_glyphs(shaped, color);
                             }
                         }
                         let snap = |value: f32| (value * self.scale).round() / self.scale;
@@ -23235,6 +23302,7 @@ mod atlas_glyph_errors_tests {
                 .collect(),
             quads: Vec::new(),
             colored: false,
+            smoothing: None,
             atlas_epoch: 0,
             last_used: 0,
             prepared: None,
