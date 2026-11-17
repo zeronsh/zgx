@@ -8324,6 +8324,25 @@ impl Scene {
     pub(crate) fn remove_held(&mut self, id: NodeId) {
         self.remove_as::<false, true>(id, 0);
     }
+    /// `append_held`, for a caller off the hot path (a canvas's text cut
+    /// by a clip or wrapped): `append_held` keeps its one caller, a
+    /// canvas's plain line, and is inlined there.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn append_held_aside(
+        &mut self,
+        parent: NodeId,
+        kind: NodeKind,
+        style: Style,
+    ) -> NodeId {
+        self.append_as::<true>(parent, kind, style)
+    }
+    /// `remove_held`, for a caller off the hot path, as `append_held_aside`.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn remove_held_aside(&mut self, id: NodeId) {
+        self.remove_as::<false, true>(id, 0);
+    }
     #[cfg(target_os = "macos")]
     /// `id`'s looping animation, sampled for the renderer to bake and play
     /// without drawing a frame per tick; `None` ends it. Internal to the

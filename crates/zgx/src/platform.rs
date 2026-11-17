@@ -178,6 +178,22 @@ pub trait Platform {
     fn set_text_language(&self, language: Option<&str>) {
         let _ = language;
     }
+    /// Add the TrueType or OpenType font in `bytes` to every window's text,
+    /// beside the faces it has (another weight of a family it holds): text
+    /// in its families shapes with it from now on, and every text measures,
+    /// lays out and draws again. The family names it holds, or why not (not
+    /// a font). None adds none.
+    fn add_font(&self, bytes: Arc<[u8]>) -> Result<Vec<String>, String> {
+        let _ = bytes;
+        Err("no fonts are added here".into())
+    }
+    /// The fonts the app's windows shape text with beside the system's
+    /// (bundled, or replaced since), each a TrueType or OpenType file, in
+    /// the order they took them: what a renderer of its own installs to
+    /// shape and draw as the windows do (`ui.render_canvas`). None here.
+    fn fonts(&self) -> Vec<Arc<[u8]>> {
+        Vec::new()
+    }
     /// Whether the platform looks words up (`look_up`): macOS's dictionary
     /// panel. A context menu offers Look Up where it does.
     fn looks_up(&self) -> bool {
@@ -335,6 +351,8 @@ pub fn unforwarded(wrap: impl FnOnce(PlatformService) -> PlatformService) -> Vec
     let _ = w.substitutions("", Substitutions::default());
     let _ = w.correction("", 0..0);
     w.set_text_language(None);
+    let _ = w.add_font(Arc::from(&[][..]));
+    let _ = w.fonts();
     let _ = w.looks_up();
     let _ = w.look_up("", (0., 0.), 0.);
     let _ = w.clipboard_files();
@@ -367,7 +385,7 @@ struct Probe {
 }
 impl Probe {
     /// Every `Platform` method, in the trait's order.
-    const METHODS: [&'static str; 29] = [
+    const METHODS: [&'static str; 31] = [
         "clipboard_text",
         "set_clipboard_text",
         "primary_text",
@@ -380,6 +398,8 @@ impl Probe {
         "substitutions",
         "correction",
         "set_text_language",
+        "add_font",
+        "fonts",
         "looks_up",
         "look_up",
         "clipboard_files",
@@ -447,6 +467,14 @@ impl Platform for Probe {
     }
     fn set_text_language(&self, _: Option<&str>) {
         self.heard("set_text_language");
+    }
+    fn add_font(&self, _: Arc<[u8]>) -> Result<Vec<String>, String> {
+        self.heard("add_font");
+        Ok(Vec::new())
+    }
+    fn fonts(&self) -> Vec<Arc<[u8]>> {
+        self.heard("fonts");
+        Vec::new()
     }
     fn looks_up(&self) -> bool {
         self.heard("looks_up");

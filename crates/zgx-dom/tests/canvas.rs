@@ -117,7 +117,8 @@ async fn a_canvas_draws_its_commands_and_again_as_they_change() {
                         font: Default::default(),
                         anchor: TextAnchor::Start,
                         baseline: TextBaseline::Top,
-                        known_size: None,
+                        known_size: zgx::canvas::KnownSize::NONE,
+                        width: f32::INFINITY,
                     });
                 drawing
             })
@@ -141,6 +142,97 @@ async fn a_canvas_draws_its_commands_and_again_as_they_change() {
     color.set(Color(0, 128, 0, 255));
     zgx_dom::flush();
     assert_eq!(pixel(&host, 10., 10.), [0, 128, 0, 255]);
+    mounted.unmount();
+    host.remove();
+}
+
+#[wasm_bindgen_test]
+async fn a_canvas_draws_pictures_shadows_and_radial_and_conic_gradients() {
+    use zgx::{affine::Affine, image::ImageData, style::ObjectFit};
+    let stops = |a: Color, b: Color| {
+        [
+            GradientStop {
+                offset: 0.,
+                color: a,
+            },
+            GradientStop {
+                offset: 1.,
+                color: b,
+            },
+        ]
+    };
+    let (red, blue) = (Color(255, 0, 0, 255), Color(0, 0, 255, 255));
+    // Two pixels side by side, red then blue.
+    let picture =
+        std::sync::Arc::new(ImageData::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap());
+    let host = host();
+    let runtime = Runtime::new();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            canvas(move |_| {
+                let mut drawing = Canvas::new();
+                drawing
+                    // A radial gradient of radius 10 about (10, 10): red at
+                    // its centre, blue on and past its circle.
+                    .fill(
+                        Path::rectangle(Rect::new(0., 0., 40., 20.)),
+                        Brush::radial(
+                            Affine::scale(10., 10.).then(Affine::translation(10., 10.)),
+                            stops(red, blue),
+                        )
+                        .unwrap(),
+                    )
+                    // A conic one about (60, 10), red all round, as a stroke.
+                    .stroke(
+                        Path::rectangle(Rect::new(50., 0., 20., 20.)),
+                        Brush::conic(Affine::translation(60., 10.), stops(red, red)).unwrap(),
+                        Stroke {
+                            width: 4.,
+                            ..Default::default()
+                        },
+                    )
+                    // A sharp shadow 10 points right of a square at 80, grown
+                    // by 2.
+                    .shadow(
+                        Path::rectangle(Rect::new(80., 0., 10., 10.)),
+                        blue,
+                        Point::new(10., 0.),
+                        0.,
+                        2.,
+                    )
+                    // The picture stretched over 20 by 10 points.
+                    .image(
+                        picture.clone(),
+                        Rect::new(0., 25., 20., 10.),
+                        ObjectFit::Fill,
+                        0.,
+                        1.,
+                    );
+                drawing
+            })
+            .w(120.)
+            .h(40.),
+        ),
+    );
+    sleep(60).await;
+    // Red at its centre (a pixel's middle is a little off it), blue past it.
+    let centre = pixel(&host, 10., 10.);
+    assert!(
+        centre[0] > 200 && centre[2] < 50,
+        "radial centre: {centre:?}"
+    );
+    assert_eq!(pixel(&host, 30., 10.), [0, 0, 255, 255], "past its circle");
+    assert_eq!(pixel(&host, 51., 10.), [255, 0, 0, 255], "the conic stroke");
+    assert_eq!(pixel(&host, 60., 10.)[3], 0, "inside the stroke");
+    // The shadow alone, not its shape, and its spread past the shape.
+    assert_eq!(pixel(&host, 85., 5.)[3], 0, "no shape drawn");
+    assert_eq!(pixel(&host, 95., 5.), [0, 0, 255, 255], "its shadow");
+    assert_eq!(pixel(&host, 101., 5.), [0, 0, 255, 255], "grown by 2");
+    assert_eq!(pixel(&host, 104., 5.)[3], 0, "no further");
+    assert_eq!(pixel(&host, 3., 30.)[0], 255, "the picture's left pixel");
+    assert_eq!(pixel(&host, 17., 30.)[2], 255, "its right one");
     mounted.unmount();
     host.remove();
 }
