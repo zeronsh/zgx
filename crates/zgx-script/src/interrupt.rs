@@ -646,8 +646,10 @@ impl Installed {
                     // Set as it starts, fired at its due time as far as a
                     // stop's report goes: no clock read for it.
                     alarm.fired_at.store(due, Ordering::SeqCst);
-                    // A new call's first safepoint looks.
-                    WASM_CHECKS.with(|checks| checks.set(0));
+                    // A new call's first look is `WASM_CHECK_EVERY`
+                    // safepoints in, where its budget starts: a shorter call
+                    // reads no clock.
+                    WASM_CHECKS.with(|checks| checks.set(1));
                     alarm.set(true);
                 }
             }
@@ -936,6 +938,12 @@ unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
         watch.set_memory_alarm();
     }
     match watch.deadline.get() {
+        // Its first look: the budget starts now (`Deadline::lazy`).
+        #[cfg(target_arch = "wasm32")]
+        Some(d) if d.lazy() => {
+            watch.deadline.set(Some(d.started_now()));
+            Verdict::Continue
+        }
         Some(d) if d.exceeded() => {
             record_stop(&watch.alarm, &d);
             #[cfg(target_arch = "wasm32")]

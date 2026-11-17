@@ -236,6 +236,13 @@ pub(crate) struct Deadline {
     wall: Instant,
     cpu: Duration,
     budget: Duration,
+    /// In the browser, an outermost call's budget starts at the first check
+    /// that looks (`interrupt::check`), not as the call does: reading the
+    /// clock (`performance.now`, through JS) cost more than most calls, and
+    /// a call that ends before that check never reads it. Until then `wall`
+    /// and `cpu` mean nothing.
+    #[cfg(target_arch = "wasm32")]
+    lazy: bool,
 }
 /// How old a CPU-time reading an outermost call's budget may start from:
 /// reading the thread's CPU clock costs more than a short call itself, and a
@@ -267,15 +274,26 @@ fn recent_thread_cpu(now: Instant) -> Duration {
 impl Deadline {
     /// A budget from now, its CPU start a recent reading (`CPU_READING_AGE`).
     fn start_recent(budget: Duration) -> Self {
-        let wall = Instant::now();
-        Self {
-            wall,
-            #[cfg(any(unix, windows))]
-            cpu: recent_thread_cpu(wall),
-            // Wall time stands in for the CPU's (`thread_cpu`): read once.
-            #[cfg(not(any(unix, windows)))]
-            cpu: thread_cpu_at(wall),
+        // Started at the first check that looks (`lazy`).
+        #[cfg(target_arch = "wasm32")]
+        return Self {
+            wall: clock_start(),
+            cpu: Duration::ZERO,
             budget,
+            lazy: true,
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let wall = Instant::now();
+            Self {
+                wall,
+                #[cfg(any(unix, windows))]
+                cpu: recent_thread_cpu(wall),
+                // Wall time stands in for the CPU's (`thread_cpu`): read once.
+                #[cfg(not(any(unix, windows)))]
+                cpu: thread_cpu_at(wall),
+                budget,
+            }
         }
     }
     /// A budget from now, read exactly: one that will shift another.
@@ -284,15 +302,34 @@ impl Deadline {
             wall: Instant::now(),
             cpu: thread_cpu(),
             budget,
+            #[cfg(target_arch = "wasm32")]
+            lazy: false,
         }
+    }
+    /// Whether its clock has yet to start (`lazy`).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn lazy(&self) -> bool {
+        self.lazy
+    }
+    /// The same budget, its clock started now.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn started_now(self) -> Self {
+        Self::start(self.budget)
     }
     /// The same budget with the time `other` has run since it started
     /// taken off the clock.
     fn shifted(self, other: &Deadline) -> Self {
+        // Not started: nothing has been counted to take off.
+        #[cfg(target_arch = "wasm32")]
+        if self.lazy {
+            return self;
+        }
         Self {
             wall: self.wall + other.wall.elapsed(),
             cpu: self.cpu + thread_cpu().saturating_sub(other.cpu),
             budget: self.budget,
+            #[cfg(target_arch = "wasm32")]
+            lazy: false,
         }
     }
     /// When its wall time passes its budget: it is exceeded from then on,
@@ -423,8 +460,14 @@ fn thread_cpu() -> Duration {
 /// [`thread_cpu`] as of `now`, a reading of the wall clock already made.
 #[cfg(not(any(unix, windows)))]
 fn thread_cpu_at(now: Instant) -> Duration {
+    now.saturating_duration_since(clock_start())
+}
+/// When this thread first read the clock for a budget: what its stand-in
+/// CPU time counts from, and a budget not yet started holds.
+#[cfg(not(any(unix, windows)))]
+fn clock_start() -> Instant {
     thread_local! { static START: Instant = Instant::now(); }
-    START.with(|start| now.saturating_duration_since(*start))
+    START.with(|start| *start)
 }
 
 /// What a script reads of time and chance, on a virtual clock: Luau's own
@@ -552,6 +595,11 @@ impl Vm {
     /// it rebuilds) off the script's clock: the budget stops runaway
     /// scripts, not the updates they cause.
     pub(crate) fn off_clock<R>(&self, f: impl FnOnce() -> R) -> R {
+        // A budget not yet started has nothing to take off.
+        #[cfg(target_arch = "wasm32")]
+        if self.deadline.get().is_some_and(|d| d.lazy()) {
+            return f();
+        }
         let started = Deadline::start(Duration::ZERO);
         let result = f();
         if let Some(d) = self.deadline.get() {
