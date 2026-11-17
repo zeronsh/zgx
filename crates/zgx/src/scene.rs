@@ -14799,6 +14799,11 @@ impl Scene {
         let transform = self.node(id).transform;
         self.set_transform(id, transform);
     }
+    /// Whether `id`'s translation rests on whole device pixels
+    /// (`set_pixel_snap`).
+    pub(crate) fn snaps_to_pixels(&self, id: NodeId) -> bool {
+        self.node(id).pixel_snap
+    }
     /// How many device pixels a point is (the window's scale factor).
     /// Scroll content then moves by whole device pixels, as Safari's and
     /// AppKit's do: a trackpad's fractional offsets would leave its edges
