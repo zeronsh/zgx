@@ -293,6 +293,44 @@ fn a_spellchecked_editor_marks_misspellings_and_its_menu_corrects_them() {
     assert_eq!(*speller.learned.borrow(), ["teh"]);
 }
 
+/// A misspelled word in an atom (a chip's label) has no mark, as a
+/// `contentEditable=false` chip has none on the web; the same word outside
+/// it has one, and its menu offers no guesses for the atom's.
+#[test]
+fn a_misspelling_in_an_atom_is_not_marked() {
+    let mut ui = Ui::new(400., 200.);
+    let speller = Rc::new(Speller::default());
+    let value = ui.signal("ask teh and teh".to_owned());
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(speller.clone()),
+        column().size(400., 200.).child(
+            text_area("Notes", value.clone())
+                .id("field")
+                .spellcheck(true)
+                .w(300.)
+                .h(80.),
+        ),
+    ));
+    ui.prepare_frame();
+    assert_eq!(marks(&ui).len(), 2, "both marked");
+    let editor = ui.editor(view.find("field").unwrap()).unwrap();
+    let id = editor.new_atom_id();
+    editor.set_atoms(vec![zgx::text_edit::Atom::new(id, 4..7)]);
+    ui.prepare_frame();
+    let shown = marks(&ui);
+    assert_eq!(shown.len(), 1, "only the one outside the atom: {shown:?}");
+    let outside = editor.range_boxes(12..15)[0];
+    assert!(
+        (shown[0].x - outside.x).abs() < 1.,
+        "under the word outside: {shown:?} {outside:?}"
+    );
+    // A context click on the atom's word offers no spelling items.
+    let word = editor.range_boxes(4..7)[0];
+    context_click(&mut ui, word.x + word.width / 2., word.y + word.height / 2.);
+    assert!(view.find("editor-copy").is_some(), "its menu shows");
+    assert!(view.find("spelling-learn").is_none());
+}
+
 #[test]
 fn turning_spellcheck_off_clears_the_marks_and_on_checks_again() {
     let mut ui = Ui::new(400., 200.);
