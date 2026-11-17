@@ -105,7 +105,13 @@ fn answer(mut stream: TcpStream, closed: &AtomicBool) {
 }
 
 fn app(base: &str) -> TestApp {
-    let upload = std::env::temp_dir().join(format!("zgx-run-upload-{}.txt", std::process::id()));
+    // A file of this app's own: the tests making apps run at once, and one
+    // writing a shared path (`fs::write` empties it first) could leave
+    // another's upload reading it empty.
+    static APPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let made = APPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let upload =
+        std::env::temp_dir().join(format!("zgx-run-upload-{}-{made}.txt", std::process::id()));
     std::fs::write(&upload, "a file's text").unwrap();
     let upload = upload.display();
     let script = format!(
