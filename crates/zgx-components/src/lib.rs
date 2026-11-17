@@ -31,7 +31,7 @@ pub use grid::{GridCell, GridColumn, GridSelection, GridSort, GridSource, data_g
 pub use palette::{PaletteCommand, command_palette, fuzzy_score};
 pub use select::{SelectOption, select, select_live};
 pub use tabs::{CloseTab, MoveTab, Tab, TabsMore, TabsOptions, TearOffTab, tabs, tabs_with};
-pub use toast::{Toast, ToastAction, ToastKind, Toaster, toast_host};
+pub use toast::{Toast, ToastAction, ToastDefaults, ToastKind, Toaster, toast_host};
 pub use tree::{TreeChildren, TreeItem, tree};
 
 /// The components, for `use zgx_components::prelude::*` beside
@@ -40,8 +40,9 @@ pub mod prelude {
     pub use super::{
         CalendarDate, CalendarOptions, ComboItem, ComboboxOptions, GridCell, GridColumn,
         GridSelection, GridSort, GridSource, PaletteCommand, SelectOption, StepperOptions, Tab,
-        TabsOptions, TimeOfDay, TimeOptions, Toast, ToastKind, Toaster, TreeChildren, TreeItem,
-        accordion, calendar, combobox, command_palette, data_grid, date_picker, disclosure,
-        segmented, select, separator, stepper, tabs, time_field, toast_host, tree,
+        TabsOptions, TimeOfDay, TimeOptions, Toast, ToastDefaults, ToastKind, Toaster,
+        TreeChildren, TreeItem, accordion, calendar, combobox, command_palette, data_grid,
+        date_picker, disclosure, segmented, select, separator, stepper, tabs, time_field,
+        toast_host, tree,
     };
 }

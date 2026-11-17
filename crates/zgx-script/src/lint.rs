@@ -311,6 +311,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "sort",
     "number",
     "toast",
+    "toast_defaults",
     "dismiss_toast",
     "shader",
     "layer_shader",
