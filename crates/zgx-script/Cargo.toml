@@ -76,7 +76,7 @@ zgx-components = { path = "../zgx-components", version = "0.1.10", optional = tr
 zgx-3d = { path = "../zgx-3d", version = "0.1.10", optional = true }
 zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
-mlua = { package = "zgx-mlua", version = "0.12.9", path = "../../vendor/mlua", features = ["luau"] }
+mlua = { package = "zgx-mlua", version = "0.12.10", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
 # `.luaurc` aliases for `require("@alias/...")`.
 serde = "1"

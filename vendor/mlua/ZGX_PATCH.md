@@ -162,3 +162,11 @@ Built for wasm32-unknown-unknown (zgx-script under zgx-dom), `Lua::heap_dump`
 declares the C file functions it reads Luau's dump back with itself (Rust's
 `libc` has none for that target; the wasi-libc zgx-dom links has them). The
 browser has no files, so `tmpfile` fails and there is no dump.
+
+## A collector step for memory outside the heap (zgx-mlua 0.12.10)
+
+`Lua::gc_step_kbytes` (`src/state.rs`, Luau only) is `lua_gc(LUA_GCSTEP, kbytes)`:
+the collector's work for that many kilobytes, as if the VM had allocated
+them. zgx-script's nodes keep most of their bytes in Rust behind a
+pointer-sized userdata, which Luau's pacing doesn't count; it steps the
+collector by what they hold.

@@ -54,6 +54,11 @@ web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "
 name = "luau"
 required-features = ["luau"]
 
+# Its own binary: it counts every allocation of the page.
+[[test]]
+name = "luau_memory"
+required-features = ["luau"]
+
 # `ui.fetch` through the page's `fetch` (`install_fetcher`).
 [[test]]
 name = "fetch"
