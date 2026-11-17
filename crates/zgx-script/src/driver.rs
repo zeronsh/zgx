@@ -276,6 +276,27 @@ pub fn first_text(scene: &Scene, node: NodeId) -> Option<String> {
     None
 }
 
+/// The value of `node`, or of the first node inside it with one, depth
+/// first: what a field, an editor or a slider holds, as assistive
+/// technology reads it (a text's value is its text, left to [`first_text`]).
+#[doc(hidden)]
+pub fn first_value(ui: &Ui, node: NodeId) -> Option<String> {
+    let scene = ui.scene.borrow();
+    let semantics = ui.semantics.borrow();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if let Some(value) = semantics
+            .get(n)
+            .filter(|s| s.role != Role::Label)
+            .and_then(|s| s.value.clone())
+        {
+            return Some(value);
+        }
+        stack.extend(scene.children(n).iter().rev());
+    }
+    None
+}
+
 /// The rows of list `list` that are mounted, top to bottom.
 pub fn rows(scene: &Scene, list: NodeId) -> Vec<NodeId> {
     // A list holds a viewport, which holds the content, which holds the rows.

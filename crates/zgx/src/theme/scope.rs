@@ -16,7 +16,7 @@ use crate::reactive::{Runtime, Signal, WeakRuntime};
 use crate::scene::{BoxShadow, Color};
 use crate::text_layout::FontFamily;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
@@ -292,8 +292,14 @@ struct Shared {
     state: RefCell<State>,
     /// The root theme's name, for what shows it (a theme picker).
     current: Signal<Arc<str>>,
-    /// The system's display settings (`Themes::set_system_preferences`).
+    /// The system's display settings (`Themes::set_system_preferences`),
+    /// with an in-process override applied (`override_reduced_motion`).
     preferences: Signal<SystemPreferences>,
+    /// What the host last reported, apart from any override.
+    reported: Cell<SystemPreferences>,
+    /// Reduced motion as devtools set it, over the system's
+    /// (`zgx inspect prefers reduced-motion`); never the system's own.
+    reduced_motion_override: Cell<Option<bool>>,
 }
 
 /// The system's accessibility display settings, as a page's CSS media
@@ -695,6 +701,8 @@ impl Themes {
             }),
             current: runtime.signal(DARK.into()),
             preferences: runtime.signal(SystemPreferences::default()),
+            reported: Cell::new(SystemPreferences::default()),
+            reduced_motion_override: Cell::new(None),
         });
         let root = ThemeScope::new(shared.clone(), None, ThemeOverride::default());
         Themes { shared, root }
@@ -818,7 +826,31 @@ impl Themes {
     }
     /// The system's display settings changed (the desktop host calls this).
     pub fn set_system_preferences(&self, preferences: SystemPreferences) {
-        self.shared.preferences.set(preferences);
+        self.shared.reported.set(preferences);
+        self.apply_preferences();
+    }
+    /// Reduced motion as the app reads it, set here over the system's:
+    /// `Some` holds it until `None` gives the system's back. In this process
+    /// alone, for devtools to try a reduced-motion pass
+    /// (`zgx inspect prefers reduced-motion on`); the system's own setting
+    /// is never changed.
+    #[doc(hidden)]
+    pub fn override_reduced_motion(&self, reduced: Option<bool>) {
+        self.shared.reduced_motion_override.set(reduced);
+        self.apply_preferences();
+    }
+    fn apply_preferences(&self) {
+        let mut preferences = self.shared.reported.get();
+        if let Some(reduced) = self.shared.reduced_motion_override.get() {
+            preferences.reduced_motion = reduced;
+        }
+        if self
+            .shared
+            .preferences
+            .with_untracked(|now| *now != preferences)
+        {
+            self.shared.preferences.set(preferences);
+        }
     }
     /// The system's display settings. Read inside an effect, it follows them.
     pub fn system_preferences(&self) -> SystemPreferences {

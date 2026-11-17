@@ -8156,35 +8156,17 @@ impl WindowManager {
                             paths,
                             accepted,
                         } => {
-                            let mut result = Ok(());
-                            let mut handled = false;
-                            for path in paths.iter() {
-                                if host.context.window.is_closed() {
-                                    break;
-                                }
-                                match host.dispatch_prevented(InputEvent::FileDrop {
-                                    x,
-                                    y,
-                                    path: path.clone(),
-                                }) {
-                                    Ok(value) => handled |= value,
-                                    Err(error) => {
-                                        result = Err(error);
-                                        break;
-                                    }
-                                }
-                            }
-                            if result.is_ok() && !host.context.window.is_closed() {
-                                match host.dispatch_prevented(InputEvent::FilesDrop { x, y, paths })
-                                {
-                                    Ok(value) => handled |= value,
-                                    Err(error) => result = Err(error),
-                                }
-                            }
+                            // A `FileDrop` each, then `FilesDrop`, as
+                            // `zgx inspect files drop` drives it.
+                            let result = zgx::outside_drag::drop_files(x, y, paths, |event| {
+                                (!host.context.window.is_closed())
+                                    .then(|| host.dispatch_prevented(event))
+                            });
                             let _ = accepted.send(
-                                result.is_ok() && handled && !host.context.window.is_closed(),
+                                result.as_ref().is_ok_and(|handled| *handled)
+                                    && !host.context.window.is_closed(),
                             );
-                            result
+                            result.map(|_| ())
                         }
                     };
                     if let Err(error) = result {

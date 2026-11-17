@@ -469,6 +469,13 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   click <target>       type <target> <text>      key <keys>
   type --no-click <text>                 where focus is, no click first
   hover <target|x,y>   right-click <target|x,y>  drag <from> <to|x,y>
+  files hover <target|x,y> <path…>       files drop <target|x,y> <path…>   files leave
+                       files dragged in from a file manager, as the host hears them
+                       (drop: a FileDrop each, then FilesDrop, Linux's order; macOS
+                       and Windows deliver FilesDrop after a queue)
+  text-drop <target|x,y> --text T [--html H] [--hover-only]
+                       text dragged in from another app, let go there
+  prefers reduced-motion on|off|system   what zgx reads as the system's (never its setting)
   scroll <target> <dy> command <id>
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
@@ -536,6 +543,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 flags.push((arg[2..].to_string(), None))
             }
             "--no-click" => flags.push(("no_click".into(), None)),
+            "--hover-only" => flags.push(("hover_only".into(), None)),
             // Paths, up to the next flag.
             "--files" => {
                 while args
@@ -660,6 +668,26 @@ fn inspect(args: Vec<String>) -> ExitCode {
         "drag" => {
             put("target", arg(1));
             put("to", arg(2));
+        }
+        "files" => {
+            put("action", arg(1));
+            put("at", arg(2));
+            let paths: Vec<Value> = words
+                .iter()
+                .skip(3)
+                .map(|path| match std::path::absolute(path) {
+                    Ok(path) => Value::from(path.display().to_string().as_str()),
+                    Err(_) => Value::from(path.as_str()),
+                })
+                .collect();
+            if !paths.is_empty() {
+                fields.push(("files".into(), Value::List(paths.into())));
+            }
+        }
+        "text-drop" => put("at", arg(1)),
+        "prefers" => {
+            put("name", arg(1));
+            put("value", arg(2));
         }
         "scroll" => {
             put("target", arg(1));
@@ -904,6 +932,33 @@ const TOOLS: &[Tool] = &[
         "Drag with the primary button from a node (its middle) or \"x,y\" to a node or \"x,y\", in steps as a hand moves.",
     ),
     (
+        "zgx_files",
+        "files",
+        &[
+            ("action", "string", true),
+            ("at", "string", false),
+            ("files", "array", false),
+        ],
+        "Files dragged in from a file manager, as the desktop host hears them: action `hover` (over `at`, a node or \"x,y\"), `drop` (let go there: a FileDrop each, then FilesDrop, Linux's order; macOS and Windows deliver FilesDrop after a queue) or `leave`; `files` are paths.",
+    ),
+    (
+        "zgx_text_drop",
+        "text-drop",
+        &[
+            ("at", "string", true),
+            ("text", "string", false),
+            ("html", "string", false),
+            ("hover_only", "boolean", false),
+        ],
+        "Text dragged in from another app (a browser's selection), as the desktop host hears it: over `at` (a node or \"x,y\") and let go there with `text` and `html`; with hover_only, over it and gone, for a destination's highlight.",
+    ),
+    (
+        "zgx_prefers",
+        "prefers",
+        &[("name", "string", true), ("value", "string", true)],
+        "What zgx reads as a system preference, set in this process alone (never the system's own setting): name `reduced-motion`, value `on`, `off` or `system`.",
+    ),
+    (
         "zgx_type",
         "type",
         &[
@@ -996,7 +1051,7 @@ const TOOLS: &[Tool] = &[
             ("gone", "boolean", false),
             ("timeout_ms", "number", false),
         ],
-        "Wait until a node shows (holding text, if given), or is gone; fails with why after the timeout.",
+        "Wait until a node shows (holding text, if given: in what it says or a field's value), or is gone; fails with why after the timeout.",
     ),
     (
         "zgx_snapshot",
