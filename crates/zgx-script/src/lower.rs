@@ -4713,6 +4713,13 @@ fn styled(
                 _ => None,
             });
         }
+        if let Some(level) = &a11y.level_of {
+            let (level, vm) = (resolve_owned(level), vm.clone());
+            view = view.level_when(move || match resolve(&level, Ty::Num, None, &vm) {
+                Some(Lit::Num(level)) if level >= 1. => level.min(255.) as usize,
+                _ => 1,
+            });
+        }
         if let Some(selected) = &a11y.selected {
             let (selected, vm) = (resolve_owned(selected), vm.clone());
             view = view.selected_when(move || {

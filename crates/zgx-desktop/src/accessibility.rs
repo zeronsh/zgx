@@ -4557,6 +4557,53 @@ mod atspi_tests {
         out.push(node);
     }
 
+    /// A tree item's depth (`aria-level`), as a number and followed: a row
+    /// whose depth changes in place is told at its new depth, the same node,
+    /// in the update of what changed.
+    #[test]
+    fn a_tree_items_level_follows_its_depth_without_a_rebuild() {
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let depth = ui.signal(1_usize);
+        let read = depth.clone();
+        ui.mount(
+            column()
+                .child(
+                    row()
+                        .role(Role::TreeItem)
+                        .accessible_label("Fixed")
+                        .level(2)
+                        .child(text("Fixed")),
+                )
+                .child(
+                    row()
+                        .role(Role::TreeItem)
+                        .accessible_label("Moved")
+                        .level_when(move || read.get())
+                        .child(text("Moved")),
+                ),
+        );
+        let mut tree = AccessibilityTree::new();
+        let first = frame(&mut ui, &mut tree, None);
+        let level_of = |update: &TreeUpdate, label: &str| {
+            update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == accesskit::Role::TreeItem && n.label() == Some(label))
+                .map(|(id, n)| (*id, n.level()))
+        };
+        assert_eq!(level_of(&first, "Fixed").unwrap().1, Some(2));
+        let (moved, level) = level_of(&first, "Moved").unwrap();
+        assert_eq!(level, Some(1));
+        depth.set(3);
+        let next = frame(&mut ui, &mut tree, None);
+        assert_eq!(
+            level_of(&next, "Moved"),
+            Some((moved, Some(3))),
+            "the same node, told at its new depth"
+        );
+    }
+
     #[test]
     fn a_grid_reads_as_a_table_and_a_tree_item_as_open_or_closed() {
         let mut ui = Ui::new(600., 400.);

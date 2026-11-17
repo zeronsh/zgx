@@ -2526,8 +2526,10 @@ export type NodeProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Reactive<boolean>?,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
-	level: number?,
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Reactive<number>?,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
 	current: Reactive<string>?,
@@ -3001,7 +3003,9 @@ export type Props = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -3410,7 +3414,7 @@ export type Props_description = (string | ReadOnlyState<string> | (() -> string)
 export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
 export type Props_aria_hidden = Reactive<boolean>?
-export type Props_level = number?
+export type Props_level = Reactive<number>?
 export type Props_current = Reactive<string>?
 export type Props_busy = Reactive<boolean>?
 export type Props_inert = Reactive<boolean>?
@@ -3738,7 +3742,9 @@ export type ContainerProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -4227,7 +4233,9 @@ export type GlassProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -4725,7 +4733,9 @@ export type ScrollProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -5240,7 +5250,9 @@ export type TextProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -5714,7 +5726,9 @@ export type MarkdownViewProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -6354,7 +6368,9 @@ export type RichProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -6822,7 +6838,9 @@ export type ImageProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -7307,7 +7325,9 @@ export type SvgProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -7903,7 +7923,9 @@ export type Scene3DProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -8394,7 +8416,9 @@ export type CanvasProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -8894,7 +8918,9 @@ export type CheckboxProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -9372,7 +9398,9 @@ export type InputProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -10010,7 +10038,9 @@ export type ProgressProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -10476,7 +10506,9 @@ export type SliderProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -10963,7 +10995,9 @@ export type SegmentedProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -11443,7 +11477,9 @@ export type StepperProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -11924,7 +11960,9 @@ export type DisclosureProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -12416,7 +12454,9 @@ export type AccordionProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -12882,7 +12922,9 @@ export type SectionProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -13373,7 +13415,9 @@ export type SeparatorProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -13847,7 +13891,9 @@ export type TabsProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -14343,7 +14389,9 @@ export type TreeProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -14835,7 +14883,9 @@ export type DataGridProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -15323,7 +15373,9 @@ export type CalendarProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -15804,7 +15856,9 @@ export type DatePickerProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -16283,7 +16337,9 @@ export type TimeFieldProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -16761,7 +16817,9 @@ export type ComboboxProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -17247,7 +17305,9 @@ export type CommandPaletteProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -17721,7 +17781,9 @@ export type SelectProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -18202,7 +18264,9 @@ export type SplitProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -18739,7 +18803,9 @@ export type ListProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -19310,7 +19376,9 @@ export type LayerProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -19798,7 +19866,9 @@ export type ModalProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -20335,7 +20405,9 @@ export type PopoverProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -20860,7 +20932,9 @@ export type MenuItemProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -21337,7 +21411,9 @@ export type SubmenuProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -21834,7 +21910,9 @@ export type WebViewProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -22328,7 +22406,9 @@ export type TerminalProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -22797,7 +22877,9 @@ export type HostViewProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -23261,7 +23343,9 @@ export type SlotProps = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -23781,7 +23865,9 @@ export type EachOptions = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.
@@ -24265,7 +24351,9 @@ export type PresenceOptions = {
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
 	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
-	-- flat siblings, so a reader can't infer it.
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
 	level: Props_level,
 	-- What this is the current one of (`aria-current`): "page", "step",
 	-- "location", "date", "time" or "true"; anything else (or nil) is none.

@@ -1620,6 +1620,13 @@ impl View {
         self.accessibility_mut().current_when = Some(Box::new(current));
         self
     }
+    /// [`View::level`], followed: a row whose depth changes in place (moved
+    /// into another branch) is read at its new depth, without a rebuild.
+    #[doc(hidden)]
+    pub fn level_when(mut self, level: impl FnMut() -> usize + 'static) -> Self {
+        self.accessibility_mut().level_when = Some(Box::new(level));
+        self
+    }
     /// Whether this option, tab or item is the chosen one, followed
     /// (`aria-selected`).
     pub fn selected_when(mut self, selected: impl FnMut() -> bool + 'static) -> Self {
@@ -9261,6 +9268,8 @@ type NumericValue = Box<dyn FnMut() -> f64>;
 pub(crate) struct Accessibility {
     role: Option<Role>,
     level: Option<usize>,
+    /// `View::level_when`: a depth worked out from state.
+    level_when: Option<Box<dyn FnMut() -> usize>>,
     selected: Option<Box<dyn FnMut() -> bool>>,
     checked: Option<Box<dyn FnMut() -> bool>>,
     radio_item: bool,
@@ -9304,6 +9313,9 @@ impl Accessibility {
         }
         if outer.level.is_some() {
             inner.level = outer.level;
+        }
+        if outer.level_when.is_some() {
+            inner.level_when = outer.level_when;
         }
         if outer.selected.is_some() {
             inner.selected = outer.selected;
@@ -9394,6 +9406,7 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
     let Accessibility {
         role,
         level,
+        level_when,
         selected,
         mut checked,
         radio_item,
@@ -9508,6 +9521,18 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         ui.bind(root, move || {
             let hidden = hidden();
             tree.borrow_mut().update(root, |node| node.hidden = hidden);
+        });
+    }
+    if let Some(mut level) = level_when {
+        let tree = ui.semantics.clone();
+        let assistive = assistive.clone();
+        ui.bind(root, move || {
+            if !assistive.get() {
+                return;
+            }
+            let level = level().max(1);
+            tree.borrow_mut()
+                .update(root, |node| node.level = Some(level));
         });
     }
     if let Some(mut description) = description_when {
