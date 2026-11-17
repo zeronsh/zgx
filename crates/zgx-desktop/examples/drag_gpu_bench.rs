@@ -153,7 +153,8 @@ fn main() {
     let (width, height) = (1600., 1000.);
     let mut ui = Ui::new(width, height);
     let size = ((width * scale) as u32, (height * scale) as u32);
-    let layer = cfg!(target_os = "macos") && zgx::env::var("PRESENT").as_deref() != Ok("headless");
+    #[cfg(target_os = "macos")]
+    let layer = zgx::env::var("PRESENT").as_deref() != Ok("headless");
     #[cfg(target_os = "macos")]
     let mut gpu = if layer {
         GpuRenderer::debug_for_layer(objc2_quartz_core::CALayer::new(), size.0, size.1)
