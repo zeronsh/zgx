@@ -7,8 +7,8 @@
 //!
 //! Nothing is scheduled outside the band, at the end of what can scroll, or
 //! with no drag over the window: an idle window does no work.
-use crate::{input::InputEvent, scene::NodeId, time::Instant, widgets::Ui};
-use std::time::Duration;
+use crate::{input::InputEvent, scene::NodeId, widgets::Ui};
+use std::time::{Duration, Instant};
 
 /// How far in from a scroll view's edge a drag scrolls it.
 const BAND: f32 = 48.;
