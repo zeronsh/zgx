@@ -2270,6 +2270,7 @@ impl Host {
             let handle = handle.clone();
             inspector.set_wake(move || handle.request_redraw());
         }
+        inspector.set_native_views(native.natives.clone());
         let full_screen_transition = ui.signal(None);
         let maximized = ui.signal(false);
         let context = WindowContext {

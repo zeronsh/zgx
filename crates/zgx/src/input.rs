@@ -2485,6 +2485,45 @@ impl InputDispatcher {
         }
         removed
     }
+    /// Why `node` can't take input now (`enabled` is false), for
+    /// diagnostics (`NativeViews`' `route_explained`): it isn't shown, it
+    /// or an ancestor is disabled or transparent (that node), or it is
+    /// outside the active modal scope (that scope's root).
+    pub(crate) fn why_not_enabled(
+        &self,
+        scene: &Scene,
+        node: NodeId,
+    ) -> crate::native_view::RouteWhy {
+        use crate::native_view::RouteWhy;
+        if !scene.layout_visible(node) {
+            return RouteWhy::NotShown(node);
+        }
+        if !self.enabled_without_scope(scene, node) {
+            let state = self.state.borrow();
+            let mut at = Some(node);
+            while let Some(id) = at {
+                if state
+                    .options
+                    .get(&id)
+                    .is_some_and(|options| options.disabled)
+                {
+                    return RouteWhy::Disabled(id);
+                }
+                if scene.effects(id).opacity <= 0. {
+                    return RouteWhy::NotShown(id);
+                }
+                at = scene.parent(id);
+            }
+            return RouteWhy::Disabled(node);
+        }
+        match self.focus_scope() {
+            Some(scope) => RouteWhy::OutsideScope {
+                native: node,
+                scope,
+            },
+            None => RouteWhy::Disabled(node),
+        }
+    }
     fn enabled_without_scope(&self, scene: &Scene, mut node: NodeId) -> bool {
         if !scene.layout_visible(node) {
             return false;
