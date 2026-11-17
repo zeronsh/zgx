@@ -98,8 +98,9 @@ fn page_dialog(
 ) {
     use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSModalResponse, NSTextField};
     let mtm = MainThreadMarker::from(view);
-    let Some(window) = view.window() else {
-        // No window to show it on: an alert is dismissed, the rest cancelled.
+    // No window to show it on, or off-screen (`ZGX_OFFSCREEN`, whose sheets
+    // would order the window in): an alert is dismissed, the rest cancelled.
+    let Some(window) = view.window().filter(|_| crate::window_chrome::may_show()) else {
         return answer(matches!(dialog, Dialog::Alert).then(String::new));
     };
     // SAFETY: getters of the frame WebKit passes for this call.

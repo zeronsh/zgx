@@ -161,6 +161,11 @@ zgx-script = { path = "../zgx-script", version = "0.1.10", optional = true }
 name = "menu_services"
 harness = false
 
+# `ZGX_OFFSCREEN`, read once: a process of its own.
+[[test]]
+name = "offscreen"
+harness = false
+
 [dev-dependencies]
 # The components the Linux probe's example shows (`components_probe`).
 zgx-components = { path = "../zgx-components" }

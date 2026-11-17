@@ -2169,6 +2169,15 @@ pub(crate) fn send_offscreen(window: &winit::window::Window) {
     let _ = window;
 }
 
+/// Whether anything may be put on the screen: not under `OFFSCREEN`, whose
+/// windows are never ordered in (made hidden, a show, focus, restore,
+/// fullscreen or zoom of one does nothing) and which shows no popup, native
+/// menu, dialog, alert, notification, look-up or browser. WindowServer lists
+/// none of its windows on any screen.
+pub(crate) fn may_show() -> bool {
+    !*OFFSCREEN
+}
+
 /// A shown window's alpha: none while `OFFSCREEN`.
 pub(crate) fn shown_alpha() -> f64 {
     if *OFFSCREEN { 0. } else { 1. }
