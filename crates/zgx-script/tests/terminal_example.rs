@@ -1485,8 +1485,11 @@ fn a_dragged_tab_is_a_small_window_of_its_panes_as_laid_out() {
         .expect("a preview follows the pointer");
     app.h.ui.prepare_frame();
     let scene = app.h.ui.scene.borrow();
-    // Its title row, then the panes' area: a box per pane.
-    let children = scene.children(preview).to_vec();
+    // In the box that carries it, its title row, then the panes' area: a
+    // box per pane.
+    let carried = scene.children(preview).to_vec();
+    assert_eq!(carried.len(), 1, "the preview alone in its box");
+    let children = scene.children(carried[0]).to_vec();
     assert_eq!(children.len(), 2, "a title and the panes");
     let boxes: Vec<_> = scene
         .children(children[1])
