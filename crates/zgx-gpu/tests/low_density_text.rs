@@ -1,15 +1,16 @@
-//! Text below 2x goes on whole device pixels: a glyph repeated along a
-//! line lands on the same pixel phase each time, so it is one image in the
-//! atlas. At 2x it keeps its quarter-pixel places, one image per place.
+//! Text below 2x starts its lines on whole device pixels and firms its
+//! glyphs' edges; its glyphs keep their quarter-pixel places along the line,
+//! so letters are spaced as their layout says.
 use zgx::scene::*;
 use zgx_gpu::{GpuRenderer, text::FontData};
 
 const GEIST: &[u8] = include_bytes!("fonts/GeistVariable-subset.ttf");
 
-/// Glyph images uploaded drawing `text` in Geist at `scale`.
-fn uploads(text: &str, scale: f32) -> usize {
-    let mut gpu =
-        GpuRenderer::new((400. * scale) as u32, (40. * scale) as u32).expect("a GPU adapter");
+/// The device-pixel distances between the stems of a run of `l`s drawn in
+/// Geist at `scale`: each stem's place is its ink's centre.
+fn stem_gaps(scale: f32) -> Vec<f32> {
+    let (width, height) = ((400. * scale) as usize, (40. * scale) as usize);
+    let mut gpu = GpuRenderer::new(width as u32, height as u32).expect("a GPU adapter");
     gpu.set_scale_factor(scale);
     FontData::new(GEIST.to_vec())
         .unwrap()
@@ -19,7 +20,7 @@ fn uploads(text: &str, scale: f32) -> usize {
     let node = scene.append(
         scene.root(),
         NodeKind::Text {
-            text: text.into(),
+            text: "l ".repeat(16).into(),
             font_size: 13.,
             color: Color(255, 255, 255, 255),
         },
@@ -37,18 +38,50 @@ fn uploads(text: &str, scale: f32) -> usize {
         },
     );
     let damage = scene.flush().damage;
-    gpu.render(&scene, &damage).unwrap().glyph_uploads
+    gpu.render(&scene, &damage).unwrap();
+    let pixels = gpu.readback().unwrap();
+    let columns: Vec<f32> = (0..width)
+        .map(|x| {
+            (0..height)
+                .map(|y| pixels[(y * width + x) * 4] as f32)
+                .sum()
+        })
+        .collect();
+    let mut stems = Vec::new();
+    let mut x = 0;
+    while x < width {
+        if columns[x] == 0. {
+            x += 1;
+            continue;
+        }
+        let (mut ink, mut moment) = (0., 0.);
+        while x < width && columns[x] > 0. {
+            ink += columns[x];
+            moment += columns[x] * x as f32;
+            x += 1;
+        }
+        stems.push(moment / ink);
+    }
+    assert_eq!(stems.len(), 16, "one stem per l at {scale}x");
+    stems.windows(2).map(|pair| pair[1] - pair[0]).collect()
 }
 
+/// A letter repeated along a line is drawn evenly at every scale: the gaps
+/// between its copies differ by what quarter-pixel places allow (under 0.42
+/// px at 1x here), not by a whole pixel, as where each copy's place was
+/// rounded on its own (6 and 7 px at 1x).
 #[test]
-fn a_glyph_repeated_along_a_line_is_one_image_below_2x() {
-    let line = "l".repeat(24);
-    assert_eq!(uploads(&line, 1.), 1, "one place, one image at 1x");
-    assert_eq!(uploads(&line, 1.5), 1, "one place, one image at 1.5x");
-    assert!(
-        uploads(&line, 2.) > 1,
-        "at 2x a glyph keeps its quarter-pixel places"
-    );
+fn a_letter_repeated_along_a_line_is_evenly_spaced() {
+    for scale in [1., 1.25, 1.5, 1.75, 2.] {
+        let gaps = stem_gaps(scale);
+        let (least, most) = gaps
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &g| (lo.min(g), hi.max(g)));
+        assert!(
+            most - least < 0.75,
+            "gaps from {least} to {most} device pixels at {scale}x: {gaps:?}"
+        );
+    }
 }
 
 /// A centred line whose box grows, so only its start moves, keeps its spacing
