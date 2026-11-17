@@ -775,7 +775,7 @@ fn downloads_app(
 /// Starts a download of `name` in the web view `id`, keeping where it was
 /// told to save (`None`, cancelled) and what hears it.
 fn download_into(
-    h: &Harness,
+    h: &mut Harness,
     id: &str,
     name: &str,
     answers: &Rc<RefCell<Vec<Option<PathBuf>>>>,
@@ -857,8 +857,8 @@ fn a_download_saves_into_the_hosts_folder_with_no_dialog() {
     let answers: Rc<RefCell<Vec<Option<PathBuf>>>> = Rc::default();
     let statuses: Rc<RefCell<Vec<zgx::web_view::DownloadStatusFn>>> = Rc::default();
     // Two of one name at once, and a third of it after a file has it.
-    download_into(&h, "page", "paper.pdf", &answers, &statuses);
-    download_into(&h, "page", "paper.pdf", &answers, &statuses);
+    download_into(&mut h, "page", "paper.pdf", &answers, &statuses);
+    download_into(&mut h, "page", "paper.pdf", &answers, &statuses);
     settle_until(&mut h, &|_| answers.borrow().len() == 2);
     assert_eq!(
         *answers.borrow(),
@@ -885,11 +885,11 @@ fn a_download_saves_into_the_hosts_folder_with_no_dialog() {
     settle_until(&mut h, &|label| label.contains("stopped paper.pdf"));
     assert!(h.text("label").contains("finished false cancelled"));
     // A file has the name now; the stopped one's is free again.
-    download_into(&h, "page", "paper.pdf", &answers, &statuses);
+    download_into(&mut h, "page", "paper.pdf", &answers, &statuses);
     settle_until(&mut h, &|_| answers.borrow().len() == 3);
     assert_eq!(answers.borrow()[2], Some(downloads.join("paper (1).pdf")));
     // A name with folders in it stays in the folder.
-    download_into(&h, "page", "../../up.pdf", &answers, &statuses);
+    download_into(&mut h, "page", "../../up.pdf", &answers, &statuses);
     settle_until(&mut h, &|_| answers.borrow().len() == 4);
     assert_eq!(answers.borrow()[3], Some(downloads.join(".._.._up.pdf")));
     assert!(!dir.join("out.txt").exists(), "a dialog was asked");
@@ -907,7 +907,7 @@ fn a_download_saves_with_no_dialog_only_where_the_host_allows() {
     // No folder named.
     let mut h = downloads_app(&dir, None, SAVE_TEMP, None);
     h.ui.prepare_frame();
-    download_into(&h, "page", "paper.pdf", &answers, &statuses);
+    download_into(&mut h, "page", "paper.pdf", &answers, &statuses);
     settle_until(&mut h, &|label| label.contains("refused"));
     assert!(
         h.text("label").contains("ScriptHost::download_dir"),
@@ -938,7 +938,7 @@ return ui.column { ui.text { id = "label", "" }, ui.slot("bar") }
         Some((PLUGIN, vec![Capability::Web])),
     );
     h.ui.prepare_frame();
-    download_into(&h, "theirs", "paper.pdf", &answers, &statuses);
+    download_into(&mut h, "theirs", "paper.pdf", &answers, &statuses);
     let deadline = Instant::now() + Duration::from_secs(5);
     while !h.text("said").contains("Capability::Files") {
         assert!(Instant::now() < deadline, "said {:?}", h.text("said"));
