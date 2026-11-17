@@ -1,4 +1,4 @@
-//! A text area's atoms in scripts (`atoms`, `on_atoms`, `el:insert_atom`):
+//! A text area's atoms in scripts (`atoms`, `on_atoms`, `ui.editor.insert_atom`):
 //! ranges of its text that edit as one unit, each named by a string and
 //! carrying a plain value. The editor keeps them (`zgx::text_edit::Atom`);
 //! what a script adds rides in the atom's payload, so it moves with the atom
