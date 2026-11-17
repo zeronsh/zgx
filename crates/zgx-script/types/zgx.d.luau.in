@@ -1519,6 +1519,10 @@ declare extern type Download with
 	function save_to(self, file: File | string, opts: DownloadOptions?): ()
 	-- The save dialog, suggesting `name`: the file saved to, or nil.
 	function ask(self, opts: DownloadOptions?): Promise<File?>
+	-- Internal, subject to change: saved with no dialog in the folder the
+	-- host names for downloads, under `name` made unique: the file once
+	-- it is whole, or nil if it stopped.
+	function save_temp(self, opts: DownloadOptions?): Promise<File?>
 	function cancel(self): ()
 end
 declare extern type Web with
