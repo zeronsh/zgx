@@ -1092,6 +1092,115 @@ impl Session {
                     Value::Nil,
                 ))
             })(),
+            // Files dragged in from a file manager, as the desktop host
+            // hears them (`zgx::outside_drag`): hovering, dropped (a
+            // `FileDrop` each, then `FilesDrop`, Linux's order; macOS and
+            // Windows deliver `FilesDrop` after a queue), or gone.
+            "files" => (|| {
+                let action = text("action").ok_or("files takes `hover`, `drop` or `leave`")?;
+                let files: Vec<std::path::PathBuf> = match field("files") {
+                    Some(Value::List(files)) => {
+                        files.iter().map(|f| f.to_string().into()).collect()
+                    }
+                    Some(file @ Value::Str(_)) => vec![file.to_string().into()],
+                    _ => Vec::new(),
+                };
+                match action.as_str() {
+                    "leave" => {
+                        ui.dispatch(zgx::input::InputEvent::FileHoverCancelled);
+                        Ok(("the files' drag left".to_string(), Value::Nil))
+                    }
+                    "hover" | "drop" => {
+                        let (x, y) = point_of(&ui, "at")?;
+                        if files.is_empty() {
+                            return Err(format!("files {action} takes one path or more"));
+                        }
+                        let count = files.len();
+                        if action == "hover" {
+                            for path in files {
+                                ui.dispatch(zgx::input::InputEvent::FileHover { x, y, path });
+                            }
+                            return Ok((format!("{count} files over {x:.0},{y:.0}"), Value::Nil));
+                        }
+                        let taken = zgx::outside_drag::drop_files(x, y, files.into(), |event| {
+                            Some(Ok::<_, std::convert::Infallible>(
+                                ui.dispatch(event).default_prevented,
+                            ))
+                        })
+                        .unwrap_or(false);
+                        Ok((
+                            format!(
+                                "{count} files dropped at {x:.0},{y:.0}: {}",
+                                if taken { "taken" } else { "not taken" }
+                            ),
+                            Value::record([("taken", Value::Bool(taken))]),
+                        ))
+                    }
+                    other => Err(format!(
+                        "files takes `hover`, `drop` or `leave`, not `{other}`"
+                    )),
+                }
+            })(),
+            // Text dragged in from another app (a browser's selection), as
+            // the desktop host hears it: over the point, then let go there
+            // (or, `hover_only`, over it and gone, for a destination's
+            // highlight).
+            "text-drop" => (|| {
+                let (x, y) = point_of(&ui, "at")?;
+                let over = zgx::outside_drag::text_over(&ui, x, y);
+                if field("hover_only").is_some_and(|v| v.truthy()) {
+                    zgx::outside_drag::text_out(&ui);
+                    return Ok((
+                        format!(
+                            "text over {x:.0},{y:.0}: {}",
+                            if over {
+                                "would drop"
+                            } else {
+                                "nothing takes it"
+                            }
+                        ),
+                        Value::record([("over", Value::Bool(over))]),
+                    ));
+                }
+                let dropped = text("text").ok_or("text-drop takes a `text`")?;
+                let html = text("html");
+                let taken = zgx::outside_drag::text_dropped(&ui, x, y, &dropped, html.as_deref());
+                Ok((
+                    format!(
+                        "text dropped at {x:.0},{y:.0}: {}",
+                        if taken { "taken" } else { "not taken" }
+                    ),
+                    Value::record([("over", Value::Bool(over)), ("taken", Value::Bool(taken))]),
+                ))
+            })(),
+            // What zgx reads as the system's preference, set in this process
+            // alone (never the system's own setting).
+            "prefers" => (|| {
+                let name = text("name").ok_or("prefers takes `reduced-motion`")?;
+                if name != "reduced-motion" {
+                    return Err(format!("prefers knows `reduced-motion`, not `{name}`"));
+                }
+                let set = match text("value").as_deref() {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    Some("system") => None,
+                    _ => return Err("prefers reduced-motion takes `on`, `off` or `system`".into()),
+                };
+                ui.theme().override_reduced_motion(set);
+                let now = ui.theme().system_preferences().reduced_motion;
+                Ok((
+                    format!(
+                        "reduced motion {} ({})",
+                        if now { "on" } else { "off" },
+                        if set.is_some() {
+                            "set here; the system's own is unchanged"
+                        } else {
+                            "the system's"
+                        }
+                    ),
+                    Value::record([("reduced_motion", Value::Bool(now))]),
+                ))
+            })(),
             "type" => (|| {
                 let typed = text("text").ok_or("type takes a `text`")?;
                 // Where focus is, with the caret and selection as they
@@ -2155,9 +2264,12 @@ impl Session {
                 (Ok(_), true) => false,
                 (Ok(node), false) => match &want {
                     None => true,
+                    // What it says, or what a field in it holds.
                     Some(text) => {
-                        let scene = ui.scene.borrow();
-                        driver::first_text(&scene, *node).is_some_and(|t| t.contains(text.as_str()))
+                        let shown = driver::first_text(&ui.scene.borrow(), *node);
+                        shown.is_some_and(|t| t.contains(text.as_str()))
+                            || driver::first_value(&ui, *node)
+                                .is_some_and(|v| v.contains(text.as_str()))
                     }
                 },
                 (Err(_), false) => false,
@@ -2177,10 +2289,16 @@ impl Session {
             }
             if Instant::now() >= deadline {
                 let why = match found {
-                    Ok(node) => format!(
-                        "still there: {}",
-                        driver::first_text(&ui.scene.borrow(), node).unwrap_or_default()
-                    ),
+                    Ok(node) => {
+                        let shown = driver::first_text(&ui.scene.borrow(), node);
+                        match driver::first_value(&ui, node) {
+                            Some(value) => format!(
+                                "still there: {}, holding {value:?}",
+                                shown.unwrap_or_default()
+                            ),
+                            None => format!("still there: {}", shown.unwrap_or_default()),
+                        }
+                    }
                     Err(error) => error,
                 };
                 return failed(format!("timed out after {timeout} ms ({why})"));

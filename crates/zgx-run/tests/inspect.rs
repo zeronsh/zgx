@@ -1231,6 +1231,36 @@ return ui.column {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// `wait --text` is met by what a field holds, as by what a node says: a
+/// labelled field's first text is its label, and its value no text of it.
+#[test]
+fn waiting_for_text_is_met_by_what_is_typed_into_a_field() {
+    const APP: &str = r##"
+local value = ui.state("value", "")
+return ui.column {
+    ui.input { id = "field", label = "Field", value = value, w = 160 },
+}
+"##;
+    let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", APP));
+    let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
+    let early = ask(
+        &app,
+        &session,
+        r##"{"cmd":"wait","target":"#field","text":"typed","timeout_ms":50}"##,
+    );
+    assert!(error(&early).contains("still there"), "{}", early.to_json());
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"type","target":"#field","text":"typed here"}"##,
+    ));
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"wait","target":"#field","text":"typed"}"##,
+    ));
+}
+
 /// `type --no-click` types where focus is, the caret where it was: a click
 /// first would put it where the click landed.
 #[test]
@@ -1272,4 +1302,137 @@ fn type_without_a_click_types_at_the_caret_where_focus_is() {
         "{}",
         both.to_json()
     );
+}
+
+/// What `zgx inspect` drives of drags from outside the app reaches what the
+/// host's real events do (`zgx::outside_drag`): files hovering a node and
+/// leaving (its `on_file_hover`), dropped (its `on_file_drop`, on
+/// `FilesDrop`), text let go over a field (into it), text only passing over
+/// (a would-drop answer, nothing dropped), and reduced motion set here and
+/// given back (what `ui.prefers` reads).
+#[test]
+fn outside_drags_and_reduced_motion_reach_what_the_hosts_events_do() {
+    const APP: &str = r##"
+local heard = ui.state("heard", "")
+local over = ui.state("over", "no")
+local value = ui.state("value", "ab")
+return ui.column {
+    ui.div { id = "drop", w = 200, h = 100, bg = "#333333",
+        on_file_hover = function(on) over:set(if on then "yes" else "no") end,
+        on_file_drop = function(files)
+            local names = {}
+            for _, file in files do table.insert(names, file.name) end
+            heard:set(table.concat(names, " "))
+        end },
+    ui.text { id = "over", "{over}" },
+    ui.text { id = "heard", "{heard}" },
+    ui.input { id = "field", label = "Field", value = value, w = 160 },
+    ui.text { id = "motion", function() return if ui.prefers.reduced_motion:get() then "still" else "moving" end },
+}
+"##;
+    let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", APP));
+    let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
+    let dir = std::env::temp_dir().join(format!("zgx-outside-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+    std::fs::write(&a, "a").unwrap();
+    std::fs::write(&b, "b").unwrap();
+    let files = Value::List(
+        [&a, &b]
+            .map(|path| Value::from(path.to_str().unwrap()))
+            .into(),
+    );
+    let ask_json = |request: String| ask(&app, &session, &request);
+    // Hovering, then leaving.
+    let hover = format!(
+        r##"{{"cmd":"files","action":"hover","at":"#drop","files":{}}}"##,
+        files.to_json()
+    );
+    let said = text(&ask_json(hover));
+    assert!(said.contains("2 files over"), "{said}");
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"wait","target":"#over","text":"yes"}"##,
+    ));
+    text(&ask(&app, &session, r#"{"cmd":"files","action":"leave"}"#));
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"wait","target":"#over","text":"no"}"##,
+    ));
+    // Dropped: `on_file_drop` hears both, by name, as on `FilesDrop`.
+    let drop = format!(
+        r##"{{"cmd":"files","action":"drop","at":"#drop","files":{}}}"##,
+        files.to_json()
+    );
+    let said = text(&ask_json(drop));
+    assert!(
+        said.contains("2 files dropped") && said.contains("taken"),
+        "{said}"
+    );
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"wait","target":"#heard","text":"a.txt b.txt"}"##,
+    ));
+    // Text over the field only: it would drop, nothing is dropped.
+    let passing = ask(
+        &app,
+        &session,
+        r##"{"cmd":"text-drop","at":"#field","hover_only":true}"##,
+    );
+    assert!(
+        text(&passing).contains("would drop"),
+        "{}",
+        passing.to_json()
+    );
+    let value = |app: &TestApp| {
+        app.host
+            .states()
+            .into_iter()
+            .find(|(name, _)| name == "value")
+            .map(|(_, value)| value.to_string())
+            .unwrap()
+    };
+    assert_eq!(value(&app), "ab", "a drag passing over drops nothing");
+    // Let go over the field: it goes in.
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"text-drop","at":"#field","text":"XY","html":"<b>XY</b>"}"##,
+    ));
+    assert!(value(&app).contains("XY"), "{}", value(&app));
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"wait","target":"#field","text":"XY"}"##,
+    ));
+    // Reduced motion set here, either way, then the system's back.
+    let system = text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"node","target":"#motion"}"##,
+    ));
+    let system = if system.contains("still") {
+        "still"
+    } else {
+        "moving"
+    };
+    for (value, shows) in [("on", "still"), ("off", "moving"), ("system", system)] {
+        let said = text(&ask(
+            &app,
+            &session,
+            &format!(r#"{{"cmd":"prefers","name":"reduced-motion","value":"{value}"}}"#),
+        ));
+        if value != "system" {
+            assert!(said.contains("the system's own is unchanged"), "{said}");
+        }
+        text(&ask(
+            &app,
+            &session,
+            &format!(r##"{{"cmd":"wait","target":"#motion","text":"{shows}"}}"##),
+        ));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
