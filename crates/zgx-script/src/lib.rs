@@ -24,6 +24,14 @@
 //!
 //! The `ui` and `anime` libraries are documented in `docs/scripting.md`.
 #![warn(missing_docs)]
+
+/// The commit this crate was built from: its full 40-hex id, or `"unknown"`
+/// when it was built from no git checkout and no packaged crate saying one
+/// (a tarball, say). Read from git's own files when it builds, so a cargo
+/// git checkout, a worktree and a path build each say what they hold.
+#[doc(hidden)]
+pub const BUILD_REV: &str = env!("ZGX_BUILD_REV");
+
 mod actions;
 mod anim;
 mod anime;
