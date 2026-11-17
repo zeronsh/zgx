@@ -24,6 +24,61 @@ pub(crate) type SharedPlatform = Rc<RefCell<Option<PlatformService>>>;
 /// may read or write.
 pub(crate) type Picked = Rc<RefCell<HashSet<PathBuf>>>;
 
+/// Where `d:save_temp` saves (`ScriptHost::download_dir`): nowhere until
+/// the host names a folder; and the paths downloads still going hold, so
+/// two of one name never share a file.
+#[derive(Default)]
+pub(crate) struct Downloads {
+    pub dir: RefCell<Option<PathBuf>>,
+    saving: RefCell<HashSet<PathBuf>>,
+}
+impl Downloads {
+    /// A path in `dir` for a download suggested as `name` that no file and
+    /// no download going has: `name`, else `name (1)`, `name (2)`…, its
+    /// extension kept.
+    pub fn reserve(&self, dir: &Path, name: &str) -> PathBuf {
+        let name = PathBuf::from(safe_name(name));
+        let stem = name
+            .file_stem()
+            .map_or_else(Default::default, |s| s.to_string_lossy().into_owned());
+        let extension = name.extension().map(|e| e.to_string_lossy().into_owned());
+        let mut saving = self.saving.borrow_mut();
+        let mut path = dir.join(&name);
+        let mut n = 0;
+        while saving.contains(&path) || std::fs::symlink_metadata(&path).is_ok() {
+            n += 1;
+            path = dir.join(match &extension {
+                Some(extension) => format!("{stem} ({n}).{extension}"),
+                None => format!("{stem} ({n})"),
+            });
+        }
+        saving.insert(path.clone());
+        path
+    }
+    /// `path`'s download ended: its name is the file's, or free again.
+    pub fn release(&self, path: &Path) {
+        self.saving.borrow_mut().remove(path);
+    }
+}
+/// A suggested name as one file's name in the folder: no folders, no
+/// characters a platform refuses in a name, never empty or `..`.
+fn safe_name(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .take(200)
+        .collect();
+    let name = name.trim().trim_end_matches('.');
+    match name {
+        "" | "." | ".." => "download".into(),
+        name => name.into(),
+    }
+}
+
 pub(crate) fn platform(shared: &SharedPlatform, what: &str) -> mlua::Result<PlatformService> {
     shared.borrow().clone().ok_or_else(|| {
         mlua::Error::runtime(format!(
@@ -685,7 +740,7 @@ pub(crate) fn install(
 
 /// `on_download`'s `d`: a download the page started, for the script to save
 /// (`d:save_to(file)`, a file the user picked; `d:ask()`, the save dialog
-/// with its name) or not (`d:cancel()`). One left unanswered is cancelled
+/// with its name; `d:save_temp()`, the host's folder for them) or not (`d:cancel()`). One left unanswered is cancelled
 /// as it's collected: a page saves nothing the app didn't decide on.
 pub(crate) struct DownloadUd {
     request: zgx::web_view::DownloadRequest,
@@ -789,6 +844,70 @@ impl mlua::UserData for DownloadUd {
                 picked.borrow_mut().insert(path.clone());
                 responder.save_to(path.clone(), status);
                 Ok(file_value(&path))
+            })?;
+            Ok(PromiseUd(promise))
+        });
+        // Saved with no dialog, in the folder the host names for downloads
+        // (`ScriptHost::download_dir`), under its name made unique: a
+        // promise of the file once it is whole, or nil if it stopped. The
+        // file is the script's to read and pass on, as a picked one is.
+        methods.add_method("save_temp", |lua, d, opts: Option<Table>| {
+            let env = crate::node::env(lua)?;
+            if !env.grants.allows(&crate::Capability::Files) {
+                return Err(denied("d:save_temp", "Files"));
+            }
+            let Some(dir) = env.downloads.dir.borrow().clone() else {
+                return Err(mlua::Error::runtime(
+                    "d:save_temp: the host names no folder for downloads \
+                     (`ScriptHost::download_dir`)",
+                ));
+            };
+            if d.responder.borrow().is_none() {
+                return Err(mlua::Error::runtime(
+                    "d:save_temp: this download was answered already",
+                ));
+            }
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                mlua::Error::runtime(format!("d:save_temp: {}: {e}", dir.display()))
+            })?;
+            let path = env.downloads.reserve(&dir, &d.request.name);
+            let mut status =
+                match crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())
+                    .and_then(|()| download_status(lua, opts))
+                {
+                    Ok(status) => status,
+                    Err(e) => {
+                        env.downloads.release(&path);
+                        return Err(e);
+                    }
+                };
+            let (tell, mut heard) = zgx::task::latest::<bool>();
+            let (picked, downloads, saved) =
+                (env.picked.clone(), env.downloads.clone(), path.clone());
+            d.take("d:save_temp")?.save_to(path.clone(), move |s| {
+                use zgx::web_view::DownloadStatus;
+                let ended = match &s {
+                    DownloadStatus::Finished => Some(true),
+                    DownloadStatus::Failed(_) => Some(false),
+                    _ => None,
+                };
+                if let Some(whole) = ended {
+                    downloads.release(&saved);
+                    if whole {
+                        picked.borrow_mut().insert(saved.clone());
+                    }
+                }
+                status(s);
+                if let Some(whole) = ended {
+                    tell.send(whole);
+                }
+            });
+            let promise = pending(lua, "save_temp".into())?;
+            settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+                match heard.recv().await {
+                    Some(true) => Ok(file_value(&path)),
+                    _ => Ok(Value::Nil),
+                }
             })?;
             Ok(PromiseUd(promise))
         });
