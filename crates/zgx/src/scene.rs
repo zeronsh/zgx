@@ -12999,14 +12999,16 @@ impl Scene {
     /// The containing block of absolute node `id` when it is not its parent:
     /// the nearest `relative` ancestor above the parent, the search
     /// stopping at an `absolute` one (which contains its own absolute
-    /// descendants). `None`: its parent places it, as it does any child.
+    /// descendants). `None`: its parent places it, as it does any child,
+    /// and always under a replaced parent (`set_replaced`): an icon's or a
+    /// canvas's drawing is its own, in its box.
     fn containing_block(&self, id: NodeId) -> Option<NodeId> {
         if self.relative_count == 0 || !self.node(id).style.absolute {
             return None;
         }
         let parent = self.node(id).parent?;
         let style = &self.node(parent).style;
-        if style.relative || style.absolute {
+        if style.relative || style.absolute || self.node(parent).boxed & REPLACED != 0 {
             return None;
         }
         if self.node(parent).zoom() != 1. {
