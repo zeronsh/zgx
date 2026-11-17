@@ -6847,7 +6847,7 @@ impl GpuRenderer {
                 cache.watched = None;
             }
         }
-        self.prepare_effects(scene, &items)?;
+        self.prepare_effects(scene, &items, self.plane_offset().unwrap_or_default())?;
         // Kept only if every item draws flat (no layer, no effect) from
         // what the scene marks when it changes.
         let keep = keep
@@ -7642,7 +7642,7 @@ impl GpuRenderer {
                 && !(moving && cache.factor != factor.to_bits())
         });
         self.layer_shifted = shifted;
-        self.prepare_effects(scene, &items)?;
+        self.prepare_effects(scene, &items, (0., 0.))?;
         if let Some(damage) = partial {
             let mut cache = self.layers.remove(&id).expect("kept above");
             cache.placement_mut().seen = seen;

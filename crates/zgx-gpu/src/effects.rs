@@ -259,14 +259,18 @@ fn packs(width: u32, height: u32, rooms: &[(u32, u32)]) -> bool {
     true
 }
 impl GpuRenderer {
-    /// Plan the effect layers among `items` (prepared layers, positioned as
-    /// their layers are): each slot drawn as it is, or a job drawing it in
-    /// the next `render_flat`.
+    /// Plan the effect layers among `items` (prepared layers): each slot
+    /// drawn as it is, or a job drawing it in the next `render_flat`.
+    /// `origin` is where `items` are drawn from (a plane's corner, for a
+    /// popup's or an overlay's renderer): their layers' boxes are the
+    /// window's, and a mask lies from its node's corner there.
     pub(crate) fn prepare_effects(
         &mut self,
         scene: &Scene,
         items: &[PaintItem<'_>],
+        origin: (f32, f32),
     ) -> Result<(), GpuError> {
+        let drawn_from = origin;
         let mut wanted = Vec::new();
         let shadows = scene.has_drop_shadows();
         for item in items {
@@ -354,14 +358,14 @@ impl GpuRenderer {
                             mask.size.0,
                             width,
                             bounds.x + origin.0,
-                            item.bounds.x,
+                            item.bounds.x + drawn_from.0,
                             mask.offset.0,
                         );
                         let (y, step_y) = along(
                             mask.size.1,
                             height,
                             bounds.y + origin.1,
-                            item.bounds.y,
+                            item.bounds.y + drawn_from.1,
                             mask.offset.1,
                         );
                         Some((image, [x, y, step_x, step_y], [width, height]))
