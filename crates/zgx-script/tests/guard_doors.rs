@@ -788,14 +788,14 @@ local tab = ui.web("tab")
 local loose = ui.web()
 local said = ui.state("said", "")
 return ui.column {
-    ui.text { id = "said", function() return said:get() end },
-    ui.webview { web = tab, id = "tab", w = 200, h = 100 },
-    ui.webview { web = loose, id = "loose", w = 200, h = 100 },
-    ui.webview { id = "own", w = 200, h = 100, src = "http://plain.test/own" },
     ui.button { id = "load", w = 10, h = 10, on_click = function()
         local ok, why = pcall(function() loose:load("http://plain.test/loose") end)
         said:set(if ok then "loaded" else tostring(why))
     end },
+    ui.text { id = "said", function() return said:get() end },
+    ui.webview { web = tab, id = "tab", w = 200, h = 40 },
+    ui.webview { web = loose, id = "loose", w = 200, h = 40 },
+    ui.webview { id = "own", w = 200, h = 40, src = "http://plain.test/own" },
 }
 "##;
 
@@ -890,7 +890,7 @@ fn a_page_the_web_guard_refuses_loads_nothing() {
     let (mut h, web_asked, _) = web_guarded();
     let loose = web_named(&mut h, "loose");
     h.click("load");
-    h.ui.prepare_frame();
+    h.settle();
     assert!(
         h.text("said").contains("https only here"),
         "{}",
