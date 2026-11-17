@@ -12,6 +12,8 @@ mod composition_progress;
 mod composition_slider;
 #[path = "../composition_split.rs"]
 mod composition_split;
+#[path = "../composition_unstyled_regions.rs"]
+mod composition_unstyled_regions;
 #[path = "../deferred_mount_failure.rs"]
 mod deferred_mount_failure;
 #[path = "../glass.rs"]
