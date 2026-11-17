@@ -4510,53 +4510,6 @@ mod vocabulary_tests {
             assert!(found[0].supports_action(Action::Focus), "{role:?}");
         }
     }
-}
-
-/// What AT-SPI reads of zgx's tree, through the adapter AccessKit's Linux
-/// host serves it from (vendor/accesskit_unix/ZGX_PATCH.md).
-#[cfg(all(test, target_os = "linux"))]
-mod atspi_tests {
-    use super::*;
-    use accesskit_atspi_common::{
-        Adapter, AdapterCallback, AppContext, Event, InterfaceSet, PlatformNode, Role as AtspiRole,
-        State, WindowBounds,
-    };
-    use zgx::{compose::prelude::*, widgets::Ui};
-    use zgx_components::{GridColumn, GridSource, TreeChildren, TreeItem, data_grid, tree};
-
-    struct Quiet;
-    impl AdapterCallback for Quiet {
-        fn register_interfaces(
-            &self,
-            _: &Adapter,
-            _: accesskit_atspi_common::NodeId,
-            _: InterfaceSet,
-        ) {
-        }
-        fn unregister_interfaces(
-            &self,
-            _: &Adapter,
-            _: accesskit_atspi_common::NodeId,
-            _: InterfaceSet,
-        ) {
-        }
-        fn emit_event(&self, _: &Adapter, _: Event) {}
-    }
-    struct Ignore;
-    impl accesskit::ActionHandler for Ignore {
-        fn do_action(&mut self, _: accesskit::ActionRequest) {}
-    }
-
-    /// Every node under `node`, depth first.
-    fn walk(adapter: &Adapter, node: PlatformNode, out: &mut Vec<PlatformNode>) {
-        for index in 0..node.child_count().unwrap() as usize {
-            if let Some(child) = node.child_at_index(index).unwrap() {
-                walk(adapter, adapter.platform_node(child), out);
-            }
-        }
-        out.push(node);
-    }
-
     /// A tree item's depth (`aria-level`), as a number and followed: a row
     /// whose depth changes in place is told at its new depth, the same node,
     /// in the update of what changed.
@@ -4602,6 +4555,52 @@ mod atspi_tests {
             Some((moved, Some(3))),
             "the same node, told at its new depth"
         );
+    }
+}
+
+/// What AT-SPI reads of zgx's tree, through the adapter AccessKit's Linux
+/// host serves it from (vendor/accesskit_unix/ZGX_PATCH.md).
+#[cfg(all(test, target_os = "linux"))]
+mod atspi_tests {
+    use super::*;
+    use accesskit_atspi_common::{
+        Adapter, AdapterCallback, AppContext, Event, InterfaceSet, PlatformNode, Role as AtspiRole,
+        State, WindowBounds,
+    };
+    use zgx::{compose::prelude::*, widgets::Ui};
+    use zgx_components::{GridColumn, GridSource, TreeChildren, TreeItem, data_grid, tree};
+
+    struct Quiet;
+    impl AdapterCallback for Quiet {
+        fn register_interfaces(
+            &self,
+            _: &Adapter,
+            _: accesskit_atspi_common::NodeId,
+            _: InterfaceSet,
+        ) {
+        }
+        fn unregister_interfaces(
+            &self,
+            _: &Adapter,
+            _: accesskit_atspi_common::NodeId,
+            _: InterfaceSet,
+        ) {
+        }
+        fn emit_event(&self, _: &Adapter, _: Event) {}
+    }
+    struct Ignore;
+    impl accesskit::ActionHandler for Ignore {
+        fn do_action(&mut self, _: accesskit::ActionRequest) {}
+    }
+
+    /// Every node under `node`, depth first.
+    fn walk(adapter: &Adapter, node: PlatformNode, out: &mut Vec<PlatformNode>) {
+        for index in 0..node.child_count().unwrap() as usize {
+            if let Some(child) = node.child_at_index(index).unwrap() {
+                walk(adapter, adapter.platform_node(child), out);
+            }
+        }
+        out.push(node);
     }
 
     #[test]
