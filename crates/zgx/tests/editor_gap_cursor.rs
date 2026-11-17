@@ -47,7 +47,7 @@ fn key(ui: &mut Ui, key: Key) {
     });
     ui.prepare_frame();
 }
-fn caret(ui: &Ui, editor: &EditorHandle) -> zgx::geometry::Rect {
+fn caret(ui: &Ui, editor: &EditorHandle) -> zgx::scene::Rect {
     ui.scene.borrow().bounds(editor.caret)
 }
 fn focus(editor: &EditorHandle) -> usize {
