@@ -1426,14 +1426,17 @@ impl ShapeWord {
         let is_simple_ascii =
             word.is_ascii() && !word.chars().any(|c| c.is_ascii_control() && c != '\t');
 
-        // zgx patch: no spans, no attributes to compare.
+        // zgx patch: no spans, no attributes to compare. (A word in an inline
+        // box over text of its own, an editor atom shown as a picture, has
+        // spans: `in_text_box`, asked only on lines holding boxes.)
         if is_simple_ascii && !word.is_empty() && (attrs_list.spans.is_empty() || {
             let attrs_start = attrs_list.get_span(word_range.start);
             attrs_list.spans_iter().all(|(other_range, other_attrs)| {
                 word_range.end <= other_range.start
                     || other_range.end <= word_range.start
                     || attrs_start.compatible(&other_attrs.as_attrs())
-            })
+            }) && !(font_system.shape_buffer.boxes
+                && in_text_box(line, attrs_list, &word_range))
         }) {
             shaping.run(
                 &mut glyphs,
@@ -1444,7 +1447,9 @@ impl ShapeWord {
                 word_range.end,
                 span_rtl,
             );
-        } else if font_system.shape_buffer.boxes && word.contains('\u{FFFC}') {
+        } else if font_system.shape_buffer.boxes
+            && (word.contains('\u{FFFC}') || in_text_box(line, attrs_list, &word_range))
+        {
             // zgx: a word holding inline boxes (`Attrs::inline_box`), apart:
             // every other word reads no more for them than this test.
             build_boxed(
@@ -1526,16 +1531,24 @@ fn build_boxed(
     for (egc_i, egc) in word.grapheme_indices(true) {
         let start_egc = word_range.start + egc_i;
         let attrs_egc = attrs_list.get_span(start_egc);
-        let inline = egc
-            .starts_with('\u{FFFC}')
-            .then(|| attrs_egc.inline_box_of())
-            .flatten();
+        // A replacement character is a box; a box's span over other text
+        // shows that text as one box, as wide as its first grapheme.
+        let inline = attrs_egc.inline_box_of();
         if let Some(inline) = inline {
             if start_run < start_egc {
                 shaping.run(glyphs, font_system, line, attrs_list, start_run, start_egc, span_rtl);
             }
-            let after = start_egc + '\u{FFFC}'.len_utf8();
-            box_glyphs(glyphs, font_system, line, &attrs_egc, inline, start_egc, after);
+            let text = !egc.starts_with('\u{FFFC}');
+            let after = start_egc + if text { egc.len() } else { '\u{FFFC}'.len_utf8() };
+            let width = if !text
+                || start_egc == 0
+                || attrs_list.get_span(start_egc - 1) != attrs_egc
+            {
+                inline.width
+            } else {
+                0.0
+            };
+            box_glyphs(glyphs, font_system, line, &attrs_egc, inline, start_egc, after, width, text);
             start_run = after;
             attrs = if after < word_range.end {
                 attrs_list.get_span(after)
@@ -1565,6 +1578,7 @@ fn build_boxed(
 /// `y_offset` how far its top is above the baseline; its `x_offset` holds
 /// what the run font's strut (its ascent and half its leading) adds above
 /// the baseline, its line height the rest (`ShapeLine::inline_line_box`).
+#[allow(clippy::too_many_arguments)]
 fn box_glyphs(
     glyphs: &mut Vec<ShapeGlyph>,
     font_system: &mut FontSystem,
@@ -1573,6 +1587,8 @@ fn box_glyphs(
     inline: InlineBox,
     start: usize,
     end: usize,
+    width: f32,
+    text: bool,
 ) {
     // A span without metrics of its own has none here to scale by (the
     // buffer's come at layout): its glyph is sized in pixels, at a size of 1,
@@ -1628,10 +1644,13 @@ fn box_glyphs(
         _ => inline.extents(ascent, descent, x_height),
     };
     for (at, c) in line[start..end].char_indices() {
+        // Over text of its own (`in_text_box`): its first character the
+        // box's width, the rest none.
+        let advance = if !text || at == 0 { width } else { 0.0 };
         glyphs.push(ShapeGlyph {
             start: start + at,
             end: start + at + c.len_utf8(),
-            x_advance: inline.width / size,
+            x_advance: advance / size,
             y_advance: 0.0,
             x_offset: strut_top / size,
             y_offset: above / size,
@@ -1648,6 +1667,21 @@ fn box_glyphs(
             metrics_opt: Some(metrics),
         });
     }
+}
+
+/// zgx: whether `word_range` of `line` lies in an inline box's span over
+/// text of its own (not a replacement character): an editor atom shown as a
+/// picture, its text kept for copy and search. Asked only on lines holding
+/// boxes.
+#[cold]
+#[inline(never)]
+fn in_text_box(line: &str, attrs_list: &AttrsList, word_range: &Range<usize>) -> bool {
+    attrs_list.spans_iter().any(|(range, attrs)| {
+        range.start < word_range.end
+            && word_range.start < range.end
+            && attrs.as_attrs().padding_opt.is_some_and(LetterSpacing::is_inline_box)
+            && !line[range.start.min(line.len())..].starts_with('\u{FFFC}')
+    })
 }
 
 /// zgx patch: a line's words as `ShapeSpan::build` finds them in a line

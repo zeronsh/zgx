@@ -799,7 +799,7 @@ impl FallbackTextLayout {
     /// Mixed-size approximate cells used when no native rich shaper is installed.
     pub fn with_rich(rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
         if rich.has_inline_boxes() {
-            return Self::with_boxes(rich, width);
+            return Self::with_boxes(rich, width).0;
         }
         let mut cells: Vec<(Range<usize>, Rect)> = Vec::new();
         let (mut x, mut y, mut max_x, mut pitch) = (0_f32, 0_f32, 0_f32, 0_f32);
@@ -847,19 +847,55 @@ impl FallbackTextLayout {
         };
         layout.finished(rich, width)
     }
-    /// `with_rich` for text with inline boxes (`fallback_boxes`).
+    /// `with_rich` as a layout of its own, which says where its inline boxes
+    /// are (`TextLayout::inline_boxes`) when it has them: what a scene with
+    /// no rich shaper shapes with.
+    pub(crate) fn rich_layout(
+        rich: &crate::rich_text::RichText,
+        width: Option<f32>,
+    ) -> Box<dyn TextLayout> {
+        if rich.has_inline_boxes() {
+            return Self::placed(rich, width);
+        }
+        Box::new(Self::with_rich(rich, width))
+    }
+    /// `rich_layout` for text with inline boxes. Rare, out of line.
     #[cold]
     #[inline(never)]
-    fn with_boxes(rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
+    fn placed(rich: &crate::rich_text::RichText, width: Option<f32>) -> Box<dyn TextLayout> {
+        let (layout, places) = Self::with_boxes(rich, width);
+        Box::new(PlacedFallback { layout, places })
+    }
+    /// `with_rich` for text with inline boxes (`fallback_boxes`), and where
+    /// each box is: its character's offset, left and top.
+    #[cold]
+    #[inline(never)]
+    fn with_boxes(rich: &crate::rich_text::RichText, width: Option<f32>) -> (Self, Places) {
         let boxes = crate::rich_text::fallback_boxes(rich, width);
         let (x, y, height) = boxes.end;
         let wide = boxes.rows.iter().fold(0_f32, |w, row| w.max(row.2));
-        Self {
+        // Each box's character, and its top, before its cells move.
+        let held: Vec<(usize, f32)> = boxes
+            .places
+            .iter()
+            .filter_map(|&(cell, top)| Some((boxes.cells.get(cell)?.0.start, top)))
+            .collect();
+        let layout = Self {
             cells: boxes.cells,
             end: Rect::new(x, y, 1., height),
             size: (wide, y + height),
         }
-        .finished(rich, width)
+        .finished(rich, width);
+        // Each box where its cell ended up (aligned, kept by a clamp).
+        let mut kept = layout.cells.iter();
+        let places = held
+            .into_iter()
+            .filter_map(|(at, top)| {
+                let (_, rect) = kept.find(|(kept, _)| kept.start == at)?;
+                Some((at, rect.x, top))
+            })
+            .collect();
+        (layout, places)
     }
     /// Where each of `rich`'s inline boxes is at `width` (as
     /// `TextLayout::inline_boxes`): its character's offset, left and top.
@@ -868,19 +904,7 @@ impl FallbackTextLayout {
         rich: &crate::rich_text::RichText,
         width: Option<f32>,
     ) -> Vec<(usize, f32, f32)> {
-        let boxes = crate::rich_text::fallback_boxes(rich, width);
-        let layout = Self::with_boxes(rich, width);
-        // Both in order: each found from where the last was.
-        let mut kept = layout.cells.iter();
-        boxes
-            .places
-            .iter()
-            .filter_map(|&(cell, top)| {
-                let (range, _) = boxes.cells.get(cell)?;
-                let (_, rect) = kept.find(|(kept, _)| kept == range)?;
-                Some((range.start, rect.x, top))
-            })
-            .collect()
+        Self::with_boxes(rich, width).1.into_vec()
     }
     /// `with_rich`'s cells cut as its clamp says, and aligned.
     #[inline(always)]
@@ -1292,6 +1316,43 @@ impl Iterator for AsciiClusters<'_> {
         };
         self.at = start + len;
         Some(start..self.at)
+    }
+}
+/// Where a layout's inline boxes are (`TextLayout::inline_boxes`): each
+/// one's character's offset, left and top.
+type Places = Box<[(usize, f32, f32)]>;
+/// A fallback layout of text with inline boxes, and where they are
+/// (`FallbackTextLayout::rich_layout`): plain text's layouts don't carry
+/// them.
+struct PlacedFallback {
+    layout: FallbackTextLayout,
+    places: Places,
+}
+impl TextLayout for PlacedFallback {
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        self.places.to_vec()
+    }
+    fn cache_weight(&self) -> Option<usize> {
+        let places = std::mem::size_of_val(&*self.places);
+        Some(self.layout.cache_weight()?.saturating_add(places))
+    }
+    fn size(&self) -> (f32, f32) {
+        self.layout.size()
+    }
+    fn hit_test(&self, x: f32, y: f32) -> usize {
+        self.layout.hit_test(x, y)
+    }
+    fn hit_position(&self, x: f32, y: f32) -> TextPosition {
+        self.layout.hit_position(x, y)
+    }
+    fn caret_position(&self, position: TextPosition) -> Rect {
+        self.layout.caret_position(position)
+    }
+    fn caret(&self, byte_offset: usize) -> Rect {
+        self.layout.caret(byte_offset)
+    }
+    fn selection(&self, range: Range<usize>) -> Vec<Rect> {
+        self.layout.selection(range)
     }
 }
 impl TextLayout for FallbackTextLayout {
