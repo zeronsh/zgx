@@ -1106,7 +1106,14 @@ impl Surfaces {
         // Unmounted: their cuts go (pages stay with their controllers). A
         // view with keyboard focus that is mounted again elsewhere (its node
         // rebuilt) gets it back once placed.
-        let views = natives.views();
+        // The split's native nodes alone: one node a page, the one that
+        // shows (`NativeViews::shown_nodes`); a page's other nodes get no clip
+        // to take its view into.
+        let views: Vec<_> = natives
+            .views()
+            .into_iter()
+            .filter(|(node, _)| split.is_native(*node))
+            .collect();
         let mut order_changed = false;
         let mut refocus: Option<Retained<NSView>> = None;
         self.clips.retain(|(node, clip)| {

@@ -166,6 +166,41 @@ impl NativeViews {
             .map(|entry| (entry.node, entry.content.clone()))
             .collect()
     }
+    /// The mounted native nodes that show their content, one node a
+    /// content, in registration order: what a host places and routes to.
+    /// Where one content (a page) is registered at more than one live node
+    /// (a pane mounted again while its old node lingers, the same page in a
+    /// hidden pane), the node laid out visible in `scene` takes it, else the
+    /// latest registered. A host mounts a view in one place: given to a
+    /// node that isn't shown, a page's clicks reached nothing where it showed.
+    pub fn shown_nodes(&self, scene: &Scene) -> Vec<NodeId> {
+        let entries = self.0.entries.borrow();
+        // Each content's chosen registration, as an index into `entries`.
+        let mut chosen: Vec<usize> = Vec::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            if !scene.contains(entry.node) {
+                continue;
+            }
+            match chosen
+                .iter()
+                .position(|&other| entries[other].content.same(&entry.content))
+            {
+                None => chosen.push(index),
+                Some(at) => {
+                    // The later one, unless only the earlier shows.
+                    let earlier = entries[chosen[at]].node;
+                    if scene.layout_visible(entry.node) || !scene.layout_visible(earlier) {
+                        chosen[at] = index;
+                    }
+                }
+            }
+        }
+        chosen.sort_unstable();
+        chosen
+            .into_iter()
+            .map(|index| entries[index].node)
+            .collect()
+    }
     /// The mounted native nodes, in registration order.
     pub fn nodes(&self) -> Vec<NodeId> {
         self.0
