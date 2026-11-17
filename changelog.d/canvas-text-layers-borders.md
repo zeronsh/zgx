@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **Canvas text stays under an overlay drawn over a screen of bordered cards** (zgx): a canvas keeps its texts in its drawing's order in at most 8 layers, and a stroke drawn after a text counted as covering everything inside its bounds, so each card's border, drawn after its own words, started a layer. Past 8, the texts left were drawn over every later shape: a scrim and a dialog over a dozen cards showed the cards' words through them (a window's canvas and `ui.render_canvas` alike). A stroke round a rectangle or an ellipse now reaches a text only along its outline, so such a border keeps its words in its layer; and past 8 layers the two neighbours whose joining lays the least text over a later shape are joined, again and again, so a large overlay keeps its split. A canvas whose text all comes after its drawing does none of this, as before.

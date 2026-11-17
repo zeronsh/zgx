@@ -17,6 +17,13 @@ fn plugin(name: &str, code: &str) -> PathBuf {
     std::fs::write(&entry, code).unwrap();
     entry
 }
+/// A 2×2 PNG.
+const PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6, 0,
+    0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240, 31, 132,
+    25, 96, 12, 0, 71, 202, 7, 249, 103, 89, 110, 183, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+    130,
+];
 fn reads(name: &str) -> Capability {
     Capability::Named(name.into())
 }
@@ -501,6 +508,48 @@ ui.contribute("bar", ui.text { tostring(ok) .. " " .. tostring(got), id = "got" 
 }
 
 #[test]
+fn a_plugin_is_not_shown_a_picture_the_app_holds_that_it_may_not_open() {
+    // The app and its plugins share one cache of pictures. A plugin asks
+    // what it may reach before it: else, once the app showed a file, any
+    // plugin naming it was shown it too (and could read its pixels back
+    // with `c:image` and `ui.render_canvas`).
+    let outside = common::temp_dir("cached-outside").join("apps.png");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    std::fs::write(&outside, PNG).unwrap();
+    let app = format!(
+        r#"return ui.column {{
+    ui.image {{ src = "{}", w = 10, h = 10 }},
+    ui.slot("bar", {{ id = "bar" }}),
+}}"#,
+        outside.display()
+    );
+    let h = Harness::inline(&app);
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    let entry = plugin(
+        "peek",
+        &format!(
+            r#"ui.contribute("bar", ui.canvas {{ w = 10, h = 10, draw = function(c)
+    c:image("{}", 0, 0, 10, 10)
+end }})"#,
+            outside.display()
+        ),
+    );
+    h.host.set_plugins(vec![Plugin {
+        name: "peek".into(),
+        entry,
+        grants: vec![],
+    }]);
+    h.host.reload().unwrap();
+    h.frames(1);
+    let error = h.error().unwrap_or_default();
+    assert!(
+        error.contains("a plugin's images come from its directory"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_plugins_images_come_from_its_directory() {
     let outside = common::temp_dir("outside").join("outside.png");
     std::fs::write(&outside, b"not really a png").unwrap();
@@ -601,6 +650,108 @@ ui.contribute("bar", ui.column {
         h.error().is_some_and(|e| e.contains("size")),
         "{:?}",
         h.error()
+    );
+}
+
+/// A plugin that holds `mb` strings of 1 MB, saying how many it made.
+fn holding(name: &str, mb: usize) -> PathBuf {
+    plugin(
+        name,
+        &format!(
+            r#"
+local held, made = table.create({mb}), 0
+for i = 1, {mb} do
+    if not pcall(function() held[i] = string.rep("x", 1048576) .. i end) then break end
+    made = i
+end
+ui.contribute("bar", ui.text {{ id = "{name}", tostring(made) }})
+"#
+        ),
+    )
+}
+
+#[test]
+fn a_plugin_given_more_memory_holds_past_the_default() {
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", APP);
+        let plugin = |name: &str| Plugin {
+            name: name.into(),
+            entry: holding(name, 48),
+            grants: vec![],
+        };
+        host.set_plugins(vec![plugin("big"), plugin("small")]);
+        host.plugin_memory("big", 64 << 20);
+        host
+    });
+    assert_eq!(h.error(), None);
+    // 48 MB fits its 64; the other stops short of the default 32.
+    assert_eq!(h.text("big"), "48");
+    let small: usize = h.text("small").parse().unwrap();
+    assert!(small < 32, "{small}");
+}
+
+#[test]
+fn a_plugins_decoded_pictures_count_against_its_memory_limit() {
+    // A `ui.decode_image` picture keeps its file's bytes in Rust, outside
+    // the VM: counted as a state's value is, a plugin keeping picture after
+    // picture (6 MB each) stops at its 32 MB.
+    use base64::Engine as _;
+    // The 2×2 PNG with a chunk of its own of 6 MB (ancillary: read past,
+    // and kept with the file) after its header.
+    let crc = |bytes: &[u8]| {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & (!(crc & 1)).wrapping_add(1));
+            }
+        }
+        !crc
+    };
+    let mut chunk = b"zgXz".to_vec();
+    chunk.resize(4 + (6 << 20), 0);
+    let mut png = PNG[..33].to_vec();
+    png.extend_from_slice(&((chunk.len() - 4) as u32).to_be_bytes());
+    png.extend_from_slice(&chunk);
+    png.extend_from_slice(&crc(&chunk).to_be_bytes());
+    png.extend_from_slice(&PNG[33..]);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+    let entry = plugin(
+        "pictures",
+        &format!(
+            r#"
+local kept, made = {{}}, ui.state("made", 0)
+local encoded = "{encoded}"
+local _ = ui.task(function()
+    for i = 1, 8 do
+        kept[i] = ui.decode_image(encoded):await()
+        made:set(i)
+    end
+end)
+ui.contribute("bar", ui.text {{ id = "made", function() return tostring(made:get()) end }})
+"#
+        ),
+    );
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", APP);
+        host.set_plugins(vec![Plugin {
+            name: "pictures".into(),
+            entry,
+            grants: vec![],
+        }]);
+        host
+    });
+    // The picture past its room is refused: the task stops there.
+    h.wait_until(|h| h.error().is_some());
+    let error = h.error().unwrap_or_default();
+    assert!(
+        error.contains("a plugin's memory is 32 MB at most"),
+        "{error}"
+    );
+    let made: usize = h.text("made").parse().unwrap();
+    assert!(
+        (1..5).contains(&made),
+        "{made} pictures of 6 MB kept in 32 MB"
     );
 }
 

@@ -381,6 +381,80 @@ fn rgb(bytes: &[u8], width: usize, x: usize, y: usize) -> [u8; 3] {
     [bytes[at], bytes[at + 1], bytes[at + 2]]
 }
 
+/// Radial and conic gradients show on screen as they rasterize: a canvas
+/// of them draws through its raster, panned and zoomed by its view.
+#[test]
+fn radial_and_conic_gradients_show_as_drawn() {
+    use zgx::{affine::Affine, scene::CanvasView};
+    let stops = vec![
+        GradientStop {
+            offset: 0.,
+            color: Color(255, 0, 0, 255),
+        },
+        GradientStop {
+            offset: 1.,
+            color: Color(0, 0, 255, 255),
+        },
+    ];
+    let mut scene = Scene::new(200., 100.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let mut canvas = Canvas::new();
+    canvas
+        .fill(
+            Path::rectangle(Rect::new(0., 0., 100., 100.)),
+            Brush::radial(
+                Affine::scale(40., 40.).then(Affine::translation(50., 50.)),
+                stops.clone(),
+            )
+            .unwrap(),
+        )
+        .fill(
+            Path::rectangle(Rect::new(100., 0., 100., 100.)),
+            Brush::conic(Affine::translation(150., 50.), stops).unwrap(),
+        );
+    let node = scene.append(
+        scene.root(),
+        NodeKind::Canvas(Arc::new(canvas)),
+        Style {
+            width: Some(200.),
+            height: Some(100.),
+            ..Default::default()
+        },
+    );
+    let mut gpu = GpuRenderer::new(200, 100).unwrap();
+    let report = scene.flush();
+    gpu.render(&scene, &report.damage).unwrap();
+    let bytes = gpu.readback().unwrap();
+    let near = |found: [u8; 3], expected: [u8; 3]| {
+        found.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 4)
+    };
+    let centre = rgb(&bytes, 200, 50, 50);
+    assert!(near(centre, [253, 0, 2]), "{centre:?}");
+    let half = rgb(&bytes, 200, 70, 50);
+    assert!(near(half, [125, 0, 130]), "halfway out: {half:?}");
+    assert_eq!(rgb(&bytes, 200, 50, 70), half, "a circle");
+    assert_eq!(rgb(&bytes, 200, 2, 2), [0, 0, 255], "past its edge");
+    let down = rgb(&bytes, 200, 150, 90);
+    assert!(near(down, [191, 0, 64]), "a quarter round: {down:?}");
+    let up = rgb(&bytes, 200, 150, 10);
+    assert!(near(up, [64, 0, 191]), "three quarters round: {up:?}");
+    // Zoomed twice about the top left: the circle's centre moves to (100, 100),
+    // halfway out is 40 across.
+    scene.set_canvas_view(
+        node,
+        Some(CanvasView {
+            x: 0.,
+            y: -50.,
+            scale: 2.,
+        }),
+    );
+    let report = scene.flush();
+    gpu.render(&scene, &report.damage).unwrap();
+    let bytes = gpu.readback().unwrap();
+    let half = rgb(&bytes, 200, 140, 50);
+    assert!(near(half, [125, 0, 130]), "zoomed: {half:?}");
+}
+
 #[test]
 fn a_canvas_view_places_its_drawing_without_drawing_it_again() {
     use zgx::scene::{CanvasView, GridFill, GridMark};
@@ -467,6 +541,494 @@ fn a_canvas_view_places_its_drawing_without_drawing_it_again() {
     assert_eq!(rgb(&bytes, 200, 35, 15), [0, 0, 0], "between dots");
     // Under the drawing: the rectangle covers the dot at (25, 25).
     assert_eq!(rgb(&bytes, 200, 25, 25), [255, 0, 0]);
+}
+
+/// A board larger than a 200 by 120 box, of curves, ellipses, a gradient
+/// and a clip.
+fn board() -> Arc<Canvas> {
+    let mut board = Canvas::new();
+    board.fill(
+        Path::rectangle(Rect::new(0., 0., 400., 300.)),
+        Brush::linear(
+            Point::new(0., 0.),
+            Point::new(400., 300.),
+            vec![
+                GradientStop {
+                    offset: 0.,
+                    color: Color(250, 240, 220, 255),
+                },
+                GradientStop {
+                    offset: 1.,
+                    color: Color(40, 60, 120, 255),
+                },
+            ],
+        )
+        .unwrap(),
+    );
+    board.clip(
+        Path::rounded_rect(Rect::new(30., 20., 300., 200.), 24.).unwrap(),
+        FillRule::Winding,
+    );
+    for i in 0..12 {
+        let at = i as f32 * 31.;
+        board.fill(
+            Path::ellipse(Rect::new(at, at * 0.6, 70., 40.)).unwrap(),
+            Color(200, (i * 20) as u8, 40, 255),
+        );
+        let mut curve = Path::builder();
+        curve.move_to(at, 250.).cubic_to(
+            Point::new(at + 20., 150.),
+            Point::new(at + 50., 290.),
+            Point::new(at + 80., 200.),
+        );
+        board.stroke(
+            curve.build().unwrap(),
+            Color(20, 20, 20, 255),
+            Stroke {
+                width: 3.,
+                ..Stroke::default()
+            },
+        );
+    }
+    board.restore();
+    Arc::new(board)
+}
+/// A board larger than its box, of curves, an ellipse, a gradient and a
+/// clip: panned, its raster moves with no rasterizing, or rasterizes what
+/// the pan shows anew alone, and looks as its raster under the view does.
+#[test]
+fn a_panned_canvas_moves_its_raster_and_looks_as_drawn_under_the_view() {
+    use zgx::scene::CanvasView;
+    let board = board();
+    let mut scene = Scene::new(200., 120.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let node = scene.append(
+        scene.root(),
+        NodeKind::Canvas(board.clone()),
+        Style {
+            width: Some(200.),
+            height: Some(120.),
+            ..Default::default()
+        },
+    );
+    let at = |x: f32, y: f32, scale: f32| CanvasView { x, y, scale };
+    let renderer = || {
+        let mut gpu = GpuRenderer::new(300, 180).unwrap();
+        gpu.set_scale_factor(1.5);
+        gpu
+    };
+    // What a box's raster under `view` shows.
+    let drawn = |view: CanvasView| {
+        let image = zgx_gpu::canvas::rasterize_viewed(&board, view, 200., 120., 1.5).unwrap();
+        image.pixels().to_vec()
+    };
+    // The pixels that differ by more than 2 in a colour, and the most any does.
+    let differ = |a: &[u8], b: &[u8]| {
+        let off = (0..300 * 180)
+            .filter(|i| (0..3).any(|c| a[i * 4 + c].abs_diff(b[i * 4 + c]) > 2))
+            .count();
+        let most = (0..300 * 180 * 4)
+            .filter(|i| i % 4 != 3)
+            .map(|i| a[i].abs_diff(b[i]))
+            .max()
+            .unwrap();
+        (off, most)
+    };
+    // As its raster under `view`, but at edges' antialiasing, which
+    // tiny-skia draws a little differently for the same drawing moved by
+    // whole pixels.
+    let looks_as_drawn = |gpu: &GpuRenderer, view: CanvasView| {
+        let (off, most) = differ(&gpu.readback().unwrap(), &drawn(view));
+        assert!(
+            off < 300 * 180 / 100 && most < 80,
+            "{view:?}: {off} pixels, by {most}"
+        );
+    };
+    let mut gpu = renderer();
+    let mut show = |gpu: &mut GpuRenderer, view: CanvasView| {
+        scene.set_canvas_view(node, Some(view));
+        let report = scene.flush();
+        gpu.render(&scene, &report.damage).unwrap()
+    };
+    let start = at(-10., -6., 1.5);
+    assert_eq!(show(&mut gpu, start).canvas_rasterizations, 1);
+    let first = drawn(start);
+    assert_eq!(differ(&gpu.readback().unwrap(), &first), (0, 0));
+    // Panned (by whole pixels) onto more of it: what is new rasterized,
+    // beside what was.
+    let panned = at(-90., -50., 1.5);
+    let stats = show(&mut gpu, panned);
+    assert_eq!(stats.canvas_rasterizations, 1);
+    assert_eq!(stats.image_uploads, 1);
+    looks_as_drawn(&gpu, panned);
+    // Back, and between: the raster moves, nothing drawn or uploaded, its
+    // pixels exactly the first raster's moved.
+    for (view, dx, dy) in [
+        (start, 0, 0),
+        (at(-50., -30., 1.5), 60, 36),
+        (at(-12., -8., 1.5), 3, 3),
+    ] {
+        let stats = show(&mut gpu, view);
+        assert_eq!(stats.canvas_rasterizations, 0, "{view:?}");
+        assert_eq!(stats.image_uploads, 0, "{view:?}");
+        looks_as_drawn(&gpu, view);
+        let shown = gpu.readback().unwrap();
+        for y in 0..180 - dy {
+            for x in 0..300 - dx {
+                let (i, j) = ((y * 300 + x) * 4, ((y + dy) * 300 + x + dx) * 4);
+                assert_eq!(shown[i..i + 3], first[j..j + 3], "{view:?} at {x}, {y}");
+            }
+        }
+    }
+    // Panned off it, and back: nothing shows, then it does.
+    assert_eq!(show(&mut gpu, at(500., 0., 1.5)).canvas_rasterizations, 0);
+    assert_eq!(gpu.readback().unwrap(), {
+        let mut empty = renderer();
+        let mut blank = Scene::new(200., 120.);
+        let report = blank.flush();
+        empty.render(&blank, &report.damage).unwrap();
+        empty.readback().unwrap()
+    });
+    assert_eq!(show(&mut gpu, start).canvas_rasterizations, 0);
+    assert_eq!(differ(&gpu.readback().unwrap(), &first), (0, 0));
+    // A zoom draws it again: what shows, as its raster under the view.
+    let zoomed = at(-40., -20., 2.);
+    assert_eq!(show(&mut gpu, zoomed).canvas_rasterizations, 1);
+    assert_eq!(differ(&gpu.readback().unwrap(), &drawn(zoomed)), (0, 0));
+}
+
+/// A board of screens, each an `each` item's part (clipped to its rounded
+/// box, a shadow, an ellipse and a curve in it), joined (`parts`) or drawn
+/// as one list of commands.
+fn screens(parts: bool) -> Arc<Canvas> {
+    let mut board = Canvas::new();
+    board.fill(
+        Path::rectangle(Rect::new(-20., -20., 900., 700.)),
+        Color(30, 30, 40, 255),
+    );
+    for i in 0..24 {
+        let (x, y) = ((i % 6) as f32 * 140., (i / 6) as f32 * 160.);
+        let mut screen = Canvas::new();
+        let at = Rect::new(x, y, 120., 140.);
+        screen.shadow(
+            Path::rounded_rect(at, 12.).unwrap(),
+            Color(0, 0, 0, 120),
+            Point::new(0., 4.),
+            6.,
+            0.,
+        );
+        screen.clip(Path::rounded_rect(at, 12.).unwrap(), FillRule::Winding);
+        screen.fill(Path::rectangle(at), Color(240, 240, 250, 255));
+        screen.fill(
+            Path::ellipse(Rect::new(x + 60., y + 70., 90., 60.)).unwrap(),
+            Color(200, (i * 10) as u8, 40, 255),
+        );
+        let mut curve = Path::builder();
+        curve.move_to(x, y + 120.).cubic_to(
+            Point::new(x + 40., y + 20.),
+            Point::new(x + 80., y + 160.),
+            Point::new(x + 130., y + 30.),
+        );
+        screen.stroke(
+            curve.build().unwrap(),
+            Color(20, 20, 20, 255),
+            Stroke {
+                width: 3.,
+                ..Stroke::default()
+            },
+        );
+        screen.restore();
+        match parts {
+            true => {
+                board.extend(&screen);
+            }
+            false => {
+                for command in screen.commands() {
+                    match command {
+                        Draw::Clip { path, rule } => board.clip(path.clone(), *rule),
+                        Draw::Restore => board.restore(),
+                        Draw::Fill { path, brush, rule } => {
+                            board.fill_rule(path.clone(), brush.clone(), *rule)
+                        }
+                        Draw::Stroke { path, brush, style } => {
+                            board.stroke(path.clone(), brush.clone(), style.clone())
+                        }
+                        Draw::Shadow {
+                            path,
+                            color,
+                            offset,
+                            blur,
+                            spread,
+                        } => board.shadow(path.clone(), *color, *offset, *blur, *spread),
+                        Draw::Image { .. } => unreachable!(),
+                    };
+                }
+            }
+        }
+    }
+    assert_eq!(board.parts().len(), if parts { 24 } else { 0 });
+    Arc::new(board)
+}
+/// A board of `each` items' parts, panned and zoomed, shows what the same
+/// drawing as one list of commands does: the strips a pan draws leave out
+/// the parts they can't reach, and nothing else.
+#[test]
+fn a_board_of_parts_looks_as_drawn_whole_however_panned_and_zoomed() {
+    use zgx::scene::CanvasView;
+    let at = |x: f32, y: f32, scale: f32| CanvasView { x, y, scale };
+    let views = [
+        at(-10., -6., 1.),
+        at(-90., -50., 1.),
+        at(-200., -40., 1.),
+        at(-230., -190., 1.),
+        at(-400., -300., 1.),
+        at(-100., -100., 2.5),
+        at(-130., -120., 2.5),
+        at(5., 5., 0.3),
+    ];
+    let shown = |board: Arc<Canvas>| {
+        let mut scene = Scene::new(200., 120.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let node = scene.append(
+            scene.root(),
+            NodeKind::Canvas(board),
+            Style {
+                width: Some(200.),
+                height: Some(120.),
+                ..Default::default()
+            },
+        );
+        // An offscreen renderer draws a zoom at once, as a window's does
+        // once the zoom's raster lands.
+        let mut gpu = GpuRenderer::new(300, 180).unwrap();
+        gpu.set_scale_factor(1.5);
+        views
+            .iter()
+            .map(|view| {
+                scene.set_canvas_view(node, Some(*view));
+                let report = scene.flush();
+                gpu.render(&scene, &report.damage).unwrap();
+                gpu.readback().unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let (parts, whole) = (shown(screens(true)), shown(screens(false)));
+    for ((a, b), view) in parts.iter().zip(&whole).zip(views) {
+        assert!(a == b, "{view:?}");
+    }
+    // And as a picture of it under each view.
+    let board = screens(true);
+    for (shown, view) in parts.iter().zip(views) {
+        let drawn = zgx_gpu::canvas::rasterize_viewed(&board, view, 200., 120., 1.5).unwrap();
+        let off = (0..300 * 180)
+            .filter(|i| (0..3).any(|c| shown[i * 4 + c].abs_diff(drawn.pixels()[i * 4 + c]) > 2))
+            .count();
+        assert!(off < 300 * 180 / 100, "{view:?}: {off} pixels");
+    }
+}
+/// A clip over all the raster draws as no clip; one past it, as nothing;
+/// one over part of it, its shape.
+#[test]
+fn clips_over_all_or_none_of_the_raster_draw_as_their_masks_do() {
+    use zgx::scene::CanvasView;
+    let view = CanvasView::default();
+    let ellipse = || Path::ellipse(Rect::new(-10., 10., 120., 70.)).unwrap();
+    let drawn = |clip: Option<Path>| {
+        let mut canvas = Canvas::new();
+        if let Some(clip) = &clip {
+            canvas.clip(clip.clone(), FillRule::Winding);
+        }
+        canvas.fill(ellipse(), Color(200, 30, 40, 255));
+        if clip.is_some() {
+            canvas.restore();
+        }
+        zgx_gpu::canvas::rasterize_viewed(&canvas, view, 100., 60., 1.5)
+            .unwrap()
+            .pixels()
+            .to_vec()
+    };
+    let none = drawn(None);
+    assert_eq!(
+        drawn(Some(Path::rectangle(Rect::new(-1., -1., 102., 62.)))),
+        none
+    );
+    assert_eq!(
+        drawn(Some(
+            Path::rounded_rect(Rect::new(-20., -20., 140., 100.), 10.).unwrap()
+        )),
+        none
+    );
+    let past = drawn(Some(Path::rectangle(Rect::new(200., 0., 50., 50.))));
+    assert!(past.iter().all(|v| *v == 0));
+    // Half of it: the left half as drawn, the right empty.
+    let half = drawn(Some(Path::rectangle(Rect::new(0., 0., 50., 60.))));
+    for y in 0..90 {
+        for x in 0..150 {
+            let i = (y * 150 + x) * 4;
+            match x < 75 {
+                true => assert_eq!(half[i..i + 4], none[i..i + 4], "{x}, {y}"),
+                false => assert_eq!(half[i + 3], 0, "{x}, {y}"),
+            }
+        }
+    }
+}
+
+/// Zoomed, a window's canvas shows the raster of the zoom before, scaled,
+/// rasterizing nothing on the frame; the new zoom's tiles are made off it,
+/// the window woken as they land, and it then shows the zoom as drawn
+/// under the view.
+#[test]
+fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zgx::scene::CanvasView;
+    static WOKEN: AtomicUsize = AtomicUsize::new(0);
+    zgx::image::set_decoded_wake(|| {
+        WOKEN.fetch_add(1, Ordering::SeqCst);
+    });
+    let board = board();
+    let mut scene = Scene::new(200., 120.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let node = scene.append(
+        scene.root(),
+        NodeKind::Canvas(board.clone()),
+        Style {
+            width: Some(200.),
+            height: Some(120.),
+            ..Default::default()
+        },
+    );
+    let at = |x: f32, y: f32, scale: f32| CanvasView { x, y, scale };
+    let mut gpu = GpuRenderer::new(300, 180).unwrap();
+    gpu.set_scale_factor(1.5);
+    gpu.debug_go_without();
+    let mut show = |gpu: &mut GpuRenderer, view: CanvasView| {
+        scene.set_canvas_view(node, Some(view));
+        let report = scene.flush();
+        gpu.render(&scene, &report.damage).unwrap()
+    };
+    let start = at(-10., -6., 1.5);
+    assert_eq!(show(&mut gpu, start).canvas_rasterizations, 1);
+    assert!(!gpu.take_images_awaited());
+    // Zoomed by a third about the box's middle: the first raster, scaled
+    // (cut into tiles), nothing rasterized on the frame.
+    let zoomed = at(-40., -20., 2.);
+    let stats = show(&mut gpu, zoomed);
+    assert_eq!(stats.canvas_rasterizations, 0);
+    let scaled = gpu.readback().unwrap();
+    let drawn = zgx_gpu::canvas::rasterize_viewed(&board, zoomed, 200., 120., 1.5).unwrap();
+    // Close to it, but for what scaling blurs.
+    let near = (0..300 * 180)
+        .filter(|i| (0..3).all(|c| scaled[i * 4 + c].abs_diff(drawn.pixels()[i * 4 + c]) < 48))
+        .count();
+    assert!(near > 300 * 180 * 9 / 10, "{near} pixels near");
+    // Its tiles made off the frame: the window is woken, and draws again
+    // until none is awaited; then it shows the zoom as drawn under it (but
+    // for antialiasing rounded the other way here and there).
+    // Drawn again, as a host does once woken, while the frame before
+    // waited on tiles: what then shows, and how many frames it took.
+    fn settled(
+        gpu: &mut GpuRenderer,
+        show: &mut impl FnMut(&mut GpuRenderer, CanvasView) -> zgx_gpu::GpuStats,
+        view: CanvasView,
+    ) -> (Vec<u8>, usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut frames = 0;
+        while gpu.images_decoded() {
+            assert!(std::time::Instant::now() < deadline, "never settled");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert_eq!(
+                show(gpu, view).canvas_rasterizations,
+                0,
+                "none on the frame"
+            );
+            frames += 1;
+        }
+        (gpu.readback().unwrap(), frames)
+    }
+    // Alike but on drawn edges, where antialiasing depends a little on
+    // where a tile starts (and a curve is cut where it leaves one): each
+    // pixel by no more than the drawing changes within two pixels of it.
+    let same = |shown: &[u8], drawn: &[u8]| {
+        let at = |image: &[u8], x: i32, y: i32, c: usize| image[(y * 300 + x) as usize * 4 + c];
+        let mut off = 0;
+        for y in 0..180 {
+            for x in 0..300 {
+                let d = (0..3)
+                    .map(|c| at(shown, x, y, c).abs_diff(at(drawn, x, y, c)))
+                    .max();
+                let d = d.unwrap();
+                if d <= 2 {
+                    continue;
+                }
+                off += 1;
+                let contrast = (y - 2..=y + 2)
+                    .flat_map(|ny| (x - 2..=x + 2).map(move |nx| (nx, ny)))
+                    .filter(|(nx, ny)| (0..300).contains(nx) && (0..180).contains(ny))
+                    .flat_map(|(nx, ny)| (0..3).map(move |c| (nx, ny, c)))
+                    .map(|(nx, ny, c)| at(drawn, nx, ny, c).abs_diff(at(drawn, x, y, c)))
+                    .max()
+                    .unwrap();
+                // (The drawing's own raster is cut at the box's edge too.)
+                let border = x < 2 || y < 2 || x >= 298 || y >= 178;
+                if d > contrast && !border {
+                    return false;
+                }
+            }
+        }
+        off * 20 < 300 * 180
+    };
+    let (shown, frames) = settled(&mut gpu, &mut show, zoomed);
+    assert!(frames > 0, "its tiles awaited");
+    assert!(WOKEN.load(Ordering::SeqCst) > 0, "woken as they land");
+    assert!(
+        same(&shown, drawn.pixels()),
+        "shown as drawn under the zoom"
+    );
+    // And pans at it as any: what a pan shows anew is made off the frame,
+    // and what it showed before shows again at once.
+    let panned = at(-46., -26., 2.);
+    assert_eq!(show(&mut gpu, panned).canvas_rasterizations, 0);
+    let (shown_panned, _) = settled(&mut gpu, &mut show, panned);
+    let drawn_panned = zgx_gpu::canvas::rasterize_viewed(&board, panned, 200., 120., 1.5).unwrap();
+    assert!(
+        same(&shown_panned, drawn_panned.pixels()),
+        "shown as drawn under the pan"
+    );
+    assert_eq!(show(&mut gpu, zoomed).canvas_rasterizations, 0);
+    assert!(!gpu.take_images_awaited());
+    // Zoomed on before the zoom held still: the last zoom's tiles are made
+    // and shown.
+    let (on, last) = (at(-60., -30., 2.4), at(-70., -36., 2.6));
+    assert_eq!(show(&mut gpu, on).canvas_rasterizations, 0);
+    assert!(gpu.take_images_awaited());
+    assert_eq!(show(&mut gpu, last).canvas_rasterizations, 0);
+    let drawn = zgx_gpu::canvas::rasterize_viewed(&board, last, 200., 120., 1.5).unwrap();
+    let (shown_last, frames) = settled(&mut gpu, &mut show, last);
+    assert!(frames > 0, "its tiles awaited");
+    assert!(
+        same(&shown_last, drawn.pixels()),
+        "shown as drawn under the last view"
+    );
+    // Zoomed out far: the zoom before, scaled, would show a corner of the
+    // board; its backdrop shows all of it (blurred) until the zoom's own
+    // tiles land.
+    let out = at(40., 30., 0.3);
+    let stats = show(&mut gpu, out);
+    assert_eq!(stats.canvas_rasterizations, 0);
+    assert!(gpu.take_images_awaited());
+    let backdrop = gpu.readback().unwrap();
+    let drawn = zgx_gpu::canvas::rasterize_viewed(&board, out, 200., 120., 1.5).unwrap();
+    let near = (0..300 * 180)
+        .filter(|i| (0..3).all(|c| backdrop[i * 4 + c].abs_diff(drawn.pixels()[i * 4 + c]) < 48))
+        .count();
+    assert!(near > 300 * 180 * 95 / 100, "{near} pixels near");
+    // An offscreen renderer waits for it, as it does for shaders.
+    let mut waits = GpuRenderer::new(300, 180).unwrap();
+    waits.set_scale_factor(1.5);
+    assert_eq!(show(&mut waits, start).canvas_rasterizations, 1);
+    assert_eq!(show(&mut waits, zoomed).canvas_rasterizations, 1);
+    assert!(!waits.take_images_awaited());
+    assert!(same(&waits.readback().unwrap(), &shown));
 }
 
 /// A filled area under a chart's line, its top chain jagged, in a gradient

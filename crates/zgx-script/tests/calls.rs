@@ -721,6 +721,156 @@ fn a_failed_remote_image_is_asked_for_again_while_it_is_shown() {
     assert_eq!(h.host.error().get(), None);
 }
 
+/// The picture an image shows (its first image node's), if any.
+fn shown(h: &mut Harness, id: &str) -> Option<std::sync::Arc<zgx::image::ImageData>> {
+    use zgx::scene::NodeKind;
+    let node = h.find(id)?;
+    let scene = h.ui.scene.borrow();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match scene.kind(n) {
+            NodeKind::Image(image) => return Some(image.clone()),
+            _ => stack.extend(scene.children(n).iter().copied()),
+        }
+    }
+    None
+}
+
+/// Settles until `done`, at most five seconds.
+fn settle_until(h: &mut Harness, mut done: impl FnMut(&mut Harness) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done(h) && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// An image whose remote `src` changes (a tile a program redraws, fetched
+/// under a new URL each time) shows the picture it had until the next one
+/// arrives: never the empty placeholder between them.
+#[test]
+fn a_remote_image_keeps_its_picture_while_its_next_src_loads() {
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local src = ui.shared("src", "https://img.test/tile.png?v=1")
+            return ui.column {
+                ui.image { src = function() return src:get() end, id = "tile", w = 20, h = 20 },
+            }"#,
+        );
+        host.fetcher(move |request: zgx_script::Request| async move {
+            // The second version comes late, so the switch is seen first.
+            let late = request.url.ends_with("v=2");
+            zgx::timer::sleep(Duration::from_millis(if late { 200 } else { 2 })).await;
+            Ok(zgx_script::Response {
+                status: 200,
+                headers: vec![],
+                body: PNG.to_vec(),
+            })
+        });
+        host
+    });
+    settle_until(&mut h, |h| shown(h, "tile").is_some_and(|i| i.width() == 2));
+    let first = shown(&mut h, "tile").expect("the first version");
+    assert_eq!(first.width(), 2);
+    h.host
+        .shared("src", Value::Nil)
+        .set(Value::from("https://img.test/tile.png?v=2"));
+    for _ in 0..5 {
+        h.settle();
+        h.ui.prepare_frame();
+    }
+    let between = shown(&mut h, "tile").expect("a picture while v=2 loads");
+    assert_eq!(
+        between.id(),
+        first.id(),
+        "v=1's picture, not the placeholder"
+    );
+    settle_until(&mut h, |h| {
+        shown(h, "tile").is_some_and(|i| i.id() != first.id())
+    });
+    let second = shown(&mut h, "tile").expect("the second version");
+    assert_ne!(second.id(), first.id());
+    assert_eq!(second.width(), 2);
+    assert_eq!(h.host.error().get(), None);
+}
+
+/// A remote picture up to a megapixel arrives decoded (decoded off the
+/// main thread as it came), so its first frame draws it at any size: it
+/// keeps no file to decode as it is drawn, a frame late.
+#[test]
+fn a_remote_image_arrives_decoded() {
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.column {
+                ui.image { src = "https://img.test/tile.png", id = "tile", w = 20, h = 20 },
+            }"#,
+        );
+        host.fetcher(move |_| async move {
+            Ok(zgx_script::Response {
+                status: 200,
+                headers: vec![],
+                body: PNG.to_vec(),
+            })
+        });
+        host
+    });
+    settle_until(&mut h, |h| shown(h, "tile").is_some_and(|i| i.width() == 2));
+    let image = shown(&mut h, "tile").expect("the picture");
+    assert!(!image.keeps_file(), "decoded as it arrived");
+    assert_eq!(image.pixels().len(), 2 * 2 * 4);
+}
+
+/// Remote pictures replaced under new URLs, by an image that stays mounted,
+/// don't pile up until the window idles: past twice the cache's budget,
+/// those no node shows go.
+#[test]
+fn replaced_remote_pictures_go_once_the_cache_is_past_twice_its_budget() {
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local src = ui.shared("src", "https://img.test/tile.png?v=0")
+            return ui.column {
+                ui.image { src = function() return src:get() end, id = "tile", w = 20, h = 20 },
+            }"#,
+        )
+        // Room for two of these pictures (16 bytes each, decoded).
+        .image_cache(32);
+        host.fetcher(move |_| async move {
+            Ok(zgx_script::Response {
+                status: 200,
+                headers: vec![],
+                body: PNG.to_vec(),
+            })
+        });
+        host
+    });
+    let src = h.host.shared("src", Value::Nil);
+    for v in 0..40 {
+        src.set(Value::from(
+            format!("https://img.test/tile.png?v={v}").as_str(),
+        ));
+        // Each arrives (one more decoded) before the next is asked for.
+        settle_until(&mut h, |h| h.host.image_cache_stats().2 > v);
+    }
+    let (pictures, bytes, decoded) = h.host.image_cache_stats();
+    assert!(decoded >= 40, "each version fetched and decoded: {decoded}");
+    assert!(pictures <= 5, "{pictures} pictures kept of 40");
+    assert!(bytes <= 2 * 32 + 16, "{bytes} bytes kept");
+    // One that went, shown again, is fetched again: not a blank.
+    src.set(Value::from("https://img.test/tile.png?v=0"));
+    settle_until(&mut h, |h| h.host.image_cache_stats().2 > decoded);
+    assert!(h.host.image_cache_stats().2 > decoded, "v=0 decoded again");
+    settle_until(&mut h, |h| shown(h, "tile").is_some_and(|i| i.width() == 2));
+    assert_eq!(shown(&mut h, "tile").map(|i| i.width()), Some(2));
+    assert_eq!(h.host.error().get(), None);
+}
+
 /// A remote picture tells `on_load` its size once it has arrived, or
 /// `on_error` why it didn't.
 #[test]
