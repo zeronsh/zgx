@@ -2987,6 +2987,9 @@ impl Host {
         let visible = match (self.draw_hidden, self.unmapped) {
             (true, _) => Some(true),
             (false, true) => Some(false),
+            // Off-screen, never ordered in: it draws as the app has it
+            // shown or hidden.
+            (false, false) if !crate::window_chrome::may_show() => Some(self.state.visible),
             (false, false) => window.is_visible(),
         };
         // X11's minimized query is a synchronous property roundtrip. Focused
@@ -4572,7 +4575,8 @@ impl Host {
                 self.options.bounds = Some(crate::WindowBounds::read(&window));
             }
         }
-        if self.options.fullscreen {
+        let may_show = crate::window_chrome::may_show();
+        if self.options.fullscreen && may_show {
             let display = self
                 .options
                 .display
@@ -4580,12 +4584,15 @@ impl Host {
                 .and_then(|selector| crate::window_info::select_monitor(event_loop, selector));
             window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(display)));
         }
-        window.set_visible(self.state.visible);
-        if self.state.minimized {
+        // Off-screen (`ZGX_OFFSCREEN`), made hidden, it stays so.
+        window.set_visible(self.state.visible && may_show);
+        if self.state.minimized && may_show {
             window.set_minimized(true);
         }
         if self.state.focus_requested {
-            window.focus_window();
+            if may_show {
+                window.focus_window();
+            }
             self.state.focus_requested = false;
         }
         window.request_redraw();
@@ -4745,11 +4752,22 @@ impl Host {
                 let _ = window.request_inner_size(size);
             }
             WindowCommand::Fullscreen(value) => {
-                window.set_fullscreen(value.then_some(winit::window::Fullscreen::Borderless(None)))
+                if crate::window_chrome::may_show() {
+                    window.set_fullscreen(
+                        value.then_some(winit::window::Fullscreen::Borderless(None)),
+                    )
+                }
             }
             WindowCommand::ContextMenu { entries, x, y } => {
                 #[cfg(target_os = "macos")]
-                {
+                if !crate::window_chrome::may_show() {
+                    // Off-screen: no native menu, which would show on a screen.
+                    let _ = (entries, x, y);
+                    self.context
+                        .window_info
+                        .last_request_error
+                        .set(Some("off-screen: no native menu shows".into()));
+                } else {
                     let shown = crate::app_menu::show_context_menu(window, &entries, x, y);
                     self.context
                         .window_info
@@ -4853,12 +4871,18 @@ impl Host {
                 if value {
                     self.context.ui.cancel_interactions();
                 }
-                window.set_minimized(value);
+                if crate::window_chrome::may_show() {
+                    window.set_minimized(value);
+                }
                 self.context
                     .ui
                     .set_presented(self.state.visible && !value && !self.native_occluded);
             }
-            WindowCommand::Maximized(value) => window.set_maximized(value),
+            WindowCommand::Maximized(value) => {
+                if crate::window_chrome::may_show() {
+                    window.set_maximized(value)
+                }
+            }
             WindowCommand::Visible(value) => {
                 if !value {
                     self.context.ui.cancel_interactions();
@@ -4876,7 +4900,7 @@ impl Host {
                 if showing && let Err(error) = self.draw_hidden_frame() {
                     eprintln!("zgx: {error}");
                 }
-                window.set_visible(value);
+                window.set_visible(value && crate::window_chrome::may_show());
                 if showing {
                     zgx_gpu::present_log::log(|| "window shown".into());
                     zgx::profile::mark("window shown");
@@ -4888,7 +4912,9 @@ impl Host {
                 }
             }
             WindowCommand::Focus => {
-                window.focus_window();
+                if crate::window_chrome::may_show() {
+                    window.focus_window();
+                }
                 self.state.focus_requested = false;
             }
             // Applies without a native window too: the clock outlives it.
@@ -7838,8 +7864,10 @@ impl WindowManager {
                 data.activate(token, window);
             }
         } else {
-            window.set_minimized(false);
-            window.focus_window();
+            if crate::window_chrome::may_show() {
+                window.set_minimized(false);
+                window.focus_window();
+            }
             crate::x11_startup::complete(&window, &token);
         }
     }
