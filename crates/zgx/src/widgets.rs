@@ -1365,12 +1365,6 @@ impl EditorHandle {
     pub fn is_read_only(&self) -> bool {
         self.read_only.get()
     }
-    /// How far its text is scrolled within it, across and down, as the
-    /// next draw shows it.
-    #[doc(hidden)]
-    pub fn scroll_offset(&self) -> (f32, f32) {
-        *self.hint.scrolled.offset.borrow()
-    }
     /// Keep a wheel gesture that starts over it at its edges, as CSS's
     /// `overscroll-behavior: contain`: the scroll views around it don't
     /// take what it can't scroll (`View::overscroll_contain`).

@@ -348,20 +348,20 @@ fn a_drag_near_a_text_areas_bottom_scrolls_its_text_and_is_over_it_again() {
     let view = note(&mut ui, 80, over.clone());
     ui.prepare_frame();
     let editor = ui.editor(view.find("note").unwrap()).unwrap();
-    assert_eq!(editor.scroll_offset(), (0., 0.));
+    assert_eq!(editor.scroll_offset(), 0.);
     start_drag(&ui);
     // 10 in from its bottom edge.
     moved(&ui, 150., 230.);
     let heard = over.get();
     tick(&ui).expect("near the edge");
     tick(&ui).expect("still near it");
-    let (_, down) = editor.scroll_offset();
+    let down = editor.scroll_offset();
     assert!((down - 24.).abs() < 0.01, "{down}");
     assert_eq!(over.get(), heard + 2, "over it again after each step");
     // Toward the top: back up.
     moved(&ui, 150., 50.);
     tick(&ui).expect("near the top");
-    assert!(editor.scroll_offset().1 < down);
+    assert!(editor.scroll_offset() < down);
     press(&ui, 150., 50., false);
     assert_eq!(ui.next_interaction_deadline(), None, "dropped: no more");
 }
@@ -381,5 +381,5 @@ fn a_drag_near_a_text_areas_edge_schedules_nothing_when_its_text_fits() {
         ui.input.next_spring_deadline()
     );
     let editor = ui.editor(view.find("note").unwrap()).unwrap();
-    assert_eq!(editor.scroll_offset(), (0., 0.));
+    assert_eq!(editor.scroll_offset(), 0.);
 }
