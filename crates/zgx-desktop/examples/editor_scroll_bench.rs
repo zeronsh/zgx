@@ -72,7 +72,10 @@ fn main() {
             delta_y,
         });
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
         if moved {
             let now = report();
             eprintln!("frame {n}: {last:?} -> {now:?}");
