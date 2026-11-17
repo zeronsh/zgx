@@ -81,7 +81,11 @@ async fn until(what: &str, done: impl Fn() -> bool) {
 /// test before may have left a sound playing, or the hold not yet passed.
 async fn quiet() {
     for _ in 0..800 {
-        if state("running").as_bool() != Some(true) {
+        // Not wanted, and the context suspended (or never made): the next
+        // sound starts fresh, its lead back at 120 ms.
+        if state("running").as_bool() != Some(true)
+            && state("context").as_string().as_deref() != Some("running")
+        {
             return;
         }
         tick().await;
@@ -386,4 +390,173 @@ async fn a_second_host_given_sound_shares_the_engine() {
         state("posted").as_f64().unwrap_or(0.) > posted
     })
     .await;
+}
+
+/// A page playing a 2 s tone round and round, with buttons to start and
+/// stop it.
+async fn looping() -> App {
+    let samples: Vec<f32> = (0..96_000)
+        .map(|i| (i as f32 * 0.06).sin() * 0.25)
+        .collect();
+    let bytes = wav::write(&samples, 1, 48_000, wav::Encoding::Float32).unwrap();
+    let url =
+        js_sys::Function::new_with_args("bytes", "return URL.createObjectURL(new Blob([bytes]))")
+            .call1(&JsValue::NULL, &js_sys::Uint8Array::from(&bytes[..]))
+            .unwrap()
+            .as_string()
+            .unwrap();
+    let app = mount(&format!(
+        r#"
+        local tone = audio.sound("{url}")
+        local v = nil
+        return ui.column {{
+            ui.text {{ function() return if tone.ready:get() then "ready" else "loading" end }},
+            ui.button {{ on_click = function() v = audio.play(tone, {{ loop = true }}) end, "Play" }},
+            ui.button {{ on_click = function() if v then v:stop() end end, "Stop" }},
+        }}
+        "#
+    ));
+    until("the sound loads", || text(&app).starts_with("ready")).await;
+    // Answered twice since this play: playing, not waiting to begin (a
+    // stall before the first block is a start, not a dry gap), and its
+    // lead reported by this play's own asks, not a test's before.
+    let posted = state("posted").as_f64().unwrap_or(0.);
+    press(&app, 0);
+    until("the worklet is answered twice", || {
+        state("posted").as_f64().unwrap_or(0.) >= posted + 2.
+    })
+    .await;
+    app
+}
+
+/// Presses the app's `n`th button.
+fn press(app: &App, n: u32) {
+    let button: web_sys::HtmlElement = app
+        .host
+        .query_selector_all("button")
+        .unwrap()
+        .item(n)
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    button.click();
+}
+
+/// The lead the worklet starts with: 120 ms at the context's rate.
+fn base_mark() -> f64 {
+    (0.12 * state("sampleRate").as_f64().unwrap()).round()
+}
+
+/// Waits `frames` audio frames' worth of time, and a little more.
+async fn frames_pass(frames: f64) {
+    let rate = state("sampleRate").as_f64().unwrap();
+    let ticks = (frames / rate * 1000. / 10.).ceil() as usize + 10;
+    for _ in 0..ticks {
+        tick().await;
+    }
+}
+
+/// A late answer (held back in the worklet, in audio frames, so it doesn't
+/// hang on how busy the runner is) runs it dry once: its lead grows by half,
+/// and the same stall then plays through.
+#[wasm_bindgen_test]
+async fn a_late_answer_grows_the_lead_and_the_same_stall_then_plays_through() {
+    quiet().await;
+    let app = looping().await;
+    let base = base_mark();
+    assert_eq!(state("mark").as_f64(), Some(base));
+    // Longer than what it holds when it asks (under its mark): it runs dry.
+    let stall = (base * 1.25).round();
+    let dry = state("underruns").as_f64().unwrap();
+    zgx_dom::__audio_stall_next_answer(stall as u32);
+    until("the stall runs it dry", || {
+        state("underruns").as_f64().unwrap() > dry
+    })
+    .await;
+    frames_pass(stall).await;
+    let grown = (base * 1.5).round();
+    assert_eq!(state("mark").as_f64(), Some(grown), "grown by half, once");
+    // The same stall again: it holds at least its grown mark less a
+    // quantum when it asks, more than the stall.
+    let dry = state("underruns").as_f64().unwrap();
+    zgx_dom::__audio_stall_next_answer(stall as u32);
+    frames_pass(stall * 2.).await;
+    assert_eq!(
+        state("underruns").as_f64().unwrap(),
+        dry,
+        "the same stall ran it dry again; depths {}",
+        depths()
+    );
+    assert_eq!(state("mark").as_f64(), Some(grown));
+    press(&app, 1);
+}
+
+/// However often it runs dry, its lead stops at half a second.
+#[wasm_bindgen_test]
+async fn the_lead_never_passes_half_a_second() {
+    quiet().await;
+    let app = looping().await;
+    let cap = (0.5 * state("sampleRate").as_f64().unwrap()).round();
+    for _ in 0..6 {
+        let dry = state("underruns").as_f64().unwrap();
+        let stall = cap + 4_096.;
+        zgx_dom::__audio_stall_next_answer(stall as u32);
+        until("the stall runs it dry", || {
+            state("underruns").as_f64().unwrap() > dry
+        })
+        .await;
+        frames_pass(stall).await;
+        let mark = state("mark").as_f64().unwrap();
+        assert!(mark <= cap, "the lead {mark} passed {cap}");
+    }
+    assert_eq!(state("mark").as_f64(), Some(cap), "it reached the cap");
+    press(&app, 1);
+}
+
+/// Grown, then the page goes quiet: the next sound, on a resumed context,
+/// starts with the 120 ms lead again.
+#[wasm_bindgen_test]
+async fn the_lead_starts_over_on_a_resumed_context() {
+    quiet().await;
+    let app = looping().await;
+    let base = base_mark();
+    let dry = state("underruns").as_f64().unwrap();
+    let stall = (base * 1.25).round();
+    zgx_dom::__audio_stall_next_answer(stall as u32);
+    until("the stall runs it dry", || {
+        state("underruns").as_f64().unwrap() > dry
+    })
+    .await;
+    frames_pass(stall).await;
+    assert!(state("mark").as_f64().unwrap() > base);
+    press(&app, 1);
+    quiet().await;
+    until("the context is suspended", || {
+        state("context").as_string().as_deref() == Some("suspended")
+    })
+    .await;
+    let asked = state("asked").as_f64().unwrap();
+    press(&app, 0);
+    until("the worklet asks again", || {
+        state("asked").as_f64().unwrap() > asked
+    })
+    .await;
+    assert_eq!(state("mark").as_f64(), Some(base), "back to 120 ms");
+    press(&app, 1);
+}
+
+/// A device that never runs dry keeps the 120 ms lead.
+#[wasm_bindgen_test]
+async fn a_device_that_never_runs_dry_keeps_its_lead() {
+    quiet().await;
+    let app = looping().await;
+    let dry = state("underruns").as_f64().unwrap();
+    for _ in 0..60 {
+        tick().await;
+    }
+    // Growth needs a dry gap; with none, the lead is where it began.
+    if state("underruns").as_f64().unwrap() == dry {
+        assert_eq!(state("mark").as_f64(), Some(base_mark()));
+    }
+    press(&app, 1);
 }

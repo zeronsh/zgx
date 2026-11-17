@@ -40,6 +40,7 @@ extern "C" {
     fn zgx_audio_wake();
     fn zgx_audio_state() -> JsValue;
     fn zgx_audio_drain_and_wake(slow_suspend_ms: f64);
+    fn zgx_audio_stall(frames: f64);
 }
 
 /// The worklet's source, made a Blob URL unless the page serves the file.
@@ -83,6 +84,15 @@ pub fn install_audio_at(host: &ScriptHost, worklet_url: &str) {
 #[doc(hidden)]
 pub fn __audio_state() -> JsValue {
     zgx_audio_state()
+}
+
+/// The worklet holds back the answer to its next ask until `frames` audio
+/// frames after it asked, as a main thread that late would. For tests only,
+/// of what the worklet does with a late answer (it grows its lead); never
+/// call it from an app.
+#[doc(hidden)]
+pub fn __audio_stall_next_answer(frames: u32) {
+    zgx_audio_stall(f64::from(frames));
 }
 
 /// The worklet's drained message handled, as if the hold had passed, and a

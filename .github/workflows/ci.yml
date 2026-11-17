@@ -411,8 +411,11 @@ jobs:
           # given to Chrome here; webdriver.json is each machine's own).
           echo '{"goog:chromeOptions":{"args":["--autoplay-policy=no-user-gesture-required"]}}' > crates/zgx-dom/webdriver.json
           cargo clippy -p zgx-dom --features audio-effects,audio-vorbis,audio-mp3,audio-opus,audio-streams --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+          # The audio tests wait out real sound (holds, stalls, a context
+          # suspending between tests): past the runner's 20 s for a whole run.
           CHROMEDRIVER="$(command -v chromedriver || echo "$CHROMEWEBDRIVER/chromedriver")" \
             CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$HOME/.local/wasm-bindgen-$WASM_BINDGEN/bin/wasm-bindgen-test-runner" \
+            WASM_BINDGEN_TEST_TIMEOUT=120 \
             cargo test --release -p zgx-dom --features audio --test audio --target wasm32-unknown-unknown --locked -- --nocapture
       # zgx-script's tests with all its features, as an app built by zgx-run
       # has them (scene3d, i18n, gltf, inspect): ICU's plural rules change

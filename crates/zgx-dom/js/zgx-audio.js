@@ -11,7 +11,7 @@ let ctx = null;
 let node = null;
 let starting = null;
 let wanted = false;
-const state = { asked: 0, posted: 0, underruns: 0, late: 0, depths: [] };
+const state = { asked: 0, posted: 0, underruns: 0, late: 0, mark: 0, depths: [] };
 
 export function zgx_audio_install(fillFn, rateFn, workletSource, workletUrl, aheadSeconds) {
   // One engine and one context for the page: installed once.
@@ -33,6 +33,9 @@ export function zgx_audio_install(fillFn, rateFn, workletSource, workletUrl, ahe
 }
 
 async function start() {
+  // New, or resumed from suspended: the worklet's lead starts over at
+  // `ahead`, whatever it grew to before.
+  const fresh = !ctx || ctx.state !== "running";
   if (!ctx) {
     ctx = new AudioContext();
     setRate(ctx.sampleRate);
@@ -58,6 +61,7 @@ async function start() {
         // for a test to read. Bounded and cheap (three numbers an ask,
         // about ten a second while sound plays).
         state.depths.push([message.held, message.lowest, message.wait]);
+        state.mark = message.mark;
         if (state.depths.length > 64) state.depths.shift();
         const answer = fill(message.low);
         if (!answer) return;
@@ -78,7 +82,7 @@ async function start() {
   // after this: resumed whenever sound is wanted (a running context's
   // resume does nothing).
   if (wanted) await ctx.resume().catch(() => {});
-  node.port.postMessage({ start: true });
+  node.port.postMessage({ start: true, fresh });
 }
 
 // The worklet has played out what it held: suspended, unless a sound has
@@ -89,6 +93,12 @@ function drained() {
       if (!wanted && ctx) return ctx.suspend();
     })
     .catch(() => {});
+}
+
+// For a test: hold the worklet's answer to its next ask back by `frames`, as
+// a main thread that late would.
+export function zgx_audio_stall(frames) {
+  if (node) node.port.postMessage({ stall: frames });
 }
 
 // For a test: the drained message as if the hold had passed, and a sound
@@ -126,6 +136,7 @@ export function zgx_audio_state() {
     posted: state.posted,
     underruns: state.underruns,
     late: state.late,
+    mark: state.mark,
     sampleRate: ctx ? ctx.sampleRate : 0,
     depths: state.depths.slice(),
   };
