@@ -2402,6 +2402,11 @@ export type NodeProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: number?,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: (number | Readable<number> | (() -> number))?,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -2851,6 +2856,11 @@ export type Props = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -3249,6 +3259,7 @@ export type Props_focus_on_press = boolean?
 export type Props_capture_keys = boolean?
 export type Props_role = AriaRole?
 export type Props_heading = number?
+export type Props_level = (number | Readable<number> | (() -> number))?
 export type Props_selected = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_checked = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_expanded = (boolean | Readable<boolean> | (() -> boolean))?
@@ -3553,6 +3564,11 @@ export type ContainerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -4016,6 +4032,11 @@ export type GlassProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -4488,6 +4509,11 @@ export type ScrollProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -4977,6 +5003,11 @@ export type TextProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -5425,6 +5456,11 @@ export type MarkdownViewProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -5970,6 +6006,11 @@ export type RichProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -6412,6 +6453,11 @@ export type ImageProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -6871,6 +6917,11 @@ export type SvgProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -7441,6 +7492,11 @@ export type Scene3DProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -7906,6 +7962,11 @@ export type CanvasProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -8380,6 +8441,11 @@ export type CheckboxProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -8832,6 +8898,11 @@ export type InputProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -9448,6 +9519,11 @@ export type ProgressProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -9891,6 +9967,11 @@ export type SliderProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -10349,6 +10430,11 @@ export type SegmentedProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -10803,6 +10889,11 @@ export type StepperProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -11258,6 +11349,11 @@ export type DisclosureProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -11724,6 +11820,11 @@ export type AccordionProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -12164,6 +12265,11 @@ export type SectionProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -12629,6 +12735,11 @@ export type SeparatorProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -13077,6 +13188,11 @@ export type TabsProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -13547,6 +13663,11 @@ export type TreeProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -14013,6 +14134,11 @@ export type DataGridProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -14475,6 +14601,11 @@ export type CalendarProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -14930,6 +15061,11 @@ export type DatePickerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -15383,6 +15519,11 @@ export type TimeFieldProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -15835,6 +15976,11 @@ export type ComboboxProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -16295,6 +16441,11 @@ export type CommandPaletteProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -16743,6 +16894,11 @@ export type SelectProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -17198,6 +17354,11 @@ export type SplitProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -17709,6 +17870,11 @@ export type ListProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -18251,6 +18417,11 @@ export type LayerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -18713,6 +18884,11 @@ export type ModalProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -19193,6 +19369,11 @@ export type PopoverProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -19683,6 +19864,11 @@ export type MenuItemProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	expanded: Props_expanded,
@@ -20130,6 +20316,11 @@ export type SubmenuProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -20598,6 +20789,11 @@ export type WebViewProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -21066,6 +21262,11 @@ export type TerminalProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -21509,6 +21710,11 @@ export type SlotProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -22001,6 +22207,11 @@ export type EachOptions = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -22459,6 +22670,11 @@ export type PresenceOptions = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on

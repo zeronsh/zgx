@@ -1868,6 +1868,9 @@ fn primitive(
             if let Some(level) = a.level {
                 attrs.push(("aria-level", level.to_string()));
             }
+            if let Some(mut f) = a.level_when {
+                bound_attrs.push(("aria-level", Box::new(move || Some(f().max(1).to_string()))));
+            }
             if let Some(live) = a.live {
                 attrs.push((
                     "aria-live",

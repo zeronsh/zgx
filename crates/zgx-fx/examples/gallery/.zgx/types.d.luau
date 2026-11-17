@@ -2407,6 +2407,11 @@ export type NodeProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: number?,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: (number | Readable<number> | (() -> number))?,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: (boolean | Readable<boolean> | (() -> boolean))?,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -2526,10 +2531,6 @@ export type NodeProps = {
 	layer_on: Reactive<boolean>?,
 	-- Events.
 	on_click: (ClickHandler | Handler | Action)?,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: SoundProp?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -2856,6 +2857,11 @@ export type Props = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -2975,10 +2981,6 @@ export type Props = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -3254,6 +3256,7 @@ export type Props_focus_on_press = boolean?
 export type Props_capture_keys = boolean?
 export type Props_role = AriaRole?
 export type Props_heading = number?
+export type Props_level = (number | Readable<number> | (() -> number))?
 export type Props_selected = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_checked = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_expanded = (boolean | Readable<boolean> | (() -> boolean))?
@@ -3301,7 +3304,6 @@ export type Props_layer_clock = boolean?
 export type Props_shader_clock = boolean?
 export type Props_layer_on = Reactive<boolean>?
 export type Props_on_click = (ClickHandler | Handler | Action)?
-export type Props_sound = SoundProp?
 export type Props_on_press = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_release = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_aux_click = (((e: AuxClickEvent) -> ...unknown) | Action)?
@@ -3558,6 +3560,11 @@ export type ContainerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -3677,10 +3684,6 @@ export type ContainerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -4021,6 +4024,11 @@ export type GlassProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -4140,10 +4148,6 @@ export type GlassProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -4493,6 +4497,11 @@ export type ScrollProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -4612,10 +4621,6 @@ export type ScrollProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -4982,6 +4987,11 @@ export type TextProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -5101,10 +5111,6 @@ export type TextProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -5430,6 +5436,11 @@ export type MarkdownViewProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -5549,10 +5560,6 @@ export type MarkdownViewProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -5975,6 +5982,11 @@ export type RichProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -6094,10 +6106,6 @@ export type RichProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -6417,6 +6425,11 @@ export type ImageProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -6536,10 +6549,6 @@ export type ImageProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -6876,6 +6885,11 @@ export type SvgProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -6995,10 +7009,6 @@ export type SvgProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -7446,6 +7456,11 @@ export type Scene3DProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -7565,10 +7580,6 @@ export type Scene3DProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -7911,6 +7922,11 @@ export type CanvasProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -8030,10 +8046,6 @@ export type CanvasProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -8385,6 +8397,11 @@ export type CheckboxProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -8504,10 +8521,6 @@ export type CheckboxProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -8837,6 +8850,11 @@ export type InputProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -8956,10 +8974,6 @@ export type InputProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -9453,6 +9467,11 @@ export type ProgressProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -9572,10 +9591,6 @@ export type ProgressProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -9896,6 +9911,11 @@ export type SliderProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -10012,10 +10032,6 @@ export type SliderProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -10354,6 +10370,11 @@ export type SegmentedProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -10473,10 +10494,6 @@ export type SegmentedProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -10808,6 +10825,11 @@ export type StepperProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -10927,10 +10949,6 @@ export type StepperProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -11263,6 +11281,11 @@ export type DisclosureProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -11382,10 +11405,6 @@ export type DisclosureProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -11729,6 +11748,11 @@ export type AccordionProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -11848,10 +11872,6 @@ export type AccordionProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -12169,6 +12189,11 @@ export type SectionProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -12288,10 +12313,6 @@ export type SectionProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -12634,6 +12655,11 @@ export type SeparatorProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -12753,10 +12779,6 @@ export type SeparatorProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -13082,6 +13104,11 @@ export type TabsProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -13201,10 +13228,6 @@ export type TabsProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -13552,6 +13575,11 @@ export type TreeProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -13671,10 +13699,6 @@ export type TreeProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -14018,6 +14042,11 @@ export type DataGridProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -14137,10 +14166,6 @@ export type DataGridProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -14480,6 +14505,11 @@ export type CalendarProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -14599,10 +14629,6 @@ export type CalendarProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -14935,6 +14961,11 @@ export type DatePickerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -15054,10 +15085,6 @@ export type DatePickerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -15388,6 +15415,11 @@ export type TimeFieldProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -15507,10 +15539,6 @@ export type TimeFieldProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -15840,6 +15868,11 @@ export type ComboboxProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -15959,10 +15992,6 @@ export type ComboboxProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -16300,6 +16329,11 @@ export type CommandPaletteProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -16419,10 +16453,6 @@ export type CommandPaletteProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -16748,6 +16778,11 @@ export type SelectProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -16867,10 +16902,6 @@ export type SelectProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -17203,6 +17234,11 @@ export type SplitProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -17322,10 +17358,6 @@ export type SplitProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -17714,6 +17746,11 @@ export type ListProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -17833,10 +17870,6 @@ export type ListProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -18256,6 +18289,11 @@ export type LayerProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -18375,10 +18413,6 @@ export type LayerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -18718,6 +18752,11 @@ export type ModalProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -18837,10 +18876,6 @@ export type ModalProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -19198,6 +19233,11 @@ export type PopoverProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -19317,10 +19357,6 @@ export type PopoverProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -19688,6 +19724,11 @@ export type MenuItemProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	expanded: Props_expanded,
@@ -19803,10 +19844,6 @@ export type MenuItemProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -20135,6 +20172,11 @@ export type SubmenuProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -20254,10 +20296,6 @@ export type SubmenuProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -20603,6 +20641,11 @@ export type WebViewProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -20722,10 +20765,6 @@ export type WebViewProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -21071,6 +21110,11 @@ export type TerminalProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -21190,10 +21234,6 @@ export type TerminalProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -21514,6 +21554,11 @@ export type SlotProps = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -21633,10 +21678,6 @@ export type SlotProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -22008,6 +22049,11 @@ export type EachOptions = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -22127,10 +22173,6 @@ export type EachOptions = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -22466,6 +22508,11 @@ export type PresenceOptions = {
 	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
 	-- list headings and move between them.
 	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
 	-- Whether this option, tab or item is the chosen one (`aria-selected`).
 	selected: Props_selected,
 	-- Whether a switch, checkbox or radio of the app's own is on
@@ -22585,10 +22632,6 @@ export type PresenceOptions = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -23906,207 +23949,6 @@ declare extern type Scope with
 	function revert(self): ()
 end
 export type EaseMaker = (...number) -> AnimeEase
-
----------------------------------------------------------------------------
--- Sound (`audio`, zgx-script's `audio` feature; docs/reference/audio.md).
-
-export type Curve = "linear" | "equal_power" | "exponential"
--- Seconds, in straight steps, or along a curve.
-export type Fade = number | { seconds: number, curve: Curve? }
-
--- `audio.sound`'s: decoded on a thread of its own.
-declare extern type Sound with
-	ready: ReadOnlyState<boolean>
-	-- Why it couldn't be loaded, or nil.
-	error: ReadOnlyState<string?>
-	-- Seconds, once ready (else 0).
-	duration: number
-	-- This sound for `sound =`, at its own level and pitch.
-	function with(self, opts: { gain: number?, pitch: number? }?): SoundWith
-end
-
--- `sound:with { … }`'s: a sound for `sound =`, at a level and pitch.
-declare extern type SoundWith with
-end
-
--- `audio.choose(f)`'s: for `sound =`, `f` called as its control is
--- activated, answering the sound to play, or none.
-declare extern type SoundChoice with
-end
-
-export type SoundOptions = {
-	-- false: it loads at its first play.
-	preload: boolean?,
-}
-
-export type PlayOptions = {
-	-- A bus's name or the bus: `"world"` for `audio.play`, `"music"` for
-	-- `audio.music`.
-	bus: (string | Bus)?,
-	gain: Reactive<number>?,
-	-- -1 left to 1 right, as a balance.
-	pan: Reactive<number>?,
-	-- Speed and pitch together: 2 is an octave up.
-	pitch: Reactive<number>?,
-	-- A time on `audio.now()`'s clock: it starts on that exact frame.
-	at: number?,
-	loop: boolean?,
-	-- Seconds into the sound: an intro, then the loop between them.
-	loop_start: number?,
-	loop_end: number?,
-	-- Kept over lower priorities when 64 voices play.
-	priority: number?,
-	fade_in: Fade?,
-}
-
-declare extern type Voice with
-	-- True until it has ended or been stopped.
-	playing: ReadOnlyState<boolean>
-	-- Fades out and stops (5 ms if not given).
-	function stop(self, seconds: number?): ()
-	function fade(self, gain: number, seconds: number, curve: Curve?): ()
-	function gain(self, value: Reactive<number>): ()
-	function pan(self, value: Reactive<number>): ()
-	function pitch(self, value: Reactive<number>): ()
-	-- The same voice, for the next call to land on that frame.
-	function at(self, time: number): Voice
-	-- Fades this voice out (and stops it) and `to`, started silent, up to
-	-- `gain` (1), along equal-power curves over `seconds`.
-	function crossfade(self, to: Voice, seconds: number, gain: number?): ()
-end
-
--- A stock effect described (`audio.low_pass { … }`), to put on a bus with
--- `bus:add_effect`. Every parameter is a number, a state, a function or a
--- binding, followed with no script per frame.
-declare extern type EffectSpec with
-end
-
-export type FilterOptions = {
-	-- Hz, 10 to 24000.
-	cutoff: Reactive<number>?,
-	-- Q, 0.1 to 20: 0.707 is flat.
-	resonance: Reactive<number>?,
-	-- dB an octave: 12 or 24.
-	slope: number?,
-}
-export type PeakingOptions = {
-	frequency: Reactive<number>?,
-	q: Reactive<number>?,
-	-- dB, -36 to 36.
-	gain: Reactive<number>?,
-}
-export type DelayOptions = {
-	-- Seconds, up to `longest`.
-	time: Reactive<number>?,
-	-- 0 to 0.98.
-	feedback: Reactive<number>?,
-	wet: Reactive<number>?,
-	dry: Reactive<number>?,
-	-- The longest time it will be given, in seconds (1, or `time` if
-	-- longer; 10 at most): what its line holds.
-	longest: number?,
-}
-export type ReverbOptions = {
-	-- 0.25 to 2.
-	size: Reactive<number>?,
-	-- Seconds to fall 60 dB, 0.1 to 20.
-	decay: Reactive<number>?,
-	-- 0 to 1: how much the highs fade first.
-	damping: Reactive<number>?,
-	-- Seconds, up to 0.25.
-	pre_delay: Reactive<number>?,
-	wet: Reactive<number>?,
-	dry: Reactive<number>?,
-}
-export type CompressorOptions = {
-	-- dB, -60 to 0.
-	threshold: Reactive<number>?,
-	ratio: Reactive<number>?,
-	-- Seconds.
-	attack: Reactive<number>?,
-	release: Reactive<number>?,
-	-- dB.
-	knee: Reactive<number>?,
-	makeup: Reactive<number>?,
-}
-export type DuckOptions = {
-	-- dB the bus goes down by, -60 to 0.
-	depth: Reactive<number>?,
-	-- dB the other bus's level must pass.
-	threshold: Reactive<number>?,
-	attack: Reactive<number>?,
-	release: Reactive<number>?,
-}
-
--- An effect on a bus (`bus:add_effect`, `bus:duck`).
-declare extern type AudioEffect with
-	-- A parameter by its name: a number, or a state, function or binding
-	-- it follows.
-	function set(self, name: string, value: Reactive<number>): ()
-	function fade(self, name: string, value: number, seconds: number, curve: Curve?): ()
-	-- Takes it off its bus (its tail cut).
-	function remove(self): ()
-	function at(self, time: number): AudioEffect
-end
-
-declare extern type Bus with
-	-- Read by the mixer each block, gliding over 10 ms: no message, even
-	-- for a binding.
-	function gain(self, value: Reactive<number>): ()
-	function fade(self, gain: number, seconds: number, curve: Curve?): ()
-	function mute(self, value: Reactive<boolean>): ()
-	function solo(self, value: Reactive<boolean>): ()
-	function at(self, time: number): Bus
-	-- After the bus's other effects, before its gain: 8 at most.
-	function add_effect(self, effect: EffectSpec): AudioEffect
-	-- Ducks this bus under `side` (music under dialogue).
-	function duck(self, side: Bus, opts: DuckOptions?): AudioEffect
-end
-
-export type AudioStats = {
-	voices: number,
-	stolen: number,
-	dropped: number,
-	late: number,
-	dry: number,
-	streams: number,
-	underruns: number,
-	running: boolean,
-	starts: number,
-	stops: number,
-	peak: number,
-}
-
--- `sound =` on a control: a sound, `sound:with`'s, `audio.choose`'s, or
--- none. Extern types and false alone: a table or a function among them, in
--- a property every element has, made props built a field at a time too
--- complex for luau-lsp 1.70.1 to check.
-export type SoundProp = Sound | SoundWith | SoundChoice | false
-
-declare audio: {
-	sound: (src: string, opts: SoundOptions?) -> Sound,
-	music: (src: string, opts: PlayOptions?) -> Voice,
-	play: (sound: Sound, opts: PlayOptions?) -> Voice,
-	-- For `sound =`: `f` chooses the sound as the control is activated.
-	choose: (f: () -> Sound | SoundWith | false | nil) -> SoundChoice,
-	-- A plugin's `audio.bus()` is its own bus, the only one it reaches.
-	bus: (name: string?) -> Bus?,
-	-- Under `master` unless `parent` says.
-	add_bus: (name: string, opts: { parent: string? }?) -> Bus,
-	-- The mixer's clock, in seconds: still while nothing plays.
-	now: () -> number,
-	prewarm: () -> (),
-	stats: () -> AudioStats,
-	low_pass: (opts: FilterOptions?) -> EffectSpec,
-	high_pass: (opts: FilterOptions?) -> EffectSpec,
-	-- A band of EQ.
-	peaking: (opts: PeakingOptions?) -> EffectSpec,
-	delay: (opts: DelayOptions?) -> EffectSpec,
-	reverb: (opts: ReverbOptions?) -> EffectSpec,
-	compressor: (opts: CompressorOptions?) -> EffectSpec,
-	-- The user's interface-sound setting, which the `ui` bus follows.
-	ui_sounds_enabled: ReadOnlyState<boolean>,
-}
 
 -- Besides elements, animations and utils target a state's or a plain
 -- table's fields: the script's own data, so `{ [string]: any }`.

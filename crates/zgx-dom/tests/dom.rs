@@ -420,6 +420,48 @@ fn a_pressed_state_reaches_aria_pressed_and_follows() {
     assert_eq!(view.get_attribute("aria-pressed").unwrap(), "true");
 }
 
+/// A tree item's depth reaches `aria-level`, as a number and followed: the
+/// same element takes its new depth.
+#[wasm_bindgen_test]
+fn a_tree_items_level_reaches_aria_level_and_follows() {
+    let runtime = Runtime::new();
+    let depth = runtime.signal(1_usize);
+    let read = depth.clone();
+    let host = host();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column()
+            .child(
+                row()
+                    .role(zgx::semantics::Role::TreeItem)
+                    .level(2)
+                    .child(text("Fixed")),
+            )
+            .child(
+                row()
+                    .role(zgx::semantics::Role::TreeItem)
+                    .level_when(move || read.get())
+                    .child(text("Moved")),
+            ),
+    );
+    let items = host.query_selector_all("[role=treeitem]").unwrap();
+    let item = |i| {
+        items
+            .item(i)
+            .unwrap()
+            .dyn_into::<web_sys::Element>()
+            .unwrap()
+    };
+    let (fixed, moved) = (item(0), item(1));
+    assert_eq!(fixed.get_attribute("aria-level").as_deref(), Some("2"));
+    assert_eq!(moved.get_attribute("aria-level").as_deref(), Some("1"));
+    depth.set(3);
+    zgx_dom::flush();
+    assert_eq!(moved.get_attribute("aria-level").as_deref(), Some("3"));
+    assert!(moved.is_connected(), "the same element, not a new one");
+}
+
 #[wasm_bindgen_test]
 fn clocks_and_tracing_read_the_browser_clock() {
     // std's clock panics in a browser; zgx's reads `performance.now()`.
