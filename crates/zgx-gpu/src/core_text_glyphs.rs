@@ -108,6 +108,9 @@ unsafe extern "C" {
     fn CGContextScaleCTM(context: CFTypeRef, sx: f64, sy: f64);
     fn CGContextSetRGBFillColor(context: CFTypeRef, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetShouldAntialias(context: CFTypeRef, on: bool);
+    fn CGContextSetTextDrawingMode(context: CFTypeRef, mode: i32);
+    fn CGContextSetLineWidth(context: CFTypeRef, width: f64);
+    fn CGContextSetRGBStrokeColor(context: CFTypeRef, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetShouldSmoothFonts(context: CFTypeRef, on: bool);
     fn CGContextSetAllowsFontSubpixelPositioning(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSubpixelPositionFonts(context: CFTypeRef, on: bool);
@@ -395,6 +398,27 @@ pub(crate) fn font_smoothing() -> bool {
     SMOOTHING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The fake-bold stroke Chrome's font synthesis adds to the system font, in
+/// points: at 501 to 538 at any size, and at 501 to 599 at exactly 14 px
+/// (measured in Anara's Electron app and Chrome 158, 11 to 30 px: 539 and up,
+/// and 13.9 or 14.1 px, draw on the weight axis alone). Its width is Skia's
+/// `size * lerp(size, 9..36, 1/24..1/32)`; `key`'s size is in points.
+fn synthetic_bold_width(fonts: &FontSystem, key: CacheKey) -> Option<f64> {
+    let weight = key.font_weight.0;
+    let size = f64::from(f32::from_bits(key.font_size_bits));
+    let stroked = (501..=538).contains(&weight)
+        || ((501..=599).contains(&weight) && (size - 14.).abs() < 0.05);
+    let system = stroked
+        && fonts
+            .db()
+            .face(key.font_id)
+            .is_some_and(|face| face.post_script_name.starts_with(".SFNS-"));
+    system.then(|| {
+        let t = ((size - 9.) / 27.).clamp(0., 1.);
+        size * (1. / 24. + (1. / 32. - 1. / 24.) * t)
+    })
+}
+
 /// Whether Core Text draws glyphs of `face` through Chrome's recipe: any
 /// face but a colour one (emoji draw their own colours through swash).
 /// `key`'s glyph as Chrome draws it on macOS: Skia draws it through Core
@@ -477,6 +501,12 @@ pub(crate) fn chrome_glyph(
                 y: (dy - f64::from(bottom)) / k,
             };
             CGContextScaleCTM(context.0, k, k);
+            if let Some(width) = synthetic_bold_width(fonts, key) {
+                CGContextSetRGBStrokeColor(context.0, 0., 0., 0., 1.);
+                CGContextSetLineWidth(context.0, width);
+                // `kCGTextFillStroke`
+                CGContextSetTextDrawingMode(context.0, 2);
+            }
             CTFontDrawGlyphs(font, &glyph, &at, 1, context.0);
         }
         let alpha: Vec<u8> = data
