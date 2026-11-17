@@ -109,6 +109,7 @@ const WINDOW_OPTIONS: &[&str] = &[
     "frame_autosave",
     "under_pointer",
     "tabbing",
+    "full_screen",
 ];
 
 /// Every rule's name and a one-line summary.

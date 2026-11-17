@@ -1,5 +1,5 @@
 //! Windows scripts declare: `ui.window { id, title, width, height, open,
-//! frame_autosave, tabbing, under_pointer, node }`. A settings window, an inspector: each is open
+//! frame_autosave, tabbing, under_pointer, full_screen, node }`. A settings window, an inspector: each is open
 //! while its `open` state is true, and closing it sets the state false.
 //! `ui.windows(list, build, { key, on_close })` is a window an item of a
 //! list: opened as the item appears, closed as it goes.
@@ -51,6 +51,10 @@ pub struct WindowExtras {
     /// Shown while true (none: shown): made hidden while false, laid out
     /// and drawn, and shown whole as it turns true.
     pub visible: Option<Signal<Value>>,
+    /// In full screen while true (none: as the person puts it): the host
+    /// puts it there and takes it out as it changes, and sets it as the
+    /// person leaves or enters full screen themselves.
+    pub full_screen: Option<Signal<Value>>,
     /// Its own state, which the host keeps as the system says and its
     /// content reads (`win.active`, `win.shown`, `win.size`); none for a
     /// window whose content never asked.
@@ -343,10 +347,12 @@ fn extras_moved(old: &HashMap<String, Content>, new: &HashMap<String, Content>) 
         };
         let (a, b) = (&was.extras, &content.extras);
         a.under_pointer != b.under_pointer
-            || match (&a.visible, &b.visible) {
-                (Some(a), Some(b)) => !a.ptr_eq(b),
-                (a, b) => a.is_some() != b.is_some(),
-            }
+            || [(&a.visible, &b.visible), (&a.full_screen, &b.full_screen)]
+                .into_iter()
+                .any(|pair| match pair {
+                    (Some(a), Some(b)) => !a.ptr_eq(b),
+                    (a, b) => a.is_some() != b.is_some(),
+                })
     })
 }
 /// An item's window id: `key(item)`, else its `id` field.
@@ -417,16 +423,18 @@ fn window_of(
         Some(at) => Some((at.get::<f64>(1)?, at.get::<f64>(2)?)),
         None => None,
     };
-    let visible = match table.get::<mlua::Value>("visible")? {
-        mlua::Value::Nil => None,
-        mlua::Value::Boolean(visible) => Some(signals.signal(Value::Bool(visible))),
-        state => Some(crate::node::state_of(&state).ok_or_else(|| {
-            mlua::Error::runtime(format!(
-                "{} must be a boolean or a ui.state",
-                what("visible")
-            ))
-        })?),
+    // A boolean, or a state the host follows.
+    let flag = |key: &str| -> mlua::Result<Option<Signal<Value>>> {
+        Ok(match table.get::<mlua::Value>(key)? {
+            mlua::Value::Nil => None,
+            mlua::Value::Boolean(on) => Some(signals.signal(Value::Bool(on))),
+            state => Some(crate::node::state_of(&state).ok_or_else(|| {
+                mlua::Error::runtime(format!("{} must be a boolean or a ui.state", what(key)))
+            })?),
+        })
     };
+    let visible = flag("visible")?;
+    let full_screen = flag("full_screen")?;
     // Each a width and a height, given together.
     let size = |w: &str, h: &str| -> mlua::Result<Option<(f64, f64)>> {
         match (table.get::<Option<f64>>(w)?, table.get::<Option<f64>>(h)?) {
@@ -466,6 +474,7 @@ fn window_of(
     let extras = WindowExtras {
         under_pointer,
         visible,
+        full_screen,
         state,
     };
     let known: &[&str] = if declared {
@@ -479,6 +488,7 @@ fn window_of(
             "tabbing",
             "under_pointer",
             "visible",
+            "full_screen",
             "min_width",
             "min_height",
             "max_width",
@@ -493,6 +503,7 @@ fn window_of(
             "tabbing",
             "under_pointer",
             "visible",
+            "full_screen",
             "min_width",
             "min_height",
             "max_width",

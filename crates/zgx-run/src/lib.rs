@@ -665,11 +665,16 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                         .visible
                         .as_ref()
                         .is_none_or(|visible| visible.with_untracked(Value::truthy)),
+                    fullscreen: extras
+                        .full_screen
+                        .as_ref()
+                        .is_some_and(|full| full.with_untracked(Value::truthy)),
                     ..Default::default()
                 };
                 let (view_host, state, id) = (host.clone(), window.open.clone(), window.id.clone());
                 let own = extras.state.clone();
                 let visible = extras.visible.clone();
+                let full_screen = extras.full_screen.clone();
                 // Devtools reach it too, while it is open (`zgx inspect`'s
                 // `window`).
                 let devtools = inspect_asked().then(|| window.title.clone());
@@ -707,6 +712,33 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                             window.set_visible(visible.get().truthy());
                         });
                         wcx.on_closed(move || drop(keep));
+                    }
+                    // In full screen as its `full_screen` state says (it
+                    // opened so), and the state set as the person leaves or
+                    // enters it themselves (Esc on macOS, the green button).
+                    if let Some(wanted) = full_screen {
+                        let (window, is) = (wcx.window.clone(), wcx.window_info.fullscreen.clone());
+                        let mut first = true;
+                        let follow = wcx.ui.runtime.effect({
+                            let (wanted, is) = (wanted.clone(), is.clone());
+                            move || {
+                                let on = wanted.get().truthy();
+                                if !std::mem::take(&mut first) && is.with_untracked(|is| *is != on)
+                                {
+                                    window.set_fullscreen(on);
+                                }
+                            }
+                        });
+                        let mut first = true;
+                        let told = wcx.ui.runtime.effect(move || {
+                            let on = is.get();
+                            if !std::mem::take(&mut first)
+                                && wanted.with_untracked(|was| was.truthy() != on)
+                            {
+                                wanted.set(Value::Bool(on));
+                            }
+                        });
+                        wcx.on_closed(move || drop((follow, told)));
                     }
                     let closing = id.clone();
                     wcx.on_closed(move || {
