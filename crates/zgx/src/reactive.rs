@@ -431,10 +431,14 @@ impl Runtime {
         signal
     }
     /// Runs immediately. Keep the returned handle alive to keep the subscription.
+    /// Traced, it is named by the line that made it until a maker names it
+    /// better (`@12 binding`, a script's line).
+    #[cfg_attr(feature = "trace", track_caller)]
     pub fn effect(&self, callback: impl FnMut() + 'static) -> Effect {
         self.effect_marked(false, callback)
     }
     /// [`Runtime::effect`], `mount_pure` if it reads no layout.
+    #[cfg_attr(feature = "trace", track_caller)]
     pub(crate) fn effect_marked(
         &self,
         mount_pure: bool,
@@ -449,6 +453,7 @@ impl Runtime {
     pub(crate) fn rest(&self) {
         self.inner.effects.borrow_mut().rest();
     }
+    #[cfg_attr(feature = "trace", track_caller)]
     pub(crate) fn effect_callback(&self, mount_pure: bool, callback: Callback) -> Effect {
         let born = self.inner.next.get();
         self.inner.next.set(born + 1);
@@ -464,6 +469,10 @@ impl Runtime {
                 owns: false,
             },
         );
+        #[cfg(feature = "trace")]
+        if crate::trace::enabled() {
+            crate::trace::made_effect(id, std::panic::Location::caller());
+        }
         self.inner.queue(id);
         let effect = Effect {
             id,
@@ -476,6 +485,7 @@ impl Runtime {
     /// even inside a batch or a flush, where `effect` queues it behind what
     /// is running: a value derived by it is readable at once (a computed
     /// made while a component builds, which `on_mount` then reads).
+    #[cfg_attr(feature = "trace", track_caller)]
     pub fn effect_now(&self, callback: impl FnMut() + 'static) -> Effect {
         if self.inner.batch_depth.get() == 0 && !self.inner.flushing.get() {
             return self.effect(callback);
@@ -495,6 +505,10 @@ impl Runtime {
                 owns: false,
             },
         );
+        #[cfg(feature = "trace")]
+        if crate::trace::enabled() {
+            crate::trace::made_effect(id, std::panic::Location::caller());
+        }
         // Made before it runs: a first run that panics drops it, so
         // nothing is left subscribed with no handle to dispose of it.
         let effect = Effect {
