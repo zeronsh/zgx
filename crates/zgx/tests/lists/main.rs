@@ -32,6 +32,8 @@ mod navigation_swipes;
 mod overlay_scrollbars;
 #[path = "../scroll_latching.rs"]
 mod scroll_latching;
+#[path = "../scroll_moves_merged.rs"]
+mod scroll_moves_merged;
 #[path = "../scroll_paging.rs"]
 mod scroll_paging;
 #[path = "../scrollbar_style.rs"]
