@@ -244,13 +244,16 @@ pub(crate) struct Deadline {
 /// past it. Starts that shift another budget (a nested call, work off the
 /// clock) read the clock afresh: an early start there would give the outer
 /// call back more than it spent, every time.
+#[cfg(any(unix, windows))]
 const CPU_READING_AGE: Duration = Duration::from_millis(1);
+#[cfg(any(unix, windows))]
 thread_local! {
     /// The thread's last CPU-time reading, and the last instant it is fresh.
     /// An unrepresentable expiry is beyond every representable instant.
     static CPU_READING: Cell<Option<(Option<Instant>, Duration)>> = const { Cell::new(None) };
 }
 /// The thread's CPU time, or a reading of it at most `CPU_READING_AGE` old.
+#[cfg(any(unix, windows))]
 fn recent_thread_cpu(now: Instant) -> Duration {
     CPU_READING.with(|reading| match reading.get() {
         Some((until, cpu)) if until.is_none_or(|until| now <= until) => cpu,
@@ -267,7 +270,11 @@ impl Deadline {
         let wall = Instant::now();
         Self {
             wall,
+            #[cfg(any(unix, windows))]
             cpu: recent_thread_cpu(wall),
+            // Wall time stands in for the CPU's (`thread_cpu`): read once.
+            #[cfg(not(any(unix, windows)))]
+            cpu: thread_cpu_at(wall),
             budget,
         }
     }
@@ -298,12 +305,15 @@ impl Deadline {
         thread_cpu().saturating_sub(self.cpu)
     }
     pub(crate) fn exceeded(&self) -> bool {
-        past_budget(
-            self.wall.elapsed(),
-            thread_cpu().saturating_sub(self.cpu),
-            self.budget,
-            CPU_GRAIN,
-        )
+        #[cfg(any(unix, windows))]
+        let (wall, cpu) = (self.wall.elapsed(), thread_cpu().saturating_sub(self.cpu));
+        // Wall time stands in for the CPU's (`thread_cpu`): read once.
+        #[cfg(not(any(unix, windows)))]
+        let (wall, cpu) = {
+            let now = Instant::now();
+            (now - self.wall, thread_cpu_at(now).saturating_sub(self.cpu))
+        };
+        past_budget(wall, cpu, self.budget, CPU_GRAIN)
     }
 }
 /// How coarse the thread's CPU clock is (`thread_cpu`): exact on Unix; a
@@ -408,8 +418,13 @@ fn thread_cpu() -> Duration {
 /// Without a thread CPU clock, wall time stands in.
 #[cfg(not(any(unix, windows)))]
 fn thread_cpu() -> Duration {
+    thread_cpu_at(Instant::now())
+}
+/// [`thread_cpu`] as of `now`, a reading of the wall clock already made.
+#[cfg(not(any(unix, windows)))]
+fn thread_cpu_at(now: Instant) -> Duration {
     thread_local! { static START: Instant = Instant::now(); }
-    START.with(|s| s.elapsed())
+    START.with(|start| now.saturating_duration_since(*start))
 }
 
 /// What a script reads of time and chance, on a virtual clock: Luau's own
