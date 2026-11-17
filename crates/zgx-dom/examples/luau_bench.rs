@@ -111,12 +111,16 @@ return ui.column {
 			end
 		end),
 	},
-	ui.each(rows, row, {
-		id = "rows",
-		key = function(item: Row)
-			return item.id
-		end,
-	}),
+	-- In a column of its own, as the other pages' rows are: an `each` in the
+	-- root's would lay its rows out by the root's gap and stretch.
+	ui.column {
+		ui.each(rows, row, {
+			id = "rows",
+			key = function(item: Row)
+				return item.id
+			end,
+		}),
+	},
 }
 "##;
 
