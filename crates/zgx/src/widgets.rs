@@ -650,6 +650,10 @@ struct CodeHint {
     top_line_listened: Cell<bool>,
     top_line_drawn: Cell<Option<usize>>,
     top_line_told: Cell<Option<usize>>,
+    /// Its spans' edges the caret tells apart (`EditorHandle::
+    /// set_caret_edges`), made when the app first sets them; most text
+    /// areas never do.
+    edge: std::cell::OnceCell<Box<crate::editor_edge::EdgeHint>>,
 }
 /// What a text area's atoms need (`CodeHint::atoms`).
 #[derive(Default)]
@@ -794,6 +798,10 @@ impl EditorHint {
     }
     fn code_made(&self) -> &CodeHint {
         self.code.get_or_init(Default::default)
+    }
+    /// Its edges' state, if the app ever set them.
+    fn edge(&self) -> Option<&crate::editor_edge::EdgeHint> {
+        self.code()?.edge.get().map(|edge| &**edge)
     }
     /// Its long text's line cache, made the first time it is needed.
     fn line_cache(&self) -> Rc<crate::editor_lines::LineCache> {
@@ -1008,7 +1016,52 @@ pub struct Caret {
     /// Where the caret is.
     pub focus: usize,
 }
+/// Which side of a span's edge the caret is at (`EditorHandle::
+/// set_caret_edges`): one offset, inside the span or outside it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaretSide {
+    /// Outside the span: what is typed is not of it.
+    #[default]
+    Outside,
+    /// Just inside it.
+    Inside,
+}
 impl EditorHandle {
+    /// The spans whose edges the caret tells apart (a note's inline code):
+    /// `edges(offset)` gives the span the offset is in or at an end of. At
+    /// such an edge the caret is inside the span or outside it
+    /// (`caret_side`); the first ← or → there moves to the other side
+    /// without moving over a character, and the caret shows a hair inside
+    /// or outside the edge. An arrow reaching an edge from within the span
+    /// is inside; an edit, a press or `set_selection` puts it outside.
+    /// `None`: no such spans.
+    #[doc(hidden)]
+    pub fn set_caret_edges(
+        &self,
+        edges: Option<Rc<dyn Fn(usize) -> Option<std::ops::Range<usize>>>>,
+    ) {
+        let edge = self.hint.code_made().edge.get_or_init(Default::default);
+        *edge.edges.borrow_mut() = edges;
+        edge.side.set(CaretSide::Outside);
+        self.refresh();
+    }
+    /// Which side of an edge the caret is at (`Outside` away from any).
+    #[doc(hidden)]
+    pub fn caret_side(&self) -> CaretSide {
+        self.hint
+            .edge()
+            .map_or(CaretSide::Outside, |edge| edge.side.get())
+    }
+    /// Put the caret on `side` of the edge it is at (after `set_selection`,
+    /// which puts it outside).
+    #[doc(hidden)]
+    pub fn set_caret_side(&self, side: CaretSide) {
+        if let Some(edge) = self.hint.edge() {
+            edge.side.set(side);
+            self.refresh();
+        }
+    }
     /// Exact natural metrics at a finite, positive content width. A reactive
     /// reader follows content, IME and typography changes after layout settles.
     /// Passwords and unmounted editors return `None`.
@@ -1226,6 +1279,9 @@ impl EditorHandle {
     /// `set_selection`, the caret scrolled into view (`reveal`) or left
     /// where it is (`Ui::restore_focus`).
     fn select(&self, anchor: usize, focus: usize, reveal: bool) {
+        if let Some(edge) = self.hint.edge() {
+            edge.side.set(CaretSide::Outside);
+        }
         let focus = {
             let mut editor = self.editor.borrow_mut();
             editor.set_selection(anchor, focus);
@@ -6720,7 +6776,14 @@ impl Ui {
                     }
                 };
             let caret_rect = layout.caret_position(caret_position);
-            let cx = caret_rect.x;
+            // A hair inside or outside a span's edge (`set_caret_edges`).
+            let cx = caret_rect.x
+                + match draw_hint.edge() {
+                    Some(edge) if selection.range().is_empty() && e.preedit().is_none() => {
+                        edge.nudge(display_cursor)
+                    }
+                    _ => 0.,
+                };
             let cy = caret_rect.y;
             let line_height = caret_rect.height;
             let mut scroll = scroll_for_draw.borrow_mut();
@@ -8043,6 +8106,9 @@ impl Ui {
             ) || (gesture.mode.get().is_some() && matches!(event, InputEvent::PointerMove { .. }))
             {
                 preferred_x.set(None);
+                if let Some(edge) = hint.edge() {
+                    edge.side.set(CaretSide::Outside);
+                }
             }
             let mut changed = false;
             match event {
@@ -8555,7 +8621,23 @@ impl Ui {
                                 affinity: TextAffinity::After,
                             });
                         }
+                        // At an inline span's edge (`set_caret_edges`), the
+                        // first arrow crosses it without moving.
+                        let from = e.selection().focus;
+                        let edge = hint.edge();
+                        let mut crossed = false;
                         match key {
+                            Key::ArrowLeft | Key::ArrowRight
+                                if !word
+                                    && !modifiers.shift
+                                    && !modifiers.meta
+                                    && e.selection().range().is_empty()
+                                    && edge.is_some_and(|edge| {
+                                        edge.step(from, key == Key::ArrowRight)
+                                    }) =>
+                            {
+                                crossed = true;
+                            }
                             Key::ArrowLeft if cfg!(target_os = "macos") && modifiers.meta => {
                                 e.move_home(modifiers.shift)
                             }
@@ -8795,6 +8877,14 @@ impl Ui {
                             // on (a dialog around the field closes).
                             Key::Escape if e.preedit().is_some() => e.cancel_preedit(),
                             _ => return,
+                        }
+                        if !crossed && let Some(edge) = edge {
+                            match key {
+                                Key::ArrowLeft | Key::ArrowRight => {
+                                    edge.moved(from, e.selection().focus)
+                                }
+                                _ => edge.side.set(CaretSide::Outside),
+                            }
                         }
                     }
                     cx.prevent_default();
