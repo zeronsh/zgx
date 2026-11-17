@@ -670,6 +670,9 @@ struct CodeHint {
     /// set_caret_edges`), made when the app first sets them; most text
     /// areas never do.
     edge: std::cell::OnceCell<Box<crate::editor_edge::EdgeHint>>,
+    /// Its gap cursor (`EditorHandle::set_gaps`), made when the app first
+    /// sets or listens to one; most text areas never do.
+    gap: std::cell::OnceCell<Box<crate::editor_gap::GapHint>>,
 }
 /// What a text area's atoms need (`CodeHint::atoms`).
 #[derive(Default)]
@@ -818,6 +821,13 @@ impl EditorHint {
     /// Its edges' state, if the app ever set them.
     fn edge(&self) -> Option<&crate::editor_edge::EdgeHint> {
         self.code()?.edge.get().map(|edge| &**edge)
+    }
+    /// Its gap cursor's state, if the app ever set one.
+    fn gap(&self) -> Option<&crate::editor_gap::GapHint> {
+        self.code()?.gap.get().map(|gap| &**gap)
+    }
+    fn gap_made(&self) -> &crate::editor_gap::GapHint {
+        self.code_made().gap.get_or_init(Default::default)
     }
     /// Its long text's line cache, made the first time it is needed.
     fn line_cache(&self) -> Rc<crate::editor_lines::LineCache> {
@@ -1047,6 +1057,24 @@ pub enum CaretSide {
     /// Just inside it.
     Inside,
 }
+/// What was typed with the caret at a gap (`EditorHandle::on_gap_input`):
+/// nothing of it went into the text, for the app to add a paragraph there.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GapInput {
+    /// Text typed (or committed by an input method).
+    Text(String),
+    /// Return.
+    Enter,
+    /// Backspace (`backward`) or forward Delete.
+    Delete {
+        /// Backspace.
+        backward: bool,
+    },
+    /// Text pasted.
+    Paste(String),
+}
 impl EditorHandle {
     /// The spans whose edges the caret tells apart (a note's inline code):
     /// `edges(offset)` gives the span the offset is in or at an end of. At
@@ -1078,6 +1106,50 @@ impl EditorHandle {
             edge.side.set(side);
             self.refresh();
         }
+    }
+    /// Where the caret may sit between lines rather than in one (a gap
+    /// cursor): `gaps(n)` says whether before line `n` (`n` the line count:
+    /// after the last) is such a place, where no text is to put a caret in
+    /// (between two tables, an image and a rule, before a table at the
+    /// start). The arrows go into such a boundary from the line beside it,
+    /// as does a press on it; there the caret shows as a short bar along it,
+    /// and what is typed goes to `on_gap_input`, not into the text. `None`:
+    /// none (the caret leaves the one it is in).
+    #[doc(hidden)]
+    pub fn set_gaps(&self, gaps: Option<Rc<dyn Fn(usize) -> bool>>) {
+        let gap = self.hint.gap_made();
+        let none = gaps.is_none();
+        *gap.gaps.borrow_mut() = gaps;
+        if none {
+            gap.go(None);
+        }
+        self.refresh();
+    }
+    /// Put the caret at the gap before line `at` (`None`: back in the text,
+    /// where its selection is), whether or not `set_gaps` allows it there.
+    #[doc(hidden)]
+    pub fn set_gap(&self, at: Option<usize>) {
+        self.hint.gap_made().go(at);
+        self.refresh();
+    }
+    /// The gap the caret is at, if it is at one.
+    #[doc(hidden)]
+    pub fn gap(&self) -> Option<usize> {
+        self.hint.gap().and_then(|gap| gap.at.get())
+    }
+    /// Call `told` when the caret goes into a gap (`Some(line)`: before
+    /// that line) or out of one (`None`), by the arrows, a press or the app.
+    #[doc(hidden)]
+    pub fn on_gap(&self, told: impl FnMut(Option<usize>) + 'static) {
+        *self.hint.gap_made().on_gap.borrow_mut() = Some(Box::new(told));
+    }
+    /// Call `told` with what is typed while the caret is at a gap (the gap's
+    /// line, and what), which doesn't go into the text: the app adds a
+    /// paragraph there and puts the caret in it (`set_gap(None)`,
+    /// `set_selection`).
+    #[doc(hidden)]
+    pub fn on_gap_input(&self, told: impl FnMut(usize, GapInput) + 'static) {
+        *self.hint.gap_made().on_input.borrow_mut() = Some(Box::new(told));
     }
     /// Exact natural metrics at a finite, positive content width. A reactive
     /// reader follows content, IME and typography changes after layout settles.
@@ -1298,6 +1370,9 @@ impl EditorHandle {
     fn select(&self, anchor: usize, focus: usize, reveal: bool) {
         if let Some(edge) = self.hint.edge() {
             edge.side.set(CaretSide::Outside);
+        }
+        if let Some(gap) = self.hint.gap() {
+            gap.go(None);
         }
         let focus = {
             let mut editor = self.editor.borrow_mut();
@@ -1903,6 +1978,12 @@ impl EditorHandle {
         if self.is_read_only() {
             return;
         }
+        if let Some(gap) = self.hint.gap()
+            && let Some(at) = gap.at.get()
+        {
+            gap.input(at, GapInput::Paste(normalize_text(text, self.multiline)));
+            return;
+        }
         self.preferred_x.set(None);
         // A step of its own, even of one character: not the typing's.
         self.editor
@@ -2142,6 +2223,184 @@ fn long_layout(
         scene.text_shaper_revision(),
         || (scene.line_shaper(size, font), scene.rich_line_shaper()),
     )
+}
+/// Where the boundary before line `n` of `text` lies in `layout`: the top
+/// of that line, or the bottom of the last for `n` past it.
+fn gap_boundary_y(layout: &dyn TextLayout, text: &str, n: usize) -> f32 {
+    match crate::editor_gap::line_start(text, n) {
+        Some(start) => {
+            layout
+                .caret_position(TextPosition {
+                    byte_offset: start,
+                    affinity: TextAffinity::After,
+                })
+                .y
+        }
+        None => {
+            let end = layout.caret_position(TextPosition {
+                byte_offset: text.len(),
+                affinity: TextAffinity::Before,
+            });
+            end.y + end.height
+        }
+    }
+}
+/// What a text area's gap cursor does with `event` (`EditorHandle::set_gaps`):
+/// the caret at a gap takes the arrows out of it and what is typed (to the
+/// app); the arrows or a press beside a boundary the app allows take it in.
+/// True if the event was its. `layout` lays the text out; `point` turns a
+/// press's point into the text's.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn gap_event(
+    gap: &crate::editor_gap::GapHint,
+    event: &InputEvent,
+    editor: &RefCell<TextEditor>,
+    position: &Cell<TextPosition>,
+    layout: &dyn Fn(&TextEditor) -> Rc<dyn TextLayout>,
+    point: &dyn Fn(f32, f32) -> (f32, f32),
+    single_press: bool,
+) -> bool {
+    use crate::editor_gap::{line_end, line_of, line_start};
+    let at = gap.at.get();
+    match event {
+        InputEvent::KeyDown { key, modifiers, .. } => {
+            let arrow = matches!(
+                key,
+                Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown
+            );
+            let back = matches!(key, Key::ArrowLeft | Key::ArrowUp);
+            if let Some(n) = at {
+                match key {
+                    // Out, to the text beside it; at the text's very start or
+                    // end it stays.
+                    _ if arrow => {
+                        let to = {
+                            let e = editor.borrow();
+                            let text = e.text();
+                            match back {
+                                true => n.checked_sub(1).and_then(|m| line_end(&text, m)),
+                                false => line_start(&text, n),
+                            }
+                        };
+                        if let Some(to) = to {
+                            let focus = {
+                                let mut e = editor.borrow_mut();
+                                e.set_selection(to, to);
+                                e.selection().focus
+                            };
+                            position.set(TextPosition {
+                                byte_offset: focus,
+                                affinity: TextAffinity::After,
+                            });
+                            gap.go(None);
+                        }
+                    }
+                    Key::Enter => gap.input(n, GapInput::Enter),
+                    Key::Backspace => gap.input(n, GapInput::Delete { backward: true }),
+                    Key::Delete => gap.input(n, GapInput::Delete { backward: false }),
+                    // Moving by more leaves the gap, from the caret it had.
+                    Key::Home | Key::End | Key::PageUp | Key::PageDown => {
+                        gap.go(None);
+                        return false;
+                    }
+                    _ => return false,
+                }
+                return true;
+            }
+            if !arrow || modifiers.shift || modifiers.meta || modifiers.control || modifiers.alt {
+                return false;
+            }
+            // In, from the edge of the line beside the boundary.
+            let target = {
+                let e = editor.borrow();
+                let selection = e.selection();
+                if !selection.range().is_empty() {
+                    return false;
+                }
+                let (text, focus) = (e.text(), selection.focus);
+                let line = line_of(&text, focus);
+                let (Some(start), Some(end)) = (line_start(&text, line), line_end(&text, line))
+                else {
+                    return false;
+                };
+                match key {
+                    Key::ArrowLeft => (focus == start).then_some(line),
+                    Key::ArrowRight => (focus == end).then_some(line + 1),
+                    _ => {
+                        // Up from its first row, down from its last.
+                        let layout = layout(&e);
+                        let shown = position.get();
+                        let current = match shown.byte_offset == focus {
+                            true => shown,
+                            false => TextPosition {
+                                byte_offset: focus,
+                                affinity: TextAffinity::After,
+                            },
+                        };
+                        let edge = TextPosition {
+                            byte_offset: if back { start } else { end },
+                            affinity: if back {
+                                TextAffinity::After
+                            } else {
+                                TextAffinity::Before
+                            },
+                        };
+                        let row = |p| layout.caret_position(p).y;
+                        ((row(current) - row(edge)).abs() < 0.5).then_some(if back {
+                            line
+                        } else {
+                            line + 1
+                        })
+                    }
+                }
+            };
+            match target {
+                Some(n) if gap.allows(n) => {
+                    gap.go(Some(n));
+                    true
+                }
+                _ => false,
+            }
+        }
+        InputEvent::Text(text) | InputEvent::ImeCommit(text) => match at {
+            Some(n) => {
+                gap.input(n, GapInput::Text(text.clone()));
+                true
+            }
+            None => false,
+        },
+        InputEvent::PointerDown {
+            x,
+            y,
+            button: PointerButton::Primary,
+        } => {
+            // A press on a boundary the app allows (a line's top or bottom,
+            // within a few points): the caret goes into its gap.
+            let pressed = single_press.then(|| {
+                let (x, y) = point(*x, *y);
+                let e = editor.borrow();
+                let layout = layout(&e);
+                let text = e.text();
+                let line = line_of(&text, layout.hit_position(x, y).byte_offset);
+                [line, line + 1].into_iter().find(|&n| {
+                    (y - gap_boundary_y(&*layout, &text, n)).abs() <= crate::editor_gap::PRESS_SLOP
+                })
+            });
+            match pressed.flatten() {
+                Some(n) if gap.allows(n) => {
+                    gap.go(Some(n));
+                    true
+                }
+                _ => {
+                    gap.go(None);
+                    false
+                }
+            }
+        }
+        _ => false,
+    }
 }
 /// `e`'s committed text laid out (`editor_layout`): a long one by its
 /// lines, from the chunks it shares, known by its revision (a pointer's
@@ -6793,15 +7052,25 @@ impl Ui {
                     }
                 };
             let caret_rect = layout.caret_position(caret_position);
-            // A hair inside or outside a span's edge (`set_caret_edges`).
-            let cx = caret_rect.x
-                + match draw_hint.edge() {
-                    Some(edge) if selection.range().is_empty() && e.preedit().is_none() => {
-                        edge.nudge(display_cursor)
-                    }
-                    _ => 0.,
-                };
-            let cy = caret_rect.y;
+            // At a gap (`EditorHandle::set_gaps`): a short bar along it;
+            // else a hair inside or outside a span's edge (`set_caret_edges`).
+            let gap_at = draw_hint.gap().and_then(|gap| gap.at.get());
+            let (cx, cy) = match gap_at {
+                Some(n) => (
+                    0.,
+                    gap_boundary_y(&*layout, &e.text(), n) - crate::editor_gap::BAR_HEIGHT / 2.,
+                ),
+                None => (
+                    caret_rect.x
+                        + match draw_hint.edge() {
+                            Some(edge) if selection.range().is_empty() && e.preedit().is_none() => {
+                                edge.nudge(display_cursor)
+                            }
+                            _ => 0.,
+                        },
+                    caret_rect.y,
+                ),
+            };
             let line_height = caret_rect.height;
             let mut scroll = scroll_for_draw.borrow_mut();
             let reveal = !draw_hint.hold.replace(false) && draw_gesture.mode.get().is_none();
@@ -6882,7 +7151,13 @@ impl Ui {
                 .get()
                 .1
                 .unwrap_or_else(|| draw_caret_width.get());
-            s.set_style(caret, fixed(caret_width, line_height));
+            match gap_at {
+                Some(_) => s.set_style(
+                    caret,
+                    fixed(crate::editor_gap::BAR_WIDTH, crate::editor_gap::BAR_HEIGHT),
+                ),
+                None => s.set_style(caret, fixed(caret_width, line_height)),
+            }
             // Aligned, the text's box is its layout's width, which the text
             // aligns in as the layout does; its placeholder, the field's.
             let aligned_placeholder = factor > 0. && shown.is_some();
@@ -8140,6 +8415,33 @@ impl Ui {
                 if mutation { cx.prevent_default(); return; }
             }
             let event = cx.event.clone();
+            // The caret at a gap, or going into one (`EditorHandle::set_gaps`):
+            // only a text area whose app set gaps asks.
+            if let Some(gap) = hint.gap() {
+                let layout = |e: &TextEditor| {
+                    let s = scene.borrow();
+                    let (_, size, font) = typography.borrow().clone();
+                    committed_layout(&input_storage, &s, root, e, size,
+                        wrap.get().then_some(s.bounds(viewport).width.max(1.)), &font,
+                    )
+                };
+                let point = |x: f32, y: f32| {
+                    let s = scene.borrow();
+                    let bounds = s.bounds(viewport);
+                    let scroll = *scroll.borrow();
+                    let (x, y) = in_viewport(&s, viewport, x, y);
+                    (x - bounds.x + scroll.0, y - bounds.y + scroll.1)
+                };
+                let single = cx.click_count() == 1 && !cx.pointer_modifiers().shift;
+                if gap_event(gap, &event, &editor, &position, &layout, &point, single) {
+                    if matches!(event, InputEvent::PointerDown { .. }) {
+                        cx.capture_pointer();
+                    }
+                    cx.prevent_default();
+                    draw();
+                    return;
+                }
+            }
             if matches!(
                 event,
                 InputEvent::PointerDown { .. }
