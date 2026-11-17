@@ -288,11 +288,23 @@ pub(crate) fn mount(ui: &mut Ui, source: NodeId, mut builder: PreviewBuilder) {
                     old.unmount();
                 }
                 if let Some(view) = (builder.build)(&event.payload) {
-                    let view = ui.mount(view);
+                    // In a box of its own, out of the window's flow: a
+                    // preview whose root lays out as its children
+                    // (`contents`, as a Luau component's does) has no box
+                    // to take `absolute`, and would take room from the page.
+                    let view = ui.mount(crate::compose::div().child(view));
                     let node = view.node();
                     let mut style = ui.scene.borrow().style(node);
                     style.absolute = true;
-                    ui.scene.borrow_mut().set_style(node, style);
+                    let mut scene = ui.scene.borrow_mut();
+                    scene.set_style(node, style);
+                    // The box moves with the pointer: on whole device pixels
+                    // if the preview asked for its own (`View::pixel_snap`).
+                    let inner = scene.children(node).first().copied();
+                    if inner.is_some_and(|inner| scene.snaps_to_pixels(inner)) {
+                        scene.set_pixel_snap(node, true);
+                    }
+                    drop(scene);
                     ui.input.set_drag_preview(Some(node));
                     // Where popups have windows of their own, so does the
                     // preview: the host moves its window with the pointer,

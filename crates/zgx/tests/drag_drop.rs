@@ -849,3 +849,45 @@ fn an_anchored_preview_hangs_below_the_pointer_centred() {
     up(&ui, 150., 100.);
     view.unmount();
 }
+
+/// A drag preview is out of the window's flow, whatever its root is: one
+/// whose root lays out as its children (`contents`, as a Luau component's
+/// does) takes no room from the page while the drag is held, and the page is
+/// where it was after the drop.
+#[test]
+fn a_drag_preview_takes_no_room_from_the_page() {
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        column()
+            .w_full()
+            .h_full()
+            .child(
+                div()
+                    .id("source")
+                    .size(100., 40.)
+                    .on_drag(|| Card(1))
+                    .drag_preview(|_: &Card| {
+                        div().contents().child(div().id("ghost").size(100., 28.))
+                    }),
+            )
+            .child(div().id("page").w_full().grow()),
+    );
+    ui.prepare_frame();
+    let page = view.find("page").unwrap();
+    let bounds = |ui: &Ui| ui.scene.borrow().layout_bounds(page);
+    let before = bounds(&ui);
+    assert_eq!(before.height, 260., "the page takes the rest");
+    down(&ui, 20., 20.);
+    moved(&ui, 40., 60.);
+    assert!(ui.input.is_dragging());
+    assert!(
+        ui.input.drag_state().unwrap().preview.is_some(),
+        "a preview shows"
+    );
+    assert_eq!(bounds(&ui), before, "held: the page as it was");
+    moved(&ui, 200., 200.);
+    assert_eq!(bounds(&ui), before, "moved: the page as it was");
+    up(&ui, 200., 200.);
+    assert!(!ui.input.is_dragging());
+    assert_eq!(bounds(&ui), before, "dropped: the page as it was");
+}

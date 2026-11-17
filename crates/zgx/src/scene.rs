@@ -15712,6 +15712,13 @@ impl Scene {
             cold.snapping.remove(&id);
         }
     }
+    /// Whether `id`'s translation stays on whole device pixels
+    /// (`set_pixel_snap`).
+    pub(crate) fn snaps_to_pixels(&self, id: NodeId) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| cold.snapping.get(&id) == Some(&true))
+    }
     /// Each snapping node's translation (`set_pixel_snap`) on whole device
     /// pixels, as its writers left it: once a frame, before layout. Nodes
     /// gone since are let go of.
