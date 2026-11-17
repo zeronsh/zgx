@@ -1016,6 +1016,10 @@ pub struct Caret {
     /// Where the caret is.
     pub focus: usize,
 }
+/// The span whose edges the caret tells apart at an offset
+/// (`EditorHandle::set_caret_edges`).
+#[doc(hidden)]
+pub type CaretEdges = Rc<dyn Fn(usize) -> Option<std::ops::Range<usize>>>;
 /// Which side of a span's edge the caret is at (`EditorHandle::
 /// set_caret_edges`): one offset, inside the span or outside it.
 #[doc(hidden)]
@@ -1037,10 +1041,7 @@ impl EditorHandle {
     /// is inside; an edit, a press or `set_selection` puts it outside.
     /// `None`: no such spans.
     #[doc(hidden)]
-    pub fn set_caret_edges(
-        &self,
-        edges: Option<Rc<dyn Fn(usize) -> Option<std::ops::Range<usize>>>>,
-    ) {
+    pub fn set_caret_edges(&self, edges: Option<CaretEdges>) {
         let edge = self.hint.code_made().edge.get_or_init(Default::default);
         *edge.edges.borrow_mut() = edges;
         edge.side.set(CaretSide::Outside);
