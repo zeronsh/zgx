@@ -165,3 +165,5 @@ mod wheel_across;
 mod wheel_phase;
 #[path = "../z_order.rs"]
 mod z_order;
+#[path = "../anchor_fill_text_area.rs"]
+mod anchor_fill_text_area;

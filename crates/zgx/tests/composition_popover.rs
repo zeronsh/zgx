@@ -407,3 +407,58 @@ fn an_anchor_fill_slot_shrinks_as_its_anchor_may() {
         "nested slots"
     );
 }
+
+/// A text area (a composer's field: `grow`, `min_w = 0`, a fixed control
+/// width of its own) in a 200 row between two 28 buttons, as itself or a
+/// popover's `anchor_fill` anchor: its bounds and the last button's.
+fn composer_text_area(in_popover: bool) -> (zgx::scene::Rect, zgx::scene::Rect) {
+    let mut ui = Ui::new(400., 200.);
+    let open = ui.signal(false);
+    let value = ui.signal(String::from("Also include Brazil"));
+    let field = text_area("Message", value)
+        .id("field")
+        .grow()
+        .min_w(0.)
+        .h(28.);
+    let middle = if in_popover {
+        popover("Mentions", open, field)
+            .anchor_fill()
+            .child(text("menu"))
+    } else {
+        field
+    };
+    let view = ui.mount(
+        column().w(200.).child(
+            row()
+                .w_full()
+                .gap(6.)
+                .child(button().size(28., 28.))
+                .child(middle)
+                .child(button().id("last").size(28., 28.)),
+        ),
+    );
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    (
+        scene.bounds(view.find("field").unwrap()),
+        scene.bounds(view.find("last").unwrap()),
+    )
+}
+
+/// A text area as a popover's `anchor_fill` anchor shrinks with its slot,
+/// as it does in the row itself, its fixed control width (240) no floor:
+/// a chat composer's field and the send button after it stay in the pane.
+#[test]
+fn an_anchor_fill_text_area_shrinks_as_in_its_row() {
+    let (plain, plain_last) = composer_text_area(false);
+    let (field, last) = composer_text_area(true);
+    assert!(
+        plain_last.x + plain_last.width <= 200.,
+        "the plain row fits"
+    );
+    assert_eq!(
+        (field.width, last.x),
+        (plain.width, plain_last.x),
+        "as the popover's anchor: as wide, the last button in its row"
+    );
+}
