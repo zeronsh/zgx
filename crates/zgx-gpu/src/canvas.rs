@@ -14,6 +14,9 @@ use zgx::{
 mod tiles;
 pub use tiles::TILE_SIZE;
 const BUDGET: usize = 32 * 1024 * 1024;
+/// How many of its window's frames a window's canvas rasters may take
+/// together, past `BUDGET` (`CanvasCache::set_window`).
+const WINDOW_FRAMES: usize = 4;
 const MAX_ENTRIES: usize = 1024;
 struct Entry {
     canvas: Weak<Canvas>,
@@ -841,8 +844,26 @@ pub struct CanvasCache {
     /// What uploading a tile's texture takes, in ms, and the frame whose
     /// uploads it last counted, with the ms they took (`tile_uploaded`).
     uploads: (f32, u64, f32, usize),
+    /// The bytes its rasters may take together (`set_window`); 0 is
+    /// `BUDGET`.
+    budget: usize,
 }
 impl CanvasCache {
+    /// Size its budget to a window of `width` by `height` device pixels:
+    /// `WINDOW_FRAMES` of its frames, and at least `BUDGET`, as isolated
+    /// layers are. A few window-sized canvases (a prototype's Screens, a
+    /// big or 2x window's board and its previews) then stay rasterized
+    /// together, rather than each frame evicting and rasterizing them again.
+    pub fn set_window(&mut self, width: u32, height: u32) {
+        let frames = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4 * WINDOW_FRAMES);
+        self.budget = frames.max(BUDGET);
+    }
+    /// The bytes its rasters may take together.
+    pub fn budget(&self) -> usize {
+        self.budget.max(BUDGET)
+    }
     /// Draw the text of canvases that draw it into their raster
     /// (`Canvas::raster_text`) in `fonts` (and the system's), as the window
     /// shapes its text.
@@ -1438,7 +1459,8 @@ impl CanvasCache {
             took = old.took;
         }
         let bytes = image.pixels().len();
-        while (self.bytes + bytes > BUDGET || self.entries.len() >= MAX_ENTRIES)
+        let budget = self.budget();
+        while (self.bytes + bytes > budget || self.entries.len() >= MAX_ENTRIES)
             && !self.entries.is_empty()
         {
             let victim = *self.entries.iter().min_by_key(|(_, e)| e.used).unwrap().0;
@@ -3017,6 +3039,40 @@ mod lifetime_tests {
         assert_eq!(cache.entries.len(), MAX_ENTRIES);
         assert_eq!(cache.bytes(), MAX_ENTRIES * 4);
         assert!(!cache.entries.contains_key(&first.unwrap()));
+    }
+    /// Three canvases of 2560x1400 device pixels (14 MB each) fit together
+    /// in a cache sized to a window that big, where 32 MiB alone evicts and
+    /// rasterizes them again each time round; a small window keeps 32 MiB.
+    #[test]
+    fn a_window_sized_budget_keeps_three_window_sized_canvases() {
+        let rounds = |window: Option<(u32, u32)>| {
+            let mut scene = Scene::new(100., 100.);
+            let canvas = Arc::new(Canvas::new());
+            let mut cache = CanvasCache::default();
+            if let Some((w, h)) = window {
+                cache.set_window(w, h);
+            }
+            let nodes: Vec<_> = (0..3)
+                .map(|_| {
+                    scene.append(
+                        scene.root(),
+                        NodeKind::Canvas(canvas.clone()),
+                        Default::default(),
+                    )
+                })
+                .collect();
+            for _ in 0..3 {
+                for node in &nodes {
+                    cache.get(*node, &canvas, 2560., 1400., 1.).unwrap();
+                }
+            }
+            (cache.rasterizations(), cache.budget())
+        };
+        assert_eq!(rounds(None), (9, BUDGET));
+        assert_eq!(rounds(Some((800, 600))), (9, BUDGET));
+        let (made, budget) = rounds(Some((2560, 1400)));
+        assert_eq!(made, 3, "each rasterized once");
+        assert_eq!(budget, 2560 * 1400 * 4 * WINDOW_FRAMES);
     }
 }
 
