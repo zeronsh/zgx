@@ -256,6 +256,10 @@ SCENES = [
     ('app-mail', 'zgx-script', 'list_state_bench', {'APP': 'mail', 'REPS': '2'}),
     # A list with an estimate (`ui.list { estimate = … }`): it runs per row.
     ('list-estimate', 'zgx-script', 'estimate_bench', {}),
+    # A library table scrolled 600 points at a time: the rows that come into
+    # view mount (Luau builders, each `ui.switch`/`ui.show`'s shown branch,
+    # styles, layout, text), as an app's library of papers does.
+    ('library-scroll', 'zgx-script', 'library_scroll_bench', {}),
     # New text mounting, cold: a word's first shape.
     ('mount-text', 'zgx-script', 'mount_text_bench', {}),
     # An app's cold start: a chat feed decoded from the script's source into
