@@ -296,3 +296,114 @@ fn virtual_row_disposal_removes_open_popover_scope_and_subscriptions() {
     assert_eq!(builds.get(), drops.get());
     assert!(ui.scene.borrow().children(ui.root()).is_empty());
 }
+
+/// A field that grows into its row and may shrink below its text (`grow`,
+/// `min_w = 0`), its text far wider than its room.
+fn shrinking_field(id: &str) -> View {
+    row()
+        .id(id)
+        .grow()
+        .min_w(0.)
+        .h(28.)
+        .child(text("Also include Brazil and every country around it").min_w(0.))
+}
+
+/// A row 200 wide: a 28 button, `field` (as itself, or a popover's
+/// `anchor_fill` anchor), another 28 button, 6 apart. The field's and the
+/// last button's bounds.
+fn composer_row(in_popover: bool, field: View) -> (zgx::scene::Rect, zgx::scene::Rect) {
+    let mut ui = Ui::new(400., 200.);
+    let open = ui.signal(false);
+    let middle = if in_popover {
+        popover("Mentions", open, field)
+            .anchor_fill()
+            .child(text("menu"))
+    } else {
+        field
+    };
+    let view = ui.mount(
+        column().w(200.).child(
+            row()
+                .w_full()
+                .gap(6.)
+                .child(button().size(28., 28.))
+                .child(middle)
+                .child(button().id("last").size(28., 28.)),
+        ),
+    );
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    (
+        scene.bounds(view.find("field").unwrap()),
+        scene.bounds(view.find("last").unwrap()),
+    )
+}
+
+/// A popover's `anchor_fill` slot takes its anchor's smallest width, as a
+/// CSS flex item takes `min-width: 0`: a field that may shrink below its
+/// text does so inside the popover as it does outside it, rather than
+/// stopping at its text's width and pushing what follows out of its row.
+#[test]
+fn an_anchor_fill_slot_shrinks_as_its_anchor_may() {
+    let (plain, plain_last) = composer_row(false, shrinking_field("field"));
+    assert!(
+        plain_last.x + plain_last.width <= 200.,
+        "the plain row fits its column: {plain:?} {plain_last:?}"
+    );
+    // `grow` and `min_w = 0` (a composer's field, a column header's row).
+    let (field, last) = composer_row(true, shrinking_field("field"));
+    assert_eq!(
+        (field.width, last.x),
+        (plain.width, plain_last.x),
+        "as the popover's anchor: as wide, the last button in its row"
+    );
+    // `w = "100%"` and `min_w = 0` (a form's picker).
+    let full = row()
+        .id("field")
+        .w_full()
+        .min_w(0.)
+        .h(28.)
+        .child(text("Also include Brazil and every country around it").min_w(0.));
+    let (field, last) = composer_row(true, full);
+    assert_eq!(
+        (field.width, last.x),
+        (plain.width, plain_last.x),
+        "a 100% anchor"
+    );
+    // One anchor_fill slot in another (a composer's frame around its field).
+    let mut ui = Ui::new(400., 200.);
+    let (outer, inner) = (ui.signal(false), ui.signal(false));
+    let view = ui.mount(
+        column().w(200.).child(
+            popover(
+                "Commands",
+                outer,
+                column().w_full().child(
+                    row()
+                        .w_full()
+                        .gap(6.)
+                        .child(button().size(28., 28.))
+                        .child(
+                            popover("Mentions", inner, shrinking_field("field"))
+                                .anchor_fill()
+                                .child(text("menu")),
+                        )
+                        .child(button().id("last").size(28., 28.)),
+                ),
+            )
+            .anchor_fill()
+            .child(text("commands")),
+        ),
+    );
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    let (field, last) = (
+        scene.bounds(view.find("field").unwrap()),
+        scene.bounds(view.find("last").unwrap()),
+    );
+    assert_eq!(
+        (field.width, last.x),
+        (plain.width, plain_last.x),
+        "nested slots"
+    );
+}
