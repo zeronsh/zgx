@@ -130,6 +130,10 @@ pub const RULES: &[(&str, &str)] = &[
         "state:get() in a positional ui.list's row is read once per index",
     ),
     (
+        "eager-branch",
+        "a ui.show or ui.switch branch in a row, built for every row whether it shows or not",
+    ),
+    (
         "state-in-builder",
         "ui.state in a component or row is shared by every instance",
     ),
@@ -845,6 +849,9 @@ struct Frame {
     key: Option<String>,
     /// For a function: its parameters.
     params: Vec<String>,
+    /// For a call's `(` or a table's `{`: the commas so far at its own
+    /// level (which argument or field is being read).
+    commas: usize,
 }
 
 /// Elements `size` does nothing on (`Kind::takes_size`): a box's width and
@@ -1480,13 +1487,25 @@ impl Linter<'_> {
                         .then(|| self.callee(at))
                         .flatten()
                         .filter(|_| !self.is(at.wrapping_sub(2), "function"));
+                    if let Some(callee) = &callee {
+                        self.eager_branch(at, callee, &stack);
+                    }
                     stack.push(Frame {
                         open,
                         at,
                         callee,
                         key: self.field(at),
                         params: Vec::new(),
+                        commas: 0,
                     });
+                }
+                "," => {
+                    if let Some(frame) = stack
+                        .last_mut()
+                        .filter(|f| matches!(f.open, Open::Paren | Open::Brace))
+                    {
+                        frame.commas += 1;
+                    }
                 }
                 ")" | "}" | "]" => {
                     let want = match token.text.as_str() {
@@ -1513,6 +1532,7 @@ impl Linter<'_> {
                         callee: None,
                         key: self.field(at),
                         params,
+                        commas: 0,
                     });
                 }
                 "do" | "repeat" if token.kind == Kind::Name => stack.push(Frame {
@@ -1521,6 +1541,7 @@ impl Linter<'_> {
                     callee: None,
                     key: None,
                     params: Vec::new(),
+                    commas: 0,
                 }),
                 "if" if token.kind == Kind::Name && !self.expression_if(at) => stack.push(Frame {
                     open: Open::Block,
@@ -1528,6 +1549,7 @@ impl Linter<'_> {
                     callee: None,
                     key: None,
                     params: Vec::new(),
+                    commas: 0,
                 }),
                 "end" | "until" if token.kind == Kind::Name => {
                     if let Some(index) = stack
@@ -1627,6 +1649,53 @@ impl Linter<'_> {
             && self.is(at + n + 2, "(")
             && self.is(at + n + 3, copy)
             && self.is(at + n + 4, ")")
+    }
+    /// A call building a `ui.show` branch or a `ui.switch` case straight in
+    /// a row's builder: built for every row, shown or not, where a function
+    /// is built only when it shows.
+    fn eager_branch(&mut self, at: usize, callee: &str, stack: &[Frame]) {
+        let Some(top) = stack.last() else {
+            return;
+        };
+        let branch = match (top.open, top.callee.as_deref()) {
+            // `ui.show(cond, then, otherwise)`: the second and third.
+            (Open::Paren, Some("ui.show")) => (1..=2).contains(&top.commas),
+            // `ui.switch(value, cases, default)`: the default.
+            (Open::Paren, Some("ui.switch")) => top.commas == 2,
+            // A case's value in the cases table.
+            (Open::Brace, None) => {
+                stack.len() >= 2 && {
+                    let parent = &stack[stack.len() - 2];
+                    parent.open == Open::Paren
+                        && parent.callee.as_deref() == Some("ui.switch")
+                        && parent.commas == 1
+                }
+            }
+            _ => false,
+        };
+        if !branch {
+            return;
+        }
+        let in_row = stack.iter().enumerate().rev().any(|(index, frame)| {
+            frame.open == Open::Function
+                && (frame.key.as_deref() == Some("row")
+                    || index
+                        .checked_sub(1)
+                        .is_some_and(|p| stack[p].callee.as_deref() == Some("ui.each")))
+        });
+        if !in_row {
+            return;
+        }
+        let what = top.callee.as_deref().unwrap_or("ui.switch");
+        self.report(
+            at.saturating_sub(1),
+            "eager-branch",
+            format!(
+                "`{callee}` is built for every row as a `{what}` branch, shown or not; give a \
+                 function that returns it (`function() return {callee}(…) end`, or the \
+                 builder itself), built only when the branch shows."
+            ),
+        );
     }
     fn token_rules(&mut self, at: usize, stack: &[Frame]) {
         if let Some(method) = self.cloned_for_one_change(at) {
@@ -3097,6 +3166,48 @@ return ui.column {
                 (9, "untracked-get".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn a_rows_branches_built_eagerly_are_reported() {
+        let source = r##"
+local rows = ui.state("rows", {})
+local function placeholder() return ui.text { "…" } end
+return ui.column {
+    ui.show(true, ui.text { "once" }, ui.text { "not a row" }),
+    ui.list { data = rows, key = "id", height = 20, row = function(r)
+        return ui.switch(r.kind, {
+            row = ui.text { r.title },
+            placeholder = placeholder(),
+            lazy = function() return ui.text { r.title } end,
+            builder = placeholder,
+        }, ui.text { "default" })
+    end },
+    ui.each(rows, function(r)
+        return ui.show(r.open, ui.text { r.title }, function() return ui.text { "closed" } end)
+    end),
+}
+"##;
+        assert_eq!(
+            rules(source),
+            [
+                (8, "eager-branch".to_string()),
+                (9, "eager-branch".to_string()),
+                (12, "eager-branch".to_string()),
+                (15, "eager-branch".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_read_once_in_a_function_branch_is_reported() {
+        let source = r##"
+local label = ui.state("label", "a")
+return ui.show(true, function()
+    return ui.text { "v" .. label:get() }
+end)
+"##;
+        assert_eq!(rules(source), [(4, "untracked-get".to_string())]);
     }
 
     #[test]

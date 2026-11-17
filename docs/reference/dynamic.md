@@ -16,7 +16,9 @@ ui.presence(value: string | Readable<unknown> | (() -> unknown), build: (value: 
 | `each` | `build(item, index)` for each item of a list state, or of a plain table that never changes, `index` from 1; a row whose item changes is built again, or, if `build` takes a third parameter, gets its item as state and updates in place; rows that come, go and move can animate |
 | `presence` | what `build(value)` makes of the current value; when it changes, the old content leaves (playing `exit`) while the new enters (`enter`). `nil` shows nothing |
 
-`show` and `switch` build the node they show when it appears, from the node you gave: the nodes are descriptions, so state they create inside a component is fresh each time. `each` rows and `presence` content are built by your function, which owns what it creates (`ui.computed`, `ui.effect`, `ui.use_state`): they end when the row or content goes.
+`show` and `switch` build the node they show when it appears, from the node you gave: the nodes are descriptions, so state they create inside a component is fresh each time.
+
+*Internal, subject to change:* a branch of `show` or `switch` (a case, the default, `node` or `otherwise`) may be a function returning its node, `ui.show(open, function() return Panel {} end)`. It is called only when the branch shows, each time it does, in a scope of its own (`ui.use_state` in it starts again), and, as every builder, once: what it shows follows state through its bindings. A branch given as a node is built by your script whether it shows or not, so a row of a long list with branches that rarely show (an editor while renaming, a retry button after a failure) pays for them on every row; given as functions, it pays for what shows (`zgx lint`'s `eager-branch`). `each` rows and `presence` content are built by your function, which owns what it creates (`ui.computed`, `ui.effect`, `ui.use_state`): they end when the row or content goes.
 
 ## Options
 
