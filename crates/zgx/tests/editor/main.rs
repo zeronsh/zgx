@@ -36,6 +36,8 @@ mod editor_code;
 mod editor_context_menu;
 #[path = "../editor_copy_hook.rs"]
 mod editor_copy_hook;
+#[path = "../editor_edge_caret.rs"]
+mod editor_edge_caret;
 #[path = "../editor_external_edits.rs"]
 mod editor_external_edits;
 #[path = "../editor_focus_snapshot.rs"]
