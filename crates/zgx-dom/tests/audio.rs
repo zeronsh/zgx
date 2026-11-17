@@ -188,12 +188,17 @@ async fn a_sound_plays_through_the_worklet_and_the_page_goes_quiet_after() {
     assert!(text(&app).contains("quiet"), "{}", text(&app));
 }
 
-/// The main thread held up while a sound plays, as by a long frame: with
-/// blocks mixed 120 ms ahead, 50 ms holds never run the worklet dry. 150 ms
-/// ones (past the lead) do, and fade rather than click; their count is
-/// printed, not held to a number.
+/// The main thread held up while a sound plays, as by long frames. The
+/// worklet runs dry only after an answer later than what it held when it
+/// asked lasted: the main thread's lateness, never the queue's. A browser
+/// promises nothing about how late a busy main thread answers (a loaded CI
+/// runner was more than 118 ms late around a 50 ms hold), so that, not a
+/// count of dry blocks, is what's held: dry blocks during the 50 ms holds
+/// only with a late answer among them, and none with every answer in time.
+/// Asks, waits, depths and counts are printed for the 50 ms and 150 ms
+/// holds alike.
 #[wasm_bindgen_test]
-async fn a_busy_main_thread_doesnt_run_the_worklet_dry() {
+async fn a_busy_main_thread_runs_the_worklet_dry_only_when_it_answers_late() {
     quiet().await;
     let samples: Vec<f32> = (0..96_000)
         .map(|i| (i as f32 * 0.06).sin() * 0.25)
@@ -238,7 +243,8 @@ async fn a_busy_main_thread_doesnt_run_the_worklet_dry() {
     for _ in 0..20 {
         tick().await;
     }
-    let before = state("underruns").as_f64().unwrap_or(0.);
+    let count = |key: &str| state(key).as_f64().unwrap_or(0.);
+    let (before, late_before) = (count("underruns"), count("late"));
     web_sys::console::log_1(
         &format!(
             "rate {:?}; depths before the holds {}",
@@ -253,22 +259,40 @@ async fn a_busy_main_thread_doesnt_run_the_worklet_dry() {
             tick().await;
         }
     }
-    web_sys::console::log_1(&format!("depths through the 50 ms holds {}", depths()).into());
-    let at_50 = state("underruns").as_f64().unwrap_or(0.) - before;
+    web_sys::console::log_1(
+        &format!(
+            "depths (held, least, wait) through the 50 ms holds {}",
+            depths()
+        )
+        .into(),
+    );
+    let at_50 = count("underruns") - before;
+    let late_50 = count("late") - late_before;
     for _ in 0..3 {
         busy(150.);
         for _ in 0..10 {
             tick().await;
         }
     }
-    let at_150 = state("underruns").as_f64().unwrap_or(0.) - before - at_50;
+    let at_150 = count("underruns") - before - at_50;
+    let late_150 = count("late") - late_before - late_50;
     web_sys::console::log_1(
-        &format!("underrun blocks: 6 holds of 50 ms {at_50}, 3 of 150 ms {at_150}").into(),
+        &format!(
+            "underrun blocks: 6 holds of 50 ms {at_50} ({late_50} late answers), \
+             3 of 150 ms {at_150} ({late_150} late answers)"
+        )
+        .into(),
     );
-    assert_eq!(
-        at_50,
-        0.,
-        "a 50 ms hold ran the worklet dry; depths (held, least) {}",
+    // Dry only after a late answer, and never with every answer in time.
+    assert!(
+        at_50 == 0. || late_50 > 0.,
+        "the worklet ran dry with every answer in time: {at_50} dry blocks; \
+         depths (held, least, wait) {}",
+        depths()
+    );
+    assert!(
+        at_150 == 0. || late_150 > 0.,
+        "the worklet ran dry with every answer in time (150 ms holds): {at_150}; {}",
         depths()
     );
 }

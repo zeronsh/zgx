@@ -11,7 +11,7 @@ let ctx = null;
 let node = null;
 let starting = null;
 let wanted = false;
-const state = { asked: 0, posted: 0, underruns: 0, depths: [] };
+const state = { asked: 0, posted: 0, underruns: 0, late: 0, depths: [] };
 
 export function zgx_audio_install(fillFn, rateFn, workletSource, workletUrl, aheadSeconds) {
   // One engine and one context for the page: installed once.
@@ -53,10 +53,11 @@ async function start() {
       const message = event.data;
       if (message.low) {
         state.asked += 1;
-        // What the worklet held as it asked, and the least since its last
-        // ask (frames): kept, the last 64, for a test to read. Bounded and
-        // cheap (two numbers an ask, about ten a second while sound plays).
-        state.depths.push([message.held, message.lowest]);
+        // What the worklet held as it asked, the least since its last ask,
+        // and how long its last answer took (frames): kept, the last 64,
+        // for a test to read. Bounded and cheap (three numbers an ask,
+        // about ten a second while sound plays).
+        state.depths.push([message.held, message.lowest, message.wait]);
         if (state.depths.length > 64) state.depths.shift();
         const answer = fill(message.low);
         if (!answer) return;
@@ -66,6 +67,7 @@ async function start() {
         node.port.postMessage({ block, going }, [block.buffer]);
       } else if (message.underruns !== undefined) {
         state.underruns = message.underruns;
+        state.late = message.late;
       } else if (message.drained) {
         drained();
       }
@@ -123,6 +125,7 @@ export function zgx_audio_state() {
     asked: state.asked,
     posted: state.posted,
     underruns: state.underruns,
+    late: state.late,
     sampleRate: ctx ? ctx.sampleRate : 0,
     depths: state.depths.slice(),
   };
