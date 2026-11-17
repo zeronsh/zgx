@@ -1128,3 +1128,83 @@ fn route_explained_routes_as_route_and_names_what_decided() {
         }
     );
 }
+
+/// One page registered at two live nodes (a pane mounted again while its
+/// old node lingers, the same page in a hidden pane): the node that shows
+/// takes it, whichever registered last, and alone is the split's native
+/// node, so a host mounts the page there and input there reaches it. A
+/// node no longer in the scene never takes it.
+#[test]
+fn a_page_registered_twice_is_shown_by_the_node_that_shows() {
+    use zgx::native_view::NativeContent;
+    let mut ui = Ui::new(800., 600.);
+    let natives = supported();
+    let web = WebView::new(&ui.runtime, WebViewOptions::default());
+    let first = ui.signal(true);
+    let shown = |on: bool, first: &zgx::reactive::Signal<bool>| {
+        let first = first.clone();
+        move || match first.get() == on {
+            true => Styles::new(),
+            false => Styles::new().hidden(),
+        }
+    };
+    let view = ui.mount(provide(
+        natives.clone(),
+        column()
+            .w(800.)
+            .h(600.)
+            .child(
+                web_view(&web)
+                    .id("a")
+                    .w(800.)
+                    .h(300.)
+                    .reactive_style(shown(true, &first)),
+            )
+            // Registered after "a", hidden while "a" shows.
+            .child(
+                web_view(&web)
+                    .id("b")
+                    .w(800.)
+                    .h(300.)
+                    .reactive_style(shown(false, &first)),
+            ),
+    ));
+    ui.prepare_frame();
+    let (a, b) = (view.find("a").unwrap(), view.find("b").unwrap());
+    let root = ui.scene.borrow().root();
+    // A registration at a node gone from the scene, made last of all.
+    let gone = ui.scene.borrow_mut().append(
+        root,
+        zgx::scene::NodeKind::Container(zgx::scene::Layout::Overlay),
+        Default::default(),
+    );
+    ui.scene.borrow_mut().remove(gone);
+    let _stale = natives.register(gone, NativeContent::Web(web.clone()));
+    assert_eq!(natives.nodes().len(), 3, "all three registrations live");
+    let check = |ui: &Ui, shows: zgx::scene::NodeId, hidden: zgx::scene::NodeId| {
+        let scene = ui.scene.borrow();
+        assert_eq!(natives.shown_nodes(&scene), vec![shows]);
+        let (split, _) =
+            PlaneSplit::compute(&scene, &natives.shown_nodes(&scene), &PlaneSplit::default());
+        assert!(split.is_native(shows) && !split.is_native(hidden) && !split.is_native(gone));
+        let bounds = scene.bounds(shows);
+        let (x, y) = (bounds.x + bounds.width / 2., bounds.y + bounds.height / 2.);
+        assert_eq!(
+            split.route(&scene, &ui.input, x, y),
+            PointerRoute::Native(shows)
+        );
+    };
+    check(&ui, a, b);
+    first.set(false);
+    ui.prepare_frame();
+    check(&ui, b, a);
+    // Two pages, each once: both shown.
+    let other = WebView::new(&ui.runtime, WebViewOptions::default());
+    let solo = ui.scene.borrow_mut().append(
+        root,
+        zgx::scene::NodeKind::Container(zgx::scene::Layout::Overlay),
+        Default::default(),
+    );
+    let _solo = natives.register(solo, NativeContent::Web(other));
+    assert_eq!(natives.shown_nodes(&ui.scene.borrow()), vec![b, solo]);
+}

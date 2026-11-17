@@ -674,7 +674,14 @@ impl Surfaces {
         // Pages zoom with the window, as a browser's do (placements come in
         // the zoomed window's points already).
         let zoom = self.pointer.router.zoom.get();
-        let views = natives.views();
+        // The split's native nodes alone: one node a page, the one that
+        // shows (`NativeViews::shown_nodes`); a page's other nodes get no clip
+        // to take its view into.
+        let views: Vec<_> = natives
+            .views()
+            .into_iter()
+            .filter(|(node, _)| split.is_native(*node))
+            .collect();
         // Unmounted: their cuts go (pages stay with their controllers).
         self.clips.retain(|(node, clip)| {
             let kept = views.iter().any(|(other, _)| other == node);
