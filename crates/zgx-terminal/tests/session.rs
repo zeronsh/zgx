@@ -151,6 +151,36 @@ fn input_reaches_the_program_and_it_echoes() {
     assert_eq!(run.exited(), 0);
 }
 
+/// A stream of small writes (macOS paces its reads) lands whole and in
+/// order.
+#[cfg(unix)]
+#[test]
+fn a_stream_of_small_writes_lands_whole() {
+    let mut run = Scripted::run("seq 1 50000", 10, 4);
+    assert_eq!(run.exited(), 0);
+    assert_eq!(rows(&run.session.term()), ["49998", "49999", "50000", ""]);
+}
+
+/// Typing reaches a program while its output streams in (between the
+/// paced reads, macOS).
+#[cfg(unix)]
+#[test]
+fn input_reaches_a_program_while_its_output_streams() {
+    let mut run = Scripted::run(
+        "seq 1 2000000 & read line; kill $!; wait; echo \"got $line\"",
+        20,
+        4,
+    );
+    run.until("the stream", |_, term| {
+        rows(term)
+            .iter()
+            .any(|row| row.parse::<u32>().is_ok_and(|n| n > 1000))
+    });
+    run.session.write(b"hi\r".as_slice());
+    run.until("the line read", |_, term| shows(term, "got hi"));
+    assert_eq!(run.exited(), 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn ctrl_c_interrupts_the_foreground_program() {
