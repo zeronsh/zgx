@@ -954,3 +954,91 @@ fn text_dragged_in_from_another_app_drops_with_its_html() {
     mounted.unmount();
     host.remove();
 }
+
+#[wasm_bindgen_test]
+fn nested_stamped_rows_reach_their_nodes_and_handlers() {
+    // Rows whose written nodes sit deep, after static siblings and inside
+    // static parents: the same DOM stamped as written in full, and each
+    // row's handlers, at two depths, act for that row.
+    let keys = || (0..40).collect::<Vec<u32>>();
+    let runtime = Runtime::new();
+    let pressed = runtime.signal(Vec::<(u32, u8)>::new());
+    let shape = {
+        let pressed = pressed.clone();
+        move |k: u32, _: &mut zgx::compose::Context| {
+            let (a, b) = (pressed.clone(), pressed.clone());
+            row()
+                .child(text("static"))
+                .child(column().child(text("inner static")).child(
+                    button().child(text(format!("deep {k}"))).on_click(move || {
+                        a.update(|p| p.push((k, 1)));
+                    }),
+                ))
+                .child(text(format!("after {k}")))
+                .child(button().child(text("x")).on_click(move || {
+                    b.update(|p| p.push((k, 2)));
+                }))
+        }
+    };
+    let (stamped, full) = (host(), host());
+    let a = zgx_dom::mount(&runtime, &stamped, keyed(keys, shape.clone()));
+    zgx_dom::__set_templates(false);
+    let b = zgx_dom::mount(&runtime, &full, keyed(keys, shape));
+    zgx_dom::__set_templates(true);
+    assert_eq!(stamped.inner_html(), full.inner_html());
+    let rows = first(&stamped).children();
+    for k in [3u32, 17, 39] {
+        let buttons = rows.item(k).unwrap().query_selector_all("button").unwrap();
+        assert_eq!(
+            buttons.item(0).unwrap().text_content().unwrap(),
+            format!("deep {k}")
+        );
+        for i in 0..2 {
+            buttons
+                .item(i)
+                .unwrap()
+                .dyn_into::<web_sys::HtmlElement>()
+                .unwrap()
+                .click();
+        }
+    }
+    assert_eq!(
+        pressed.get(),
+        [(3, 1), (3, 2), (17, 1), (17, 2), (39, 1), (39, 2)]
+    );
+    a.unmount();
+    b.unmount();
+    stamped.remove();
+    full.remove();
+}
+
+#[wasm_bindgen_test]
+fn rows_alternating_between_two_shapes_stamp_each_right() {
+    // Each row's shape differs from the last's: checked against it, it
+    // isn't that one, and is stamped from its own shape's template. Then
+    // rows of one shape run, and a row of the other between them.
+    let order = |k: u32| if k < 30 { k.is_multiple_of(2) } else { k != 45 };
+    let shape = move |k: u32, _: &mut zgx::compose::Context| {
+        if order(k) {
+            row().child(text(format!("a {k}"))).child(text("left"))
+        } else {
+            column()
+                .child(text("top"))
+                .child(text(format!("b {k}")))
+                .child(button().child(text("go")))
+        }
+    };
+    let keys = || (0..60).collect::<Vec<u32>>();
+    let runtime = Runtime::new();
+    let (stamped, full) = (host(), host());
+    let a = zgx_dom::mount(&runtime, &stamped, keyed(keys, shape));
+    zgx_dom::__set_templates(false);
+    let b = zgx_dom::mount(&runtime, &full, keyed(keys, shape));
+    zgx_dom::__set_templates(true);
+    assert_eq!(stamped.inner_html(), full.inner_html());
+    assert!(stamped.inner_html().contains("b 45"));
+    a.unmount();
+    b.unmount();
+    stamped.remove();
+    full.remove();
+}
