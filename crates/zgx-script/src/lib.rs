@@ -1852,6 +1852,8 @@ struct Inner {
     platform: io::SharedPlatform,
     /// The files the user picked in this host's dialogs.
     picked: io::Picked,
+    /// Where `d:save_temp` saves (`download_dir`).
+    downloads: Rc<io::Downloads>,
     /// What scripts may have of folders, and the ones kept past a run.
     folders: Rc<folder::Access>,
     /// `ui.args` and `ui.on_open` (`ScriptHost::args`, `open`).
@@ -2068,6 +2070,7 @@ impl ScriptHost {
             rewatch: RefCell::default(),
             platform: Rc::default(),
             picked: Rc::default(),
+            downloads: Rc::default(),
             folders: Rc::new(folder::Access::new(persist.clone())),
             opens: Rc::default(),
             show_errors: cfg!(debug_assertions),
@@ -2313,6 +2316,16 @@ impl ScriptHost {
                 Files::Disk => {}
             }
         })
+    }
+    /// The folder a page's downloads are saved into with no dialog
+    /// (Luau's `d:save_temp`), each under its suggested name made unique:
+    /// one of the app's own, temporary, which the app clears. Until it
+    /// names one, `d:save_temp` raises. Plugins need `Capability::Files`
+    /// for it, as for `d:save_to`.
+    #[doc(hidden)]
+    pub fn download_dir(self, dir: impl Into<PathBuf>) -> Self {
+        *self.0.downloads.dir.borrow_mut() = Some(dir.into());
+        self
     }
     /// Whether a script error shows over the interface, with where it
     /// happened (development), or not (what ships: the last good interface
@@ -4786,6 +4799,7 @@ impl ScriptHost {
             actions: self.0.actions.clone(),
             platform: self.0.platform.clone(),
             picked: self.0.picked.clone(),
+            downloads: self.0.downloads.clone(),
             functions: self.0.functions.clone(),
             persist: self.0.persist.clone(),
             warnings: self.0.warnings.clone(),
