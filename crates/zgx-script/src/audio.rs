@@ -77,6 +77,10 @@ pub(crate) struct AudioHost {
     /// Stops and removals a full queue refused (`Error::QueueFull`), sent
     /// again until it takes them: each answers whether it went.
     unsent: RefCell<Vec<Box<dyn FnMut() -> bool>>>,
+    /// Finished decodes held back from their plays while set
+    /// (`ScriptHost::hold_sound_loads`): a test placing a play's wait on its
+    /// own clock.
+    held_loads: Rc<HeldLoads>,
     /// Effects scripts put on buses, by their own count.
     #[cfg(feature = "audio-effects")]
     effects: RefCell<HashMap<u64, effects::LiveEffect>>,
@@ -116,6 +120,7 @@ impl AudioHost {
             slots: RefCell::default(),
             loader: RefCell::default(),
             unsent: RefCell::default(),
+            held_loads: Rc::default(),
             #[cfg(feature = "audio-effects")]
             effects: RefCell::default(),
             #[cfg(feature = "audio-effects")]
@@ -310,6 +315,10 @@ impl AudioHost {
             gone
         };
         drop(gone);
+    }
+
+    pub(crate) fn hold_loads(&self, held: bool) {
+        self.held_loads.set(held);
     }
 
     pub(crate) fn sounds_held(&self) -> usize {
@@ -901,6 +910,37 @@ fn fail(call: &str, error: zgx_audio::Error) -> mlua::Error {
     mlua::Error::runtime(format!("{call}: {error}"))
 }
 
+/// Whether finished decodes are held back from their plays, and the loads
+/// waiting to be let go.
+#[derive(Default)]
+struct HeldLoads {
+    held: Cell<bool>,
+    waiting: RefCell<Vec<std::task::Waker>>,
+}
+
+impl HeldLoads {
+    fn set(&self, held: bool) {
+        self.held.set(held);
+        if !held {
+            for waker in self.waiting.take() {
+                waker.wake();
+            }
+        }
+    }
+
+    /// Ready at once unless loads are held; then once they're let go.
+    fn released(&self) -> impl std::future::Future<Output = ()> + '_ {
+        poll_fn(move |cx| {
+            if self.held.get() {
+                self.waiting.borrow_mut().push(cx.waker().clone());
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(())
+            }
+        })
+    }
+}
+
 /// A sound a script loaded (`audio.sound`): decoded on a thread of its own,
 /// ready when it says so.
 pub(crate) struct SoundSlot {
@@ -944,12 +984,13 @@ impl SoundSlot {
                 return;
             }
         };
-        let slot = self.clone();
+        let (slot, held) = (self.clone(), host.held_loads.clone());
         host.spawn(async move {
             let loaded = match task.await {
                 Ok(loaded) => loaded,
                 Err(error) => Err(error.to_string()),
             };
+            held.released().await;
             slot.loaded(loaded);
         });
     }

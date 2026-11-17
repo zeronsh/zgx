@@ -383,20 +383,30 @@ fn a_play_before_its_sound_is_ready_plays_when_ready_within_250_ms() {
         ),
         &[("click", &click)],
     );
-    // In time: the play waits for the decode, then starts.
+    // In time: the play waits for the decode, then starts. The decode's
+    // answer is held until the test's own clock has moved 200 ms (within the
+    // 250 ms a play may wait), so how fast the decode thread ran on this
+    // machine doesn't count either way.
     let mut s = Sounding::new(&code);
+    let clock = zgx::clock::VirtualClock::new();
     assert_eq!(s.app.text("ready"), "0", "not loaded until played");
+    s.app.host.hold_sound_loads(true);
     s.app.click("play");
+    clock.advance(Duration::from_millis(200), || {});
+    s.app.host.hold_sound_loads(false);
     s.ready(1);
     assert_eq!(s.audio.voices_playing(), 1);
     assert!(s.render(0.05).iter().any(|&l| l > 0.4));
     drop(s);
+    drop(clock);
     // Late: the decode took longer than a click may wait.
     let mut s = Sounding::new(&code);
     let clock = zgx::clock::VirtualClock::new();
+    s.app.host.hold_sound_loads(true);
     s.app.click("play");
     assert_eq!(s.app.text("playing"), "true", "waiting");
     clock.advance(Duration::from_millis(300), || {});
+    s.app.host.hold_sound_loads(false);
     s.ready(1);
     assert_eq!(s.audio.voices_playing(), 0, "dropped");
     assert_eq!(s.app.text("playing"), "false");

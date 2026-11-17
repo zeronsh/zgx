@@ -3296,6 +3296,14 @@ impl ScriptHost {
     pub fn voices_ended(&self, ids: &[u64]) {
         self.0.audio.voices_ended(ids);
     }
+    /// Holds finished decodes back from the plays waiting on them, until
+    /// called again with `false`: for a test that places how long a play
+    /// waited on a clock of its own, whatever the decode took.
+    #[doc(hidden)]
+    #[cfg(feature = "audio")]
+    pub fn hold_sound_loads(&self, held: bool) {
+        self.0.audio.hold_loads(held);
+    }
     /// How many sounds the host keeps decoded for its app's scripts
     /// (`audio.sound`): what a test reads to see a sound let go.
     #[cfg(feature = "audio")]
