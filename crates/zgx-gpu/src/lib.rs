@@ -4909,7 +4909,6 @@ impl GpuContext {
     /// `Scene::fonts_replaced`.
     pub fn replace_font(&self, font: &crate::text::FontData) {
         font.replace_in(&mut self.inner.fonts.borrow_mut());
-        self.inner.canvas_fonts.add(font, true);
         self.inner.text_cache.borrow_mut().clear();
     }
     /// Shape text with `font` too, beside the faces its families have
@@ -4919,7 +4918,6 @@ impl GpuContext {
         let mut fonts = self.inner.fonts.borrow_mut();
         font.install(&mut fonts);
         fonts.shape_run_cache.clear();
-        self.inner.canvas_fonts.add(font, false);
         self.inner.text_cache.borrow_mut().clear();
     }
     /// Shape text as in `language` from now on (`None`: the system's), its
