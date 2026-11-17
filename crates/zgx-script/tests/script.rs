@@ -758,6 +758,35 @@ fn text_templates_in_a_module_name_its_own_state() {
 }
 
 #[test]
+fn a_nested_module_names_its_state_with_slashes_on_every_os() {
+    let dir = common::temp_dir("module-state-slashes");
+    std::fs::create_dir_all(dir.join("ui/screens")).unwrap();
+    let write = |path: &str, code: &str| std::fs::write(dir.join(path), code).unwrap();
+    // On Windows the chunk is `ui\screens\drafts.luau`: its state keys still read with `/`,
+    // as tests, `zgx inspect set` and saved state name them.
+    write(
+        "ui/screens/drafts.luau",
+        r##"local drafts = ui.state("drafts", 2)
+        return function() return ui.text { "{drafts}", id = "drafts" } end"##,
+    );
+    write("app.luau", r##"return require("./ui/screens/drafts")()"##);
+    let path = dir.join("app.luau");
+    let mut h = common::Harness::new(|runtime| zgx_script::ScriptHost::new(runtime, path));
+    assert_eq!(h.host.error().get(), None);
+    let names: Vec<String> = h.host.states().into_iter().map(|(name, _)| name).collect();
+    assert!(
+        names.iter().any(|n| n == "ui/screens/drafts.luau::drafts"),
+        "{names:?}"
+    );
+    h.host
+        .set_state("ui/screens/drafts.luau::drafts", zgx_script::Value::Num(5.))
+        .unwrap();
+    h.settle();
+    assert_eq!(h.text("drafts"), "5");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn editing_an_image_file_reloads_it() {
     let path = temp_script(
         "asset_reload",

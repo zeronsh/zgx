@@ -7769,7 +7769,17 @@ fn module_prefix(lua: &Lua, env: &Env) -> Option<String> {
         .flatten()?;
     let path = chunk.strip_prefix('@')?;
     let script = env.vm.upgrade().is_some_and(|vm| vm.name == path);
-    (!script).then(|| format!("{path}::"))
+    (!script).then(|| format!("{}::", state_path(path)))
+}
+
+/// A chunk's path as its state keys spell it: `/` between folders on every OS, so `screens/x.luau::name` names the
+/// same state on Windows, where the chunk carries the path's `\`.
+fn state_path(path: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) && path.contains('\\') {
+        path.replace('\\', "/").into()
+    } else {
+        path.into()
+    }
 }
 
 /// `f`'s value, kept current in Rust: `ui.computed`. It lives as long as
