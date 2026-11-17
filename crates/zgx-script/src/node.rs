@@ -1177,6 +1177,9 @@ pub(crate) struct InputRare {
     /// substitutions as it is typed (`View::autocorrect`, `smart_punctuation`).
     pub(crate) autocorrect: bool,
     pub(crate) smart_punctuation: bool,
+    /// `drop_caret = false` (internal): text dragged over a textarea leaves
+    /// its caret where it is (`View::drop_caret`).
+    pub(crate) no_drop_caret: bool,
 }
 
 #[derive(Clone)]
@@ -4093,6 +4096,7 @@ const LATE_FIELDS: &[&str] = &[
     "selection_radius",
     "autocorrect",
     "smart_punctuation",
+    "drop_caret",
     "container",
     "queries",
 ];
@@ -4101,7 +4105,7 @@ const LATE_FIELDS: &[&str] = &[
 /// it, so no style key compares against it: an input's caret (few set it,
 /// read only from those that do), whether plugins may target the node
 /// (`hook`, `private`), an input's `on_paste`, `active_descendant`, `read_only`,
-/// `autocorrect` and `smart_punctuation`, a
+/// `autocorrect`, `smart_punctuation` and `drop_caret`, a
 /// popover's `at_caret`; `inputmode` is read by `ui.input` itself, `on_end` and
 /// `end_distance` by `ui.list`. Any other key is unknown.
 #[cold]
@@ -4191,6 +4195,12 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
             if let Kind::Input { rare, .. } = &mut node.kind {
                 let read_only = source(lua, Ty::Bool, name, value)?;
                 rare.get_or_insert_default().read_only = Some(read_only);
+            }
+        }
+        "drop_caret" => {
+            if let Kind::Input { rare, .. } = &mut node.kind {
+                let shows: bool = lua.unpack(value)?;
+                rare.get_or_insert_default().no_drop_caret = !shows;
             }
         }
         "autocorrect" | "smart_punctuation" => {
