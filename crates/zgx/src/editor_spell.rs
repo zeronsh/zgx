@@ -13,49 +13,61 @@ pub(crate) fn mount(
     ui: &mut Ui,
     editor: EditorHandle,
     platform: Rc<PlatformService>,
-    mut on: Box<dyn FnMut() -> bool>,
+    on: Box<dyn FnMut() -> bool>,
 ) {
     // The text last checked, and its misspellings (`None` while off).
     let checked: Rc<RefCell<Option<Checked>>> = Rc::default();
+    let on = RefCell::new(on);
+    // Checks the text: only what an edit touched, or all of it when `all`
+    // (the checker now knows another word).
+    let check =
+        {
+            let (editor, checked) = (editor.clone(), checked.clone());
+            Rc::new(move |all: bool| {
+                if !(on.borrow_mut())() {
+                    // Off: no marks, and a fresh check when on again.
+                    if checked.borrow_mut().take().is_some() {
+                        editor.set_misspellings(Vec::new());
+                    }
+                    return;
+                }
+                let text = editor.text();
+                let mut checked = checked.borrow_mut();
+                if all {
+                    *checked = None;
+                }
+                let fresh = checked.is_none();
+                let (old, ranges) = checked.get_or_insert_with(Default::default);
+                if *old == text && !fresh {
+                    return;
+                }
+                let (start, end, shift) = changed_paragraphs(old, &text);
+                let old_end = (end as isize - shift) as usize;
+                let mut next: Vec<Range<usize>> =
+                    ranges.iter().filter(|r| r.end <= start).cloned().collect();
+                next.extend(
+                    platform
+                        .0
+                        .misspellings(&text[start..end])
+                        .into_iter()
+                        .filter(|r| r.start < r.end && r.end <= end - start)
+                        .map(|r| r.start + start..r.end + start),
+                );
+                next.extend(ranges.iter().filter(|r| r.start >= old_end).map(|r| {
+                    (r.start as isize + shift) as usize..(r.end as isize + shift) as usize
+                }));
+                *old = text;
+                *ranges = next.clone();
+                drop(checked);
+                editor.set_misspellings(next);
+            })
+        };
+    let all = check.clone();
+    editor.set_spell_recheck(Rc::new(move || all(true)));
     let value = editor.value().clone();
     ui.bind(editor.node, move || {
         value.track();
-        if !on() {
-            // Off: no marks, and a fresh check when on again.
-            if checked.borrow_mut().take().is_some() {
-                editor.set_misspellings(Vec::new());
-            }
-            return;
-        }
-        let text = editor.text();
-        let mut checked = checked.borrow_mut();
-        let fresh = checked.is_none();
-        let (old, ranges) = checked.get_or_insert_with(Default::default);
-        if *old == text && !fresh {
-            return;
-        }
-        let (start, end, shift) = changed_paragraphs(old, &text);
-        let old_end = (end as isize - shift) as usize;
-        let mut next: Vec<Range<usize>> =
-            ranges.iter().filter(|r| r.end <= start).cloned().collect();
-        next.extend(
-            platform
-                .0
-                .misspellings(&text[start..end])
-                .into_iter()
-                .filter(|r| r.start < r.end && r.end <= end - start)
-                .map(|r| r.start + start..r.end + start),
-        );
-        next.extend(
-            ranges
-                .iter()
-                .filter(|r| r.start >= old_end)
-                .map(|r| (r.start as isize + shift) as usize..(r.end as isize + shift) as usize),
-        );
-        *old = text;
-        *ranges = next.clone();
-        drop(checked);
-        editor.set_misspellings(next);
+        check(false);
     });
 }
 

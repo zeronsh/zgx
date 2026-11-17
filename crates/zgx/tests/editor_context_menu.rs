@@ -677,3 +677,50 @@ fn an_editor_hearing_pastes_keeps_paste_enabled_on_an_empty_clipboard() {
     assert_eq!(*heard.borrow(), [None, Some("typed".to_owned())]);
     assert_eq!(value.get(), "typed", "not taken, it goes in");
 }
+
+/// A host that learns a word itself (its own menu, through the platform) has the underline go by asking
+/// the editor to check again, as zgx's own menu's Learn Spelling does.
+#[test]
+fn recheck_spelling_forgets_what_the_checker_now_knows() {
+    let mut ui = Ui::new(400., 200.);
+    let speller = Rc::new(Speller::default());
+    let value = ui.signal("fix teh bug".to_owned());
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(speller.clone()),
+        column().size(400., 200.).child(
+            text_area("Notes", value.clone())
+                .id("field")
+                .spellcheck(true)
+                .w(300.)
+                .h(80.),
+        ),
+    ));
+    ui.prepare_frame();
+    assert_eq!(marks(&ui).len(), 1, "teh is marked");
+    let editor = ui.editor(view.find("field").unwrap()).unwrap();
+    // Nothing the checker said has changed: a recheck keeps the mark.
+    editor.recheck_spelling();
+    ui.prepare_frame();
+    assert_eq!(marks(&ui).len(), 1);
+    // The host learns the word through the platform; the mark stays until it is asked to look again.
+    zgx::platform::Platform::learn_spelling(&*speller, "teh");
+    ui.prepare_frame();
+    assert_eq!(marks(&ui).len(), 1, "the text did not change");
+    editor.recheck_spelling();
+    ui.prepare_frame();
+    assert!(marks(&ui).is_empty(), "the underline is gone");
+    // And an edit elsewhere does not bring it back from what was checked before.
+    editor.set_selection(11, 11);
+    editor.paste(" ok");
+    ui.prepare_frame();
+    assert!(marks(&ui).is_empty());
+    // Without spellcheck it is nothing.
+    let mut plain = Ui::new(100., 100.);
+    let unchecked = plain.signal(String::new());
+    let field = plain.mount(text_area("Notes", unchecked).id("plain"));
+    plain.prepare_frame();
+    plain
+        .editor(field.find("plain").unwrap())
+        .unwrap()
+        .recheck_spelling();
+}
