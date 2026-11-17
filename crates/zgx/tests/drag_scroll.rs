@@ -306,3 +306,80 @@ fn a_drag_near_a_horizontal_scroll_views_right_edge_scrolls_it_across() {
     tick(&ui).expect("still near it");
     assert!((offset.get() - 24.).abs() < 0.01, "{}", offset.get());
 }
+
+/// A window with a drag source of text at the top left and, under it (40 to
+/// 240 down), a text area 300 by 200 of `lines` lines that scrolls itself;
+/// a box round it counts the drags it hears over the text area.
+fn note(ui: &mut Ui, lines: usize, over: Rc<Cell<u32>>) -> zgx::compose::ViewHandle {
+    let text: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+    let value = ui.signal(text);
+    ui.mount(
+        column()
+            .child(
+                div()
+                    .size(80., 40.)
+                    .on_drag(|| zgx::input::DraggedText::new("dropped")),
+            )
+            .child(
+                div()
+                    .on_event(move |cx| {
+                        // Once a route: on its way in, not out again.
+                        if let InputEvent::Drag(drag) = &cx.event
+                            && drag.phase == DragPhase::Over
+                            && cx.phase == zgx::input::EventPhase::Capture
+                        {
+                            over.set(over.get() + 1);
+                        }
+                    })
+                    .child(
+                        text_area("note", value)
+                            .id("note")
+                            .size(300., 200.)
+                            .drop_caret(false),
+                    ),
+            ),
+    )
+}
+
+#[test]
+fn a_drag_near_a_text_areas_bottom_scrolls_its_text_and_is_over_it_again() {
+    let mut ui = Ui::new(400., 400.);
+    let over = Rc::new(Cell::new(0));
+    let view = note(&mut ui, 80, over.clone());
+    ui.prepare_frame();
+    let editor = ui.editor(view.find("note").unwrap()).unwrap();
+    assert_eq!(editor.scroll_offset(), (0., 0.));
+    start_drag(&ui);
+    // 10 in from its bottom edge.
+    moved(&ui, 150., 230.);
+    let heard = over.get();
+    tick(&ui).expect("near the edge");
+    tick(&ui).expect("still near it");
+    let (_, down) = editor.scroll_offset();
+    assert!((down - 24.).abs() < 0.01, "{down}");
+    assert_eq!(over.get(), heard + 2, "over it again after each step");
+    // Toward the top: back up.
+    moved(&ui, 150., 50.);
+    tick(&ui).expect("near the top");
+    assert!(editor.scroll_offset().1 < down);
+    press(&ui, 150., 50., false);
+    assert_eq!(ui.next_interaction_deadline(), None, "dropped: no more");
+}
+
+#[test]
+fn a_drag_near_a_text_areas_edge_schedules_nothing_when_its_text_fits() {
+    let mut ui = Ui::new(400., 400.);
+    let view = note(&mut ui, 2, Rc::new(Cell::new(0)));
+    ui.prepare_frame();
+    start_drag(&ui);
+    moved(&ui, 150., 230.);
+    // The text area takes the drag, so the spring-loading delay alone is due
+    // (it would spring open a destination the drag rests on).
+    assert!(ui.input.next_spring_deadline().is_some());
+    assert_eq!(
+        ui.next_interaction_deadline(),
+        ui.input.next_spring_deadline()
+    );
+    let editor = ui.editor(view.find("note").unwrap()).unwrap();
+    assert_eq!(editor.scroll_offset(), (0., 0.));
+}

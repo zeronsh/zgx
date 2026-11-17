@@ -54,6 +54,7 @@ fn speed(at: f32, start: f32, extent: f32) -> f32 {
 
 /// What a drag near a scroll view's edge scrolls.
 struct Plan {
+    /// What the scroll goes to: the scroll view, or a text area's root.
     viewport: NodeId,
     /// Points a frame, across and down.
     speed: (f32, f32),
@@ -62,50 +63,63 @@ struct Plan {
 }
 
 /// What the drag at `x`, `y` scrolls: the innermost scroll view around what
-/// is under it, past `preview`, whose edge it is near on an axis it can still
-/// move along.
+/// is under it, past `preview`, or text area that scrolls itself, whose edge
+/// it is near on an axis it can still move along.
 fn plan(ui: &Ui, x: f32, y: f32, preview: Option<NodeId>) -> Option<Plan> {
     let scene = ui.scene.borrow();
     let hit = scene.hit_test_all(x, y).into_iter().find(|hit| {
         preview
             .is_none_or(|preview| *hit != preview && !scene.ancestors(*hit).any(|id| id == preview))
     })?;
-    let contents = std::iter::once(hit)
-        .chain(scene.ancestors(hit))
-        .filter(|id| scene.is_scroll_content(*id));
-    for content in contents {
-        let Some(viewport) = scene.parent(content) else {
+    let room = |speed: f32, offset: f32, limit: f32| {
+        let room = if speed < 0. { offset } else { limit - offset };
+        if speed != 0. && room > 0.01 {
+            (speed, room)
+        } else {
+            (0., 0.)
+        }
+    };
+    for id in std::iter::once(hit).chain(scene.ancestors(hit)) {
+        // A scroll view's content, or a text area that scrolls itself.
+        let (viewport, target, offset, limit, across) = if scene.is_scroll_content(id) {
+            let Some(viewport) = scene.parent(id) else {
+                continue;
+            };
+            // How far its content sits before it, and how far it can.
+            let (frame, inner) = (
+                scene.transformed_bounds(viewport),
+                scene.transformed_bounds(id),
+            );
+            (
+                viewport,
+                viewport,
+                (frame.x - inner.x, frame.y - inner.y),
+                (inner.width - frame.width, inner.height - frame.height),
+                true,
+            )
+        } else if let Some(editor) = ui.editor_scroll(id) {
+            (
+                editor.viewport,
+                id,
+                editor.offset,
+                editor.limit,
+                editor.across,
+            )
+        } else {
             continue;
         };
         let Some(visible) = scene.visible_bounds(viewport) else {
             continue;
         };
-        // How far its content sits before it, and how far it can.
-        let (frame, inner) = (
-            scene.transformed_bounds(viewport),
-            scene.transformed_bounds(content),
-        );
-        let room = |speed: f32, offset: f32, limit: f32| {
-            let room = if speed < 0. { offset } else { limit - offset };
-            if speed != 0. && room > 0.01 {
-                (speed, room)
-            } else {
-                (0., 0.)
-            }
+        let (dx, across) = if across {
+            room(speed(x, visible.x, visible.width), offset.0, limit.0)
+        } else {
+            (0., 0.)
         };
-        let (dx, across) = room(
-            speed(x, visible.x, visible.width),
-            frame.x - inner.x,
-            inner.width - frame.width,
-        );
-        let (dy, down) = room(
-            speed(y, visible.y, visible.height),
-            frame.y - inner.y,
-            inner.height - frame.height,
-        );
+        let (dy, down) = room(speed(y, visible.y, visible.height), offset.1, limit.1);
         if dx != 0. || dy != 0. {
             return Some(Plan {
-                viewport,
+                viewport: target,
                 speed: (dx, dy),
                 room: (across, down),
             });
