@@ -3813,8 +3813,8 @@ impl Host {
         }
     }
     /// What a standard edit item does, as its shortcut does it: the
-    /// clipboard's commands as `clipboard_command`, Select All on the
-    /// focused editor, Undo and Redo as their keys to it; full screen
+    /// clipboard's commands as `clipboard_command`, Select All as
+    /// `Ui::select_all`, Undo and Redo as their keys to it; full screen
     /// toggles the window. Whether anything took it.
     fn standard_edit(&mut self, item: crate::app_menu::StandardItem) -> bool {
         use crate::app_menu::StandardItem;
@@ -3832,12 +3832,8 @@ impl Host {
             StandardItem::Copy => self.clipboard_command("c"),
             StandardItem::Cut => self.clipboard_command("x"),
             StandardItem::Paste => self.clipboard_command("v"),
-            StandardItem::SelectAll => self
-                .context
-                .ui
-                .focused_editor()
-                .map(|editor| editor.select_all())
-                .is_some(),
+            // The focused editor's text, else a selectable region's, as ⌘A.
+            StandardItem::SelectAll => self.context.ui.select_all(),
             StandardItem::Undo | StandardItem::Redo => {
                 self.context.ui.focused_editor().is_some()
                     && self

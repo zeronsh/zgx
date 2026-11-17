@@ -1778,6 +1778,31 @@ impl Ui {
             _ => false,
         }
     }
+    /// Select All, as the Edit menu's and ⌘A (Ctrl+A elsewhere) do it: all
+    /// of the focused editor's text, else all of the selectable region the
+    /// person last selected in or pressed (else the window's own, if it has
+    /// one). Whether anything took it.
+    #[doc(hidden)]
+    pub fn select_all(&self) -> bool {
+        if let Some(editor) = self.focused_editor() {
+            editor.select_all();
+            return true;
+        }
+        self.select_all_in_region()
+    }
+    /// [`Ui::select_all`] with no editor focused: the region's text.
+    fn select_all_in_region(&self) -> bool {
+        if self.selection_state().borrow().roots.is_empty() {
+            return false;
+        }
+        let root = {
+            let state = self.selection_state().borrow();
+            state.root.or(state.active_root)
+        };
+        let root = root.filter(|root| self.scene.borrow().contains(*root));
+        root.or_else(|| self.select_all_fallback())
+            .is_some_and(|root| self.select_all_text(root))
+    }
     /// Select all the text in the selectable region holding `node`.
     pub fn select_all_text(&self, node: NodeId) -> bool {
         let Some(root) = self.scene.borrow().selection_root(node) else {
@@ -2449,20 +2474,10 @@ impl Ui {
                 }
             }
             SelectionEvent::SelectAll => {
-                if result.default_prevented
-                    || self.selection_state().borrow().roots.is_empty()
-                    || self.focused_editor().is_some()
-                {
+                if result.default_prevented || self.focused_editor().is_some() {
                     return;
                 }
-                let root = {
-                    let state = self.selection_state().borrow();
-                    state.root.or(state.active_root)
-                };
-                let root = root.filter(|root| self.scene.borrow().contains(*root));
-                if let Some(root) = root.or_else(|| self.select_all_fallback())
-                    && self.select_all_text(root)
-                {
+                if self.select_all_in_region() {
                     result.default_prevented = true;
                 }
             }

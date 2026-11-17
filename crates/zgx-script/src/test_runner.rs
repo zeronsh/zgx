@@ -628,13 +628,27 @@ impl UserData for Mounted {
             app.settle();
             Ok(())
         });
+        // An app's own command, else the Edit menu's item of that name,
+        // as the desktop's menu does it (`Ui::edit_command`): whether
+        // anything took it.
         methods.add_method("command", |_, m, id: String| {
+            use zgx::widgets::EditCommand;
+            let desktop = m.desktop();
             let app = m.app()?;
-            if !app.host.run_command(&id) {
-                return Err(mlua::Error::runtime(format!("no command `{id}`")));
+            if app.host.run_command(&id) {
+                app.settle();
+                return Ok(true);
             }
+            let edit = match id.as_str() {
+                "copy" => EditCommand::Copy,
+                "cut" => EditCommand::Cut,
+                "paste" => EditCommand::Paste,
+                "select-all" => EditCommand::SelectAll,
+                _ => return Err(mlua::Error::runtime(format!("no command `{id}`"))),
+            };
+            let took = app.ui.edit_command(edit, desktop.as_ref());
             app.settle();
-            Ok(())
+            Ok(took)
         });
         methods.add_method("text", |_, m, target: String| {
             let mut app = m.app()?;
