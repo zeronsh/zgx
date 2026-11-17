@@ -499,7 +499,13 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     if json.loads(evaluated) != "probe page 3":
         raise AssertionError(f"evaluated {evaluated}")
     checks["script evaluated"] = evaluated
-    # The page's frame reaches the window a frame after it loads.
+    # The page's own first frame reaching the window (`WEB_DAMAGE`, its
+    # first upload), before its pixels are looked for: the window's first
+    # present (`Session.first_frame`) is zgx's own paint, and a loaded
+    # runner's WebKit may paint the page seconds after it loads (#2324's
+    # web-view-wayland-ime: FINISHED, and every sampled pixel the window's
+    # background for the ten seconds after).
+    session.wait(lambda: session.lines("WEB_DAMAGE "), "the page's frame never reached the window", 60)
     def shown():
         pixel = session.grab()
         found = {name: pixel(*at) for name, (at, _) in colours.items()}
@@ -1153,10 +1159,11 @@ def x11(args, output, private):
         extra += ["--media", serve_media(output)] if args.media else []
         if args.unaccelerated:
             extra.append("--unaccelerated")
-            env["ZGX_WEB_DAMAGE"] = "1"
         with (output / "application.log").open("w") as log, (output / "stderr.log").open("w") as errors:
-            # Its first present, logged (`Session.first_frame`).
-            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=dict(env, ZGX_SHADER_LOG="1"), stdout=log,
+            # Its first present, logged (`Session.first_frame`), and each of
+            # the page's frames it uploads (`WEB_DAMAGE`, `page_checks`).
+            app = subprocess.Popen([str(args.binary.resolve())] + extra,
+                                   env=dict(env, ZGX_SHADER_LOG="1", ZGX_WEB_DAMAGE="1"), stdout=log,
                                    stderr=errors)
         owned.append(app)
         deadline = time.monotonic() + 20
@@ -1280,9 +1287,10 @@ def wayland(args, output, private):
             extra = (["--transparent"] if args.transparent else []) + (["--large-page"] if args.inspector else [])
             if args.unaccelerated:
                 extra.append("--unaccelerated")
-                native["ZGX_WEB_DAMAGE"] = "1"
-            # Its first present, logged (`Session.first_frame`).
-            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=dict(native, ZGX_SHADER_LOG="1"), stdout=log,
+            # Its first present, logged (`Session.first_frame`), and each of
+            # the page's frames it uploads (`WEB_DAMAGE`, `page_checks`).
+            app = subprocess.Popen([str(args.binary.resolve())] + extra,
+                                   env=dict(native, ZGX_SHADER_LOG="1", ZGX_WEB_DAMAGE="1"), stdout=log,
                                    stderr=errors)
         owned.append(app)
         subprocess.run(["xdotool", "windowfocus", "--sync", window], env=env, check=False)
