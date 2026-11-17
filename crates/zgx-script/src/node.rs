@@ -4289,6 +4289,24 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 _ => {}
             }
         }
+        // A tree item's depth (few nodes have one, so here, off the common
+        // properties' path): a number as it is; a state or function is
+        // followed, and only it pays for following.
+        "level" => match value {
+            mlua::Value::Integer(_) | mlua::Value::Number(_) => {
+                let level: f64 = lua.unpack(value)?;
+                if !(1. ..=255.).contains(&level) || level.fract() != 0. {
+                    return Err(mlua::Error::runtime(format!(
+                        "`level` is a depth from 1 to 255, not {level}"
+                    )));
+                }
+                node.a11y.get_or_insert_default().level = Some(level as u8);
+            }
+            value => {
+                node.a11y.get_or_insert_default().level_of =
+                    Some(source(lua, Ty::Num, "level", value)?);
+            }
+        },
         "at_caret" => {
             if let Kind::Popover { at_caret, .. } = &mut node.kind {
                 *at_caret = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
@@ -5045,23 +5063,6 @@ fn fill_from(
                 a11y.role = Some(zgx::semantics::Role::Heading);
                 a11y.level = Some(level as u8);
             }
-            // A number is the depth as it is; a state or function is
-            // followed, and only it pays for following.
-            "level" => match value {
-                mlua::Value::Integer(_) | mlua::Value::Number(_) => {
-                    let level: f64 = lua.unpack(value)?;
-                    if !(1. ..=255.).contains(&level) || level.fract() != 0. {
-                        return Err(mlua::Error::runtime(format!(
-                            "`level` is a depth from 1 to 255, not {level}"
-                        )));
-                    }
-                    node.a11y.get_or_insert_default().level = Some(level as u8);
-                }
-                value => {
-                    node.a11y.get_or_insert_default().level_of =
-                        Some(source(lua, Ty::Num, "level", value)?);
-                }
-            },
             "selected" => {
                 node.a11y.get_or_insert_default().selected =
                     Some(source(lua, Ty::Bool, "selected", value)?);
