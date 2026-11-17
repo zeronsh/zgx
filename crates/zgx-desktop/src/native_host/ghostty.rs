@@ -452,9 +452,12 @@ extern "C" fn action(
             // alive for the call; copied before it returns.
             let bytes = unsafe { std::slice::from_raw_parts(open.url as *const u8, open.len) };
             let url = String::from_utf8_lossy(bytes).into_owned();
-            on_main(move || {
-                let _ = open::that_detached(url);
-            });
+            // Off-screen (`ZGX_OFFSCREEN`): no browser comes up.
+            if crate::window_chrome::may_show() {
+                on_main(move || {
+                    let _ = open::that_detached(url);
+                });
+            }
             true
         }
         g::GHOSTTY_ACTION_RENDER => {

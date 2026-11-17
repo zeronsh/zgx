@@ -44,6 +44,10 @@ pub async fn open_url(url: impl Into<String>) -> Result<(), OpenUrlError> {
     if !valid_url(&url) {
         return Err(OpenUrlError::InvalidUrl);
     }
+    // Off-screen (`ZGX_OFFSCREEN`): no browser comes up on anyone's screen.
+    if !crate::window_chrome::may_show() {
+        return Ok(());
+    }
     crate::file_dialog::background(move || open::that(url))
         .map_err(|_| OpenUrlError::WorkerUnavailable)?
         .await
