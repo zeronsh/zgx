@@ -513,7 +513,7 @@ type Decorations = Vec<(std::ops::Range<usize>, crate::scene::Color)>;
 /// Ranges of a text underlined (`View::underlines`).
 type Underlines = Vec<crate::widgets::EditorUnderline>;
 /// What gives a text area's atoms as the values it reads change.
-type AtomsFollow = Box<dyn FnMut(&crate::widgets::EditorHandle) -> Vec<crate::text_edit::Atom>>;
+type AtomsFollow = Box<dyn FnMut(&mut crate::text_edit::TextEditor) -> Vec<crate::text_edit::Atom>>;
 /// What a code editor adds to a text area: its lines' colours, ranges
 /// marked behind its text, its current line and what Tab inserts.
 #[derive(Default)]
@@ -2068,10 +2068,13 @@ impl View {
         (pointer, new)
     }
     /// A text area's atoms follow what `atoms` gives, as the reactive values
-    /// it reads change (a draft restored).
+    /// it reads change (a draft restored). It is given the text area's model
+    /// (its text, its atoms now, new atoms' ids), on every target alike. The
+    /// model is borrowed while it runs: it must not reach the text area's
+    /// handle (`EditorHandle`), whose calls borrow it again.
     pub fn atoms_when(
         mut self,
-        atoms: impl FnMut(&crate::widgets::EditorHandle) -> Vec<crate::text_edit::Atom> + 'static,
+        atoms: impl FnMut(&mut crate::text_edit::TextEditor) -> Vec<crate::text_edit::Atom> + 'static,
     ) -> Self {
         self.code_mut().atoms_when = Some(Box::new(atoms));
         self
@@ -7607,7 +7610,7 @@ fn open_element(
             if let Some(mut atoms) = atoms_when {
                 let editor = editor.clone();
                 ui.bind(root, move || {
-                    let next = atoms(&editor);
+                    let next = atoms(&mut editor.editor.borrow_mut());
                     editor.set_atoms(next)
                 });
             }
