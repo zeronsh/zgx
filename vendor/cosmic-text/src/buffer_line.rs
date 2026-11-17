@@ -23,6 +23,9 @@ pub struct BufferLine {
     /// zgx: whether a span is an inline box (`Attrs::inline_box`), as
     /// `set_inline_boxes` says: in its padding, so no line is bigger.
     boxes: bool,
+    /// zgx: whether a span has room before it only, an atom's leading icon
+    /// (a negative padding), as `set_leads` says: a line may break before it.
+    leads: bool,
     /// zgx: each of its lines takes CSS's line box, a span in it being a
     /// box (inline-flex) of its own (`set_css_line_box`).
     css: bool,
@@ -48,6 +51,7 @@ impl BufferLine {
             shaping,
             metadata: None,
             boxes: false,
+            leads: false,
             css: false,
         }
     }
@@ -71,6 +75,7 @@ impl BufferLine {
         self.shaping = shaping;
         self.metadata = None;
         self.boxes = false;
+        self.leads = false;
         self.css = false;
     }
 
@@ -96,6 +101,7 @@ impl BufferLine {
             self.ending = ending;
             self.attrs_list = attrs_list;
             self.boxes = false;
+        self.leads = false;
         self.css = false;
             self.reset();
             true
@@ -141,6 +147,7 @@ impl BufferLine {
         if attrs_list != self.attrs_list {
             self.attrs_list = attrs_list;
             self.boxes = false;
+        self.leads = false;
         self.css = false;
             self.reset_shaping();
             true
@@ -157,6 +164,21 @@ impl BufferLine {
         if holds != self.boxes {
             self.reset_shaping();
             self.boxes = holds;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// zgx: say whether a span has room before it only (`AttrsList::holds_leads`,
+    /// an atom's leading icon): only a line said to have one may break
+    /// before such a span, so no other reads its spans for them. Its text or
+    /// attributes set again say none. Resets its shape if it differs; returns
+    /// whether it did.
+    pub fn set_leads(&mut self, holds: bool) -> bool {
+        if holds != self.leads {
+            self.reset_shaping();
+            self.leads = holds;
             true
         } else {
             false
@@ -243,6 +265,10 @@ impl BufferLine {
             self.boxes = self.attrs_list.holds_inline_boxes();
             new.boxes = new.attrs_list.holds_inline_boxes();
         }
+        if self.leads {
+            self.leads = self.attrs_list.holds_leads();
+            new.leads = new.attrs_list.holds_leads();
+        }
         new.css = self.css;
         new
     }
@@ -274,6 +300,7 @@ impl BufferLine {
                 .unwrap_or_else(ShapeLine::empty);
             // zgx: whether its spans hold an inline box, for its words.
             font_system.shape_buffer.boxes = self.boxes;
+            font_system.shape_buffer.leads = self.leads;
             line.build(
                 font_system,
                 &self.text,
@@ -282,6 +309,7 @@ impl BufferLine {
                 tab_width,
             );
             font_system.shape_buffer.boxes = false;
+            font_system.shape_buffer.leads = false;
             // zgx: its lines' boxes, CSS's or not (laid out, not shaped).
             line.css = self.css;
             self.shape_opt.set_used(line);
@@ -380,6 +408,7 @@ impl BufferLine {
             shaping: Shaping::Advanced,
             metadata: None,
             boxes: false,
+            leads: false,
             css: false,
         }
     }
