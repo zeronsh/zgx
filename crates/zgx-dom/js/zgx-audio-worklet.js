@@ -17,6 +17,7 @@ class ZgxAudio extends AudioWorkletProcessor {
     this.step = 1 / (0.005 * sampleRate);
     this.underruns = 0;
     this.told = 0;
+    this.toldLate = 0;
     this.drained = false;
     // Whether a block has come since the last start: a queue empty before
     // the first is waiting to begin, not running dry.
@@ -24,9 +25,21 @@ class ZgxAudio extends AudioWorkletProcessor {
     // The least it has held since it last asked: how close it came to
     // running dry (reported with each ask).
     this.lowest = Infinity;
+    // When it last asked (in frames) and what it held then; how long the
+    // answer took; and how many answers came later than what it held then
+    // lasted (`late`). It runs dry only after a late answer: a main thread
+    // busy past the queue, not the queue itself.
+    this.askedAt = 0;
+    this.heldAtAsk = 0;
+    this.lastWait = 0;
+    this.late = 0;
     this.port.onmessage = (event) => {
       const message = event.data;
       if (message.block) {
+        if (this.asked) {
+          this.lastWait = currentFrame - this.askedAt;
+          if (this.lastWait > this.heldAtAsk) this.late += 1;
+        }
         this.queue.push(message.block);
         this.held += message.block.length / 2;
         this.primed = true;
@@ -44,10 +57,13 @@ class ZgxAudio extends AudioWorkletProcessor {
   ask() {
     if (this.going && !this.asked && this.held < this.mark) {
       this.asked = true;
+      this.askedAt = currentFrame;
+      this.heldAtAsk = this.held;
       this.port.postMessage({
         low: this.mark * 2 - this.held,
         held: this.held,
         lowest: this.lowest === Infinity ? this.held : this.lowest,
+        wait: this.lastWait,
       });
       this.lowest = Infinity;
     }
@@ -81,9 +97,10 @@ class ZgxAudio extends AudioWorkletProcessor {
     }
     if (this.going && this.primed) this.lowest = Math.min(this.lowest, this.held);
     if (dry) this.underruns += 1;
-    if (this.underruns !== this.told) {
+    if (this.underruns !== this.told || this.late !== this.toldLate) {
       this.told = this.underruns;
-      this.port.postMessage({ underruns: this.underruns });
+      this.toldLate = this.late;
+      this.port.postMessage({ underruns: this.underruns, late: this.late });
     }
     this.ask();
     // Stopped and played out: the main thread suspends the context.
