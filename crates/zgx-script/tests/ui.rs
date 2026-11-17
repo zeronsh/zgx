@@ -1636,6 +1636,43 @@ fn layers_stay_live_over_an_open_modal() {
     assert_eq!(h.host.error().get(), None);
 }
 
+/// A control in a layer built in this frame (a presence's new content)
+/// takes focus from its own `on_mount` with a modal open elsewhere, as it
+/// does once the layer is up: the change pill's first press. `el:focus()`
+/// says whether it took.
+#[test]
+fn a_layer_built_this_frame_takes_focus_under_a_modal() {
+    let mut h = Harness::inline(
+        r##"local keyed = ui.state("keyed", false)
+        local said = ui.state("said", "")
+        return ui.column { w_full = true, h_full = true,
+            ui.modal { open = ui.state("dialog", true), w = 300, h = 200,
+                ui.button { id = "inside", "inside" } },
+            ui.presence(function() return if keyed:get() then "keys" else "plain" end, function(key)
+                return ui.layer { placement = { x = "start", y = "start", inset = 8 },
+                    ui.div { w = 120, h = 40,
+                        if key == "keys" then ui.button { id = "first", w = 80, h = 30, "go",
+                            on_mount = function(el) said:set(tostring(el:focus())) end }
+                        else ui.text { "pill" } } }
+            end) }"##,
+    );
+    h.frames(3);
+    h.host
+        .set_state("keyed", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frames(3);
+    let first = h.find("first").expect("the layer's button");
+    let said = h
+        .host
+        .states()
+        .into_iter()
+        .find(|(name, _)| name == "said")
+        .map(|(_, value)| value.to_string());
+    assert_eq!(said.as_deref(), Some("true"), "el:focus() said it took");
+    assert_eq!(h.ui.input.focused(), Some(first), "the button took focus");
+    assert_eq!(h.host.error().get(), None);
+}
+
 #[test]
 fn auto_margins_keep_the_rows_gaps() {
     let mut h = Harness::inline(
