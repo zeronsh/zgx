@@ -2952,6 +2952,25 @@ impl ScriptHost {
             vm.lua.set_app_data(rules::Guarded(rules));
         }
     }
+    /// Asks `guard` of pages in place of [`guard`](Self::guard)'s
+    /// [`GuardKind::Web`]: each URL the app's scripts load (`:load`, `src`,
+    /// `html`'s base) and each navigation the platform starts, a main
+    /// frame's, an iframe's and a redirect's, told the id the page was made
+    /// under (`ui.web("tab")` gives `Some("tab")`; an anonymous `ui.web(opts)`
+    /// or `ui.webview` without `web`, `None`). An `Err` stops it, as
+    /// `guard`'s does. So one host lets its browser tabs reach what its
+    /// previews may not. Unset, `guard` decides as before. The last one set
+    /// applies, at once.
+    #[doc(hidden)]
+    pub fn web_guard(&self, guard: impl Fn(Option<&str>, &str) -> Result<(), String> + 'static) {
+        let rules = rules::start(&self.0);
+        rules.set_web_guard(Rc::new(guard));
+        if let Some(loaded) = &*self.0.current.borrow()
+            && let Some(vm) = loaded._vms.last()
+        {
+            vm.lua.set_app_data(rules::Guarded(rules));
+        }
+    }
     /// Saves what `ui.persist` keys the guard refused hold
     /// ([`GuardKind::Persist`]): the person kept what they previewed. How
     /// many changed what is kept. It saves as any change does, 250 ms after
