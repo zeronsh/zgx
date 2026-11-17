@@ -9,6 +9,8 @@ pub mod view;
 pub mod virtual_list;
 
 pub mod input;
+#[doc(hidden)]
+pub mod outside_drag;
 pub mod semantics;
 pub mod text;
 pub mod text_edit;

@@ -3,21 +3,21 @@
 //! the platform's drag reaches winit's windows
 //! (`winit::platform::text_drop`), and the window's destinations hear it as
 //! a drag from another of the app's windows carrying `DraggedText`
-//! (`InputDispatcher::drag_over`). What it carries is known only as it
+//! (`InputDispatcher::drag_over`, through `zgx::outside_drag`, which
+//! `zgx inspect text-drop` drives too). What it carries is known only as it
 //! drops (X11 hands it over then), so over a window it names no text.
 //! Wayland's drags reach the data worker instead (`wayland_data`), which
 //! asks the window's host the same (`over`, `out`, `dropped`). winit's hook
 //! is the vendored winit's (`zgx_winit_patched`): with crates.io's, only
 //! Wayland's drags drop.
-use std::cell::RefCell;
 #[cfg(zgx_winit_patched)]
 use std::{
+    cell::RefCell,
     collections::HashMap,
     sync::{Arc, Weak},
 };
 #[cfg(zgx_winit_patched)]
 use winit::window::{Window, WindowId};
-use zgx::{actions::Action, input::DraggedText};
 
 #[cfg(zgx_winit_patched)]
 struct Target {
@@ -27,12 +27,10 @@ struct Target {
     wake: Box<dyn Fn()>,
 }
 
+#[cfg(zgx_winit_patched)]
 thread_local! {
     /// The windows' interfaces, by their winit window.
-    #[cfg(zgx_winit_patched)]
     static WINDOWS: RefCell<HashMap<WindowId, Target>> = RefCell::default();
-    /// What a drag over a window carries while it is: text, not yet known.
-    static HOVER: RefCell<Option<Action>> = const { RefCell::new(None) };
 }
 
 /// `window` shows `ui`: text dragged in from other apps drops there. The
@@ -97,28 +95,17 @@ fn wake(window: WindowId) {
     });
 }
 
-fn hover() -> Action {
-    HOVER.with(|hover| {
-        hover
-            .borrow_mut()
-            .get_or_insert_with(|| Action::new(DraggedText::new(String::new())))
-            .clone()
-    })
-}
-
 /// A drag carrying text from another app is over `ui` at `(x, y)` (its
 /// points): whether it would drop there. A drag of the app's own the
 /// platform has (Windows asks its windows' drop targets of it too) is the
 /// host's to carry to its windows: none here.
 pub(crate) fn over(ui: &zgx::widgets::Ui, x: f32, y: f32) -> bool {
-    !crate::native_drag::handed_off() && ui.input.drag_over(&ui.scene, &hover(), x, y)
+    !crate::native_drag::handed_off() && zgx::outside_drag::text_over(ui, x, y)
 }
 
 /// The drag left `ui`, or was let go of where nothing took it.
 pub(crate) fn out(ui: &zgx::widgets::Ui) {
-    if HOVER.with(|hover| hover.borrow_mut().take()).is_some() {
-        ui.input.drag_out(&ui.scene);
-    }
+    zgx::outside_drag::text_out(ui);
 }
 
 /// The drag was let go of over `ui` at `(x, y)`, carrying `text` and, where
@@ -134,9 +121,7 @@ pub(crate) fn dropped(
     if crate::native_drag::handed_off() {
         return false;
     }
-    HOVER.with(|hover| hover.borrow_mut().take());
-    let text = Action::new(DraggedText::with_html(text, html.map(str::to_owned)));
-    ui.input.drag_drop(&ui.scene, &text, x, y)
+    zgx::outside_drag::text_dropped(ui, x, y, text, html)
 }
 
 #[cfg(zgx_winit_patched)]
@@ -171,7 +156,7 @@ impl winit::platform::text_drop::TextDrops for Windows {
 mod tests {
     use super::*;
     use winit::platform::text_drop::TextDrops;
-    use zgx::compose::prelude::*;
+    use zgx::{compose::prelude::*, input::DraggedText};
 
     #[test]
     fn text_dragged_in_drops_into_the_field_under_it() {
