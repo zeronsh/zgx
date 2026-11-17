@@ -4986,6 +4986,13 @@ fn mount_portal_panel(
     } else {
         Vec::new()
     };
+    // A layer's content is live under a modal from its first mount, not
+    // only once `activate` below makes it a layer: a control in it that
+    // takes focus as it mounts (a presence's new content focusing its
+    // button in `on_mount`) takes it.
+    if is_layer {
+        ui.input.set_layer(portal.overlay, true);
+    }
     let panel = mount_element(
         ui,
         portal.position,
