@@ -403,6 +403,10 @@ struct EditorHint {
     /// Text dragged over it leaves its caret and selection where they are
     /// (`View::drop_caret(false)`): the app shows where it would drop.
     no_drop_caret: Cell<bool>,
+    /// What it scrolls itself in, how far its text is scrolled and how far
+    /// it can be: a drag held near its edge scrolls it (`drag_scroll`), as a
+    /// scroll view's.
+    scrolled: Scrolled,
     /// A password field: its text shows masked and never leaves it.
     secure: Cell<bool>,
     /// What kind of text it takes (`View::input_mode`).
@@ -685,10 +689,26 @@ impl Drop for CodeHint {
         }
     }
 }
+/// An editor's viewport, how far its text is scrolled in it, across and
+/// down, and how far it can be.
+struct Scrolled {
+    viewport: NodeId,
+    offset: Rc<RefCell<(f32, f32)>>,
+    limit: Rc<Cell<(f32, f32)>>,
+}
+/// A text area that scrolls itself, as `drag_scroll` reads it.
+pub(crate) struct EditorScroll {
+    pub(crate) viewport: NodeId,
+    pub(crate) offset: (f32, f32),
+    pub(crate) limit: (f32, f32),
+    /// It scrolls across: it doesn't wrap.
+    pub(crate) across: bool,
+}
 impl EditorHint {
-    fn new(value: EditorValue, lines: bool) -> Self {
+    fn new(value: EditorValue, lines: bool, scrolled: Scrolled) -> Self {
         Self {
             value,
+            scrolled,
             placeholder: RefCell::default(),
             caret: Cell::default(),
             select_on_focus: Cell::default(),
@@ -1314,6 +1334,12 @@ impl EditorHandle {
     /// Whether user editing is blocked. Selection, copying and model writes remain available.
     pub fn is_read_only(&self) -> bool {
         self.read_only.get()
+    }
+    /// How far its text is scrolled within it, across and down, as the
+    /// next draw shows it.
+    #[doc(hidden)]
+    pub fn scroll_offset(&self) -> (f32, f32) {
+        *self.hint.scrolled.offset.borrow()
     }
     /// Keep a wheel gesture that starts over it at its edges, as CSS's
     /// `overscroll-behavior: contain`: the scroll views around it don't
@@ -5507,6 +5533,21 @@ impl Ui {
     pub fn editor(&self, node: NodeId) -> Option<EditorHandle> {
         self.storage.editors.borrow().get(&node).cloned()
     }
+    /// For a text area whose root is `node`, which scrolls itself (not in a
+    /// scroll view): its viewport, how far its text is scrolled and how far
+    /// it can be, and whether it scrolls across (it doesn't wrap). None for
+    /// any other node, a one-line field's included (`drag_scroll`).
+    pub(crate) fn editor_scroll(&self, node: NodeId) -> Option<EditorScroll> {
+        let editors = self.storage.editors.borrow();
+        let editor = editors.get(&node).filter(|editor| editor.multiline)?;
+        let scrolled = &editor.hint.scrolled;
+        Some(EditorScroll {
+            viewport: scrolled.viewport,
+            offset: *scrolled.offset.borrow(),
+            limit: scrolled.limit.get(),
+            across: !editor.wrap.get(),
+        })
+    }
     /// The editor whose root is `node` or inside it, if there is one.
     pub fn editor_within(&self, node: NodeId) -> Option<EditorHandle> {
         if let Some(editor) = self.editor(node) {
@@ -6413,7 +6454,15 @@ impl Ui {
         let draw_read_only = read_only.clone();
         let gesture = Rc::new(EditorDrag::default());
         let draw_gesture = gesture.clone();
-        let hint = Rc::new(EditorHint::new(value, multiline));
+        let hint = Rc::new(EditorHint::new(
+            value,
+            multiline,
+            Scrolled {
+                viewport,
+                offset: scroll.clone(),
+                limit: scroll_limit.clone(),
+            },
+        ));
         let wheel_hint = hint.clone();
         hint.composition_layer.set(Some(preedit_layer));
         let draw_hint = hint.clone();
