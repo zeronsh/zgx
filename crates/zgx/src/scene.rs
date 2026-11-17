@@ -3072,8 +3072,20 @@ fn stale() -> ! {
 fn stated_size_agrees(stated: (f32, f32), measured: (f32, f32)) -> bool {
     (stated.0 - measured.0).abs() <= 1. / 256. && stated.1 == measured.1
 }
+/// A context's bits, to compare a kept one with one worked out again.
+#[cfg(test)]
+type ContextBits = Option<([u32; 2], Option<[u32; 4]>)>;
+#[cfg(test)]
+fn context_bits(context: DamageContext) -> ContextBits {
+    context.map(|(t, clip)| {
+        (
+            [t.x, t.y].map(f32::to_bits),
+            clip.map(|r| [r.x, r.y, r.width, r.height].map(f32::to_bits)),
+        )
+    })
+}
 /// Where a parent's children are damaged (`Scene::damage_context`).
-type DamageContext = Option<(Transform, Option<Rect>)>;
+pub(crate) type DamageContext = Option<(Transform, Option<Rect>)>;
 /// What a [`Scene::flush`] did, for renderers and diagnostics.
 #[derive(Default, Debug)]
 pub struct FrameReport {
@@ -8167,6 +8179,71 @@ impl Scene {
         node.boxed &= !HIT_INSIDE;
         self.invalidate(id, if colour { PAINT | PAINT_ONLY } else { PAINT });
         if !layout_unchanged {
+            self.invalidate_layout(id);
+        }
+    }
+    /// `set_kind` for a text node becoming another text (a canvas's line,
+    /// `CanvasLabels::show`), damaged under its parent's `context`, which a
+    /// run of its siblings changed one after another shares: worked out by
+    /// the first and taken by the rest (`damage_subtree_with`). The caller
+    /// keeps it while nothing changes the parent's place, clip or
+    /// visibility; a test build checks each use against the context worked
+    /// out again.
+    ///
+    /// It repeats `set_kind`'s Text-to-Text path (nothing for an equal
+    /// text; colour alone repaints, `PAINT_ONLY`; text or size lays out
+    /// again), so that `set_kind` keeps one caller of what it inlines. It
+    /// must change when that path does: the test
+    /// `set_text_kind_sharing_does_what_set_kind_does` holds them together.
+    /// A node that isn't text goes to `set_kind`.
+    pub(crate) fn set_text_kind_sharing(
+        &mut self,
+        id: NodeId,
+        text: Arc<str>,
+        color: Color,
+        font_size: f32,
+        context: &mut Option<DamageContext>,
+    ) {
+        let NodeKind::Text {
+            text: was_text,
+            color: was_color,
+            font_size: was_size,
+        } = &self.node(id).kind
+        else {
+            return self.set_kind(
+                id,
+                NodeKind::Text {
+                    text,
+                    color,
+                    font_size,
+                },
+            );
+        };
+        // As `set_kind`'s `layout_unchanged` and `paints_only` find for two
+        // texts: the same text at the same size.
+        let same_box = *was_text == text && *was_size == font_size;
+        if same_box && *was_color == color {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(kept) = *context {
+            let parent = self.node(id).parent;
+            assert_eq!(
+                context_bits(kept),
+                context_bits(self.damage_context(parent)),
+                "a shared sibling context went stale"
+            );
+        }
+        self.damage_subtree_with(id, context);
+        let node = self.node_mut(id);
+        node.kind = NodeKind::Text {
+            text,
+            color,
+            font_size,
+        };
+        node.boxed &= !HIT_INSIDE;
+        self.invalidate(id, if same_box { PAINT | PAINT_ONLY } else { PAINT });
+        if !same_box {
             self.invalidate_layout(id);
         }
     }
@@ -22485,6 +22562,161 @@ mod style_default_tests {
             change(&mut style);
             assert_ne!(style, Style::default(), "change {i}");
             assert!(!style.is_default(), "change {i}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod text_kind_sharing_tests {
+    use super::*;
+
+    /// A translated, clipping box holding a group of `lines` texts: a
+    /// canvas's lines, as `CanvasLabels::show` changes them.
+    fn lines(count: usize) -> (Scene, NodeId, Vec<NodeId>) {
+        let mut scene = Scene::new(400., 300.);
+        let clip = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(300.),
+                height: Some(200.),
+                clip: true,
+                ..Default::default()
+            },
+        );
+        scene.set_transform(clip, Transform { x: 11., y: 7. });
+        let group = scene.append(clip, NodeKind::Container(Layout::Column), Style::default());
+        let lines = (0..count)
+            .map(|i| {
+                scene.append(
+                    group,
+                    NodeKind::Text {
+                        text: format!("line {i}").into(),
+                        color: Color(1, 2, 3, 255),
+                        font_size: 12.,
+                    },
+                    Style::default(),
+                )
+            })
+            .collect();
+        scene.flush();
+        (scene, group, lines)
+    }
+
+    /// `set_text_kind_sharing` repeats `set_kind`'s Text-to-Text path: over
+    /// randomized runs of changes to a group's lines (text, colour, size,
+    /// each alone and together, and none), with the group moved between
+    /// some runs, twin scenes changed through each leave identical kinds,
+    /// invalidation flags, revisions, damage and layout at every step. If
+    /// `set_kind`'s Text path changes, this fails until the setter follows.
+    #[test]
+    fn set_text_kind_sharing_does_what_set_kind_does() {
+        const LINES: usize = 8;
+        let (mut plain, plain_group, plain_lines) = lines(LINES);
+        let (mut shared, shared_group, shared_lines) = lines(LINES);
+        let texts = ["a", "bb", "line 3", "a longer line of text", "bb"];
+        let colours = [
+            Color(1, 2, 3, 255),
+            Color(200, 10, 10, 255),
+            Color(0, 0, 0, 0),
+        ];
+        let sizes = [12., 14., 12.5];
+        // A deterministic sequence (no dependency): a linear congruential
+        // generator.
+        let mut seed: u64 = 0x5eed_2026_1117;
+        let mut next = |below: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) as usize) % below
+        };
+        for step in 0..300 {
+            if step % 37 == 5 {
+                let to = Transform {
+                    x: next(40) as f32,
+                    y: next(30) as f32,
+                };
+                plain.set_transform(plain_group, to);
+                shared.set_transform(shared_group, to);
+            }
+            let mut context = None;
+            for at in 0..LINES {
+                if next(3) == 0 {
+                    continue;
+                }
+                let NodeKind::Text {
+                    text,
+                    color,
+                    font_size,
+                } = plain.kind(plain_lines[at]).clone()
+                else {
+                    unreachable!()
+                };
+                // What changes: a bit each for text, colour and size (none
+                // too: an equal text changes nothing).
+                let what = next(8);
+                let text = if what & 1 != 0 {
+                    texts[next(texts.len())].into()
+                } else {
+                    text
+                };
+                let color = if what & 2 != 0 {
+                    colours[next(colours.len())]
+                } else {
+                    color
+                };
+                let font_size = if what & 4 != 0 {
+                    sizes[next(sizes.len())]
+                } else {
+                    font_size
+                };
+                plain.set_kind(
+                    plain_lines[at],
+                    NodeKind::Text {
+                        text: text.clone(),
+                        color,
+                        font_size,
+                    },
+                );
+                shared.set_text_kind_sharing(
+                    shared_lines[at],
+                    text,
+                    color,
+                    font_size,
+                    &mut context,
+                );
+                let (a, b) = (plain.node(plain_lines[at]), shared.node(shared_lines[at]));
+                assert_eq!(a.kind, b.kind, "step {step}, line {at}: kind");
+                assert_eq!(a.dirty, b.dirty, "step {step}, line {at}: invalidation");
+                assert_eq!(a.boxed, b.boxed, "step {step}, line {at}: boxed");
+            }
+            assert_eq!(
+                plain.content_revision, shared.content_revision,
+                "step {step}"
+            );
+            assert_eq!(
+                plain.geometry_revision(),
+                shared.geometry_revision(),
+                "step {step}"
+            );
+            let sorted = |mut rects: Vec<Rect>| {
+                rects.sort_by(|a, b| {
+                    [a.x, a.y, a.width, a.height]
+                        .partial_cmp(&[b.x, b.y, b.width, b.height])
+                        .unwrap()
+                });
+                rects
+            };
+            let (a, b) = (plain.flush(), shared.flush());
+            assert_eq!(sorted(a.damage), sorted(b.damage), "step {step}: damage");
+            assert_eq!(a.layout_nodes, b.layout_nodes, "step {step}: layout");
+            for at in 0..LINES {
+                assert_eq!(
+                    plain.bounds(plain_lines[at]),
+                    shared.bounds(shared_lines[at]),
+                    "step {step}, line {at}: box"
+                );
+            }
         }
     }
 }

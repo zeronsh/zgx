@@ -2498,22 +2498,32 @@ impl CanvasLabels {
             scene.remove_held(gone);
         }
         let was = self.shown.as_ref().map_or(&[][..], |shown| shown.texts());
+        // The group's place and clip, worked out for its first changed line
+        // and taken by the rest: nothing below changes them (lines' text,
+        // fonts and own places, lines added).
+        let mut shared = None;
         for (index, text) in texts.iter().enumerate() {
             // Each node shows the line at its place in the last drawing.
             if index < self.nodes.len() && was.get(index) == Some(text) {
                 continue;
             }
-            let kind = NodeKind::Text {
-                text: text.text.clone(),
-                color: text.color,
-                font_size: text.size,
-            };
             let node = match self.nodes.get(index) {
                 Some(&node) => {
-                    scene.set_kind(node, kind);
+                    scene.set_text_kind_sharing(
+                        node,
+                        text.text.clone(),
+                        text.color,
+                        text.size,
+                        &mut shared,
+                    );
                     node
                 }
                 None => {
+                    let kind = NodeKind::Text {
+                        text: text.text.clone(),
+                        color: text.color,
+                        font_size: text.size,
+                    };
                     let node = scene.append_held(
                         group,
                         kind,
