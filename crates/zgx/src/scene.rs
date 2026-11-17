@@ -2155,6 +2155,23 @@ struct Local {
     /// compare the transform with the identity field by field.
     maps: bool,
 }
+/// The nodes that may paint other than as plain items (isolated,
+/// transformed, an effect's layer, faded or an image with an effect), for
+/// `paints_plainly`: a scroller's content none of them is in paints plainly
+/// without a walk. Made at a scene's first look (`AskedFor::plain`). Every
+/// setter that makes a node so marks it repainted, so what changed since a
+/// look is found in the flushes' repaints (`Scene::repaints`), which a look
+/// reads, so they are kept for the next; no setter does more than on its
+/// own.
+#[derive(Default)]
+struct PlainLook {
+    /// The nodes found, let go at a look once gone or plain again.
+    unplain: Vec<NodeId>,
+    /// The last flush a look read the repaints of (every flush counted, as
+    /// `Scene::repaints`); 0 before the first. Where the repaints begin
+    /// past the one after it, a look finds the nodes among every node.
+    read: u64,
+}
 /// What few scenes have, by node; each entry goes with its node.
 #[derive(Default)]
 struct ColdMaps {
@@ -3448,6 +3465,9 @@ pub struct Scene {
     popup_anchors: Vec<(NodeId, NodeId)>,
     popups_promoted: Vec<NodeId>,
     blur_nodes: Vec<NodeId>,
+    /// `paints_plainly`'s walks that ran (tests).
+    #[cfg(test)]
+    plain_walks_run: std::cell::Cell<usize>,
     /// `fade_overflow` nodes, with how far their content runs past each edge
     /// (top, right, bottom, left; at most the band there).
     overflow_fades: Vec<(NodeId, [f32; 4])>,
@@ -3679,11 +3699,10 @@ pub struct Scene {
     selectable: select::Selectable,
     /// Canvas views and grid fills (`scene_view`).
     views: view::Views,
-    /// The nodes whose resources a renderer keeps may have changed
-    /// (`resource_changes`), made as one first reads them; noted while one
-    /// does (`recording`): a scene none reads notes none. Last: the fields
-    /// before keep the places they had, which the hot paths address.
-    changes: std::cell::OnceCell<Box<ResourceChanges>>,
+    /// What a scene keeps only once something asks for it (`AskedFor`).
+    /// Last: the fields before keep the places they had, which the hot
+    /// paths address.
+    asked: std::cell::OnceCell<Box<AskedFor>>,
     recording: std::cell::Cell<bool>,
 }
 /// A visual line of text, for assistive technology (`Scene::text_lines`).
@@ -3807,6 +3826,8 @@ impl Scene {
             popup_anchors: Vec::new(),
             popups_promoted: Vec::new(),
             blur_nodes: Vec::new(),
+            #[cfg(test)]
+            plain_walks_run: std::cell::Cell::new(0),
             overflow_fades: Vec::new(),
             platform_nodes: Vec::new(),
             pending_moves: Vec::new(),
@@ -3814,7 +3835,7 @@ impl Scene {
             moves: Vec::new(),
             flush_serial: 0,
             repaints: Vec::new(),
-            changes: std::cell::OnceCell::new(),
+            asked: std::cell::OnceCell::new(),
             recording: std::cell::Cell::new(false),
             repaints_from: 1,
             repaint_flushes: 0,
@@ -15806,12 +15827,14 @@ impl Scene {
     /// has read them, and within a bound; a flush costs nothing for them.
     pub fn resource_changes(&self) -> (std::ops::RangeInclusive<u64>, &[NodeId]) {
         let flushes = self.repaint_flushes;
-        let changes = self.changes.get_or_init(|| {
-            Box::new(ResourceChanges {
+        let changes = self
+            .asked
+            .get_or_init(Box::default)
+            .changes
+            .get_or_init(|| ResourceChanges {
                 since: std::cell::Cell::new(flushes + 1),
                 ..Default::default()
-            })
-        });
+            });
         self.recording.set(true);
         changes.read.set(true);
         let from = changes.since.replace(flushes + 1);
@@ -15827,7 +15850,11 @@ impl Scene {
         // Walked into the list it is noted in (`removed`), which keeps its
         // room from one flush to the next: no list of its own, and no copy
         // of each node's children.
-        let Some(changes) = self.changes.get_mut() else {
+        let Some(changes) = self
+            .asked
+            .get_mut()
+            .and_then(|asked| asked.changes.get_mut())
+        else {
             return;
         };
         if changes.read.replace(false) {
@@ -15846,7 +15873,11 @@ impl Scene {
             noted.extend_from_slice(self.children_raw(self.node(id)));
         }
         let flushes = self.repaint_flushes;
-        let changes = self.changes.get_mut().expect("noting changes");
+        let changes = self
+            .asked
+            .get_mut()
+            .and_then(|asked| asked.changes.get_mut())
+            .expect("noting changes");
         changes.noted = noted;
         if changes.noted.len() > REPAINTS_KEPT {
             changes.noted = Vec::new();
@@ -15864,7 +15895,11 @@ impl Scene {
     #[inline(never)]
     fn removed(&mut self, ids: &[NodeId]) {
         let flushes = self.repaint_flushes;
-        let Some(changes) = self.changes.get_mut() else {
+        let Some(changes) = self
+            .asked
+            .get_mut()
+            .and_then(|asked| asked.changes.get_mut())
+        else {
             return;
         };
         // Read since the last: all noted were given.
@@ -16392,6 +16427,72 @@ impl Scene {
             Some(node),
         ))
     }
+    /// Whether `id` may paint other than as a plain item, as
+    /// `paints_plainly`'s walk looks at it (blurs are `blur_nodes`').
+    fn may_paint_unplainly(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        node.isolated
+            || node.transformed()
+            || node.effect_layer()
+            || fades(&node.style)
+            || image_with_effect(&node.kind)
+    }
+    /// Whether no node noted as maybe painting otherwise (`unplain`) is
+    /// `root` or in it: those gone or plain again let go first. `false`
+    /// where too many are noted for the look to stay cheaper than the walk.
+    fn none_unplain_within(&self, root: NodeId) -> bool {
+        let mut plain = self
+            .asked
+            .get_or_init(Box::default)
+            .plain
+            .get_or_init(Box::default)
+            .borrow_mut();
+        let plain = &mut *plain;
+        let (covered, repaints) = self.repaints();
+        if plain.read == 0 || *covered.start() > plain.read + 1 {
+            self.find_unplain(&mut plain.unplain);
+        } else if plain.read < *covered.end() {
+            for &(id, _) in repaints {
+                self.note_unplain_at(id, &mut plain.unplain);
+            }
+        }
+        plain.read = *covered.end();
+        // Changed since the flush (set before a frame paints).
+        for &id in &self.dirty {
+            self.note_unplain_at(id, &mut plain.unplain);
+        }
+        let unplain = &mut plain.unplain;
+        if unplain.is_empty() {
+            return true;
+        }
+        unplain.retain(|id| self.contains(*id) && self.may_paint_unplainly(*id));
+        unplain.len() <= UNPLAIN_LOOKED_AT && !unplain.iter().any(|id| self.is_within(*id, root))
+    }
+    /// Add `id` to `unplain` where it may paint otherwise.
+    fn note_unplain_at(&self, id: NodeId, unplain: &mut Vec<NodeId>) {
+        if self.contains(id) && self.may_paint_unplainly(id) && !unplain.contains(&id) {
+            unplain.push(id);
+        }
+    }
+    /// Every node in the scene that may paint otherwise, into `unplain`:
+    /// the first look, or one after flushes whose repaints weren't kept.
+    #[cold]
+    #[inline(never)]
+    fn find_unplain(&self, unplain: &mut Vec<NodeId>) {
+        unplain.clear();
+        for (index, slot) in self.slots.iter().enumerate() {
+            if slot.dead || slot.node.is_none() {
+                continue;
+            }
+            let id = NodeId {
+                index: index as u32,
+                generation: slot.generation,
+            };
+            if self.may_paint_unplainly(id) {
+                unplain.push(id);
+            }
+        }
+    }
     /// Whether everything `root` holds that can show within `clip` (`root`
     /// itself among it) paints as a plain item: no layer (isolated,
     /// transformed or an effect's), backdrop blur, edge fade, picture drawn
@@ -16417,6 +16518,12 @@ impl Scene {
             return false;
         }
         self.settle_children();
+        // None of the nodes that may paint otherwise is in it: no walk.
+        if self.none_unplain_within(root) {
+            return true;
+        }
+        #[cfg(test)]
+        self.plain_walks_run.set(self.plain_walks_run.get() + 1);
         let mut transform = Transform::default();
         let mut parent = self.node(root).parent;
         while let Some(id) = parent {
@@ -17138,6 +17245,17 @@ impl Scene {
 /// starts at (`since`), whether one read since the last was noted (`read`),
 /// and whether past the bound they are given up until it reads again
 /// (`dropping`). A flush does nothing here.
+/// What a scene keeps only once something asks for it, in one box.
+#[derive(Default)]
+struct AskedFor {
+    /// The nodes whose resources a renderer keeps may have changed
+    /// (`resource_changes`), made as one first reads them; noted while one
+    /// does (`recording`): a scene none reads notes none.
+    changes: std::cell::OnceCell<ResourceChanges>,
+    /// What `paints_plainly` knows of the nodes that may paint otherwise,
+    /// made at its first look.
+    plain: std::cell::OnceCell<Box<std::cell::RefCell<PlainLook>>>,
+}
 #[derive(Default)]
 struct ResourceChanges {
     noted: Vec<NodeId>,
@@ -17145,6 +17263,13 @@ struct ResourceChanges {
     since: std::cell::Cell<u64>,
     read: std::cell::Cell<bool>,
     dropping: bool,
+}
+/// The most nodes noted as maybe painting otherwise (`PlainLook::unplain`) that
+/// `paints_plainly` looks through before it walks instead.
+const UNPLAIN_LOOKED_AT: usize = 64;
+/// Whether `kind` is an image drawn with an effect (`paints_plainly`).
+fn image_with_effect(kind: &NodeKind) -> bool {
+    matches!(kind, NodeKind::Image(image) if image.effect() != crate::image::ImageEffect::Plain)
 }
 /// Whether `style` fades any edge (`fade_mask` makes a mask of its own).
 fn fades(style: &Style) -> bool {
@@ -18001,6 +18126,172 @@ mod tests {
         scene.flush();
         assert!(scene.paints_plainly(view, clip));
         assert!(scene.paints_plainly(root, clip));
+    }
+    /// An edge fade given to a row already in the content by a restyle is
+    /// noted as its style comes (the style it had fades nothing): the walk
+    /// is taken, and says no.
+    #[test]
+    fn paints_plainly_walks_for_a_fade_restyled_in() {
+        let boxed = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let mut scene = Scene::new(300., 200.);
+        let root = scene.root();
+        let view = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            Style {
+                clip: true,
+                ..boxed(300., 200.)
+            },
+        );
+        let content = scene.append(view, NodeKind::Container(Layout::Column), boxed(280., 800.));
+        scene.set_scroll_copy(content, true);
+        let row = scene.append(
+            content,
+            NodeKind::Rect(Color(9, 9, 9, 255)),
+            boxed(280., 40.),
+        );
+        scene.prepare_layout();
+        scene.flush();
+        let clip = Rect::new(0., 0., 300., 200.);
+        assert!(scene.paints_plainly(content, clip));
+        let mut style = scene.style(row);
+        style.fade_edges = [12., 12.];
+        scene.set_style(row, style);
+        assert!(!scene.paints_plainly(content, clip));
+        assert_eq!(scene.plain_walks_run.get(), 1);
+    }
+    /// A scroller's content that none of the nodes noted as maybe painting
+    /// otherwise is in paints plainly without a walk; one blurred row in it
+    /// takes the walk (which says it doesn't), the blur gone, not again; and
+    /// such a node outside the content (a blurred sidebar) leaves it be.
+    #[test]
+    fn paints_plainly_walks_only_with_an_unplain_node_in_it() {
+        let boxed = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let mut scene = Scene::new(400., 300.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Row));
+        let sidebar = scene.append(root, NodeKind::Rect(Color(9, 9, 9, 255)), boxed(80., 300.));
+        let view = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            Style {
+                clip: true,
+                ..boxed(300., 200.)
+            },
+        );
+        let content = scene.append(
+            view,
+            NodeKind::Container(Layout::Column),
+            boxed(280., 2000.),
+        );
+        scene.set_scroll_copy(content, true);
+        let rows: Vec<NodeId> = (0..20)
+            .map(|i| {
+                scene.append(
+                    content,
+                    NodeKind::Rect(Color(i as u8 * 9, 9, 9, 255)),
+                    boxed(280., 40.),
+                )
+            })
+            .collect();
+        scene.prepare_layout();
+        scene.flush();
+        let clip = Rect::new(80., 0., 300., 200.);
+        let walks = |scene: &Scene| scene.plain_walks_run.get();
+        // Nothing in it: answered without a walk.
+        assert!(scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 0);
+        // A row blurred (a layer of its own): the walk, which says no.
+        let blurred = Effects {
+            filter_blur: 4.,
+            ..Effects::default()
+        };
+        scene.set_effects(rows[2], blurred);
+        assert!(!scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 1);
+        // Its blur gone: let go, and no walk again.
+        scene.set_effects(rows[2], Effects::default());
+        assert!(scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 1);
+        // Outside the content (a sidebar made a layer): no walk.
+        scene.set_isolated(sidebar, true);
+        assert!(scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 1);
+        // Inside it, isolated, out of the clip: the walk, which finds it
+        // doesn't show; then one in view: the walk, which says no.
+        scene.set_isolated(rows[7], true);
+        assert!(scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 2);
+        scene.set_isolated(rows[3], true);
+        assert!(!scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 3);
+        let noted = |scene: &Scene| -> Vec<NodeId> {
+            scene
+                .asked
+                .get()
+                .and_then(|asked| asked.plain.get())
+                .map(|plain| plain.borrow().unplain.clone())
+                .unwrap_or_default()
+        };
+        let listed = |scene: &Scene, id: NodeId| noted(scene).contains(&id);
+        // Removed: let go at the next look, which walks no more for them.
+        assert!(listed(&scene, rows[3]) && listed(&scene, rows[7]));
+        scene.remove(rows[3]);
+        scene.remove(rows[7]);
+        assert!(scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 3);
+        assert!(!listed(&scene, rows[3]) && !listed(&scene, rows[7]));
+        // One in a subtree removed whole: the same.
+        let group = scene.append(
+            content,
+            NodeKind::Container(Layout::Column),
+            boxed(280., 40.),
+        );
+        let inner = scene.append(group, NodeKind::Rect(Color(9, 9, 9, 255)), boxed(280., 40.));
+        scene.set_isolated(inner, true);
+        // Found at the next look (it walks: past the clip, so plainly).
+        assert!(scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 4);
+        assert!(listed(&scene, inner));
+        scene.remove(group);
+        assert!(scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 4);
+        assert!(!listed(&scene, inner));
+        // Mounted and removed again and again with no look between (a
+        // scene that never scrolls): nothing is kept for them.
+        for _ in 0..500 {
+            let row = scene.append(
+                content,
+                NodeKind::Rect(Color(9, 9, 9, 255)),
+                boxed(280., 40.),
+            );
+            scene.set_isolated(row, true);
+            scene.remove(row);
+        }
+        assert!(noted(&scene).len() <= UNPLAIN_LOOKED_AT);
+        // Mounted, it walks; removed, it doesn't, and only the sidebar stays.
+        let row = scene.append(
+            content,
+            NodeKind::Rect(Color(9, 9, 9, 255)),
+            boxed(280., 40.),
+        );
+        scene.set_isolated(row, true);
+        scene.prepare_layout();
+        scene.flush();
+        scene.paints_plainly(content, clip);
+        assert_eq!(walks(&scene), 5);
+        scene.remove(row);
+        assert!(scene.paints_plainly(content, clip));
+        assert_eq!(walks(&scene), 5);
+        assert_eq!(noted(&scene), vec![sidebar]);
     }
     /// A long column's ink worked out from its kept union and the children
     /// that grew where they were (`grown_ink`) is, to the bit, the ink worked
