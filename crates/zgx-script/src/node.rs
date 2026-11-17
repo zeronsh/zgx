@@ -2287,6 +2287,8 @@ pub(crate) struct Env {
     /// The clipboard's files as a paste hears them (`io::pasted_files`).
     pub platform: crate::io::SharedPlatform,
     pub picked: crate::io::Picked,
+    /// Where `d:save_temp` saves (`ScriptHost::download_dir`).
+    pub downloads: Rc<crate::io::Downloads>,
     /// The host's functions (`ui.call_sync`).
     pub functions: crate::Functions,
     /// The host's saved state (`ui.persist`).
