@@ -156,6 +156,9 @@ struct Log {
     made: HashMap<usize, &'static std::panic::Location<'static>>,
     /// Those lines' texts, one each.
     made_text: HashMap<(&'static str, u32), Rc<str>>,
+    /// The names of effects by the Rust line that made them, one a line
+    /// (`zgx/src/compose.rs:812 effect`).
+    effect_text: HashMap<(&'static str, u32), Rc<str>>,
 }
 thread_local! {
     static LOG: RefCell<Log> = RefCell::default();
@@ -197,7 +200,9 @@ pub fn memory(report: &mut crate::memory::Report) {
             + log.sites.values().map(&mut text).sum::<usize>();
         names += table(log.made.capacity(), size_of::<usize>())
             + table(log.made_text.capacity(), size_of::<Rc<str>>())
-            + log.made_text.values().map(&mut text).sum::<usize>();
+            + log.made_text.values().map(&mut text).sum::<usize>()
+            + table(log.effect_text.capacity(), size_of::<Rc<str>>())
+            + log.effect_text.values().map(&mut text).sum::<usize>();
         for f in frames {
             names += f
                 .runs
@@ -222,6 +227,19 @@ pub fn name(effect: u64, name: impl Into<Rc<str>>) {
             log.names.insert(effect, name.into());
         });
     }
+}
+/// Effect `effect` was made at `at` (`Runtime::effect`'s caller): traces
+/// name it by that line (`zgx/src/compose.rs:812 effect`) until its maker
+/// names it ([`name`]).
+pub(crate) fn made_effect(effect: u64, at: &'static std::panic::Location<'static>) {
+    LOG.with_borrow_mut(|log| {
+        let name = log
+            .effect_text
+            .entry((at.file(), at.line()))
+            .or_insert_with(|| Rc::from(format!("{} effect", rust_line(at))))
+            .clone();
+        log.names.insert(effect, name);
+    });
 }
 /// Effect `effect` is gone: its name, and the cause of a run it was queued
 /// for and never made, go too (each mount names its effects anew).
@@ -523,6 +541,48 @@ pub(crate) mod tests {
         super::set_enabled(false);
         assert_eq!(plain_site, Some(format!("zgx/src/trace.rs:{line}")));
         assert_eq!(named_site.as_deref(), Some("app.luau:3 use_state"));
+    }
+
+    /// An effect no maker named is named by the Rust line that made it; one
+    /// its maker named keeps that name.
+    #[test]
+    fn an_effect_no_maker_named_says_the_rust_line_that_made_it() {
+        let _tracing = TRACING.lock().unwrap_or_else(|e| e.into_inner());
+        super::set_enabled(true);
+        let runtime = crate::reactive::Runtime::new();
+        let value = runtime.signal(0);
+        let (a, b) = (value.clone(), value.clone());
+        let line = line!() + 1;
+        let plain = runtime.effect(move || {
+            a.get();
+        });
+        let named = runtime.effect(move || {
+            b.get();
+        });
+        super::name(named.number(), "@12 binding");
+        let now_line = line!() + 1;
+        let now = runtime.effect_now(|| {});
+        value.set(1);
+        let name = |effect: &crate::reactive::Effect| {
+            super::LOG.with_borrow(|log| log.names.get(&effect.number()).map(|n| n.to_string()))
+        };
+        let ran = super::LOG.with_borrow(|log| {
+            log.current
+                .runs
+                .iter()
+                .rev()
+                .find(|run| run.effect == plain.number())
+                .and_then(|run| run.name.as_deref().map(str::to_owned))
+        });
+        let (plain_name, named_name, now_name) = (name(&plain), name(&named), name(&now));
+        super::set_enabled(false);
+        assert_eq!(plain_name, Some(format!("zgx/src/trace.rs:{line} effect")));
+        assert_eq!(ran, plain_name, "its runs say it");
+        assert_eq!(named_name.as_deref(), Some("@12 binding"));
+        assert_eq!(
+            now_name,
+            Some(format!("zgx/src/trace.rs:{now_line} effect"))
+        );
     }
 
     /// Held by tests that turn tracing on and off: it is the process's, and

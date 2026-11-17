@@ -60,14 +60,14 @@ zgx inspect search --next             # the window's find steps on; --prev back,
   2 @14 [cafe] two
 ```
 
-`frames` is where each frame's time went and why the app did what it did: the frame's time, the states written (named ones by name; the rest by where the script made them, `40 × rows.luau:12 use_state` for forty rows' own, a `computed` or a `tween` likewise, or what the engine made them for, else the Rust line that made them, `31 × zgx-script/src/lower.rs:8290`; any made before tracing began counted as unnamed) and the runs they caused with their total; then its phases, the costliest first (each counted once, with its instructions where the platform counts them); then the costliest runs, each with its time, what it is and the state that queued it:
+`frames` is where each frame's time went and why the app did what it did: the frame's time, the states written (named ones by name; the rest by where the script made them, `40 × rows.luau:12 use_state` for forty rows' own, a `computed` or a `tween` likewise, or what the engine made them for, else the Rust line that made them, `31 × zgx-script/src/lower.rs:8290`; any made before tracing began counted as unnamed) and the runs they caused with their total; then its phases, the costliest first (each counted once, with its instructions where the platform counts them); then the costliest runs, each with its time, what it is (a binding, a script's line, else the Rust line that made it, `zgx/src/compose.rs:812 effect`; one made before tracing began by its number) and the state that queued it:
 
 ```text
 frame 131 (1.42 ms): state.luau::messages, 8 × components/transcript.luau:18 use_state → 20 runs, 293 µs
   phases: update 310 µs (1840K instr), text 402 µs, layout 260 µs (1210K instr), paint 190 µs, encode 120 µs, present 95 µs
   153 µs @67 binding (markdown_view components/transcript.luau:32) ← a state
   28 µs @102 binding #transcript (list #transcript components/transcript.luau:73) ← a state
-  19 µs effect 124 ← state.luau::messages
+  19 µs zgx/src/compose.rs:812 effect ← state.luau::messages
 ```
 
 Where the engine took a slower path, or waited, the frame says why, and where the renderer measures the GPU's own time (macOS's Metal frames) it says that too:
