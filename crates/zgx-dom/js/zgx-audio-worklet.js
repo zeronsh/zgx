@@ -53,6 +53,10 @@ class ZgxAudio extends AudioWorkletProcessor {
         }
         this.answered(message);
       } else if (message.start) {
+        // Started again: it says when it has drained again, even if the
+        // first answer says stop before any block plays (a sound already
+        // over), so the context is suspended rather than left running.
+        this.drained = false;
         if (message.fresh) this.mark = this.base;
         if (!this.going && this.held === 0) this.primed = false;
         this.going = true;

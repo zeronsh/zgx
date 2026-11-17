@@ -52,6 +52,10 @@ fn mount(source: &str) -> App {
     let script = ScriptHost::inline(&runtime, "app.luau", source);
     zgx_dom::install_fetcher(&script);
     zgx_dom::install_audio(&script);
+    // A short quiet hold (50 ms, not a second): every test waits for the
+    // page's sound to go quiet, and the suite would otherwise wait a
+    // second of silence each time.
+    zgx_dom::__audio_set_hold(0.05);
     script.reload().expect("the script loads");
     let document = web_sys::window().unwrap().document().unwrap();
     let host = document.create_element("div").unwrap();
@@ -108,6 +112,7 @@ fn text(app: &App) -> String {
 
 #[wasm_bindgen_test]
 async fn a_sound_plays_through_the_worklet_and_the_page_goes_quiet_after() {
+    let _timed = Timed::new("a_sound_plays_through_the_worklet_and_the_page_goes_quiet_after");
     quiet().await;
     let url = tone_url();
     // The page's one engine may be left from a test before (suspended):
@@ -172,7 +177,7 @@ async fn a_sound_plays_through_the_worklet_and_the_page_goes_quiet_after() {
         state("posted").as_f64() > Some(0.)
     })
     .await;
-    // The tone (0.2 s) and the hold (1 s) pass: no more asked for, and the
+    // The tone (0.2 s) and the hold (50 ms here) pass: no more asked for, and the
     // context suspended.
     until("the page goes quiet", || {
         state("running").as_bool() == Some(false)
@@ -203,6 +208,7 @@ async fn a_sound_plays_through_the_worklet_and_the_page_goes_quiet_after() {
 /// holds alike.
 #[wasm_bindgen_test]
 async fn a_busy_main_thread_runs_the_worklet_dry_only_when_it_answers_late() {
+    let _timed = Timed::new("a_busy_main_thread_runs_the_worklet_dry_only_when_it_answers_late");
     quiet().await;
     let samples: Vec<f32> = (0..96_000)
         .map(|i| (i as f32 * 0.06).sin() * 0.25)
@@ -307,6 +313,7 @@ async fn a_busy_main_thread_runs_the_worklet_dry_only_when_it_answers_late() {
 /// sound wanted.
 #[wasm_bindgen_test]
 async fn a_wake_just_after_a_drain_leaves_the_context_running() {
+    let _timed = Timed::new("a_wake_just_after_a_drain_leaves_the_context_running");
     quiet().await;
     let samples: Vec<f32> = (0..96_000)
         .map(|i| (i as f32 * 0.06).sin() * 0.25)
@@ -360,6 +367,7 @@ async fn a_wake_just_after_a_drain_leaves_the_context_running() {
 /// leaves the first playing.
 #[wasm_bindgen_test]
 async fn a_second_host_given_sound_shares_the_engine() {
+    let _timed = Timed::new("a_second_host_given_sound_shares_the_engine");
     quiet().await;
     let url = tone_url();
     let source = format!(
@@ -390,6 +398,23 @@ async fn a_second_host_given_sound_shares_the_engine() {
         state("posted").as_f64().unwrap_or(0.) > posted
     })
     .await;
+}
+
+/// Logs how long a test took when it ends: what the suite's time is
+/// made of.
+struct Timed(&'static str, f64);
+impl Timed {
+    fn new(name: &'static str) -> Timed {
+        Timed(name, now_ms())
+    }
+}
+impl Drop for Timed {
+    fn drop(&mut self) {
+        web_sys::console::log_1(&format!("{} took {:.0} ms", self.0, now_ms() - self.1).into());
+    }
+}
+fn now_ms() -> f64 {
+    web_sys::window().unwrap().performance().unwrap().now()
 }
 
 /// A page playing a 2 s tone round and round, with buttons to start and
@@ -447,6 +472,31 @@ fn base_mark() -> f64 {
     (0.12 * state("sampleRate").as_f64().unwrap()).round()
 }
 
+/// Holds the worklet's next answer back by `stall` frames, longer than it
+/// holds: waits until it has run dry and the answer, late, has been let go
+/// (`late` counts it as it lands), and then for its next ask, which reports
+/// the lead it grew to.
+async fn stall_past_its_queue(stall: f64) {
+    let (dry, late, asked) = (
+        state("underruns").as_f64().unwrap(),
+        state("late").as_f64().unwrap(),
+        state("asked").as_f64().unwrap(),
+    );
+    zgx_dom::__audio_stall_next_answer(stall as u32);
+    until("the stall runs it dry", || {
+        state("underruns").as_f64().unwrap() > dry
+    })
+    .await;
+    until("the late answer lands", || {
+        state("late").as_f64().unwrap() > late
+    })
+    .await;
+    until("it asks again", || {
+        state("asked").as_f64().unwrap() > asked + 1.
+    })
+    .await;
+}
+
 /// Waits `frames` audio frames' worth of time, and a little more.
 async fn frames_pass(frames: f64) {
     let rate = state("sampleRate").as_f64().unwrap();
@@ -461,19 +511,14 @@ async fn frames_pass(frames: f64) {
 /// and the same stall then plays through.
 #[wasm_bindgen_test]
 async fn a_late_answer_grows_the_lead_and_the_same_stall_then_plays_through() {
+    let _timed = Timed::new("a_late_answer_grows_the_lead_and_the_same_stall_then_plays_through");
     quiet().await;
     let app = looping().await;
     let base = base_mark();
     assert_eq!(state("mark").as_f64(), Some(base));
     // Longer than what it holds when it asks (under its mark): it runs dry.
     let stall = (base * 1.25).round();
-    let dry = state("underruns").as_f64().unwrap();
-    zgx_dom::__audio_stall_next_answer(stall as u32);
-    until("the stall runs it dry", || {
-        state("underruns").as_f64().unwrap() > dry
-    })
-    .await;
-    frames_pass(stall).await;
+    stall_past_its_queue(stall).await;
     let grown = (base * 1.5).round();
     assert_eq!(state("mark").as_f64(), Some(grown), "grown by half, once");
     // The same stall again: it holds at least its grown mark less a
@@ -494,22 +539,26 @@ async fn a_late_answer_grows_the_lead_and_the_same_stall_then_plays_through() {
 /// However often it runs dry, its lead stops at half a second.
 #[wasm_bindgen_test]
 async fn the_lead_never_passes_half_a_second() {
+    let _timed = Timed::new("the_lead_never_passes_half_a_second");
     quiet().await;
     let app = looping().await;
     let cap = (0.5 * state("sampleRate").as_f64().unwrap()).round();
-    for _ in 0..6 {
-        let dry = state("underruns").as_f64().unwrap();
-        let stall = cap + 4_096.;
-        zgx_dom::__audio_stall_next_answer(stall as u32);
-        until("the stall runs it dry", || {
-            state("underruns").as_f64().unwrap() > dry
-        })
-        .await;
-        frames_pass(stall).await;
+    // Stalls just past what it holds each time (1.25 times its lead): each
+    // runs it dry and grows the lead by half, up to the cap, then one more
+    // past the cap leaves it there.
+    let mut stalls = 0;
+    loop {
         let mark = state("mark").as_f64().unwrap();
-        assert!(mark <= cap, "the lead {mark} passed {cap}");
+        stall_past_its_queue((mark * 1.25).round()).await;
+        let grown = state("mark").as_f64().unwrap();
+        assert!(grown <= cap, "the lead {grown} passed {cap}");
+        stalls += 1;
+        if mark == cap {
+            assert_eq!(grown, cap, "a stall past the cap left it at the cap");
+            break;
+        }
+        assert!(stalls < 8, "the lead never reached the cap: {grown}");
     }
-    assert_eq!(state("mark").as_f64(), Some(cap), "it reached the cap");
     press(&app, 1);
 }
 
@@ -517,17 +566,11 @@ async fn the_lead_never_passes_half_a_second() {
 /// starts with the 120 ms lead again.
 #[wasm_bindgen_test]
 async fn the_lead_starts_over_on_a_resumed_context() {
+    let _timed = Timed::new("the_lead_starts_over_on_a_resumed_context");
     quiet().await;
     let app = looping().await;
     let base = base_mark();
-    let dry = state("underruns").as_f64().unwrap();
-    let stall = (base * 1.25).round();
-    zgx_dom::__audio_stall_next_answer(stall as u32);
-    until("the stall runs it dry", || {
-        state("underruns").as_f64().unwrap() > dry
-    })
-    .await;
-    frames_pass(stall).await;
+    stall_past_its_queue((base * 1.25).round()).await;
     assert!(state("mark").as_f64().unwrap() > base);
     press(&app, 1);
     quiet().await;
@@ -548,6 +591,7 @@ async fn the_lead_starts_over_on_a_resumed_context() {
 /// A device that never runs dry keeps the 120 ms lead.
 #[wasm_bindgen_test]
 async fn a_device_that_never_runs_dry_keeps_its_lead() {
+    let _timed = Timed::new("a_device_that_never_runs_dry_keeps_its_lead");
     quiet().await;
     let app = looping().await;
     let dry = state("underruns").as_f64().unwrap();
