@@ -6824,13 +6824,19 @@ impl Ui {
             );
             text_style.text_wrap = draw_wrap.get();
             s.set_style(text, text_style);
-            s.set_transform(
-                text,
-                Transform {
-                    x: if aligned_placeholder { 0. } else { -scroll.0 },
-                    y: -scroll.1,
-                },
-            );
+            // A long text's node holds nothing (its lines show apart, in
+            // their layer): moved with each scroll, its box as tall as the
+            // text would repaint all the view shows. It stays, and is placed
+            // again once it shows text.
+            if !(long && shown.is_none()) {
+                s.set_transform(
+                    text,
+                    Transform {
+                        x: if aligned_placeholder { 0. } else { -scroll.0 },
+                        y: -scroll.1,
+                    },
+                );
+            }
             // A long text shows the lines in view, a text node each (by line
             // number: a scroll gives one node a new line, not each of them).
             let shown_lines = match &long_lines {
@@ -6862,6 +6868,12 @@ impl Ui {
                         .map_or(order.len(), |i| i + 1);
                     order.insert(at, layer);
                     s.reorder_children(viewport, &order);
+                    // Scroll content: the lines are placed in it where they
+                    // are in the text, and a scroll moves it alone, by whole
+                    // device pixels (the lines' glyphs snap to them anyway),
+                    // which the renderer copies, painting only what comes
+                    // into view.
+                    s.set_scroll_copy(layer, true);
                     code.line_layer.set(Some(layer));
                     pool.clear();
                 }
@@ -6946,11 +6958,18 @@ impl Ui {
                         s.set_transform(
                             *id,
                             Transform {
-                                x: -scroll.0,
-                                y: lines.top(*i) - scroll.1,
+                                x: 0.,
+                                y: lines.top(*i),
                             },
                         );
                     }
+                    s.set_transform(
+                        layer,
+                        Transform {
+                            x: -scroll.0,
+                            y: -scroll.1,
+                        },
+                    );
                 }
                 for id in free {
                     s.remove(id);
