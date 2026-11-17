@@ -18,6 +18,20 @@ impl NodeId {
     pub fn number(self) -> u32 {
         self.index
     }
+    /// A handle for it that outlives it: the slot and the generation in one
+    /// number, which `from_bits` turns back into this node's id, and which
+    /// `Scene::contains` then says is gone once the node is (a slot a later
+    /// node reuses has another generation).
+    pub fn to_bits(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+    /// The id `to_bits` made.
+    pub fn from_bits(bits: u64) -> Self {
+        Self {
+            index: bits as u32,
+            generation: (bits >> 32) as u32,
+        }
+    }
     /// Its slot: no other node in the scene has it while this one is there.
     pub(crate) fn slot(self) -> usize {
         self.index as usize
