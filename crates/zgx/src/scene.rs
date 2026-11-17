@@ -3596,6 +3596,12 @@ pub struct Scene {
     /// Tests: a damaged paint walk filters every child (`searched` unused).
     #[cfg(test)]
     pub(crate) linear_walks: bool,
+    /// Tests: hit tests prove nothing (`hit_proved`), and walk every subtree.
+    #[cfg(test)]
+    pub(crate) unproved_walks: bool,
+    /// Tests: proofs `hit_projection` took from a node's own, at an offset.
+    #[cfg(test)]
+    pub(crate) hit_proofs_reused: std::cell::Cell<u64>,
     /// Whether some node's children ever outgrew `COLUMN_KEPT_FROM` (set as
     /// `append` grows a long list): hit tests ask each node whether to search
     /// its children (`hit_rows`) only then. Never cleared: a search checks
@@ -3629,6 +3635,14 @@ pub struct Scene {
     /// hit (`hit_test_all`): a pointer move's dispatch and its cursor ask the
     /// same, and most moves between frames ask where nothing changed.
     hit_memo: std::cell::RefCell<Option<HitMemo>>,
+    /// The point the last hit walk asked about, and whether this walk asks
+    /// the same (a pointer resting while the scene changes under it, as a
+    /// scroll does): only then are rows proved in their own frame as the
+    /// walk meets them (`hit_projection_own`), the next frame's walk being
+    /// likely to read those proofs. A pointer moving, or a scene changed
+    /// between its asks, would pay for proofs nothing reads.
+    hit_point: std::cell::Cell<(u32, u32)>,
+    hit_resting: std::cell::Cell<bool>,
     /// Nodes the hit walk visited (`hit_nodes_walked`), debug builds alone.
     #[cfg(debug_assertions)]
     hit_walked: std::cell::Cell<u64>,
@@ -3878,6 +3892,10 @@ impl Scene {
             reference_walks: false,
             #[cfg(test)]
             linear_walks: false,
+            #[cfg(test)]
+            unproved_walks: false,
+            #[cfg(test)]
+            hit_proofs_reused: Default::default(),
             long_lists: false,
             #[cfg(test)]
             hit_rows_searched: Default::default(),
@@ -3894,6 +3912,8 @@ impl Scene {
             #[cfg(test)]
             hit_walks: Default::default(),
             hit_memo: Default::default(),
+            hit_point: std::cell::Cell::new((u32::MAX, u32::MAX)),
+            hit_resting: Default::default(),
             #[cfg(debug_assertions)]
             hit_walked: Default::default(),
             cursor_styles: 0,
@@ -6475,6 +6495,8 @@ impl Scene {
     fn hit_test_all_walked(&self, x: f32, y: f32) -> Vec<NodeId> {
         #[cfg(test)]
         self.hit_walks.set(self.hit_walks.get() + 1);
+        let point = (x.to_bits(), y.to_bits());
+        self.hit_resting.set(self.hit_point.replace(point) == point);
         // Before the others, which compile as they did: a scene with
         // targets walks apart (`hit_test_targets`).
         if self.has_hit_targets() {
@@ -6549,7 +6571,13 @@ impl Scene {
     }
     #[inline(never)]
     fn hit_proved<const D: usize>(&self, node: &Node) -> bool {
-        if node.bounds_valid.get() & HIT_CHECKED == 0 {
+        #[cfg(test)]
+        if self.unproved_walks {
+            return false;
+        }
+        // Proved that way already (its own frame's verdict, kept bare
+        // under an ancestor's proof: `hit_projection_own`): not again.
+        if node.bounds_valid.get() & (HIT_CHECKED | (HIT_DIRECTION << D)) == 0 {
             let b = node.bounds;
             let start = if D < 2 { b.x } else { b.y };
             let limit = if D.is_multiple_of(2) {
@@ -6580,6 +6608,54 @@ impl Scene {
             node.boxed |= HIT_INSIDE;
         }
     }
+    /// `hit_projection` of a `node` not proved yet, at `offset` under an
+    /// ancestor's proof (a row a scroll moves): projected in its own frame,
+    /// so what it keeps is its own verdict, as `hit_proved` keeps it,
+    /// within the ancestor's `limit` seen from there but never short of its
+    /// own edge; then placed. One walk, and the ancestor's next proof reads
+    /// its verdict instead. `None` where that doesn't apply (a leaf, not at
+    /// a finite place, or a walk not where the last one was: `hit_resting`):
+    /// `hit_projection` goes on. Out of line, so that
+    /// `hit_projection` itself stays as it was inlined.
+    #[cold]
+    #[inline(never)]
+    fn hit_projection_own<const D: usize>(
+        &self,
+        node: &Node,
+        offset: f32,
+        level: u32,
+        limit: f32,
+    ) -> Option<Option<f32>> {
+        if !self.hit_resting.get() {
+            return None;
+        }
+        let b = node.bounds;
+        let (start, size) = if D < 2 {
+            (b.x, b.width)
+        } else {
+            (b.y, b.height)
+        };
+        if !(start + offset).is_finite() || self.children_raw(node).is_empty() {
+            return None;
+        }
+        let local = limit - offset;
+        let local = if D.is_multiple_of(2) {
+            local.min(start)
+        } else {
+            local.max(start + size)
+        };
+        #[cfg(test)]
+        self.hit_proofs_reused.set(self.hit_proofs_reused.get() + 1);
+        let extent = self.hit_projection::<D>(node, 0., level, local);
+        // Proved that way: that way's bit alone, so the walk still proves
+        // the others (a pointer passing across, not along). A failed scan
+        // stays checked, not walked again each frame.
+        let kept = node.bounds_valid.get();
+        if kept & (HIT_DIRECTION << D) != 0 {
+            node.bounds_valid.set(kept & !HIT_CHECKED);
+        }
+        Some(extent.map(|extent| extent + offset))
+    }
     #[inline(always)]
     fn hit_projection<const D: usize>(
         &self,
@@ -6607,8 +6683,24 @@ impl Scene {
                 .set(cached | BOUNDS_VALID | if zero { HIT_CHECKED } else { 0 });
             return None;
         }
-        if zero && cached & (HIT_DIRECTION << D) != 0 {
+        // Proved (at its own offset, `zero`, as every proof is kept): its
+        // subtree reaches no further than its box that way, wherever it is
+        // placed. Not walked again under an ancestor proving its own (the
+        // rows and boxes a scroll moves, under the view's).
+        if cached & (HIT_DIRECTION << D) != 0 && (zero || own.is_finite()) {
+            #[cfg(test)]
+            if !zero {
+                self.hit_proofs_reused.set(self.hit_proofs_reused.get() + 1);
+            }
             return Some(own);
+        }
+        // Not proved yet, under an ancestor's proof (a row a scroll moves):
+        // its own verdict worked out (`hit_projection_own`), out of line.
+        if !zero
+            && cached & HIT_CHECKED == 0
+            && let Some(extent) = self.hit_projection_own::<D>(node, offset, level, limit)
+        {
+            return extent;
         }
         let safe = !node.transformed()
             && (!matches!(node.kind, NodeKind::Image(_) | NodeKind::Svg(_))
@@ -18275,6 +18367,217 @@ mod tests {
                 1 => assert!((100..2400).contains(&searched), "case {case}: {searched}"),
                 _ => assert!(searched > 2000, "case {case}: searched {searched} times"),
             }
+        }
+    }
+    /// A hit test that takes a node's kept proof wherever an ancestor's
+    /// proof finds it (the rows a scroll moves) finds what a walk proving
+    /// nothing does: through random scrolls, rows mounted and removed, and
+    /// columns scrolled inside rows two levels deep, near the top and a
+    /// million points down, where a point's rounding is a twentieth of one.
+    #[test]
+    fn a_hit_test_reusing_kept_proofs_finds_what_proving_nothing_does() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let quad = |n: u32| {
+            NodeKind::Quad(QuadStyle {
+                fill: Color((n % 251) as u8, 90, 70, 255),
+                ..Default::default()
+            })
+        };
+        for (far, seed) in [(0_f32, 7_u64), (1.0e6, 11), (1.0e6, 23)] {
+            let mut seed = seed;
+            let mut next = |of: u64| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (seed >> 33) % of
+            };
+            let mut scene = Scene::new(300., 400.);
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let view = scene.append(
+                root,
+                NodeKind::Container(Layout::Overlay),
+                sized(300., 400.),
+            );
+            let content = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+            scene.set_scroll_copy(content, true);
+            scene.append(
+                content,
+                NodeKind::Container(Layout::Column),
+                sized(300., far),
+            );
+            // A row, now and then one holding a column scrolled in it, now
+            // and then that column holding another.
+            let mut inner = Vec::new();
+            let mut made = 0_u32;
+            let mut row = |scene: &mut Scene, inner: &mut Vec<NodeId>| {
+                made += 1;
+                let n = made;
+                let height = 17. + (n * 7 % 11) as f32 * 0.37;
+                let row = scene.append(
+                    content,
+                    NodeKind::Container(Layout::Row),
+                    sized(300., height),
+                );
+                scene.append(row, quad(n), sized(40. + (n % 5) as f32 * 30., height / 2.));
+                if n.is_multiple_of(6) {
+                    let column = scene.append(
+                        row,
+                        NodeKind::Container(Layout::Column),
+                        sized(120., height),
+                    );
+                    inner.push(column);
+                    for j in 0..5 {
+                        scene.append(column, quad(n + j), sized(110., 6.5));
+                    }
+                    if n.is_multiple_of(12) {
+                        let deeper = scene.append(
+                            column,
+                            NodeKind::Container(Layout::Column),
+                            sized(90., 9.),
+                        );
+                        inner.push(deeper);
+                        for j in 0..3 {
+                            scene.append(deeper, quad(n + 9 + j), sized(80., 4.25));
+                        }
+                    }
+                }
+            };
+            for _ in 0..120 {
+                row(&mut scene, &mut inner);
+            }
+            scene.flush();
+            let reused = scene.hit_proofs_reused.get();
+            for step in 0..60 {
+                match next(4) {
+                    0 | 1 => {
+                        let to = far + next(1500) as f32 + next(64) as f32 / 64. + 0.003;
+                        scene.set_transform(content, Transform { x: 0., y: -to });
+                    }
+                    2 => {
+                        if let Some(&column) = inner.get(next(inner.len().max(1) as u64) as usize)
+                            && scene.contains(column)
+                        {
+                            let by = next(40) as f32 * 0.25 - 5.;
+                            scene.set_transform(column, Transform { x: 0., y: by });
+                        }
+                    }
+                    _ => {
+                        let rows = scene.children(content).len();
+                        if next(2) == 0 && rows > 60 {
+                            let at = scene.children(content)[1 + next(rows as u64 - 1) as usize];
+                            scene.remove(at);
+                        } else {
+                            row(&mut scene, &mut inner);
+                        }
+                    }
+                }
+                scene.flush();
+                for yi in 0..40 {
+                    for xi in 0..6 {
+                        let (x, y) = (xi as f32 * 51. + 2., yi as f32 * 9.97 + 0.25);
+                        scene.unproved_walks = false;
+                        // Asked twice, as a resting pointer is: the second
+                        // proves rows in their own frame (`hit_resting`).
+                        scene.hit_test_all_walked(x, y);
+                        let proved = scene.hit_test_all_walked(x, y);
+                        scene.unproved_walks = true;
+                        let walked = scene.hit_test_all_walked(x, y);
+                        scene.unproved_walks = false;
+                        assert_eq!(proved, walked, "far {far}, step {step}, at ({x}, {y})");
+                    }
+                }
+            }
+            assert!(
+                scene.hit_proofs_reused.get() > reused + 10,
+                "far {far}: kept proofs taken {} times",
+                scene.hit_proofs_reused.get() - reused
+            );
+        }
+    }
+    /// A row whose child reaches a hundredth of a point past it, proved
+    /// under its view while scrolled a million points away (where the two
+    /// round to one), keeps no proof from there: scrolled back, a point in
+    /// that hundredth still hits the child.
+    #[test]
+    fn a_proof_made_far_down_holds_nothing_back_near_the_top() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let mut scene = Scene::new(400., 400.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let view = scene.append(root, NodeKind::Container(Layout::Overlay), sized(300., 20.));
+        let content = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_scroll_copy(content, true);
+        let row = scene.append(
+            content,
+            NodeKind::Container(Layout::Overlay),
+            sized(100., 20.),
+        );
+        let child = scene.append(
+            row,
+            NodeKind::Quad(QuadStyle::default()),
+            sized(100., 20.01),
+        );
+        scene.set_transform(content, Transform { x: 0., y: -1.0e6 });
+        scene.flush();
+        // Below the view: its proof, the row under it a million points up.
+        // Twice, as a resting pointer asks: the second proves the row in
+        // its own frame.
+        scene.hit_test_all_walked(10., 30.);
+        assert!(!scene.hit_test_all_walked(10., 30.).contains(&child));
+        scene.set_transform(content, Transform { x: 0., y: 0. });
+        scene.flush();
+        let hits = scene.hit_test_all_walked(10., 20.005);
+        scene.unproved_walks = true;
+        assert_eq!(hits, scene.hit_test_all_walked(10., 20.005));
+        assert!(hits.contains(&child), "{hits:?}");
+    }
+    /// A row taller than the view it scrolls in, all it holds within its
+    /// own box: the view's proof fails on it without deciding its own, so a
+    /// point below the row skips everything in it.
+    #[test]
+    fn a_row_past_its_view_still_proves_its_own_box() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let mut scene = Scene::new(400., 400.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let view = scene.append(root, NodeKind::Container(Layout::Overlay), sized(300., 20.));
+        let content = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_scroll_copy(content, true);
+        let row = scene.append(
+            content,
+            NodeKind::Container(Layout::Column),
+            sized(100., 30.),
+        );
+        for _ in 0..40 {
+            scene.append(row, NodeKind::Quad(QuadStyle::default()), sized(100., 0.5));
+        }
+        scene.set_transform(content, Transform { x: 0., y: -3.25 });
+        scene.flush();
+        // Below the view (its proof fails on the row), then below the row.
+        scene.hit_test_all_walked(10., 22.);
+        let before = scene.hit_nodes_walked();
+        let hits = scene.hit_test_all_walked(10., 28.);
+        let walked = scene.hit_nodes_walked() - before;
+        scene.unproved_walks = true;
+        assert_eq!(hits, scene.hit_test_all_walked(10., 28.));
+        if cfg!(debug_assertions) {
+            assert!(
+                walked < 10,
+                "walked {walked} nodes: the row's 40 were entered"
+            );
         }
     }
     #[test]
