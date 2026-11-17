@@ -112,12 +112,23 @@ def window_steps(env, wayland):
 
 
 def run(binary, env, output, name, extra, during=None):
-    """The example for `SECONDS` (and what `during` does meanwhile), its
-    stderr's lines."""
+    """The example for `SECONDS` from its first frame shown (and what
+    `during` does meanwhile), its stderr's lines. The seconds start at the
+    window's first present (`ZGX_SHADER_LOG=1`'s line), not its launch: on
+    a loaded runner a start of three seconds left the rest too few frames
+    to judge, or none."""
     log = output / f"{name}.log"
     with log.open("w") as stderr:
-        app = subprocess.Popen([str(binary)], env=dict(env, **extra), stdout=stderr, stderr=stderr)
+        app = subprocess.Popen([str(binary)], env=dict(env, ZGX_SHADER_LOG="1", **extra), stdout=stderr,
+                               stderr=stderr)
         try:
+            deadline = time.monotonic() + 60
+            while "zgx: first frame presented" not in log.read_text(errors="replace"):
+                if app.poll() is not None:
+                    raise RuntimeError(f"{name}: the example exited before its first frame ({app.returncode}); see {log}")
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"{name}: no frame presented in 60 s; see {log}")
+                time.sleep(.05)
             if during:
                 time.sleep(.8)
                 during()
