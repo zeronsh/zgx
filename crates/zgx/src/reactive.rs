@@ -146,6 +146,85 @@ impl Effects {
 /// most nodes' effects join (the inherited typography) is removed from
 /// one by one as they go, in constant time.
 type IdSet = HashSet<EffectId, std::hash::BuildHasherDefault<IdHasher>>;
+/// No effect: `born` stays under `1 << (64 - SLOT_BITS)`, so no id is it.
+const NO_EFFECT: EffectId = EffectId::MAX;
+/// A signal's subscribers: the one or two most signals have inline, a set
+/// past that. No bigger than an empty set, and allocates only at a third.
+enum Subscribers {
+    Inline([EffectId; 2]),
+    Set(IdSet),
+}
+impl Default for Subscribers {
+    fn default() -> Self {
+        Self::Inline([NO_EFFECT; 2])
+    }
+}
+impl Subscribers {
+    /// Whether `id` was not subscribed already.
+    #[inline]
+    fn insert(&mut self, id: EffectId) -> bool {
+        match self {
+            Self::Inline(ids) => {
+                if ids.contains(&id) {
+                    return false;
+                }
+                if let Some(free) = ids.iter_mut().find(|slot| **slot == NO_EFFECT) {
+                    *free = id;
+                    return true;
+                }
+                self.spill(id);
+                true
+            }
+            Self::Set(set) => set.insert(id),
+        }
+    }
+    /// A third subscriber: the set takes the two and it.
+    #[cold]
+    #[inline(never)]
+    fn spill(&mut self, id: EffectId) {
+        if let Self::Inline(ids) = *self {
+            let mut set = IdSet::default();
+            set.extend(ids);
+            set.insert(id);
+            *self = Self::Set(set);
+        }
+    }
+    fn remove(&mut self, id: EffectId) {
+        match self {
+            Self::Inline(ids) => {
+                if let Some(slot) = ids.iter_mut().find(|slot| **slot == id) {
+                    *slot = NO_EFFECT;
+                }
+            }
+            Self::Set(set) => {
+                set.remove(&id);
+            }
+        }
+    }
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Inline(ids) => ids.iter().all(|id| *id == NO_EFFECT),
+            Self::Set(set) => set.is_empty(),
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = &EffectId> {
+        let (inline, set) = match self {
+            Self::Inline(ids) => (Some(ids.iter().filter(|id| **id != NO_EFFECT)), None),
+            Self::Set(set) => (None, Some(set.iter())),
+        };
+        inline
+            .into_iter()
+            .flatten()
+            .chain(set.into_iter().flatten())
+    }
+    /// The room it holds beside itself (a memory report's).
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Inline(_) => 0,
+            Self::Set(set) => crate::memory::set_bytes(set),
+        }
+    }
+}
 #[derive(Default)]
 struct Inner {
     effects: RefCell<Effects>,
@@ -1048,7 +1127,7 @@ struct SignalInner<T> {
     value: RefCell<T>,
     /// Writes that changed the value (`Signal::version`).
     version: Cell<u64>,
-    subscribers: RefCell<IdSet>,
+    subscribers: RefCell<Subscribers>,
     runtime: Weak<Inner>,
 }
 // A traced signal's maker goes with it: its address may be another's next.
@@ -1062,7 +1141,7 @@ impl<T> Drop for SignalInner<T> {
 }
 impl<T> Dependency for SignalInner<T> {
     fn unsubscribe(&self, id: EffectId) {
-        self.subscribers.borrow_mut().remove(&id);
+        self.subscribers.borrow_mut().remove(id);
     }
     fn bytes(&self) -> usize {
         2 * size_of::<usize>()
@@ -1070,7 +1149,7 @@ impl<T> Dependency for SignalInner<T> {
             + self
                 .subscribers
                 .try_borrow()
-                .map_or(0, |subscribers| crate::memory::set_bytes(&subscribers))
+                .map_or(0, |subscribers| subscribers.bytes())
     }
 }
 /// Effects held by [`Runtime::hold_effects`] until it drops.
@@ -1743,6 +1822,70 @@ mod tests {
             assert!(runtime.inner.queued.borrow().is_empty());
             assert!(runtime.inner.pending.borrow().is_empty());
         });
+    }
+
+    #[test]
+    fn two_subscribers_stay_inline_and_a_third_takes_a_set() {
+        assert!(size_of::<Subscribers>() <= size_of::<IdSet>());
+        let runtime = Runtime::new();
+        let value = runtime.signal(0);
+        let runs = Rc::new(Cell::new(0));
+        let reader = || {
+            let (value, runs) = (value.clone(), runs.clone());
+            runtime.effect(move || {
+                value.get();
+                runs.set(runs.get() + 1);
+            })
+        };
+        let inline = |value: &Signal<i32>| {
+            matches!(*value.inner.subscribers.borrow(), Subscribers::Inline(_))
+        };
+        let (first, second) = (reader(), reader());
+        assert!(inline(&value));
+        assert_eq!(value.inner.subscribers.borrow().bytes(), 0);
+        value.set(1);
+        assert_eq!(runs.get(), 4);
+        // One goes, and the next takes its place: still inline.
+        drop(first);
+        value.set(2);
+        assert_eq!(runs.get(), 5);
+        let third = reader();
+        assert!(inline(&value));
+        let fourth = reader();
+        assert!(!inline(&value));
+        assert!(value.inner.subscribers.borrow().bytes() > 0);
+        value.set(3);
+        assert_eq!(runs.get(), 10);
+        drop((second, third, fourth));
+        assert!(!value.is_observed());
+        value.set(4);
+        assert_eq!(runs.get(), 10);
+    }
+
+    #[test]
+    fn an_inline_subscriber_reading_twice_is_one_subscriber() {
+        let mut subscribers = Subscribers::default();
+        assert!(subscribers.is_empty());
+        assert!(subscribers.insert(7));
+        assert!(!subscribers.insert(7));
+        assert!(subscribers.insert(9));
+        assert!(!subscribers.insert(9));
+        assert!(subscribers.insert(11));
+        assert!(!subscribers.insert(7));
+        let mut ids: Vec<_> = subscribers.iter().copied().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [7, 9, 11]);
+        subscribers.remove(9);
+        subscribers.remove(9);
+        let mut ids: Vec<_> = subscribers.iter().copied().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [7, 11]);
+        let mut subscribers = Subscribers::default();
+        subscribers.insert(3);
+        subscribers.remove(5);
+        subscribers.remove(3);
+        assert!(subscribers.is_empty());
+        assert_eq!(subscribers.iter().count(), 0);
     }
 
     #[test]
