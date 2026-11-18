@@ -217,8 +217,13 @@ impl<T: 'static> EventLoop<T> {
 
         let ime = ime.ok().map(RefCell::new);
 
-        let randr_event_offset =
-            xconn.select_xrandr_input(root).expect("Failed to query XRandR extension");
+        // None without RandR: its monitor (the root window) never changes.
+        let randr_event_offset = match xconn.randr_version() {
+            Some(_) => Some(
+                xconn.select_xrandr_input(root).expect("Failed to query XRandR extension"),
+            ),
+            None => None,
+        };
 
         let xi2ext = xconn
             .xcb_connection()
