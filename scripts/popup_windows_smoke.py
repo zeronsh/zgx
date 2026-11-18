@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Popups past their window on X11 (Xvfb/Openbox), driving the popup_probe
-example: a menu hanging past its window's bottom edge shows in a window of
-its own, override-redirect, typed a popup menu and transient for its parent,
-its rows past the parent's edge drawn and chosen there; a press on the bare
-desktop closes it (the pointer grab a menu holds); and no popup window
-exists before one is wanted, nor shows once it closed. A popup whose frame
-panics every time it is drawn (`ZGX_PANIC_IN`, debug builds) is reported
-once and skipped while the app runs on and still closes it. With no compositor
-a menu's window is its panel alone, corners cut, and the system reports reduced
-transparency; under picom it keeps its shadow's margin, with no shadow of
-picom's round it. At a scale of 2 (`WINIT_X11_SCALE_FACTOR`), its window is its
-size in the screen's pixels, where the scene put it in them, and its last item
-is chosen there."""
+example: a menu hanging past its window's bottom edge shows in a window of its
+own, override-redirect, typed a popup menu and transient for its parent, its
+rows past the parent's edge drawn and chosen there, with no window manager too;
+a press on the bare desktop closes it (the pointer grab a menu holds); and no
+popup window exists before one is wanted, nor shows once it closed. A popup
+whose frame panics every time it is drawn (`ZGX_PANIC_IN`, debug builds) is
+reported once and skipped while the app runs on and still closes it. With no
+compositor a menu's window is its panel alone, corners cut, and the system
+reports reduced transparency; under picom it keeps its shadow's margin, with no
+shadow of picom's round it. At a scale of 2 (`WINIT_X11_SCALE_FACTOR`), its
+window is its size in the screen's pixels, where the scene put it in them, and
+its last item is chosen there."""
 import argparse
 import json
 import os
@@ -39,8 +39,16 @@ def main():
     processes, checks = [], {}
 
     def launch(name, command, env, **options):
-        log = (args.output / (name + ".log")).open("w")
-        child = subprocess.Popen(command, env=env, stdout=options.pop("stdout", log), stderr=log, **options)
+        path = args.output / (name + ".log")
+        log = path.open("w")
+        stdout = options.pop("stdout", log)
+        # Output to this same file (the application's log) takes its errors
+        # through one handle: two handles on one file each wrote from its
+        # start, and a line on stderr (an old Vulkan loader's warning)
+        # overwrote READY. A file of its own for each keeps them apart.
+        same = stdout is not log and getattr(stdout, "name", None) == str(path)
+        stderr = subprocess.STDOUT if same else log
+        child = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr, **options)
         processes.append(child)
         return child
 
@@ -284,11 +292,36 @@ def main():
         run("xdotool", "click", 1)
         until("the item chosen at 2x", lambda: 'CHOSEN "Item 8"' in log.read_text())
         checks["2x: chosen past the window"] = True
+
+        # With no window manager (a headless capture's X server): the menu
+        # still opens in its own window. Its window was made after the
+        # frame that found none ready, and only a window manager's events
+        # brought another frame to show it: the menu stayed open, shown
+        # nowhere.
+        bare = dict(env, WINIT_X11_SCALE_FACTOR="1")
+        xvfb = launch("xvfb-bare", ["Xvfb", "-r", "-noreset", "-displayfd", "1", "-screen", "0", "%dx%dx24" % SCREEN,
+                                    "-ac"], bare, stdout=subprocess.PIPE, text=True)
+        if not select.select([xvfb.stdout], [], [], 30)[0]:
+            raise RuntimeError("Xvfb startup timed out")
+        env = bare
+        env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
+        log = args.output / "application-bare.log"
+        app = launch("application-bare", [str(args.binary.resolve())], env, stdout=log.open("w"))
+        until("READY with no window manager", lambda: "READY" in log.read_text())
+        main_window = until("the window with no window manager", lambda: (windows(True) or [None])[0])
+        x, y, w, h = geometry(main_window)
+        run("xdotool", "mousemove", x + 76, y + h - 30)
+        time.sleep(.3)
+        run("xdotool", "click", 1)
+        until("the menu open with no window manager", lambda: state().startswith("OPEN true"))
+        popup = until("the menu's window with no window manager",
+                      lambda: next((win for win in windows(True) if win != main_window), None), 5)
+        checks["no window manager: menu window"] = list(geometry(popup))
         (args.output / "result.json").write_text(json.dumps(checks, indent=2) + "\n")
         assert all(value is not False for value in checks.values()), checks
         print("PASS: a menu past its window on X11: its own override-redirect popup-menu window, "
               "drawn and chosen past the edge, closed by a press on the desktop, nothing at rest, "
-              "and at a scale of 2 in the screen's pixels")
+              "at a scale of 2 in the screen's pixels, and with no window manager")
     finally:
         for process in reversed(processes):
             stop(process)

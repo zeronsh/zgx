@@ -4022,6 +4022,17 @@ impl Scene {
             &self.popups
         }
     }
+    /// Popup roots open but held while the app is at the back
+    /// (`set_popups_held`): those `popups` leaves out, which show as it
+    /// comes forward.
+    #[doc(hidden)]
+    pub fn held_popups(&self) -> Vec<NodeId> {
+        if !self.popups_held {
+            return Vec::new();
+        }
+        let held = self.popups.iter().filter(|id| self.popup_held(**id));
+        held.copied().collect()
+    }
     /// What popup root `id` is, for a host that stacks each kind as its
     /// platform does; a root opened for the app to see waits for it to come
     /// forward (`set_popups_held`). Set before `set_popup`.

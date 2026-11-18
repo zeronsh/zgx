@@ -8615,6 +8615,17 @@ impl WindowManager {
             return;
         }
         let active = self.hosts.values().any(|host| host.native_focused);
+        // With no window manager (a bare X server, as headless machines
+        // run), nothing gives a window focus: the app would stay at the back
+        // and its popups past the window wait for ever, open and shown
+        // nowhere. There it is as forward as anything.
+        #[cfg(target_os = "linux")]
+        let active = active
+            || self.hosts.values().any(|host| {
+                host.window
+                    .as_ref()
+                    .is_some_and(|window| crate::x11_work_area::unmanaged(window))
+            });
         if self.app_was_active != active {
             self.app_was_active = active;
             // The interface-sound setting, changed in another app meanwhile.

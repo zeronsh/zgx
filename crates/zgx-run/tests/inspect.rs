@@ -219,6 +219,64 @@ fn an_app_serves_its_session_on_a_socket_only_its_user_reaches() {
     drop(server);
 }
 
+/// A popup open while the app is at the back waits, held, to show as it
+/// comes forward: `windows` lists it held, and why, not as none. A capture
+/// of an app on an X server with no window manager (never focused) read
+/// `popups: []` with a menu open.
+#[test]
+fn windows_lists_a_held_popup_held() {
+    let app = TestApp::new(|runtime| {
+        ScriptHost::inline(
+            runtime,
+            "app",
+            r##"
+local fruit = ui.state("fruit", "apple")
+return ui.select { id = "fruit", label = "Fruit", value = fruit, w = 160, options = { "apple", "fig" } }
+"##,
+        )
+    });
+    // Popups past the window, as a desktop host shows them; the app at the back.
+    app.ui
+        .set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1200., 900.)]);
+    app.ui.set_app_active(false);
+    let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"click","target":"#fruit"}"##,
+    ));
+    // The main window's popups, as JSON.
+    let popups = |answer: &Value| match answer.field("data") {
+        Some(Value::List(windows)) => (windows.first())
+            .and_then(|main| main.field("popups"))
+            .map(Value::to_json)
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let held = ask(&app, &session, r#"{"cmd":"windows"}"#);
+    let listed = text(&held);
+    assert!(listed.contains("\n  popup @"), "{listed}");
+    assert!(listed.contains("held: the app is at the back"), "{listed}");
+    assert!(
+        popups(&held).contains(r#""held":true"#),
+        "{}",
+        popups(&held)
+    );
+    // Forward: shown, and listed so.
+    app.ui.set_app_active(true);
+    let shown = ask(&app, &session, r#"{"cmd":"windows"}"#);
+    let listed = text(&shown);
+    assert!(
+        listed.contains("\n  popup @") && !listed.contains("held"),
+        "{listed}"
+    );
+    assert!(
+        popups(&shown).contains(r#""held":false"#),
+        "{}",
+        popups(&shown)
+    );
+}
+
 #[test]
 fn a_snapshot_is_a_png_of_the_node_only_its_user_reads() {
     let (app, session) = app();

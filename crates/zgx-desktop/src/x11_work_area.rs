@@ -126,19 +126,55 @@ fn cardinals(connection: &impl Connection, window: u32, property: u32) -> Option
     Some(reply.value32()?.collect())
 }
 
+thread_local! {
+    /// A connection kept for what is asked as windows move and focus does
+    /// (`current`, `unmanaged`), and its screen's root.
+    static CONNECTION: Option<(x11rb::rust_connection::RustConnection, u32)> =
+        x11rb::connect(None).ok().map(|(connection, screen)| {
+            let root = connection.setup().roots[screen].root;
+            (connection, root)
+        });
+}
+
 /// The current desktop's work area, on a connection kept for it: what
 /// popups may cover (`popup_window`), asked as the window moves.
 pub(crate) fn current() -> Option<(i32, i32, i32, i32)> {
-    thread_local! {
-        static CONNECTION: Option<(x11rb::rust_connection::RustConnection, u32)> =
-            x11rb::connect(None).ok().map(|(connection, screen)| {
-                let root = connection.setup().roots[screen].root;
-                (connection, root)
-            });
-    }
     CONNECTION.with(|connection| {
         let (connection, root) = connection.as_ref()?;
         work_area(connection, *root)
+    })
+}
+
+/// Whether `window` is an X11 window on a display no window manager runs
+/// (no `_NET_SUPPORTING_WM_CHECK` naming a live window, EWMH): a bare X
+/// server, as headless machines run. Nothing gives a window focus there, so
+/// winit never reports one focused.
+pub(crate) fn unmanaged(window: &Window) -> bool {
+    let x11 = window.window_handle().is_ok_and(|handle| {
+        matches!(
+            handle.as_raw(),
+            RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)
+        )
+    });
+    x11 && CONNECTION.with(|connection| {
+        let Some((connection, root)) = connection.as_ref() else {
+            return false;
+        };
+        let Some(check) = atom(connection, "_NET_SUPPORTING_WM_CHECK") else {
+            return true;
+        };
+        let child = |window: u32| {
+            connection
+                .get_property(false, window, check, AtomEnum::WINDOW, 0, 1)
+                .ok()?
+                .reply()
+                .ok()?
+                .value32()?
+                .next()
+        };
+        // The manager's own window names itself: one left by a manager
+        // gone names nothing (or a window gone).
+        child(*root).is_none_or(|own| child(own) != Some(own))
     })
 }
 
