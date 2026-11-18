@@ -8206,7 +8206,8 @@ impl ListStretch {
 /// How far scroll view `viewport` (the node holding its content) moves its
 /// content along its axis so focused `target` inside shows: the least
 /// (CSS's `nearest`), the view's `scroll_padding` kept clear; 0 where it
-/// shows, or spans the view. None if either is gone.
+/// shows, or spans the view. None if either is gone. The rule and the
+/// padding are `NodeHandle::scroll_into_view`'s (`scroll_reveal`).
 pub(crate) fn focus_movement(
     ui: &Ui,
     target: NodeId,
@@ -8219,34 +8220,12 @@ pub(crate) fn focus_movement(
         return None;
     }
     let target = scene.bounds(target);
-    let visible = scene.bounds(viewport);
-    let (target_start, target_size, visible_start, visible_size) = if horizontal {
-        let size = (visible.width - padding.left - padding.right).max(0.);
-        (target.x, target.width, visible.x + padding.left, size)
-    } else {
-        let size = (visible.height - padding.top - padding.bottom).max(0.);
-        (target.y, target.height, visible.y + padding.top, size)
+    let shown = crate::scroll_reveal::padded(scene.bounds(viewport), padding);
+    let (start, size, from, length) = match horizontal {
+        true => (target.x, target.width, shown.x, shown.width),
+        false => (target.y, target.height, shown.y, shown.height),
     };
-    let start_delta = target_start as f64 - visible_start as f64;
-    let end_delta =
-        target_start as f64 + target_size as f64 - visible_start as f64 - visible_size as f64;
-    Some(if start_delta < 0. && end_delta > 0. {
-        0. // Oversized targets already spanning the viewport stay put.
-    } else if start_delta < 0. {
-        if target_size > visible_size {
-            end_delta
-        } else {
-            start_delta
-        }
-    } else if end_delta > 0. {
-        if target_size > visible_size {
-            start_delta
-        } else {
-            end_delta
-        }
-    } else {
-        0.
-    })
+    Some(crate::scroll_reveal::shift(RowAlign::Nearest, start, size, from, length, 0.) as f64)
 }
 /// Where a list that scrolls with the scroll view around it
 /// (`View::virtualize_in_ancestor`) shows: its viewport's place, and those

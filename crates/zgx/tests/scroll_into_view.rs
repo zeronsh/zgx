@@ -283,3 +283,107 @@ fn the_person_scrolling_stops_an_ease_where_it_is() {
         .unwrap();
     assert_eq!(offset.get(), after, "the wheel's, not the reveal's");
 }
+
+/// Ten focusable rows 40 high in a 200 × 100 scroll view whose
+/// `scroll_padding` keeps 20 clear at its top and 30 at its bottom (a bar
+/// over each edge): what shows is 20 to 70 of it.
+fn padded_rows(ui: &mut Ui) -> (zgx::reactive::Signal<f32>, zgx::compose::ViewHandle) {
+    let offset = ui.signal(0.);
+    let view = ui.mount(
+        scroll(offset.clone())
+            .w(200.)
+            .h(100.)
+            .scroll_padding(zgx::scene::Insets {
+                top: 20.,
+                bottom: 30.,
+                ..Default::default()
+            })
+            .children((0..10).map(|n| div().id(format!("r{n}")).h(40.).focusable(true))),
+    );
+    ui.prepare_frame();
+    (offset, view)
+}
+
+/// As the web's `scroll-padding`: a node scrolled into view shows within
+/// the padding, not under what it keeps clear.
+#[test]
+fn the_views_scroll_padding_is_kept_clear() {
+    let mut ui = Ui::new(400., 300.);
+    let (offset, view) = padded_rows(&mut ui);
+    let r5 = view.find("r5").unwrap();
+    // r5 is 200 to 240 down the rows.
+    assert!(ui.scroll_node_into_view(r5, down(RowAlign::Start)));
+    assert_eq!(offset.get(), 180., "its top 20 below the view's");
+    assert!(ui.scroll_node_into_view(r5, down(RowAlign::End)));
+    assert_eq!(offset.get(), 170., "its bottom 30 above the view's");
+    assert!(ui.scroll_node_into_view(r5, down(RowAlign::Center)));
+    assert_eq!(offset.get(), 175., "centred in the 50 between");
+    offset.set(0.);
+    ui.prepare_frame();
+    assert!(ui.scroll_node_into_view(r5, down(RowAlign::Nearest)));
+    assert_eq!(offset.get(), 170.);
+    // Shown under the top's padding, it isn't shown: nearest moves it.
+    offset.set(190.);
+    ui.prepare_frame();
+    assert!(ui.scroll_node_into_view(r5, down(RowAlign::Nearest)));
+    assert_eq!(offset.get(), 180.);
+}
+
+/// Focus shows a node by the same rule as `scroll_into_view`'s nearest,
+/// padding and all: from either side, the two land in the same place.
+#[test]
+fn focus_shows_a_node_where_scroll_into_view_nearest_does() {
+    for start in [0., 300.] {
+        for row in ["r2", "r5", "r8"] {
+            let mut ui = Ui::new(400., 300.);
+            let (offset, view) = padded_rows(&mut ui);
+            offset.set(start);
+            ui.prepare_frame();
+            let node = view.find(row).unwrap();
+            ui.scroll_node_into_view(node, down(RowAlign::Nearest));
+            let revealed = offset.get();
+            offset.set(start);
+            ui.prepare_frame();
+            ui.input.focus(&ui.scene, Some(node));
+            ui.prepare_frame();
+            assert_eq!(
+                offset.get(),
+                revealed,
+                "{row} from {start}: focus and scroll_into_view agree"
+            );
+        }
+    }
+}
+
+/// The web's `nearest` for a box taller than the view: one spanning it
+/// stays; one coming from above shows its end, from below its start.
+#[test]
+fn a_box_taller_than_the_view_shows_as_the_webs_nearest() {
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let view = ui.mount(
+        scroll(offset.clone())
+            .w(200.)
+            .h(100.)
+            .child(div().h(300.))
+            .child(div().id("tall").h(250.))
+            .child(div().h(300.)),
+    );
+    ui.prepare_frame();
+    let tall = view.find("tall").unwrap();
+    // 300 to 550 down; the view shows 100.
+    offset.set(350.);
+    ui.prepare_frame();
+    assert!(
+        !ui.scroll_node_into_view(tall, down(RowAlign::Nearest)),
+        "spanning the view: it stays"
+    );
+    offset.set(0.);
+    ui.prepare_frame();
+    assert!(ui.scroll_node_into_view(tall, down(RowAlign::Nearest)));
+    assert_eq!(offset.get(), 300., "from below: its start at the top");
+    offset.set(750.);
+    ui.prepare_frame();
+    assert!(ui.scroll_node_into_view(tall, down(RowAlign::Nearest)));
+    assert_eq!(offset.get(), 450., "from above: its end at the bottom");
+}

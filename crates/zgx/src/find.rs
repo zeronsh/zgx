@@ -601,14 +601,16 @@ impl Ui {
             let Some(visible) = self.scene.borrow().visible_bounds(viewport) else {
                 continue;
             };
+            // The reveal's rule (`scroll_reveal::shift`), a little room spared.
             let along = |start: f32, size: f32, from: f32, length: f32| {
-                if start < from {
-                    (start - from - ROOM).max(start + size - from - length)
-                } else if start + size > from + length {
-                    (start + size - from - length + ROOM).min(start - from)
-                } else {
-                    0.
-                }
+                crate::scroll_reveal::shift(
+                    crate::compose::RowAlign::Nearest,
+                    start,
+                    size,
+                    from,
+                    length,
+                    ROOM,
+                )
             };
             let dy = along(rect.y, rect.height, visible.y, visible.height);
             let dx = along(rect.x, rect.width, visible.x, visible.width);
