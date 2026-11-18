@@ -13347,12 +13347,14 @@ impl Scene {
         self.measure_depth -= 1;
         size
     }
-    /// A box measured with no placements kept from before: room for its
-    /// children's at once where the first room a list takes would not hold
-    /// them, rather than one allocation each time it doubles. As many or
-    /// fewer take that room as ever (another size would gain nothing but
-    /// a chunk the allocator reuses otherwise). Out of line: `measure_uncached`
-    /// keeps the call alone.
+    /// A box measured for the first time (just made): room for its
+    /// children's placements at once where the first room a list takes
+    /// would not hold them, rather than one allocation each time it
+    /// doubles. As many or fewer take that room as ever (another size would
+    /// gain nothing but a chunk the allocator reuses otherwise). Cold and
+    /// out of line: a box is made once and measured many times, and
+    /// `measure_uncached` keeps the call alone.
+    #[cold]
     #[inline(never)]
     fn placements_for(&self, id: NodeId) -> Vec<ChildPlacement> {
         let count = self.children_raw(self.tree_node(id)).len();
@@ -13438,6 +13440,8 @@ impl Scene {
         let pass = self.layout_pass;
         let node = self.tree_node_mut(id);
         let stale = node.dirty & LAYOUT != 0;
+        // Never measured: a box just made.
+        let made = node.measurement.is_none();
         let reused = match &mut node.measurement {
             Some(last) if layout.is_some() && stale && last.pass != pass => {
                 Some(std::mem::take(&mut last.children))
@@ -13446,7 +13450,7 @@ impl Scene {
         };
         let mut children = match reused {
             Some(reused) => reused,
-            None if layout.is_some() => self.placements_for(id),
+            None if made && layout.is_some() => self.placements_for(id),
             None => Vec::new(),
         };
         children.clear();
