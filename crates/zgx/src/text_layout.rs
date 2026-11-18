@@ -285,6 +285,14 @@ impl FontFeatures {
         let others = others.filter(|(tag, _)| *tag != Self::HAN);
         Self::settled(others.chain((han != 0).then_some((Self::HAN, han))))
     }
+    /// These features with `tag` set to `value`, in place of any it had.
+    #[doc(hidden)]
+    pub fn with_feature(&self, tag: [u8; 4], value: u32) -> Self {
+        if self.settings().contains(&(tag, value)) {
+            return self.clone();
+        }
+        Self::settled(self.settings().iter().copied().chain([(tag, value)]))
+    }
     /// zgx's mark on a style's features that say only a language
     /// (`Styled::lang`): they go over the inherited ones (`layered`), not
     /// in their place. Never in a text's resolved features.

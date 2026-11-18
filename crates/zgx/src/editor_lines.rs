@@ -330,6 +330,10 @@ pub struct LineMark {
     /// easing out, unless the system reduces motion.
     #[doc(hidden)]
     pub rotate: f32,
+    /// Its label in tabular figures (OpenType's `tnum`), each digit a figure's width: an ordered list's numbers,
+    /// lined up as the web's are.
+    #[doc(hidden)]
+    pub tabular: bool,
 }
 /// A line mark's picture (`LineMark::image`): decoded pixels and how they fit the mark's box. A file is decoded by
 /// the app, as an image view's is (`zgx_gpu::assets::decode_image_kept`), and kept in its `ImageCache`.
@@ -371,6 +375,7 @@ impl Default for LineMark {
             pinned: false,
             over_text: false,
             rotate: 0.,
+            tabular: false,
         }
     }
 }

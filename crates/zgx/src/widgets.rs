@@ -452,6 +452,9 @@ fn paint_marks(
                 if mark.mono {
                     label_font.family = crate::text_layout::FontFamily::Monospace;
                 }
+                if mark.tabular {
+                    label_font.features = label_font.features.with_feature(*b"tnum", 1);
+                }
                 if mark.height.is_finite() && mark.height > 0. {
                     label_font.line_height = crate::text_layout::LineHeight::px(mark.height);
                 }

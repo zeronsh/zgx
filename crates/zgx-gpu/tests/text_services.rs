@@ -125,3 +125,73 @@ fn a_run_on_a_grid_takes_its_cells_whichever_font_draws_it() {
         );
     }
 }
+
+/// A line mark's label in tabular figures (`LineMark::tabular`, OpenType's
+/// `tnum`: an ordered list's numbers, lined up as the web's): each digit of
+/// "1." and "11." a figure's width, as "8."'s is. Without it, Geist's "1"
+/// is narrower than its other figures, and a mark's label is as it was.
+#[test]
+fn a_tabular_mark_labels_digits_each_take_a_figures_width() {
+    use std::rc::Rc;
+    use zgx::scene::{Color, NodeKind};
+    use zgx::widgets::LineMark;
+    let services = TextServices::new();
+    zgx_gpu::text::FontData::new(include_bytes!("fonts/GeistVariable-subset.ttf").to_vec())
+        .unwrap()
+        .install(&mut services.text_system().borrow_mut());
+    let mut ui = Ui::new(400., 200.);
+    services.install(&mut ui.scene.borrow_mut());
+    let value = ui.signal("one\ntwo\nthree".to_owned());
+    let view = ui.mount(
+        text_area("Note", value)
+            .w(300.)
+            .h(150.)
+            .font_family("Geist")
+            .text_size(13.)
+            .line_height(20.),
+    );
+    ui.prepare_frame();
+    let editor = ui.editor(view.node()).unwrap();
+    editor.set_line_marks(Some(Rc::new(|i| {
+        let (label, tabular) = [("1.", true), ("11.", true), ("1.", false)][i.min(2)];
+        vec![LineMark {
+            width: 28.,
+            height: 20.,
+            label: Some((label.into(), Color(0, 0, 0, 255), 13.)),
+            tabular,
+            ..LineMark::default()
+        }]
+    })));
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    let (mut tabular, mut plain) = (Vec::new(), Vec::new());
+    let mut pending = vec![editor.node];
+    while let Some(id) = pending.pop() {
+        if let NodeKind::Text { text, .. } = scene.kind(id)
+            && text.ends_with('.')
+        {
+            let font = scene.font(id).clone();
+            let tnum = font.features.settings().contains(&(*b"tnum", 1));
+            if tnum { &mut tabular } else { &mut plain }.push((text.to_string(), font));
+        }
+        pending.extend_from_slice(scene.children(id));
+    }
+    assert_eq!(tabular.len(), 2, "{tabular:?}");
+    assert_eq!(plain.len(), 1, "a mark without it as it was: {plain:?}");
+    let width = |text: &str, font| scene.measure_text_with_font(text, 13., None, font).0;
+    let font = &tabular[0].1;
+    let figure = width("8.", font) - width(".", font);
+    assert!(
+        (width("1.", font) - width(".", font) - figure).abs() < 0.01,
+        "\"1\" a figure's width"
+    );
+    assert!(
+        (width("11.", font) - width(".", font) - 2. * figure).abs() < 0.01,
+        "\"11\" two figures' widths"
+    );
+    let font = &plain[0].1;
+    assert!(
+        width("1.", font) < width("8.", font) - 0.5,
+        "Geist's proportional \"1\" is narrower"
+    );
+}
