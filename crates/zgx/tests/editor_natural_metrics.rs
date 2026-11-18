@@ -87,7 +87,7 @@ fn viewport_focus_selection_and_scroll_reuse_metrics_but_content_and_font_invali
 
 #[test]
 fn span_weights_and_mentions_use_the_displayed_rich_shaper() {
-    let (ui, editor, _) = fixture("@mention and bold");
+    let (ui, editor, _) = fixture("@mention and bold text");
     ui.scene.borrow_mut().set_rich_text_shaper(|rich, width| {
         let runs: Vec<_> = rich
             .runs()
