@@ -6695,17 +6695,21 @@ fn mount_element(
     }
     ui.open_element(opened.root);
     // Its children's nodes, made one by one below: room for them at once
-    // (a dynamic child, a list or `each`, takes one place; its rows grow
-    // its own).
-    if !opened.children.is_empty() {
-        ui.scene
-            .borrow_mut()
-            .reserve_children(opened.child_parent, opened.children.len());
+    // where the first room a list takes would not hold them (a dynamic
+    // child, a list or `each`, takes one place; its rows grow its own).
+    if opened.children.len() > crate::scene::FIRST_CHILD_ROOM {
+        reserve_children(ui, opened.child_parent, opened.children.len());
     }
     for child in std::mem::take(&mut opened.children) {
         mount(ui, opened.child_parent, child, opened.environment.clone());
     }
     close_element(ui, opened)
+}
+/// `mount_element`'s reserve, out of line: most elements have no more
+/// children than a list's first room, and the call alone stays in it.
+#[inline(never)]
+fn reserve_children(ui: &Ui, parent: NodeId, count: usize) {
+    ui.scene.borrow_mut().reserve_children(parent, count);
 }
 /// A scroll view's or a list's own scrollbar style, taken before its
 /// element opens (a list's edges go to its region there) and held for the

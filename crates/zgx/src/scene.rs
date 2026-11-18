@@ -55,6 +55,10 @@ const EXPIRED_PASS: u64 = u64::MAX - 1;
 /// The children a column has as it looks at its end alone
 /// (`Scene::children_outgrown`): fewer cost little to lay out whole.
 const COLUMN_KEPT_FROM: usize = 64;
+/// The room a node's children take at its first: a `Vec` of ids starts at
+/// four. As many or fewer are reserved for gain nothing but a chunk of
+/// another size (`reserve_children`).
+pub(crate) const FIRST_CHILD_ROOM: usize = 4;
 /// Layout passes in a row a column lays out whole before it stops looking at
 /// its end alone (`Scene::column_laid_out_whole`): one that isn't streamed
 /// into pays no more than this.
@@ -8324,9 +8328,10 @@ impl Scene {
     /// about to append (`compose::mount_element`): one allocation of the
     /// size they take, not one each time the list doubles. A list that will
     /// be long grows as ever, so that its outgrowing is seen (`append_as`).
+    /// No more than the first room (`FIRST_CHILD_ROOM`), it takes none.
     pub(crate) fn reserve_children(&mut self, parent: NodeId, count: usize) {
         let children = self.node_mut(parent).children.get_mut();
-        if children.len() + count < COLUMN_KEPT_FROM {
+        if count > FIRST_CHILD_ROOM && children.len() + count < COLUMN_KEPT_FROM {
             children.reserve_exact(count);
         }
     }
@@ -17758,12 +17763,22 @@ impl<'a> Iterator for PaintIter<'a> {
 #[cfg(test)]
 mod tests {
     /// Children reserved for before they are appended take one allocation of
-    /// their size; a list that will be long grows as ever, so that its
-    /// outgrowing is seen (`long_lists`).
+    /// their size; as many as a list's first room take that room as ever,
+    /// and a list that will be long grows as ever, so that its outgrowing is
+    /// seen (`long_lists`).
     #[test]
-    fn reserved_children_take_their_room_at_once_unless_long() {
+    fn reserved_children_take_their_room_at_once_unless_few_or_long() {
         let mut scene = Scene::new(200., 200.);
         let root = scene.root();
+        let few = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.reserve_children(few, FIRST_CHILD_ROOM);
+        assert_eq!(scene.node_mut(few).children.get_mut().capacity(), 0);
+        scene.append(few, NodeKind::Container(Layout::Row), Style::default());
+        assert_eq!(
+            scene.node_mut(few).children.get_mut().capacity(),
+            FIRST_CHILD_ROOM,
+            "a list's first room"
+        );
         let short = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
         scene.reserve_children(short, 5);
         for _ in 0..5 {
