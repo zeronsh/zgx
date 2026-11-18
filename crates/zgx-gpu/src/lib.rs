@@ -2038,6 +2038,7 @@ struct Shaped {
     /// How much its glyphs' keys are thickened (`text::smoothing`, macOS):
     /// its colour's level, `PER_RUN` for rich text's (each glyph its run's),
     /// none until keyed for its colours (`smooth_glyphs`).
+    #[cfg(target_os = "macos")]
     smoothing: Option<u8>,
     atlas_epoch: u64,
     last_used: u64,
@@ -2059,10 +2060,12 @@ impl Shaped {
 }
 /// `Shaped::smoothing` of rich text: each glyph's key thickened by its
 /// run's colour.
+#[cfg(target_os = "macos")]
 const PER_RUN: u8 = u8::MAX;
 /// Key `shaped`'s glyphs for macOS's font smoothing (`text::smoothing`) by
 /// its colour, `color`, or each rich run's, unless they are already: its
 /// quads then hold other glyphs, placed again from the new ones.
+#[cfg(target_os = "macos")]
 fn smooth_glyphs(shaped: &mut Shaped, color: zgx::scene::Color) {
     let want = match shaped.rich {
         Some(_) => PER_RUN,
@@ -5268,6 +5271,7 @@ pub struct GpuRenderer {
     fresh: bool,
     /// `text::font_smoothing_epoch` its text was drawn at: another, and its
     /// next frame draws all of it again (`text::set_font_smoothing`).
+    #[cfg(target_os = "macos")]
     smoothing_epoch: u64,
     /// Consecutive presented frames whose damage covered the window.
     whole_frames: u32,
@@ -6124,6 +6128,7 @@ impl GpuRenderer {
             shaped_like: FxHashMap::default(),
             shaped_bytes: 0,
             fresh: true,
+            #[cfg(target_os = "macos")]
             smoothing_epoch: text::font_smoothing_epoch(),
             whole_frames: 0,
             rendered_serial: None,
@@ -7042,13 +7047,17 @@ impl GpuRenderer {
             }
         }
         // Text drawn thicker or lighter since (`text::set_font_smoothing`):
-        // every text's glyphs again, its layers' too.
-        let smoothing = text::font_smoothing_epoch();
-        if smoothing != self.smoothing_epoch {
-            self.smoothing_epoch = smoothing;
-            self.flush_pending();
-            self.layers.clear();
-            self.fresh = true;
+        // every text's glyphs again, its layers' too. macOS only: elsewhere
+        // nothing of it is compiled, so `render` is as it was.
+        #[cfg(target_os = "macos")]
+        {
+            let smoothing = text::font_smoothing_epoch();
+            if smoothing != self.smoothing_epoch {
+                self.smoothing_epoch = smoothing;
+                self.flush_pending();
+                self.layers.clear();
+                self.fresh = true;
+            }
         }
         let presented = std::mem::take(&mut self.present_stats);
         if compile::declared() + zgx::decoration::layer_shaders_declared() != self.fills_declared {
@@ -11141,7 +11150,10 @@ impl GpuRenderer {
                                     decoration.color = decoration.color_in(new);
                                 }
                                 shaped.rich = Some(new.clone());
-                                shaped.smoothing = None;
+                                #[cfg(target_os = "macos")]
+                                {
+                                    shaped.smoothing = None;
+                                }
                                 shaped.atlas_epoch = self.atlas_epoch.wrapping_sub(1);
                             }
                             shaped.rich != rich
@@ -11191,6 +11203,7 @@ impl GpuRenderer {
                             // (A twin's quads come with whether they hold colour glyphs,
                             // and its glyphs with how they are thickened.)
                             let mut twin_colored = false;
+                            #[cfg(target_os = "macos")]
                             let mut twin_smoothing = None;
                             let twin = content
                                 .and_then(|content| self.shaped_like.get(&content))
@@ -11207,7 +11220,10 @@ impl GpuRenderer {
                                 })
                                 .map(|twin| {
                                     spare_glyphs.extend_from_slice(&twin.glyphs);
-                                    twin_smoothing = twin.smoothing;
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        twin_smoothing = twin.smoothing;
+                                    }
                                     let placed = twin.atlas_epoch == self.atlas_epoch;
                                     if placed {
                                         spare_quads.extend_from_slice(&twin.quads);
@@ -11330,6 +11346,7 @@ impl GpuRenderer {
                                 glyphs,
                                 quads: spare_quads,
                                 colored: twin_colored,
+                                #[cfg(target_os = "macos")]
                                 smoothing: twin_smoothing,
                                 atlas_epoch: epoch.unwrap_or(0),
                                 last_used: self.frame,
@@ -11345,8 +11362,10 @@ impl GpuRenderer {
                             }
                         }
                         // On macOS, its glyphs thickened as its colour has macOS's
-                        // own text thickened: a new colour, new glyphs.
-                        if cfg!(target_os = "macos") {
+                        // own text thickened: a new colour, new glyphs. Compiled
+                        // only there, so elsewhere this function is as it was.
+                        #[cfg(target_os = "macos")]
+                        {
                             let held = match fresh.as_mut() {
                                 Some(shaped) => Some(shaped),
                                 None => self.shapes.get_mut(&item.id),
@@ -23302,6 +23321,7 @@ mod atlas_glyph_errors_tests {
                 .collect(),
             quads: Vec::new(),
             colored: false,
+            #[cfg(target_os = "macos")]
             smoothing: None,
             atlas_epoch: 0,
             last_used: 0,
