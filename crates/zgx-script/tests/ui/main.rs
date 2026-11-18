@@ -15,6 +15,8 @@ mod components;
 mod container_queries;
 #[path = "../decision.rs"]
 mod decision;
+#[path = "../dim.rs"]
+mod dim;
 #[path = "../display_contents.rs"]
 mod display_contents;
 #[path = "../drag_declined.rs"]

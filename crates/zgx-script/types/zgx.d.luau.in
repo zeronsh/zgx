@@ -2550,9 +2550,12 @@ export type NodeProps = {
 	tooltip_group: TooltipGroup?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
-	-- `false` keeps it undimmed while disabled (a disabled control is dimmed
-	-- unless it styles itself); it is still disabled for assistive technology.
-	dim: boolean?,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: (boolean | Readable<boolean> | (() -> boolean))?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,

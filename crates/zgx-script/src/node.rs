@@ -57,6 +57,10 @@ pub(crate) struct Node {
     /// lets it through).
     pub pointer_events: Option<Source>,
     pub disabled: Option<Source>,
+    /// `dim` given as a state or function: whether it looks disabled
+    /// (dimmed) while disabled, followed (a sending button that stays
+    /// disabled but keeps its ink).
+    pub dim: Option<Box<Source>>,
     /// `layout = "height"`: the node's size follows its content, animated.
     pub layout: Option<LayoutAnim>,
     /// `layout_id = "selection"`: a node mounting as another with the same
@@ -780,6 +784,7 @@ impl Node {
             focusable: None,
             pointer_events: None,
             disabled: None,
+            dim: None,
             layout: None,
             layout_id: None,
             mask: None,
@@ -4988,13 +4993,12 @@ fn fill_from(
                 node.pseudo.push((pseudo, lits.into()));
             }
             // `dim = false`: stays as it is while disabled (the read-only
-            // look is the app's), still disabled for assistive technology.
+            // look is the app's), still disabled for assistive technology; a
+            // state or function decides as it changes. Kept until the
+            // node's fields are all read (`variants::dimmed`).
             "dim" => match value {
-                mlua::Value::Boolean(false) => node
-                    .pseudo
-                    .push((Pseudo::Disabled, vec![(Prop::Opacity, Lit::Num(1.))].into())),
                 mlua::Value::Boolean(true) => {}
-                _ => return Err(mlua::Error::runtime("`dim` is a boolean")),
+                value => node.dim = Some(Box::new(source(lua, Ty::Bool, "dim", value)?)),
             },
             "variants" => match value {
                 mlua::Value::UserData(ud) if ud.is::<crate::variants::SelectionUd>() => {
@@ -5185,6 +5189,10 @@ fn fill_from(
     {
         layout.height = false;
         layout.position = true;
+    }
+    // `dim`: one more variant, chosen as it says.
+    if node.dim.is_some() {
+        variants = Some(crate::variants::dimmed(lua, node, variants.take())?);
     }
     // What the element's variants set and it does not.
     if let Some(selection) = variants {
