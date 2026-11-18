@@ -119,6 +119,7 @@ unsafe extern "C" {
     fn CGContextSetShouldSubpixelPositionFonts(context: CFTypeRef, on: bool);
     fn CGContextSetAllowsFontSubpixelQuantization(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSubpixelQuantizeFonts(context: CFTypeRef, on: bool);
+    fn CGContextClearRect(context: CFTypeRef, rect: CGRect);
 }
 /// `kCGImageAlphaOnly`: a context of one alpha byte a pixel.
 const ALPHA_ONLY: u32 = 7;
@@ -156,7 +157,59 @@ struct Cache {
 }
 thread_local! {
     static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
+    /// The bitmap glyphs are drawn into, kept: made, set up and released
+    /// for each glyph, a context costs as much as the glyph's drawing.
+    static CANVAS: RefCell<Option<Canvas>> = const { RefCell::new(None) };
 }
+/// A one-byte-a-pixel context over `pixels`, `width` by `height`, set up to
+/// draw glyphs as macOS draws its text: each glyph cleared for and drawn in
+/// its bottom left corner (Core Graphics' origin), then copied out.
+struct Canvas {
+    // Dropped (released) before `pixels`, which it draws into.
+    context: Owned,
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+impl Canvas {
+    /// One at least `width` by `height`, grown in steps of 64 so a few
+    /// sizes make all of them.
+    fn at_least(width: usize, height: usize) -> Option<Canvas> {
+        let (width, height) = (width.next_multiple_of(64), height.next_multiple_of(64));
+        let mut pixels = vec![0u8; width * height];
+        // SAFETY: `pixels` is the context's `width` by `height` bytes, kept
+        // beside it in `Canvas` and dropped after it.
+        unsafe {
+            let context = CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                width,
+                height,
+                8,
+                width,
+                std::ptr::null(),
+                ALPHA_ONLY,
+            );
+            if context.is_null() {
+                return None;
+            }
+            CGContextSetAllowsFontSmoothing(context, true);
+            CGContextSetShouldAntialias(context, true);
+            CGContextSetAllowsFontSubpixelPositioning(context, true);
+            CGContextSetShouldSubpixelPositionFonts(context, true);
+            CGContextSetAllowsFontSubpixelQuantization(context, false);
+            CGContextSetShouldSubpixelQuantizeFonts(context, false);
+            Some(Canvas {
+                context: Owned(context),
+                pixels,
+                width,
+                height,
+            })
+        }
+    }
+}
+/// The largest canvas kept between glyphs, a side in pixels: a glyph past
+/// it (a heading zoomed far in) draws in one of its own, let go after.
+const KEPT_CANVAS: usize = 256;
 
 /// `key`'s glyph through Core Text, as macOS draws its own text; none for a
 /// colour face's (emoji: swash draws their bitmaps and layers) or an inline
@@ -397,45 +450,56 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
         let bottom = (rect.origin.y + dy).floor() as i32 - 1;
         let top = (rect.origin.y + rect.size.height + dy).ceil() as i32 + 1;
         let (width, height) = ((right - left) as u32, (top - bottom) as u32);
-        let mut data = vec![0u8; width as usize * height as usize];
-        // SAFETY: `data` is the context's `width` by `height` bytes and
-        // outlives it; the context is released before `data` is moved.
-        unsafe {
-            let context = CGBitmapContextCreate(
-                data.as_mut_ptr().cast(),
-                width as usize,
-                height as usize,
-                8,
-                width as usize,
-                std::ptr::null(),
-                ALPHA_ONLY,
-            );
-            if context.is_null() {
-                return None;
-            }
-            let context = Owned(context);
-            // Font smoothing thickens strokes, the more the lighter the
-            // fill, as macOS's own text is thickened by its colour's (four
-            // steps, plus one: `text::smoothing`; 0 not smoothed). An
-            // alpha-only context keeps only the coverage, so the fill colour
-            // says how much.
-            let smoothing = (key.flags & CacheKeyFlags::SMOOTHING).bits() >> 6;
-            CGContextSetAllowsFontSmoothing(context.0, true);
-            CGContextSetShouldSmoothFonts(context.0, smoothing > 0);
-            let level = smoothing.saturating_sub(1).min(4);
-            CGContextSetGrayFillColor(context.0, f64::from(level) * 0.25, 1.);
-            CGContextSetShouldAntialias(context.0, true);
-            CGContextSetAllowsFontSubpixelPositioning(context.0, true);
-            CGContextSetShouldSubpixelPositionFonts(context.0, true);
-            CGContextSetAllowsFontSubpixelQuantization(context.0, false);
-            CGContextSetShouldSubpixelQuantizeFonts(context.0, false);
-            // The pen where its offset puts it, from the box's corner.
-            let at = CGPoint {
-                x: dx - f64::from(left),
-                y: dy - f64::from(bottom),
+        let (w, h) = (width as usize, height as usize);
+        let data = CANVAS.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            let mut own = None;
+            let canvas = if w > KEPT_CANVAS || h > KEPT_CANVAS {
+                own.insert(Canvas::at_least(w, h)?)
+            } else {
+                if kept.as_ref().is_none_or(|c| c.width < w || c.height < h) {
+                    let (was_w, was_h) = kept.as_ref().map_or((0, 0), |c| (c.width, c.height));
+                    *kept = None;
+                    *kept = Some(Canvas::at_least(w.max(was_w), h.max(was_h))?);
+                }
+                kept.as_mut()?
             };
-            CTFontDrawGlyphs(font, &glyph, &at, 1, context.0);
-        }
+            let context = canvas.context.0;
+            // SAFETY: the context lives in the canvas, its pixels beside it;
+            // what it draws stays in the corner cleared for it.
+            unsafe {
+                let corner = CGRect {
+                    origin: CGPoint::default(),
+                    size: CGSize {
+                        width: f64::from(width),
+                        height: f64::from(height),
+                    },
+                };
+                CGContextClearRect(context, corner);
+                // Font smoothing thickens strokes, the more the lighter the
+                // fill, as macOS's own text is thickened by its colour's (four
+                // steps, plus one: `text::smoothing`; 0 not smoothed). An
+                // alpha-only context keeps only the coverage, so the fill
+                // colour says how much.
+                let smoothing = (key.flags & CacheKeyFlags::SMOOTHING).bits() >> 6;
+                CGContextSetShouldSmoothFonts(context, smoothing > 0);
+                let level = smoothing.saturating_sub(1).min(4);
+                CGContextSetGrayFillColor(context, f64::from(level) * 0.25, 1.);
+                // The pen where its offset puts it, from the box's corner.
+                let at = CGPoint {
+                    x: dx - f64::from(left),
+                    y: dy - f64::from(bottom),
+                };
+                CTFontDrawGlyphs(font, &glyph, &at, 1, context);
+            }
+            // Its rows, top first: the corner's are the canvas's last `h`.
+            let mut data = Vec::with_capacity(w * h);
+            for row in canvas.height - h..canvas.height {
+                let start = row * canvas.width;
+                data.extend_from_slice(&canvas.pixels[start..start + w]);
+            }
+            Some(data)
+        })?;
         let mut image = SwashImage::new();
         image.content = SwashContent::Mask;
         image.placement = Placement {
