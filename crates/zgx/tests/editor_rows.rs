@@ -202,3 +202,108 @@ fn a_marks_decoration_gives_its_quad_per_corner_radii_and_per_side_borders() {
     assert_eq!(decorated.len(), 1, "the first cell's mark");
     assert_eq!(decorated[0].0, decoration);
 }
+
+const SPANNED: &str = "before\nSpan\nA\nB\nC\nafter";
+
+/// A cell spanning three rows (`LineInset::spans_rows`, a table's `rowspan`), 120 tall with its room below, beside
+/// three rows of one 20-tall cell each.
+fn spanned() -> (Ui, EditorHandle) {
+    let mut ui = Ui::new(500., 400.);
+    let value = ui.signal(SPANNED.to_string());
+    let view = ui.mount(
+        text_area("Notes", value)
+            .w(400.)
+            .h(300.)
+            .p(0.)
+            .text_size(10.)
+            .line_height(20.)
+            .text_wrap(true),
+    );
+    ui.prepare_frame();
+    let editor = ui.editor(view.node()).unwrap();
+    editor.set_line_insets(Some(Rc::new(|i| match i {
+        1 => LineInset {
+            width: Some(100.),
+            below: 100.,
+            joins_next: true,
+            spans_rows: 3,
+            ..LineInset::default()
+        },
+        2..=4 => LineInset {
+            left: 110.,
+            width: Some(100.),
+            ..LineInset::default()
+        },
+        _ => LineInset::default(),
+    })));
+    editor.set_line_marks(Some(Rc::new(|i| match i {
+        1..=4 => vec![LineMark {
+            x: if i == 1 { 0. } else { 110. },
+            width: f32::INFINITY,
+            height: f32::INFINITY,
+            border_color: BORDER,
+            border_width: 1.,
+            ..LineMark::default()
+        }],
+        _ => Vec::new(),
+    })));
+    ui.input.focus(&ui.scene, Some(editor.node));
+    ui.prepare_frame();
+    (ui, editor)
+}
+
+/// The rows a cell spans share its height (equal rows, equally), its border reaches down them all, the line after
+/// starts below them; Down from it leaves them all, and Down beside it goes row by row.
+#[test]
+fn a_cell_spanning_rows_reaches_down_them_and_they_share_its_height() {
+    let (mut ui, editor) = spanned();
+    let span = line(&ui, &editor, "Span");
+    let (a, b, c) = (
+        line(&ui, &editor, "A"),
+        line(&ui, &editor, "B"),
+        line(&ui, &editor, "C"),
+    );
+    let after = line(&ui, &editor, "after");
+    assert_eq!(
+        (a.y, a.x),
+        (span.y, span.x + 110.),
+        "its first row beside it"
+    );
+    assert_eq!(b.y, a.y + 40., "each row a third of its 120: {a:?} {b:?}");
+    assert_eq!(c.y, b.y + 40.);
+    assert_eq!(after.y, span.y + 120., "the line after below them all");
+    let mut borders: Vec<Rect> = nodes(&ui, editor.node, |kind| match kind {
+        NodeKind::Quad(quad) if quad.border_color == BORDER => Some(()),
+        _ => None,
+    })
+    .into_iter()
+    .map(|(_, at)| at)
+    .collect();
+    borders.sort_by(|p, q| (p.y, p.x).partial_cmp(&(q.y, q.x)).unwrap());
+    assert_eq!(
+        borders,
+        [
+            Rect::new(span.x, span.y, 100., 120.),
+            Rect::new(a.x, a.y, 100., 40.),
+            Rect::new(b.x, b.y, 100., 40.),
+            Rect::new(c.x, c.y, 100., 40.),
+        ]
+    );
+    let at = |needle: &str| SPANNED.find(needle).unwrap();
+    editor.set_selection(at("A") + 1, at("A") + 1);
+    ui.prepare_frame();
+    press(&mut ui, Key::ArrowDown);
+    assert_eq!(
+        editor.selection().1,
+        at("B") + 1,
+        "the row below, beside it"
+    );
+    editor.set_selection(at("Span") + 2, at("Span") + 2);
+    ui.prepare_frame();
+    press(&mut ui, Key::ArrowDown);
+    assert!(
+        editor.selection().1 >= at("after"),
+        "below all the rows it spans: {}",
+        editor.selection().1
+    );
+}

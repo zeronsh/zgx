@@ -239,6 +239,13 @@ pub struct LineInset {
     /// as far as its scroll group's frame and scrolls sideways with the group (`scroll_group`), which it belongs in.
     #[doc(hidden)]
     pub nowrap: bool,
+    /// How many rows its cell spans (a table cell's `rowspan`), on the cell's first line: the cell joins its row
+    /// (`joins_next`), but its height counts toward its rows together, not its first's. Each of them is as tall as
+    /// its own cells, and what the cell needs past them all goes to them in proportion to their heights (to the
+    /// last where all are empty), as Chrome shares it. The lines of the rows after its first lay out at their own
+    /// lefts beside it; carets, hits and selection follow it across them. 0 or 1: its own row's.
+    #[doc(hidden)]
+    pub spans_rows: u16,
 }
 /// A scroll group's frame set by the app (`EditorHandle::set_group_frame`): each part given overrides what its
 /// lines say (a table's cells, whose borders and fills sit outside their text). All `None`: as its lines say.
@@ -1272,11 +1279,22 @@ struct Heights {
     each: Vec<f32>,
     /// Each line's own height, where any share a row (empty where none does: `each` is it).
     own: Vec<f32>,
+    /// The first lines of cells spanning rows (`LineInset::spans_rows`), in order, and how many: empty where
+    /// none does, each row then as tall as its tallest cell alone.
+    spans: Vec<(usize, u16)>,
 }
 impl Heights {
     /// Of lines `own` high, those at `joins` (in order) sharing a row with the next, those at `stacks` (in order,
-    /// among `joins`) its cell.
-    fn with_rows(own: Vec<f32>, joins: &[usize], stacks: &[usize]) -> Self {
+    /// among `joins`) its cell, and those at `spans` (in order) the first lines of cells spanning rows.
+    fn with_rows(
+        own: Vec<f32>,
+        joins: &[usize],
+        stacks: &[usize],
+        spans: Vec<(usize, u16)>,
+    ) -> Self {
+        if !spans.is_empty() {
+            return Self::spanned(own, joins, stacks, spans);
+        }
         if joins.is_empty() {
             return Self::new(own);
         }
@@ -1297,6 +1315,30 @@ impl Heights {
         heights.own = own;
         heights
     }
+    /// `with_rows` where cells span rows: every row settled together (`settle_rows`).
+    #[cold]
+    #[inline(never)]
+    fn spanned(own: Vec<f32>, joins: &[usize], stacks: &[usize], spans: Vec<(usize, u16)>) -> Self {
+        let mut each = vec![0.; own.len()];
+        let settled = settle_rows(
+            &own,
+            0..own.len(),
+            |j| joins.binary_search(&j).is_ok(),
+            |j| stacks.binary_search(&j).is_ok(),
+            |j| {
+                spans
+                    .binary_search_by_key(&j, |s| s.0)
+                    .map_or(1, |k| spans[k].1)
+            },
+        );
+        for (last, height) in settled {
+            each[last] = height;
+        }
+        let mut heights = Self::new(each);
+        heights.own = own;
+        heights.spans = spans;
+        heights
+    }
     fn new(each: Vec<f32>) -> Self {
         let mut tree: Vec<f64> = each.iter().map(|h| *h as f64).collect();
         for i in 0..tree.len() {
@@ -1309,6 +1351,7 @@ impl Heights {
             tree,
             each,
             own: Vec::new(),
+            spans: Vec::new(),
         }
     }
     /// Line `i`'s own height.
@@ -1356,6 +1399,61 @@ impl Heights {
     fn total(&self) -> f64 {
         self.above(self.tree.len())
     }
+}
+
+/// The heights rows of lines `lines` (whole rows, in order; `links`: a line and the next share a row, `stacks`: are
+/// one cell) add to the tops of those below, each at its row's last line: a row as tall as its tallest cell
+/// (`tallest_cell`), but a cell spanning rows (`spans`, on its first line: `LineInset::spans_rows`) counting toward
+/// its rows together. What it needs past their heights goes to them in proportion to those heights, all to the last
+/// where they are all empty, as Chrome shares a `rowspan` cell's height; cells in order, each on the rows the
+/// earlier left. A span reaching past `lines` is cut at their end.
+fn settle_rows(
+    own: &[f32],
+    lines: Range<usize>,
+    links: impl Fn(usize) -> bool,
+    stacks: impl Fn(usize) -> bool,
+    spans: impl Fn(usize) -> u16,
+) -> Vec<(usize, f32)> {
+    let mut rows: Vec<(usize, f32)> = Vec::new();
+    // Each spanning cell: its first row, how many it spans, its height.
+    let mut spanning: Vec<(usize, usize, f32)> = Vec::new();
+    let mut start = lines.start;
+    while start < lines.end {
+        let mut end = start + 1;
+        while end < lines.end && links(end - 1) {
+            end += 1;
+        }
+        let (mut tallest, mut cell, mut first) = (0f32, 0f32, start);
+        for (j, height) in own.iter().enumerate().take(end).skip(start) {
+            cell += height;
+            if j == end - 1 || !stacks(j) {
+                match usize::from(spans(first)) {
+                    n if n > 1 => spanning.push((rows.len(), n, cell)),
+                    _ => tallest = tallest.max(cell),
+                }
+                cell = 0.;
+                first = j + 1;
+            }
+        }
+        rows.push((end - 1, tallest));
+        start = end;
+    }
+    for (row, n, needs) in spanning {
+        let end = (row + n).min(rows.len());
+        let spanned = &mut rows[row..end];
+        let sum: f32 = spanned.iter().map(|r| r.1).sum();
+        if needs > sum {
+            let more = needs - sum;
+            if sum > 0. {
+                for r in spanned.iter_mut() {
+                    r.1 += more * r.1 / sum;
+                }
+            } else if let Some(last) = spanned.last_mut() {
+                last.1 += more;
+            }
+        }
+    }
+    rows
 }
 
 /// The height of the row of lines `row`, `own` high: its tallest cell's, a cell's lines (`stacks`: the line and the
@@ -1459,6 +1557,7 @@ impl LinesLayout {
             let known = layout.cache.heights.borrow();
             let mut joins = Vec::new();
             let mut stacks = Vec::new();
+            let mut spans = Vec::new();
             let mut grouped = false;
             // Asked once, not each line's: without any, each line's is the default.
             let insets = layout.cache.insets.borrow().clone();
@@ -1478,12 +1577,17 @@ impl LinesLayout {
                     if inset.stacks_next {
                         stacks.push(i);
                     }
+                    if inset.spans_rows > 1 {
+                        spans.push((i, inset.spans_rows));
+                    }
                     layout.measured(i, &inset, &known, width)
                 })
                 .collect();
             drop(known);
             layout.grouped = grouped;
-            layout.heights = Some(RefCell::new(Heights::with_rows(each, &joins, &stacks)));
+            layout.heights = Some(RefCell::new(Heights::with_rows(
+                each, &joins, &stacks, spans,
+            )));
         }
         layout
     }
@@ -1522,10 +1626,12 @@ impl LinesLayout {
             let known = layout.cache.heights.borrow();
             let count = layout.line_count();
             let mut joined = !old.own.is_empty();
+            let mut spanned = !old.spans.is_empty();
             let mut measured = Vec::with_capacity(first_moved + 1 - kept);
             for i in kept - 1..first_moved {
                 let inset = layout.inset(i);
                 joined |= inset.joins_next || inset.stacks_next;
+                spanned |= inset.spans_rows > 1;
                 layout.grouped |= inset.scroll_group.is_some();
                 measured.push(layout.measured(i, &inset, &known, width));
             }
@@ -1538,7 +1644,15 @@ impl LinesLayout {
                 all
             };
             let mut each = spliced(&old.each);
-            let new = if joined {
+            let new = if spanned {
+                // Cells spanning rows: a row's height can hang on rows far from the edit, so all are settled again.
+                let own = if old.own.is_empty() {
+                    each
+                } else {
+                    spliced(&old.own)
+                };
+                layout.respanned(own)
+            } else if joined {
                 // The rows the edit touches take their heights again; the rest keep theirs.
                 let own = if old.own.is_empty() {
                     each.clone()
@@ -1576,6 +1690,25 @@ impl LinesLayout {
             layout.heights = Some(RefCell::new(new));
         }
         layout
+    }
+    /// Heights of lines `own` high, each line's inset asked again for its row and its span.
+    #[cold]
+    #[inline(never)]
+    fn respanned(&self, own: Vec<f32>) -> Heights {
+        let (mut joins, mut stacks, mut spans) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..self.line_count() {
+            let inset = self.inset(i);
+            if inset.links() {
+                joins.push(i);
+            }
+            if inset.stacks_next {
+                stacks.push(i);
+            }
+            if inset.spans_rows > 1 {
+                spans.push((i, inset.spans_rows));
+            }
+        }
+        Heights::with_rows(own, &joins, &stacks, spans)
     }
     /// Line `i`'s height with its room before it is shaped: the height its text had (`known`), else an estimate.
     fn measured(
@@ -1688,10 +1821,87 @@ impl LinesLayout {
         }
         start..end
     }
-    /// The height of line `i`'s row: its tallest line's (the line's own, alone).
+    /// The cells spanning rows (`LineInset::spans_rows`): their first lines and how many rows each spans.
+    fn spans(&self) -> Vec<(usize, u16)> {
+        self.heights
+            .as_ref()
+            .map_or_else(Vec::new, |h| h.borrow().spans.clone())
+    }
+    /// The lines of the rows a cell starting at line `cell` spans, `n` of them (fewer at the text's end).
+    fn span_reach(&self, cell: usize, n: u16) -> Range<usize> {
+        let row = self.row_of(cell);
+        let mut end = row.end;
+        for _ in 1..n {
+            if end >= self.line_count() {
+                break;
+            }
+            end = self.row_of(end).end;
+        }
+        row.start..end
+    }
+    /// The lines of the rows line `i`'s cell spans, where it spans more than its own.
+    #[cold]
+    #[inline(never)]
+    fn spanning(&self, i: usize) -> Option<Range<usize>> {
+        let mut cell = i;
+        while cell > 0 && self.inset(cell - 1).stacks_next {
+            cell -= 1;
+        }
+        let n = self.inset(cell).spans_rows;
+        (n > 1).then(|| self.span_reach(cell, n))
+    }
+    /// Rows `lines`, grown to whole every span reaching into them (and every span reaching into those).
+    fn span_cluster(&self, mut lines: Range<usize>) -> Range<usize> {
+        let reaches: Vec<_> = self
+            .spans()
+            .into_iter()
+            .map(|(cell, n)| self.span_reach(cell, n))
+            .collect();
+        loop {
+            let before = lines.clone();
+            for reach in &reaches {
+                if reach.start < lines.end && lines.start < reach.end {
+                    lines = lines.start.min(reach.start)..lines.end.max(reach.end);
+                }
+            }
+            if lines == before {
+                return lines;
+            }
+        }
+    }
+    /// Line `i`, of row `row`, `height` high now, where cells span rows: the rows its height bears on settled again.
+    #[cold]
+    #[inline(never)]
+    fn settle_spanned(&self, row: Range<usize>, i: usize, height: f32) {
+        let Some(heights) = &self.heights else {
+            return;
+        };
+        let lines = self.span_cluster(row);
+        heights.borrow_mut().own[i] = height;
+        let settled = settle_rows(
+            &heights.borrow().own,
+            lines,
+            |j| self.inset(j).links(),
+            |j| self.inset(j).stacks_next,
+            |j| self.inset(j).spans_rows,
+        );
+        let mut heights = heights.borrow_mut();
+        for (last, height) in settled {
+            heights.set(last, height);
+        }
+    }
+    /// The height of line `i`'s row: its tallest line's (the line's own, alone); of a cell spanning rows, theirs
+    /// together.
     pub(crate) fn row_height(&self, i: usize) -> f32 {
         if !self.has_rows() {
             return self.height(i);
+        }
+        if let Some(heights) = &self.heights
+            && !heights.borrow().spans.is_empty()
+            && let Some(reach) = self.spanning(i)
+        {
+            let heights = heights.borrow();
+            return (heights.above(reach.end) - heights.above(reach.start)) as f32;
         }
         let last = self.row_of(i).end - 1;
         self.heights
@@ -1715,6 +1925,53 @@ impl LinesLayout {
             i
         }
     }
+    /// In row `row`, beside cells spanning rows from above (`LineInset::spans_rows`): the line at `x`, `y` among
+    /// its cells and theirs, as `line_at_point` finds one (the cell whose room holds `x`, the first before them
+    /// all); `None` where no cell spans into it.
+    #[cold]
+    #[inline(never)]
+    fn spanned_at_point(&self, row: &Range<usize>, x: f32, y: f32) -> Option<usize> {
+        let mut lines = Vec::new();
+        for (cell, n) in self.spans() {
+            let reach = self.span_reach(cell, n);
+            if cell < row.start && row.start < reach.end {
+                // the cell's lines: its first and those stacked under it
+                let mut last = cell;
+                while last + 1 < self.line_count() && self.inset(last).stacks_next {
+                    last += 1;
+                }
+                lines.extend(cell..=last);
+            }
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        lines.extend(row.clone());
+        let x = self.within_group(row.start, x);
+        // the rightmost room starting at or before `x` (of a cell's lines, the last), else the leftmost
+        let mut found: Option<(usize, f32)> = None;
+        for j in lines {
+            let inset = self.inset(j);
+            if inset.hidden {
+                continue;
+            }
+            let left = self.left(&inset);
+            let better = match found {
+                None => true,
+                Some((_, at)) if at > x => left <= x || left < at,
+                Some((_, at)) => left <= x && left >= at,
+            };
+            if better {
+                found = Some((j, left));
+            }
+        }
+        let (mut found, _) = found?;
+        // of a cell's stacked lines, the one at `y` (the last below them)
+        while found > 0 && self.inset(found - 1).stacks_next && self.top(found) > y {
+            found -= 1;
+        }
+        Some(found)
+    }
     /// The line at `x`, `y`: in a row, the one whose room holds `x` (the first before them all, the last after).
     /// Whether it is a cell of a row.
     fn line_at_point(&self, x: f32, y: f32) -> (usize, bool) {
@@ -1723,6 +1980,12 @@ impl LinesLayout {
             return (i, false);
         }
         let row = self.row_of(i);
+        if let Some(heights) = &self.heights
+            && !heights.borrow().spans.is_empty()
+            && let Some(found) = self.spanned_at_point(&row, x, y)
+        {
+            return (found, true);
+        }
         if row.len() == 1 {
             return (i, false);
         }
@@ -1749,7 +2012,13 @@ impl LinesLayout {
     /// The lines that show between `top` and `bottom`, shaped: their
     /// numbers, the first and the last but one.
     pub(crate) fn lines_between(&self, top: f32, bottom: f32) -> Range<usize> {
-        let first = self.line_at(top);
+        let mut first = self.line_at(top);
+        // A cell spanning rows from above shows beside them: from its row.
+        if let Some(heights) = &self.heights
+            && !heights.borrow().spans.is_empty()
+        {
+            first = self.span_cluster(self.row_of(first)).start.min(first);
+        }
         let mut end = first;
         // Shaping a wrapped line corrects its height, which moves those
         // below: each is placed after the one above it is shaped.
@@ -1848,6 +2117,13 @@ impl LinesLayout {
             } else if heights.borrow().own[i] != height {
                 // its row is as tall as its tallest line now
                 let row = self.row_of(i);
+                if !heights.borrow().spans.is_empty() {
+                    self.settle_spanned(row, i, height);
+                    if inset.width.is_none() {
+                        self.cache.heights.borrow_mut().insert((*text).into(), bare);
+                    }
+                    return layout;
+                }
                 let mut heights = heights.borrow_mut();
                 heights.own[i] = height;
                 let tallest =
@@ -3127,5 +3403,166 @@ mod tests {
         let before = shaped.get();
         assert_eq!(layout.selection(at..at + 4).len(), 1);
         assert!(shaped.get() - before <= 1, "{}", shaped.get() - before);
+    }
+
+    /// A cell spanning three rows (`LineInset::spans_rows`) beside three rows of one cell each, between ordinary
+    /// lines: line 1 the spanning cell (100 wide, `tall` below its text), lines 2 to 4 the rows' cells, 110 in,
+    /// each with `room` below it (or hidden).
+    const SPANNED: &str = "before\nS\nA\nB\nC\nafter";
+    fn spanned_insets(tall: f32, room: [f32; 3], hidden: bool) -> LineInsets {
+        Rc::new(move |i| match i {
+            1 => LineInset {
+                width: Some(100.),
+                below: tall,
+                joins_next: true,
+                spans_rows: 3,
+                ..LineInset::default()
+            },
+            2..=4 => LineInset {
+                left: 110.,
+                width: Some(100.),
+                below: room[i - 2],
+                hidden,
+                ..LineInset::default()
+            },
+            _ => LineInset::default(),
+        })
+    }
+    fn spanned(tall: f32, room: [f32; 3], hidden: bool) -> (Rc<LineCache>, Rc<LinesLayout>) {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(spanned_insets(tall, room, hidden)));
+        let layout = relaid(&cache, SPANNED);
+        layout.lines_between(0., 10_000.);
+        (cache, layout)
+    }
+    /// The heights of the three spanned rows, and the span's.
+    fn spanned_rows(layout: &LinesLayout) -> ([f32; 3], f32) {
+        let tops = [1, 3, 4, 5].map(|i| layout.top(i));
+        (
+            [tops[1] - tops[0], tops[2] - tops[1], tops[3] - tops[2]],
+            layout.row_height(1),
+        )
+    }
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    /// As Chrome lays out a `rowspan` cell taller than its rows (headless Chrome 157: a 200-pixel cell beside three
+    /// rows 20, 20 and 20 high makes them 66.66, 66.66 and 66.69; beside 60, 20 and 20, 120, 40 and 40; beside three
+    /// empty rows, 0, 0 and 200): what it needs past its rows goes to them in proportion to their heights, all to the
+    /// last where they are all empty. Its own row height is theirs together; the line after them starts below.
+    #[test]
+    fn a_cell_spanning_rows_shares_its_height_among_them_as_chrome_does() {
+        let row = relaid(&Rc::new(LineCache::default()), "x").row;
+        let tall = 10. * row;
+        let cell = row + tall;
+        let (_, layout) = spanned(tall, [0.; 3], false);
+        let (rows, span) = spanned_rows(&layout);
+        assert!(
+            rows.iter().all(|&h| close(h, cell / 3.)),
+            "equal rows share it equally: {rows:?} of {cell}"
+        );
+        assert!(
+            close(span, cell),
+            "the cell's row height is its rows': {span}"
+        );
+        assert!(close(layout.row_height(2), cell / 3.));
+        assert_eq!(layout.row_of(1), 1..3);
+        assert_eq!(layout.row_of(3), 3..4);
+        let (_, layout) = spanned(tall, [2. * row, 0., 0.], false);
+        let (rows, _) = spanned_rows(&layout);
+        assert!(
+            close(rows[0], 0.6 * cell) && close(rows[1], 0.2 * cell) && close(rows[2], 0.2 * cell),
+            "rows of 3, 1 and 1 take 3/5, 1/5 and 1/5: {rows:?} of {cell}"
+        );
+        let (_, layout) = spanned(tall, [0.; 3], true);
+        let (rows, _) = spanned_rows(&layout);
+        assert!(
+            close(rows[0], 0.) && close(rows[1], 0.) && close(rows[2], cell),
+            "empty rows: all to the last: {rows:?}"
+        );
+        // A cell no taller than its rows leaves them as they are.
+        let (_, layout) = spanned(0., [row; 3], false);
+        let (rows, span) = spanned_rows(&layout);
+        assert!(rows.iter().all(|&h| close(h, 2. * row)), "{rows:?}");
+        assert!(close(span, 6. * row));
+        assert!(
+            close(layout.top(5), layout.top(1) + 6. * row),
+            "the next line below them all"
+        );
+    }
+
+    /// Beside a cell spanning rows, a row's hits find the spanning cell where `x` is in its room, and its own cell
+    /// past it; a caret moving down from a row's cell goes to the next; the spanning cell is shaped and shown with
+    /// any of its rows.
+    #[test]
+    fn hits_and_lines_shown_follow_a_cell_across_the_rows_it_spans() {
+        let (_, layout) = spanned(200., [0.; 3], false);
+        let line = |i: usize| layout.line_range(i);
+        for i in [3, 4] {
+            let y = layout.top(i) + 2.;
+            assert!(
+                line(1).contains(&layout.hit_test(50., y))
+                    || layout.hit_test(50., y) == line(1).end,
+                "row {i}: a hit in the spanning cell's room is in it: {}",
+                layout.hit_test(50., y)
+            );
+            let own = layout.hit_test(150., y);
+            assert!(
+                (line(i).start..=line(i).end).contains(&own),
+                "row {i}: past it, its own cell: {own}"
+            );
+        }
+        assert_eq!(
+            layout
+                .lines_between(layout.top(3) + 2., layout.top(3) + 4.)
+                .start,
+            1,
+            "the spanning cell's row shaped and shown with the row after it"
+        );
+        assert_eq!(
+            layout
+                .lines_between(layout.top(5) + 2., layout.top(5) + 4.)
+                .start,
+            5
+        );
+    }
+
+    /// Cells spanning one row (`spans_rows` 1, or 0, the default) lay out exactly as before.
+    #[test]
+    fn a_span_of_one_row_is_the_default() {
+        let (_, plain, _) = table(TABLE, 1);
+        let cache = Rc::new(LineCache::default());
+        let insets = table_insets(Rc::new(Cell::new(1)));
+        cache.set_insets(Some(Rc::new(move |i| LineInset {
+            spans_rows: 1,
+            ..insets(i)
+        })));
+        let ones = relaid(&cache, TABLE);
+        assert_eq!(geometry(&ones), geometry(&plain));
+        assert!(ones.heights.as_ref().unwrap().borrow().spans.is_empty());
+    }
+
+    /// An edit beside a cell spanning rows, or in it, lays them out as a layout of the text made new would.
+    #[test]
+    fn edits_beside_a_cell_spanning_rows_settle_its_rows_again() {
+        let (cache, _) = spanned(200., [0.; 3], false);
+        let fresh = |text: &str| {
+            let cache = Rc::new(LineCache::default());
+            cache.set_insets(Some(spanned_insets(200., [0.; 3], false)));
+            geometry(&relaid(&cache, text))
+        };
+        let mut text = String::from(SPANNED);
+        let b = text.find("\nB").unwrap() + 2;
+        text.insert_str(
+            b,
+            " now long enough to wrap in its cell, three rows or more of it by far",
+        );
+        let edited = relaid(&cache, &text);
+        assert_eq!(geometry(&edited), fresh(&text));
+        let s = text.find('S').unwrap() + 1;
+        text.insert_str(s, " and the spanning cell's text grown too");
+        let edited = relaid(&cache, &text);
+        assert_eq!(geometry(&edited), fresh(&text));
     }
 }
