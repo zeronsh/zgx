@@ -631,14 +631,49 @@ fn new_window(
             masks |= NSWindowStyleMask::FullSizeContentView;
         }
 
-        let window: Option<Retained<WinitWindow>> = unsafe {
-            msg_send_id![
-                super(mtm.alloc().set_ivars(())),
-                initWithContentRect: frame,
-                styleMask: masks,
-                backing: NSBackingStoreType::NSBackingStoreBuffered,
-                defer: false,
-            ]
+        // AppKit reads a new window's content rect relative to a screen,
+        // the key window's when none is given, and moves a window asked for
+        // on another screen onto that one, its height mirrored: placed on
+        // the screen its top left is on, in that screen's coordinates, it
+        // stays where it was asked to be.
+        let placed_on = match (&screen, attrs.position) {
+            (None, Some(_)) => {
+                let top_left = NSPoint::new(frame.origin.x, frame.origin.y + frame.size.height);
+                NSScreen::screens(mtm).into_iter().find(|screen| {
+                    let on = screen.frame();
+                    (on.origin.x..on.origin.x + on.size.width).contains(&top_left.x)
+                        && (on.origin.y..=on.origin.y + on.size.height).contains(&top_left.y)
+                })
+            },
+            _ => None,
+        };
+        let window: Option<Retained<WinitWindow>> = match &placed_on {
+            Some(placed_on) => {
+                let origin = placed_on.frame().origin;
+                let rect = NSRect::new(
+                    NSPoint::new(frame.origin.x - origin.x, frame.origin.y - origin.y),
+                    frame.size,
+                );
+                unsafe {
+                    msg_send_id![
+                        super(mtm.alloc().set_ivars(())),
+                        initWithContentRect: rect,
+                        styleMask: masks,
+                        backing: NSBackingStoreType::NSBackingStoreBuffered,
+                        defer: false,
+                        screen: &**placed_on,
+                    ]
+                }
+            },
+            None => unsafe {
+                msg_send_id![
+                    super(mtm.alloc().set_ivars(())),
+                    initWithContentRect: frame,
+                    styleMask: masks,
+                    backing: NSBackingStoreType::NSBackingStoreBuffered,
+                    defer: false,
+                ]
+            },
         };
         let window = window?;
 
