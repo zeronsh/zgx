@@ -11665,6 +11665,20 @@ impl Scene {
         let bounds = node.bounds.translated(transform);
         (bounds, effects, self.world_clip(id))
     }
+    /// Repaint all that `id` shows: its clip, which holds what it and its
+    /// descendants paint. For content about to move most of its view (a
+    /// page): what it changes then is held by that one area at once
+    /// (`recent_damage`), not joined into a list of areas that don't meet.
+    /// Under a transformed or filtered node the clip is not where it shows:
+    /// nothing is added, and its changes damage as they come.
+    pub(crate) fn damage_shown(&mut self, id: NodeId) {
+        if self.transformed + self.filtered.get() > 0 {
+            return;
+        }
+        if let Some(clip) = self.world_clip(id) {
+            self.add_damage(clip);
+        }
+    }
     /// `world`'s clip alone (`.2`): what `id` paints within, from its own
     /// and its ancestors' clips, each at its box translated by its own and
     /// its ancestors' translations, summed from it upwards.

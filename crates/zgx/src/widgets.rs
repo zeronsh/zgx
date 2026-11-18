@@ -6883,6 +6883,16 @@ impl Ui {
                 let mut free: Vec<NodeId> = free.into_iter().map(|(_, id)| id).collect();
                 pool.extend(kept);
                 if let (Some(lines), Some(layer)) = (&long_lines, code.line_layer.get()) {
+                    // A jump of half the view or more (a page) leaves a copy
+                    // little to keep, and every line shown changes: the view
+                    // repaints whole, damaged first, so what each line damages
+                    // after is held by it at once.
+                    let at = s.transform(layer);
+                    if (scroll.1 + at.y).abs() * 2. >= inner_height
+                        || (scroll.0 + at.x).abs() * 2. >= inner_width
+                    {
+                        s.damage_shown(layer);
+                    }
                     for i in shown_lines.clone() {
                         if pool.iter().any(|(line, _)| *line == i) {
                             continue;
