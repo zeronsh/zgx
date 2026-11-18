@@ -305,6 +305,7 @@ def main():
             raise RuntimeError("Xvfb startup timed out")
         env = bare
         env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
+        run("xsetroot", "-solid", "#3060c0")
         log = args.output / "application-bare.log"
         app = launch("application-bare", [str(args.binary.resolve())], env, stdout=log.open("w"))
         until("READY with no window manager", lambda: "READY" in log.read_text())
@@ -316,7 +317,17 @@ def main():
         until("the menu open with no window manager", lambda: state().startswith("OPEN true"))
         popup = until("the menu's window with no window manager",
                       lambda: next((win for win in windows(True) if win != main_window), None), 5)
-        checks["no window manager: menu window"] = list(geometry(popup))
+        px, py, pw, ph = geometry(popup)
+        checks["no window manager: menu window"] = [px, py, pw, ph]
+        # Nothing composites there either: the window is the panel alone,
+        # its rounded corners cut to the desktop (a capture of the window by
+        # its id shows them black: they are outside its shape).
+        checks["no window manager: the window is the panel, no shadow's margin"] = [pw, ph] == list(MENU_SIZE)
+        time.sleep(.5)
+        shot = args.output / "open-bare.png"
+        run("import", "-window", "root", str(shot))
+        corner = Image.open(shot).convert("RGB").getpixel((max(px, 0), min(py + ph - 1, SCREEN[1] - 1)))
+        checks["no window manager: its bottom corner is the desktop's, not black"] = corner == (0x30, 0x60, 0xc0)
         (args.output / "result.json").write_text(json.dumps(checks, indent=2) + "\n")
         assert all(value is not False for value in checks.values()), checks
         print("PASS: a menu past its window on X11: its own override-redirect popup-menu window, "
