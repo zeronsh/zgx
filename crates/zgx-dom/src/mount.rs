@@ -43,6 +43,15 @@ pub(crate) enum Event {
         zgx::compose::ContextMenuEvent,
         Option<zgx::compose::ContextMenuSpan>,
     ),
+    /// An edit asked of a contenteditable (`atom_editor`): a `beforeinput`'s
+    /// input type (or `compositionend`), its text, and the selection then,
+    /// in bytes of its text.
+    Edit {
+        kind: String,
+        data: String,
+        start: usize,
+        end: usize,
+    },
 }
 
 /// What runs for a node's events. A click handler is the view's own closure
@@ -289,6 +298,18 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
             Event::Resize(number as f32, h, x, y)
         }
         6 => Event::Visible(number == 1.),
+        20 => {
+            let text = text.unwrap_or_default();
+            let (kind, data) = text.split_once('\0').unwrap_or((&text, ""));
+            // Both ends in one number: the start above 2^26, the end below.
+            let packed = number.max(0.) as u64;
+            Event::Edit {
+                kind: kind.to_owned(),
+                data: data.to_owned(),
+                start: (packed >> 26) as usize,
+                end: (packed & ((1 << 26) - 1)) as usize,
+            }
+        }
         8 => {
             let text = text.unwrap_or_default();
             let mut parts = text.splitn(7, '\n');
@@ -422,11 +443,15 @@ impl Block {
     }
     /// An effect writing `node`: marked as one a template's clone must reach
     /// (`template::stamp`).
-    fn effect(&mut self, node: u32, runtime: &Runtime, f: impl FnMut() + 'static) {
+    pub(crate) fn effect(&mut self, node: u32, runtime: &Runtime, f: impl FnMut() + 'static) {
         ops::with(|ops| ops.mark(node));
         self.effects.push(runtime.effect(f));
     }
-    fn on(&mut self, node: u32, kind: u32, f: impl FnMut(Event) + 'static) {
+    /// Keep `held` as long as the block (a text area's model).
+    pub(crate) fn hold(&mut self, held: Rc<dyn Any>) {
+        self.regions.push(held);
+    }
+    pub(crate) fn on(&mut self, node: u32, kind: u32, f: impl FnMut(Event) + 'static) {
         ops::with(|ops| ops.mark(node));
         let id = handler(f);
         self.handlers.push(id);
@@ -599,6 +624,8 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
             (Tag::Span, "zt")
         }
         ElementKind::Button => (Tag::Button, "z zb"),
+        // With atoms: a contenteditable over its model (`atom_editor`).
+        ElementKind::Editor { atoms: Some(_), .. } => (Tag::Div, "z ze zc"),
         ElementKind::Editor {
             multiline: true, ..
         } => (Tag::TextArea, "z ze"),
@@ -980,6 +1007,15 @@ fn mount_kind(
                 let value = offset.get();
                 ops::with(|ops| ops.op(&[ops::NUMBER, id, prop, value.to_bits()]));
             });
+        }
+        ElementKind::Editor {
+            label,
+            value,
+            multiline,
+            atoms: Some(atoms),
+            ..
+        } => {
+            crate::atom_editor::mount(block, id, runtime, label, value, multiline, *atoms);
         }
         ElementKind::Editor {
             label,

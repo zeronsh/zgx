@@ -598,6 +598,24 @@ impl Look {
     }
 }
 
+/// What gives a DOM text area's atoms, from its model (`View::atoms_when`).
+#[doc(hidden)]
+pub type AtomsWhen =
+    Box<dyn FnMut(&mut crate::text_edit::TextEditor) -> Vec<crate::text_edit::Atom>>;
+/// A DOM text area's atoms (`ElementKind::Editor`), from its view's options:
+/// what it shows them by, as chips in its text.
+#[doc(hidden)]
+pub struct DomAtoms {
+    /// Its atoms, as the values they read change (`View::atoms_when`), given
+    /// its model.
+    pub when: Option<AtomsWhen>,
+    /// Told what happened to its atoms (`View::on_atoms`).
+    pub on_atoms: Option<crate::widgets::AtomListener>,
+    /// The wash behind atoms with none of their own (`View::atom_wash`).
+    pub wash: Option<crate::scene::Color>,
+    /// How its atoms show beyond a wash (`View::atom_style`).
+    pub style: Option<crate::editor_atom_style::AtomStyle>,
+}
 pub enum ElementKind {
     Box(Layout),
     Text(String),
@@ -629,6 +647,10 @@ pub enum ElementKind {
         multiline: bool,
         placeholder: Option<Box<dyn FnMut() -> String>>,
         secure: bool,
+        /// Its atoms (`View::atoms_when`, `on_atoms`, `atom_wash`,
+        /// `atom_style`): none for most, which show as the browser's own
+        /// field.
+        atoms: Option<Box<DomAtoms>>,
     },
     Image {
         label: String,
@@ -1181,6 +1203,7 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
                             .as_ref()
                             .and_then(|rare| rare.secure)
                             .unwrap_or(false),
+                        atoms: view.rare.as_deref_mut().and_then(Rare::take_atoms),
                     },
                     Kind::Image { label, source } => ElementKind::Image { label, source },
                     Kind::Region(_) | Kind::VirtualList(_) => {
