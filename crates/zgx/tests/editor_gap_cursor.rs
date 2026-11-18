@@ -29,7 +29,7 @@ fn fixture(allowed: &'static [usize]) -> (Ui, EditorHandle, Told) {
     ui.input.focus(&ui.scene, Some(view.node()));
     let editor = ui.focused_editor().unwrap();
     let told: Told = Rc::default();
-    editor.set_gaps(Some(Rc::new(move |n| allowed.contains(&n))));
+    editor.set_gaps(Some(Rc::new(move |n, _| allowed.contains(&n))));
     let heard = told.clone();
     editor.on_gap(move |at| heard.borrow_mut().push(format!("gap {at:?}")));
     let heard = told.clone();
@@ -236,7 +236,7 @@ fn a_gap_beside_an_inline_spans_edge() {
     ui.prepare_frame();
     ui.input.focus(&ui.scene, Some(view.node()));
     let editor = ui.focused_editor().unwrap();
-    editor.set_gaps(Some(Rc::new(|n| n == 1)));
+    editor.set_gaps(Some(Rc::new(|n, _| n == 1)));
     // "ab" is inline code: edges at 0 and 2.
     editor.set_caret_edges(Some(Rc::new(|at| (at <= 2).then_some(0..2))));
     editor.set_selection(2, 2);
@@ -267,4 +267,67 @@ fn a_gap_beside_an_inline_spans_edge() {
         (None, CaretSide::Outside)
     );
     assert_eq!(caret(&ui, &editor).x, inside.x + 2.);
+}
+
+/// The predicate hears how the caret comes: here ← and → go into the gap
+/// beside an atom's line, which ↑ and ↓ pass (selecting the atom, as the
+/// web does), and a press is the app's to allow.
+#[test]
+fn the_arrows_left_and_right_enter_a_gap_up_and_down_pass() {
+    use zgx::widgets::GapDir;
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        text_area("Note", ui.signal(TEXT.to_owned()))
+            .size(200., 160.)
+            .p(10.)
+            .text_size(10.)
+            .line_height(20.),
+    );
+    ui.prepare_frame();
+    ui.input.focus(&ui.scene, Some(view.node()));
+    let editor = ui.focused_editor().unwrap();
+    let asked: Rc<RefCell<Vec<(usize, GapDir)>>> = Rc::default();
+    let heard = asked.clone();
+    editor.set_gaps(Some(Rc::new(move |n, dir| {
+        heard.borrow_mut().push((n, dir));
+        n == 1 && matches!(dir, GapDir::Left | GapDir::Right)
+    })));
+    // ↓ from line 0's last row passes the gap before line 1.
+    editor.set_selection(1, 1);
+    ui.prepare_frame();
+    key(&mut ui, Key::ArrowDown);
+    assert_eq!(editor.gap(), None);
+    assert_ne!(focus(&editor), 1, "it moved down");
+    // ↑ from line 1 passes it too.
+    editor.set_selection(2, 2);
+    ui.prepare_frame();
+    key(&mut ui, Key::ArrowUp);
+    assert_eq!(editor.gap(), None);
+    // → at line 0's end goes in; ← at line 1's start too.
+    editor.set_selection(1, 1);
+    ui.prepare_frame();
+    key(&mut ui, Key::ArrowRight);
+    assert_eq!(editor.gap(), Some(1));
+    editor.set_selection(2, 2);
+    ui.prepare_frame();
+    key(&mut ui, Key::ArrowLeft);
+    assert_eq!(editor.gap(), Some(1));
+    // A press on the boundary asks with Press, refused here.
+    editor.set_gap(Some(1));
+    ui.prepare_frame();
+    let bar = caret(&ui, &editor);
+    editor.set_gap(None);
+    ui.prepare_frame();
+    press(&mut ui, bar.x + 30., bar.y + 1.);
+    assert_eq!(editor.gap(), None);
+    let asked = asked.borrow();
+    for dir in [
+        GapDir::Down,
+        GapDir::Up,
+        GapDir::Right,
+        GapDir::Left,
+        GapDir::Press,
+    ] {
+        assert!(asked.contains(&(1, dir)), "{dir:?} asked: {asked:?}");
+    }
 }
