@@ -189,10 +189,10 @@ fn a_press_on_an_allowed_boundary_goes_into_its_gap() {
     // in the text.
     press(&mut ui, bar.x + 30., bar.y + 21.);
     assert_eq!(editor.gap(), None);
-    // In the middle of line 0's row: the text.
+    // At the start of line 0's row, halfway down it: the text.
     editor.set_gap(Some(1));
     ui.prepare_frame();
-    press(&mut ui, bar.x + 3., bar.y - 10.);
+    press(&mut ui, bar.x, bar.y - 10.);
     assert_eq!((editor.gap(), focus(&editor)), (None, 0));
 }
 
