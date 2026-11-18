@@ -18,6 +18,8 @@ mod container_queries;
 mod decision;
 #[path = "../decode_image.rs"]
 mod decode_image;
+#[path = "../dim.rs"]
+mod dim;
 #[path = "../display_contents.rs"]
 mod display_contents;
 #[path = "../drag_declined.rs"]

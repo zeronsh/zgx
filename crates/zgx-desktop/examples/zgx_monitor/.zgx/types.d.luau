@@ -2556,6 +2556,12 @@ export type NodeProps = {
 	tooltip_delay: number?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: (boolean | Readable<boolean> | (() -> boolean))?,
 	hover: Styles?,
 	active: Styles?,
 	focus: Styles?,
@@ -3010,6 +3016,12 @@ export type Props = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -3361,6 +3373,7 @@ export type Props_tooltip_placement = Placement?
 export type Props_tooltip_interactive = boolean?
 export type Props_tooltip_delay = number?
 export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | Styles)?
+export type Props_dim = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_hover = Styles?
 export type Props_active = Styles?
 export type Props_focus = Styles?
@@ -3718,6 +3731,12 @@ export type ContainerProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -4186,6 +4205,12 @@ export type GlassProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -4663,6 +4688,12 @@ export type ScrollProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5157,6 +5188,12 @@ export type TextProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -5610,6 +5647,12 @@ export type MarkdownViewProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -6160,6 +6203,12 @@ export type RichProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -6607,6 +6656,12 @@ export type ImageProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -7071,6 +7126,12 @@ export type SvgProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -7646,6 +7707,12 @@ export type Scene3DProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8116,6 +8183,12 @@ export type CanvasProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -8595,6 +8668,12 @@ export type CheckboxProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -9052,6 +9131,12 @@ export type InputProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -9673,6 +9758,12 @@ export type ProgressProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -10118,6 +10209,12 @@ export type SliderProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -10584,6 +10681,12 @@ export type SegmentedProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11043,6 +11146,12 @@ export type StepperProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11503,6 +11612,12 @@ export type DisclosureProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -11974,6 +12089,12 @@ export type AccordionProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12419,6 +12540,12 @@ export type SectionProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -12889,6 +13016,12 @@ export type SeparatorProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -13342,6 +13475,12 @@ export type TabsProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -13817,6 +13956,12 @@ export type TreeProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14288,6 +14433,12 @@ export type DataGridProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -14755,6 +14906,12 @@ export type CalendarProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15215,6 +15372,12 @@ export type DatePickerProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -15673,6 +15836,12 @@ export type TimeFieldProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -16130,6 +16299,12 @@ export type ComboboxProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -16595,6 +16770,12 @@ export type CommandPaletteProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -17048,6 +17229,12 @@ export type SelectProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -17508,6 +17695,12 @@ export type SplitProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -18024,6 +18217,12 @@ export type ListProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -18571,6 +18770,12 @@ export type LayerProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -19038,6 +19243,12 @@ export type ModalProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -19523,6 +19734,12 @@ export type PopoverProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20014,6 +20231,12 @@ export type MenuItemProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20470,6 +20693,12 @@ export type SubmenuProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -20943,6 +21172,12 @@ export type WebViewProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -21416,6 +21651,12 @@ export type TerminalProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -21864,6 +22105,12 @@ export type SlotProps = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22363,6 +22610,12 @@ export type EachOptions = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
@@ -22826,6 +23079,12 @@ export type PresenceOptions = {
 	tooltip_delay: Props_tooltip_delay,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
 	hover: Props_hover,
 	active: Props_active,
 	focus: Props_focus,
