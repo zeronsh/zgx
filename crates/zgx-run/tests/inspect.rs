@@ -24,6 +24,8 @@ return ui.column {
 /// Held by tests that read or size the frame log (`keep`): it is the
 /// process's, and another test keeping two frames would cut theirs short.
 static FRAME_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Held by tests that serve on a socket: the process has one path for it.
+static SOCKET: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn app() -> (TestApp, Session) {
     let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", APP));
@@ -173,6 +175,7 @@ fn a_session_answers_the_tree_states_and_actions() {
 
 #[test]
 fn an_app_serves_its_session_on_a_socket_only_its_user_reaches() {
+    let _socket = SOCKET.lock().unwrap_or_else(|e| e.into_inner());
     let (app, session) = app();
     let executor = app.executor.clone();
     let server = zgx_script::inspect::serve(session, "test app", move |task| {
@@ -217,6 +220,54 @@ fn an_app_serves_its_session_on_a_socket_only_its_user_reaches() {
         "listed"
     );
     drop(server);
+}
+
+/// A server dropped (its window closed) stops listening and takes its
+/// files with it: `zgx inspect list` names no app it can't reach, and no
+/// thread goes on accepting on a socket no one can find. One dropped after
+/// another took its path leaves the other's be.
+#[cfg(unix)]
+#[test]
+fn a_dropped_server_stops_listening_and_takes_its_files() {
+    use std::os::unix::net::UnixStream;
+    let _socket = SOCKET.lock().unwrap_or_else(|e| e.into_inner());
+    let serve = |session| zgx_script::inspect::serve(session, "test app", |_| {});
+    let listed = || {
+        let pid = std::process::id();
+        zgx_script::inspect_client::apps()
+            .iter()
+            .any(|a| a.pid == pid)
+    };
+    let server = serve(app().1).expect("listening");
+    let path = server.path().to_path_buf();
+    let about = path.with_extension("json");
+    assert!(about.exists() && listed());
+    // Another name for the socket, as a client holding on to it reaches it.
+    let held = path.with_extension("held");
+    let _ = std::fs::remove_file(&held);
+    std::fs::hard_link(&path, &held).unwrap();
+    assert!(UnixStream::connect(&held).is_ok());
+    drop(server);
+    assert!(!path.exists() && !about.exists(), "its files went with it");
+    assert!(!listed(), "listed though gone");
+    assert!(
+        UnixStream::connect(&held).is_err(),
+        "still accepting on a socket no one can find"
+    );
+    std::fs::remove_file(&held).unwrap();
+    // Two in a row (a window made again): the first's drop leaves the
+    // second's socket and file.
+    let first = serve(app().1).expect("listening");
+    let second = serve(app().1).expect("listening again");
+    drop(first);
+    assert!(about.exists(), "the first's drop took the second's file");
+    assert!(
+        UnixStream::connect(&path).is_ok(),
+        "the first's drop took the second's socket"
+    );
+    assert!(listed());
+    drop(second);
+    assert!(!path.exists() && !about.exists() && !listed());
 }
 
 #[test]
