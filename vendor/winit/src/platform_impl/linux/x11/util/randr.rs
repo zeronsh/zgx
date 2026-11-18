@@ -101,6 +101,17 @@ impl XConnection {
                 return None;
             },
         };
+        let scale_factor = self.scale_factor_for(
+            (crtc.width.into(), crtc.height.into()),
+            (output_info.mm_width as _, output_info.mm_height as _),
+        );
+
+        Some((name, scale_factor, modes))
+    }
+
+    /// A monitor's scale factor: `WINIT_X11_SCALE_FACTOR`, else `Xft.dpi`,
+    /// else from its size in pixels and millimeters.
+    pub fn scale_factor_for(&self, pixels: (u32, u32), millimeters: (u64, u64)) -> f64 {
         // Override DPI if `WINIT_X11_SCALE_FACTOR` variable is set
         let deprecated_dpi_override = env::var("WINIT_HIDPI_FACTOR").ok();
         if deprecated_dpi_override.is_some() {
@@ -127,11 +138,8 @@ impl XConnection {
             },
         );
 
-        let scale_factor = match dpi_env {
-            EnvVarDPI::Randr => calc_dpi_factor(
-                (crtc.width.into(), crtc.height.into()),
-                (output_info.mm_width as _, output_info.mm_height as _),
-            ),
+        match dpi_env {
+            EnvVarDPI::Randr => calc_dpi_factor(pixels, millimeters),
             EnvVarDPI::Scale(dpi_override) => {
                 if !validate_scale_factor(dpi_override) {
                     panic!(
@@ -145,15 +153,10 @@ impl XConnection {
                 if let Some(dpi) = self.get_xft_dpi() {
                     dpi / 96.
                 } else {
-                    calc_dpi_factor(
-                        (crtc.width.into(), crtc.height.into()),
-                        (output_info.mm_width as _, output_info.mm_height as _),
-                    )
+                    calc_dpi_factor(pixels, millimeters)
                 }
             },
-        };
-
-        Some((name, scale_factor, modes))
+        }
     }
 
     pub fn set_crtc_config(
