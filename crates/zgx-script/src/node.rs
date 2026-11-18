@@ -79,6 +79,10 @@ pub(crate) struct NodeRare {
     /// lets it through).
     pub pointer_events: Option<Source>,
     pub disabled: Option<Source>,
+    /// `dim` given as a state or function: whether it looks disabled
+    /// (dimmed) while disabled, followed (a sending button that stays
+    /// disabled but keeps its ink).
+    pub dim: Option<Box<Source>>,
     /// `layout = "height"`: the node's size follows its content, animated.
     pub layout: Option<LayoutAnim>,
     /// `layout_id = "selection"`: a node mounting as another with the same
@@ -105,6 +109,7 @@ impl NodeRare {
     pub(crate) const NONE: NodeRare = NodeRare {
         pointer_events: None,
         disabled: None,
+        dim: None,
         layout: None,
         layout_id: None,
         mask: None,
@@ -4349,6 +4354,15 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                     Some(source(lua, Ty::Num, "level", value)?);
             }
         },
+        // Whether a disabled control is dimmed (few nodes say, so here, off
+        // the common properties' path): `false` keeps it as it is while
+        // disabled, still disabled to input and assistive technology; a
+        // state or function decides as it changes. Kept until the node's
+        // fields are all read (`variants::dimmed`).
+        "dim" => match value {
+            mlua::Value::Boolean(true) => {}
+            value => node.rare_mut().dim = Some(Box::new(source(lua, Ty::Bool, "dim", value)?)),
+        },
         "at_caret" => {
             if let Kind::Popover { at_caret, .. } = &mut node.kind {
                 *at_caret = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
@@ -5175,6 +5189,10 @@ fn fill_from(
     {
         layout.height = false;
         layout.position = true;
+    }
+    // `dim`: one more variant, chosen as it says.
+    if node.rare.as_ref().is_some_and(|rare| rare.dim.is_some()) {
+        variants = Some(crate::variants::dimmed(lua, node, variants.take())?);
     }
     // What the element's variants set and it does not.
     if let Some(selection) = variants {
