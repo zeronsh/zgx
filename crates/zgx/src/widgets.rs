@@ -2048,6 +2048,28 @@ pub enum EditCommand {
     /// Select all the text there is to select.
     SelectAll,
 }
+/// How a node's style that can't change (no reactive style, variants,
+/// disabled, tokens, own typography, backdrop blur, intrinsic size or
+/// layout target; not text) is applied (`Ui::set_static_styles`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StaticStyles {
+    /// Once, where its effect's first run would run, keeping nothing.
+    #[default]
+    Once,
+    /// By a style effect, as any other.
+    Effect,
+}
+impl StaticStyles {
+    /// `ZGX_STATIC_STYLES` (`once` or `effect`), else `Once`: a test suite
+    /// run whole in one mode.
+    fn from_env() -> Self {
+        match crate::env::var("ZGX_STATIC_STYLES").as_deref() {
+            Ok("effect") => Self::Effect,
+            _ => Self::Once,
+        }
+    }
+}
 /// What goes on the clipboard: text, and HTML beside it where given.
 /// (Pin line.)
 #[doc(hidden)]
@@ -2630,6 +2652,9 @@ pub(crate) struct UiStorage {
     popup_soon_sent: Cell<bool>,
     /// The host's way to picture what the window last showed (`Ui::on_snapshot`).
     snapshotter: RefCell<Option<Snapshotter>>,
+    /// Whether a style that can't change is applied once, with no effect
+    /// (`Ui::set_static_styles`).
+    static_styles: Cell<StaticStyles>,
     popup_snapshotter: RefCell<Option<PopupSnapshotter>>,
     /// The window's zoom (`zoom`), 1 at 100%.
     pub(crate) zoom: Cell<f64>,
@@ -3055,6 +3080,7 @@ impl Ui {
             popup_soon: RefCell::new(None),
             popup_soon_sent: Cell::new(false),
             snapshotter: RefCell::new(None),
+            static_styles: Cell::new(StaticStyles::from_env()),
             popup_snapshotter: RefCell::new(None),
             zoom: Cell::new(1.),
             zoom_off: Cell::new(false),
@@ -3348,6 +3374,109 @@ impl Ui {
         // SAFETY: written just above.
         let callback: Rc<RefCell<dyn FnMut()>> = unsafe { callback.assume_init() };
         self.add_binding(owner, mount_pure, callback);
+    }
+    /// [`Ui::bind_marked`] for a node's style; `once`, a style that can't
+    /// change, which runs where its first run would (a mount's order) and is
+    /// gone after, `owner` keeping nothing of it (`bind_style_once`).
+    #[inline]
+    pub(crate) fn bind_style(
+        &mut self,
+        owner: NodeId,
+        mount_pure: bool,
+        once: bool,
+        mut f: impl FnMut() + 'static,
+    ) {
+        if once {
+            return self.bind_style_once(owner, mount_pure, f);
+        }
+        assert!(
+            self.scene.borrow().contains(owner),
+            "cannot bind a removed UI node"
+        );
+        let mut initial = self.storage.mount_initialization.borrow().clone();
+        // As `bind_marked`: the callback built in its place.
+        let mut callback = Rc::new_uninit();
+        Rc::get_mut(&mut callback)
+            .expect("just made")
+            .write(RefCell::new(move || {
+                let Some(token) = initial.take() else {
+                    f();
+                    return;
+                };
+                if token.failed.get()
+                    || token
+                        .ui
+                        .upgrade()
+                        .is_none_or(|ui| !ui.scene.borrow().contains(owner))
+                {
+                    return;
+                }
+                let scope = token.enter();
+                let mut guard = InitialBindingGuard {
+                    token,
+                    scope: Some(scope),
+                    completed: false,
+                };
+                f();
+                guard.completed = true;
+            }));
+        // SAFETY: written just above.
+        let callback: Rc<RefCell<dyn FnMut()>> = unsafe { callback.assume_init() };
+        self.add_binding(owner, mount_pure, callback);
+    }
+    /// `bind_style`'s for a style that can't change: an effect with no
+    /// handle, which runs once untracked (nothing it reads changes) and goes
+    /// as that run ends, or as a failed mount's would have. Apart, so the
+    /// style's own binding is built as it was. Inline, its closure built in
+    /// its place as `bind_marked`'s is: the style moves no further.
+    #[inline]
+    fn bind_style_once(&mut self, owner: NodeId, mount_pure: bool, mut f: impl FnMut() + 'static) {
+        assert!(
+            self.scene.borrow().contains(owner),
+            "cannot bind a removed UI node"
+        );
+        let mut initial = self.storage.mount_initialization.borrow().clone();
+        let weak = self.downgrade();
+        let mut callback = Rc::new_uninit();
+        Rc::get_mut(&mut callback)
+            .expect("just made")
+            .write(RefCell::new(move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                let guard = match initial.take() {
+                    None => None,
+                    // A removed node: its style returns as it starts. The
+                    // closure holds `weak` where `bind_marked`'s holds
+                    // `owner`, the same size, so the same allocation.
+                    Some(token) if token.failed.get() => {
+                        ui.runtime.forget_active();
+                        return;
+                    }
+                    Some(token) => {
+                        let scope = token.enter();
+                        Some(InitialBindingGuard {
+                            token,
+                            scope: Some(scope),
+                            completed: false,
+                        })
+                    }
+                };
+                ui.runtime.untracked(&mut f);
+                if let Some(mut guard) = guard {
+                    guard.completed = true;
+                }
+                ui.runtime.forget_active();
+            }));
+        // SAFETY: written just above.
+        let callback: Rc<RefCell<dyn FnMut()>> = unsafe { callback.assume_init() };
+        self.add_detached(mount_pure, callback);
+    }
+    /// `bind_style_once`'s effect, with no handle: apart, as `add_binding`.
+    #[inline(never)]
+    fn add_detached(&mut self, mount_pure: bool, callback: Rc<RefCell<dyn FnMut()>>) {
+        let runtime = self.runtime.clone();
+        runtime.batch(|| runtime.effect_detached(mount_pure, callback));
     }
     /// `bind_marked`'s effect, kept by `owner`: apart, so what is generic
     /// over the callback stays small enough to inline where it is built.
@@ -4420,6 +4549,15 @@ impl Ui {
     }
     pub(crate) fn popup_flips(&self) -> Signal<Vec<(NodeId, (bool, bool))>> {
         self.storage.popup_flips.clone()
+    }
+    /// How a style that can't change is applied (`StaticStyles`): once,
+    /// with no effect, by default. For tests comparing it with the effect.
+    #[doc(hidden)]
+    pub fn set_static_styles(&self, mode: StaticStyles) {
+        self.storage.static_styles.set(mode);
+    }
+    pub(crate) fn static_styles(&self) -> StaticStyles {
+        self.storage.static_styles.get()
     }
     /// How the host pictures what the window last showed: `take(rect,
     /// max_width)` gives `rect` (in points, the window's coordinates) at

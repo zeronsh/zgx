@@ -987,6 +987,26 @@ pub(crate) fn mount_style_with_intrinsic(
         .map(Box::new),
         kind: ui.scene.borrow().kind(node).clone(),
     };
+    // A style that can't change runs once, as its effect's first run, and
+    // keeps nothing: nothing it reads can change (no reactive style,
+    // variant, interaction or disabled state; no tokens, so no theme; no
+    // typography of its own and not text, so no inherited typography shows
+    // in it; no backdrop blur, so no reduced transparency; no intrinsic
+    // size or layout target).
+    // Static: it reads no layout, so a mount need not draw its inputs first.
+    let mount_pure = dynamic.is_none() && reactive.is_none() && disabled.is_none();
+    let once = mount_pure
+        && !own
+        && !interactive
+        && ui.static_styles() == crate::widgets::StaticStyles::Once
+        && intrinsic.is_none()
+        && layout_target.is_none()
+        && object_fit.is_none()
+        && !matches!(
+            originals.kind,
+            NodeKind::Text { .. } | NodeKind::RichText { .. }
+        )
+        && unchanging(&base, &variants, &defaults);
     let mut previous_disabled = None;
     // What re-runs compare against, kept from a node's second run: most
     // nodes are styled once, and each memo costs about 1.2 KB.
@@ -1023,9 +1043,9 @@ pub(crate) fn mount_style_with_intrinsic(
     // Whether the effect subscribed to the inherited typography for good: a
     // node restyled every frame then compares its version without tracking.
     let mut parent_subscribed = false;
-    // Static: it reads no layout, so a mount need not draw its inputs first.
-    let mount_pure = dynamic.is_none() && reactive.is_none() && disabled.is_none();
-    ui.bind_marked(node, mount_pure, move || {
+    // A style that can't change runs once, where its effect's first run
+    // would, and keeps nothing; any other follows what it reads.
+    ui.bind_style(node, mount_pure, once, move || {
         let _span = crate::profile::nested(crate::profile::Phase::Style);
         // A `Ui` only for a full application: a run that changes paint or a
         // box alone needs just the scene and themes.
@@ -1656,6 +1676,21 @@ pub(crate) fn mount_style_with_intrinsic(
         }
     });
     typography
+}
+
+/// What of a style `mount_style_with_intrinsic` lets stay static besides
+/// its cheap tests: no variants or defaults, no tokens, no backdrop blur.
+/// Apart from the hot function.
+#[inline(never)]
+fn unchanging(
+    base: &Styles,
+    variants: &[Option<Box<Styles>>; 4],
+    defaults: &[Option<fn() -> Styles>; 3],
+) -> bool {
+    variants.iter().all(Option::is_none)
+        && defaults.iter().all(Option::is_none)
+        && !base.has_tokens()
+        && !matches!(base.overflow().blur.get(), Some(sigma) if sigma > 0.)
 }
 
 /// What a node showed before its style first applied: what properties no
