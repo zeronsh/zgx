@@ -44,8 +44,10 @@ impl Default for ScrollIntoView {
 
 /// How far a scroll view showing `from` to `from + length` scrolls so a box
 /// at `start`, `size` long, shows as `align` asks; `Nearest` with `room`
-/// to spare where it moves (none for the web's alignment, a little for a
-/// screen reader's).
+/// to spare where it moves (none for the web's alignment and for focus, a
+/// little for find's and a screen reader's). Every reveal's rule: the
+/// web's `nearest` moves the least, a box larger than the view showing its
+/// edge on the side it came from, and one spanning the view not at all.
 pub(crate) fn shift(
     align: RowAlign,
     start: f32,
@@ -56,7 +58,9 @@ pub(crate) fn shift(
 ) -> f32 {
     match align {
         RowAlign::Nearest => {
-            if start < from {
+            if start < from && start + size > from + length {
+                0.
+            } else if start < from {
                 (start - from - room).max(start + size - from - length)
             } else if start + size > from + length {
                 (start + size - from - length + room).min(start - from)
@@ -68,6 +72,17 @@ pub(crate) fn shift(
         RowAlign::End => start + size - from - length,
         RowAlign::Center => start + size / 2. - from - length / 2.,
     }
+}
+
+/// `frame`, a scroll view's box, less its `scroll_padding`: where a node
+/// it reveals is shown.
+pub(crate) fn padded(frame: Rect, padding: crate::scene::Insets) -> Rect {
+    Rect::new(
+        frame.x + padding.left,
+        frame.y + padding.top,
+        (frame.width - padding.left - padding.right).max(0.),
+        (frame.height - padding.top - padding.bottom).max(0.),
+    )
 }
 
 /// What each scroll view around `node` moves by (across, down) to show
@@ -91,16 +106,19 @@ fn plan(ui: &Ui, node: NodeId, mut rect: Rect, how: &ScrollIntoView) -> Vec<(Nod
             scene.transformed_bounds(viewport),
             scene.transformed_bounds(content),
         );
+        // Shown within its `scroll_padding`, as the web's `scroll-padding`
+        // keeps it (a bar over the view's top), and as focus shows a node.
+        let shown = padded(frame, ui.scroll_padding(viewport));
         let clamp = |delta: f32, offset: f32, limit: f32| {
             (offset + delta).clamp(0., limit.max(0.)) - offset
         };
         let dx = clamp(
-            shift(how.inline, rect.x, rect.width, frame.x, frame.width, 0.),
+            shift(how.inline, rect.x, rect.width, shown.x, shown.width, 0.),
             frame.x - inner.x,
             inner.width - frame.width,
         );
         let dy = clamp(
-            shift(how.block, rect.y, rect.height, frame.y, frame.height, 0.),
+            shift(how.block, rect.y, rect.height, shown.y, shown.height, 0.),
             frame.y - inner.y,
             inner.height - frame.height,
         );
