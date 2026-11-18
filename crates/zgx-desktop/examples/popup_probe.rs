@@ -135,6 +135,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     popover.bg(rgb(0x4a3768))
                 };
                 popover.arrow(8.)
+            } else if let Ok(panel) = std::env::var("POPUP_PROBE_PANEL") {
+                // `POPUP_PROBE_PANEL=inset`: its rounded panel inset in a
+                // root that paints nothing (`=nested`: under five wrappers
+                // too), for `popup_windows_smoke.py` to see the window cut
+                // to the panel with no compositor.
+                let mut inner = div()
+                    .w_full()
+                    .rounded(10.)
+                    .bg(rgb(0x2a2f3a))
+                    .p(5.)
+                    .children(items);
+                if panel == "nested" {
+                    for _ in 0..5 {
+                        inner = div().w_full().child(inner);
+                    }
+                }
+                menu("File", open.clone(), anchor)
+                    .id("menu")
+                    .w(200.)
+                    .p(8.)
+                    .bg(rgba(0x00000000))
+                    .rounded(0.)
+                    .child(inner)
             } else {
                 let menu = menu("File", open.clone(), anchor)
                     .id("menu")
