@@ -40,6 +40,8 @@ mod editor_context_menu;
 mod editor_copy_hook;
 #[path = "../editor_drag_source.rs"]
 mod editor_drag_source;
+#[path = "../editor_edge_caret.rs"]
+mod editor_edge_caret;
 #[path = "../editor_external_edits.rs"]
 mod editor_external_edits;
 #[path = "../editor_focus_snapshot.rs"]
