@@ -189,6 +189,7 @@ impl Subscribers {
             *self = Self::Set(set);
         }
     }
+    #[inline]
     fn remove(&mut self, id: EffectId) {
         match self {
             Self::Inline(ids) => {
@@ -201,6 +202,7 @@ impl Subscribers {
             }
         }
     }
+    #[inline]
     fn is_empty(&self) -> bool {
         match self {
             Self::Inline(ids) => ids.iter().all(|id| *id == NO_EFFECT),
@@ -246,8 +248,10 @@ impl Subscribers {
     }
 }
 /// Queue effect `id` to run, unless it is stopped or queued already: in a
-/// flush, among those it made run; else for the next.
-#[inline]
+/// flush, among those it made run; else for the next. Always inline:
+/// each `set` with one subscriber queues it in place, as the loop it
+/// replaces did (left to itself, the compiler made it a call).
+#[inline(always)]
 fn queue_one(inner: &Inner, id: EffectId) {
     let mut effects = inner.effects.borrow_mut();
     let Some(record) = effects.get_mut(&id) else {
