@@ -55,6 +55,8 @@ const EXPIRED_PASS: u64 = u64::MAX - 1;
 /// The children a column has as it looks at its end alone
 /// (`Scene::children_outgrown`): fewer cost little to lay out whole.
 const COLUMN_KEPT_FROM: usize = 64;
+/// The room a `Vec` of small elements (up to 1 KB) takes at its first push.
+const VEC_FIRST_ROOM: usize = 4;
 /// Layout passes in a row a column lays out whole before it stops looking at
 /// its end alone (`Scene::column_laid_out_whole`): one that isn't streamed
 /// into pays no more than this.
@@ -13345,6 +13347,20 @@ impl Scene {
         self.measure_depth -= 1;
         size
     }
+    /// A box measured with no placements kept from before: room for its
+    /// children's at once where the first room a list takes would not hold
+    /// them, rather than one allocation each time it doubles. As many or
+    /// fewer take that room as ever (another size would gain nothing but
+    /// a chunk the allocator reuses otherwise). Out of line: `measure_uncached`
+    /// keeps the call alone.
+    #[inline(never)]
+    fn placements_for(&self, id: NodeId) -> Vec<ChildPlacement> {
+        let count = self.children_raw(self.tree_node(id)).len();
+        match count > VEC_FIRST_ROOM {
+            true => Vec::with_capacity(count),
+            false => Vec::new(),
+        }
+    }
     /// `measured`, when nothing kept serves.
     /// A contents or zoomed node goes to `measure_special`.
     fn measure_uncached(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
@@ -13422,11 +13438,16 @@ impl Scene {
         let pass = self.layout_pass;
         let node = self.tree_node_mut(id);
         let stale = node.dirty & LAYOUT != 0;
-        let mut children = match &mut node.measurement {
+        let reused = match &mut node.measurement {
             Some(last) if layout.is_some() && stale && last.pass != pass => {
-                std::mem::take(&mut last.children)
+                Some(std::mem::take(&mut last.children))
             }
-            _ => Vec::new(),
+            _ => None,
+        };
+        let mut children = match reused {
+            Some(reused) => reused,
+            None if layout.is_some() => self.placements_for(id),
+            None => Vec::new(),
         };
         children.clear();
         let (mut width, mut height) = match layout {
@@ -17697,6 +17718,59 @@ impl<'a> Iterator for PaintIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// A box measured fresh keeps room for its children's placements at
+    /// once; as many as a list's first room take that room as ever; one
+    /// measured again keeps the buffer it had, whatever its children now.
+    #[test]
+    fn placements_take_their_room_at_once_and_a_remeasure_keeps_its_buffer() {
+        let mut scene = Scene::new(800., 200.);
+        let root = scene.root();
+        let cell = Style {
+            width: Some(10.),
+            height: Some(10.),
+            ..Style::default()
+        };
+        let row = |scene: &mut Scene, n: usize| {
+            let row = scene.append(root, NodeKind::Container(Layout::Row), Style::default());
+            let cells: Vec<NodeId> = (0..n)
+                .map(|_| scene.append(row, NodeKind::Rect(Color(1, 2, 3, 255)), cell.clone()))
+                .collect();
+            (row, cells)
+        };
+        let room = |scene: &Scene, row: NodeId| {
+            let measured = scene.tree_node(row).measurement.as_ref().expect("measured");
+            (measured.children.len(), measured.children.capacity())
+        };
+        let (wide, cells) = row(&mut scene, 10);
+        let (few, _) = row(&mut scene, 3);
+        scene.flush();
+        assert_eq!(room(&scene, wide), (10, 10), "fresh: room for its children");
+        assert_eq!(
+            room(&scene, few),
+            (3, VEC_FIRST_ROOM),
+            "a list's first room"
+        );
+        // Fewer children: the same buffer, room as it was.
+        for cell in &cells[7..] {
+            scene.remove(*cell);
+        }
+        scene.flush();
+        assert_eq!(
+            room(&scene, wide),
+            (7, 10),
+            "kept, not made again for seven"
+        );
+        // More: the kept buffer grows from its room, as a fresh one would not.
+        for _ in 0..5 {
+            scene.append(wide, NodeKind::Rect(Color(1, 2, 3, 255)), cell.clone());
+        }
+        scene.flush();
+        assert_eq!(
+            room(&scene, wide),
+            (12, 20),
+            "kept and grown, not made for twelve"
+        );
+    }
     /// `given_size` reads the width and height `style` gives: a plain node's,
     /// one laid out otherwise than given (right to left), and a contents
     /// node's own.
