@@ -59,6 +59,8 @@ mod list_drag_keeps_row;
 mod list_edges;
 #[path = "../list_estimate.rs"]
 mod list_estimate;
+#[path = "../list_fading_in.rs"]
+mod list_fading_in;
 #[path = "../list_failed_key.rs"]
 mod list_failed_key;
 #[path = "../list_focus_scroll.rs"]
