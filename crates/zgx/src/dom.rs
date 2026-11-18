@@ -39,7 +39,7 @@ impl Scope {
                 typography,
                 registry: Default::default(),
                 portal: None,
-                menu: None,
+                rare: None,
                 measure: Default::default(),
                 theme,
             },
@@ -1290,7 +1290,7 @@ fn menu_item(
     if view.variants.focus.is_none() {
         view.variants.defaults[2] = Some(super::menu_focus(&view.styles));
     }
-    let menu = scope.as_ref().unwrap_or(parent).environment.menu.clone();
+    let menu = scope.as_ref().unwrap_or(parent).environment.menu();
     let (trigger, check, shortcut) = match view.rare.as_deref_mut() {
         Some(rare) => (
             rare.menu_trigger.take(),
@@ -1523,12 +1523,14 @@ fn overlay(
     }
     let mut inner = outer.clone();
     if is_menu {
-        inner.environment.menu = Some(crate::compose_menu::MenuContext::new(
-            open.clone(),
-            outer.environment.menu.clone(),
-            None,
-            kind == OverlayKind::Submenu,
-        ));
+        inner
+            .environment
+            .set_menu(Some(crate::compose_menu::MenuContext::new(
+                open.clone(),
+                outer.environment.menu(),
+                None,
+                kind == OverlayKind::Submenu,
+            )));
     }
     let placement = match options.as_ref().and_then(|o| o.placement) {
         Some(placement) => placement,
