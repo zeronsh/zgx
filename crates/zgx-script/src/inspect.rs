@@ -1783,15 +1783,21 @@ impl Session {
     }
 
     /// This window's size, and its popups open (`windows`).
-    fn about(&self) -> Option<(zgx::scene::Rect, Vec<String>)> {
+    /// The window's size and its popups open, each with whether it is
+    /// held while the app is at the back (`Scene::held_popups`): open, and
+    /// shown as the app comes forward.
+    fn about(&self) -> Option<(zgx::scene::Rect, Vec<(String, bool)>)> {
         let ui = self.0.ui.upgrade()?;
         let scene = ui.scene.borrow();
         let size = scene.bounds(scene.root());
-        let popups = scene.popups().to_vec();
+        let shown = scene.popups().iter().map(|popup| (*popup, false));
+        let popups: Vec<_> = shown
+            .chain(scene.held_popups().into_iter().map(|popup| (popup, true)))
+            .collect();
         drop(scene);
         let popups = popups
             .into_iter()
-            .map(|popup| driver::describe(&ui, popup))
+            .map(|(popup, held)| (driver::describe(&ui, popup), held))
             .collect();
         Some((size, popups))
     }
@@ -2392,9 +2398,14 @@ fn window_session(name: &str) -> Result<Session, String> {
         }
     })
 }
+/// Why a popup open is held, not shown (`windows`).
+const HELD: &str =
+    "the app is at the back (no window of it is active); it shows as the app comes forward";
+
 /// `windows`: the main window and the app's others, each with its size and
 /// its popups open (menus, popovers past the window: targets inside reach
-/// them, as the window's own nodes).
+/// them, as the window's own nodes), a held one said so: a tool reading
+/// none while one is open would mislead whoever reads it.
 fn windows(main: &Session) -> (String, Value) {
     let mut lines = Vec::new();
     let mut data = Vec::new();
@@ -2408,8 +2419,11 @@ fn windows(main: &Session) -> (String, Value) {
         if !title.is_empty() {
             line.push_str(&format!("  \"{title}\""));
         }
-        for popup in &popups {
+        for (popup, held) in &popups {
             line.push_str(&format!("\n  popup {popup}"));
+            if *held {
+                line.push_str(&format!("  held: {HELD}"));
+            }
         }
         lines.push(line);
         data.push(Value::record([
@@ -2419,7 +2433,21 @@ fn windows(main: &Session) -> (String, Value) {
             ("height", Value::Num(size.height.round() as f64)),
             (
                 "popups",
-                Value::List(popups.iter().map(|p| Value::from(p.as_str())).collect()),
+                Value::List(
+                    popups
+                        .iter()
+                        .map(|(popup, held)| {
+                            let mut fields = vec![
+                                ("popup", Value::from(popup.as_str())),
+                                ("held", Value::Bool(*held)),
+                            ];
+                            if *held {
+                                fields.push(("why", Value::from(HELD)));
+                            }
+                            Value::record(fields)
+                        })
+                        .collect(),
+                ),
             ),
         ]));
     }
