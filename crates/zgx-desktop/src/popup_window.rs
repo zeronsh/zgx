@@ -2605,10 +2605,14 @@ mod x11 {
         true
     }
 
+    /// What each popup last showed, for `Ui::snapshot`: its root, its
+    /// window's frame, its scale and where it lies in the scene.
+    pub(crate) type PopupFrames = Rc<RefCell<Vec<(NodeId, zgx_gpu::ShownFrame, f32, Rect)>>>;
     /// A window's shown popups.
     pub(crate) struct PopupHost {
         shown: Vec<(NodeId, Popup)>,
         send: Sink,
+        frames: PopupFrames,
         /// The display whose pointer a menu or popover holds (`grab`).
         grabbed: Option<usize>,
         /// A Wayland window's popups.
@@ -2624,6 +2628,7 @@ mod x11 {
                 shown: Vec::new(),
                 wayland: super::wayland::Popups::new(send.clone()),
                 send,
+                frames: PopupFrames::default(),
                 grabbed: None,
                 composited: true,
             }
@@ -2693,6 +2698,9 @@ mod x11 {
                     Some((*root, bounds))
                 })
                 .collect();
+            self.frames
+                .borrow_mut()
+                .retain(|frame| wanted.iter().any(|(root, _)| *root == frame.0));
             let mut index = 0;
             while index < self.shown.len() {
                 if wanted.iter().any(|(root, _)| *root == self.shown[index].0) {
@@ -2832,11 +2840,22 @@ mod x11 {
                     if let Some(drawn) = drawn {
                         drawn?;
                         renderer.present()?;
+                        // What it shows now, for `Ui::snapshot`.
+                        let mut frames = self.frames.borrow_mut();
+                        frames.retain(|shown| shown.0 != root);
+                        if let Some(shown) = renderer.shown_frame() {
+                            frames.push((root, shown, scale, frame));
+                        }
                     }
                 }
                 // Onto the screen once its frame is there.
                 if popup.rect != Some(frame) {
                     place(&popup.window, origin, frame, scale);
+                    // Moved, not drawn again (a drag preview): it shows there.
+                    let mut frames = self.frames.borrow_mut();
+                    if let Some(shown) = frames.iter_mut().find(|shown| shown.0 == root) {
+                        shown.3 = frame;
+                    }
                 }
                 let rect = frame;
                 popup.rect = Some(rect);
@@ -2909,7 +2928,12 @@ mod x11 {
             let renderers = self.shown.iter().filter_map(|(_, p)| p.renderer.as_ref());
             super::report_popups(renderers.chain(self.wayland.renderers()), report);
         }
+        /// What its popups last showed, for `Ui::snapshot`.
+        pub fn frames(&self) -> PopupFrames {
+            self.frames.clone()
+        }
         pub fn hide_all(&mut self, parent: &Window) {
+            self.frames.borrow_mut().clear();
             for (_, popup) in self.shown.drain(..) {
                 release(popup);
             }

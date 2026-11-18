@@ -1096,10 +1096,14 @@ fn follow(parent: HWND) {
     }
 }
 
+/// What each popup last showed, for `Ui::snapshot`: its root, its
+/// surface's frame, its scale and where it lies in the scene.
+pub(crate) type PopupFrames = Rc<RefCell<Vec<(NodeId, zgx_gpu::ShownFrame, f32, Rect)>>>;
 /// A window's shown popups.
 pub(crate) struct PopupHost {
     shown: Vec<(NodeId, Panel)>,
     send: Sink,
+    frames: PopupFrames,
     /// The cursor its window's zgx last chose (`set_cursor`).
     cursor: CursorIcon,
     /// The window they show over, once any has.
@@ -1116,6 +1120,7 @@ impl PopupHost {
         Self {
             shown: Vec::new(),
             send: Rc::new(send),
+            frames: PopupFrames::default(),
             cursor: CursorIcon::Default,
             parent: None,
             accent: false,
@@ -1184,6 +1189,9 @@ impl PopupHost {
             self.accent = crate::window_chrome::popup_blur_behind()
                 && !crate::system_colors::windows_transparency_off();
         }
+        self.frames
+            .borrow_mut()
+            .retain(|frame| wanted.iter().any(|(root, _)| *root == frame.0));
         let mut index = 0;
         while index < self.shown.len() {
             if wanted.iter().any(|(root, _)| *root == self.shown[index].0) {
@@ -1290,6 +1298,12 @@ impl PopupHost {
                 if let Some(drawn) = drawn {
                     drawn?;
                     renderer.present()?;
+                    // What it shows now, for `Ui::snapshot` (placed below).
+                    let mut frames = self.frames.borrow_mut();
+                    frames.retain(|shown| shown.0 != root);
+                    if let Some(shown) = renderer.shown_frame() {
+                        frames.push((root, shown, scale, rect));
+                    }
                 }
             }
             // A drag preview's window goes where the drag puts it; its frame
@@ -1307,6 +1321,10 @@ impl PopupHost {
                 None => rect,
             };
             panel.place(origin, frame);
+            if let Some(shown) = (self.frames.borrow_mut().iter_mut()).find(|shown| shown.0 == root)
+            {
+                shown.3 = frame;
+            }
             panel.set_corner(corner_of(scene, root, rect));
             panel.set_accent(system.is_some());
             if new {
@@ -1428,7 +1446,12 @@ impl PopupHost {
         let renderers = self.shown.iter();
         super::report_popups(renderers.filter_map(|(_, p)| p.renderer.as_ref()), report);
     }
+    /// What its popups last showed, for `Ui::snapshot`.
+    pub fn frames(&self) -> PopupFrames {
+        self.frames.clone()
+    }
     pub fn hide_all(&mut self, _: &winit::window::Window) {
+        self.frames.borrow_mut().clear();
         for (_, panel) in self.shown.drain(..) {
             release(panel);
         }

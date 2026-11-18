@@ -1810,6 +1810,28 @@ impl Latch {
         self.since_held = 0;
     }
 }
+/// What a window last showed, for pictures of it (`Ui::snapshot`): its GPU
+/// renderer's frame at its scale, or the raster's pixels (raster windows
+/// are 1x).
+enum Shown {
+    Gpu(zgx_gpu::ShownFrame, f64),
+    Raster(std::rc::Rc<std::cell::RefCell<crate::raster_window::RasterShown>>),
+}
+impl Shown {
+    /// `rect` (the window's points) of it, as BGRA rows and their size.
+    fn read(&self, rect: zgx::scene::Rect) -> Option<(u32, u32, Vec<u8>)> {
+        match self {
+            Shown::Gpu(frame, scale) => {
+                let (x, y, w, h) = zgx_gpu::pixel_region(rect, *scale);
+                frame.read(x, y, w, h)
+            }
+            Shown::Raster(pixels) => {
+                let (x, y, w, h) = zgx_gpu::pixel_region(rect, 1.);
+                pixels.borrow().read(x, y, w, h)
+            }
+        }
+    }
+}
 /// After the first presented frame, when to release startup's freed heap.
 const STARTUP_TRIM_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1914,9 +1936,8 @@ struct Host {
     scale_factor: f64,
     /// The display's scale: window frames, sizes and screen positions.
     display_scale: f64,
-    /// What the window last showed, and its scale, for `Ui::snapshot`.
-    #[cfg(target_os = "macos")]
-    shown: std::rc::Rc<std::cell::RefCell<Option<(zgx_gpu::ShownFrame, f64)>>>,
+    /// What the window last showed, for `Ui::snapshot`.
+    shown: std::rc::Rc<std::cell::RefCell<Option<Shown>>>,
     /// The next frame repaints the whole window, and its popups.
     force: bool,
     /// Damage the scene reported while the window waited for a frame
@@ -2240,21 +2261,19 @@ impl Host {
         #[cfg(target_os = "macos")]
         ui.input.set_spring_delay(spring_delay());
         // Pictures of what the window showed (`Ui::snapshot`): a region of
-        // its last frame, read when asked.
-        #[cfg(target_os = "macos")]
-        let shown: std::rc::Rc<std::cell::RefCell<Option<(zgx_gpu::ShownFrame, f64)>>> =
-            std::rc::Rc::default();
-        #[cfg(target_os = "macos")]
+        // its last frame, read when asked, from the GPU or the raster.
+        let shown: std::rc::Rc<std::cell::RefCell<Option<Shown>>> = std::rc::Rc::default();
         {
             let shown = shown.clone();
             ui.on_snapshot(move |rect, max_width| {
                 let shown = shown.borrow();
-                let (frame, scale) = shown.as_ref()?;
-                let (x, y, w, h) = zgx_gpu::pixel_region(rect, *scale);
-                let (w, h, bgra) = frame.read(x, y, w, h)?;
+                let (w, h, bgra) = shown.as_ref()?.read(rect)?;
                 let (w, h) = (w as usize, h as usize);
                 crate::thumbnail::image(&bgra, w, h, w * 4, max_width as usize)
             });
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        {
             // A popup is in a surface of its own, past the window or not.
             let frames = popups.frames();
             ui.on_popup_snapshot(move |root, rect, max_width| {
@@ -2410,7 +2429,6 @@ impl Host {
             x11: false,
             scale_factor: 1.,
             display_scale: 1.,
-            #[cfg(target_os = "macos")]
             shown,
             force: true,
             held_damage: FrameDamage::default(),
@@ -3254,6 +3272,9 @@ impl Host {
                             self.native.render(&scene, damage)?;
                             // Drawn and shown at once: presented.
                             note_first_present();
+                            // What it shows, for `Ui::snapshot` (the raster's
+                            // own pixels, kept between its frames).
+                            *self.shown.borrow_mut() = Some(Shown::Raster(raster.shown()));
                             // Shown: the next waits for the compositor's
                             // frame, as a GPU present's does.
                             self.present_ready = false;
@@ -3434,6 +3455,14 @@ impl Host {
                 // Commits the transaction (macOS; elsewhere there is none).
                 #[allow(dropping_copy_types)]
                 drop(transaction);
+                // What it shows now, for `Ui::snapshot`: its retained target,
+                // which the next frame draws into again (handles, no copy).
+                #[cfg(not(target_os = "macos"))]
+                {
+                    *self.shown.borrow_mut() = renderer
+                        .shown_frame()
+                        .map(|frame| Shown::Gpu(frame, self.scale_factor));
+                }
                 #[cfg(target_os = "macos")]
                 {
                     self.presented_at = Some(std::time::Instant::now());
@@ -3446,7 +3475,7 @@ impl Host {
                     // surface is the renderer's to reuse again).
                     *self.shown.borrow_mut() = renderer
                         .shown_frame()
-                        .map(|frame| (frame, self.scale_factor));
+                        .map(|frame| Shown::Gpu(frame, self.scale_factor));
                     if let Some(gpu) = renderer.take_gpu_time() {
                         zgx::profile::gpu_time(gpu);
                         if grid.is_some() {

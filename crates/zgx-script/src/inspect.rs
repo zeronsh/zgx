@@ -1250,7 +1250,7 @@ impl Session {
                 let width = number("width").map_or(4096, |w| w.clamp(1., 16384.) as u32);
                 let image = ui.snapshot(node, width).ok_or(
                     "no picture: the node is hidden or not laid out, or this window takes none \
-                     (macOS windows do)",
+                     (a desktop window takes them once it has drawn, but one drawn with Direct3D 11)",
                 )?;
                 let path = save_png(&image)?;
                 let path_text = path.display().to_string();
