@@ -654,6 +654,25 @@ fn merge_accessibility(
     }
 }
 impl Rare {
+    /// Its text area's atoms' options, taken for the DOM, which shows them
+    /// itself (`ElementKind::Editor`): none where none is set.
+    #[cfg(feature = "dom")]
+    pub(crate) fn take_atoms(&mut self) -> Option<Box<__dom::DomAtoms>> {
+        let code = self.code.as_deref_mut()?;
+        if code.atoms_when.is_none()
+            && code.on_atoms.is_none()
+            && code.atom_wash.is_none()
+            && code.atom_style.is_none()
+        {
+            return None;
+        }
+        Some(Box::new(__dom::DomAtoms {
+            when: code.atoms_when.take(),
+            on_atoms: code.on_atoms.take(),
+            wash: code.atom_wash.take(),
+            style: code.atom_style.take(),
+        }))
+    }
     /// `View::refine`'s part: what an outer view sets over its inner one.
     fn merge_into(self, inner: &mut Rare) {
         if self.trigger_id.is_some() {

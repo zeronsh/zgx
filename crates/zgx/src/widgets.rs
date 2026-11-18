@@ -590,7 +590,23 @@ pub struct AtomEvent<'a> {
     pub reason: &'a str,
     text: &'a str,
 }
-impl AtomEvent<'_> {
+impl<'a> AtomEvent<'a> {
+    /// What happened to atoms over `text` (a text area's on another target,
+    /// the DOM's): `changes`, all of them as they are, and why.
+    #[doc(hidden)]
+    pub fn new(
+        changes: &'a [crate::text_edit::AtomChange],
+        atoms: &'a [crate::text_edit::Atom],
+        reason: &'a str,
+        text: &'a str,
+    ) -> Self {
+        Self {
+            changes,
+            atoms,
+            reason,
+            text,
+        }
+    }
     /// Byte offset `byte` of the text as it is now, in characters.
     pub fn chars(&self, byte: usize) -> usize {
         let mut at = byte.min(self.text.len());

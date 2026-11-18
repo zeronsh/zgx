@@ -36,6 +36,9 @@ pub(crate) const OVERLAY: u32 = 29;
 pub(crate) const SHOW: u32 = 30;
 pub(crate) const PREVENT: u32 = 31;
 pub(crate) const MENU_AT: u32 = 33;
+/// `SELECT root anchor focus`: a contenteditable's selection, in UTF-16
+/// units of its text (`atom_editor`), while it has the focus.
+pub(crate) const SELECT: u32 = 34;
 
 /// Words a frame holds before it applies what it has (`Ops::op`).
 pub(crate) const EARLY: usize = 1 << 12;
@@ -73,6 +76,9 @@ pub(crate) const GROUP: u32 = 7;
 pub(crate) const ON_MENU: u32 = 9;
 /// A span's place in its paragraph: `HANDLER id SPAN_AT index`.
 pub(crate) const SPAN_AT: u32 = 10;
+/// A contenteditable's edits (`beforeinput`, a composition's end):
+/// `HANDLER id ON_EDIT handler`.
+pub(crate) const ON_EDIT: u32 = 11;
 
 /// `NUMBER`'s properties.
 pub(crate) const NUM_VALUE: u32 = 0;

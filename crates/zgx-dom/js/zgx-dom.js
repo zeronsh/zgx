@@ -84,6 +84,12 @@ export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   document.addEventListener("dragover", onOutsideOver, true);
   document.addEventListener("dragleave", onOutsideLeave, true);
   document.addEventListener("drop", onOutsideDrop, true);
+  // A contenteditable over a model (a text area with atoms): its edits are
+  // the model's.
+  document.addEventListener("beforeinput", onBeforeInput, true);
+  document.addEventListener("compositionstart", onCompositionStart, true);
+  document.addEventListener("compositionend", onCompositionEnd, true);
+  document.addEventListener("keydown", onEditKey, true);
 }
 
 // A link with no href (`role=link`): Enter presses it, as it does a link.
@@ -391,6 +397,7 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         else if (kind === 7) group(node, handler);
         else if (kind === 9) node.$$m = handler;
         else if (kind === 10) node.$$si = handler;
+        else if (kind === 11) node.$$e = handler;
         break;
       }
       case 15: { // VALUE id str: an editor's text, unless it holds it
@@ -520,6 +527,13 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
           panel.$$o.at = { x, y };
           if (panel.matches(":popover-open")) place(panel);
         }
+        break;
+      }
+      case 34: { // SELECT root anchor focus: a contenteditable's selection, in UTF-16 units
+        const el = nodes[ops[i++]];
+        const anchor = ops[i++];
+        const focus = ops[i++];
+        selectIn(el, anchor, focus);
         break;
       }
       case 31: // PREVENT: the click being handled doesn't do its default
@@ -1741,6 +1755,119 @@ const encoder = new TextEncoder();
 // A field whose value has a selection (text, search, a textarea…).
 function selects(el) {
   return (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.selectionStart !== null;
+}
+
+// A contenteditable over a model (`atom_editor.rs`): the element that takes
+// `target`'s edits, if it is in one.
+function editHost(target) {
+  let node = target;
+  while (node && node.$$e === undefined) node = node.parentNode;
+  return node || null;
+}
+
+// Where `node`'s `offset` is in `el`'s text, in UTF-16 units: its chips'
+// labels are its text.
+function textOffset(el, node, offset) {
+  const range = document.createRange();
+  range.setStart(el, 0);
+  range.setEnd(node, offset);
+  return range.toString().length;
+}
+
+// `el`'s selection in UTF-16 units of its text, in order.
+function editSelection(el) {
+  const selection = document.getSelection();
+  if (!selection || selection.rangeCount === 0 || !el.contains(selection.anchorNode)) {
+    const end = el.textContent.length;
+    return [end, end];
+  }
+  const range = selection.getRangeAt(0);
+  return [
+    textOffset(el, range.startContainer, range.startOffset),
+    textOffset(el, range.endContainer, range.endOffset),
+  ];
+}
+
+// A DOM point at `at` UTF-16 units into `el`'s text: never inside a chip
+// (contenteditable false), whose edges stand for it.
+function pointAt(el, at) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let seen = 0;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const length = node.nodeValue.length;
+    const chip = node.parentNode !== el && node.parentNode.isContentEditable === false
+      ? node.parentNode
+      : null;
+    if (at <= seen + length) {
+      if (!chip) return [node, at - seen];
+      const index = Array.prototype.indexOf.call(chip.parentNode.childNodes, chip);
+      return at === seen ? [chip.parentNode, index] : [chip.parentNode, index + 1];
+    }
+    seen += length;
+  }
+  return [el, el.childNodes.length];
+}
+
+// `el`'s selection set from its model's (UTF-16 units), while it has the focus.
+function selectIn(el, anchor, focus) {
+  const active = document.activeElement;
+  if (active !== el && !el.contains(active)) return;
+  const selection = document.getSelection();
+  if (!selection) return;
+  const [anchorNode, anchorOffset] = pointAt(el, anchor);
+  const [focusNode, focusOffset] = pointAt(el, focus);
+  selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+}
+
+// An edit of `el` for its model: `kind` (an input type), `data`, over bytes
+// `start` to `end` of its text.
+function sendEdit(el, kind, data, start, end) {
+  dispatch(el.$$e, 20, start * 67108864 + end, kind + "\0" + data);
+}
+
+function onBeforeInput(event) {
+  const el = editHost(event.target);
+  if (!el) return;
+  // An input method's text goes in as the browser shows it, its end to the
+  // model (`onCompositionEnd`).
+  if (event.inputType === "insertCompositionText" || event.isComposing) return;
+  event.preventDefault();
+  const text = el.textContent;
+  const [start, end] = editSelection(el);
+  let data = event.data;
+  // A paste or a drop: its plain text alone.
+  if (data == null && event.dataTransfer) data = event.dataTransfer.getData("text/plain");
+  sendEdit(el, event.inputType, data || "", utf8(text, start), utf8(text, end));
+}
+
+function onCompositionStart(event) {
+  const el = editHost(event.target);
+  if (!el) return;
+  const text = el.textContent;
+  const [start, end] = editSelection(el);
+  el.$$cs = [utf8(text, start), utf8(text, end)];
+}
+
+function onCompositionEnd(event) {
+  const el = editHost(event.target);
+  if (!el) return;
+  const [start, end] = el.$$cs || [0, 0];
+  el.$$cs = undefined;
+  sendEdit(el, "compositionend", event.data || "", start, end);
+}
+
+// Undo and redo by key in a contenteditable over a model: the model's, not
+// the browser's (which holds none of it).
+function onEditKey(event) {
+  const el = editHost(event.target);
+  if (!el || !(event.metaKey || event.ctrlKey) || event.altKey) return;
+  const key = event.key.toLowerCase();
+  const redo = (key === "z" && event.shiftKey) || (key === "y" && !event.shiftKey);
+  if (key !== "z" && !redo) return;
+  event.preventDefault();
+  const text = el.textContent;
+  const [start, end] = editSelection(el);
+  sendEdit(el, redo ? "historyRedo" : "historyUndo", "", utf8(text, start), utf8(text, end));
 }
 
 // UTF-16 offset `at` of `text` in UTF-8 bytes, as Rust counts it.

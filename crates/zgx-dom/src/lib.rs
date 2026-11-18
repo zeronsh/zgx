@@ -21,6 +21,7 @@
 //! See the crate's README for what maps, what doesn't, and the benchmark.
 #![cfg(target_arch = "wasm32")]
 
+mod atom_editor;
 #[cfg(feature = "audio")]
 mod audio;
 mod canvas;
