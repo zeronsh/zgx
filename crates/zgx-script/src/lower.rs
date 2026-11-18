@@ -1599,6 +1599,12 @@ fn token_field(prop: Prop) -> Option<zgx::theme::Field> {
         BackdropBlur => Field::Blur,
         W => Field::Width,
         H => Field::Height,
+        GapX => Field::GapX,
+        GapY => Field::GapY,
+        MinW => Field::MinWidth,
+        MaxW => Field::MaxWidth,
+        MinH => Field::MinHeight,
+        MaxH => Field::MaxHeight,
         _ => return None,
     })
 }
