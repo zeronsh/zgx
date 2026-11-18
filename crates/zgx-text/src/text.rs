@@ -30,6 +30,7 @@ pub fn glyph_image(
 /// turned smoothing off), else 1 to 5, its luminance in the four steps Core
 /// Graphics takes, plus one. macOS thickens all text, light text most: a
 /// line of Geist at 2x gains 17% coverage in black and 30% in white.
+#[doc(hidden)]
 pub fn smoothing(color: zgx::scene::Color) -> u8 {
     #[cfg(target_os = "macos")]
     if font_smoothing() {
@@ -52,6 +53,7 @@ static FONT_SMOOTHING_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 /// outlines alone), `Some(true)` always. For every window: each draws all
 /// its text again on its next frame (`GpuRenderer::render`), which a host
 /// asks for (a window's redraw). Nothing changes off macOS.
+#[doc(hidden)]
 pub fn set_font_smoothing(on: Option<bool>) {
     use std::sync::atomic::Ordering;
     let value = match on {
@@ -80,6 +82,7 @@ fn font_smoothing() -> bool {
     }
 }
 /// `key` for its glyph drawn thickened as `smoothing` says.
+#[doc(hidden)]
 pub fn smoothed(key: cosmic_text::CacheKey, smoothing: u8) -> cosmic_text::CacheKey {
     use cosmic_text::CacheKeyFlags;
     let mut key = key;
