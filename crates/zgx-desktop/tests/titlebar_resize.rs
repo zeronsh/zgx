@@ -7,18 +7,35 @@
 //! reports the resize from the content view: read against it, the lights
 //! stood the height's change down the window (Zeron's title bar row drew
 //! over the sidebar, 900 points down) and the bar was that change tall.
+//!
+//! The heights come from the screen's visible frame (what AppKit keeps an
+//! on-screen window within, and what a snap fills at most): asked for more,
+//! the window kept the visible height, so two such heights in a row left
+//! its frame unchanged and no resize to read (CI's displays are shorter
+//! than a desktop's).
 fn main() {
     #[cfg(target_os = "macos")]
     {
-        // Taller, much taller, then shorter than at first.
-        let heights = [700., 1770., 300.];
-        let readings = zgx_desktop::debug_titlebar_mid_resize(&heights);
-        assert_eq!(
-            readings.len(),
-            heights.len(),
-            "no window (not the main thread?)"
-        );
-        for (height, [during, after]) in heights.iter().zip(readings) {
+        // Taller, as tall as the screen allows (a snap filling it), then
+        // shorter than at first (a 400-point window).
+        let readings = zgx_desktop::debug_titlebar_mid_resize(|visible| {
+            assert!(
+                visible >= 500.,
+                "the screen's visible frame is {visible} tall: no room to grow a 400-point window"
+            );
+            vec![(visible + 400.) / 2., visible, 300.]
+        });
+        assert_eq!(readings.len(), 3, "no window (not the main thread?)");
+        for resize in readings {
+            let height = resize.asked;
+            assert_eq!(
+                resize.took, height,
+                "the window wasn't {height} tall: {resize:?}"
+            );
+            let Some(during) = resize.during else {
+                panic!("{height}: no resize reported: {resize:?}");
+            };
+            let after = resize.after;
             let (Some(area), Some(lights)) = after else {
                 panic!("{height}: no title bar once AppKit was done: {after:?}");
             };
