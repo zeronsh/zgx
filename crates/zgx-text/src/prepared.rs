@@ -4220,6 +4220,32 @@ mod tests {
         assert_eq!(cache.len(), 0);
     }
 
+    /// A text's words laid out take room for the lines they make, no more:
+    /// a line's text one (a first push would make room for four), however
+    /// long it stays laid out.
+    #[test]
+    fn laid_out_words_take_room_for_their_lines_alone() {
+        let mut fonts = FontSystem::new();
+        let font = FontStyle::default();
+        let mut cache = words::WordCache::default();
+        let mut spare = Vec::new();
+        let text = "a few words on a line of their own";
+        let runs = [words::Run {
+            end: text.len(),
+            font: &font,
+            size: 14.,
+            span: None,
+        }];
+        let (mut laid, _) = cache
+            .words(&mut fonts, text, &runs, &font, 14., &mut spare, None)
+            .unwrap();
+        laid.lay_out(None);
+        assert_eq!((laid.lines.len(), laid.lines.capacity()), (1, 1));
+        // Wrapped narrow, a line a word or two: as many as it makes.
+        laid.lay_out(Some(60.));
+        assert!(laid.lines.len() > 2, "{} lines", laid.lines.len());
+        assert_eq!(laid.lines.capacity(), laid.lines.len());
+    }
     /// A line's min-content measured from its copy (`min_content_copy`) is
     /// what its words give (`min_content_plain`), its kana's Han too: the
     /// copy's word of kanji alone takes the line's language.
