@@ -2891,9 +2891,7 @@ mod mac {
             (frame.origin.y + frame.size.height, frame.size.height)
         };
         let (window_top, _) = in_window(&content);
-        let (top, container_height) = container
-            .as_deref()
-            .map_or((window_top, 0.), |container| in_window(container));
+        let (top, container_height) = container.as_deref().map_or((window_top, 0.), in_window);
         // The content covers the title bar (a full-size content view): the
         // bar is what the content's layout rect leaves out. Until AppKit has
         // moved the container to the window's new top, that rect may be the
