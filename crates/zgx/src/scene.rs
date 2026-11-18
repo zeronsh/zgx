@@ -4925,6 +4925,34 @@ impl Scene {
         }
         bounds.intersection(clip.unwrap_or(self.viewport))
     }
+    /// The part of `id`'s box inside its clips and the viewport, however
+    /// transparent: `visible_bounds` without its opacity test. Where a list
+    /// scrolled by the views around it builds rows (`AncestorWindow`):
+    /// geometry, as a page's intersection observer reads it, so rows under an
+    /// ancestor fading in from nothing (a presence's `enter`) are built as it
+    /// starts to show, not when something next moves.
+    #[inline(never)]
+    pub(crate) fn clipped_bounds_shown(&self, id: NodeId) -> Option<Rect> {
+        self.note_geometry_read(id);
+        let (bounds, _, clip) = self.world_once(id);
+        if !self.popups.is_empty()
+            && let Some(shown) = self.visible_in_popup(id)
+        {
+            return shown;
+        }
+        if self.transformed > 0 {
+            let (bounds, clip, placement) = self.placed(id);
+            let visible = bounds.intersection(clip.unwrap_or(UNCLIPPED))?;
+            return match placement {
+                Some(placement) => placement
+                    .matrix
+                    .bounds(visible)
+                    .intersection(placement.clip),
+                None => Some(visible),
+            };
+        }
+        bounds.intersection(clip.unwrap_or(self.viewport))
+    }
     /// Whether any of `id`'s box grown by `margin` on every side would show:
     /// `visible_bounds`' test on a bigger box, inside the same clips and
     /// viewport (a script's `visible_margin`, an IntersectionObserver's

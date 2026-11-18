@@ -8236,7 +8236,9 @@ impl AncestorWindow {
             _ => {
                 #[cfg(test)]
                 WINDOW_CLIP_WALKS.with(|walks| walks.set(walks.get() + 1));
-                scene.visible_bounds(self.viewport)
+                // However transparent: rows under an ancestor fading in
+                // are built as it starts, not once something moves.
+                scene.clipped_bounds_shown(self.viewport)
             }
         };
         match shown {
