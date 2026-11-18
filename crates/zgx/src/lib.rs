@@ -46,6 +46,7 @@ pub(crate) mod drag_scroll;
 pub(crate) mod editor_atom_pointer;
 pub(crate) mod editor_atom_style;
 pub(crate) mod editor_autocorrect;
+pub(crate) mod editor_edge;
 pub(crate) mod editor_lines;
 pub(crate) mod editor_menu;
 pub(crate) mod editor_spell;
