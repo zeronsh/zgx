@@ -625,7 +625,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         }
         ElementKind::Button => (Tag::Button, "z zb"),
         // With atoms: a contenteditable over its model (`atom_editor`).
-        ElementKind::Editor { atoms: Some(_), .. } => (Tag::Div, "z ze zc"),
+        ElementKind::Editor { atoms: Some(_), .. } => (Tag::Div, "z ze"),
         ElementKind::Editor {
             multiline: true, ..
         } => (Tag::TextArea, "z ze"),
@@ -1012,10 +1012,22 @@ fn mount_kind(
             label,
             value,
             multiline,
+            placeholder,
             atoms: Some(atoms),
             ..
         } => {
-            crate::atom_editor::mount(block, id, runtime, label, value, multiline, *atoms);
+            crate::atom_editor::mount(
+                block,
+                id,
+                runtime,
+                crate::atom_editor::Field {
+                    label,
+                    value,
+                    multiline,
+                    placeholder,
+                },
+                *atoms,
+            );
         }
         ElementKind::Editor {
             label,

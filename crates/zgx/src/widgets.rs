@@ -9206,7 +9206,11 @@ fn editor_word_segment(text: &str, index: usize) -> (usize, usize) {
     (start, end)
 }
 
-fn normalize_text(text: &str, multiline: bool) -> std::borrow::Cow<'_, str> {
+/// `text` as an editor takes it: `\r\n` and `\r` a line break, and in a
+/// single-line editor its lines joined (the DOM's text area with atoms
+/// takes what it is given so too).
+#[doc(hidden)]
+pub fn normalize_text(text: &str, multiline: bool) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if !holds(text, b'\r') && (multiline || !holds(text, b'\n')) {
         return Cow::Borrowed(text);

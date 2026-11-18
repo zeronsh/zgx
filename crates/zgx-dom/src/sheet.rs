@@ -26,6 +26,7 @@ pub(crate) const BASE_CSS: &str = "\
 .zb:focus-visible,.ze:focus-visible{outline:2px solid Highlight;outline-offset:-2px;}\
 .ze{font:inherit;color:inherit;background:transparent;outline:none;white-space:pre-wrap;margin:0;padding:0;border:0 solid transparent;}\
 .zc{display:contents;}\
+.ze[data-placeholder]:empty::before{content:attr(data-placeholder);color:GrayText;pointer-events:none;}\
 .zt{display:block;box-sizing:border-box;}\
 .zs0{user-select:none;}.zs1{user-select:text;}\
 .zu{align-items:center;justify-content:center;border:1px dashed currentColor;opacity:.6;min-height:24px;}\

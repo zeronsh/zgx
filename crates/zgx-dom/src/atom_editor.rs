@@ -13,7 +13,10 @@ use crate::{
     mount::{Block, Event},
     ops::{self, Ops, Tag},
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 use zgx::{
     compose::__dom::DomAtoms,
     reactive::Runtime,
@@ -47,6 +50,29 @@ struct AtomEditor {
     wash: Option<Color>,
     style: Option<AtomStyle>,
     shown: RefCell<Vec<Shown>>,
+    /// An input method composing in it: its text is the browser's until it
+    /// commits, so nothing is shown again over it; `stale`: something was
+    /// asked meanwhile, shown whole once it commits.
+    composing: Cell<bool>,
+    stale: Cell<bool>,
+}
+
+/// A text area's own options, beyond its atoms.
+pub(crate) struct Field {
+    pub(crate) label: String,
+    pub(crate) value: EditorValue,
+    pub(crate) multiline: bool,
+    pub(crate) placeholder: Option<Box<dyn FnMut() -> String>>,
+}
+
+/// `at` in `text`, on a character's start (the browser's offsets and the
+/// model's text could disagree for a moment).
+fn floor_char(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 impl Drop for AtomEditor {
@@ -157,6 +183,12 @@ impl AtomEditor {
     /// every piece, as after an input method wrote into the text itself).
     /// Then its caret, from the model, where `select`.
     fn render(&self, whole: bool, select: bool) {
+        // Over an input method's text: once it commits.
+        if self.composing.get() {
+            self.stale.set(true);
+            return;
+        }
+        let whole = whole || self.stale.replace(false);
         let pieces = self.pieces();
         let mut shown = self.shown.borrow_mut();
         let (mut start, mut old_end, mut new_end) = (0, shown.len(), pieces.len());
@@ -240,19 +272,41 @@ impl AtomEditor {
     /// `data` to the model, over `start..end` (the selection then, in
     /// bytes): its text set as the model's, shown again, its caret put back.
     fn edit(&self, kind: &str, data: &str, start: usize, end: usize) {
+        match kind {
+            // An input method begins: its text is the browser's until it ends.
+            "compositionstart" => {
+                self.composing.set(true);
+                return;
+            }
+            // The browser wrote into the text itself (an edit it wouldn't let
+            // be prevented): shown again whole from the model.
+            "render" => {
+                self.render(true, true);
+                return;
+            }
+            "compositionend" => self.composing.set(false),
+            _ => {}
+        }
+        let data = zgx::widgets::normalize_text(data, self.multiline);
         let changed = {
             let mut model = self.model.borrow_mut();
-            let len = model.text().len();
-            model.set_selection(start.min(len), end.min(len));
+            let (start, end) = {
+                let text = model.text();
+                (floor_char(&text, start), floor_char(&text, end))
+            };
+            model.set_selection(start, end);
             match kind {
-                "insertText" | "insertReplacementText" | "compositionend" => model.insert(data),
-                "insertFromPaste" | "insertFromDrop" => model.insert_pasted(data),
+                "insertText" | "insertReplacementText" | "compositionend" => model.insert(&data),
+                "insertFromPaste" | "insertFromDrop" => model.insert_pasted(&data),
                 "insertParagraph" | "insertLineBreak" if self.multiline => model.insert("\n"),
                 "deleteContentBackward" => model.delete_backward(false),
                 "deleteWordBackward" => model.delete_backward(true),
                 "deleteContentForward" => model.delete_next(false),
                 "deleteWordForward" => model.delete_next(true),
-                "deleteByCut" | "deleteContent" => model.insert(""),
+                "deleteSoftLineBackward" | "deleteHardLineBackward" => model.delete_to_line_start(),
+                "deleteSoftLineForward" | "deleteHardLineForward" => model.delete_to_line_end(),
+                "insertTranspose" => model.transpose(),
+                "deleteByCut" | "deleteByDrag" | "deleteContent" => model.insert(""),
                 "historyUndo" => model.undo(),
                 "historyRedo" => model.redo(),
                 _ => false,
@@ -272,15 +326,13 @@ impl AtomEditor {
 
 /// Mount a text area with atoms at `id`: a contenteditable over a model of
 /// `value`'s text, its atoms as `atoms` says.
-pub(crate) fn mount(
-    block: &mut Block,
-    id: u32,
-    runtime: &Runtime,
-    label: String,
-    value: EditorValue,
-    multiline: bool,
-    atoms: DomAtoms,
-) {
+pub(crate) fn mount(block: &mut Block, id: u32, runtime: &Runtime, field: Field, atoms: DomAtoms) {
+    let Field {
+        label,
+        value,
+        multiline,
+        placeholder,
+    } = field;
     ops::with(|ops| {
         ops.op_str(ops::ATTR, id, "contenteditable");
         ops.str("true");
@@ -308,7 +360,32 @@ pub(crate) fn mount(
         wash,
         style,
         shown: RefCell::default(),
+        composing: Cell::new(false),
+        stale: Cell::new(false),
     });
+    // What it shows while empty, drawn by its style (`.ze[data-placeholder]`).
+    if let Some(mut placeholder) = placeholder {
+        block.effect(id, runtime, move || {
+            let text = placeholder();
+            ops::with(|ops| {
+                ops.op_str(ops::ATTR, id, "data-placeholder");
+                ops.str(&text);
+            });
+        });
+    }
+    // Its atoms as what they follow gives (`View::atoms_when`): first, so its
+    // text shows with them from the start.
+    if let Some(mut when) = when {
+        let editor = editor.clone();
+        block.effect(id, runtime, move || {
+            let next = when(&mut editor.model.borrow_mut());
+            let changed = editor.model.borrow_mut().set_atoms(next);
+            if changed {
+                editor.render(false, true);
+                editor.tell();
+            }
+        });
+    }
     // Its text as its value has it, set from outside (a draft restored).
     {
         let editor = editor.clone();
@@ -318,20 +395,8 @@ pub(crate) fn mount(
                 let mut model = editor.model.borrow_mut();
                 *model.text() != *text && model.set_text(text)
             };
-            editor.render(false, false);
+            editor.render(false, true);
             if changed {
-                editor.tell();
-            }
-        });
-    }
-    // Its atoms as what they follow gives (`View::atoms_when`).
-    if let Some(mut when) = when {
-        let editor = editor.clone();
-        block.effect(id, runtime, move || {
-            let next = when(&mut editor.model.borrow_mut());
-            let changed = editor.model.borrow_mut().set_atoms(next);
-            if changed {
-                editor.render(false, false);
                 editor.tell();
             }
         });
