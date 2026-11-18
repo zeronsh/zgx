@@ -330,6 +330,14 @@ nothing to take them, reach the app as their action: on X11, the
 `WindowHandle::dispatch_menu_action` and hears `[standard:copy, control]`
 (`standard-menu-items` in `linux_smokes.py`). On macOS they stay AppKit's.
 
+A menu shortcut acts before the input that came after it: on X11, the
+`shortcut_order` example's Ctrl+G (a menu item's key, taken by the window's
+keymap) moves the caret to the other field, and twenty times a letter sent to the
+server with no gap after Ctrl+G lands in the field it moved to, not the one it
+left (`shortcut-order` in `linux_smokes.py`). On macOS, a native menu item
+chosen by its key is carried out before the next window event the same way;
+no probe covers it.
+
 Declarative menus now expose accessible menu/item roles, trigger popup/expanded
 state, retained component/keyed items, disabled-item skipping, bounded Unicode
 prefix search, arrow/Home/End navigation, Escape and Tab exit. Actions close the

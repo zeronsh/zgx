@@ -61,6 +61,7 @@ SMOKES = [
     ("drag-drop", "python3 scripts/drag_drop_smoke.py {bin}/drag_drop --output {out}", False),
     ("native-menus", "python3 scripts/native_menu_smoke.py {bin}/dynamic_menus --output {out}", False),
     ("native-menus-wayland", "python3 scripts/native_menu_smoke.py {bin}/dynamic_menus --wayland --output {out}", False),
+    ("shortcut-order", "python3 scripts/shortcut_order_smoke.py {bin}/shortcut_order --output {out}", False),
     ("native-services", "python3 scripts/native_services_smoke.py {bin}/platform_services --native-prompts --output {out}", False),
     ("file-drop", "python3 scripts/file_drop_smoke.py {bin}/drag_drop --output {out}", False),
     ("file-drop-scaled", "python3 scripts/file_drop_smoke.py {bin}/drag_drop --output {out} --scale 1.5", False),
