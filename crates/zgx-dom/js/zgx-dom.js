@@ -212,6 +212,16 @@ function onClick(event) {
 }
 
 function onInput(event) {
+  // A contenteditable over a model the browser wrote into (`UNPREVENTED`),
+  // composing no more: shown again from the model.
+  const host = editHost(event.target);
+  if (host) {
+    if (host.$$dirty && host.$$cs === undefined) {
+      host.$$dirty = false;
+      sendEdit(host, "render", "", 0, 0);
+    }
+    return;
+  }
   const node = event.target;
   const handler = node.$$i;
   if (handler === undefined) return;
@@ -1822,18 +1832,46 @@ function selectIn(el, anchor, focus) {
 // An edit of `el` for its model: `kind` (an input type), `data`, over bytes
 // `start` to `end` of its text.
 function sendEdit(el, kind, data, start, end) {
-  dispatch(el.$$e, 20, start * 67108864 + end, kind + "\0" + data);
+  // Both ends in one number, each below 2^26 (a text past 64 MiB keeps its
+  // ends there rather than mixing them).
+  const most = 67108863;
+  dispatch(el.$$e, 20, Math.min(start, most) * 67108864 + Math.min(end, most), kind + "\0" + data);
 }
+
+// The edit's own range where the browser gives one (a spelling correction,
+// a text replacement, a drop, a drag's delete), else the selection: UTF-16
+// units of `el`'s text, in order.
+function editRange(el, event) {
+  const ranges = event.getTargetRanges ? event.getTargetRanges() : [];
+  if (ranges.length) {
+    const range = ranges[0];
+    if (el.contains(range.startContainer) && el.contains(range.endContainer)) {
+      return [
+        textOffset(el, range.startContainer, range.startOffset),
+        textOffset(el, range.endContainer, range.endOffset),
+      ];
+    }
+  }
+  return editSelection(el);
+}
+
+// Input types the browser won't let be prevented: what it writes is the
+// model's at the composition's end, and the text is shown again whole
+// after it (`onInput`).
+const UNPREVENTED = new Set(["insertCompositionText", "deleteCompositionText", "insertFromComposition"]);
 
 function onBeforeInput(event) {
   const el = editHost(event.target);
   if (!el) return;
   // An input method's text goes in as the browser shows it, its end to the
   // model (`onCompositionEnd`).
-  if (event.inputType === "insertCompositionText" || event.isComposing) return;
+  if (UNPREVENTED.has(event.inputType) || event.isComposing) {
+    el.$$dirty = true;
+    return;
+  }
   event.preventDefault();
   const text = el.textContent;
-  const [start, end] = editSelection(el);
+  const [start, end] = editRange(el, event);
   let data = event.data;
   // A paste or a drop: its plain text alone.
   if (data == null && event.dataTransfer) data = event.dataTransfer.getData("text/plain");
@@ -1846,6 +1884,7 @@ function onCompositionStart(event) {
   const text = el.textContent;
   const [start, end] = editSelection(el);
   el.$$cs = [utf8(text, start), utf8(text, end)];
+  sendEdit(el, "compositionstart", "", el.$$cs[0], el.$$cs[1]);
 }
 
 function onCompositionEnd(event) {
@@ -1853,6 +1892,7 @@ function onCompositionEnd(event) {
   if (!el) return;
   const [start, end] = el.$$cs || [0, 0];
   el.$$cs = undefined;
+  el.$$dirty = false;
   sendEdit(el, "compositionend", event.data || "", start, end);
 }
 

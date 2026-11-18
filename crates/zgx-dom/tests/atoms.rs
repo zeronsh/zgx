@@ -7,7 +7,7 @@
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 use zgx::{
-    compose::{column, text_area},
+    compose::{column, keyed, text_area, text_input},
     reactive::{Runtime, Signal},
     scene::Color,
     style::Styled,
@@ -169,9 +169,132 @@ fn an_input_methods_text_is_the_models_once_committed() {
 }
 
 #[wasm_bindgen_test]
-fn a_value_set_from_outside_shows_and_keeps_atoms_off_it() {
+fn a_value_set_from_outside_shows_and_takes_the_atoms_it_replaced() {
     let (_mounted, el, value) = note("ask Ada now", Some((4, 7)));
     value.set("hello".into());
     zgx_dom::flush();
     assert_eq!(el.text_content().unwrap(), "hello");
+    assert!(chips(&el).is_empty(), "its text replaced, its atom gone");
+}
+
+/// The caret's place in `el`'s text, in UTF-16 units, as the browser has it.
+fn caret(el: &web_sys::HtmlElement) -> u32 {
+    let selection = document().get_selection().unwrap().unwrap();
+    let range = document().create_range().unwrap();
+    range.set_start(el, 0).unwrap();
+    range
+        .set_end(&selection.anchor_node().unwrap(), selection.anchor_offset())
+        .unwrap();
+    String::from(range.to_string()).encode_utf16().count() as u32
+}
+
+#[wasm_bindgen_test]
+fn its_box_is_a_box_it_takes_the_focus_and_its_caret_is_the_models() {
+    let (_mounted, el, value) = note("ask Ada now", Some((4, 7)));
+    let display = web_sys::window()
+        .unwrap()
+        .get_computed_style(&el)
+        .unwrap()
+        .unwrap()
+        .get_property_value("display")
+        .unwrap();
+    assert_ne!(display, "contents", "a box of its own");
+    el.focus().unwrap();
+    assert_eq!(document().active_element().as_ref(), Some(el.as_ref()));
+    caret_at_end(&el);
+    before_input(&el, "insertText", Some("!"));
+    assert_eq!(value.get(), "ask Ada now!");
+    assert_eq!(
+        caret(&el),
+        12,
+        "the caret after what was typed, as the model has it"
+    );
+    // Past the chip: the caret after it, not in it.
+    before_input(&el, "deleteContentBackward", None);
+    let at = document().create_range().unwrap();
+    at.set_start(&el, 0).unwrap();
+    at.set_end(&el, 0).unwrap();
+    let selection = document().get_selection().unwrap().unwrap();
+    selection.remove_all_ranges().unwrap();
+    selection.add_range(&at).unwrap();
+    before_input(&el, "insertText", Some("x"));
+    assert_eq!(value.get(), "xask Ada now");
+    assert_eq!(caret(&el), 1);
+}
+
+#[wasm_bindgen_test]
+fn its_placeholder_shows_while_it_is_empty() {
+    let runtime = Runtime::new();
+    let value = runtime.signal(String::new());
+    let host = host();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        text_area("Message", value)
+            .placeholder("Ask anything")
+            .atoms_when(|_| Vec::new())
+            .atom_wash(Color(200, 220, 255, 255)),
+    );
+    zgx_dom::flush();
+    let el = host.query_selector(".ze").unwrap().unwrap();
+    assert_eq!(el.get_attribute("contenteditable").as_deref(), Some("true"));
+    assert_eq!(
+        el.get_attribute("data-placeholder").as_deref(),
+        Some("Ask anything")
+    );
+}
+
+#[wasm_bindgen_test]
+fn a_single_line_field_takes_no_line_breaks() {
+    let runtime = Runtime::new();
+    let value = runtime.signal(String::from("ask"));
+    let host = host();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        text_input("Name", value.clone())
+            .atoms_when(|_| Vec::new())
+            .atom_wash(Color(200, 220, 255, 255)),
+    );
+    zgx_dom::flush();
+    let el: web_sys::HtmlElement = host
+        .query_selector(".ze")
+        .unwrap()
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    caret_at_end(&el);
+    before_input(&el, "insertFromPaste", Some(" two\nlines"));
+    assert!(!value.get().contains('\n'), "joined: {:?}", value.get());
+    before_input(&el, "insertParagraph", None);
+    assert!(!value.get().contains('\n'));
+}
+
+#[wasm_bindgen_test]
+fn text_areas_with_atoms_in_a_list_each_show_theirs() {
+    let runtime = Runtime::new();
+    let host = host();
+    let rows = runtime.clone();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        keyed(
+            || vec![1, 2],
+            move |id: i32, _| {
+                let value = rows.signal(format!("row {id} Ada"));
+                text_area("Row", value)
+                    .atoms_when(|editor| {
+                        let id = editor.new_atom_id();
+                        let at = editor.text().find("Ada").unwrap();
+                        vec![Atom::new(id, at..at + 3)]
+                    })
+                    .atom_wash(Color(200, 220, 255, 255))
+            },
+        ),
+    );
+    zgx_dom::flush();
+    let list = host.query_selector_all("[data-atom]").unwrap();
+    assert_eq!(list.length(), 2, "a chip in each row");
+    let fields = host.query_selector_all(".ze").unwrap();
+    assert_eq!(fields.length(), 2);
 }
