@@ -7528,6 +7528,10 @@ impl Scene {
             shaper.shape(text, size, width, font)
         } else if font.line_height != crate::text_layout::LineHeight::NORMAL
             || font.letter_spacing != crate::text_layout::LetterSpacing::ZERO
+            || !matches!(
+                font.align,
+                crate::text_layout::TextAlign::Start | crate::text_layout::TextAlign::Left
+            )
         {
             self.shape_text_with_metrics(text, size, width, font)
         } else {
@@ -7535,8 +7539,8 @@ impl Scene {
         }
     }
     /// `shape_text_with_font` with no font shaper and explicit metrics
-    /// (letter spacing, a line height): apart, so the common call stays as
-    /// small as it is.
+    /// (letter spacing, a line height) or an alignment: apart, so the common
+    /// call stays as small as it is.
     #[inline(never)]
     fn shape_text_with_metrics(
         &self,
@@ -7546,8 +7550,12 @@ impl Scene {
         font: &crate::text_layout::FontStyle,
     ) -> Box<dyn crate::text_layout::TextLayout> {
         match self.text_shaper.as_deref() {
-            // A shaper taking no font: its advances, spaced as the GPU's.
-            Some(shaper) if font.letter_spacing != crate::text_layout::LetterSpacing::ZERO => {
+            // A shaper taking no font: its advances, spaced as the GPU's, or
+            // aligned (its rows moved as the font says) at its own line height.
+            Some(shaper)
+                if font.letter_spacing != crate::text_layout::LetterSpacing::ZERO
+                    || font.line_height == crate::text_layout::LineHeight::NORMAL =>
+            {
                 Box::new(crate::text_layout::FallbackTextLayout::spaced(
                     shaper, text, size, width, font,
                 ))
