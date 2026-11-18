@@ -133,10 +133,41 @@ pub(crate) struct Environment {
     typography: Signal<Typography>,
     registry: Registry,
     portal: Option<(NodeId, Signal<bool>)>,
-    menu: Option<Rc<crate::compose_menu::MenuContext>>,
+    /// The menu around it and whether an ancestor is disabled (`EnvRare`):
+    /// one pointer, `None` in most subtrees.
+    rare: Option<Rc<EnvRare>>,
     measure: crate::rich_text::TextMeasure,
     /// The theme scope styles in this subtree resolve tokens from.
     pub(crate) theme: Rc<crate::theme::ThemeScope>,
+}
+/// What few subtrees' environments hold, behind one pointer: the
+/// environment is cloned for every mount, so it stays small.
+#[derive(Clone, Default)]
+struct EnvRare {
+    menu: Option<Rc<crate::compose_menu::MenuContext>>,
+    /// Whether an ancestor is disabled, read where it is asked (tracked):
+    /// only below a view that can be disabled (`View::disabled_when`).
+    disabled: Option<Rc<dyn Fn() -> bool>>,
+}
+impl Environment {
+    /// The menu this subtree is in.
+    pub(crate) fn menu(&self) -> Option<Rc<crate::compose_menu::MenuContext>> {
+        self.rare.as_ref()?.menu.clone()
+    }
+    pub(crate) fn set_menu(&mut self, menu: Option<Rc<crate::compose_menu::MenuContext>>) {
+        let mut rare = self.rare.as_deref().cloned().unwrap_or_default();
+        rare.menu = menu;
+        self.rare = Some(Rc::new(rare));
+    }
+    /// Whether an ancestor is disabled, if one can be.
+    fn disabled_above(&self) -> Option<Rc<dyn Fn() -> bool>> {
+        self.rare.as_ref()?.disabled.clone()
+    }
+    fn set_disabled_above(&mut self, disabled: Rc<dyn Fn() -> bool>) {
+        let mut rare = self.rare.as_deref().cloned().unwrap_or_default();
+        rare.disabled = Some(disabled);
+        self.rare = Some(Rc::new(rare));
+    }
 }
 /// Mount-time component context. State is allocated once; there are no positional hooks.
 pub struct Context {
@@ -5397,15 +5428,10 @@ fn mount_portal_panel(
     }
     environment.portal = Some((portal.overlay, portal.visible.clone()));
     let menu_context = is_menu.then(|| {
-        crate::compose_menu::MenuContext::new(
-            open.clone(),
-            environment.menu.clone(),
-            anchor,
-            is_submenu,
-        )
+        crate::compose_menu::MenuContext::new(open.clone(), environment.menu(), anchor, is_submenu)
     });
     if let Some(menu) = &menu_context {
-        environment.menu = Some(menu.clone());
+        environment.set_menu(Some(menu.clone()));
     }
 
     let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
@@ -5923,6 +5949,39 @@ impl WidgetStyles {
 fn dim_when_disabled(view: &mut View) {
     if view.variants.disabled.is_none() {
         view.variants.disabled = Some(Box::new(Styles::new().opacity(0.45)));
+    }
+}
+/// A view disabled, or under one that is: what its children read (an
+/// ancestor disabled, followed), and what its style reads, as a node
+/// disabled itself is when it has disabled styles of its own: it or an
+/// ancestor disabled. A node with no disabled style reads nothing of its
+/// ancestors (input and assistive technology walk them).
+#[cold]
+#[inline(never)]
+fn inherit_disabled(
+    ui: &mut Ui,
+    root: NodeId,
+    environment: &mut Environment,
+    own: Option<Box<dyn FnMut() -> bool>>,
+    variants: &crate::compose_style::Variants,
+) -> Option<Box<dyn FnMut() -> bool>> {
+    let above = environment.disabled_above();
+    if own.is_some() {
+        let here = ui.input.observe_disabled(root, &ui.runtime);
+        let up = above.clone();
+        environment.set_disabled_above(Rc::new(move || {
+            here.get() || up.as_ref().is_some_and(|up| up())
+        }));
+    }
+    let Some(above) = above else {
+        return own;
+    };
+    match own {
+        Some(mut own) => Some(Box::new(move || own() || above())),
+        None if variants.disabled.is_some() || variants.reactive.is_some() => {
+            Some(Box::new(move || above()))
+        }
+        None => None,
     }
 }
 fn widget_style(pick: impl FnOnce(&WidgetStyles) -> &Styles) -> Styles {
@@ -6782,7 +6841,7 @@ fn open_element(
     // A trigger drawn by the app (`View::trigger`) shows its own chevron.
     let submenu_indicator = is_submenu_trigger && view.children.is_empty();
     // Outside a menu (a popover's list) an item is a plain action.
-    let item_menu = is_menu_item.then(|| environment.menu.clone()).flatten();
+    let item_menu = is_menu_item.then(|| environment.menu()).flatten();
     let is_editor = matches!(kind, Kind::Editor { .. });
     assert!(
         rare.as_deref().is_none_or(|r| r.read_only.is_none()) || is_editor,
@@ -7412,6 +7471,14 @@ fn open_element(
         false => rare.as_deref_mut().and_then(|r| r.layout_target.take()),
     };
     let image_fit = is_image.then(|| ui.signal(crate::style::ImagePlacement::default()));
+    if view.disabled.is_some()
+        || environment
+            .rare
+            .as_ref()
+            .is_some_and(|r| r.disabled.is_some())
+    {
+        view.disabled = inherit_disabled(ui, root, &mut environment, view.disabled, &view.variants);
+    }
     environment.typography = mount_style_with_intrinsic(
         ui,
         root,
@@ -10322,7 +10389,7 @@ impl Ui {
             typography,
             registry: registry.clone(),
             portal: None,
-            menu: None,
+            rare: None,
             measure: self.scene.borrow().text_measure(),
             theme,
         };

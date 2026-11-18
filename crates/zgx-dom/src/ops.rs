@@ -39,6 +39,9 @@ pub(crate) const MENU_AT: u32 = 33;
 /// `SELECT root anchor focus`: a contenteditable's selection, in UTF-16
 /// units of its text (`atom_editor`), while it has the focus.
 pub(crate) const SELECT: u32 = 34;
+/// `OFF id on`: an element that isn't a native control disabled, or not:
+/// it and what it holds take no input or focus and are heard disabled.
+pub(crate) const OFF: u32 = 35;
 
 /// Words a frame holds before it applies what it has (`Ops::op`).
 pub(crate) const EARLY: usize = 1 << 12;

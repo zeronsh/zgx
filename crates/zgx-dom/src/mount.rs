@@ -697,11 +697,8 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
                 if native {
                     ops.op_str(ops::PROP, id, "disabled");
                     ops.words.push(on as u32);
-                } else if on {
-                    ops.op_str(ops::ATTR, id, "aria-disabled");
-                    ops.str("true");
                 } else {
-                    ops.op_str(ops::REMOVE_ATTR, id, "aria-disabled");
+                    ops.op(&[ops::OFF, id, on as u32]);
                 }
             });
         });

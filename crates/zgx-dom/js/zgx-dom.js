@@ -193,6 +193,7 @@ export function zgx_schedule() {
 }
 
 function onClick(event) {
+  if (offCount !== 0 && event.target.closest?.("[data-off]")) return;
   let node = event.target;
   while (node && node !== root) {
     const handler = node.$$c;
@@ -209,6 +210,69 @@ function onClick(event) {
     }
     node = node.parentNode;
   }
+}
+
+// Disabled elements (`OFF`) and what they hold, as a disabled fieldset's
+// controls are: no input or focus, heard disabled. Each control inside is
+// marked as the element is disabled (or as it is added, while it is),
+// keeping its own state in `$$off` to give back when no disabled element
+// holds it any more.
+let offCount = 0;
+const OFFABLE = "button,input,select,textarea,a[href],[tabindex],[contenteditable]";
+const NATIVE = /^(BUTTON|INPUT|SELECT|TEXTAREA)$/;
+
+function setOff(el, on) {
+  if (on === el.hasAttribute("data-off")) return;
+  if (on) {
+    offCount++;
+    el.setAttribute("data-off", "");
+    el.setAttribute("aria-disabled", "true");
+    for (const inside of el.querySelectorAll(OFFABLE)) offMark(inside);
+    el.$$offWatch = new MutationObserver((records) => {
+      for (const record of records)
+        for (const added of record.addedNodes) {
+          if (added.nodeType !== 1) continue;
+          if (added.matches(OFFABLE)) offMark(added);
+          for (const inside of added.querySelectorAll(OFFABLE)) offMark(inside);
+        }
+    });
+    el.$$offWatch.observe(el, { childList: true, subtree: true });
+  } else {
+    offCount--;
+    el.$$offWatch.disconnect();
+    el.$$offWatch = undefined;
+    el.removeAttribute("data-off");
+    // Still inside another disabled element: heard disabled through it.
+    if (el.$$off === undefined) el.removeAttribute("aria-disabled");
+    for (const inside of el.querySelectorAll(OFFABLE)) offRestore(inside);
+  }
+}
+
+function offMark(el) {
+  if (el.$$off !== undefined) return;
+  el.$$off = [el.disabled, el.getAttribute("tabindex"), el.getAttribute("aria-disabled"), el.getAttribute("contenteditable")];
+  if (NATIVE.test(el.tagName)) {
+    el.disabled = true;
+    return;
+  }
+  if (el.tagName === "A") el.setAttribute("tabindex", "-1");
+  else el.removeAttribute("tabindex");
+  if (el.hasAttribute("contenteditable")) el.setAttribute("contenteditable", "false");
+  el.setAttribute("aria-disabled", "true");
+}
+
+function offRestore(el) {
+  const was = el.$$off;
+  if (was === undefined || el.parentElement?.closest("[data-off]")) return;
+  el.$$off = undefined;
+  if (NATIVE.test(el.tagName)) {
+    el.disabled = was[0];
+    return;
+  }
+  const put = (name, value) => (value === null ? el.removeAttribute(name) : el.setAttribute(name, value));
+  put("tabindex", was[1]);
+  put("aria-disabled", el.hasAttribute("data-off") ? "true" : was[2]);
+  if (was[3] !== null) el.setAttribute("contenteditable", was[3]);
 }
 
 function onInput(event) {
@@ -440,7 +504,11 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
       case 18: { // PROP id name on: a boolean property
         const node = nodes[ops[i++]];
         const name = str();
-        node[name] = ops[i++] === 1;
+        const on = ops[i++] === 1;
+        // A control inside a disabled element stays disabled: its own
+        // value waits for the element to be enabled (`offRestore`).
+        if (node.$$off !== undefined && name === "disabled") node.$$off[0] = on;
+        else node[name] = on;
         break;
       }
       case 19: { // CLONE id from: a template's copy
@@ -544,6 +612,11 @@ export function zgx_apply(memory, opsPtr, opsLen, strPtr, strLen) {
         const anchor = ops[i++];
         const focus = ops[i++];
         selectIn(el, anchor, focus);
+        break;
+      }
+      case 35: { // OFF id on: an element disabled, with what it holds
+        const el = nodes[ops[i++]];
+        setOff(el, ops[i++] === 1);
         break;
       }
       case 31: // PREVENT: the click being handled doesn't do its default
@@ -1008,6 +1081,8 @@ function heard(event) {
 function run(node, event, phase) {
   const handler = node.$$e;
   if (handler === undefined) return;
+  // Inside a disabled element, as on the desktop: no input reaches it.
+  if (offCount !== 0 && event.target.closest?.("[data-off]")) return;
   const kind = EVENTS[event.type];
   const mods =
     (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);

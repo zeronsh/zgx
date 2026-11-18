@@ -175,7 +175,9 @@ pub(crate) fn class(ops: &mut Ops, base: &'static str, look: Look) -> u32 {
                 }
                 if let Some(css) = disabled {
                     rule(
-                        format!(".c{class}:disabled,.c{class}[aria-disabled='true']"),
+                        format!(
+                            ".c{class}:disabled,.c{class}[aria-disabled='true'],[data-off] .c{class}"
+                        ),
                         css,
                     );
                 }
