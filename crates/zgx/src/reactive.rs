@@ -207,15 +207,35 @@ impl Subscribers {
             Self::Set(set) => set.is_empty(),
         }
     }
-    fn iter(&self) -> impl Iterator<Item = &EffectId> {
-        let (inline, set) = match self {
-            Self::Inline(ids) => (Some(ids.iter().filter(|id| **id != NO_EFFECT)), None),
-            Self::Set(set) => (None, Some(set.iter())),
-        };
-        inline
-            .into_iter()
-            .flatten()
-            .chain(set.into_iter().flatten())
+    /// The one subscriber, when it has exactly one (held inline).
+    #[inline]
+    fn single(&self) -> Option<EffectId> {
+        match self {
+            Self::Inline([a, b]) => match (*a == NO_EFFECT, *b == NO_EFFECT) {
+                (false, true) => Some(*a),
+                (true, false) => Some(*b),
+                _ => None,
+            },
+            Self::Set(_) => None,
+        }
+    }
+    /// Call `f` with each subscriber, in no order.
+    #[inline]
+    fn for_each(&self, mut f: impl FnMut(EffectId)) {
+        match self {
+            Self::Inline(ids) => {
+                for &id in ids {
+                    if id != NO_EFFECT {
+                        f(id);
+                    }
+                }
+            }
+            Self::Set(set) => {
+                for &id in set {
+                    f(id);
+                }
+            }
+        }
     }
     /// The room it holds beside itself (a memory report's).
     fn bytes(&self) -> usize {
@@ -223,6 +243,54 @@ impl Subscribers {
             Self::Inline(_) => 0,
             Self::Set(set) => crate::memory::set_bytes(set),
         }
+    }
+}
+/// Queue effect `id` to run, unless it is stopped or queued already: in a
+/// flush, among those it made run; else for the next.
+#[inline]
+fn queue_one(inner: &Inner, id: EffectId) {
+    let mut effects = inner.effects.borrow_mut();
+    let Some(record) = effects.get_mut(&id) else {
+        return;
+    };
+    if record.stopped || std::mem::replace(&mut record.queued, true) {
+        return;
+    }
+    match inner.flushing.get() {
+        true => inner.pending.borrow_mut().push(Reverse(id)),
+        false => inner.queued.borrow_mut().push(id),
+    }
+}
+/// `notify`'s loop over a signal's subscribers, one copy for every
+/// signal's type (each `set` holds only the call). `addr` names the
+/// signal to a trace.
+#[inline(never)]
+fn queue_subscribers(inner: &Inner, subscribers: &Subscribers, addr: usize) {
+    let mut effects = inner.effects.borrow_mut();
+    let flushing = inner.flushing.get();
+    let (mut queued, mut pending) = (inner.queued.borrow_mut(), inner.pending.borrow_mut());
+    #[cfg(feature = "trace")]
+    let mut caused: Option<Vec<EffectId>> = crate::trace::enabled().then(Vec::new);
+    #[cfg(not(feature = "trace"))]
+    let _ = addr;
+    subscribers.for_each(|id| {
+        if let Some(record) = effects.get_mut(&id)
+            && !record.stopped
+            && !std::mem::replace(&mut record.queued, true)
+        {
+            #[cfg(feature = "trace")]
+            if let Some(caused) = &mut caused {
+                caused.push(id);
+            }
+            match flushing {
+                true => pending.push(Reverse(id)),
+                false => queued.push(id),
+            }
+        }
+    });
+    #[cfg(feature = "trace")]
+    if let Some(caused) = caused {
+        crate::trace::wrote(addr, &caused);
     }
 }
 #[derive(Default)]
@@ -1278,33 +1346,23 @@ impl<T: 'static> Signal<T> {
     {
         self.with(Clone::clone)
     }
+    /// Queue its subscribers, then flush. Inline in each `set`: no
+    /// subscriber asks nothing, and one is queued in place; more go to one
+    /// loop every signal's type shares (`queue_subscribers`).
     fn notify(&self) {
         if let Some(inner) = self.inner.runtime.upgrade() {
             {
-                let mut effects = inner.effects.borrow_mut();
-                let flushing = inner.flushing.get();
-                let (mut queued, mut pending) =
-                    (inner.queued.borrow_mut(), inner.pending.borrow_mut());
+                let subscribers = self.inner.subscribers.borrow();
                 #[cfg(feature = "trace")]
-                let mut caused: Option<Vec<EffectId>> = crate::trace::enabled().then(Vec::new);
-                for id in self.inner.subscribers.borrow().iter() {
-                    if let Some(record) = effects.get_mut(id)
-                        && !record.stopped
-                        && !std::mem::replace(&mut record.queued, true)
-                    {
-                        #[cfg(feature = "trace")]
-                        if let Some(caused) = &mut caused {
-                            caused.push(*id);
-                        }
-                        match flushing {
-                            true => pending.push(Reverse(*id)),
-                            false => queued.push(*id),
-                        }
-                    }
-                }
-                #[cfg(feature = "trace")]
-                if let Some(caused) = caused {
-                    crate::trace::wrote(self.addr(), &caused);
+                let traced = crate::trace::enabled();
+                #[cfg(not(feature = "trace"))]
+                let traced = false;
+                if traced {
+                    queue_subscribers(&inner, &subscribers, self.addr());
+                } else if let Some(id) = subscribers.single() {
+                    queue_one(&inner, id);
+                } else if !subscribers.is_empty() {
+                    queue_subscribers(&inner, &subscribers, self.addr());
                 }
             }
             Runtime { inner }.flush();
@@ -1866,18 +1924,31 @@ mod tests {
     fn an_inline_subscriber_reading_twice_is_one_subscriber() {
         let mut subscribers = Subscribers::default();
         assert!(subscribers.is_empty());
+        assert_eq!(subscribers.single(), None);
         assert!(subscribers.insert(7));
+        assert_eq!(subscribers.single(), Some(7));
         assert!(!subscribers.insert(7));
         assert!(subscribers.insert(9));
+        assert_eq!(subscribers.single(), None, "two");
         assert!(!subscribers.insert(9));
+        subscribers.remove(7);
+        assert_eq!(
+            subscribers.single(),
+            Some(9),
+            "the one left, in the second slot"
+        );
+        assert!(subscribers.insert(7));
         assert!(subscribers.insert(11));
+        assert_eq!(subscribers.single(), None, "a set");
         assert!(!subscribers.insert(7));
-        let mut ids: Vec<_> = subscribers.iter().copied().collect();
+        let mut ids = Vec::new();
+        subscribers.for_each(|id| ids.push(id));
         ids.sort_unstable();
         assert_eq!(ids, [7, 9, 11]);
         subscribers.remove(9);
         subscribers.remove(9);
-        let mut ids: Vec<_> = subscribers.iter().copied().collect();
+        let mut ids = Vec::new();
+        subscribers.for_each(|id| ids.push(id));
         ids.sort_unstable();
         assert_eq!(ids, [7, 11]);
         let mut subscribers = Subscribers::default();
@@ -1885,7 +1956,7 @@ mod tests {
         subscribers.remove(5);
         subscribers.remove(3);
         assert!(subscribers.is_empty());
-        assert_eq!(subscribers.iter().count(), 0);
+        subscribers.for_each(|id| panic!("{id} left"));
     }
 
     #[test]
