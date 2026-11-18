@@ -805,6 +805,13 @@ impl Words {
         // Its lines from before are filled again, their lists kept; those
         // its words still decide stay as they are.
         let mut lines = std::mem::take(&mut self.lines);
+        // Room for as many lines as it lays out (an empty text one), at
+        // once: a first push would make room for four, and most texts are
+        // a line, kept laid out as long as they show.
+        let wanted = (kept + visual.len()).max(1);
+        if lines.capacity() < wanted {
+            lines.reserve_exact(wanted - lines.len());
+        }
         // Where its lines start and end, kept for a long paragraph only.
         let mut bounds = (self.words.len() >= STREAM_WORDS).then(|| {
             let stream = self.stream.get_or_insert_with(Default::default);
