@@ -189,13 +189,33 @@ pub(crate) fn zoom_buttons(window: &winit::window::Window, titlebar: Titlebar, z
 #[doc(hidden)]
 pub type TitlebarArea = (Option<zgx::scene::Rect>, Option<zgx::scene::Rect>);
 
+/// A resize `debug_titlebar_mid_resize` made: the height asked for and the
+/// one the window took, and the title bar as zgx reads it where winit
+/// reports the resize (None: nothing reported one, the frame unchanged),
+/// then once AppKit is done.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct TitlebarResize {
+    /// The window's frame height asked for.
+    pub asked: f64,
+    /// The frame height the window took.
+    pub took: f64,
+    /// The title bar read where winit reports the resize: None when
+    /// nothing reported one.
+    pub during: Option<TitlebarArea>,
+    /// The title bar once AppKit is done with the resize.
+    pub after: TitlebarArea,
+}
+
 /// Test hook (macOS; main thread): a bare window with the inset title bar is
-/// resized to each of `heights` as Accessibility resizes a window (Raycast,
-/// Rectangle), and for each, the title bar's area and buttons as zgx reads
+/// resized as Accessibility resizes a window (Raycast, Rectangle) to each
+/// of the heights `heights` gives for its screen's visible height (what a
+/// snapped window fills at most: AppKit keeps an on-screen window's frame
+/// within it), and for each, the title bar's area and buttons as zgx reads
 /// them where winit reports the resize, then once AppKit is done. Empty
 /// elsewhere.
 #[doc(hidden)]
-pub fn debug_titlebar_mid_resize(heights: &[f64]) -> Vec<[TitlebarArea; 2]> {
+pub fn debug_titlebar_mid_resize(heights: impl FnOnce(f64) -> Vec<f64>) -> Vec<TitlebarResize> {
     #[cfg(target_os = "macos")]
     {
         mac::titlebar_mid_resize(heights)
@@ -2777,11 +2797,14 @@ mod mac {
     }
 
     /// Test hook (`debug_titlebar_mid_resize`): a bare window with the inset
-    /// title bar, its frame set `heights` tall in turn as Accessibility sets
-    /// it (`setFrame:display:`), and `titlebar_area` read where winit reports
+    /// title bar, its frame set as tall as `heights` gives for its screen's
+    /// visible height, in turn, as Accessibility sets it
+    /// (`setFrame:display:`), and `titlebar_area` read where winit reports
     /// each resize: as the content view's frame changes. Each reading, then
     /// one once AppKit is done with the resize.
-    pub(super) fn titlebar_mid_resize(heights: &[f64]) -> Vec<[super::TitlebarArea; 2]> {
+    pub(super) fn titlebar_mid_resize(
+        heights: impl FnOnce(f64) -> Vec<f64>,
+    ) -> Vec<super::TitlebarResize> {
         use objc2::MainThreadMarker;
         use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize};
         let Some(mtm) = MainThreadMarker::new() else {
@@ -2835,16 +2858,23 @@ mod mac {
                 &block,
             )
         };
+        let visible = window
+            .screen()
+            .map_or(0., |screen| screen.visibleFrame().size.height);
         let mut readings = Vec::new();
-        for &height in heights {
+        for asked in heights(visible) {
             let mut frame = window.frame();
             // As Accessibility's AXSize: the top left stays.
-            frame.origin.y += frame.size.height - height;
-            frame.size.height = height;
+            frame.origin.y += frame.size.height - asked;
+            frame.size.height = asked;
             seen.borrow_mut().clear();
             window.setFrame_display(frame, false);
-            let during = seen.borrow().last().copied().unwrap_or((None, None));
-            readings.push([during, titlebar_area_of(&window)]);
+            readings.push(super::TitlebarResize {
+                asked,
+                took: window.frame().size.height,
+                during: seen.borrow().last().copied(),
+                after: titlebar_area_of(&window),
+            });
         }
         // SAFETY: the observer `addObserverForName:` returned.
         unsafe { center.removeObserver(observer.as_ref()) };
