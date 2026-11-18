@@ -14683,11 +14683,16 @@ impl Scene {
     /// the children before it over it, within its box.
     fn measure_contents(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
         self.node_mut(id).advanced_layout = None;
-        let ids = self.children_raw(self.node(id)).clone();
-        let lead = *ids.last().unwrap();
+        // Its children read in place, one at a time, not copied first:
+        // measuring one changes no parent's list.
+        let count = self.children_raw(self.node(id)).len();
+        let lead = self.children_raw(self.node(id))[count - 1];
         let size = self.measure(lead, constraints);
-        let mut children = Vec::with_capacity(ids.len());
-        for child in ids {
+        let mut children = Vec::with_capacity(count);
+        for at in 0..count {
+            let Some(&child) = self.children_raw(self.node(id)).get(at) else {
+                break;
+            };
             if child == lead {
                 children.push((child, Rect::new(0., 0., size.0, size.1), constraints));
                 continue;
