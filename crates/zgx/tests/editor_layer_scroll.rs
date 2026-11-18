@@ -148,3 +148,30 @@ fn a_scroll_step_copies_the_lines_and_paints_what_comes_into_view() {
         report.damage
     );
 }
+
+#[test]
+fn a_page_jump_repaints_the_view_whole_and_its_lines_show_where_their_text_is() {
+    let (mut ui, editor, at) = long_editor();
+    let top = lines(&ui, &editor)[0].2.y;
+    wheel(&mut ui, at, 12.);
+    ui.scene.borrow_mut().flush();
+    // Two thirds of the 300-point view at once: every line shown changes.
+    wheel(&mut ui, at, 200.);
+    let report = ui.scene.borrow_mut().flush();
+    let view = ui.scene.borrow().transformed_bounds(editor.node);
+    // One area, the view: not each line's, joined one by one.
+    let whole = |r: &Rect| {
+        r.x <= view.x
+            && r.y <= view.y
+            && r.x + r.width >= view.x + view.width
+            && r.y + r.height >= view.y + view.height
+    };
+    assert!(report.damage.iter().any(whole), "{:?}", report.damage);
+    assert_eq!(editor.scroll_offset().1, 212.);
+    let shown = lines(&ui, &editor);
+    assert!(shown.len() > 10, "{} lines shown", shown.len());
+    for (n, _, place) in shown {
+        let expected = top + n as f32 * 20. - 212.;
+        assert!((place.y - expected).abs() < 0.01, "line {n} at {}", place.y);
+    }
+}
