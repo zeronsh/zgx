@@ -2862,13 +2862,17 @@ fn joined_wash<'o>(
 }
 /// How far the box of `run`, a span that is a box of its own, reaches above
 /// the baseline: its line height's half-leading above its font's ascent
-/// (`glyph`'s font), then its padding, as `inline_line_box` lays it out.
+/// (`glyph`'s font), then its padding, as `inline_line_box` lays it out:
+/// the ascent and descent rounded to whole pixels at `scale` and the
+/// half-leading floored, as Blink has them, so the box sits where Chrome's
+/// inline-flex does, on the line box its line takes.
 #[cold]
 #[inline(never)]
 fn box_span_above(
     fonts: &FontSystem,
     run: &zgx::rich_text::TextRun,
     glyph: &cosmic_text::LayoutGlyph,
+    scale: f32,
 ) -> f32 {
     let size = glyph.font_size;
     let height = run.font.line_height.resolve(run.font_size);
@@ -2884,7 +2888,17 @@ fn box_span_above(
         })
         .flatten()
         .unwrap_or((0.8 * size, 0.2 * size));
-    ascent + (height - ascent - descent) / 2. + run.padding[1]
+    let snap = if scale.is_finite() && scale > 0. {
+        scale
+    } else {
+        1.
+    };
+    let (ascent, descent) = (
+        (ascent * snap).round() / snap,
+        (descent * snap).round() / snap,
+    );
+    let half = ((height * snap - ascent * snap - descent * snap) / 2.).floor() / snap;
+    ascent + half + run.padding[1]
 }
 /// Derive decoration geometry from shaped visual fragments, including bidi and wrapping.
 pub fn rich_decorations(
@@ -3111,7 +3125,10 @@ pub fn rich_decorations_in<'a>(
             // A box of its own: how far its box reaches above the baseline,
             // in its first glyph's font, as its line's box has it.
             let box_above = if rich.has_box_spans() && run.font.features.is_box_span() {
-                glyphs.clone().next().map(|g| box_span_above(fonts, run, g))
+                glyphs
+                    .clone()
+                    .next()
+                    .map(|g| box_span_above(fonts, run, g, scale))
             } else {
                 None
             };
@@ -3604,4 +3621,81 @@ fn shares_cluster_with_a_wider_glyph(
         && glyphs
             .iter()
             .any(|other| other.start == glyph.start && other.end == glyph.end && other.w > 0.)
+}
+
+#[cfg(test)]
+mod box_baseline_tests {
+    use super::*;
+    use zgx::rich_text::{RichText, TextRun};
+    use zgx::text_layout::{FontFamily, FontStyle, LineHeight};
+
+    const GEIST: &[u8] = include_bytes!("../tests/fonts/GeistVariable-subset.ttf");
+
+    /// How far a box span's top (`inline_box`, CSS's inline-flex) is above
+    /// its line's baseline, in 12-point Geist on 18-point lines, the box's
+    /// line height 16, with `padding` and then `border` round it.
+    fn top_above_baseline(padding: f32, border: f32) -> f32 {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(GEIST.to_vec());
+        let font = FontStyle {
+            family: FontFamily::Named("Geist".into()),
+            line_height: LineHeight::px(18.),
+            ..FontStyle::default()
+        };
+        let mut boxed = FontStyle {
+            line_height: LineHeight::px(16.),
+            ..font.clone()
+        };
+        boxed.features = boxed.features.with_box_span();
+        let text = "hello esc to go";
+        let run = |range: std::ops::Range<usize>, font: FontStyle, edge: f32| TextRun {
+            range,
+            font,
+            font_size: 12.,
+            padding: [edge; 2],
+            border: (border > 0. && edge > 0.).then_some((border, zgx::scene::Color(0, 0, 0, 255))),
+            background: Some(zgx::scene::Color(220, 220, 220, 255)),
+            ..Default::default()
+        };
+        let rich = RichText::new(
+            text,
+            vec![
+                TextRun {
+                    background: None,
+                    ..run(0..6, font.clone(), 0.)
+                },
+                run(6..9, boxed, padding + border),
+                TextRun {
+                    background: None,
+                    ..run(9..15, font, 0.)
+                },
+            ],
+        )
+        .unwrap()
+        .with_box_spans();
+        let buffer = rich_buffer(&mut fonts, &rich, Some(600.), None);
+        let baseline = buffer.layout_runs().next().unwrap().line_y;
+        let boxed = rich_decorations(&fonts, 1., &buffer, &rich)
+            .into_iter()
+            .find(|d| d.background && d.run == 1)
+            .expect("the box's background");
+        baseline - boxed.bounds.y
+    }
+
+    /// As Chrome lays out `display: inline-flex; line-height: 16px` in
+    /// 12-pixel Geist on 18-pixel lines (headless Chrome 157): the box's top
+    /// 12 above the baseline, and 14 with 1 of padding and 1 of border.
+    #[test]
+    fn a_box_spans_top_is_where_chromes_inline_flex_has_it() {
+        let plain = top_above_baseline(0., 0.);
+        let keycap = top_above_baseline(1., 1.);
+        assert!(
+            (plain - 12.).abs() < 0.01,
+            "plain: {plain} above the baseline, Chrome 12"
+        );
+        assert!(
+            (keycap - 14.).abs() < 0.01,
+            "keycap: {keycap} above the baseline, Chrome 14"
+        );
+    }
 }
