@@ -77,6 +77,29 @@ fn before_input(el: &web_sys::HtmlElement, kind: &str, data: Option<&str>) {
     zgx_dom::flush();
 }
 
+/// A `beforeinput` of `kind` whose target range (`getTargetRanges`) is
+/// `from..to` UTF-16 units into `node`, a text node of the field's.
+fn before_input_at(
+    el: &web_sys::HtmlElement,
+    kind: &str,
+    data: Option<&str>,
+    node: &web_sys::Node,
+    from: u32,
+    to: u32,
+) {
+    let init = web_sys::InputEventInit::new();
+    init.set_bubbles(true);
+    init.set_cancelable(true);
+    init.set_input_type(kind);
+    init.set_data(data);
+    let range =
+        web_sys::StaticRange::new(&web_sys::StaticRangeInit::new(node, to, node, from)).unwrap();
+    init.set_target_ranges(&js_sys::Array::of1(&range));
+    let event = web_sys::InputEvent::new_with_event_init_dict("beforeinput", &init).unwrap();
+    el.dispatch_event(&event).unwrap();
+    zgx_dom::flush();
+}
+
 fn chips(el: &web_sys::HtmlElement) -> Vec<String> {
     let list = el.query_selector_all("[data-atom]").unwrap();
     (0..list.length())
@@ -297,4 +320,29 @@ fn text_areas_with_atoms_in_a_list_each_show_theirs() {
     assert_eq!(list.length(), 2, "a chip in each row");
     let fields = host.query_selector_all(".ze").unwrap();
     assert_eq!(fields.length(), 2);
+}
+
+#[wasm_bindgen_test]
+fn a_replacement_takes_its_target_range_and_a_delete_the_models() {
+    let (_mounted, el, value) = note("ask Ada teh end", Some((4, 7)));
+    caret_at_end(&el);
+    // The text after the chip, " teh end": a spelling correction names
+    // "teh", the caret elsewhere.
+    let tail = el.last_child().unwrap();
+    assert_eq!(tail.text_content().unwrap(), " teh end");
+    before_input_at(&el, "insertReplacementText", Some("the"), &tail, 1, 4);
+    assert_eq!(value.get(), "ask Ada the end", "the word, not at the caret");
+    assert_eq!(chips(&el), ["Ada"]);
+    // A delete is the model's at the caret, whatever range the browser
+    // names: Backspace after the chip takes it whole.
+    let tail = el.last_child().unwrap();
+    let at = document().create_range().unwrap();
+    at.set_start(&tail, 0).unwrap();
+    at.set_end(&tail, 0).unwrap();
+    let selection = document().get_selection().unwrap().unwrap();
+    selection.remove_all_ranges().unwrap();
+    selection.add_range(&at).unwrap();
+    before_input_at(&el, "deleteContentBackward", None, &tail, 4, 8);
+    assert_eq!(value.get(), "ask  the end");
+    assert!(chips(&el).is_empty(), "the chip, whole");
 }

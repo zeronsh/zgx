@@ -1838,11 +1838,16 @@ function sendEdit(el, kind, data, start, end) {
   dispatch(el.$$e, 20, Math.min(start, most) * 67108864 + Math.min(end, most), kind + "\0" + data);
 }
 
-// The edit's own range where the browser gives one (a spelling correction,
-// a text replacement, a drop, a drag's delete), else the selection: UTF-16
-// units of `el`'s text, in order.
+// Input types whose range is not at the caret: a spelling correction or a
+// text replacement, a drop, a drag's delete. Every other edit takes the
+// selection, and the model decides what a delete takes (a chip whole, its
+// own words and lines), as a native field does.
+const TARGETED = new Set(["insertReplacementText", "insertFromDrop", "deleteByDrag"]);
+
+// The edit's own range where it isn't the caret and the browser gives one,
+// else the selection: UTF-16 units of `el`'s text, in order.
 function editRange(el, event) {
-  const ranges = event.getTargetRanges ? event.getTargetRanges() : [];
+  const ranges = TARGETED.has(event.inputType) && event.getTargetRanges ? event.getTargetRanges() : [];
   if (ranges.length) {
     const range = ranges[0];
     if (el.contains(range.startContainer) && el.contains(range.endContainer)) {

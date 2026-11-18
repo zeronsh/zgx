@@ -47,7 +47,7 @@ wasm-bindgen-futures = { version = "0.4.77", optional = true }
 zgx = { path = "../zgx", default-features = false, features = ["dom", "trace"] }
 wasm-bindgen-test = "=0.3.77"
 wasm-bindgen-futures = "0.4.77"
-web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlElement", "HtmlInputElement", "HtmlCollection", "KeyboardEvent", "KeyboardEventInit", "MouseEvent", "MouseEventInit", "Node", "NodeList", "PointerEvent", "PointerEventInit", "Window", "CssStyleDeclaration", "FocusEvent", "CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData", "ClipboardEvent", "ClipboardEventInit", "DataTransfer", "DragEvent", "DragEventInit", "InputEvent", "InputEventInit", "CompositionEvent", "CompositionEventInit", "Selection", "Range", "Text"] }
+web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlElement", "HtmlInputElement", "HtmlCollection", "KeyboardEvent", "KeyboardEventInit", "MouseEvent", "MouseEventInit", "Node", "NodeList", "PointerEvent", "PointerEventInit", "Window", "CssStyleDeclaration", "FocusEvent", "CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData", "ClipboardEvent", "ClipboardEventInit", "DataTransfer", "DragEvent", "DragEventInit", "InputEvent", "InputEventInit", "CompositionEvent", "CompositionEventInit", "Selection", "Range", "StaticRange", "StaticRangeInit", "Text"] }
 
 # The table benchmark (`bench/`): a page's module, built for wasm32.
 [[test]]
