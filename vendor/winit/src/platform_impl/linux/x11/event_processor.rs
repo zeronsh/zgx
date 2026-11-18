@@ -48,7 +48,7 @@ pub struct EventProcessor {
     pub dnd: Dnd,
     pub ime_receiver: ImeReceiver,
     pub ime_event_receiver: ImeEventReceiver,
-    pub randr_event_offset: u8,
+    pub randr_event_offset: Option<u8>,
     pub devices: RefCell<HashMap<DeviceId, Device>>,
     pub xi2ext: ExtensionInformation,
     pub xkbext: ExtensionInformation,
@@ -311,7 +311,7 @@ impl EventProcessor {
                     let xev: &XkbAnyEvent = unsafe { &*(xev as *const _ as *const XkbAnyEvent) };
                     self.xkb_event(xev, &mut callback);
                 }
-                if event_type == self.randr_event_offset as c_int {
+                if self.randr_event_offset.is_some_and(|offset| event_type == offset as c_int) {
                     self.process_dpi_change(&mut callback);
                 }
             },
