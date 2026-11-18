@@ -2575,6 +2575,11 @@ fn owe_collector(lua: &Lua, bytes: usize) {
 }
 /// The script line calling the `ui` function running now: `app.luau:12`.
 fn location(lua: &Lua) -> Option<Rc<str>> {
+    // A template's node: the line its call is written on (`templates`).
+    if let Some((source, _, line)) = crate::templates::stamping() {
+        let chunk = source.strip_prefix('@').unwrap_or(&source);
+        return Some(Rc::from(format!("{chunk}:{line}")));
+    }
     lua.inspect_stack(1, |debug| {
         let line = debug.current_line()?;
         let source = debug.source().source?;
@@ -7594,6 +7599,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // A literal tree's constructors in one call (`templates`).
+    crate::templates::install(lua, &ui)?;
     // Read-only once the host's own parts are in (see `ScriptHost::run`).
     lua.globals().set("ui", ui)
 }
@@ -7610,9 +7617,13 @@ fn module_key(lua: &Lua, env: &Env, key: String) -> String {
 /// What the calling chunk's state keys start with: `ui/card.luau::` in a
 /// required module, nothing in the script itself.
 fn module_prefix(lua: &Lua, env: &Env) -> Option<String> {
-    let chunk = lua
-        .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
-        .flatten()?;
+    // A template's node: the chunk its stamp is called from (`templates`).
+    let chunk = match crate::templates::stamping() {
+        Some((source, _, _)) => source,
+        None => lua
+            .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
+            .flatten()?,
+    };
     let path = chunk.strip_prefix('@')?;
     let script = env.vm.upgrade().is_some_and(|vm| vm.name == path);
     (!script).then(|| format!("{path}::"))
