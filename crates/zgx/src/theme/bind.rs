@@ -62,6 +62,24 @@ pub enum Field {
     Width,
     /// The height, `Styled::h`.
     Height,
+    /// The room between columns, `Styled::gap_x`.
+    #[doc(hidden)]
+    GapX,
+    /// The room between rows, `Styled::gap_y`.
+    #[doc(hidden)]
+    GapY,
+    /// The least width, `Styled::min_w`.
+    #[doc(hidden)]
+    MinWidth,
+    /// The most width, `Styled::max_w`.
+    #[doc(hidden)]
+    MaxWidth,
+    /// The least height, `Styled::min_h`.
+    #[doc(hidden)]
+    MinHeight,
+    /// The most height, `Styled::max_h`.
+    #[doc(hidden)]
+    MaxHeight,
     /// One of a shader fill's four parameters (a colour, as 0 to 1).
     ShaderParam(u8),
 }
@@ -361,8 +379,28 @@ pub(crate) fn apply(styles: &mut Styles, field: Field, value: &TokenValue) {
                 s.ml(v);
             }
         }
+        // The gap alone: `gap_x` and `gap_y` given beside it refine it, as
+        // CSS's `column-gap` and `row-gap` do `gap`, whenever it resolves.
         Field::Gap => {
-            s.gap(number());
+            s.fields_mut(crate::style::bit::GAP).gap = Some(number()).into();
+        }
+        Field::GapX => {
+            s.gap_x(number());
+        }
+        Field::GapY => {
+            s.gap_y(number());
+        }
+        Field::MinWidth => {
+            s.min_w(number());
+        }
+        Field::MaxWidth => {
+            s.max_w(number());
+        }
+        Field::MinHeight => {
+            s.min_h(number());
+        }
+        Field::MaxHeight => {
+            s.max_h(number());
         }
         Field::TextSize => {
             s.text_size(number());
@@ -451,6 +489,10 @@ pub(crate) fn resolve(styles: &mut Styles, scope: &ThemeScope) {
     }
     styles.fields_mut(crate::style::bit::TOKENS).tokens = Some(bindings);
 }
+/// `styles`' layout options, if it has any.
+fn options(styles: &Styles) -> Option<&crate::layout::LayoutOptions> {
+    styles.layout_options.as_deref()
+}
 /// Which sides of padding or margin (or, for other fields, whether) `styles`
 /// sets `field`.
 fn sets(styles: &Styles, field: Field) -> u8 {
@@ -486,6 +528,16 @@ fn sets(styles: &Styles, field: Field) -> u8 {
         Field::Blur => all(styles.overflow().blur.is_some()),
         Field::Width => all(styles.width.is_some() || styles.width_percent.is_some()),
         Field::Height => all(styles.height.is_some() || styles.height_percent.is_some()),
+        Field::GapX => all(options(styles).is_some_and(|o| o.gap_x.is_some())),
+        Field::GapY => all(options(styles).is_some_and(|o| o.gap_y.is_some())),
+        Field::MinWidth => all(styles.rare().min_width.is_some()
+            || options(styles).is_some_and(|o| o.min_width.is_some())),
+        Field::MaxWidth => all(styles.rare().max_width.is_some()
+            || options(styles).is_some_and(|o| o.max_width.is_some())),
+        Field::MinHeight => all(styles.rare().min_height.is_some()
+            || options(styles).is_some_and(|o| o.min_height.is_some())),
+        Field::MaxHeight => all(styles.rare().max_height.is_some()
+            || options(styles).is_some_and(|o| o.max_height.is_some())),
         // Set alongside the uniforms it lands in; nothing replaces it.
         Field::ShaderParam(_) => 0,
     }
