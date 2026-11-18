@@ -217,3 +217,54 @@ fn without_gaps_the_arrows_go_as_ever() {
     ui.dispatch(InputEvent::Text("x".into()));
     assert_eq!(editor.editor.borrow().text(), "a\nx\n\nb");
 }
+
+/// A gap and an inline span's edge on one line: the caret at the span's
+/// end, inside it, goes into the gap after the line (drawn as the bar),
+/// comes back to the edge drawn a hair from where it is laid out by its
+/// side, and `set_selection` leaves the gap and puts it outside.
+#[test]
+fn a_gap_beside_an_inline_spans_edge() {
+    use zgx::widgets::CaretSide;
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        text_area("Note", ui.signal("ab\n\ncd".to_owned()))
+            .size(200., 160.)
+            .p(10.)
+            .text_size(10.)
+            .line_height(20.),
+    );
+    ui.prepare_frame();
+    ui.input.focus(&ui.scene, Some(view.node()));
+    let editor = ui.focused_editor().unwrap();
+    editor.set_gaps(Some(Rc::new(|n| n == 1)));
+    // "ab" is inline code: edges at 0 and 2.
+    editor.set_caret_edges(Some(Rc::new(|at| (at <= 2).then_some(0..2))));
+    editor.set_selection(2, 2);
+    editor.set_caret_side(CaretSide::Inside);
+    ui.prepare_frame();
+    let inside = caret(&ui, &editor);
+    key(&mut ui, Key::ArrowRight);
+    assert_eq!(editor.gap(), Some(1));
+    let bar = caret(&ui, &editor);
+    assert_eq!((bar.width, bar.height), (20., 2.));
+    key(&mut ui, Key::ArrowLeft);
+    assert_eq!((editor.gap(), focus(&editor)), (None, 2));
+    // Back at the edge, drawn by its side: inside a hair left of its end,
+    // outside a hair right.
+    let back = caret(&ui, &editor);
+    let expected = match editor.caret_side() {
+        CaretSide::Inside => inside.x,
+        CaretSide::Outside => inside.x + 2.,
+    };
+    assert_eq!((back.x, back.width), (expected, inside.width));
+    // set_selection: out of the gap, and outside the span.
+    editor.set_gap(Some(1));
+    editor.set_caret_side(CaretSide::Inside);
+    editor.set_selection(2, 2);
+    ui.prepare_frame();
+    assert_eq!(
+        (editor.gap(), editor.caret_side()),
+        (None, CaretSide::Outside)
+    );
+    assert_eq!(caret(&ui, &editor).x, inside.x + 2.);
+}
