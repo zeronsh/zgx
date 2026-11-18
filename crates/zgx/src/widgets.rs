@@ -1158,6 +1158,24 @@ pub enum CaretSide {
     /// Just inside it.
     Inside,
 }
+/// How the caret comes to a gap (`EditorHandle::set_gaps`): by which arrow,
+/// or a press on its boundary.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GapDir {
+    /// ← at the start of the line after it.
+    Left,
+    /// → at the end of the line before it.
+    Right,
+    /// ↑ from the first row of the line after it.
+    Up,
+    /// ↓ from the last row of the line before it.
+    Down,
+    /// A press within a few points of its boundary: no direction, the app
+    /// decides (true for every `GapDir` keeps a press going in wherever an
+    /// arrow may).
+    Press,
+}
 /// What was typed with the caret at a gap (`EditorHandle::on_gap_input`):
 /// nothing of it went into the text, for the app to add a paragraph there.
 #[doc(hidden)]
@@ -1209,15 +1227,17 @@ impl EditorHandle {
         }
     }
     /// Where the caret may sit between lines rather than in one (a gap
-    /// cursor): `gaps(n)` says whether before line `n` (`n` the line count:
-    /// after the last) is such a place, where no text is to put a caret in
+    /// cursor): `gaps(n, dir)` says whether before line `n` (`n` the line
+    /// count: after the last) is such a place for the caret coming as `dir`
+    /// says (so ← and → may go into a gap beside an atom block that ↑ and ↓
+    /// pass, selecting the atom as the web does), where no text is to put a caret in
     /// (between two tables, an image and a rule, before a table at the
     /// start). The arrows go into such a boundary from the line beside it,
     /// as does a press on it; there the caret shows as a short bar along it,
     /// and what is typed goes to `on_gap_input`, not into the text. `None`:
     /// none (the caret leaves the one it is in).
     #[doc(hidden)]
-    pub fn set_gaps(&self, gaps: Option<Rc<dyn Fn(usize) -> bool>>) {
+    pub fn set_gaps(&self, gaps: Option<Rc<dyn Fn(usize, GapDir) -> bool>>) {
         let gap = self.hint.gap_made();
         let none = gaps.is_none();
         *gap.gaps.borrow_mut() = gaps;
@@ -2549,8 +2569,8 @@ fn gap_event(
                     return false;
                 };
                 match key {
-                    Key::ArrowLeft => (focus == start).then_some(line),
-                    Key::ArrowRight => (focus == end).then_some(line + 1),
+                    Key::ArrowLeft => (focus == start).then_some((line, GapDir::Left)),
+                    Key::ArrowRight => (focus == end).then_some((line + 1, GapDir::Right)),
                     _ => {
                         // Up from its first row, down from its last.
                         let layout = layout(&e);
@@ -2572,15 +2592,15 @@ fn gap_event(
                         };
                         let row = |p| layout.caret_position(p).y;
                         ((row(current) - row(edge)).abs() < 0.5).then_some(if back {
-                            line
+                            (line, GapDir::Up)
                         } else {
-                            line + 1
+                            (line + 1, GapDir::Down)
                         })
                     }
                 }
             };
             match target {
-                Some(n) if gap.allows(n) => {
+                Some((n, dir)) if gap.allows(n, dir) => {
                     gap.go(Some(n));
                     true
                 }
@@ -2612,7 +2632,7 @@ fn gap_event(
                 })
             });
             match pressed.flatten() {
-                Some(n) if gap.allows(n) => {
+                Some(n) if gap.allows(n, GapDir::Press) => {
                     gap.go(Some(n));
                     true
                 }

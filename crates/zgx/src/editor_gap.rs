@@ -5,15 +5,15 @@
 //! boundary; the arrows go into and out of it, and what is typed at it goes
 //! to the app (`EditorHandle::on_gap_input`), which adds a paragraph there.
 //! A text area whose app places none carries one empty pointer.
-use crate::widgets::GapInput;
+use crate::widgets::{GapDir, GapInput};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
 
 /// Whether a gap may sit before line `n` (`n` the line count: after the
-/// last).
-pub(crate) type Gaps = Rc<dyn Fn(usize) -> bool>;
+/// last), for the caret coming as `GapDir` says.
+pub(crate) type Gaps = Rc<dyn Fn(usize, GapDir) -> bool>;
 /// Told the caret went into a gap or out of one.
 type GapListener = Box<dyn FnMut(Option<usize>)>;
 /// Told what was typed at a gap.
@@ -38,10 +38,10 @@ pub(crate) struct GapHint {
     pub on_input: RefCell<Option<GapInputListener>>,
 }
 impl GapHint {
-    /// Whether a gap may sit before line `n`.
-    pub fn allows(&self, n: usize) -> bool {
+    /// Whether a gap may sit before line `n`, the caret coming as `dir`.
+    pub fn allows(&self, n: usize, dir: GapDir) -> bool {
         let gaps = self.gaps.borrow().clone();
-        gaps.is_some_and(|gaps| gaps(n))
+        gaps.is_some_and(|gaps| gaps(n, dir))
     }
     /// The caret goes to boundary `at` (or out of a gap): what listens is
     /// told when it changed. Nothing may be borrowed that it uses.
