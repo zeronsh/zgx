@@ -239,3 +239,186 @@ fn a_run_on_a_grid_takes_its_cells_whichever_font_draws_it() {
         );
     }
 }
+
+/// The link's box in a paragraph at `w` (its first fragment, as the accessibility tree has it), laid out by the
+/// real shaper (`shaped`) or headless (`FallbackTextLayout`): `words` in one span, then "Publish…" as a link span of
+/// its own.
+fn link_box(w: f32, words: &str, shaped: bool) -> Rect {
+    use zgx::semantics::Role;
+    let mut ui = Ui::new(1200., 200.);
+    if shaped {
+        TextServices::new().install(&mut ui.scene.borrow_mut());
+    }
+    ui.mount(
+        rich_text()
+            .w(w)
+            .text_size(13.)
+            .line_height(16.)
+            .text_wrap(true)
+            .child(text_span(words))
+            .child(text_span("Publish…").on_click(|| {}))
+            .into(),
+    );
+    ui.prepare_frame();
+    let link = ui
+        .semantics
+        .borrow()
+        .iter()
+        .find(|(_, s)| matches!(s.role, Role::Link | Role::Button))
+        .map(|(id, _)| id)
+        .expect("the link");
+    ui.scene.borrow().bounds(link)
+}
+
+/// A line that must break where one span ends and the next begins (the first span's trailing space) breaks there,
+/// as it would inside a span, and as Chrome does: the next span's word moves whole to the next line, not split at
+/// the line's end. Shaped or headless alike; a break inside the first span is the control.
+#[test]
+fn a_line_breaks_at_a_spans_boundary_as_between_words() {
+    for shaped in [true, false] {
+        for words in [
+            "Share it in the plugin store ",
+            "1.0.0 in the plugin store · 1.1.0 not approved ",
+        ] {
+            // Wide enough for both on one line: where the link starts and how wide it is.
+            let one = link_box(1100., words, shaped);
+            assert_eq!(one.y, 0., "{words:?}, shaped {shaped}: one line: {one:?}");
+            // The words fit, the link not after them: the break is the boundary's.
+            let w = one.x + one.width / 2.;
+            let at = link_box(w, words, shaped);
+            assert!(
+                (at.width - one.width).abs() < 0.5 && at.y >= 16. && at.x < 1.,
+                "{words:?} at {w}, shaped {shaped}: the link whole at line two's start, not split: {at:?} ({one:?})"
+            );
+            // The control: narrower still, the break inside the words.
+            let inside = link_box(one.x - 20., words, shaped);
+            assert!(
+                (inside.width - one.width).abs() < 0.5 && inside.y >= 16.,
+                "{words:?}, shaped {shaped}: a break inside the words keeps the link whole: {inside:?}"
+            );
+        }
+    }
+}
+
+/// Geist Mono: every character 0.6 em wide, as the fallback layout's estimate is, so the two lay out the same widths
+/// and only their breaks can differ.
+const GEIST_MONO: &[u8] = include_bytes!("../../zgx-desktop/examples/support/fonts/GeistMono.ttf");
+/// A character's width in Geist Mono at 10 points.
+const CELL: f32 = 6.;
+
+/// Where each of `layout`'s rows starts in `text`: each grapheme whose caret is on a row below the last's.
+fn row_starts(layout: &dyn zgx::text_layout::TextLayout, text: &str) -> Vec<usize> {
+    use zgx::text_layout::{TextAffinity, TextPosition};
+    let at = |byte_offset| {
+        layout
+            .caret_position(TextPosition {
+                byte_offset,
+                affinity: TextAffinity::After,
+            })
+            .y
+    };
+    let mut starts = vec![0];
+    let mut last = at(0);
+    for range in zgx::text_layout::grapheme_ranges(text).skip(1) {
+        let y = at(range.start);
+        if y > last + 0.5 {
+            starts.push(range.start);
+            last = y;
+        }
+    }
+    starts
+}
+
+/// Headless (`FallbackTextLayout`, what a scene with no shaper lays out with) and shaped, text breaks into the same
+/// lines: at hard breaks (line feeds, CRLF, a record separator), by word where a line is full (UAX #14: spaces
+/// hanging past the edge, a hyphen, zero-width spaces, no break at a no-break space), a word wider than the line by
+/// grapheme, and where one span ends and the next begins as anywhere else. The widths of their lines may differ
+/// (estimated advances); where they break mustn't, or a headless test sees lines the app doesn't.
+#[test]
+fn headless_text_breaks_where_shaped_text_does() {
+    use zgx::rich_text::{RichText, TextRun};
+    use zgx::text_layout::{FallbackTextLayout, FontFamily, FontStyle};
+    let services = TextServices::new();
+    zgx_gpu::text::FontData::new(GEIST_MONO.to_vec())
+        .unwrap()
+        .install(&mut services.text_system().borrow_mut());
+    let mut scene = zgx::scene::Scene::new(800., 600.);
+    services.install(&mut scene);
+    let font = FontStyle {
+        family: FontFamily::Named("Geist Mono".into()),
+        ..FontStyle::default()
+    };
+    let mut wrong = Vec::new();
+    // Each text and its width, in characters.
+    for (text, cells) in [
+        ("the quick brown fox jumps over the lazy dog", 16),
+        ("aaa bbb", 3),
+        ("aaa   bbb ccc", 4),
+        ("supercalifragilistic and more", 8),
+        ("a hard\nbreak and more words here", 12),
+        ("line one\r\nline two is longer than that", 12),
+        ("ends with a break\n", 10),
+        ("let x = 1;\u{1e}let y = 2;\u{1e}console.log(x);", 40),
+        ("well-known hyphen-ated words", 9),
+        ("verylongword\u{200b}withzero\u{200b}widthbreaks", 14),
+        ("no\u{a0}break\u{a0}here at all", 10),
+        ("dash\u{2014}between words", 7),
+        ("Share it in the plugin store Publish\u{2026}", 34),
+        ("tab\tseparated\twords and more of them", 12),
+        ("a line\u{2028}separator and more words", 12),
+        ("a paragraph\u{2029}separator and more", 12),
+        ("a lone\rcarriage return here", 12),
+        ("a next\u{85}line here and more", 12),
+    ] {
+        let width = Some(cells as f32 * CELL + CELL / 2.);
+        let shaped = scene.shape_text_with_font(text, 10., width, &font);
+        let headless = FallbackTextLayout::with_font(text, 10., width, &font);
+        let (shaped, headless) = (row_starts(&*shaped, text), row_starts(&headless, text));
+        if shaped != headless {
+            wrong.push(format!(
+                "{text:?} in {cells}: shaped {shaped:?}, headless {headless:?}"
+            ));
+        }
+    }
+    // Rich text: a line full where one span ends and the next begins.
+    for (spans, cells) in [
+        (
+            &["Share it in the plugin store ", "Publish\u{2026}"][..],
+            34,
+        ),
+        (
+            &["Share it in the plugin store", " Publish\u{2026}"][..],
+            34,
+        ),
+        (
+            &["Share it in the plugin store", " ", "Publish\u{2026}"][..],
+            34,
+        ),
+        (&["one ", "two ", "three ", "four"][..], 9),
+        (&["glued", "together", "words"][..], 12),
+    ] {
+        let mut text = String::new();
+        let mut runs = Vec::new();
+        for span in spans {
+            let start = text.len();
+            text.push_str(span);
+            runs.push(TextRun {
+                range: start..text.len(),
+                font: font.clone(),
+                font_size: 10.,
+                ..TextRun::default()
+            });
+        }
+        let rich = RichText::new(text.as_str(), runs).unwrap();
+        let width = Some(cells as f32 * CELL + CELL / 2.);
+        let shaped = scene.shape_rich_text(&rich, width);
+        let headless = FallbackTextLayout::with_rich(&rich, width);
+        let (shaped, headless) = (row_starts(&*shaped, &text), row_starts(&headless, &text));
+        if shaped != headless {
+            wrong.push(format!(
+                "{spans:?} in {cells}: shaped {shaped:?}, headless {headless:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
