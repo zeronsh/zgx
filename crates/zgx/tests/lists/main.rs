@@ -1,5 +1,7 @@
 //! Scrolling and virtual lists. One test binary for the area (see AGENTS.md):
 //! a test file goes in the group for its area, listed here.
+#[path = "../ancestor_list_fading_in.rs"]
+mod ancestor_list_fading_in;
 #[path = "../ancestor_list_window.rs"]
 mod ancestor_list_window;
 #[path = "../composition_list_edges.rs"]
