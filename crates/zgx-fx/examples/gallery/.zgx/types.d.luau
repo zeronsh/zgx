@@ -23304,6 +23304,9 @@ export type ThemeApi = {
 	register: (theme: ThemeTable) -> string,
 	-- Declare the app's tokens with defaults in terms of the standard ones.
 	tokens: (tokens: { [string]: string | number | { [string]: any } }) -> (),
+	-- Have the system's text size (GNOME's text scaling, Windows' Text size)
+	-- scale these app tokens too, as it does `font.size.*` and `font.line.*`.
+	scale_with_text: (tokens: { TokenName | string }) -> (),
 	-- A token's value (tracked): colours as "#rrggbbaa", numbers, font names.
 	get: (name: TokenName | string) -> any,
 	follow_system: (themes: { dark: string, light: string } | false) -> (),
