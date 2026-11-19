@@ -333,6 +333,7 @@ impl BufferLine {
         &mut self,
         font_system: &mut FontSystem,
         font_size: f32,
+        line_height: f32,
         width_opt: Option<f32>,
         wrap: Wrap,
         ellipsize: Ellipsize,
@@ -368,6 +369,10 @@ impl BufferLine {
                 match_mono_width,
                 hinting,
             );
+            // zgx: each line's baseline, as runs of it read it.
+            for line in &mut layout {
+                line.settle_baseline(line_height);
+            }
             self.layout_opt.set_used(layout);
         }
         self.layout_opt.get().expect("layout not found")

@@ -2407,8 +2407,12 @@ fn rasterize_scaled(
     font: &zgx::text_layout::FontStyle,
     scale: f32,
 ) -> Vec<(i32, i32, Arc<cosmic_text::SwashImage>)> {
-    // Laid out in points once, placed at this scale each time.
+    // Laid out in points once, placed at this scale each time; its baselines
+    // on this scale's device pixels, as the GPU renderer's at it.
+    let snapped = cosmic_text::baseline_scale();
+    cosmic_text::set_baseline_scale(scale);
     let lines = raster.layout(text, size, width, height, font);
+    cosmic_text::set_baseline_scale(snapped);
     let runs = lines.iter().map(crate::text::LaidLine::run);
     let glyphs = crate::styled_glyphs(Vec::new(), runs, scale, |_, _| 0);
     glyphs

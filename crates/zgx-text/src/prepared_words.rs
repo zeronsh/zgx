@@ -839,6 +839,7 @@ impl Words {
                     line_height_opt: None,
                     glyphs: Vec::new(),
                     decorations: Vec::new(),
+                    baseline: [0.; 3],
                 });
             }
             let line = &mut lines[made];
@@ -899,6 +900,7 @@ impl Words {
                     line_height_opt: None,
                     glyphs: Vec::new(),
                     decorations: Vec::new(),
+                    baseline: [0.; 3],
                 });
             }
             let line = &mut lines[0];

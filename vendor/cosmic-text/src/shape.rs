@@ -3290,6 +3290,11 @@ impl ShapeLine {
             return None;
         }
         let normal = self.metrics_opt.map(|m| m.line_height);
+        // zgx: each glyph's strut as `LayoutRunIter` puts a line's baseline
+        // (Blink's): its ascent and descent rounded to whole pixels, its
+        // half-leading floored, so text whose line takes this box sits where
+        // it would without one.
+        let snap = crate::buffer::baseline_scale();
         let (mut above, mut below, mut at_top, mut at_bottom) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         for r in &visual_line.ranges {
             let words = match hyphenation {
@@ -3326,9 +3331,10 @@ impl ShapeLine {
                             below = below.max(d);
                         }
                     } else {
-                        let half = (line_height - a - d) / 2.0;
+                        let (a, d) = ((a * snap).round() / snap, (d * snap).round() / snap);
+                        let half = ((line_height * snap - a * snap - d * snap) / 2.0).floor() / snap;
                         above = above.max(a + half);
-                        below = below.max(d + half);
+                        below = below.max(line_height - a - half);
                     }
                 }
             }
@@ -4430,6 +4436,7 @@ impl ShapeLine {
                         line_height_opt: Some(above + below),
                         glyphs,
                         decorations,
+                        baseline: [0.0; 3],
                     });
                     continue;
                 }
@@ -4458,6 +4465,7 @@ impl ShapeLine {
                 line_height_opt,
                 glyphs,
                 decorations,
+                baseline: [0.0; 3],
             });
         }
 
@@ -4470,6 +4478,7 @@ impl ShapeLine {
                 line_height_opt: self.metrics_opt.map(|x| x.line_height),
                 glyphs: Vec::default(),
                 decorations: Vec::new(),
+                baseline: [0.0; 3],
             });
         }
 

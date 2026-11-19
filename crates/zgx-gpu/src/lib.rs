@@ -103,6 +103,12 @@ pub use surface::PresentationStatus;
 pub use wgpu;
 pub use zgx_text::set_desktop_sans_serif;
 
+/// Text laid out from here on puts its baselines on device pixels at
+/// `scale` (device pixels a point), as Chrome's do: a line's ascent and
+/// descent rounded there, its half-leading floored (`cosmic_text::set_baseline_scale`).
+fn set_baseline_snap(scale: f32) {
+    cosmic_text::set_baseline_scale(scale);
+}
 /// Whether all of `clip`'s edges (logical) fall on whole device pixels.
 fn on_pixel_grid(clip: Rect, scale: f32) -> bool {
     let whole = |value: f32| {
@@ -6625,6 +6631,7 @@ impl GpuRenderer {
         } else {
             1.
         };
+        set_baseline_snap(scale);
         if self.scale != scale {
             self.flush_pending();
             self.recycle_atlas();
@@ -6808,6 +6815,7 @@ impl GpuRenderer {
     /// Draw `scene`'s `damage` (logical rectangles) to the target, and report
     /// what it did.
     pub fn render(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
+        set_baseline_snap(self.scale);
         // Drawn first by this renderer, a scene that took another context's
         // text services (the thread's last made) keeps them: said, once
         // (`take_issues`).
@@ -8275,6 +8283,7 @@ impl GpuRenderer {
         // Everything inside draws at the layer's raster scale: glyphs,
         // canvases and nested layers rasterize as finely as it shows.
         let device_scale = std::mem::replace(&mut self.scale, scale);
+        set_baseline_snap(scale);
         #[cfg(target_os = "macos")]
         self.refuse_layered_loops(scene, &items);
         zgx::scene::translate_items(&mut items, -bounds.x, -bounds.y);
@@ -8292,6 +8301,7 @@ impl GpuRenderer {
         self.width = old_size.0;
         self.height = old_size.1;
         self.scale = device_scale;
+        set_baseline_snap(device_scale);
         self.background = background;
         self.fresh = was_fresh;
         self.layer_incomplete = self.images_awaited;

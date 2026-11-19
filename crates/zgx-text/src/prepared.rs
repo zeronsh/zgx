@@ -1008,6 +1008,10 @@ impl Entry {
         }
         if let Some(words) = &mut self.words {
             words.lay_out(crate::text::wrap_width(width));
+            // Each line's baseline, as runs of it read it.
+            for line in &mut words.lines {
+                line.settle_baseline(self.metrics.line_height);
+            }
             self.laid = Some(width);
             return;
         }
@@ -1017,6 +1021,7 @@ impl Entry {
             line.layout(
                 fonts,
                 self.metrics.font_size,
+                self.metrics.line_height,
                 crate::text::wrap_width(width),
                 Wrap::WordOrGlyph,
                 Ellipsize::None,
@@ -4018,6 +4023,7 @@ mod tests {
                             line.layout(
                                 &mut fonts,
                                 metrics.font_size,
+                                metrics.line_height,
                                 wrap,
                                 Wrap::WordOrGlyph,
                                 Ellipsize::None,
@@ -4155,6 +4161,7 @@ mod tests {
                     line.layout(
                         &mut fonts,
                         metrics.font_size,
+                        metrics.line_height,
                         wrap,
                         Wrap::WordOrGlyph,
                         Ellipsize::None,

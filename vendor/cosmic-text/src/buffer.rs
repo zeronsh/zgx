@@ -281,9 +281,23 @@ impl<'b> LayoutRunIter<'b> {
             self.total_height += line_height;
 
             let line_top = self.line_top - self.scroll;
-            let glyph_height = layout_line.max_ascent + layout_line.max_descent;
-            let centering_offset = (line_height - glyph_height) / 2.0;
-            let line_y = line_top + centering_offset + layout_line.max_ascent;
+            // zgx patch: the baseline sits where a browser's line box puts it: ascent
+            // and descent rounded to whole device pixels (`baseline_scale`), the
+            // half-leading floored (Blink).
+            // Worked out as it was laid out, while the scale and its height hold.
+            let snap = baseline_scale();
+            let [at, laid_height, below] = layout_line.baseline;
+            let below = if at == snap && laid_height == line_height {
+                below
+            } else {
+                baseline_below_top(
+                    layout_line.max_ascent,
+                    layout_line.max_descent,
+                    line_height,
+                    snap,
+                )
+            };
+            let line_y = line_top + below;
             if let Some(height) = self.height_opt {
                 if line_y - layout_line.max_ascent > height {
                     return Some(None);
@@ -750,6 +764,7 @@ impl Buffer {
         Some(line.layout(
             font_system,
             self.metrics.font_size,
+            self.metrics.line_height,
             self.width_opt,
             self.wrap,
             self.ellipsize,
@@ -1875,4 +1890,27 @@ impl BorrowedWithFontSystem<'_, Buffer> {
     {
         self.inner.draw(self.font_system, cache, color, f);
     }
+}
+
+thread_local! {
+    static BASELINE_SCALE: core::cell::Cell<f32> = const { core::cell::Cell::new(1.) };
+}
+/// zgx: the device pixels a point the baselines snap to (1 by default):
+/// a browser lays a line out in device pixels, rounding the font's ascent
+/// and descent and flooring the half-leading there, not in points.
+pub fn set_baseline_scale(scale: f32) {
+    BASELINE_SCALE.with(|s| s.set(if scale.is_finite() && scale >= 1. { scale } else { 1. }));
+}
+/// zgx: the device pixels a point the baselines snap to now (`set_baseline_scale`).
+pub fn baseline_scale() -> f32 {
+    BASELINE_SCALE.with(core::cell::Cell::get)
+}
+/// zgx: how far below a line's top its baseline is, as a browser's line box
+/// puts it: its `ascent` and `descent` rounded to whole device pixels at
+/// `snap` a point, its half-leading floored (Blink). A line works it out as
+/// it is laid out (`LayoutLine::settle_baseline`).
+pub fn baseline_below_top(ascent: f32, descent: f32, line_height: f32, snap: f32) -> f32 {
+    let ascent = (ascent * snap).round() / snap;
+    let descent = (descent * snap).round() / snap;
+    ((line_height * snap - ascent * snap - descent * snap) / 2.0).floor() / snap + ascent
 }
