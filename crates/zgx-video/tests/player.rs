@@ -590,6 +590,62 @@ fn a_player_keeps_frames_only_paused_and_gives_them_back_at_rest() {
     );
 }
 
+#[test]
+fn a_player_at_rest_gives_back_its_stage_and_draws_the_same_after() {
+    let dir = temp_dir("player-rest-stage");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let path = dir.to_path_buf();
+    let mut held = None;
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Bar", json!({ "color": "#00ff00" }), 30);
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    player.keep_frames_for(Duration::from_millis(200));
+    let before = drawn_at(&mut stage, &player, 30);
+    // Left alone, paused: its stage goes (the script's VM, interface and
+    // renderer), as a gone player's would.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while player.stages_dropped() == 0 {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "kept its stage at rest");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Asked again, it builds it anew and draws as it did.
+    player.seek(20);
+    let at_20 = drawn_at(&mut stage, &player, 20);
+    assert_ne!(at_20, before, "frame 20 drew as 30");
+    player.seek(30);
+    assert_eq!(
+        drawn_at(&mut stage, &player, 30),
+        before,
+        "drew otherwise after rest"
+    );
+    // Played on after rest: it plays.
+    player.play(true);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while player.frame.with_untracked(|f| *f) < 40 {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "it didn't play after rest");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(player.error.with_untracked(Clone::clone), None);
+}
+
 /// Steps `stage` until what it draws shows `player` at `frame` and holds
 /// still, returning those pixels.
 fn drawn_at(stage: &mut Stage, player: &Player, frame: u64) -> Vec<u8> {
