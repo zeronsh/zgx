@@ -1,13 +1,11 @@
-//! Glyphs drawn by Core Text (macOS), as macOS draws its own text: every
-//! face's outlines, and those only Core Text can read (Apple's `hvgl`, as
-//! macOS 26's PingFang keeps them: zgx-cosmic-text's
-//! `Font::needs_platform_outlines`). The glyph comes out as swash's would:
-//! an alpha mask at the cache key's size and subpixel offset, placed from
-//! the pen position, for the atlas to take like any other. Its strokes are
-//! thickened as macOS's font smoothing thickens them for the text's colour
-//! (`CacheKeyFlags::SMOOTHING`, `text::smoothing`): a light text on a dark
-//! ground heavier, near-black text as it is. Colour glyphs (emoji) stay
-//! swash's.
+//! Glyphs drawn by Core Text (macOS) for the faces only Core Text can read
+//! (Apple's `hvgl`, as macOS 26's PingFang keeps them: zgx-cosmic-text's
+//! `Font::needs_platform_outlines`); every other face's are swash's,
+//! thickened as CoreGraphics does (`text::glyph_image`). The glyph comes out
+//! as swash's would: an alpha mask at the cache key's size and subpixel
+//! offset, placed from the pen position, for the atlas to take like any
+//! other. Its strokes are thickened as macOS's font smoothing thickens them
+//! for the text's colour (`CacheKeyFlags::SMOOTHING`, `text::smoothing`).
 use cosmic_text::{CacheKey, CacheKeyFlags, FontSystem, Placement, SwashContent, SwashImage};
 use std::{cell::RefCell, collections::HashMap, ffi::c_void};
 
@@ -219,7 +217,9 @@ pub(crate) fn glyph_image(fonts: &mut FontSystem, key: CacheKey) -> Option<Swash
         return None;
     }
     let font = fonts.get_font(key.font_id, key.font_weight)?;
-    if !font.needs_platform_outlines() && font.is_color() {
+    // Only the faces swash can't draw: asked of every glyph swash draws
+    // nothing for (a space), Core Text for the rest drew nothing more.
+    if !font.needs_platform_outlines() {
         return None;
     }
     draw(fonts, key)
