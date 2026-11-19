@@ -4694,6 +4694,78 @@ fn recycled_glyph_atlas_does_not_bleed_stale_texels_into_fractional_glyphs() {
     );
 }
 
+/// An atlas that fills gives back the cells of glyphs no text draws any
+/// more and leaves the rest where they lie: the text it still shows keeps
+/// its glyphs and its quads (none rasterized or placed again), and draws
+/// the pixels a fresh renderer draws.
+#[test]
+fn a_filling_atlas_keeps_the_glyphs_its_text_draws_in_place() {
+    let _gpu_fixture = gpu_fixture();
+    fn scene_with(block: f32) -> (Scene, NodeId) {
+        let mut scene = Scene::new(160., 160.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+        scene.append(
+            scene.root(),
+            NodeKind::Text {
+                text: "Kept glyphs, 0123".into(),
+                font_size: 13.,
+                color: Color(255, 255, 255, 255),
+            },
+            fixed(160., 20.),
+        );
+        let probe = scene.append(
+            scene.root(),
+            NodeKind::Text {
+                text: "█".into(),
+                font_size: block,
+                color: Color(255, 255, 255, 255),
+            },
+            fixed(150., 140.),
+        );
+        (scene, probe)
+    }
+    let all = [Rect::new(0., 0., 160., 160.)];
+    let mut gpu = GpuRenderer::new(160, 160).unwrap();
+    let (mut scene, probe) = scene_with(60.);
+    scene.flush();
+    gpu.render(&scene, &all).unwrap();
+    // Blocks of distinct sizes until the atlas fills.
+    let mut previous = gpu.debug_cache_stats().atlas_entries;
+    let mut filled = None;
+    for size in 61..200 {
+        let block = NodeKind::Text {
+            text: "█".into(),
+            font_size: size as f32,
+            color: Color(255, 255, 255, 255),
+        };
+        scene.set_kind(probe, block);
+        scene.flush();
+        let stats = gpu.render(&scene, &all).unwrap();
+        let entries = gpu.debug_cache_stats().atlas_entries;
+        if entries < previous {
+            filled = Some((size, stats));
+            break;
+        }
+        previous = entries;
+    }
+    let (size, stats) = filled.expect("the atlas filled");
+    assert_eq!(gpu.debug_cache_stats().atlas_bytes, 512 * 512 * 4);
+    // Only the new block rasterized and placed: the line's glyphs and
+    // quads kept.
+    assert_eq!(stats.glyph_uploads, 1, "glyphs rasterized again");
+    assert_eq!(stats.geometry_rebuilds, 1, "texts placed again");
+    let kept = gpu.readback().unwrap();
+    let mut fresh_gpu = GpuRenderer::new(160, 160).unwrap();
+    let (mut fresh, _) = scene_with(size as f32);
+    fresh.flush();
+    fresh_gpu.render(&fresh, &all).unwrap();
+    assert_eq!(
+        kept,
+        fresh_gpu.readback().unwrap(),
+        "kept glyphs draw as fresh"
+    );
+}
+
 #[test]
 fn damaged_blur_batches_surrounding_draws_instead_of_one_pass_each() {
     let _gpu_fixture = gpu_fixture();

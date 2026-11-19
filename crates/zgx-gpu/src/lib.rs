@@ -87,6 +87,7 @@ pub fn debug_compile_metal_libraries_at_start(on: bool) {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod phase_watch;
 mod planes;
+mod shelves;
 pub use planes::plane_size;
 pub mod present_log;
 mod surface;
@@ -5121,7 +5122,11 @@ pub struct GpuRenderer {
     warned: Vec<String>,
     issues: Vec<String>,
     entries: FxHashMap<AtlasKey, Option<AtlasEntry>>,
-    cursor: (u32, u32, u32),
+    /// The atlas's cells, taken and given back (`atlas_cell`, `evict_glyphs`).
+    shelves: shelves::Shelves,
+    /// This frame ran out of atlas at its largest and started it over:
+    /// what doesn't fit now isn't drawn (`raster_glyph`).
+    atlas_spent: bool,
     fonts: Rc<RefCell<FontSystem>>,
     text_cache: Rc<RefCell<prepared::TextCache>>,
     swash: SwashCache,
@@ -5990,7 +5995,8 @@ impl GpuRenderer {
             warned: Vec::new(),
             issues: Vec::new(),
             entries: FxHashMap::default(),
-            cursor: (0, 0, 0),
+            shelves: shelves::Shelves::new(1),
+            atlas_spent: false,
             fonts: context.text_system(),
             text_cache: context.text_cache(),
             swash: SwashCache::new(),
@@ -6331,7 +6337,7 @@ impl GpuRenderer {
         let Some(Packed {
             size,
             origins,
-            cursor,
+            shelves,
         }) = pack_cells(&sizes, self.atlas_size)
         else {
             return true;
@@ -6362,7 +6368,7 @@ impl GpuRenderer {
             };
             state.device.copy_cells(&old, &new, cells);
             state.atlas = Some(new);
-            return self.atlas_shrunk(atlas, size, cursor, live, glyphs, icons, origins);
+            return self.atlas_shrunk(atlas, size, shelves, live, glyphs, icons, origins);
         }
         #[cfg(target_os = "macos")]
         let copied_on_cpu = self.unified;
@@ -6407,7 +6413,7 @@ impl GpuRenderer {
             }
             self.queue.submit([encoder.finish()]);
         }
-        self.atlas_shrunk(atlas, size, cursor, live, glyphs, icons, origins)
+        self.atlas_shrunk(atlas, size, shelves, live, glyphs, icons, origins)
     }
     /// The atlas `shrink_atlas` copied into, `size` square, taken: the live
     /// glyphs and icons at their `origins` there.
@@ -6416,7 +6422,7 @@ impl GpuRenderer {
         &mut self,
         atlas: wgpu::Texture,
         size: u32,
-        cursor: (u32, u32, u32),
+        shelves: shelves::Shelves,
         live: FxHashMap<AtlasKey, Option<AtlasEntry>>,
         glyphs: Vec<(AtlasKey, AtlasEntry)>,
         icons: Vec<(u64, (u32, u32, u32, u32))>,
@@ -6441,7 +6447,7 @@ impl GpuRenderer {
         self.atlas = atlas;
         self.atlas_size = size;
         self.bind = self.texture_bind(&self.atlas.create_view(&Default::default()), "glyph atlas");
-        self.cursor = cursor;
+        self.shelves = shelves;
         // Every placed quad's cell moved: placed again from `entries`.
         self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
         self.kept = None;
@@ -6964,8 +6970,18 @@ impl GpuRenderer {
         if let Some(reason) = self.context.lost() {
             return Err(GpuError::device_lost(&reason));
         }
+        // A frame that runs out of atlas is drawn again: after the cells of
+        // glyphs no text holds are given back (the frame's own text holds
+        // what it drew, so those it moved on from go), then in a larger
+        // atlas, and at the largest after starting it over.
+        let mut freed = false;
+        self.atlas_spent = false;
         loop {
             match self.render_once(scene, damage) {
+                Err(error)
+                    if error.0 == "glyph atlas capacity exceeded in one frame"
+                        && !std::mem::replace(&mut freed, true)
+                        && self.free_glyphs() => {}
                 Err(error)
                     if error.0 == "glyph atlas capacity exceeded in one frame"
                         && self.atlas_size < MAX_ATLAS =>
@@ -6974,6 +6990,14 @@ impl GpuRenderer {
                     // time, each of which rasterizes the frame's glyphs.
                     let size = (self.atlas_size * 2).max(self.atlas_grew_to);
                     self.reset_atlas(size.min(MAX_ATLAS))
+                }
+                Err(error)
+                    if error.0 == "glyph atlas capacity exceeded in one frame"
+                        && !self.atlas_spent =>
+                {
+                    self.atlas_spent = true;
+                    self.recycle_atlas();
+                    self.atlas_recycled_at = self.frame;
                 }
                 result => {
                     #[cfg(target_os = "macos")]
@@ -8883,7 +8907,12 @@ impl GpuRenderer {
     /// recycles it.
     #[inline(always)]
     fn atlas_filling(&self) -> bool {
-        self.cursor.1 + self.cursor.2 > self.atlas_size * 3 / 4 || self.entries.len() >= 8192
+        // Its cells' area past half and some (what a frame adds fits the
+        // rest), or its shelves in use near its every row (a tall glyph
+        // needs rows).
+        self.shelves.area() > u64::from(self.atlas_size).pow(2) * 9 / 16
+            || self.shelves.rows() > self.atlas_size * 7 / 8
+            || self.entries.len() >= 8192
     }
     /// Draw `items`, the window's whole paint as the walk found them with
     /// what they `inherited`, and keep it to patch: their quads and draws
@@ -9856,13 +9885,15 @@ impl GpuRenderer {
         // (A kept frame's glyphs stay where they are: patching it gave way
         // before the atlas filled, `render_kept`.)
         if MODE != PATCH && !made && self.atlas_filling() {
-            // Filling again soon after the last recycle means the visible
-            // working set does not fit: grow rather than re-rasterize every
-            // glyph and icon each time it fills.
+            // Filling again soon after the last time means the visible
+            // working set does not fit: grow rather than give back or
+            // re-rasterize glyphs each time it fills. Else the cells no
+            // text holds are given back where they lie, and only where that
+            // leaves it filling does it start over.
             let thrashing = self.frame.wrapping_sub(self.atlas_recycled_at) < ATLAS_THRASH_FRAMES;
             if thrashing && self.atlas_size < MAX_ATLAS && self.entries.len() < 8192 {
                 self.reset_atlas((self.atlas_size * 2).min(MAX_ATLAS));
-            } else {
+            } else if !self.evict_glyphs() {
                 self.recycle_atlas();
             }
             self.atlas_recycled_at = self.frame;
@@ -15544,6 +15575,44 @@ impl GpuRenderer {
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         }
     }
+    /// The atlas filling: the cells of glyphs no text the renderer holds
+    /// (`shapes`) draws given back where they lie, for glyphs to come. The
+    /// rest stay where they are, so the quads placed from them still hold
+    /// (no new `atlas_epoch`): a fill moves nothing and rasterizes nothing
+    /// again. (Starting over, as it did, placed every text's quads again,
+    /// three quarters of what a fill cost a mail window.) Whether that left
+    /// it filling no more.
+    fn evict_glyphs(&mut self) -> bool {
+        self.free_glyphs();
+        !self.atlas_filling()
+    }
+    /// `evict_glyphs`' giving back: whether any cell was.
+    fn free_glyphs(&mut self) -> bool {
+        let mut held: FxHashSet<AtlasKey> = FxHashSet::default();
+        for shaped in self.shapes.values() {
+            held.extend(shaped.glyphs.iter().map(|glyph| AtlasKey::from(glyph.key)));
+        }
+        let mut freed = false;
+        let shelves = &mut self.shelves;
+        self.entries.retain(|key, entry| {
+            if held.contains(key) {
+                return true;
+            }
+            if let Some(e) = entry {
+                shelves.free((e.x - 1, e.y - 1), e.width + 2, e.height + 2);
+                freed = true;
+            }
+            false
+        });
+        if freed {
+            // A frame still on the GPU may sample a cell given back: none
+            // is written over before it is done (as `recycle_atlas`).
+            self.release_atlas_cells();
+            // A kept frame's quads may lie in them.
+            self.kept = None;
+        }
+        freed
+    }
     /// Start the glyph atlas over in place: every glyph and icon cell
     /// (`entries`, `image_cells`) given up together, so the next to take a
     /// cell never draws over one still listed. (A scale change once kept
@@ -15557,7 +15626,7 @@ impl GpuRenderer {
             blurred.glyphs.clear();
         }
         self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
-        self.cursor = (0, 0, 0);
+        self.shelves = shelves::Shelves::new(self.atlas_size);
     }
     fn reset_atlas(&mut self, size: u32) {
         self.atlas = sampled_texture(&self.device, self.unified, size, size, "glyph atlas");
@@ -15568,7 +15637,7 @@ impl GpuRenderer {
         if let Some(blurred) = &mut self.blurred {
             blurred.glyphs.clear();
         }
-        self.cursor = (0, 0, 0);
+        self.shelves = shelves::Shelves::new(self.atlas_size);
         self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
     }
     /// The quads of a run's underline or strikethrough, as its `LineStyle`
@@ -15817,7 +15886,8 @@ impl GpuRenderer {
             return Ok(None);
         }
         let cell_width = p.width + 2;
-        let atlas_full = self.atlas_size >= MAX_ATLAS;
+        // At its largest, and given back and started over this frame.
+        let atlas_full = self.atlas_size >= MAX_ATLAS && self.atlas_spent;
         let cell = self.atlas_cell(p.width, p.height, |rgba| {
             let row_start = |row: u32| ((row + 1) * cell_width + 1) as usize * 4;
             match image.content {
@@ -16146,28 +16216,16 @@ impl GpuRenderer {
             self.reset_atlas(INITIAL_ATLAS);
         }
         let (cell_width, cell_height) = (width + 2, height + 2);
-        if self.cursor.0 + cell_width > self.atlas_size {
-            self.cursor.0 = 0;
-            self.cursor.1 += self.cursor.2;
-            self.cursor.2 = 0;
-        }
-        if self.cursor.1 + cell_height > self.atlas_size || cell_width > self.atlas_size {
+        let Some((x, y)) = self.shelves.alloc(cell_width, cell_height) else {
             return Err(GpuError(
                 "glyph atlas capacity exceeded in one frame".into(),
             ));
-        }
+        };
         let mut rgba = vec![0; (cell_width * cell_height * 4) as usize];
         fill(&mut rgba);
         let atlas = self.atlas.clone();
-        self.write_texels(
-            &atlas,
-            (self.cursor.0, self.cursor.1, cell_width, cell_height),
-            &mut rgba,
-        );
-        let origin = (self.cursor.0 + 1, self.cursor.1 + 1);
-        self.cursor.0 += cell_width;
-        self.cursor.2 = self.cursor.2.max(cell_height);
-        Ok(origin)
+        self.write_texels(&atlas, (x, y, cell_width, cell_height), &mut rgba);
+        Ok((x + 1, y + 1))
     }
     /// Present the retained target. Use `present_with_status` when scheduling retries.
     pub fn present(&mut self) -> Result<(), GpuError> {
@@ -17574,6 +17632,8 @@ impl GpuRenderer {
     /// its last frame; the next frame recreates whatever it uses. Call when a
     /// window has stopped presenting for a while.
     pub fn trim(&mut self) {
+        // Glyphs no text holds any more: given up, their cells free.
+        self.free_glyphs();
         self.backdrop = None;
         #[cfg(d3d11)]
         if let Some(state) = &mut self.d3d11 {
@@ -18595,42 +18655,36 @@ fn keep_room<T>(vec: &mut Vec<T>, peak: &mut usize) {
         vec.shrink_to(*peak);
     }
 }
-/// `pack_cells`' atlas: its size, each cell's origin, and the packer's
-/// cursor after them (`GpuRenderer::cursor`).
+/// `pack_cells`' atlas: its size, each cell's origin, and its cells
+/// (`GpuRenderer::shelves`).
 struct Packed {
     size: u32,
     origins: Vec<(u32, u32)>,
-    cursor: (u32, u32, u32),
+    shelves: shelves::Shelves,
 }
 /// Cells `(width, height)` packed as `atlas_cell` packs them (in shelves,
 /// each a texel of gutter round it), tallest first, into the smallest square
 /// atlas of a power of two from `INITIAL_ATLAS` and below `below`: its size,
-/// each cell's origin in the order given, and the packer's cursor after
-/// them. `None` when only `below` or more holds them.
+/// each cell's origin in the order given, and its cells. `None` when only
+/// `below` or more holds them.
 fn pack_cells(cells: &[(u32, u32)], below: u32) -> Option<Packed> {
     let mut order: Vec<usize> = (0..cells.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse((cells[i].1, cells[i].0)));
     let mut size = INITIAL_ATLAS;
     'sizes: while size < below {
         let mut origins = vec![(0, 0); cells.len()];
-        let mut cursor = (0, 0, 0);
+        let mut shelves = shelves::Shelves::new(size);
         for &i in &order {
-            let (cell_width, cell_height) = (cells[i].0 + 2, cells[i].1 + 2);
-            if cursor.0 + cell_width > size {
-                cursor = (0, cursor.1 + cursor.2, 0);
-            }
-            if cursor.1 + cell_height > size || cell_width > size {
+            let Some((x, y)) = shelves.alloc(cells[i].0 + 2, cells[i].1 + 2) else {
                 size *= 2;
                 continue 'sizes;
-            }
-            origins[i] = (cursor.0 + 1, cursor.1 + 1);
-            cursor.0 += cell_width;
-            cursor.2 = cursor.2.max(cell_height);
+            };
+            origins[i] = (x + 1, y + 1);
         }
         return Some(Packed {
             size,
             origins,
-            cursor,
+            shelves,
         });
     }
     None
@@ -23909,11 +23963,7 @@ mod rest_tests {
     #[test]
     fn shrunk_atlas_cells_fit_and_never_overlap() {
         let cells: Vec<(u32, u32)> = (0..300).map(|i| (8 + i % 23, 10 + i % 17)).collect();
-        let Packed {
-            size,
-            origins,
-            cursor,
-        } = pack_cells(&cells, MAX_ATLAS).unwrap();
+        let Packed { size, origins, .. } = pack_cells(&cells, MAX_ATLAS).unwrap();
         assert_eq!(size, INITIAL_ATLAS);
         let boxes: Vec<(u32, u32, u32, u32)> = origins
             .iter()
@@ -23922,10 +23972,6 @@ mod rest_tests {
             .collect();
         for (i, a) in boxes.iter().enumerate() {
             assert!(a.2 <= size && a.3 <= size, "inside: {a:?}");
-            assert!(
-                a.3 <= cursor.1 + cursor.2,
-                "under the cursor's shelf: {a:?}"
-            );
             for b in &boxes[i + 1..] {
                 assert!(
                     a.2 <= b.0 || b.2 <= a.0 || a.3 <= b.1 || b.3 <= a.1,
