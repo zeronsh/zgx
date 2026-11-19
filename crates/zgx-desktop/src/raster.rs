@@ -770,6 +770,64 @@ impl Raster {
         if let zgx::image::ImageEffect::Characters(pixel) = image.effect() {
             return self.characters(bounds, clip, image, effects, pixel, reveal);
         }
+        if image.transform() == zgx::affine::Affine::IDENTITY && image.dither() <= 0. {
+            return self.image_upright(bounds, clip, image, effects);
+        }
+        self.image_mapped(bounds, clip, image, effects);
+    }
+    /// `image` neither transformed nor dithered: the column of it a pixel
+    /// shows depends on the pixel's column alone, the row on its row, so
+    /// each is worked out once (as `image_mapped` works them out for every
+    /// pixel), and the pixels a row covers are blended along it.
+    fn image_upright(
+        &mut self,
+        bounds: Rect,
+        clip: Rect,
+        image: &zgx::image::ImageData,
+        effects: Effects,
+    ) {
+        let Some(visible) = intersect(bounds, clip) else {
+            return;
+        };
+        let (x0, y0, x1, y1) = self.region(visible);
+        let (width, height) = (image.width(), image.height());
+        // The texel at `at` along a side from `start`, `size` long and
+        // `texels` across; none outside it.
+        let texel = |at: f32, start: f32, size: f32, texels: u32| {
+            (at >= start && at < start + size)
+                .then(|| (((at - start) / size * texels as f32).max(0.) as u32).min(texels - 1))
+        };
+        let columns: Vec<Option<u32>> = (x0..x1)
+            .map(|x| texel(x as f32 + 0.5, bounds.x, bounds.width, width))
+            .collect();
+        let pixels = image.pixels();
+        for y in y0..y1 {
+            let local_y = y as f32 + 0.5;
+            let Some(sy) = texel(local_y, bounds.y, bounds.height, height) else {
+                continue;
+            };
+            let opacity = effects.opacity * edge_alpha(local_y, bounds, effects.edge_fade);
+            let row = &pixels[(sy * width * 4) as usize..((sy + 1) * width * 4) as usize];
+            let line = &mut self.pixels[y * self.width + x0..y * self.width + x1];
+            for (pixel, sx) in line.iter_mut().zip(&columns) {
+                let Some(sx) = sx else {
+                    continue;
+                };
+                let i = *sx as usize * 4;
+                let [r, g, b, a] = [row[i], row[i + 1], row[i + 2], row[i + 3]];
+                blend(pixel, Color(r, g, b, a), opacity);
+            }
+        }
+    }
+    /// `image` through its transform, dithered on the screen's grid if it
+    /// is: each pixel sampled where it maps back to.
+    fn image_mapped(
+        &mut self,
+        bounds: Rect,
+        clip: Rect,
+        image: &zgx::image::ImageData,
+        effects: Effects,
+    ) {
         let transform = image.paint_transform(bounds);
         let Some(inverse) = transform.inverse() else {
             return;
@@ -1575,6 +1633,19 @@ fn pack(s: [u64; 3], n: u64) -> u32 {
 }
 fn blend(pixel: &mut u32, c: Color, opacity: f32) {
     let a = (c.3 as f32 * opacity.clamp(0., 1.)).round() as u32;
+    // What the sums below come to at either end: the pixel as it was, or
+    // the colour.
+    match a {
+        0 => {
+            *pixel &= 0xff_ffff;
+            return;
+        }
+        255 => {
+            *pixel = ((c.0 as u32) << 16) | ((c.1 as u32) << 8) | c.2 as u32;
+            return;
+        }
+        _ => {}
+    }
     let inv = 255 - a;
     let r = (c.0 as u32 * a + ((*pixel >> 16) & 255) * inv + 127) / 255;
     let g = (c.1 as u32 * a + ((*pixel >> 8) & 255) * inv + 127) / 255;
@@ -1784,6 +1855,105 @@ mod tests {
         assert_eq!(raster.pixels[6 * 40 + 6], 0x14283c);
         assert_eq!(raster.pixels[14 * 40 + 12], 0xff0000);
         assert_eq!(raster.pixels[40 + 20], 0xc86400);
+    }
+    /// An image neither transformed nor dithered is drawn a row at a time
+    /// (`image_upright`), exactly as sampling each pixel paints it
+    /// (`image_mapped`): over many images (sizes, drawn larger and smaller,
+    /// at places between pixels; texels opaque, translucent and clear), at
+    /// opacities, with edge fades, under clips.
+    #[test]
+    fn an_upright_image_is_drawn_as_each_pixel_samples_it() {
+        let (w, h) = (48usize, 40usize);
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = |range: f32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 10_000) as f32 / 10_000. * range
+        };
+        for case in 0..400 {
+            let (iw, ih) = (1 + next(24.) as u32, 1 + next(20.) as u32);
+            let texels: Vec<u8> = (0..iw * ih)
+                .flat_map(|_| {
+                    let alpha = match next(4.) as u32 {
+                        0 => 0,
+                        1 => 255,
+                        _ => next(256.) as u8,
+                    };
+                    [next(256.) as u8, next(256.) as u8, next(256.) as u8, alpha]
+                })
+                .collect();
+            let image = zgx::image::ImageData::new(iw, ih, texels).unwrap();
+            // Whole-pixel places and sizes half the time, as a row's canvas
+            // is drawn.
+            let whole = case % 2 == 0;
+            let at = |v: f32| if whole { v.round() } else { v };
+            let bounds = Rect::new(
+                at(next(40.) - 8.),
+                at(next(32.) - 6.),
+                if case % 4 == 0 {
+                    iw as f32
+                } else {
+                    at(1. + next(40.))
+                },
+                if case % 4 == 0 {
+                    ih as f32
+                } else {
+                    at(1. + next(32.))
+                },
+            );
+            let clip = if case % 3 == 0 {
+                Rect::new(0., 0., w as f32, h as f32)
+            } else {
+                Rect::new(next(20.), next(16.), 4. + next(40.), 4. + next(30.))
+            };
+            let effects = Effects {
+                opacity: [1., 1., 0.5, next(1.)][case % 4],
+                edge_fade: if case % 5 == 0 { next(8.) } else { 0. },
+                ..Default::default()
+            };
+            let mut fast = Raster::new(w, h);
+            let mut each = Raster::new(w, h);
+            for (i, pixel) in fast.pixels.iter_mut().enumerate() {
+                *pixel = (i as u32).wrapping_mul(0x9e37_79b9) & 0xff_ffff;
+            }
+            each.pixels.copy_from_slice(&fast.pixels);
+            fast.image_upright(bounds, clip, &image, effects);
+            each.image_mapped(bounds, clip, &image, effects);
+            assert!(
+                fast.pixels == each.pixels,
+                "case {case}: {iw}x{ih} in {bounds:?} under {clip:?}, {effects:?}"
+            );
+        }
+    }
+    /// `blend` of a clear or an opaque colour comes to what its sums do.
+    #[test]
+    fn blending_at_either_end_comes_to_its_sums() {
+        let summed = |pixel: u32, c: Color, opacity: f32| {
+            let a = (c.3 as f32 * opacity.clamp(0., 1.)).round() as u32;
+            let mix = |source: u8, shift: u32| {
+                (source as u32 * a + ((pixel >> shift) & 255) * (255 - a) + 127) / 255
+            };
+            (mix(c.0, 16) << 16) | (mix(c.1, 8) << 8) | mix(c.2, 0)
+        };
+        let mut seed = 0x2545_f491_u32;
+        for _ in 0..20_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let [r, g, b, pick] = seed.to_le_bytes();
+            let alpha = [0, 255, pick][(pick % 3) as usize];
+            let opacity = [1., 0., 0.5, 2.][(seed >> 7) as usize % 4];
+            let pixel = seed.rotate_left(11);
+            let c = Color(r, g, b, alpha);
+            let mut blended = pixel;
+            blend(&mut blended, c, opacity);
+            assert_eq!(
+                blended,
+                summed(pixel, c, opacity),
+                "{pixel:#x} {c:?} {opacity}"
+            );
+        }
     }
     fn scene() -> Scene {
         let mut s = Scene::new(100., 80.);
