@@ -277,8 +277,12 @@ fn parted(odd: Option<usize>) -> Arc<Canvas> {
     Arc::new(canvas)
 }
 /// Each tile shown, by where it is: its image.
+/// What `out` draws, by where: not the backdrop's pieces it hands over to
+/// upload alone (an empty `rect`), which come as the backdrop, made off
+/// the frame, lands, so one frame has them and the next doesn't.
 fn by_place(out: &[(Raster, Placement)]) -> Vec<([i32; 4], u64)> {
     out.iter()
+        .filter(|(_, p)| p.rect[2] > 0. && p.rect[3] > 0.)
         .map(|(r, p)| (p.rect.map(|v| (v * 4.).round() as i32), r.id))
         .collect()
 }
@@ -326,7 +330,11 @@ fn a_change_to_one_part_is_told_where_it_is_and_shows_once_made() {
         .unwrap();
     let before = settled(&mut cache, node, &canvas, zoomed, 1.);
     let after = settled(&mut cache, node, &changed, zoomed, 1.);
-    assert_eq!(before.len(), after.len());
+    // The same places drawn (the tiles themselves new where it changed).
+    let places = |out: &[(Raster, Placement)]| -> Vec<[i32; 4]> {
+        by_place(out).into_iter().map(|(at, _)| at).collect()
+    };
+    assert_eq!(places(&before), places(&after));
     assert!(same(
         &composed(&after, 1.),
         &raster(&changed, zoomed, [0, 0], 1.),
