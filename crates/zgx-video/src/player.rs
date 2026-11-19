@@ -79,7 +79,7 @@ pub enum Event {
 /// playing the composition from its start.
 const CACHE_BYTES: usize = 512 << 20;
 /// How long it keeps them once nothing is asked of it: at rest, a player
-/// holds no frames.
+/// holds no frames, and a while after, no stage either.
 const CACHE_KEPT: Duration = Duration::from_secs(5);
 
 /// A frame kept: its bytes (for a script), its pixel buffer (for a view on
@@ -99,6 +99,8 @@ struct Kept {
 #[derive(Default)]
 pub(crate) struct Counts {
     cached: AtomicUsize,
+    /// Times it dropped its stage at rest.
+    stages_dropped: AtomicUsize,
     #[cfg(target_os = "macos")]
     releases: AtomicUsize,
 }
@@ -405,6 +407,19 @@ pub(crate) fn run(
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             },
+            // At rest with nothing kept: its stage (the script's VM, its
+            // interface and renderer) goes too, a while on, built again
+            // when it's next asked for a frame. A paused player then holds
+            // what a gone one does.
+            None if preview.stage.is_some() => match asks.recv_timeout(keep_for) {
+                Ok(ask) => Some(ask),
+                Err(RecvTimeoutError::Timeout) => {
+                    preview.stage = None;
+                    counts.stages_dropped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
             None => match asks.recv() {
                 Ok(ask) => Some(ask),
                 Err(_) => return,
@@ -663,6 +678,11 @@ impl Player {
             surface: runtime.signal(None),
         }))
     }
+    /// Times its thread dropped its stage at rest: for tests.
+    #[doc(hidden)]
+    pub fn stages_dropped(&self) -> usize {
+        self.counts.stages_dropped.load(Ordering::Relaxed)
+    }
     /// Bytes of drawn frames its thread keeps now: for tests.
     #[doc(hidden)]
     pub fn cached_bytes(&self) -> usize {
@@ -674,8 +694,8 @@ impl Player {
     pub fn surface_releases(&self) -> usize {
         self.counts.releases.load(Ordering::Relaxed)
     }
-    /// How long it keeps drawn frames once nothing is asked of it (5 s):
-    /// for tests.
+    /// How long it keeps drawn frames once nothing is asked of it (5 s),
+    /// and its stage that long after: for tests.
     #[doc(hidden)]
     pub fn keep_frames_for(&self, time: Duration) {
         let _ = self.asks.send(Ask::KeepFor(time));
