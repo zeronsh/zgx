@@ -1041,28 +1041,55 @@ impl Raster {
             return;
         };
         let (x0, y0, x1, y1) = self.region(visible);
+        // A row's pixels whose centres lie inside the box past its corners'
+        // curve and its border, by more than half a pixel (and a margin for
+        // rounding), are covered whole: the fill's colour, its coverage
+        // math (a distance with a square root a pixel) left out. A terminal
+        // repaints its background under every frame of output: that math
+        // was most of a frame on the raster. The rest of the row (its ends,
+        // the rows through the corners and the border) as before.
+        let radius = style
+            .radius
+            .max(0.)
+            .min(bounds.width.min(bounds.height) * 0.5);
+        let border = style.border_width.max(0.);
+        let (cx, cy) = (
+            bounds.x + bounds.width * 0.5,
+            bounds.y + bounds.height * 0.5,
+        );
+        const MARGIN: f32 = 1e-2;
+        let reach_x = bounds.width * 0.5 - border - 0.5 - MARGIN;
+        let reach_y = bounds.height * 0.5 - radius.max(border + 0.5) - MARGIN;
+        let whole = quad_color(&style, 1., 1.);
         for y in y0..y1 {
-            for x in x0..x1 {
+            let amount = effects.opacity * edge_alpha(y as f32, bounds, effects.edge_fade);
+            let (from, to) = match whole {
+                Some(_) if reach_x >= 0. && (y as f32 + 0.5 - cy).abs() <= reach_y => {
+                    // x + 0.5 within `reach_x` of the centre.
+                    let from = (cx - reach_x - 0.5).ceil().max(x0 as f32) as usize;
+                    let to = ((cx + reach_x - 0.5).floor() + 1.).min(x1 as f32).max(0.) as usize;
+                    (from.min(x1), to.max(from.min(x1)))
+                }
+                _ => (x1, x1),
+            };
+            let row = y * self.width;
+            for x in (x0..from).chain(to..x1) {
                 let d = rounded_distance(x as f32 + 0.5, y as f32 + 0.5, bounds, style.radius);
                 let outer = (0.5 - d).clamp(0., 1.);
-                let inner = (0.5 - d - style.border_width.max(0.)).clamp(0., 1.);
-                let amount = effects.opacity * edge_alpha(y as f32, bounds, effects.edge_fade);
-                let a = style.fill.3 as f32 / 255. * inner
-                    + style.border_color.3 as f32 / 255. * (outer - inner);
-                if a > 0. {
-                    let channel = |fill: u8, border: u8| {
-                        ((fill as f32 * style.fill.3 as f32 / 255. * inner
-                            + border as f32 * style.border_color.3 as f32 / 255. * (outer - inner))
-                            / a)
-                            .round() as u8
-                    };
-                    let c = Color(
-                        channel(style.fill.0, style.border_color.0),
-                        channel(style.fill.1, style.border_color.1),
-                        channel(style.fill.2, style.border_color.2),
-                        (a * 255.).round() as u8,
-                    );
-                    blend(&mut self.pixels[y * self.width + x], c, amount);
+                let inner = (0.5 - d - border).clamp(0., 1.);
+                if let Some(c) = quad_color(&style, inner, outer) {
+                    blend(&mut self.pixels[row + x], c, amount);
+                }
+            }
+            if let Some(c) = whole.filter(|_| from < to) {
+                let span = &mut self.pixels[row + from..row + to];
+                // Opaque at full opacity: the colour itself (`blend` gives it).
+                if c.3 == 255 && amount >= 1. {
+                    span.fill((c.0 as u32) << 16 | (c.1 as u32) << 8 | c.2 as u32);
+                } else {
+                    for pixel in span {
+                        blend(pixel, c, amount);
+                    }
                 }
             }
         }
@@ -1590,6 +1617,75 @@ fn edge_alpha(y: f32, bounds: Rect, fade: f32) -> f32 {
 mod tests {
     use super::*;
     use zgx::scene::{Effects, Layout, NodeKind, Style, Transform};
+
+    /// A quad's pixels inside its box, past its corners and its border, are
+    /// filled without the coverage math (`quad`), exactly as that math
+    /// paints them: every pixel the same as each pixel computed in full,
+    /// over many boxes (sizes and places between pixels, radii, borders,
+    /// fills opaque, translucent and clear, opacity, edge fades, clips).
+    #[test]
+    fn a_quads_inside_is_filled_as_its_coverage_paints_it() {
+        let (w, h) = (64usize, 48usize);
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |range: f32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 10_000) as f32 / 10_000. * range
+        };
+        let scene = Scene::new(w as f32, h as f32);
+        let node = scene.root();
+        for case in 0..400 {
+            let bounds = Rect::new(next(30.) - 6., next(24.) - 6., next(56.), next(44.));
+            let clip = match case % 3 {
+                0 => Rect::new(0., 0., w as f32, h as f32),
+                1 => Rect::new(next(20.), next(16.), next(50.), next(40.)),
+                _ => Rect::new(-5., -5., w as f32 + 10., h as f32 + 10.),
+            };
+            let alpha = [255u8, 128, 0, 255][case % 4];
+            let style = zgx::scene::QuadStyle {
+                fill: Color(next(255.) as u8, next(255.) as u8, next(255.) as u8, alpha),
+                radius: [0., 3., 8.5, 20.][case % 4 / 2 + case % 2],
+                border_color: Color(next(255.) as u8, 40, 200, [255u8, 90][case % 2]),
+                border_width: [0., 1., 2.5, 4.][(case / 3) % 4],
+                ..Default::default()
+            };
+            let effects = Effects {
+                opacity: [1., 0.6][(case / 5) % 2],
+                edge_fade: [0., 6.][(case / 7) % 2],
+                ..Effects::default()
+            };
+            let mut raster = Raster::new(w, h);
+            for (i, pixel) in raster.pixels.iter_mut().enumerate() {
+                *pixel = (i as u32).wrapping_mul(2_654_435_761) & 0x00ff_ffff;
+            }
+            let mut expected = raster.pixels.clone();
+            raster.quad(node, bounds, clip, style.clone(), effects);
+            // Every pixel in full, as `quad` did before.
+            if let Some(visible) = intersect(bounds, clip) {
+                let (x0, y0, x1, y1) = raster.region(visible);
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let d =
+                            rounded_distance(x as f32 + 0.5, y as f32 + 0.5, bounds, style.radius);
+                        let outer = (0.5 - d).clamp(0., 1.);
+                        let inner = (0.5 - d - style.border_width.max(0.)).clamp(0., 1.);
+                        let amount =
+                            effects.opacity * edge_alpha(y as f32, bounds, effects.edge_fade);
+                        if let Some(c) = quad_color(&style, inner, outer) {
+                            blend(&mut expected[y * w + x], c, amount);
+                        }
+                    }
+                }
+            }
+            let differ = (0..w * h).find(|&i| raster.pixels[i] != expected[i]);
+            assert_eq!(
+                differ.map(|i| (i % w, i / w, raster.pixels[i], expected[i])),
+                None,
+                "case {case}: {bounds:?} {clip:?} {style:?} {effects:?}"
+            );
+        }
+    }
     #[test]
     fn a_selection_recolours_the_glyphs_it_holds_and_rounds_its_highlight() {
         let mut scene = Scene::new(120., 40.);
@@ -2270,6 +2366,28 @@ fn dithered([r, g, b, a]: [u8; 4], x: u32, y: u32) -> [u8; 4] {
     let gain = if bright { 255. / peak.max(1.) } else { 0.08 };
     let level = |c: u8| (c as f32 * gain).round().min(255.) as u8;
     [level(r), level(g), level(b), a]
+}
+/// The colour a quad paints a pixel covered `inner` by its fill and
+/// `outer` by its border's outer edge (`inner` ≤ `outer`): none where it
+/// paints nothing.
+fn quad_color(style: &zgx::scene::QuadStyle, inner: f32, outer: f32) -> Option<Color> {
+    let a =
+        style.fill.3 as f32 / 255. * inner + style.border_color.3 as f32 / 255. * (outer - inner);
+    if a <= 0. {
+        return None;
+    }
+    let channel = |fill: u8, border: u8| {
+        ((fill as f32 * style.fill.3 as f32 / 255. * inner
+            + border as f32 * style.border_color.3 as f32 / 255. * (outer - inner))
+            / a)
+            .round() as u8
+    };
+    Some(Color(
+        channel(style.fill.0, style.border_color.0),
+        channel(style.fill.1, style.border_color.1),
+        channel(style.fill.2, style.border_color.2),
+        (a * 255.).round() as u8,
+    ))
 }
 fn rounded_distance(x: f32, y: f32, bounds: Rect, radius: f32) -> f32 {
     let r = radius.max(0.).min(bounds.width.min(bounds.height) * 0.5);
