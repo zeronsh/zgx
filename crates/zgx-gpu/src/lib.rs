@@ -10061,13 +10061,22 @@ impl GpuRenderer {
         // (A kept frame's glyphs stay where they are: patching it gave way
         // before the atlas filled, `render_kept`.)
         if MODE != PATCH && !made && self.atlas_filling() {
-            // Filling again soon after the last time means the visible
-            // working set does not fit: grow rather than give back or
-            // re-rasterize glyphs each time it fills. Else the cells no
-            // text holds are given back where they lie, and only where that
-            // leaves it filling does it start over.
+            // Filling again soon after the last time with what its text
+            // holds means the visible working set does not fit: grow rather
+            // than give back or re-rasterize glyphs each time it fills. Not
+            // where what its text holds takes under 3/8 of it (a colour
+            // animating through font smoothing's levels leaves each level's
+            // glyphs behind, beside a page of text that stays): given back,
+            // the rest leaves room, and nothing grows to stay grown.
+            // Else the cells no text holds are given back where they lie,
+            // and only where that leaves it filling does it start over.
             let thrashing = self.frame.wrapping_sub(self.atlas_recycled_at) < ATLAS_THRASH_FRAMES;
-            if thrashing && self.atlas_size < MAX_ATLAS && self.entries.len() < 8192 {
+            if thrashing
+                && self.atlas_size < MAX_ATLAS
+                && self.entries.len() < 8192
+                && (self.shelves.area() - self.unheld_area()) * 8
+                    > u64::from(self.atlas_size).pow(2) * 3
+            {
                 let size = (self.atlas_size * 2).min(MAX_ATLAS);
                 if !self.grow_atlas(size) {
                     self.reset_atlas(size);
@@ -15768,12 +15777,27 @@ impl GpuRenderer {
         self.free_glyphs();
         !self.atlas_filling()
     }
-    /// `evict_glyphs`' giving back: whether any cell was.
-    fn free_glyphs(&mut self) -> bool {
+    /// The texels of the atlas's glyph cells no text the renderer holds.
+    fn unheld_area(&self) -> u64 {
+        let held = self.held_glyphs();
+        self.entries
+            .iter()
+            .filter(|(key, _)| !held.contains(*key))
+            .filter_map(|(_, entry)| *entry)
+            .map(|e| u64::from(e.width + 2) * u64::from(e.height + 2))
+            .sum()
+    }
+    /// The glyphs of the text the renderer holds (`shapes`).
+    fn held_glyphs(&self) -> FxHashSet<AtlasKey> {
         let mut held: FxHashSet<AtlasKey> = FxHashSet::default();
         for shaped in self.shapes.values() {
             held.extend(shaped.glyphs.iter().map(|glyph| AtlasKey::from(glyph.key)));
         }
+        held
+    }
+    /// `evict_glyphs`' giving back: whether any cell was.
+    fn free_glyphs(&mut self) -> bool {
+        let held = self.held_glyphs();
         let mut freed = false;
         let shelves = &mut self.shelves;
         self.entries.retain(|key, entry| {
