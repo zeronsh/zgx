@@ -6538,6 +6538,12 @@ impl GpuRenderer {
     pub fn presents_opaque(&self) -> Option<bool> {
         (self.config.as_ref()).map(|c| c.alpha_mode == wgpu::CompositeAlphaMode::Opaque)
     }
+    /// The composite alpha mode its window's swap chain was made with
+    /// (`PreMultiplied`, `Opaque`, ...), for devtools. None offscreen.
+    #[doc(hidden)]
+    pub fn alpha_mode(&self) -> Option<String> {
+        (self.config.as_ref()).map(|c| format!("{:?}", c.alpha_mode))
+    }
     /// Show `caret` over the window's frames, drawn and blinked by Core
     /// Animation (`zgx::caret_blink::NativeCaret`), or none. Call inside the
     /// transaction that presents the frame which stops (or starts) drawing

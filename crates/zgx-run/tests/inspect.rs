@@ -277,6 +277,54 @@ return ui.select { id = "fruit", label = "Fruit", value = fruit, w = 160, option
     );
 }
 
+/// What shows a popup in a window of its own, as the host says
+/// (`Ui::set_popup_surfaces`): `windows` lists its surface's alpha mode,
+/// whether it presents opaque and whether a compositor was found, so a
+/// capture that reads its clear parts black can tell why.
+#[test]
+fn windows_lists_what_shows_a_popup() {
+    let app = TestApp::new(|runtime| {
+        ScriptHost::inline(
+            runtime,
+            "app",
+            r##"
+local fruit = ui.state("fruit", "apple")
+return ui.select { id = "fruit", label = "Fruit", value = fruit, w = 160, options = { "apple", "fig" } }
+"##,
+        )
+    });
+    app.ui
+        .set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1200., 900.)]);
+    let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
+    text(&ask(
+        &app,
+        &session,
+        r##"{"cmd":"click","target":"#fruit"}"##,
+    ));
+    let root = app.ui.scene.borrow().popups()[0];
+    app.ui.set_popup_surfaces(vec![(
+        root,
+        zgx::widgets::PopupSurface {
+            alpha: "Opaque".into(),
+            opaque: Some(true),
+            composited: true,
+        },
+    )]);
+    let answer = ask(&app, &session, r#"{"cmd":"windows"}"#);
+    let listed = text(&answer);
+    assert!(
+        listed.contains("surface: alpha Opaque, opaque yes, compositor yes"),
+        "{listed}"
+    );
+    let data = answer.to_json();
+    assert!(
+        data.contains(r#""alpha":"Opaque""#)
+            && data.contains(r#""opaque":true"#)
+            && data.contains(r#""compositor":true"#),
+        "{data}"
+    );
+}
+
 #[test]
 fn a_snapshot_is_a_png_of_the_node_only_its_user_reads() {
     let (app, session) = app();

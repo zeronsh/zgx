@@ -2135,6 +2135,20 @@ impl Drop for FramePreparationGuard<'_> {
     }
 }
 
+/// What shows a popup in a window of its own (`Ui::popup_surface`), as its
+/// host says: what reaches a compositor of it, for devtools to tell why a
+/// popup's clear parts show black.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PopupSurface {
+    /// Its swap chain's composite alpha mode (`PreMultiplied`, `Opaque`, ...).
+    pub alpha: String,
+    /// Whether it presents opaque (its alpha ignored); None if unknown.
+    pub opaque: Option<bool>,
+    /// Whether the host found a compositor to blend what it leaves clear.
+    pub composited: bool,
+}
+
 /// One retained document. Application code keeps returned node IDs as stable widget handles.
 pub struct Ui {
     /// The reactive runtime its signals and effects live in.
@@ -2631,6 +2645,7 @@ pub(crate) struct UiStorage {
     /// The host's way to picture what the window last showed (`Ui::on_snapshot`).
     snapshotter: RefCell<Option<Snapshotter>>,
     popup_snapshotter: RefCell<Option<PopupSnapshotter>>,
+    popup_surfaces: RefCell<Vec<(NodeId, PopupSurface)>>,
     /// The window's zoom (`zoom`), 1 at 100%.
     pub(crate) zoom: Cell<f64>,
     /// The app turned zoom off (`set_zoomable`).
@@ -3056,6 +3071,7 @@ impl Ui {
             popup_soon_sent: Cell::new(false),
             snapshotter: RefCell::new(None),
             popup_snapshotter: RefCell::new(None),
+            popup_surfaces: RefCell::new(Vec::new()),
             zoom: Cell::new(1.),
             zoom_off: Cell::new(false),
             zoom_host: RefCell::new(Vec::new()),
@@ -4305,6 +4321,22 @@ impl Ui {
     /// while they can't see it.
     pub fn observe_shown(&self) -> Signal<bool> {
         self.storage.presented.clone()
+    }
+    /// What shows each popup in a window of its own, as the host says
+    /// (`set_popup_surfaces`): for devtools (`zgx inspect windows`).
+    #[doc(hidden)]
+    pub fn popup_surface(&self, root: NodeId) -> Option<PopupSurface> {
+        let surfaces = self.storage.popup_surfaces.borrow();
+        surfaces
+            .iter()
+            .find(|(shown, _)| *shown == root)
+            .map(|(_, surface)| surface.clone())
+    }
+    /// The host's popups' surfaces now (`popup_surface`), replacing those
+    /// it said before.
+    #[doc(hidden)]
+    pub fn set_popup_surfaces(&self, surfaces: Vec<(NodeId, PopupSurface)>) {
+        *self.storage.popup_surfaces.borrow_mut() = surfaces;
     }
     /// The app came forward or went to the back (any of its windows active,
     /// or none; not a window of it giving way to another): a popup wanted

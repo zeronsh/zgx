@@ -1786,7 +1786,7 @@ impl Session {
     /// The window's size and its popups open, each with whether it is
     /// held while the app is at the back (`Scene::held_popups`): open, and
     /// shown as the app comes forward.
-    fn about(&self) -> Option<(zgx::scene::Rect, Vec<(String, bool)>)> {
+    fn about(&self) -> Option<(zgx::scene::Rect, Vec<AboutPopup>)> {
         let ui = self.0.ui.upgrade()?;
         let scene = ui.scene.borrow();
         let size = scene.bounds(scene.root());
@@ -1797,7 +1797,7 @@ impl Session {
         drop(scene);
         let popups = popups
             .into_iter()
-            .map(|(popup, held)| (driver::describe(&ui, popup), held))
+            .map(|(popup, held)| (driver::describe(&ui, popup), held, ui.popup_surface(popup)))
             .collect();
         Some((size, popups))
     }
@@ -2398,6 +2398,10 @@ fn window_session(name: &str) -> Result<Session, String> {
         }
     })
 }
+/// A popup open as `windows` lists it: what it is, whether it is held, and
+/// what shows it in a window of its own, as the host says.
+type AboutPopup = (String, bool, Option<zgx::widgets::PopupSurface>);
+
 /// Why a popup open is held, not shown (`windows`).
 const HELD: &str =
     "the app is at the back (no window of it is active); it shows as the app comes forward";
@@ -2419,10 +2423,19 @@ fn windows(main: &Session) -> (String, Value) {
         if !title.is_empty() {
             line.push_str(&format!("  \"{title}\""));
         }
-        for (popup, held) in &popups {
+        for (popup, held, surface) in &popups {
             line.push_str(&format!("\n  popup {popup}"));
             if *held {
                 line.push_str(&format!("  held: {HELD}"));
+            }
+            if let Some(surface) = surface {
+                let yes = |on: bool| if on { "yes" } else { "no" };
+                line.push_str(&format!(
+                    "  surface: alpha {}, opaque {}, compositor {}",
+                    surface.alpha,
+                    surface.opaque.map_or("unknown", yes),
+                    yes(surface.composited)
+                ));
             }
         }
         lines.push(line);
@@ -2436,13 +2449,22 @@ fn windows(main: &Session) -> (String, Value) {
                 Value::List(
                     popups
                         .iter()
-                        .map(|(popup, held)| {
+                        .map(|(popup, held, surface)| {
                             let mut fields = vec![
                                 ("popup", Value::from(popup.as_str())),
                                 ("held", Value::Bool(*held)),
                             ];
                             if *held {
                                 fields.push(("why", Value::from(HELD)));
+                            }
+                            // What reaches a compositor of it (X11).
+                            if let Some(surface) = surface {
+                                fields.push(("alpha", Value::from(surface.alpha.as_str())));
+                                fields.push((
+                                    "opaque",
+                                    surface.opaque.map_or(Value::Nil, Value::Bool),
+                                ));
+                                fields.push(("compositor", Value::Bool(surface.composited)));
                             }
                             Value::record(fields)
                         })

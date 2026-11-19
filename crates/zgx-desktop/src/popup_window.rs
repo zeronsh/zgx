@@ -2909,6 +2909,24 @@ mod x11 {
             let renderers = self.shown.iter().filter_map(|(_, p)| p.renderer.as_ref());
             super::report_popups(renderers.chain(self.wayland.renderers()), report);
         }
+        /// What shows each popup now, for devtools: its surface's alpha
+        /// mode, whether it presents opaque, and whether a compositor was
+        /// found to blend what it leaves clear.
+        pub fn surfaces(&self) -> Vec<(NodeId, zgx::widgets::PopupSurface)> {
+            (self.shown.iter())
+                .filter_map(|(root, popup)| {
+                    let renderer = popup.renderer.as_ref()?;
+                    Some((
+                        *root,
+                        zgx::widgets::PopupSurface {
+                            alpha: renderer.alpha_mode().unwrap_or_default(),
+                            opaque: renderer.presents_opaque(),
+                            composited: self.composited,
+                        },
+                    ))
+                })
+                .collect()
+        }
         pub fn hide_all(&mut self, parent: &Window) {
             for (_, popup) in self.shown.drain(..) {
                 release(popup);
