@@ -440,6 +440,36 @@ impl FontFeatures {
         let others = self.settings().iter().copied();
         Self::settled(others.chain([(Self::BOX_SPAN, 1)]))
     }
+    /// Whether these are a span that is a box of its own whose middle is half
+    /// its paragraph's x-height above the baseline (`BOX_SPAN` 2: CSS's
+    /// `vertical-align: middle`), not its baseline on the line's.
+    #[doc(hidden)]
+    pub fn box_span_middle(&self) -> bool {
+        self.settings()
+            .iter()
+            .any(|(tag, value)| *tag == Self::BOX_SPAN && *value == 2)
+    }
+    /// These saying a span that is a box of its own, aligned to its middle
+    /// (`box_span_middle`).
+    #[doc(hidden)]
+    pub fn with_box_span_middle(&self) -> Self {
+        if self.box_span_middle() {
+            return self.clone();
+        }
+        let others = self.settings().iter().copied();
+        let others = others.filter(|(tag, _)| *tag != Self::BOX_SPAN);
+        Self::settled(others.chain([(Self::BOX_SPAN, 2)]))
+    }
+    /// These saying no span that is a box of its own (`BOX_SPAN`): a margin
+    /// beside one.
+    #[doc(hidden)]
+    pub fn without_box_span(&self) -> Self {
+        if !self.is_box_span() {
+            return self.clone();
+        }
+        let others = self.settings().iter().copied();
+        Self::settled(others.filter(|(tag, _)| *tag != Self::BOX_SPAN))
+    }
     /// These saying no inline box (an ellipsis cloned from a box's run).
     pub fn without_inline_box(&self) -> Self {
         if !self.is_inline_box() {

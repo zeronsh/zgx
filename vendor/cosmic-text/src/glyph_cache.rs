@@ -19,6 +19,11 @@ bitflags::bitflags! {
         /// (`InlineAlign::Top`, `Bottom`), with `INLINE_BOX`.
         const INLINE_LINE_TOP = 16;
         const INLINE_LINE_BOTTOM = 32;
+        /// zgx: a glyph of a span that is a box of its own, its box's middle
+        /// half its paragraph's x-height above the baseline (CSS's
+        /// `vertical-align: middle`, `ShapeLine::parent_x_height`): its
+        /// `y_offset` moves it with its box.
+        const MIDDLE = 64;
     }
 }
 

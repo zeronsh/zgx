@@ -179,6 +179,11 @@ pub(crate) struct SpanExtras {
     pub padding_end: Option<f32>,
     /// A box of its own (`TextSpan::inline_box`).
     pub boxed: bool,
+    /// That box's middle half its paragraph's x-height above the baseline
+    /// (`TextSpan::vertical_align`).
+    pub middle: bool,
+    /// Room before and after it that is no part of it (`TextSpan::margin`).
+    pub margin: Option<[f32; 2]>,
     /// Its text fading in (`TextSpan::fade_in`).
     pub fade: Option<TextFade>,
 }
@@ -280,6 +285,27 @@ impl TextSpan {
     #[doc(hidden)]
     pub fn inline_box(mut self) -> Self {
         self.extras.get_or_insert_default().boxed = true;
+        self
+    }
+    /// Where a span that is a box of its own (`inline_box`) sits in its line,
+    /// as CSS's `vertical-align` says: `Middle`, its box's middle half its
+    /// paragraph's x-height above the baseline (a keycap's in a sentence),
+    /// its text moved with it, its line's box growing to hold it; anything
+    /// else, its baseline on the line's. A span that isn't a box: as before.
+    #[doc(hidden)]
+    pub fn vertical_align(mut self, align: crate::rich_text::InlineAlign) -> Self {
+        self.extras.get_or_insert_default().middle =
+            matches!(align, crate::rich_text::InlineAlign::Middle);
+        self
+    }
+    /// Room before (`left`) and after (`right`) it, outside its padding and
+    /// background (CSS's horizontal `margin` on an inline box): keys of a
+    /// keycap group apart, and from the words beside them.
+    #[doc(hidden)]
+    pub fn margin(mut self, left: f32, right: f32) -> Self {
+        let (left, right) = (left.max(0.), right.max(0.));
+        self.extras.get_or_insert_default().margin =
+            (left > 0. || right > 0.).then_some([left, right]);
         self
     }
     /// Room after the text other than before it (`padding`'s `x` is then

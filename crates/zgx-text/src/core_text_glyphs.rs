@@ -76,6 +76,7 @@ unsafe extern "C" {
         matrix: *const CGAffineTransform,
     ) -> CFTypeRef;
     fn CTFontCopyPostScriptName(font: CFTypeRef) -> CFTypeRef;
+    fn CTFontGetXHeight(font: CFTypeRef) -> f64;
     fn CTFontGetBoundingRectsForGlyphs(
         font: CFTypeRef,
         orientation: u32,
@@ -168,6 +169,39 @@ pub fn core_text_glyph(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashIma
 /// Text's already), else one of its file's faces, else one of the faces Core
 /// Text reads from its data. (Core Text reads no face from PingFang's data,
 /// though it does from its file.)
+/// The x-height Core Text gives face `index` of the font file `data`, in EM
+/// (`CTFontGetXHeight` at 1,000 points), as Chrome on macOS takes a face's
+/// whose OS/2 table has none: Skia's Mac scaler asks Core Text. A face
+/// without an `x` gets one all the same (Chrome measured 0.35 and 0.6 EM for
+/// two such test faces). cosmic-text's `set_x_height_source`.
+pub(crate) fn x_height(data: &[u8], index: u32) -> Option<f32> {
+    // SAFETY: each object made is owned (`Owned`), or borrowed from an array
+    // while the array lives; the bytes passed outlive each call.
+    unsafe {
+        let bytes = Owned(CFDataCreate(
+            std::ptr::null(),
+            data.as_ptr(),
+            data.len() as isize,
+        ));
+        if bytes.0.is_null() {
+            return None;
+        }
+        let all = Owned(CTFontManagerCreateFontDescriptorsFromData(bytes.0));
+        if all.0.is_null() || CFArrayGetCount(all.0) <= index as isize {
+            return None;
+        }
+        let descriptor = CFArrayGetValueAtIndex(all.0, index as isize);
+        let font = Owned(CTFontCreateWithFontDescriptor(
+            descriptor,
+            1000.,
+            std::ptr::null(),
+        ));
+        if font.0.is_null() {
+            return None;
+        }
+        Some((CTFontGetXHeight(font.0) / 1000.) as f32)
+    }
+}
 fn descriptor(fonts: &mut FontSystem, id: cosmic_text::fontdb::ID) -> Option<Owned> {
     let font = fonts.get_font(id, cosmic_text::fontdb::Weight::NORMAL)?;
     let face = fonts.db().face(id)?;

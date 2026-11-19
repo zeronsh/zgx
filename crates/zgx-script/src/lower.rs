@@ -9202,6 +9202,12 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     if rare.boxed {
                         out = out.inline_box();
                     }
+                    if rare.middle {
+                        out = out.vertical_align(zgx::rich_text::InlineAlign::Middle);
+                    }
+                    if let Some([left, right]) = rare.margin {
+                        out = out.margin(left, right);
+                    }
                     if let Some(height) = rare.line_height {
                         out = out.line_height(height);
                     }
