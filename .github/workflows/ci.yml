@@ -997,6 +997,7 @@ jobs:
             a_node_mounted_and_gone_while_a_layered_list_moves_leaves_nothing  # fails on WARP without D3D11 (#2124)
             atlas_icons_survive_the_atlas_filling_up                     # fails on WARP without D3D11 (#2124)
             a_frame_kept_before_a_scroll_patches_after_it_as_drawn_afresh  # its first scrolled frame differs on D3D11 (#2154)
+            growing_kept_text_matches_fresh_and_clears_shorter_values    # kept and fresh glyphs in other atlas cells, WARP samples them up to 2 apart (#2390)
           )
           args=()
           for skip in "${skips[@]}"; do args+=(--skip "$skip"); done
