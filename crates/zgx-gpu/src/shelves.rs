@@ -105,6 +105,12 @@ impl Shelves {
             rows: 0,
         }
     }
+    /// The atlas grown to `size` square: its shelves where they lie, now as
+    /// wide as it, with the rows below them free.
+    pub(crate) fn grow(&mut self, size: u32) {
+        debug_assert!(size >= self.size);
+        self.size = size;
+    }
     /// Texels of the cells taken.
     pub(crate) fn area(&self) -> u64 {
         self.area
