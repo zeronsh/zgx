@@ -83,7 +83,7 @@ enum Owner {
     #[cfg(d3d11)]
     D3d11 {
         device: std::rc::Rc<crate::d3d11_frame::Device>,
-        views: std::cell::RefCell<Option<[crate::d3d11_frame::Surface; 2]>>,
+        views: std::rc::Rc<std::cell::RefCell<Option<[crate::d3d11_frame::Surface; 2]>>>,
         presents: std::cell::Cell<usize>,
     },
 }
@@ -349,6 +349,16 @@ impl Chain {
             unsafe { device.context.ClearState() };
             device.wait_idle();
         }
+    }
+    /// Direct3D 11: the buffers' views, for what the window showed to read
+    /// (`crate::ShownFrame`): weakly, so they go as the chain lets them go
+    /// (`release`), and a read after finds none.
+    #[cfg(d3d11)]
+    pub(crate) fn d3d11_shown(&self) -> Option<crate::D3d11Views> {
+        let Owner::D3d11 { views, .. } = &self.owner else {
+            return None;
+        };
+        Some(std::rc::Rc::downgrade(views))
     }
     /// Direct3D 11: the views of the buffer to draw and the one shown
     /// (`Owner::D3d11`), once `buffers` made them.

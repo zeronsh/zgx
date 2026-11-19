@@ -17017,19 +17017,37 @@ impl GpuRenderer {
     }
     /// What the window last showed, to read a region of later
     /// (`ShownFrame::read`): its retained target as this frame left it,
-    /// which holds what was presented until the next frame draws. Take a
-    /// new one after each frame. None drawn with Direct3D 11 directly.
+    /// which holds what was presented until the next frame draws (with
+    /// Direct3D 11 directly, its swap chain's buffer shown, or offscreen its
+    /// target). Take a new one after each frame.
     #[cfg(not(target_os = "macos"))]
     pub fn shown_frame(&self) -> Option<ShownFrame> {
+        // Direct3D 11 directly: the swap chain's buffer shown, or offscreen
+        // its target.
         #[cfg(d3d11)]
-        if self.d3d11.is_some() {
-            return None;
+        if let Some(state) = &self.d3d11 {
+            let device = state.device.clone();
+            let chain = (self.layer_present.as_ref()).and_then(|present| present.chain.as_ref());
+            let source = match chain.and_then(dxgi_present::Chain::d3d11_shown) {
+                Some(views) => ShownSource::D3d11Chain { device, views },
+                None => {
+                    let target = state.target.as_ref()?;
+                    ShownSource::D3d11Target {
+                        device,
+                        texture: target.texture.clone(),
+                        size: (target.width, target.height),
+                    }
+                }
+            };
+            return Some(ShownFrame { source });
         }
         self.flush_pending();
         Some(ShownFrame {
-            device: self.device.clone(),
-            queue: self.queue.clone(),
-            texture: self.target.clone(),
+            source: ShownSource::Wgpu {
+                device: self.device.clone(),
+                queue: self.queue.clone(),
+                texture: self.target.clone(),
+            },
         })
     }
     /// Diagnostics: split each frame drawn with Metal directly at its
@@ -18481,13 +18499,38 @@ impl ShownFrame {
         Some((w, h, pixels))
     }
 }
+/// Direct3D 11's swap chain buffer views (`dxgi_present::Owner::D3d11`),
+/// as what a window showed holds them: weakly.
+#[cfg(d3d11)]
+pub(crate) type D3d11Views = std::rc::Weak<std::cell::RefCell<Option<[d3d11_frame::Surface; 2]>>>;
 /// A frame a window showed (`GpuRenderer::shown_frame`): its retained
 /// target, readable between its frames.
 #[cfg(not(target_os = "macos"))]
 pub struct ShownFrame {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    texture: wgpu::Texture,
+    source: ShownSource,
+}
+#[cfg(not(target_os = "macos"))]
+enum ShownSource {
+    Wgpu {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        texture: wgpu::Texture,
+    },
+    /// Drawn with Direct3D 11 directly, offscreen: its target, its size.
+    #[cfg(d3d11)]
+    D3d11Target {
+        device: std::rc::Rc<d3d11_frame::Device>,
+        texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+        size: (u32, u32),
+    },
+    /// Drawn with Direct3D 11 directly, in a window: its swap chain's
+    /// buffer shown (1 of two), read when asked; none once the chain let
+    /// its buffers go (resized, gone).
+    #[cfg(d3d11)]
+    D3d11Chain {
+        device: std::rc::Rc<d3d11_frame::Device>,
+        views: D3d11Views,
+    },
 }
 #[cfg(not(target_os = "macos"))]
 impl ShownFrame {
@@ -18495,7 +18538,39 @@ impl ShownFrame {
     /// to it) as premultiplied BGRA rows, with its size; `None` for a region
     /// outside it. Only that region is copied from the GPU, and waited for.
     pub fn read(&self, x: u32, y: u32, width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
-        let size = self.texture.size();
+        let (device, queue, texture) = match &self.source {
+            ShownSource::Wgpu {
+                device,
+                queue,
+                texture,
+            } => (device, queue, texture),
+            #[cfg(d3d11)]
+            ShownSource::D3d11Target {
+                device,
+                texture,
+                size,
+            } => {
+                return device
+                    .read_region(texture, *size, (x, y, width, height))
+                    .ok()
+                    .flatten();
+            }
+            #[cfg(d3d11)]
+            ShownSource::D3d11Chain { device, views } => {
+                let views = views.upgrade()?;
+                let views = views.borrow();
+                let shown = &views.as_ref()?[1];
+                return device
+                    .read_region(
+                        &shown.texture,
+                        (shown.width, shown.height),
+                        (x, y, width, height),
+                    )
+                    .ok()
+                    .flatten();
+            }
+        };
+        let size = texture.size();
         let w = width.min(size.width.checked_sub(x)?);
         let h = height.min(size.height.checked_sub(y)?);
         if w == 0 || h == 0 {
@@ -18503,16 +18578,16 @@ impl ShownFrame {
         }
         let stride = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shown frame read"),
             size: u64::from(stride) * u64::from(h),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
@@ -18531,12 +18606,12 @@ impl ShownFrame {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit([encoder.finish()]);
+        queue.submit([encoder.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer.map_async(wgpu::MapMode::Read, .., move |r| {
             let _ = tx.send(r);
         });
-        self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
         rx.recv().ok()?.ok()?;
         let mapped = buffer.get_mapped_range(..);
         let row = w as usize * 4;
@@ -18547,7 +18622,7 @@ impl ShownFrame {
         drop(mapped);
         buffer.unmap();
         // Retained targets are BGRA (`FORMAT`); any other is RGBA, swapped.
-        if self.texture.format() != wgpu::TextureFormat::Bgra8Unorm {
+        if texture.format() != wgpu::TextureFormat::Bgra8Unorm {
             for pixel in pixels.as_chunks_mut::<4>().0 {
                 *pixel = bgra_to_rgba(u32::from_le_bytes(*pixel)).to_le_bytes();
             }
