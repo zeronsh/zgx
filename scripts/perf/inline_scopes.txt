@@ -8,7 +8,7 @@ zgx	45	1177	scene::<impl in crates/zgx/src/scene.rs>::arrange
 zgx	41	587	scene::<impl in crates/zgx/src/scene.rs>::store_measurement
 zgx	45	841	scene::<impl in crates/zgx/src/scene.rs>::invalidate_layout_with
 zgx	168	3009	scene::<impl in crates/zgx/src/scene.rs>::column_end
-zgx	539	5896	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
+zgx	539	5896	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk_body
 zgx	275	2327	scene::<impl in crates/zgx/src/scene.rs>::flush
 zgx	0	21	scene::<impl in crates/zgx/src/scene.rs>::ink
 zgx	90	1495	scene::<impl in crates/zgx/src/scene.rs>::set_kind
@@ -17,7 +17,7 @@ zgx	20	378	advanced_layout::<impl in crates/zgx/src/scene_layout.rs>::resolved_l
 zgx	180	1263	reactive::<impl in crates/zgx/src/reactive.rs>::flush
 zgx	196	1432	reactive::<impl in crates/zgx/src/reactive.rs>::flush_watched
 zgx	643	5152	selection::<impl in crates/zgx/src/selection.rs>::refresh_selection
-zgx	193	2414	mount_style_with_intrinsic
+zgx	203	2687	mount_style_with_intrinsic
 zgx	371	9710	mount_style_with_intrinsic::{closure#10}
 zgx	97	1723	mount_element
 zgx	61	768	compose::<impl in crates/zgx/src/compose.rs>::mount
