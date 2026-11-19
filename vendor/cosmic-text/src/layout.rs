@@ -125,6 +125,29 @@ pub struct LayoutLine {
     pub glyphs: Vec<LayoutGlyph>,
     /// Text decoration spans covering ranges of glyphs
     pub decorations: Vec<DecorationSpan>,
+    /// zgx: how far below its top its baseline is, worked out as it was laid
+    /// out (`settle_baseline`): what a run of it reads while the scale it was
+    /// worked out at holds, which whoever holds the lines keeps
+    /// (`BufferLine`'s, `LayoutRunIter::from_paragraph`'s `settled`).
+    /// In the padding after its other fields: no line is bigger for it.
+    pub baseline: f32,
+}
+
+impl LayoutLine {
+    /// zgx: work out where its baseline is (`baseline`), the line `line_height`
+    /// high unless it says its own, at `snap` device pixels a point (what
+    /// `crate::buffer::baseline_scale` says now, read once for every line laid
+    /// out together; `crate::buffer::baseline_below_top`).
+    #[inline]
+    pub fn settle_baseline(&mut self, line_height: f32, snap: f32) {
+        let line_height = self.line_height_opt.unwrap_or(line_height);
+        self.baseline = crate::buffer::baseline_below_top(
+            self.max_ascent,
+            self.max_descent,
+            line_height,
+            snap,
+        );
+    }
 }
 
 /// Wrapping mode
