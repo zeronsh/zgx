@@ -34,7 +34,9 @@ pub struct Raster {
     pub pixels: Vec<u32>,
     width: usize,
     height: usize,
-    font: Font,
+    /// The bundled font, shared with the mattes of the layers it draws
+    /// (`isolated`): its outlines are copied for none of them.
+    font: std::rc::Rc<Font>,
     styled_fonts: std::rc::Rc<std::cell::RefCell<Option<zgx_gpu::text::CpuTextRaster>>>,
     styled_glyphs: HashMap<StyledGlyphKey, StyledGlyphImages>,
     rich_glyphs: RichGlyphCache,
@@ -51,6 +53,9 @@ pub struct Raster {
     rendered: Option<u64>,
     /// Scroll moves applied by moving pixels already drawn (for tests).
     scroll_copies: u64,
+    /// Layers drawn into mattes (`isolated`), for tests.
+    #[cfg(test)]
+    layers_drawn: usize,
     /// The text services the scene is laid out with (`share_text`): plain
     /// text drawn from their layout, as the GPU renderer draws it.
     shared_text: Option<std::rc::Rc<std::cell::RefCell<SharedText>>>,
@@ -87,11 +92,13 @@ impl Raster {
             pixels: vec![0x10141c; width * height],
             width,
             height,
-            font: Font::from_bytes(
-                include_bytes!("../assets/DejaVuSans.ttf") as &[u8],
-                FontSettings::default(),
-            )
-            .expect("bundled font"),
+            font: std::rc::Rc::new(
+                Font::from_bytes(
+                    include_bytes!("../assets/DejaVuSans.ttf") as &[u8],
+                    FontSettings::default(),
+                )
+                .expect("bundled font"),
+            ),
             styled_fonts: Default::default(),
             styled_glyphs: HashMap::new(),
             rich_glyphs: Vec::new(),
@@ -104,6 +111,8 @@ impl Raster {
             selected: None,
             rendered: None,
             scroll_copies: 0,
+            #[cfg(test)]
+            layers_drawn: 0,
             shared_text: None,
             changed: Vec::new(),
         }
@@ -544,6 +553,32 @@ impl Raster {
         {
             return;
         }
+        let output = Rect::new(
+            x - self.origin.0,
+            y - self.origin.1,
+            width as f32,
+            height as f32,
+        );
+        // A transformed layer samples back through its matrix (from this
+        // target's origin), nearest texel, as transformed images do.
+        let matrix = item.projective().map(|matrix| {
+            use zgx::affine::{Affine, Projective};
+            let (x, y) = self.origin;
+            Projective::from(Affine::translation(x, y))
+                .then(matrix)
+                .then(Projective::from(Affine::translation(-x, -y)))
+        });
+        let inverse = match matrix.map(|matrix| matrix.inverse()) {
+            Some(None) => return,
+            Some(inverse) => inverse,
+            None => None,
+        };
+        // Its mattes are drawn only for the area being painted that it
+        // reaches: a layer outside it costs nothing.
+        let painted = matrix.map_or(output, |matrix| matrix.bounds(output));
+        let Some(visible) = intersect(painted, clip) else {
+            return;
+        };
         let make = |background| Self {
             pixels: vec![background; width * height],
             width,
@@ -561,9 +596,15 @@ impl Raster {
             selected: None,
             rendered: None,
             scroll_copies: 0,
+            #[cfg(test)]
+            layers_drawn: 0,
             shared_text: self.shared_text.clone(),
             changed: Vec::new(),
         };
+        #[cfg(test)]
+        {
+            self.layers_drawn += 1;
+        }
         let mut black = make(0);
         let mut white = make(0xffffff);
         let mut items = scene.layer_items(Some(item.id));
@@ -598,32 +639,8 @@ impl Raster {
             };
             image.pixels()[(ty * image.width() as usize + tx) * 4 + 3] as f32 / 255.
         };
-        let output = Rect::new(
-            x - self.origin.0,
-            y - self.origin.1,
-            width as f32,
-            height as f32,
-        );
         // Mixed with the pixels under it by its blend mode.
         let mode = scene.blend(item.id);
-        // A transformed layer samples back through its matrix (from this
-        // target's origin), nearest texel, as transformed images do.
-        let matrix = item.projective().map(|matrix| {
-            use zgx::affine::{Affine, Projective};
-            let (x, y) = self.origin;
-            Projective::from(Affine::translation(x, y))
-                .then(matrix)
-                .then(Projective::from(Affine::translation(-x, -y)))
-        });
-        let inverse = match matrix.map(|matrix| matrix.inverse()) {
-            Some(None) => return,
-            Some(inverse) => inverse,
-            None => None,
-        };
-        let painted = matrix.map_or(output, |matrix| matrix.bounds(output));
-        let Some(visible) = intersect(painted, clip) else {
-            return;
-        };
         if item.effects.blur_radius > 0. {
             self.blur(visible, item.effects.blur_radius.ceil().min(64.) as usize)
         }
@@ -2393,6 +2410,72 @@ mod isolation_tests {
         raster.render(&scene, &d);
         let partial = raster.pixels.clone();
         raster.render(&scene, &[Rect::new(0., 0., 40., 30.)]);
+        assert_eq!(partial, raster.pixels);
+    }
+    #[test]
+    fn a_layer_away_from_the_damage_is_not_drawn() {
+        let mut scene = Scene::new(60., 30.);
+        let root = scene.root();
+        let root = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                width: Some(60.),
+                height: Some(30.),
+                ..Default::default()
+            },
+        );
+        // A faded group at the left, a box at the right that changes.
+        let group = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                width: Some(20.),
+                height: Some(20.),
+                ..Default::default()
+            },
+        );
+        scene.set_isolated(group, true);
+        scene.set_effects(
+            group,
+            Effects {
+                opacity: 0.5,
+                ..Default::default()
+            },
+        );
+        scene.append(
+            group,
+            NodeKind::Rect(Color(255, 0, 0, 255)),
+            Style {
+                width: Some(20.),
+                height: Some(20.),
+                ..Default::default()
+            },
+        );
+        let right = scene.append(
+            root,
+            NodeKind::Rect(Color(0, 0, 255, 255)),
+            Style {
+                width: Some(10.),
+                height: Some(10.),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(right, Transform { x: 45., y: 5. });
+        let mut raster = Raster::new(60, 30);
+        let d = scene.flush().damage;
+        raster.render(&scene, &d);
+        assert_eq!(raster.layers_drawn, 1, "drawn with the first frame");
+        scene.set_kind(right, NodeKind::Rect(Color(0, 255, 0, 255)));
+        let d = scene.flush().damage;
+        assert!(d.iter().all(|r| r.x >= 20.), "damage away from it: {d:?}");
+        raster.render(&scene, &d);
+        assert_eq!(raster.layers_drawn, 1, "nothing of it was repainted");
+        assert_eq!(raster.pixels[10 * 60 + 50], 0x00ff00);
+        // As a whole frame paints it.
+        let partial = raster.pixels.clone();
+        raster.render(&scene, &[Rect::new(0., 0., 60., 30.)]);
+        assert_eq!(raster.layers_drawn, 2);
         assert_eq!(partial, raster.pixels);
     }
 }
