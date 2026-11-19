@@ -978,6 +978,13 @@ impl Scene {
                         scene.map_size_calcs(*child, &mut mapped, bases);
                         scene.map_grid_place(*child, &mut mapped);
                     }
+                    // A replaced box's own unsized drawing fills it, as
+                    // where zgx lays it out (`drawing_fill`).
+                    if scene.node(*child).boxed & super::DRAWING != 0
+                        && mapped.size == t::Size::auto()
+                    {
+                        mapped.size = t::Size::from_percent(1., 1.);
+                    }
                     // A `contents` child clips as the child it lays out as.
                     mapped.overflow = overflow(super::clips(&scene.node(laid).style));
                     if stacked {
