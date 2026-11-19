@@ -70,6 +70,8 @@ mod layout_unsettled;
 mod lazy_branches;
 #[path = "../lazy_ui.rs"]
 mod lazy_ui;
+#[path = "../list_animate.rs"]
+mod list_animate;
 #[path = "../list_drag_keeps_row.rs"]
 mod list_drag_keeps_row;
 #[path = "../list_edges.rs"]
