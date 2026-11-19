@@ -5220,15 +5220,17 @@ impl Ui {
             let scene = self.scene.borrow();
             let observed = self.storage.observed_visibility.borrow();
             let margins = self.storage.visibility_margins.borrow();
-            let mut pass = crate::scene::ShownPass::default();
             fresh
                 .into_iter()
                 .filter_map(|node| {
                     let observed = observed.get(&node).filter(|_| scene.contains(node))?;
-                    let margin = margins.get(&node).copied();
-                    let mut kept = observed.kept.get();
-                    let now = scene.shows_within_kept(node, margin, &mut kept, &mut pass);
-                    observed.kept.set(kept);
+                    // The full walk, as `shows_within_kept` would take it:
+                    // what it keeps (and its one call, inlined in the
+                    // frame's gather) stays the frame's.
+                    let now = match margins.get(&node) {
+                        Some(margin) => scene.shows_within(node, *margin),
+                        None => scene.visible_bounds(node).is_some(),
+                    };
                     let signal = &observed.signal;
                     signal
                         .with_untracked(|told| *told != now)
