@@ -980,7 +980,7 @@ impl Live {
             Self::Fn(f) => vm
                 .call::<Value>(f, ())
                 .map(|v| crate::lower::number(&v))
-                .map_err(|e| vm.report(e))
+                .map_err(|e| vm.report_as(e, "a 3D property's function", f))
                 .unwrap_or(0.),
             Self::Driven(s, None) => s.get(),
             Self::Driven(s, Some((from, to))) => from + (to - from) * s.get(),
@@ -1014,7 +1014,7 @@ impl LiveVec {
                     crate::node::Readable::State(s) => s.get(),
                     crate::node::Readable::Function(f) => vm
                         .call::<Value>(f, ())
-                        .map_err(|e| vm.report(e))
+                        .map_err(|e| vm.report_as(e, "a 3D property's function", f))
                         .unwrap_or_default(),
                 };
                 let at = |i: usize| value.list().get(i).map(crate::lower::number).unwrap_or(0.);
@@ -1045,7 +1045,7 @@ impl LiveColor {
             Self::State(s) => value_color(&s.get(), theme),
             Self::Fn(f) => vm
                 .call::<Value>(f, ())
-                .map_err(|e| vm.report(e))
+                .map_err(|e| vm.report_as(e, "a 3D property's function", f))
                 .ok()
                 .and_then(|v| value_color(&v, theme)),
         };
@@ -1491,7 +1491,7 @@ fn hearing(
 /// Call a script's handler `f` with `arg`, in one batch, its error reported.
 fn call(vm: &Rc<Vm>, f: &Function, arg: mlua::Value) {
     vm.runtime.clone().batch(|| {
-        if let Err(error) = vm.call::<()>(f, arg) {
+        if let Err(error) = vm.call_as::<()>("a 3D event handler", f, arg) {
             vm.report(error);
         }
     });

@@ -671,11 +671,161 @@ impl Vm {
     ) -> mlua::Result<R> {
         self.guard(self.budget, || f.call(args))
     }
+    /// `call`, for `f` as `role` ("the row function of ui.each"): an error
+    /// it raises, or one in what it returned, says which function it was
+    /// and where it is defined (`in_role`). Always inlined: its caller
+    /// calls `call` as it would without the role (no instance of its own
+    /// to pull `guard` in), and the naming is a cold call in the error arm.
+    #[inline(always)]
+    pub(crate) fn call_as<R: mlua::FromLuaMulti>(
+        &self,
+        role: &'static str,
+        f: &mlua::Function,
+        args: impl mlua::IntoLuaMulti,
+    ) -> mlua::Result<R> {
+        match self.call(f, args) {
+            Ok(value) => Ok(value),
+            Err(error) => Err(in_role(error, role, f)),
+        }
+    }
+    /// `report`, for an error `f` raised as `role` (`in_role`): for a call
+    /// made with `call` on a hot path, named in its error arm alone.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn report_as(&self, error: mlua::Error, role: &str, f: &mlua::Function) {
+        self.report(in_role(error, role, f));
+    }
     pub(crate) fn report(&self, error: mlua::Error) {
         let message = describe(&self.name, &error);
         eprintln!("{message}");
         report(&self.errors, message);
     }
+}
+
+/// The `file:line` a line of an error starts with (`app.luau:12: …`), if
+/// it does.
+fn starts_located(line: &str) -> bool {
+    let mut parts = line.splitn(3, ':');
+    let (Some(file), Some(number), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !file.is_empty()
+        && !file.contains(char::is_whitespace)
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An error's text saying where in the script it was raised: a Rust
+/// function's error (an argument it refused) names no line as Luau's own
+/// errors do (`app.luau:12: attempt to …`), only its traceback does. Its
+/// first line naming no line then takes the traceback's first script
+/// frame, after the kind (`runtime error: app.luau:12: …`), as Luau's sit.
+/// Lines saying which function it was in (`in …:`, `in_role`) stay above.
+fn located(text: &str) -> String {
+    let Some((head, trace)) = text.split_once("\nstack traceback:") else {
+        return text.to_string();
+    };
+    // The first frame in the script, not a Rust function's (`[C]`).
+    let Some(at) = trace.lines().map(str::trim).find_map(|frame| {
+        let (at, rest) = frame.split_once(": ")?;
+        (starts_located(&format!("{at}: ")) && !at.starts_with('[') && rest.starts_with("in "))
+            .then_some(at)
+    }) else {
+        return text.to_string();
+    };
+    let mut lines: Vec<String> = head.lines().map(str::to_string).collect();
+    let Some(first) = lines
+        .iter_mut()
+        .find(|line| !(line.starts_with("in ") && line.ends_with(':')))
+    else {
+        return text.to_string();
+    };
+    const KINDS: [&str; 3] = ["runtime error: ", "memory error: ", "callback error: "];
+    let (kind, message) = KINDS
+        .iter()
+        .find_map(|kind| {
+            first
+                .strip_prefix(kind)
+                .map(|rest| (*kind, rest.to_string()))
+        })
+        .unwrap_or(("", first.clone()));
+    if starts_located(&message) {
+        return text.to_string();
+    }
+    *first = format!("{kind}{at}: {message}");
+    format!("{}\nstack traceback:{trace}", lines.join("\n"))
+}
+
+/// Where script function `f` is defined, as `app.luau:40`: `None` for a
+/// Rust function, or one with no line.
+pub(crate) fn defined_at(f: &mlua::Function) -> Option<String> {
+    let info = f.info();
+    if info.what == "C" {
+        return None;
+    }
+    let source = info.short_src?;
+    let line = info.line_defined?;
+    Some(format!("{source}:{line}"))
+}
+
+/// `role` and where `f` is defined, as an error names a function: "the row
+/// function of ui.each (defined at app.luau:40)".
+pub(crate) fn named(role: &str, f: &mlua::Function) -> String {
+    match defined_at(f) {
+        Some(at) => format!("{role} (defined at {at})"),
+        None => role.to_string(),
+    }
+}
+
+/// `error`, raised calling `f` as `role`, saying first which function it
+/// was: "in the row function of ui.each (defined at app.luau:40):", above
+/// the error and its traceback. An error a function raised in what it
+/// returned (a value of the wrong type) has no traceback: this is where it
+/// was. Cold: success never comes here.
+#[cold]
+#[inline(never)]
+pub(crate) fn in_role(error: mlua::Error, role: &str, f: &mlua::Function) -> mlua::Error {
+    // mlua's own context error: its `Arc`, though `Error` isn't `Send`
+    // here (the VM never leaves its thread).
+    #[allow(clippy::arc_with_non_send_sync)]
+    let cause = std::sync::Arc::new(error);
+    mlua::Error::WithContext {
+        context: format!("in {}:", named(role, f)),
+        cause,
+    }
+}
+
+/// What `f`, called as `role`, returned (`got`) that zgx can't take, at
+/// `f`'s definition as Luau places an error (`file:line: …`), since nothing
+/// else is left to point at once it has returned: "app.luau:40: the row
+/// function of ui.each returned nothing; return a ui node". `wanted` is
+/// what to return.
+#[cold]
+#[inline(never)]
+pub(crate) fn returned(
+    role: &str,
+    f: &mlua::Function,
+    got: &mlua::Value,
+    wanted: &str,
+) -> mlua::Error {
+    let what = match got {
+        mlua::Value::Nil => "nothing".to_string(),
+        // Luau's numbers are one type, whatever mlua reads them as.
+        mlua::Value::Integer(_) | mlua::Value::Number(_) => "a number".to_string(),
+        other => {
+            let name = other.type_name();
+            let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("{article} {name}")
+        }
+    };
+    let at = defined_at(f)
+        .map(|at| format!("{at}: "))
+        .unwrap_or_default();
+    mlua::Error::runtime(format!("{at}{role} returned {what}; return {wanted}"))
 }
 
 /// Make `message` the error shown, telling what follows the error (the
@@ -709,7 +859,7 @@ impl Drop for CallEnd<'_> {
 
 /// An error with Rust-side frames removed from its traceback.
 fn describe(name: &str, error: &mlua::Error) -> String {
-    let text = error.to_string();
+    let text = located(&error.to_string());
     let lines: Vec<_> = text
         .lines()
         .filter(|line| line.trim() != "[C]: in ?")
@@ -4372,7 +4522,7 @@ impl ScriptHost {
                     let mounted = loaded.mounted.clone();
                     view.on_mount(move |_| {
                         for (vm, f) in mounted {
-                            if let Err(e) = vm.call::<()>(&f, ()) {
+                            if let Err(e) = vm.call_as::<()>("an on_mount function", &f, ()) {
                                 vm.report(e);
                             }
                         }

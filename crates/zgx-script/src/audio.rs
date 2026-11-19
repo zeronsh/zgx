@@ -497,7 +497,7 @@ impl AudioHost {
                 let Some(vm) = vm.upgrade() else { return };
                 match vm.call::<Value>(&f, ()) {
                     Ok(value) => on(&value),
-                    Err(error) => vm.report(error),
+                    Err(error) => vm.report_as(error, "a sound's function", &f),
                 }
             }),
             Followed::Anim(anim) => {
@@ -815,7 +815,7 @@ impl Followed {
                 match vm.runtime.untracked(|| vm.call::<Value>(f, ())) {
                     Ok(value) => number(&value),
                     Err(error) => {
-                        vm.report(error);
+                        vm.report_as(error, "a sound's function", f);
                         0.
                     }
                 }
@@ -1952,7 +1952,7 @@ pub(crate) fn activate(prop: &SoundProp, vm: &Vm) {
         SoundProp::Chosen(f) => {
             let chosen = vm
                 .runtime
-                .untracked(|| vm.call::<mlua::Value>(f, ()))
+                .untracked(|| vm.call_as::<mlua::Value>("a sound's function", f, ()))
                 .and_then(|value| sound_prop(&value));
             match chosen {
                 Ok(Some(prop @ SoundProp::Sound { .. })) => prop,

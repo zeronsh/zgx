@@ -322,11 +322,13 @@ fn hear(waiter: Waiter, settled: &Settled) {
         } => {
             let Some(vm) = vm.upgrade() else { return };
             let result = match settled {
-                Settled::Value(value) => on_value.map(|f| vm.call::<()>(&f, value.clone())),
+                Settled::Value(value) => {
+                    on_value.map(|f| vm.call_as::<()>("the on_value handler", &f, value.clone()))
+                }
                 Settled::Error(error) => on_error.map(|f| {
                     vm.lua
                         .create_userdata(UiError::of(error.clone()))
-                        .and_then(|error| vm.call::<()>(&f, error))
+                        .and_then(|error| vm.call_as::<()>("the on_error handler", &f, error))
                 }),
                 Settled::Pending => None,
             };
@@ -757,7 +759,11 @@ fn sending(
         let vm = env(lua)?.vm.clone();
         *body.0.progress.borrow_mut() = Some(Box::new(move |sent, total| {
             if let Some(vm) = vm.upgrade()
-                && let Err(e) = vm.call::<()>(&on_progress, (sent as f64, total as f64))
+                && let Err(e) = vm.call_as::<()>(
+                    "the on_progress handler",
+                    &on_progress,
+                    (sent as f64, total as f64),
+                )
             {
                 vm.report(e);
             }
@@ -973,13 +979,13 @@ impl Listener {
         };
         batch(&self.runtime, || {
             if let Some(f) = &self.on_chunk
-                && let Err(error) = vm.call::<()>(f, text)
+                && let Err(error) = vm.call_as::<()>("the on_chunk handler", f, text)
             {
                 vm.report(error);
             }
             if let Some(f) = &self.on_event {
                 for event in events {
-                    if let Err(error) = vm.call::<()>(f, event) {
+                    if let Err(error) = vm.call_as::<()>("the on_event handler", f, event) {
                         vm.report(error);
                     }
                 }

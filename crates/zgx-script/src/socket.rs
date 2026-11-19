@@ -433,7 +433,7 @@ impl Conn {
 
     fn call(&self, f: &Function, args: impl mlua::IntoLuaMulti) {
         let Some(vm) = self.vm.upgrade() else { return };
-        if let Err(e) = vm.call::<()>(f, args) {
+        if let Err(e) = vm.call_as::<()>("a socket handler", f, args) {
             vm.report(e);
         }
     }
@@ -622,7 +622,7 @@ fn socket(
                 Err(url) => url.clone(),
                 Ok(f) => {
                     let Some(vm) = conn.vm.upgrade() else { return };
-                    match vm.call::<String>(f, ()) {
+                    match vm.call_as::<String>("the socket's token function", f, ()) {
                         Ok(url) => url,
                         Err(e) => return vm.report(e),
                     }
