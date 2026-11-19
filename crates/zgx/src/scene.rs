@@ -1943,6 +1943,10 @@ fn repaint_flags(dirty: u8) -> u8 {
 /// `Node::boxed`'s bits.
 const REPLACED: u8 = 1;
 const HIT_INSIDE: u8 = 2;
+/// A replaced box's own drawing (`Scene::set_drawing`). 8: 4 is the render
+/// lane's `OFF_GRID` (#2354). Each bit is set and cleared on its own (`|=`,
+/// `& !`), never the whole byte written.
+const DRAWING: u8 = 8;
 /// Whether `new` differs from `old` in colour alone (`PAINT_ONLY`): a rect's
 /// colour, a text's colour, a box's fill or border colour (with no
 /// decoration, whose rasters are kept apart).
@@ -2128,8 +2132,10 @@ struct Node {
     /// `HIT_INSIDE`: an image or SVG compose mounted drawn in its box (an
     /// icon, `Scene::mark_drawn_in_box`), so hit within it and proved as any
     /// box is. Unmarked (a raw `append`, or a kind set since), a picture may
-    /// be hit past its box, so no proof under it holds. One byte: a node is
-    /// no larger than a bool made it.
+    /// be hit past its box, so no proof under it holds. `DRAWING`: a replaced
+    /// box's own drawing (an icon's artwork, `Scene::set_drawing`): absolute
+    /// and unsized, it fills its box. One byte: a node is no larger than a
+    /// bool made it.
     boxed: u8,
     /// Its lines run right to left (`Scene::set_direction`, its own or its
     /// parent's): `style` is then laid out mirrored (`laid_out_style`).
@@ -2704,6 +2710,29 @@ impl From<&Measurement> for ProbeSize {
             size: m.size,
             pass: m.pass,
         }
+    }
+}
+/// A replaced box's own drawing (`Scene::set_drawing`: an icon's artwork),
+/// sized on neither axis, fills the room it is placed in (`placed`, as its
+/// box measures its absolute children, or as the containing block above
+/// does for one under a `relative` ancestor): `placed` with that room forced.
+/// Sized by its own style, it keeps that. Any other absolute child (an
+/// app's badge) is placed as ever. Out of line, and taking and giving
+/// `placed` by value: the common case keeps its constraints in registers.
+#[cold]
+#[inline(never)]
+fn drawing_fill(style: &Style, placed: Constraints) -> Constraints {
+    let sized = style.width.is_some()
+        || style.height.is_some()
+        || style.width_percent.is_some()
+        || style.height_percent.is_some();
+    match sized {
+        true => placed,
+        false => Constraints {
+            force_width: placed.width,
+            force_height: placed.height,
+            ..placed
+        },
     }
 }
 /// `Scene::relevant` for `node`, whose `reads_bits` are `bits`.
@@ -6115,6 +6144,19 @@ impl Scene {
         if (self.node(id).boxed & REPLACED != 0) != replaced {
             let node = self.node_mut(id);
             node.boxed = node.boxed & !REPLACED | if replaced { REPLACED } else { 0 };
+            self.invalidate_layout(id);
+        }
+    }
+    /// Mark `id`, an absolute child of a replaced box (`set_replaced`), as
+    /// that box's own drawing (an icon's artwork): with no size of its own,
+    /// it fills the room inside the box's padding and border, in the same
+    /// layout pass, at the start of that room, whether its box places it or
+    /// a `relative` block above does (`drawing_fill`, `drawing_room`). Nothing
+    /// else under the box is (an app's badge in an image keeps its own size
+    /// and place).
+    pub(crate) fn set_drawing(&mut self, id: NodeId) {
+        if self.node(id).boxed & DRAWING == 0 {
+            self.node_mut(id).boxed |= DRAWING;
             self.invalidate_layout(id);
         }
     }
@@ -12836,16 +12878,71 @@ impl Scene {
     /// The containing block of absolute node `id` when it is not its parent:
     /// the nearest `relative` ancestor above the parent, the search
     /// stopping at an `absolute` one (which contains its own absolute
-    /// descendants). `None`: its parent places it, as it does any child,
-    /// and always under a replaced parent (`set_replaced`): an icon's or a
-    /// canvas's drawing is its own, in its box.
+    /// descendants). `None`: its parent places it, as it does any child.
+    /// The room a replaced box's own drawing (`set_drawing`) has where a
+    /// containing block above its box places it: its box's, inside its
+    /// padding and border (`drawing_fill`). Out of line: only drawings ask.
+    #[cold]
+    #[inline(never)]
+    fn drawing_room(&self, replaced: NodeId, drawing: NodeId) -> Constraints {
+        let (bounds, content) = (self.node(replaced).bounds, self.content_insets(replaced));
+        let (width, height) = (
+            (bounds.width - content.left - content.right).max(0.),
+            (bounds.height - content.top - content.bottom).max(0.),
+        );
+        drawing_fill(
+            &self.node(drawing).style,
+            Constraints {
+                width: Some(width),
+                height: Some(height),
+                percent_width: Some(width),
+                percent_height: Some(height),
+                ..Constraints::default()
+            },
+        )
+    }
+    /// A replaced box's absolute children, measured and placed as any
+    /// container's are (the loop in `measure_uncached`), its own drawing
+    /// (`set_drawing`) filling the room inside it (`drawing_fill`). Out of
+    /// line: only replaced boxes holding absolute children come here, so
+    /// every other container's loop asks nothing of its children.
+    #[cold]
+    #[inline(never)]
+    fn measure_replaced_absolutes(
+        &mut self,
+        absolute: &[NodeId],
+        (inner_w, inner_h): (f32, f32),
+        padding: Insets,
+        children: &mut Vec<ChildPlacement>,
+    ) {
+        for &child in absolute {
+            let margin = self.tree_node(child).style.margin;
+            let placed = Constraints {
+                width: Some((inner_w - margin.left - margin.right).max(0.0)),
+                height: Some((inner_h - margin.top - margin.bottom).max(0.0)),
+                percent_width: Some(inner_w.max(0.0)),
+                percent_height: Some(inner_h.max(0.0)),
+                ..Constraints::default()
+            };
+            let placed = match self.tree_node(child).boxed & DRAWING != 0 {
+                true => drawing_fill(&self.tree_node(child).style, placed),
+                false => placed,
+            };
+            let ((w, h), placed) = self.measure_kept(child, placed);
+            children.push((
+                child,
+                Rect::new(padding.left + margin.left, padding.top + margin.top, w, h),
+                placed,
+            ));
+        }
+    }
     fn containing_block(&self, id: NodeId) -> Option<NodeId> {
         if self.relative_count == 0 || !self.node(id).style.absolute {
             return None;
         }
         let parent = self.node(id).parent?;
         let style = &self.node(parent).style;
-        if style.relative || style.absolute || self.node(parent).boxed & REPLACED != 0 {
+        if style.relative || style.absolute {
             return None;
         }
         if self.node(parent).zoom() != 1. {
@@ -13850,6 +13947,17 @@ impl Scene {
                         kept[i],
                     ));
                     cursor += main(sizes[i]) + main_margin(s) + style.gap + extra_gap;
+                }
+                // A replaced box's (an icon's) go aside: its own drawing
+                // fills it (`measure_replaced_absolutes`).
+                if !absolute.is_empty() && self.tree_node(id).boxed & REPLACED != 0 {
+                    self.measure_replaced_absolutes(
+                        &absolute,
+                        (inner_w, inner_h),
+                        padding,
+                        &mut children,
+                    );
+                    absolute.clear();
                 }
                 for &child in &absolute {
                     let margin = self.tree_node(child).style.margin;
@@ -15321,6 +15429,12 @@ impl Scene {
                     } else {
                         between(top, bottom, height, m.top, m.bottom)
                     },
+                };
+                // A replaced box's own drawing fills that box, whatever
+                // block is above it (placed at its content's start below).
+                let constraints = match self.node(id).boxed & DRAWING != 0 {
+                    true => self.drawing_room(parent, id),
+                    false => constraints,
                 };
                 let (w, h) = self.measure_full(id, constraints);
                 let start = self.node(parent).bounds;
@@ -22203,6 +22317,262 @@ mod measure_work_tests {
         let (shallow, deep) = (measures_per_frame(8, true), measures_per_frame(32, true));
         assert!(deep <= 20 * shallow, "{shallow} at depth 8, {deep} at 32");
     }
+    /// A sidebar beside a page, its rows each a 16-point replaced box (an
+    /// icon's) holding an absolute drawing, then a label: the drawing the
+    /// box's own and unsized if `filled` (it fills the box), else 16 points
+    /// of its own.
+    /// The scene's measures for its first layout, and the first drawing's
+    /// size.
+    fn sidebar_measures(filled: bool) -> (u64, (f32, f32)) {
+        let mut scene = Scene::new(800., 600.);
+        let split = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Row),
+            Style::default(),
+        );
+        let side = scene.append(
+            split,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(200.),
+                flex_shrink: 0.,
+                ..Default::default()
+            },
+        );
+        let mut first = None;
+        for n in 0..40 {
+            let row = scene.append(
+                side,
+                NodeKind::Container(Layout::Row),
+                Style {
+                    width: Some(200.),
+                    height: Some(24.),
+                    ..Default::default()
+                },
+            );
+            let icon = scene.append(
+                row,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    width: Some(16.),
+                    height: Some(16.),
+                    ..Default::default()
+                },
+            );
+            scene.set_replaced(icon, true);
+            let drawing = match filled {
+                true => Style {
+                    absolute: true,
+                    ..Default::default()
+                },
+                false => Style {
+                    absolute: true,
+                    width: Some(16.),
+                    height: Some(16.),
+                    ..Default::default()
+                },
+            };
+            let drawing = scene.append(icon, NodeKind::Container(Layout::Overlay), drawing);
+            if filled {
+                scene.set_drawing(drawing);
+            }
+            first.get_or_insert(drawing);
+            scene.append(
+                row,
+                NodeKind::Text {
+                    text: format!("Folder {n}").into(),
+                    color: Color(0, 0, 0, 255),
+                    font_size: 13.,
+                },
+                Style::default(),
+            );
+        }
+        scene.append(
+            split,
+            NodeKind::Container(Layout::Column),
+            Style {
+                flex_grow: 1.,
+                ..Default::default()
+            },
+        );
+        let before = scene.measure_calls;
+        scene.flush();
+        let drawing = scene.bounds(first.unwrap());
+        (
+            scene.measure_calls - before,
+            (drawing.width, drawing.height),
+        )
+    }
+    /// A replaced box's unsized drawing fills it with nothing for the layout
+    /// above to weigh: the sidebar its rows are in is measured as one whose
+    /// drawings are sized in points.
+    #[test]
+    fn a_replaced_boxs_drawing_fills_it_and_leaves_its_ancestors_measures_alone() {
+        let ((points, sized), (filled, drawn)) = (sidebar_measures(false), sidebar_measures(true));
+        assert_eq!(sized, (16., 16.));
+        assert_eq!(drawn, (16., 16.), "the unsized drawing fills its box");
+        assert_eq!(
+            filled, points,
+            "{filled} measures with drawings filling their boxes, {points} sized in points"
+        );
+    }
+    /// A replaced box's own unsized drawing fills the room inside its padding
+    /// and border, follows the box as it resizes, and does so too where taffy
+    /// lays the box out (its own layout options ask it to); one sized by its
+    /// own style keeps that (an image fitted past its box).
+    #[test]
+    fn a_replaced_boxs_unsized_drawing_fills_inside_its_padding_and_border() {
+        use crate::layout::{LayoutOptions, Length};
+        for advanced in [false, true] {
+            let mut scene = Scene::new(400., 300.);
+            let icon = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    width: Some(40.),
+                    height: Some(30.),
+                    padding: 4.,
+                    // A minimum of none: laid out by taffy, its size as it is.
+                    layout_options: advanced.then(|| {
+                        Arc::new(LayoutOptions {
+                            min_width: Some(Length::Px(0.)),
+                            ..Default::default()
+                        })
+                    }),
+                    ..Default::default()
+                },
+            );
+            scene.set_replaced(icon, true);
+            let drawing = scene.append(
+                icon,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    absolute: true,
+                    ..Default::default()
+                },
+            );
+            scene.set_drawing(drawing);
+            let fitted = scene.append(
+                icon,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    absolute: true,
+                    width: Some(90.),
+                    height: Some(10.),
+                    ..Default::default()
+                },
+            );
+            scene.flush();
+            let size = |scene: &Scene, id| (scene.bounds(id).width, scene.bounds(id).height);
+            assert_eq!(size(&scene, drawing), (32., 22.), "advanced {advanced}");
+            assert_eq!(size(&scene, fitted), (90., 10.), "advanced {advanced}");
+            let mut style = scene.style(icon);
+            style.width = Some(60.);
+            style.height = Some(50.);
+            scene.set_style(icon, style);
+            scene.flush();
+            assert_eq!(
+                size(&scene, drawing),
+                (52., 42.),
+                "resized, advanced {advanced}"
+            );
+        }
+    }
+    /// An app's absolute badge inside a replaced box (an image) is placed as
+    /// ever: by its content's size, at its insets, from its containing block,
+    /// a `relative` ancestor's if there is one. Only the box's own drawing
+    /// (`set_drawing`) fills the box.
+    #[test]
+    fn an_apps_absolute_badge_in_an_image_keeps_its_size_and_place() {
+        use crate::layout::{EdgeLengths, LayoutOptions, Length};
+        for (inset, relative) in [(false, false), (true, false), (true, true)] {
+            let mut scene = Scene::new(400., 300.);
+            let block = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(300.),
+                    height: Some(200.),
+                    padding: 10.,
+                    relative,
+                    ..Default::default()
+                },
+            );
+            let image = scene.append(
+                block,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    width: Some(80.),
+                    height: Some(60.),
+                    ..Default::default()
+                },
+            );
+            scene.set_replaced(image, true);
+            let drawing = scene.append(
+                image,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    absolute: true,
+                    ..Default::default()
+                },
+            );
+            scene.set_drawing(drawing);
+            let badge = scene.append(
+                image,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    absolute: true,
+                    layout_options: inset.then(|| {
+                        Arc::new(LayoutOptions {
+                            inset: EdgeLengths {
+                                top: Some(Length::Px(2.)),
+                                right: Some(Length::Px(2.)),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                    }),
+                    ..Default::default()
+                },
+            );
+            scene.append(
+                badge,
+                NodeKind::Rect(Color(255, 0, 0, 255)),
+                Style {
+                    width: Some(10.),
+                    height: Some(8.),
+                    ..Default::default()
+                },
+            );
+            scene.flush();
+            let case = format!("inset {inset}, relative {relative}");
+            let drawn = scene.bounds(drawing);
+            assert_eq!(
+                (drawn.width, drawn.height),
+                (80., 60.),
+                "{case}: the drawing fills"
+            );
+            let at = scene.bounds(badge);
+            assert_eq!(
+                (at.width, at.height),
+                (10., 8.),
+                "{case}: the badge, its content's size"
+            );
+            let (image_at, block_at) = (scene.bounds(image), scene.bounds(block));
+            let expected = match (inset, relative) {
+                (false, _) => (image_at.x, image_at.y),
+                // From the image's box.
+                (true, false) => (image_at.x + 80. - 2. - 10., image_at.y + 2.),
+                // From the relative block's padding box.
+                (true, true) => (block_at.x + 300. - 2. - 10., block_at.y + 2.),
+            };
+            assert_eq!(
+                (at.x, at.y),
+                expected,
+                "{case}: the badge where its insets put it"
+            );
+        }
+    }
 }
 #[cfg(test)]
 mod paint_geometry_tests {
@@ -22542,6 +22912,109 @@ mod absolute_layout_tests {
         let before = scene.geometry_revision();
         scene.set_transform(scene.root(), Transform { x: 1., y: 2. });
         assert_eq!(scene.geometry_revision(), before);
+    }
+    /// A drawing 100% of its containing block, absolute: it reports no
+    /// percentages above it, yet follows the block as the window resizes
+    /// it, and as the block is restyled.
+    fn fill(scene: &mut Scene, parent: NodeId) -> NodeId {
+        scene.append(
+            parent,
+            NodeKind::Rect(Color(0, 255, 0, 255)),
+            Style {
+                absolute: true,
+                width_percent: Some(1.),
+                height_percent: Some(1.),
+                ..Style::default()
+            },
+        )
+    }
+    fn size(scene: &Scene, id: NodeId) -> (f32, f32) {
+        let bounds = scene.bounds(id);
+        (bounds.width, bounds.height)
+    }
+    #[test]
+    fn an_absolute_fill_follows_its_parent_resized() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+        // Half the window's width, in a column of others.
+        scene.append(
+            scene.root(),
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            Style {
+                height: Some(10.),
+                ..Style::default()
+            },
+        );
+        let block = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Row),
+            Style {
+                width_percent: Some(0.5),
+                height: Some(40.),
+                ..Style::default()
+            },
+        );
+        let drawing = fill(&mut scene, block);
+        scene.flush();
+        assert_eq!(size(&scene, drawing), (200., 40.));
+        scene.resize(600., 300.);
+        scene.flush();
+        assert_eq!(size(&scene, block), (300., 40.));
+        assert_eq!(size(&scene, drawing), (300., 40.), "the window resized");
+        scene.set_style(
+            block,
+            Style {
+                width: Some(120.),
+                height: Some(70.),
+                ..Style::default()
+            },
+        );
+        scene.flush();
+        assert_eq!(size(&scene, drawing), (120., 70.), "its parent restyled");
+    }
+    #[test]
+    fn an_absolute_fill_follows_a_relative_block_above_a_plain_box() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Column));
+        let block = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                relative: true,
+                width_percent: Some(0.5),
+                height: Some(60.),
+                ..Style::default()
+            },
+        );
+        // A box between, its size its own: it reads nothing from above.
+        let between = scene.append(
+            block,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                width: Some(20.),
+                height: Some(20.),
+                ..Style::default()
+            },
+        );
+        let drawing = fill(&mut scene, between);
+        scene.flush();
+        assert_eq!(size(&scene, drawing), (200., 60.));
+        scene.resize(600., 300.);
+        scene.flush();
+        assert_eq!(size(&scene, block), (300., 60.));
+        assert_eq!(size(&scene, between), (20., 20.));
+        assert_eq!(size(&scene, drawing), (300., 60.), "the window resized");
+        scene.set_style(
+            block,
+            Style {
+                relative: true,
+                width: Some(150.),
+                height: Some(90.),
+                ..Style::default()
+            },
+        );
+        scene.flush();
+        assert_eq!(size(&scene, drawing), (150., 90.), "the block restyled");
     }
 }
 
