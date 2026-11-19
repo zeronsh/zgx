@@ -126,6 +126,11 @@ impl RasterWindow {
         self.services.text_cache().borrow_mut().clear();
         self.raster.fonts_replaced();
     }
+    /// The window at rest (its idle trim): the text it shapes rests as a
+    /// renderer's does (`Raster::rest`).
+    pub(crate) fn rest(&mut self) {
+        self.raster.rest();
+    }
     /// The colour its frames clear to.
     pub(crate) fn set_background(&mut self, color: Color) {
         self.raster

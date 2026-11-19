@@ -67,7 +67,8 @@ struct SharedText {
     images: HashMap<cosmic_text::CacheKey, Option<cosmic_text::SwashImage>>,
     image_bytes: usize,
     /// The prepared texts drawn this frame, kept when it trims the
-    /// services after it (`zgx_gpu::trim_text`).
+    /// services after it (`zgx_gpu::trim_text`), and when they rest
+    /// (`Raster::rest`) until the next.
     drawn: Vec<u64>,
 }
 impl Raster {
@@ -162,8 +163,28 @@ impl Raster {
     pub fn scroll_copies(&self) -> u64 {
         self.scroll_copies
     }
+    /// A window at rest: its shared text services rest as a renderer's do
+    /// (`GpuRenderer::trim`): the words kept for the next frame's shaping
+    /// go, and prepared text but what its last frame drew. Its pixels stay,
+    /// and so do the glyph images and canvases they are repainted from.
+    #[doc(hidden)]
+    pub fn rest(&mut self) {
+        let Some(shared) = &self.shared_text else {
+            return;
+        };
+        let shared = shared.borrow();
+        {
+            let mut fonts = shared.fonts.borrow_mut();
+            fonts.shape_run_cache = Default::default();
+            fonts.rest();
+        }
+        shared.cache.borrow_mut().rest(shared.drawn.iter().copied());
+    }
     /// Repaint `damage` (and whatever scrolled) from `scene`.
     pub fn render(&mut self, scene: &Scene, damage: &[Rect]) {
+        if let Some(shared) = &self.shared_text {
+            shared.borrow_mut().drawn.clear();
+        }
         self.canvases.retain(scene);
         self.svgs.retain(scene);
         let serial = scene.flush_serial();
@@ -218,7 +239,6 @@ impl Raster {
                 );
             }
             shared.drawn = drawn;
-            shared.drawn.clear();
         }
         repaint.extend(moved);
         self.changed = repaint;
@@ -2666,6 +2686,68 @@ mod outline_tests {
         assert_eq!(at(&raster, 19, 40), 0xffffff);
         assert_eq!(at(&raster, 21, 40), 0xffffff);
         assert_eq!(at(&raster, 23, 40), 0xff0000);
+    }
+}
+
+#[cfg(test)]
+mod rest_tests {
+    use super::*;
+    use zgx::scene::Style;
+    /// At rest, a raster's shared text keeps what its last frame drew and
+    /// lets go of what was shaped since and never drawn (a window laid out
+    /// with no frame to show it, its updates measuring their text): the
+    /// label showing stays prepared, the texts measured after it go.
+    #[test]
+    fn at_rest_its_text_keeps_what_its_last_frame_drew() {
+        let services = zgx_gpu::TextServices::new();
+        let mut scene = Scene::new(400., 60.);
+        services.install(&mut scene);
+        // Long enough that none fits what a trim keeps of text not drawn.
+        let words = |word: &str| -> std::sync::Arc<str> {
+            (0..300).map(|_| word).collect::<Vec<_>>().join(" ").into()
+        };
+        scene.append(
+            scene.root(),
+            NodeKind::Text {
+                text: words("shown"),
+                color: Color(255, 255, 255, 255),
+                font_size: 13.,
+            },
+            Style {
+                width: Some(400.),
+                height: Some(60.),
+                ..Default::default()
+            },
+        );
+        let mut raster = Raster::new(400, 60);
+        raster.share_text(services.text_system(), services.text_cache());
+        let full = [Rect::new(0., 0., 400., 60.)];
+        let _ = scene.flush();
+        raster.render(&scene, &full);
+        let shaped = || services.text_cache().borrow().bytes().0;
+        let shown = shaped();
+        assert!(shown > 0, "the label prepared as it was drawn");
+        // Measured after it, as layout measures, and drawn by no frame.
+        for word in ["one", "two", "three", "four", "five"] {
+            services.text_cache().borrow_mut().measure_plain(
+                &mut services.text_system().borrow_mut(),
+                &words(word),
+                13.,
+                &zgx::text_layout::FontStyle::default(),
+                Some(400.),
+            );
+        }
+        let grown = shaped();
+        assert!(grown > shown * 4, "the measured texts held: {grown}");
+        raster.rest();
+        let rested = shaped();
+        assert!(
+            (shown..shown + 64 * 1024).contains(&rested),
+            "the label kept, the texts measured since gone: {rested} of {grown} ({shown} the label's)"
+        );
+        // What it kept draws again as it was prepared: nothing shaped anew.
+        raster.render(&scene, &full);
+        assert_eq!(shaped(), rested);
     }
 }
 

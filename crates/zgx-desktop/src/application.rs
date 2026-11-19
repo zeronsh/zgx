@@ -1278,6 +1278,17 @@ static RENDER_WHEN_COVERED: std::sync::LazyLock<bool> = std::sync::LazyLock::new
     zgx::env::var_os("ZGX_RENDER_WHEN_COVERED").is_some_and(|v| !v.is_empty() && v != "0")
         || *crate::window_chrome::OFFSCREEN
 });
+/// The idle trim armed at `now` (`TRIM_DELAY` on), with no frame presented to
+/// arm it: unless a trim is due already (only what goes at rest, `Rest`,
+/// counts as none). Re-armed as it runs while frames stay away, it trims
+/// again `TRIM_DELAY` after each.
+fn armed_trim(
+    trim_at: Option<std::time::Instant>,
+    stage: TrimStage,
+    now: std::time::Instant,
+) -> Option<(std::time::Instant, TrimStage)> {
+    (trim_at.is_none() || stage == TrimStage::Rest).then_some((now + TRIM_DELAY, TrimStage::Trim))
+}
 /// What a window's next trim is for (`Host::trim_at`): the trim of what
 /// animation alone used, or what goes later at rest (`Rest`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3218,6 +3229,15 @@ impl Host {
                 // so is every view it scrolled (`hold_frame`).
                 hold_frame(&mut self.held_damage, damage, &scene);
                 window.request_redraw();
+                // And what that layout shaped is trimmed as a frame would have
+                // it trimmed, if none comes (a window hidden or covered under
+                // its updates): the trim armed, unless one is due already.
+                if let Some((at, stage)) =
+                    armed_trim(self.trim_at, self.trim_stage, std::time::Instant::now())
+                {
+                    self.trim_at = Some(at);
+                    self.trim_stage = stage;
+                }
             } else {
                 // Steady frames render at a time of their own within their
                 // wait for the refresh point (`Latch::hold`); a scroll's at a
@@ -3320,6 +3340,17 @@ impl Host {
                             // Shown: the next waits for the compositor's
                             // frame, as a GPU present's does.
                             self.present_ready = false;
+                            // And the window's idle trims are armed, as a GPU
+                            // present arms them: unarmed, a window on the
+                            // raster never came to rest.
+                            let now = std::time::Instant::now();
+                            self.trim_at = Some(now + TRIM_DELAY);
+                            self.release_rows_at = Some(now + zgx::spare::KEPT_REST);
+                            self.trim_stage = TrimStage::Trim;
+                            self.rest = Rest::none();
+                            if self.startup_trim == StartupTrim::Pending {
+                                self.startup_trim = StartupTrim::At(now + STARTUP_TRIM_DELAY);
+                            }
                         }
                         None => undrawn = true,
                     }
@@ -6852,6 +6883,9 @@ impl Host {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.trim();
                 }
+                if let Some(raster) = &mut self.raster {
+                    raster.rest();
+                }
                 // What goes later, each at its own delay past this trim: the
                 // glyph atlas (a window that grew one), and Metal's queue once
                 // a frame would find it cold anyway.
@@ -7137,10 +7171,11 @@ impl Host {
         let ui = &self.context.ui;
         let asked = zgx::idle::take_request(&ui.runtime);
         if (asked || (ui.reclaiming() && !self.frames_presented()))
-            && (self.trim_at.is_none() || self.trim_stage == TrimStage::Rest)
+            && let Some((at, stage)) =
+                armed_trim(self.trim_at, self.trim_stage, std::time::Instant::now())
         {
-            self.trim_at = Some(std::time::Instant::now() + TRIM_DELAY);
-            self.trim_stage = TrimStage::Trim;
+            self.trim_at = Some(at);
+            self.trim_stage = stage;
         }
     }
     /// Start, stop or schedule this window's frame source to match demand.
@@ -9926,6 +9961,26 @@ mod tests {
         );
         // A queue that never rested (a window's first frames): not lone.
         assert_eq!(lone_wake(None, tick), None);
+    }
+    /// A window laying out with no frame to show it arms its trim, unless
+    /// one is due; what goes later at rest is no trim, and it arms again
+    /// after each trim while frames stay away.
+    #[test]
+    fn a_window_with_no_frames_arms_its_trim_unless_one_is_due() {
+        use super::{TRIM_DELAY, TrimStage, armed_trim};
+        let now = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(
+            armed_trim(None, TrimStage::Trim, now),
+            Some((now + TRIM_DELAY, TrimStage::Trim))
+        );
+        // A trim due (a frame presented a moment ago armed it): kept.
+        assert_eq!(armed_trim(Some(now + ms(200)), TrimStage::Trim, now), None);
+        // Only the atlas or the queue owed: the trim comes first.
+        assert_eq!(
+            armed_trim(Some(now + ms(20_000)), TrimStage::Rest, now),
+            Some((now + TRIM_DELAY, TrimStage::Trim))
+        );
     }
     #[test]
     fn rest_gives_back_the_atlas_then_the_queue() {
