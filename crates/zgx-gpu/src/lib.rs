@@ -23152,8 +23152,43 @@ mod kept_text_growth_tests {
                         GpuRenderer::new_with_context(width, height, &gpu.context()).unwrap();
                     fresh.set_scale_factor(scale);
                     fresh.render(&scene, &full).unwrap();
+                    let drawn = fresh.readback().unwrap();
+                    // SCRATCH (diagnosis, not for main): how they differ.
+                    if actual != drawn {
+                        let mut differ = Vec::new();
+                        for (i, (a, b)) in actual.iter().zip(&drawn).enumerate() {
+                            if a != b {
+                                differ.push((i / 4, a.abs_diff(*b)));
+                            }
+                        }
+                        let max = differ.iter().map(|d| d.1).max().unwrap_or(0);
+                        eprintln!(
+                            "DIAG scale {scale} trailing {trailing} step {step}: {} channels differ, max {max}",
+                            differ.len()
+                        );
+                        for (px, d) in differ.iter().take(12) {
+                            let (x, y) = (*px as u32 % width, *px as u32 / width);
+                            eprintln!(
+                                "DIAG px ({x}, {y}) diff {d} kept {:?} fresh {:?}",
+                                &actual[px * 4..px * 4 + 4],
+                                &drawn[px * 4..px * 4 + 4]
+                            );
+                        }
+                        let cells = |r: &GpuRenderer| {
+                            let mut v: Vec<_> = r
+                                .entries
+                                .values()
+                                .flatten()
+                                .map(|e| (e.x, e.y, e.width, e.height))
+                                .collect();
+                            v.sort();
+                            v
+                        };
+                        eprintln!("DIAG kept cells {:?}", cells(&gpu));
+                        eprintln!("DIAG fresh cells {:?}", cells(&fresh));
+                    }
                     assert!(
-                        actual == fresh.readback().unwrap(),
+                        actual == drawn,
                         "scale {scale}, trailing {trailing}, step {step}"
                     );
                 }
