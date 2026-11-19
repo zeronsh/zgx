@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **A window on the software raster comes to rest, and a window drawing no frames gives back the text it lays out** (zgx-desktop): the idle trim (the scene, text, and freed heap given back to the system) was armed only by a GPU present, so a window on the raster (a machine with no GPU) never rested; and a window laying out with no frame granted (hidden, covered) shaped its updates' text into the cache a frame would have trimmed, up to its budget, and kept it. A raster frame now arms the trim as a present does, the trim rests the raster's text but what it last drew, and a window laying out with no frame keeps its trim armed. A terminal on the raster: 48 MB at rest rather than 80 (Linux), 67 MB rather than 99–103 after output, and hidden under output, 88 MB rather than 115.
