@@ -15885,6 +15885,7 @@ impl GpuRenderer {
             && self.entries.len() < 8192
             && (self.shelves.area() - self.unheld_area()) * 8
                 > u64::from(self.atlas_size).pow(2) * 3
+            && !self.levels_replaced()
         {
             let size = (self.atlas_size * 2).min(MAX_ATLAS);
             if !self.grow_atlas(size) {
@@ -15904,6 +15905,42 @@ impl GpuRenderer {
             .filter_map(|(_, entry)| *entry)
             .map(|e| u64::from(e.width + 2) * u64::from(e.height + 2))
             .sum()
+    }
+    /// macOS: whether most of the atlas's glyphs no text holds are those of
+    /// glyphs it does hold at another font smoothing level (a colour
+    /// animating through the levels, its text the same): given back, they
+    /// leave the room they took, as no new text would. Off macOS there are
+    /// no levels.
+    fn levels_replaced(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            let level = |key: &AtlasKey| AtlasKey {
+                words: [
+                    key.words[0],
+                    key.words[1] & !cosmic_text::CacheKeyFlags::SMOOTHING.bits(),
+                    key.words[2],
+                    key.words[3],
+                ],
+                ..*key
+            };
+            let held = self.held_glyphs();
+            let held_unlevelled: FxHashSet<AtlasKey> = held.iter().map(level).collect();
+            let (mut unheld, mut replaced) = (0_u64, 0_u64);
+            for (key, entry) in &self.entries {
+                let Some(e) = entry else { continue };
+                if held.contains(key) {
+                    continue;
+                }
+                let texels = u64::from(e.width + 2) * u64::from(e.height + 2);
+                unheld += texels;
+                if held_unlevelled.contains(&level(key)) {
+                    replaced += texels;
+                }
+            }
+            replaced * 2 >= unheld && unheld > 0
+        }
+        #[cfg(not(target_os = "macos"))]
+        false
     }
     /// The glyphs of the text the renderer holds (`shapes`).
     fn held_glyphs(&self) -> FxHashSet<AtlasKey> {
