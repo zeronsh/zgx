@@ -184,10 +184,14 @@ impl Raster {
     }
     /// A window at rest: its shared text services rest as a renderer's do
     /// (`GpuRenderer::trim`): the words kept for the next frame's shaping
-    /// go, and prepared text but what its last frame drew. Its pixels stay,
-    /// and so do the glyph images and canvases they are repainted from.
+    /// go, and prepared text but what its last frame drew. The rasters of
+    /// its canvases and icons go too (a renderer's go once uploaded): its
+    /// pixels hold what they drew, and a repaint over one rasterizes it
+    /// again, as a change to it would. Its glyph images stay.
     #[doc(hidden)]
     pub fn rest(&mut self) {
+        self.canvases.retain_nodes(|_| false);
+        self.svgs.rest();
         let Some(shared) = &self.shared_text else {
             return;
         };
@@ -3254,6 +3258,39 @@ mod rest_tests {
         // What it kept draws again as it was prepared: nothing shaped anew.
         raster.render(&scene, &full);
         assert_eq!(shaped(), rested);
+    }
+    /// At rest, a raster lets its canvases' rasters go; a repaint over one
+    /// rasterizes it again, drawing what it drew.
+    #[test]
+    fn at_rest_its_canvases_go_and_draw_again_as_they_were() {
+        use zgx::canvas::{Canvas, Path};
+        let mut scene = Scene::new(60., 40.);
+        let mut drawing = Canvas::new();
+        drawing.fill(
+            Path::rectangle(Rect::new(5., 5., 20., 10.)),
+            Color(250, 20, 10, 255),
+        );
+        scene.append(
+            scene.root(),
+            NodeKind::Canvas(std::sync::Arc::new(drawing)),
+            Style {
+                width: Some(60.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        let full = [Rect::new(0., 0., 60., 40.)];
+        let _ = scene.flush();
+        let mut raster = Raster::new(60, 40);
+        raster.render(&scene, &full);
+        assert!(!raster.canvases.is_empty(), "its raster held as it drew");
+        let drawn = raster.pixels.clone();
+        assert_eq!(drawn[10 * 60 + 10], 0xfa140a);
+        raster.rest();
+        assert!(raster.canvases.is_empty(), "let go at rest");
+        assert_eq!(raster.pixels, drawn, "its pixels stay");
+        raster.render(&scene, &full);
+        assert_eq!(raster.pixels, drawn, "repainted as it was");
     }
 }
 
