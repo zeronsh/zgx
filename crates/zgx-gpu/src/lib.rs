@@ -9070,7 +9070,10 @@ impl GpuRenderer {
                 && let Some(boxed) = kept.items[first].boxed
                 && kept.items.get(first + 1).is_none_or(|next| next.id != id)
             {
-                let (bounds, kind) = scene.box_in(id, &kept.items[first].inherited);
+                let (mut bounds, kind) = scene.box_in(id, &kept.items[first].inherited);
+                if scene.pixel_scale() > 0. {
+                    scene.snap_kept_box(id, &mut bounds, &kept.items[first].inherited);
+                }
                 if plain_quad(kind) {
                     boxes += 1;
                     if self.patch_box_moved(&mut kept, first, bounds, boxed.clip, viewport) {
@@ -9108,10 +9111,13 @@ impl GpuRenderer {
                 continue;
             }
             for place in first..first + count {
-                let Some(item) = scene.item_in(id, &kept.items[place].inherited) else {
+                let Some(mut item) = scene.item_in(id, &kept.items[place].inherited) else {
                     splices.push((first, kept.items[first].end as usize, id));
                     break;
                 };
+                if scene.pixel_scale() > 0. {
+                    scene.snap_kept_item(&mut item);
+                }
                 let plain = plain_box(&item);
                 kept.items[place].boxed = KeptBox::of(&item, plain);
                 if plain {
