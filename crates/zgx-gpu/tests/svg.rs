@@ -238,3 +238,75 @@ fn atlas_icons_survive_a_change_of_scale_and_back() {
         assert_eq!(row(&got), row(&want), "row {y}");
     }
 }
+
+/// The pixels a 160×60 window at `scale` shows of `mark`, in a padded row at
+/// a fraction of a point, with the artwork `id`ed `"slot"` drawn in that box
+/// by hand at its size (as an icon was once its box had one) if `by_hand`.
+fn icon_pixels(scale: f32, mark: zgx::compose::View, by_hand: Option<Arc<SvgData>>) -> Vec<u8> {
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let (w, h) = (160., 60.);
+    let mut gpu = GpuRenderer::new((w * scale) as u32, (h * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let mut ui = Ui::new(w, h);
+    let view = ui.mount(row().pt(7.25).pl(13.5).child(mark));
+    ui.prepare_frame();
+    if let Some(artwork) = by_hand {
+        let slot = view.find("slot").unwrap();
+        let size = ui.scene.borrow().layout_bounds(slot);
+        ui.scene.borrow_mut().append(
+            slot,
+            zgx::scene::NodeKind::Svg(artwork),
+            zgx::scene::Style {
+                absolute: true,
+                width: Some(size.width),
+                height: Some(size.height),
+                ..Default::default()
+            },
+        );
+        ui.prepare_frame();
+    }
+    ui.scene.borrow_mut().flush();
+    gpu.render(&ui.scene.borrow(), &[zgx::scene::Rect::new(0., 0., w, h)])
+        .unwrap();
+    gpu.readback().unwrap()
+}
+
+/// An icon draws as its artwork drawn in its box at its size: a square, a
+/// non-square one, and a square one kept square in a wide box, at 1x and 2x.
+#[test]
+fn an_icon_draws_as_its_artwork_at_its_boxs_size() {
+    use zgx::compose::prelude::*;
+    let artwork = |w: u32, h: u32| {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}"><rect width="{w}" height="{h}" fill="#2050e0"/><circle cx="{}" cy="{}" r="{}" fill="#e04020"/></svg>"##,
+            w as f32 * 0.3,
+            h as f32 * 0.6,
+            w.min(h) as f32 * 0.3,
+        );
+        Arc::new(SvgData::new(svg.into_bytes()).unwrap())
+    };
+    let cases = [
+        ("square", artwork(16, 16), (24., 24.)),
+        ("non-square", artwork(32, 16), (40., 20.)),
+        ("square in a wide box", artwork(16, 16), (120., 24.)),
+    ];
+    for scale in [1., 2.] {
+        for (name, art, (width, height)) in &cases {
+            let icon = icon_pixels(scale, svg("Icon", art.clone()).size(*width, *height), None);
+            let by_hand = icon_pixels(
+                scale,
+                div().id("slot").size(*width, *height),
+                Some(art.clone()),
+            );
+            let inked = icon
+                .chunks(4)
+                .filter(|p| p[3] > 0 && (p[0] > 100 || p[2] > 100))
+                .count();
+            assert!(inked > 0, "{name} at {scale}x draws");
+            assert!(
+                icon == by_hand,
+                "{name} at {scale}x draws as its artwork at its box's size"
+            );
+        }
+    }
+}

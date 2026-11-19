@@ -11358,6 +11358,42 @@ mod input_draw_pass_tests {
             );
         }
     }
+
+    /// Layout passes a mount of `n` rows, each a label beside a box, takes
+    /// to its first drawn frame: the box an icon if `icons`.
+    fn passes_to_draw_rows(n: usize, icons: bool) -> u64 {
+        let mut ui = Ui::new(1200., 800.);
+        let artwork = std::sync::Arc::new(
+            crate::svg::SvgData::new(
+                &br#"<svg viewBox="0 0 16 16"><rect width="16" height="16"/></svg>"#[..],
+            )
+            .unwrap(),
+        );
+        let before = ui.scene.borrow().layout_passes();
+        let _handle = ui.mount(column().children((0..n).map(|i| {
+            let mark = match icons {
+                true => svg("Folder", artwork.clone()).size(16., 16.),
+                false => div().size(16., 16.),
+            };
+            row().gap(8.).child(mark).child(text(format!("Row {i}")))
+        })));
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        ui.scene.borrow().layout_passes() - before
+    }
+
+    /// Icons mount drawn in their boxes: as many layout passes as boxes take,
+    /// none more once their boxes have their sizes.
+    #[test]
+    fn icons_mount_in_the_layout_their_boxes_take() {
+        let (boxes, icons) = (
+            passes_to_draw_rows(50, false),
+            passes_to_draw_rows(50, true),
+        );
+        assert_eq!(icons, boxes, "{icons} passes for icons, {boxes} for boxes");
+    }
 }
 /// A handle to no `Ui`, for a node `zgx-dom` mounted.
 #[cfg(feature = "dom")]
