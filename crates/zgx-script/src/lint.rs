@@ -707,12 +707,9 @@ pub(crate) struct Token {
     pub(crate) text: String,
     pub(crate) line: u32,
     pub(crate) column: u32,
-    /// Where it starts in the source, in characters (`templates` rewrites
-    /// by it).
-    pub(crate) at: usize,
 }
 impl Token {
-    pub(crate) fn is(&self, text: &str) -> bool {
+    fn is(&self, text: &str) -> bool {
         self.kind != Kind::Str && self.text == text
     }
 }
@@ -826,7 +823,6 @@ pub(crate) fn tokenize(source: &str) -> (Vec<Token>, Vec<(u32, String)>) {
             text: chars[i..i + len].iter().collect(),
             line: start_line,
             column: start_column,
-            at: i,
         });
         advance(&mut i, &mut line, &mut column, len);
     }

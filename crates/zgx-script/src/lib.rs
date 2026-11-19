@@ -119,6 +119,12 @@ pub fn __templates_stamped() -> u64 {
 pub fn __templates_live() -> usize {
     templates::live()
 }
+/// What the templates alive on this thread keep in Rust, in bytes (the
+/// rest-memory measure's count).
+#[doc(hidden)]
+pub fn __templates_bytes() -> usize {
+    templates::bytes()
+}
 mod term;
 pub mod test_runner;
 pub mod testing;
@@ -1635,7 +1641,7 @@ fn require_module<const LENDING: bool>(
     };
     let loaded = match (bytecode, &templated) {
         (Some(bytecode), _) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
-        (None, Some(source)) => files.chunk(lua.load(&source[..])),
+        (None, Some(source)) => files.chunk(lua.load(source.as_bytes())),
         (None, None) => files.chunk(lua.load(code)),
     };
     // Its top level's registrations are its own, and so are the globals it
@@ -5052,7 +5058,7 @@ impl ScriptHost {
                     (Some(bytecode), _) => {
                         lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary)
                     }
-                    (None, Some(source)) => files.chunk(lua.load(&source[..])),
+                    (None, Some(source)) => files.chunk(lua.load(source.as_bytes())),
                     (None, None) => files.chunk(lua.load(code)),
                 };
                 loaded.set_name(format!("@{name}")).eval::<mlua::Value>()
@@ -5190,6 +5196,8 @@ const STATE_LISTED_FROM: usize = 64 * 1024;
 /// while the app is in use, so a page shown again is instant).
 fn trim_idle(inner: &Inner) {
     value::forget_streamed_edits();
+    // Templates' prototypes and nodes made once: made again as stamped.
+    templates::trim();
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
         markdown::rest(&vm.lua);

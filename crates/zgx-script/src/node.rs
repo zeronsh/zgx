@@ -3628,7 +3628,7 @@ fn in_order<T>(mut items: Vec<(i64, T)>) -> Vec<T> {
 
 /// A child as its table holds it: a node, read where it lies (no
 /// reference to it is made), or any other value.
-enum Child {
+pub(crate) enum Child {
     Node(Rc<Node>),
     Value(mlua::Value),
 }
@@ -4573,9 +4573,10 @@ pub(crate) fn fill(lua: &Lua, mut node: Node, table: Option<&Table>) -> mlua::Re
     }
     Ok(node)
 }
+
 /// What a `ui.text` table holds besides styles: its content (element 1)
 /// and whether to show it `literal`ly.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct TextArgs {
     content: mlua::Value,
     literal: Option<bool>,
@@ -5199,6 +5200,133 @@ fn fill_from(
     }
     node.children = kids;
     Ok(())
+}
+
+/// A template's node as its literal fields make it, once (`templates`):
+/// what `kind`'s constructor makes of a table holding them alone, before
+/// it is finished (its text, a grid's flag, its userdata). Each stamp
+/// clones it and walks only its holes (`from_proto`): the walk's props are
+/// sorted with these, and its children are all the node's, as one walk
+/// over the whole table gives.
+pub(crate) struct Proto {
+    node: Node,
+    text: Option<TextArgs>,
+}
+
+/// `kind`'s node made from `literals` (its literal fields), not finished.
+/// `None` for a kind templates don't make.
+pub(crate) fn proto(lua: &Lua, kind: &str, literals: &Table) -> mlua::Result<Option<Proto>> {
+    let (owner, lint) = owner_and_lint(lua)?;
+    let (node_kind, text) = match kind {
+        "column" => (Kind::Column, None),
+        "row" => (Kind::Row, None),
+        "div" | "grid" => (Kind::Div, None),
+        "overlay" => (Kind::Overlay, None),
+        "button" => (Kind::Button, None),
+        "text" => (
+            Kind::Text(Text::Literal(String::new())),
+            Some(TextArgs::default()),
+        ),
+        _ => return Ok(None),
+    };
+    let mut node = Node::new(owner, node_kind);
+    let mut text = text;
+    if kind == "button" {
+        button_look(lua, literals)?;
+    }
+    fill_from(lua, &mut node, literals, text.as_mut(), lint)?;
+    Ok(Some(Proto { node, text }))
+}
+
+/// A node of `kind` made from `proto` and the rest of its table: its named
+/// fields that are expressions (`named`, walked as `fill_from` walks a
+/// table: none, nothing to walk), a text's content when an expression
+/// gives it, and its children (`items`, by their places): what `kind`'s
+/// constructor makes of the whole table.
+pub(crate) fn made(
+    lua: &Lua,
+    kind: &str,
+    proto: &Proto,
+    named: Option<&Table>,
+    content: Option<mlua::Value>,
+    items: Vec<(i64, Child)>,
+) -> mlua::Result<Node> {
+    let mut node = proto.node.clone();
+    let mut text = proto.text.clone();
+    if let Some(named) = named {
+        let (_, lint) = owner_and_lint(lua)?;
+        fill_from(lua, &mut node, named, text.as_mut(), lint)?;
+    }
+    if !items.is_empty() {
+        let mut kids = Vec::with_capacity(items.len());
+        children(lua, &node.owner, items, &mut kids)?;
+        if !kids.is_empty() && !node.kind.takes_children() {
+            return Err(mlua::Error::runtime(format!(
+                "`{}` does not take children",
+                node.tag()
+            )));
+        }
+        node.children = kids;
+    }
+    if kind == "grid" {
+        node.props
+            .insert(0, (Prop::Grid, Source::Lit(Lit::Bool(true))));
+    }
+    if let Some(mut args) = text {
+        if let Some(content) = content {
+            args.content = content;
+        }
+        let literal = args.literal.unwrap_or(false);
+        node.kind = Kind::Text(text_of(lua, args.content, "ui.text", literal)?);
+    }
+    Ok(node)
+}
+
+/// `node` held as a script's nodes are (`node_ud`), with no userdata: a
+/// template's node within another.
+pub(crate) fn node_rc(lua: &Lua, mut node: Node) -> Rc<Node> {
+    if node.owner.upgrade().is_some_and(|vm| vm.locate.get()) {
+        node.source = location(lua);
+    }
+    let node = Rc::new(node);
+    #[cfg(target_arch = "wasm32")]
+    owe_collector(lua, node_bytes(&node));
+    node
+}
+
+/// `node` as a script holds it: its userdata.
+pub(crate) fn wrap(lua: &Lua, node: Rc<Node>) -> mlua::Result<mlua::AnyUserData> {
+    // Through `node_ud`, the one maker of a node's userdata: a second
+    // would make its inlined body a call apart for every node (zgx #2368).
+    node_ud(lua, Rc::unwrap_or_clone(node))
+}
+
+/// What a prototype keeps in Rust (`templates::bytes`).
+pub(crate) fn proto_bytes(proto: &Proto) -> usize {
+    let node = &proto.node;
+    size_of::<Proto>()
+        + node.props.capacity() * size_of::<(Prop, Source)>()
+        + node.children.capacity() * size_of::<Rc<Node>>()
+        + node.events.as_ref().map_or(0, |_| size_of::<Events>())
+        + node.rare.as_ref().map_or(0, |_| size_of::<NodeRare>())
+}
+
+/// What a node keeps in Rust, itself in its `Rc` and the nodes within it
+/// (`templates::bytes`, for one made once and shared).
+pub(crate) fn tree_bytes(node: &Node) -> usize {
+    size_of::<Node>()
+        + 2 * size_of::<usize>()
+        + node.props.capacity() * size_of::<(Prop, Source)>()
+        + node.children.capacity() * size_of::<Rc<Node>>()
+        + node.events.as_ref().map_or(0, |_| size_of::<Events>())
+        + node.rare.as_ref().map_or(0, |_| size_of::<NodeRare>())
+        + node.children.iter().map(|c| tree_bytes(c)).sum::<usize>()
+}
+
+/// Whether the script's nodes say where they were made (an inspector
+/// locating them): a template's node made once can't then be shared.
+pub(crate) fn locating(lua: &Lua) -> bool {
+    env(lua).is_ok_and(|env| env.vm.upgrade().is_some_and(|vm| vm.locate.get()))
 }
 
 /// What a `pointer_events` value says: whether the pointer stops at the

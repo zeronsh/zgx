@@ -1106,6 +1106,25 @@ impl Lua {
         }
     }
 
+    /// Whether this state holds more than its memory limit (no limit set:
+    /// never), as an allocation made with the limit set aside
+    /// (`create_userdata_relaxed`, `create_table_relaxed`…) can leave it. A
+    /// caller making such allocations for a script, again and again, checks
+    /// this first and fails when it is: no loop can grow past the limit by
+    /// them alone, as none would by checked allocations.
+    ///
+    /// zgx patch: not in upstream mlua (see `vendor/mlua/ZGX_PATCH.md`).
+    #[inline]
+    pub fn over_memory_limit(&self) -> bool {
+        let lua = self.lock();
+        unsafe {
+            let mem_state = MemoryState::get(lua.main_state());
+            !mem_state.is_null()
+                && (*mem_state).memory_limit() > 0
+                && (*mem_state).used_memory() > (*mem_state).memory_limit()
+        }
+    }
+
     /// Sets a memory limit (in bytes) on this Lua state.
     ///
     /// Once an allocation occurs that would pass this memory limit, a `Error::MemoryError` is
@@ -1463,6 +1482,34 @@ impl Lua {
     /// Lua may use these hints to preallocate memory for the new table.
     pub fn create_table_with_capacity(&self, narr: usize, nrec: usize) -> Result<Table> {
         unsafe { self.lock().create_table_with_capacity(narr, nrec) }
+    }
+
+    /// As [`Lua::create_table_with_capacity`], with the memory limit set
+    /// aside for the one allocation instead of a protected call around it:
+    /// only the system running out of memory can fail it, and that aborts.
+    /// For a table made for each of many small calls (a template's node),
+    /// where the protected call costs more than the table.
+    ///
+    /// zgx patch: not in upstream mlua (see `vendor/mlua/ZGX_PATCH.md`).
+    pub fn create_table_relaxed(&self, narr: usize, nrec: usize) -> Result<Table> {
+        let lua = self.lock();
+        let state = lua.state();
+        unsafe {
+            let _sg = crate::util::StackGuard::new(state);
+            crate::util::check_stack(state, 3)?;
+            let mut pushed = Ok(());
+            // SAFETY: with the limit ignored, `lua_createtable` raises none of
+            // its errors (the allocator aborts rather than return null; the
+            // sizes are clamped below `push_table`'s protected range), and its
+            // collection step runs only userdata destructors and the interrupt
+            // with `gc >= 0`, as `make_userdata_relaxed` says.
+            let (narr, nrec) = (narr.min(1 << 20), nrec.min(1 << 20));
+            crate::memory::MemoryState::relax_limit_with(state, || {
+                pushed = crate::util::push_table(state, narr, nrec, false)
+            });
+            pushed?;
+            Ok(Table(lua.try_pop_ref()?))
+        }
     }
 
     /// Creates a table and fills it with values from an iterator.

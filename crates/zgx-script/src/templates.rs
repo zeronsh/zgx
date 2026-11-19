@@ -21,7 +21,152 @@
 //! constructor called other than `ui.<kind> { … }`, and any kind not in
 //! `KINDS`, whose constructors read or do more than build a node.
 
-use crate::lint::{Kind as Tk, Token, tokenize};
+use crate::lint::Kind as Tk;
+
+/// A token of a script as the rewrite reads it: its kind, its text (where it
+/// lies in the source) and its line. Read as lint's tokenizer reads
+/// (`lint::tokenize`), without copying any text: a load leaves its
+/// allocator little to keep.
+#[derive(Clone, Copy)]
+struct Tok<'a> {
+    kind: Tk,
+    text: &'a str,
+    line: u32,
+}
+impl Tok<'_> {
+    fn is(&self, text: &str) -> bool {
+        self.kind != Tk::Str && self.text == text
+    }
+    /// Where it starts in `source` (the source it was read from), in bytes.
+    fn at(&self, source: &str) -> usize {
+        self.text.as_ptr() as usize - source.as_ptr() as usize
+    }
+}
+
+/// `source`'s tokens, comments left out: counted first, so their list is
+/// made once, at its size.
+fn lex(source: &str) -> Vec<Tok<'_>> {
+    let mut count = 0;
+    lex_each(source, |_| count += 1);
+    let mut tokens = Vec::with_capacity(count);
+    lex_each(source, |token| tokens.push(token));
+    tokens
+}
+
+/// Each of `source`'s tokens, in order, to `each`.
+fn lex_each<'a>(source: &'a str, mut each: impl FnMut(Tok<'a>)) {
+    let bytes = source.as_bytes();
+    let (mut i, mut line) = (0, 1u32);
+    // The level of a long bracket opening at `at` (`[[` 0, `[==[` 2).
+    let long_open = |at: usize| -> Option<usize> {
+        if bytes.get(at) != Some(&b'[') {
+            return None;
+        }
+        let level = bytes[at + 1..].iter().take_while(|b| **b == b'=').count();
+        (bytes.get(at + 1 + level) == Some(&b'[')).then_some(level)
+    };
+    // Where a long bracket of `level` opened at `at` ends.
+    let long_end = |at: usize, level: usize| -> usize {
+        let body = at + level + 2;
+        (body..bytes.len())
+            .find(|&j| {
+                bytes[j] == b']'
+                    && bytes.get(j + 1 + level) == Some(&b']')
+                    && bytes[j + 1..j + 1 + level].iter().all(|b| *b == b'=')
+            })
+            .map_or(bytes.len(), |j| j + level + 2)
+    };
+    while i < bytes.len() {
+        let c = bytes[i];
+        let start_line = line;
+        if c.is_ascii_whitespace() {
+            line += u32::from(c == b'\n');
+            i += 1;
+            continue;
+        }
+        if c == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            let end = match long_open(i + 2) {
+                Some(level) => long_end(i + 2, level),
+                None => bytes[i..]
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map_or(bytes.len(), |n| i + n),
+            };
+            line += bytes[i..end].iter().filter(|b| **b == b'\n').count() as u32;
+            i = end;
+            continue;
+        }
+        let (kind, end) = if let Some(level) = long_open(i) {
+            (Tk::Str, long_end(i, level))
+        } else if c == b'"' || c == b'\'' || c == b'`' {
+            let mut j = i + 1;
+            let mut depth = 0;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' => j += 1,
+                    b'{' if c == b'`' => depth += 1,
+                    b'}' if c == b'`' && depth > 0 => depth -= 1,
+                    b'\n' if c != b'`' => break,
+                    q if q == c && depth == 0 => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+            (Tk::Str, (j + 1).min(bytes.len()))
+        } else if c.is_ascii_digit()
+            || (c == b'.' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
+        {
+            let hex = bytes.get(i + 1).is_some_and(|c| matches!(c, b'x' | b'X'));
+            let mut j = i;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric()
+                    || bytes[j] == b'_'
+                    || bytes[j] == b'.'
+                    || (matches!(bytes[j], b'+' | b'-')
+                        && !hex
+                        && matches!(bytes[j - 1], b'e' | b'E')))
+            {
+                j += 1;
+            }
+            (Tk::Number, j)
+        } else if let Some(first) = source[i..].chars().next()
+            && (first.is_alphabetic() || first == '_')
+        {
+            // A name: from an alphabetic character or `_` on, as lint reads.
+            let len = source[i..]
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .map(char::len_utf8)
+                .sum::<usize>();
+            (Tk::Name, i + len)
+        } else if c >= 0x80 {
+            // Any other character: itself.
+            let len = source[i..].chars().next().map_or(1, char::len_utf8);
+            (Tk::Punct, i + len)
+        } else {
+            const LONG: &[&str] = &[
+                "...", "..=", "//=", "==", "~=", "<=", ">=", "..", "::", "->", "+=", "-=", "*=",
+                "/=", "%=", "^=", "//",
+            ];
+            let len = LONG
+                .iter()
+                .find(|op| bytes[i..].starts_with(op.as_bytes()))
+                .map_or(1, |op| op.len());
+            (Tk::Punct, i + len)
+        };
+        // The end on a character's boundary (a string cut at the source's end).
+        let end = (end..=bytes.len())
+            .find(|&e| source.is_char_boundary(e))
+            .unwrap_or(bytes.len());
+        each(Tok {
+            kind,
+            text: &source[i..end],
+            line: start_line,
+        });
+        line += source[i..end].bytes().filter(|b| *b == b'\n').count() as u32;
+        i = end;
+    }
+}
 use mlua::{Function, Lua, MultiValue, Table, Value};
 use std::{
     cell::RefCell,
@@ -40,16 +185,16 @@ pub(crate) const KINDS: &[&str] = &["column", "row", "div", "overlay", "button",
 /// fields in the order written.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TNode {
-    pub kind: String,
+    pub kind: &'static str,
     pub line: u32,
-    pub fields: Vec<(Option<String>, TValue)>,
+    pub fields: Vec<(Option<&'static str>, TValue)>,
 }
 
 /// A field's value.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TValue {
     /// A literal, as written.
-    Lit(String),
+    Lit(Literal),
     /// The `n`th hole of the template.
     Hole(usize),
     /// The `n`th hole, a call (or `...`) ending a table's list: each of its
@@ -68,9 +213,9 @@ struct HoleAt {
 
 /// A script's source with its templates rewritten.
 pub(crate) struct Rewritten {
-    pub source: String,
+    pub source: Rc<str>,
     /// Its templates, in the order its `__stamp` calls number them (from 1).
-    pub templates: Vec<TNode>,
+    pub templates: Rc<[TNode]>,
     /// What its first line asks for its templates by (`ui.__templates`): a
     /// hash of the source as written.
     pub key: u64,
@@ -83,21 +228,67 @@ const LOCAL: &str = "__zgx_t";
 /// Whether templates are on (`ZGX_TEMPLATES=force`; off otherwise).
 pub(crate) fn enabled() -> bool {
     thread_local! {
-        static ON: bool = std::env::var("ZGX_TEMPLATES").is_ok_and(|v| v == "force");
+        static ON: bool =
+            std::env::var("ZGX_TEMPLATES").is_ok_and(|v| v == "force" || v == "stamp");
     }
     ON.with(|on| *on)
 }
 
 /// What `code` compiles to: rewritten if templates are on and it has any.
 /// The same bytes in every VM, so compiled once (`sources`) for all.
-pub(crate) fn for_compile(code: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    match enabled()
-        .then(|| std::str::from_utf8(code).ok().and_then(rewrite))
-        .flatten()
-    {
-        Some(rewritten) => std::borrow::Cow::Owned(rewritten.source.into_bytes()),
-        None => std::borrow::Cow::Borrowed(code),
+pub(crate) fn for_compile(code: &[u8]) -> ToCompile<'_> {
+    match enabled().then(|| rewritten(code)).flatten() {
+        Some(rewritten) => ToCompile::Rewritten(rewritten.source.clone()),
+        None => ToCompile::AsWritten(code),
     }
+}
+
+/// What a source compiles from (`for_compile`): itself, or its rewrite,
+/// shared with the load that registered it (not copied).
+pub(crate) enum ToCompile<'a> {
+    AsWritten(&'a [u8]),
+    Rewritten(Rc<str>),
+}
+impl std::ops::Deref for ToCompile<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            ToCompile::AsWritten(code) => code,
+            ToCompile::Rewritten(source) => source.as_bytes(),
+        }
+    }
+}
+
+/// A source's hash and length, and what it rewrote to (`LAST`).
+type LastRewritten = (u64, usize, Option<Rc<Rewritten>>);
+
+thread_local! {
+    /// The last source rewritten, by its hash and length: a load rewrites
+    /// it to register its templates and again to compile it (`for_compile`).
+    /// Let go as idle (`trim`).
+    static LAST: RefCell<Option<LastRewritten>> = const { RefCell::new(None) };
+}
+
+/// `code` rewritten (`rewrite`), once for a load's two uses.
+fn rewritten(code: &[u8]) -> Option<Rc<Rewritten>> {
+    let hash = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        code.hash(&mut hasher);
+        hasher.finish()
+    };
+    if let Some(found) = LAST.with_borrow(|last| {
+        last.as_ref()
+            .filter(|(h, len, _)| *h == hash && *len == code.len())
+            .map(|(_, _, rewritten)| rewritten.clone())
+    }) {
+        return found;
+    }
+    let made = std::str::from_utf8(code)
+        .ok()
+        .and_then(rewrite)
+        .map(Rc::new);
+    LAST.set(Some((hash, code.len(), made.clone())));
+    made
 }
 
 /// What `code` loads as in `lua`: `None`, as written, templates being off
@@ -105,15 +296,19 @@ pub(crate) fn for_compile(code: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// from it, `for_compile`), its templates made for `lua` and waiting for the
 /// chunk to take them as it starts (`ui.__templates`). Called just before
 /// the chunk is compiled and run.
-pub(crate) fn register(lua: &Lua, code: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn register(lua: &Lua, code: &[u8]) -> Option<Rc<str>> {
     if !enabled() {
         return None;
     }
-    let rewritten = rewrite(std::str::from_utf8(code).ok()?)?;
+    let rewritten = rewritten(code)?;
     let registry = lua.app_data_ref::<Registry>()?;
-    let chunk = Chunk::new(lua, &rewritten.templates);
-    *registry.next.borrow_mut() = Some((rewritten.key, Rc::new(chunk)));
-    Some(rewritten.source.into_bytes())
+    let chunk = Rc::new(Chunk::new(&rewritten.templates));
+    CHUNKS.with_borrow_mut(|chunks| {
+        chunks.retain(|chunk| chunk.strong_count() > 0);
+        chunks.push(Rc::downgrade(&chunk));
+    });
+    *registry.next.borrow_mut() = Some((rewritten.key, chunk));
+    Some(rewritten.source.clone())
 }
 
 /// `source` with its templates rewritten to `ui.__stamp` calls, or `None`
@@ -121,7 +316,7 @@ pub(crate) fn register(lua: &Lua, code: &[u8]) -> Option<Vec<u8>> {
 /// line starts by taking its templates (`local __zgx_t =
 /// ui.__templates(key) `), on that line, so every line stays where it was.
 pub(crate) fn rewrite(source: &str) -> Option<Rewritten> {
-    let mut scan = scan(source)?;
+    let mut scan = scan(source, false)?;
     if scan.templates.is_empty() {
         return None;
     }
@@ -133,31 +328,30 @@ pub(crate) fn rewrite(source: &str) -> Option<Rewritten> {
     };
     // A script that is an expression (`ui.column { … }`, no `return`) is
     // run as one (mlua's `eval`): it returns it still, from the same frame.
-    let expression = mlua::chunk::Compiler::new()
-        .compile(format!("return {source}"))
-        .is_ok();
+    // One that starts with a statement's keyword can't be: not compiled to
+    // see.
+    let expression = !scan.statement
+        && mlua::chunk::Compiler::new()
+            .compile(format!("return {source}"))
+            .is_ok();
     let prologue = format!(
         "local {LOCAL} = ui.__templates({key}) {}",
         if expression { "return " } else { "" }
     );
     // Before its first token: after any comments (`--!strict` and the
     // like stay first).
-    let at = scan
-        .out
-        .char_indices()
-        .nth(scan.first)
-        .map_or(scan.out.len(), |(at, _)| at);
-    scan.out.insert_str(at, &prologue);
+    // (What comes before its first token is copied as it was.)
+    scan.out.insert_str(scan.first, &prologue);
     Some(Rewritten {
-        source: scan.out,
-        templates: scan.templates,
+        source: Rc::from(scan.out),
+        templates: Rc::from(scan.templates),
         key,
     })
 }
 
 /// Whether `tokens` name `ui` only as `ui.<field>` (as a field of
 /// something else too): otherwise a file is left as written.
-fn ui_only_as_fields(tokens: &[Token]) -> bool {
+fn ui_only_as_fields(tokens: &[Tok<'_>]) -> bool {
     tokens.iter().enumerate().all(|(i, token)| {
         token.kind != Tk::Name
             || token.text != "ui"
@@ -168,38 +362,67 @@ fn ui_only_as_fields(tokens: &[Token]) -> bool {
 
 /// A source rewritten: its text, its templates, and which tokens are a
 /// template's own (not its holes').
-struct Scan {
-    chars: Vec<char>,
+struct Scan<'a> {
+    source: &'a str,
     out: String,
     templates: Vec<TNode>,
     stamped: Vec<bool>,
-    /// Where its first token is, in chars (none: its end).
+    /// Where its first token is, in bytes (none: its end).
     first: usize,
+    /// Whether it starts with a statement's keyword (`local`, `return`…):
+    /// then it can't be an expression.
+    statement: bool,
 }
 
-fn scan(source: &str) -> Option<Scan> {
-    let (tokens, _) = tokenize(source);
+fn scan(source: &str, report: bool) -> Option<Scan<'_>> {
+    // No `ui.<kind>` in it: nothing to read.
+    if !source
+        .match_indices("ui.")
+        .any(|(at, _)| KINDS.iter().any(|kind| source[at + 3..].starts_with(kind)))
+    {
+        return None;
+    }
+    let tokens = lex(source);
     // `ui` named any other way (a local, a parameter, passed on): left alone.
     if !ui_only_as_fields(&tokens) {
         return None;
     }
-    let chars: Vec<char> = source.chars().collect();
     let mut scan = Scan {
-        first: tokens.first().map_or(chars.len(), |t| t.at),
-        chars,
-        out: String::with_capacity(source.len() + 48),
+        first: tokens.first().map_or(source.len(), |t| t.at(source)),
+        statement: tokens.first().is_some_and(|t| {
+            t.kind == Tk::Name
+                && matches!(
+                    t.text,
+                    "local"
+                        | "function"
+                        | "return"
+                        | "if"
+                        | "for"
+                        | "while"
+                        | "do"
+                        | "repeat"
+                        | "export"
+                        | "type"
+                )
+        }),
+        source,
+        out: String::with_capacity(source.len() + 64),
         templates: Vec::new(),
-        stamped: vec![false; tokens.len()],
+        // Which tokens are a template's own: for `report` alone.
+        stamped: if report {
+            vec![false; tokens.len()]
+        } else {
+            Vec::new()
+        },
     };
-    let stop = scan.chars.len();
-    scan.emit(&tokens, 0, tokens.len(), 0, stop);
+    scan.emit(&tokens, 0, tokens.len(), 0, source.len());
     Some(scan)
 }
 
-impl Scan {
-    /// Tokens `from..to`, chars `start..stop`, written out with each
+impl Scan<'_> {
+    /// Tokens `from..to`, bytes `start..stop`, written out with each
     /// template in them a stamp (the templates in its holes too).
-    fn emit(&mut self, tokens: &[Token], from: usize, to: usize, start: usize, stop: usize) {
+    fn emit(&mut self, tokens: &[Tok<'_>], from: usize, to: usize, start: usize, stop: usize) {
         let mut copied = start;
         let mut i = from;
         while i < to {
@@ -211,8 +434,11 @@ impl Scan {
             // Numbered before the templates in its holes.
             self.templates.push(node);
             let number = self.templates.len();
-            self.out.extend(&self.chars[copied..tokens[i].at]);
-            self.stamped[i..=end].fill(true);
+            self.out
+                .push_str(&self.source[copied..tokens[i].at(self.source)]);
+            if let Some(stamped) = self.stamped.get_mut(i..=end) {
+                stamped.fill(true);
+            }
             // `ui.__stamp(__zgx_t, n, …)`, each hole on its own line again.
             self.out.push_str(&format!("ui.__stamp({LOCAL}, {number}"));
             let mut line = tokens[i].line;
@@ -222,10 +448,15 @@ impl Scan {
                     line += 1;
                 }
                 self.out.push_str(", ");
-                let from = tokens[hole.first].at;
-                let to = tokens[hole.last].at + tokens[hole.last].text.chars().count();
-                line += self.chars[from..to].iter().filter(|c| **c == '\n').count() as u32;
-                self.stamped[hole.first..=hole.last].fill(false);
+                let from = tokens[hole.first].at(self.source);
+                let to = tokens[hole.last].at(self.source) + tokens[hole.last].text.len();
+                line += self.source[from..to]
+                    .bytes()
+                    .filter(|b| *b == b'\n')
+                    .count() as u32;
+                if let Some(stamped) = self.stamped.get_mut(hole.first..=hole.last) {
+                    stamped.fill(false);
+                }
                 if hole.spread {
                     self.out.push_str("ui.__pack(");
                 }
@@ -239,10 +470,10 @@ impl Scan {
                 line += 1;
             }
             self.out.push(')');
-            copied = tokens[end].at + 1;
+            copied = tokens[end].at(self.source) + 1;
             i = end + 1;
         }
-        self.out.extend(&self.chars[copied..stop]);
+        self.out.push_str(&self.source[copied..stop]);
     }
 }
 
@@ -250,8 +481,8 @@ impl Scan {
 /// `ui.<kind>(…)`): how many it stamps, and each it leaves as written with
 /// why (the corpus test's report).
 pub(crate) fn report(source: &str) -> (usize, Vec<String>) {
-    let (tokens, _) = tokenize(source);
-    let stamped = scan(source).map(|scan| scan.stamped);
+    let tokens = lex(source);
+    let stamped = scan(source, true).map(|scan| scan.stamped);
     let mut count = 0;
     let mut left = Vec::new();
     for i in 0..tokens.len() {
@@ -268,7 +499,7 @@ pub(crate) fn report(source: &str) -> (usize, Vec<String>) {
             count += 1;
             continue;
         }
-        let kind = tokens[i + 2].text.as_str();
+        let kind = tokens[i + 2].text;
         let why = if stamped.is_none() {
             "`ui` used as a value in its file"
         } else if !KINDS.contains(&kind) {
@@ -289,7 +520,7 @@ pub(crate) fn report(source: &str) -> (usize, Vec<String>) {
 /// its closing `}`.
 type Found = (TNode, Vec<HoleAt>, usize);
 
-fn template_at(tokens: &[Token], i: usize) -> Option<Found> {
+fn template_at(tokens: &[Tok<'_>], i: usize) -> Option<Found> {
     let mut holes = Vec::new();
     let (node, end) = node_at(tokens, i, &mut holes)?;
     if !in_order(tokens, i, end, &holes) {
@@ -304,7 +535,7 @@ fn template_at(tokens: &[Token], i: usize) -> Option<Found> {
 /// (`node::template`), so a hole after it that may make state (a call) must
 /// run after it, as written. Such a template is left as written; the
 /// templates within it are found on their own.
-fn in_order(tokens: &[Token], i: usize, end: usize, holes: &[HoleAt]) -> bool {
+fn in_order(tokens: &[Tok<'_>], i: usize, end: usize, holes: &[HoleAt]) -> bool {
     let mut text_template = false;
     let mut holes = holes.iter().peekable();
     let mut k = i;
@@ -330,13 +561,13 @@ fn in_order(tokens: &[Token], i: usize, end: usize, holes: &[HoleAt]) -> bool {
 /// Whether the expression in tokens `first..=last` may call a function as
 /// it is evaluated: a call (`f(…)`, `f "…"`, `f {…}`, `a:m()`). A function
 /// literal runs nothing until called.
-fn may_call(tokens: &[Token], first: usize, last: usize) -> bool {
+fn may_call(tokens: &[Tok<'_>], first: usize, last: usize) -> bool {
     if tokens[first].kind == Tk::Name && tokens[first].text == "function" {
         return false;
     }
     (first + 1..=last).any(|k| {
         let before = &tokens[k - 1];
-        let callee = (before.kind == Tk::Name && !is_keyword(&before.text))
+        let callee = (before.kind == Tk::Name && !is_keyword(before.text))
             || before.is(")")
             || before.is("]")
             || (before.kind == Tk::Str && k - 1 > first);
@@ -363,7 +594,7 @@ fn is_keyword(name: &str) -> bool {
     )
 }
 
-fn node_at(tokens: &[Token], i: usize, holes: &mut Vec<HoleAt>) -> Option<(TNode, usize)> {
+fn node_at(tokens: &[Tok<'_>], i: usize, holes: &mut Vec<HoleAt>) -> Option<(TNode, usize)> {
     let ui = tokens.get(i)?;
     if ui.kind != Tk::Name || ui.text != "ui" {
         return None;
@@ -375,7 +606,7 @@ fn node_at(tokens: &[Token], i: usize, holes: &mut Vec<HoleAt>) -> Option<(TNode
         return None;
     }
     let kind = tokens.get(i + 2)?;
-    if kind.kind != Tk::Name || !KINDS.contains(&kind.text.as_str()) {
+    if kind.kind != Tk::Name || !KINDS.contains(&kind.text) {
         return None;
     }
     if !tokens.get(i + 3)?.is("{") {
@@ -397,7 +628,7 @@ fn node_at(tokens: &[Token], i: usize, holes: &mut Vec<HoleAt>) -> Option<(TNode
         }
         let (key, from) = if token.kind == Tk::Name && tokens.get(k + 1).is_some_and(|t| t.is("="))
         {
-            (Some(token.text.clone()), k + 2)
+            (Some(intern(token.text)), k + 2)
         } else {
             (None, k)
         };
@@ -427,7 +658,7 @@ fn node_at(tokens: &[Token], i: usize, holes: &mut Vec<HoleAt>) -> Option<(TNode
     }
     Some((
         TNode {
-            kind: kind.text.clone(),
+            kind: KINDS.iter().copied().find(|k| *k == kind.text)?,
             line: ui.line,
             fields,
         },
@@ -437,7 +668,7 @@ fn node_at(tokens: &[Token], i: usize, holes: &mut Vec<HoleAt>) -> Option<(TNode
 
 /// The value of the expression in tokens `first..=last`: a literal, a
 /// template or a hole.
-fn value_of(tokens: &[Token], first: usize, last: usize, holes: &mut Vec<HoleAt>) -> TValue {
+fn value_of(tokens: &[Tok<'_>], first: usize, last: usize, holes: &mut Vec<HoleAt>) -> TValue {
     let one = &tokens[first];
     if first == last {
         let plain_string = one.kind == Tk::Str
@@ -445,13 +676,16 @@ fn value_of(tokens: &[Token], first: usize, last: usize, holes: &mut Vec<HoleAt>
             && !one.text.contains('\\');
         if one.kind == Tk::Number
             || plain_string
-            || (one.kind == Tk::Name && matches!(one.text.as_str(), "true" | "false" | "nil"))
+            || (one.kind == Tk::Name && matches!(one.text, "true" | "false" | "nil"))
         {
-            return TValue::Lit(one.text.clone());
+            return TValue::Lit(Literal::read(one.text));
         }
     }
     if last == first + 1 && one.is("-") && tokens[last].kind == Tk::Number {
-        return TValue::Lit(format!("-{}", tokens[last].text));
+        return TValue::Lit(match Literal::read(tokens[last].text) {
+            Literal::Number(n) => Literal::Number(-n),
+            _ => Literal::Luau(format!("-{}", tokens[last].text).into()),
+        });
     }
     if let Some((node, end)) = node_at(tokens, first, holes)
         && end == last
@@ -469,7 +703,7 @@ fn value_of(tokens: &[Token], first: usize, last: usize, holes: &mut Vec<HoleAt>
 /// Whether the expression in tokens `first..=last` may give more than one
 /// value: a call (`f(…)`, `f "…"`, `f {…}`) or `...`. Taking one for a
 /// spread costs a table, never a wrong answer.
-fn multiple(tokens: &[Token], first: usize, last: usize) -> bool {
+fn multiple(tokens: &[Tok<'_>], first: usize, last: usize) -> bool {
     let end = &tokens[last];
     end.is("...") || (last > first && (end.is(")") || end.is("}") || end.kind == Tk::Str))
 }
@@ -477,7 +711,7 @@ fn multiple(tokens: &[Token], first: usize, last: usize) -> bool {
 /// Where the expression starting at `from` ends: the index of the `,`,
 /// `;` or `}` after it, at its own depth (brackets, and the blocks of
 /// function literals and the like).
-fn expression_end(tokens: &[Token], from: usize) -> Option<usize> {
+fn expression_end(tokens: &[Tok<'_>], from: usize) -> Option<usize> {
     /// What is open: a block closed by `end` or `until` (an `if`
     /// statement's too), or an `if` expression, closed by its `else`.
     #[derive(PartialEq)]
@@ -494,7 +728,7 @@ fn expression_end(tokens: &[Token], from: usize) -> Option<usize> {
         let token = tokens.get(k)?;
         let mut next_is_expression = false;
         if token.kind == Tk::Punct {
-            match token.text.as_str() {
+            match token.text {
                 "(" | "{" | "[" => brackets += 1,
                 ")" | "]" => brackets -= 1,
                 "}" if brackets == 0 && open.is_empty() => return Some(k),
@@ -504,9 +738,9 @@ fn expression_end(tokens: &[Token], from: usize) -> Option<usize> {
             }
             // After an operator, `=`, `,` or an opening bracket comes an
             // expression; after a closing bracket, no.
-            next_is_expression = !matches!(token.text.as_str(), ")" | "]" | "}");
+            next_is_expression = !matches!(token.text, ")" | "]" | "}");
         } else if token.kind == Tk::Name {
-            match token.text.as_str() {
+            match token.text {
                 // A condition is an expression, whichever `if` it is.
                 "if" => {
                     open.push(if expression_next {
@@ -553,18 +787,274 @@ pub(crate) struct Registry {
 /// closure of it that stamps: freed with the last of them.
 struct Chunk {
     templates: Vec<Compiled>,
+    /// Its stamps' caller, read at its first (`Caller`).
+    caller: RefCell<Option<Rc<Caller>>>,
 }
 
-/// A template, its literals made once.
+/// A template: its tree, and a plan for each of its nodes (in order, each
+/// before the nodes within it).
 struct Compiled {
-    node: TNode,
-    /// Its literals, in the order its fields name them.
-    literals: Vec<Value>,
+    /// Its chunk's trees, shared with the rewrite that read them, and
+    /// which is its own.
+    nodes: Rc<[TNode]>,
+    at: usize,
+    plans: Vec<Plan>,
+}
+impl Compiled {
+    fn node(&self) -> &TNode {
+        &self.nodes[self.at]
+    }
+}
+
+/// How a stamp makes one of a template's nodes.
+struct Plan {
+    /// Its own fields' literals, in their order: made at its first stamp
+    /// (`Plan::literals`), let go as idle (`trim`).
+    literals: RefCell<Option<Rc<[Value]>>>,
+    /// The nodes it is made of, itself included: the plan after its last
+    /// is `size` on.
+    size: usize,
+    /// Made from a prototype of its literals (`node::proto`) and a table of
+    /// its holes and children alone, not a whole table: every node whose
+    /// constructor reads only what `fill_from` walks.
+    fast: bool,
+    /// No hole in it or within it: made once, and shared after.
+    constant: bool,
+    proto: RefCell<Option<Rc<crate::node::Proto>>>,
+    made: RefCell<Option<Rc<crate::node::Node>>>,
+    /// Stamps it has been made by: a prototype only once it is made again
+    /// (most of an app's interface is made once, and keeps nothing for it).
+    stamped: std::cell::Cell<u32>,
+    /// Its named fields that a stamp gives (holes and nodes), and all its
+    /// named fields: the sizes of the tables it makes.
+    named: usize,
+    named_all: usize,
+}
+
+/// Plans for `node` and the nodes within it, in order, into `out`.
+fn plans_of(node: &TNode, out: &mut Vec<Plan>) -> bool {
+    let at = out.len();
+    let keyed = |name: &str| node.fields.iter().any(|(key, _)| *key == Some(name));
+    // What a constructor reads of its table beyond `fill_from`'s walk, or
+    // what that walk finishes with that a second walk wouldn't redo.
+    let fast = !keyed("variants")
+        && !keyed("role")
+        && !node
+            .fields
+            .iter()
+            .any(|(key, _)| key.is_some_and(|k| k.starts_with("layout")))
+        // A button's `variant` adds its look where the table sets none
+        // (`button_look`): only over a table of literals alone.
+        && !(node.kind == "button"
+            && keyed("variant")
+            && node
+                .fields
+                .iter()
+                .any(|(key, value)| key.is_some() && !matches!(value, TValue::Lit(_))));
+    out.push(Plan {
+        literals: RefCell::default(),
+        size: 1,
+        fast,
+        constant: false,
+        proto: RefCell::default(),
+        made: RefCell::default(),
+        stamped: std::cell::Cell::new(0),
+        named: node
+            .fields
+            .iter()
+            .filter(|(key, value)| key.is_some() && !matches!(value, TValue::Lit(_)))
+            .count(),
+        named_all: node.fields.iter().filter(|(key, _)| key.is_some()).count(),
+    });
+    let mut constant = true;
+    for (_, value) in &node.fields {
+        match value {
+            TValue::Lit(_) => {}
+            TValue::Node(child) => constant &= plans_of(child, out),
+            TValue::Hole(_) | TValue::Spread(_) => constant = false,
+        }
+    }
+    let size = out.len() - at;
+    let plan = &mut out[at];
+    plan.size = size;
+    plan.constant = constant && fast;
+    constant
+}
+
+/// A literal as the rewrite read it (`value_of`): its value made from this
+/// at a stamp (`Literal::value`), no text kept for the common ones.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Literal {
+    Number(f64),
+    /// A quoted string's characters (no escapes: `value_of` takes none).
+    Text(Box<str>),
+    True,
+    False,
+    Nil,
+    /// Any other number as written (hex, `_`, an exponent), read by Luau.
+    Luau(Box<str>),
+}
+
+impl Literal {
+    /// The literal token `text` reads as.
+    fn read(text: &str) -> Self {
+        let quoted = text.len() >= 2
+            && (text.starts_with('"') && text.ends_with('"')
+                || text.starts_with('\'') && text.ends_with('\''));
+        match text {
+            "true" => Literal::True,
+            "false" => Literal::False,
+            "nil" => Literal::Nil,
+            _ if quoted => Literal::Text(text[1..text.len() - 1].into()),
+            _ if text.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                && text.bytes().filter(|b| *b == b'.').count() <= 1 =>
+            {
+                text.parse::<f64>()
+                    .map_or_else(|_| Literal::Luau(text.into()), Literal::Number)
+            }
+            _ => Literal::Luau(text.into()),
+        }
+    }
+    /// Its value, as Luau reads it.
+    fn value(&self, lua: &Lua) -> Value {
+        match self {
+            Literal::Number(n) => Value::Number(*n),
+            Literal::Text(text) => lua.create_string(&**text).map_or(Value::Nil, Value::String),
+            Literal::True => Value::Boolean(true),
+            Literal::False => Value::Boolean(false),
+            Literal::Nil => Value::Nil,
+            Literal::Luau(text) => lua
+                .load(format!("return {text}"))
+                .eval()
+                .unwrap_or(Value::Nil),
+        }
+    }
+}
+
+/// A field's name, kept once for the process: the names scripts give
+/// fields are few, and every template's tree shares them.
+fn intern(name: &str) -> &'static str {
+    thread_local! {
+        static NAMES: RefCell<std::collections::HashSet<&'static str>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+    NAMES.with_borrow_mut(|names| {
+        if let Some(known) = names.get(name) {
+            return *known;
+        }
+        let kept: &'static str = Box::leak(name.into());
+        names.insert(kept);
+        kept
+    })
+}
+
+impl Plan {
+    /// Its node's literals, as Luau reads them: kept from its second stamp
+    /// after it loaded or went idle, while it is used; made for the one
+    /// stamp alone before.
+    fn literals(&self, lua: &Lua, node: &TNode) -> Rc<[Value]> {
+        if let Some(literals) = self.literals.borrow().as_ref() {
+            return literals.clone();
+        }
+        let literals: Rc<[Value]> = node
+            .fields
+            .iter()
+            .filter_map(|(_, value)| match value {
+                TValue::Lit(literal) => Some(literal.value(lua)),
+                _ => None,
+            })
+            .collect();
+        if self.stamped.get() > 1 {
+            *self.literals.borrow_mut() = Some(literals.clone());
+        }
+        literals
+    }
+}
+
+/// Whether stamps make nodes by their plans (`ZGX_TEMPLATES=force`), or
+/// each from a whole table as the script would (`=stamp`: the rewrite
+/// alone, to compare).
+fn planned() -> bool {
+    thread_local! {
+        static ON: bool = std::env::var("ZGX_TEMPLATES").is_ok_and(|v| v == "force");
+    }
+    ON.with(|on| *on)
 }
 
 thread_local! {
     /// Templates alive on this thread (their chunks not yet freed).
     static LIVE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The chunks alive on this thread, for `trim` and `bytes`.
+    static CHUNKS: RefCell<Vec<std::rc::Weak<Chunk>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// What the templates alive on this thread keep, as idle: their prototypes
+/// and the nodes made once, made again at their next stamp.
+pub(crate) fn trim() {
+    LAST.set(None);
+    CHUNKS.with_borrow_mut(|chunks| {
+        chunks.retain(|chunk| chunk.strong_count() > 0);
+        for chunk in chunks.iter().filter_map(std::rc::Weak::upgrade) {
+            for plan in chunk.templates.iter().flat_map(|t| &t.plans) {
+                plan.proto.take();
+                plan.made.take();
+                plan.literals.take();
+            }
+        }
+    });
+}
+
+/// What the templates alive on this thread keep in Rust, in bytes: their
+/// trees, plans, literals' values, prototypes and nodes made once.
+pub(crate) fn bytes() -> usize {
+    fn tree(node: &TNode) -> usize {
+        size_of::<TNode>()
+            + node.fields.capacity() * size_of::<(Option<&str>, TValue)>()
+            + node
+                .fields
+                .iter()
+                .map(|(_, value)| match value {
+                    TValue::Lit(Literal::Text(text) | Literal::Luau(text)) => text.len(),
+                    TValue::Node(child) => tree(child),
+                    _ => 0,
+                })
+                .sum::<usize>()
+    }
+    let plan = |plan: &Plan| {
+        plan.literals
+            .borrow()
+            .as_ref()
+            .map_or(0, |l| l.len() * size_of::<Value>())
+            + plan
+                .proto
+                .borrow()
+                .as_deref()
+                .map_or(0, crate::node::proto_bytes)
+            + plan
+                .made
+                .borrow()
+                .as_deref()
+                .map_or(0, crate::node::tree_bytes)
+    };
+    CHUNKS.with_borrow(|chunks| {
+        chunks
+            .iter()
+            .filter_map(std::rc::Weak::upgrade)
+            .map(|chunk| {
+                size_of::<Chunk>()
+                    + chunk.templates.capacity() * size_of::<Compiled>()
+                    + chunk
+                        .templates
+                        .iter()
+                        .map(|t| {
+                            tree(t.node())
+                                + t.plans.capacity() * size_of::<Plan>()
+                                + t.plans.iter().map(plan).sum::<usize>()
+                        })
+                        .sum::<usize>()
+            })
+            .sum()
+    })
 }
 
 /// Templates alive on this thread: the memory test's count.
@@ -573,20 +1063,23 @@ pub(crate) fn live() -> usize {
 }
 
 impl Chunk {
-    fn new(lua: &Lua, nodes: &[TNode]) -> Self {
+    fn new(nodes: &Rc<[TNode]>) -> Self {
         LIVE.with(|live| live.set(live.get() + nodes.len()));
         Self {
             templates: nodes
                 .iter()
-                .map(|node| {
-                    let mut literals = Vec::new();
-                    literals_of(lua, node, &mut literals);
+                .enumerate()
+                .map(|(at, node)| {
+                    let mut plans = Vec::new();
+                    plans_of(node, &mut plans);
                     Compiled {
-                        node: node.clone(),
-                        literals,
+                        nodes: nodes.clone(),
+                        at,
+                        plans,
                     }
                 })
                 .collect(),
+            caller: RefCell::default(),
         }
     }
 }
@@ -600,21 +1093,6 @@ impl Drop for Chunk {
 /// A chunk's templates, as its `__zgx_t` holds them.
 struct ChunkData(Rc<Chunk>);
 impl mlua::UserData for ChunkData {}
-
-fn literals_of(lua: &Lua, node: &TNode, out: &mut Vec<Value>) {
-    for (_, value) in &node.fields {
-        match value {
-            // What the rewrite reads as a literal is one Luau reads.
-            TValue::Lit(text) => out.push(
-                lua.load(format!("return {text}"))
-                    .eval()
-                    .unwrap_or(Value::Nil),
-            ),
-            TValue::Node(child) => literals_of(lua, child, out),
-            TValue::Hole(_) | TValue::Spread(_) => {}
-        }
-    }
-}
 
 /// A stamp's caller: its chunk's source, its short name, and the line.
 type Stamping = Option<(Rc<str>, Rc<str>, u32)>;
@@ -648,8 +1126,24 @@ pub(crate) fn stamping() -> Option<(String, String, u32)> {
     })
 }
 
+/// A stamp's tables and nodes are made with the VM's memory limit set
+/// aside (`create_table_relaxed`, `create_userdata_relaxed`): counted, not
+/// checked. So each stamp checks first that the VM is under its limit, and
+/// fails as an allocation past it would: a script stamping in a loop (a
+/// plugin's, untrusted) goes past its limit by one stamp at most.
+fn over_limit(lua: &Lua) -> mlua::Result<()> {
+    if lua.over_memory_limit() {
+        return Err(mlua::Error::MemoryError("not enough memory".into()));
+    }
+    Ok(())
+}
+
 /// Install `ui.__stamp` on `ui`, its constructors those `ui` has now.
 pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    // Off, a script loads as written: no stamp to take, nothing installed.
+    if !enabled() {
+        return Ok(());
+    }
     let mut constructors = HashMap::new();
     for kind in KINDS {
         constructors.insert(*kind, ui.get::<Function>(*kind)?);
@@ -660,10 +1154,11 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.set(
         "__pack",
         lua.create_function(|lua, args: MultiValue| {
-            let packed = lua.create_table_with_capacity(args.len(), 1)?;
-            packed.raw_set("n", args.len())?;
+            over_limit(lua)?;
+            let packed = lua.create_table_relaxed(args.len(), 1)?;
+            packed.raw_set_field_relaxed("n", args.len())?;
             for (i, value) in args.into_iter().enumerate() {
-                packed.raw_set(i + 1, value)?;
+                packed.raw_set_relaxed(i + 1, value)?;
             }
             Ok(packed)
         })?,
@@ -686,13 +1181,13 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     )?;
     ui.set(
         "__stamp",
-        lua.create_function(move |lua, args: MultiValue| {
-            let mut args = args.into_iter();
-            let chunk = match args.next() {
+        lua.create_function(move |lua, mut args: MultiValue| {
+            over_limit(lua)?;
+            let chunk = match args.pop_front() {
                 Some(Value::UserData(chunk)) => chunk.borrow::<ChunkData>()?.0.clone(),
                 _ => return Err(mlua::Error::runtime("ui.__stamp: no templates")),
             };
-            let number = match args.next() {
+            let number = match args.pop_front() {
                 Some(Value::Integer(n)) => n as usize,
                 Some(Value::Number(n)) => n as usize,
                 _ => 0,
@@ -701,48 +1196,58 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 .checked_sub(1)
                 .and_then(|at| chunk.templates.get(at))
                 .ok_or_else(|| mlua::Error::runtime("ui.__stamp: an unknown template"))?;
-            let holes: Vec<Value> = args.collect();
+            // Read where they came: no copy of them made.
+            let holes: &[Value] = args.make_contiguous();
             STAMPS.with(|stamps| stamps.set(stamps.get() + 1));
-            // The chunk calling the stamp: its nodes' caller.
-            let caller = lua
-                .inspect_stack(1, |d| {
-                    let source = d.source();
-                    Caller {
-                        source: Rc::from(source.source.as_deref().unwrap_or("")),
-                        short: Rc::from(source.short_src.as_deref().unwrap_or("")),
-                        line: d.current_line().unwrap_or(0) as u32,
-                    }
-                })
-                .unwrap_or_else(|| Caller {
-                    source: Rc::from(""),
-                    short: Rc::from(""),
-                    line: 0,
-                });
-            let mut literals = compiled.literals.iter();
-            build(
+            // The chunk calling the stamp, its nodes' caller: read at its first.
+            let caller = chunk.caller.borrow().clone();
+            let caller = match caller {
+                Some(caller) => caller,
+                None => {
+                    let caller = Rc::new(
+                        lua.inspect_stack(1, |d| {
+                            let source = d.source();
+                            Caller {
+                                source: Rc::from(source.source.as_deref().unwrap_or("")),
+                                short: Rc::from(source.short_src.as_deref().unwrap_or("")),
+                            }
+                        })
+                        .unwrap_or(Caller {
+                            source: Rc::from(""),
+                            short: Rc::from(""),
+                        }),
+                    );
+                    *chunk.caller.borrow_mut() = Some(caller.clone());
+                    caller
+                }
+            };
+            let stamp = Stamp {
                 lua,
-                &caller,
-                &compiled.node,
-                &holes,
-                &mut literals,
-                &constructors,
-            )
+                caller: &caller,
+                plans: &compiled.plans,
+                holes,
+                constructors: &constructors,
+                planned: planned(),
+                // A node made once says nothing of where it is used again.
+                shared: planned() && !crate::node::locating(lua),
+            };
+            stamp.build(compiled.node(), &mut 0, true)?.value(lua)
         })?,
     )
 }
 
-/// A stamp's caller: its chunk's `source` and short name, and the line of
-/// the stamp's call (where the chunk's frame is while it runs).
+/// A stamp's caller: its chunk's `source` and short name. Every stamp of
+/// a chunk has the same (its `__zgx_t` is the chunk's own), read at its
+/// first; the line of the call is read only for an error (`as_written`).
 struct Caller {
     source: Rc<str>,
     short: Rc<str>,
-    line: u32,
 }
 
 /// A constructor's `error`, as the script's own call on `line` would have
 /// raised it: its message as it was, its traceback naming `line` where
 /// the stamp's call is.
-fn as_written(error: mlua::Error, caller: &Caller, line: u32) -> mlua::Error {
+fn as_written(lua: &Lua, error: mlua::Error, caller: &Caller, line: u32) -> mlua::Error {
     let mlua::Error::CallbackError { traceback, cause } = error else {
         return error;
     };
@@ -750,14 +1255,18 @@ fn as_written(error: mlua::Error, caller: &Caller, line: u32) -> mlua::Error {
     while let mlua::Error::CallbackError { cause, .. } = &*root {
         root = cause.clone();
     }
-    if line == caller.line {
+    // Where the chunk's frame is: the stamp's call.
+    let called = lua
+        .inspect_stack(1, |d| d.current_line().unwrap_or(0) as u32)
+        .unwrap_or(0);
+    if line == called {
         // The stamp's own traceback is the one the call would have had.
         return Arc::unwrap_or_clone(root);
     }
     // This traceback in place of the stamp's (which, naming the stamp's
     // line, isn't found in it: `CallbackError`'s display shows it whole).
     let traceback = traceback.replacen(
-        &format!("\t{}:{}:", caller.short, caller.line),
+        &format!("\t{}:{called}:", caller.short),
         &format!("\t{}:{line}:", caller.short),
         1,
     );
@@ -767,53 +1276,258 @@ fn as_written(error: mlua::Error, caller: &Caller, line: u32) -> mlua::Error {
     }
 }
 
-/// The node `node` makes: its table as the script would have built it,
-/// given to its constructor as if called from the node's own line. A
-/// constructor's error is that line's.
-fn build<'a>(
-    lua: &Lua,
-    caller: &Caller,
-    node: &TNode,
-    holes: &[Value],
-    literals: &mut std::slice::Iter<'a, Value>,
-    constructors: &HashMap<&'static str, Function>,
-) -> mlua::Result<Value> {
-    let table = lua.create_table()?;
-    let mut at = 1;
-    for (key, value) in &node.fields {
-        let value = match value {
-            TValue::Lit(_) => literals.next().cloned().unwrap_or(Value::Nil),
-            TValue::Hole(n) => holes.get(*n).cloned().unwrap_or(Value::Nil),
-            TValue::Spread(n) => {
-                if let Some(Value::Table(packed)) = holes.get(*n) {
-                    let count: usize = packed.raw_get("n")?;
-                    for i in 1..=count {
-                        table.raw_set(at, packed.raw_get::<Value>(i)?)?;
-                        at += 1;
-                    }
-                }
-                continue;
-            }
-            TValue::Node(child) => build(lua, caller, child, holes, literals, constructors)?,
-        };
-        match key {
-            Some(name) => table.raw_set(name.as_str(), value)?,
-            None => {
-                table.raw_set(at, value)?;
-                at += 1;
-            }
+/// A node a stamp made: by its plan (`Rc<Node>`, no userdata yet), or by
+/// its constructor from a whole table (the script's value).
+enum Made {
+    Node(Rc<crate::node::Node>),
+    Value(Value),
+}
+
+impl Made {
+    /// As the script holds it.
+    fn value(self, lua: &Lua) -> mlua::Result<Value> {
+        match self {
+            Made::Node(node) => crate::node::wrap(lua, node).map(Value::UserData),
+            Made::Value(value) => Ok(value),
         }
     }
-    let constructor = constructors
-        .get(node.kind.as_str())
-        .ok_or_else(|| mlua::Error::runtime("ui.__stamp: an unknown kind"))?;
-    let before = STAMPING.with(|s| {
-        s.borrow_mut()
-            .replace((caller.source.clone(), caller.short.clone(), node.line))
-    });
-    let made = constructor.call(table);
-    STAMPING.with(|s| *s.borrow_mut() = before);
-    made.map_err(|error| as_written(error, caller, node.line))
+    /// As a child of the node being made.
+    fn child(self) -> crate::node::Child {
+        match self {
+            Made::Node(node) => crate::node::Child::Node(node),
+            Made::Value(value) => crate::node::Child::Value(value),
+        }
+    }
+}
+
+/// One stamp's making: its template's plans and holes, and its caller.
+struct Stamp<'a> {
+    lua: &'a Lua,
+    caller: &'a Caller,
+    plans: &'a [Plan],
+    holes: &'a [Value],
+    constructors: &'a HashMap<&'static str, Function>,
+    /// Nodes made by their plans (`planned`), not each from a whole table.
+    planned: bool,
+    /// A node with no hole made once and shared.
+    shared: bool,
+}
+
+impl Stamp<'_> {
+    /// The node `node` makes, `plan` (its index in `plans`) moved past it
+    /// and the nodes within it: what its constructor makes of the table the
+    /// script would have built, as if called from the node's own line. A
+    /// constructor's error is that line's.
+    fn build(&self, node: &TNode, plan: &mut usize, root: bool) -> mlua::Result<Made> {
+        let at = *plan;
+        let this = &self.plans[at];
+        *plan += 1;
+        let again = this.stamped.get() > 0;
+        this.stamped.set(this.stamped.get().saturating_add(1));
+        // Its first stamp by the whole table, as written: a prototype (and
+        // what it keeps) only for a node made again.
+        if self.planned && this.fast && again {
+            if self.shared
+                && this.constant
+                && let Some(made) = this.made.borrow().clone()
+            {
+                *plan = at + this.size;
+                return Ok(Made::Node(made));
+            }
+            if let Some(proto) = self.proto(node, this) {
+                match self.planned_node(node, this, &proto, plan) {
+                    // A stamp's own node, not shared: its userdata made from
+                    // it by `node_ud`, as every node's is.
+                    Ok(made) if root && !(self.shared && this.constant) => {
+                        let made = self.at(node, || crate::node::node_ud(self.lua, made))?;
+                        return Ok(Made::Value(Value::UserData(made)));
+                    }
+                    Ok(made) => {
+                        let made = self.at(node, || Ok(crate::node::node_rc(self.lua, made)))?;
+                        if self.shared && this.constant {
+                            *this.made.borrow_mut() = Some(made.clone());
+                        }
+                        return Ok(Made::Node(made));
+                    }
+                    // Made again as the script would: its error is then
+                    // the constructor's, with the script's traceback.
+                    Err(_) => *plan = at + 1,
+                }
+            }
+        }
+        self.whole(node, this, plan).map(Made::Value)
+    }
+
+    /// `node`'s prototype: made from its literal fields at its first stamp
+    /// (`node::proto`), then kept. `None` if they fail: the whole table
+    /// then says so, as the script's call would.
+    fn proto(&self, node: &TNode, plan: &Plan) -> Option<Rc<crate::node::Proto>> {
+        if let Some(proto) = plan.proto.borrow().as_ref() {
+            return Some(proto.clone());
+        }
+        let made = (|| {
+            let table = self.lua.create_table_relaxed(0, node.fields.len())?;
+            let literals = plan.literals(self.lua, node);
+            let (mut literals, mut at) = (literals.iter(), 1);
+            for (key, value) in &node.fields {
+                match (key, value) {
+                    (Some(name), TValue::Lit(_)) => {
+                        table.raw_set_field_relaxed(name, literals.next().cloned())?
+                    }
+                    (None, TValue::Lit(_)) => {
+                        let literal = literals.next().cloned();
+                        // A text's content, its first element: read as it is made.
+                        if node.kind == "text" && at == 1 {
+                            table.raw_set_relaxed(1, literal)?;
+                        }
+                        at += 1;
+                    }
+                    (None, _) => at += 1,
+                    _ => {}
+                }
+            }
+            self.at(node, || crate::node::proto(self.lua, node.kind, &table))
+        })();
+        let proto = Rc::new(made.ok().flatten()?);
+        *plan.proto.borrow_mut() = Some(proto.clone());
+        Some(proto)
+    }
+
+    /// `node` made from `proto` and what its literals don't give: its named
+    /// holes (walked from a table of them alone, if it has any), a text's
+    /// content, and its children, the nodes within it made by their plans.
+    fn planned_node(
+        &self,
+        node: &TNode,
+        this: &Plan,
+        proto: &crate::node::Proto,
+        plan: &mut usize,
+    ) -> mlua::Result<crate::node::Node> {
+        let text = node.kind == "text";
+        let mut named: Option<Table> = None;
+        let mut content = None;
+        let mut items = Vec::new();
+        let literals = this.literals(self.lua, node);
+        let (mut literals, mut at) = (literals.iter(), 1_i64);
+        // A positional value at `at`: a text's content first, else a child.
+        let mut put = |at: &mut i64, child: crate::node::Child| -> mlua::Result<()> {
+            if text && *at == 1 {
+                content = Some(match child {
+                    crate::node::Child::Node(node) => {
+                        Value::UserData(crate::node::wrap(self.lua, node)?)
+                    }
+                    crate::node::Child::Value(value) => value,
+                });
+            } else {
+                items.push((*at, child));
+            }
+            *at += 1;
+            Ok(())
+        };
+        for (key, value) in &node.fields {
+            match (key, value) {
+                // In its prototype.
+                (Some(_), TValue::Lit(_)) => {
+                    literals.next();
+                }
+                (Some(name), TValue::Hole(n)) => {
+                    let value = self.holes.get(*n).cloned().unwrap_or(Value::Nil);
+                    let table = match &named {
+                        Some(table) => table,
+                        None => named.insert(self.lua.create_table_relaxed(0, this.named)?),
+                    };
+                    table.raw_set_field_relaxed(name, value)?;
+                }
+                (Some(name), TValue::Node(child)) => {
+                    let value = self.build(child, plan, false)?.value(self.lua)?;
+                    let table = match &named {
+                        Some(table) => table,
+                        None => named.insert(self.lua.create_table_relaxed(0, this.named)?),
+                    };
+                    table.raw_set_field_relaxed(name, value)?;
+                }
+                (None, TValue::Lit(_)) => {
+                    let literal = literals.next().cloned().unwrap_or(Value::Nil);
+                    if text && at == 1 {
+                        // A text's content written out: in its prototype.
+                        at += 1;
+                    } else {
+                        put(&mut at, crate::node::Child::Value(literal))?;
+                    }
+                }
+                (None, TValue::Hole(n)) => {
+                    let value = self.holes.get(*n).cloned().unwrap_or(Value::Nil);
+                    put(&mut at, crate::node::Child::Value(value))?;
+                }
+                (_, TValue::Spread(n)) => {
+                    if let Some(Value::Table(packed)) = self.holes.get(*n) {
+                        let count: usize = packed.raw_get("n")?;
+                        for i in 1..=count {
+                            put(&mut at, crate::node::Child::Value(packed.raw_get(i)?))?;
+                        }
+                    }
+                }
+                (None, TValue::Node(child)) => {
+                    let child = self.build(child, plan, false)?.child();
+                    put(&mut at, child)?;
+                }
+            }
+        }
+        self.at(node, || {
+            crate::node::made(self.lua, node.kind, proto, named.as_ref(), content, items)
+        })
+    }
+
+    /// `node` made from the whole table the script would have built, by
+    /// its constructor.
+    fn whole(&self, node: &TNode, this: &Plan, plan: &mut usize) -> mlua::Result<Value> {
+        let positional = node.fields.len() - this.named_all;
+        let table = self.lua.create_table_relaxed(positional, this.named_all)?;
+        let literals = this.literals(self.lua, node);
+        let (mut literals, mut at) = (literals.iter(), 1);
+        for (key, value) in &node.fields {
+            let value = match value {
+                TValue::Lit(_) => literals.next().cloned().unwrap_or(Value::Nil),
+                TValue::Hole(n) => self.holes.get(*n).cloned().unwrap_or(Value::Nil),
+                TValue::Spread(n) => {
+                    if let Some(Value::Table(packed)) = self.holes.get(*n) {
+                        let count: usize = packed.raw_get("n")?;
+                        for i in 1..=count {
+                            table.raw_set_relaxed(at, packed.raw_get::<Value>(i)?)?;
+                            at += 1;
+                        }
+                    }
+                    continue;
+                }
+                TValue::Node(child) => self.build(child, plan, false)?.value(self.lua)?,
+            };
+            match key {
+                Some(name) => table.raw_set_field_relaxed(name, value)?,
+                None => {
+                    table.raw_set_relaxed(at, value)?;
+                    at += 1;
+                }
+            }
+        }
+        let constructor = self
+            .constructors
+            .get(node.kind)
+            .ok_or_else(|| mlua::Error::runtime("ui.__stamp: an unknown kind"))?;
+        self.at(node, || constructor.call(table))
+    }
+
+    /// `make`, as a call from `node`'s own line: what it reads of its caller
+    /// (`STAMPING`), and its error.
+    fn at<T>(&self, node: &TNode, make: impl FnOnce() -> mlua::Result<T>) -> mlua::Result<T> {
+        let caller = self.caller;
+        let before = STAMPING.with(|s| {
+            s.borrow_mut()
+                .replace((caller.source.clone(), caller.short.clone(), node.line))
+        });
+        let made = make();
+        STAMPING.with(|s| *s.borrow_mut() = before);
+        made.map_err(|error| as_written(self.lua, error, caller, node.line))
+    }
 }
 
 #[cfg(test)]
@@ -832,7 +1546,7 @@ mod tests {
         assert_eq!(rewritten.templates.len(), 1);
         let node = &rewritten.templates[0];
         assert_eq!(
-            rewritten.source,
+            &*rewritten.source,
             format!(
                 "local __zgx_t = ui.__templates({}) return ui.__stamp(__zgx_t, 1, f(), tostring(x))",
                 rewritten.key
@@ -970,6 +1684,59 @@ mod tests {
         ] {
             let rewritten = rewrite(source).expect("a template");
             assert_eq!(rewritten.templates[0].kind, "row", "{source}");
+        }
+    }
+
+    #[test]
+    fn the_rewrite_reads_tokens_as_lint_does() {
+        // Every script in the repository, and the hard cases.
+        let mut sources: Vec<String> = vec![
+            "local s = [==[ a ]] b ]==] --[[ c\n d ]] x = `a {b {c}} d` .. 'e\\'' -- f\n1e-5 0x1F 1_000 .5 a...b ::"
+                .into(),
+            "local é = 1\nreturn ui.text { \"ü\", é }".into(),
+        ];
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if path.is_dir() && !name.starts_with("target") && !name.starts_with('.') {
+                    walk(&path, out);
+                } else if name.ends_with(".luau")
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                {
+                    out.push(text);
+                }
+            }
+        }
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".."),
+            &mut sources,
+        );
+        assert!(sources.len() > 100, "{}", sources.len());
+        for source in &sources {
+            let (theirs, _) = crate::lint::tokenize(source);
+            let ours = lex(source);
+            assert_eq!(theirs.len(), ours.len(), "{source}");
+            // A byte offset's column, in characters from 1, as lint counts.
+            let column = |at: usize| {
+                let start = source[..at].rfind('\n').map_or(0, |n| n + 1);
+                source[start..at].chars().count() as u32 + 1
+            };
+            for (t, o) in theirs.iter().zip(&ours) {
+                assert!(
+                    t.kind == o.kind && t.text == o.text,
+                    "{} {:?}",
+                    t.text,
+                    o.text
+                );
+                assert_eq!(
+                    (t.line, t.column),
+                    (o.line, column(o.at(source))),
+                    "{}",
+                    t.text
+                );
+            }
         }
     }
 
