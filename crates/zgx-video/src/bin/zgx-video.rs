@@ -15,7 +15,9 @@ const USAGE: &str = "usage: zgx video render <dir> [composition] <out> [options]
 <out>'s extension says the format: .mp4 is H.264, .mov ProRes 4444, .webm VP9
 (alpha kept), .gif a GIF,
 and a directory or a path holding %04d is a PNG for each frame. H.264, HEVC,
-ProRes, VP9 and AV1 need ffmpeg on the PATH.
+ProRes, VP9 and AV1 need ffmpeg on the PATH (macOS writes H.264, HEVC and
+ProRes without it, below ffmpeg's quality, and no sound yet). It says which
+writes the file, and why.
 
   --codec h264|hevc|prores|vp9|av1|png|gif   the format, over the extension
   --fps N             frames per second of the file (the composition plays at
@@ -122,6 +124,18 @@ fn parse(args: Vec<String>) -> Result<Parsed, String> {
 }
 
 fn render_one(options: &RenderOptions, quiet: bool) -> Result<(), String> {
+    // Which encoder writes it, and why (macOS's own, or ffmpeg's).
+    let format = options
+        .format
+        .or_else(|| zgx_video::Format::of_path(&options.output));
+    if let Some(format) = format
+        && !quiet
+    {
+        let (writer, why) = zgx_video::encode::choice(format);
+        if writer != zgx_video::encode::Writer::Own {
+            eprintln!("zgx video: {why}");
+        }
+    }
     let mut shown = 0;
     let report = zgx_video::render(options, |progress| {
         if !quiet && (progress.done == progress.total || progress.done >= shown + 30) {
