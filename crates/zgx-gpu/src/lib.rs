@@ -6423,7 +6423,21 @@ impl GpuRenderer {
             .map(|(((x, y), (w, h)), (to_x, to_y))| {
                 (x - 1, y - 1, w + 2, h + 2, to_x - 1, to_y - 1)
             });
-        // Direct3D 11: its own atlas's cells copied into one the new size.
+        if !self.copy_atlas_cells(&atlas, size, cells) {
+            return false;
+        }
+        self.atlas_shrunk(atlas, size, shelves, live, glyphs, icons, origins)
+    }
+    /// `cells` (`x, y, width, height` and where they go) of the atlas copied
+    /// into `atlas`, `size` square, as the atlas is written: on the CPU
+    /// where the CPU writes it in place (macOS), by the GPU elsewhere, and
+    /// into Direct3D 11's own atlas made that size. False where it can't.
+    fn copy_atlas_cells(
+        &mut self,
+        atlas: &wgpu::Texture,
+        size: u32,
+        cells: impl Iterator<Item = (u32, u32, u32, u32, u32, u32)>,
+    ) -> bool {
         #[cfg(d3d11)]
         if let Some(state) = &mut self.d3d11 {
             let Some(old) = state.atlas.take() else {
@@ -6438,8 +6452,9 @@ impl GpuRenderer {
             };
             state.device.copy_cells(&old, &new, cells);
             state.atlas = Some(new);
-            return self.atlas_shrunk(atlas, size, shelves, live, glyphs, icons, origins);
+            return true;
         }
+        let _ = size;
         #[cfg(target_os = "macos")]
         let copied_on_cpu = self.unified;
         #[cfg(not(target_os = "macos"))]
@@ -6448,13 +6463,13 @@ impl GpuRenderer {
             // Shared textures the CPU writes: read and written in place.
             #[cfg(target_os = "macos")]
             for (x, y, w, h, to_x, to_y) in cells {
-                upload::copy_texels(&self.atlas, &atlas, (x, y, w, h), (to_x, to_y));
+                upload::copy_texels(&self.atlas, atlas, (x, y, w, h), (to_x, to_y));
             }
         } else {
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("glyph atlas shrunk"),
+                    label: Some("glyph atlas cells"),
                 });
             for (x, y, w, h, to_x, to_y) in cells {
                 encoder.copy_texture_to_texture(
@@ -6465,7 +6480,7 @@ impl GpuRenderer {
                         aspect: wgpu::TextureAspect::All,
                     },
                     wgpu::TexelCopyTextureInfo {
-                        texture: &atlas,
+                        texture: atlas,
                         mip_level: 0,
                         origin: wgpu::Origin3d {
                             x: to_x,
@@ -6483,7 +6498,90 @@ impl GpuRenderer {
             }
             self.queue.submit([encoder.finish()]);
         }
-        self.atlas_shrunk(atlas, size, shelves, live, glyphs, icons, origins)
+        true
+    }
+    /// The atlas grown to `size`, its cells where they lie: copied into the
+    /// larger one's corner, and the quads placed from them (texts', their
+    /// blurred shadows') given UVs a power of two smaller, exactly what
+    /// placing them in the larger atlas gives (both sizes powers of two). So
+    /// growing rasterizes and places nothing again (the mail example's
+    /// growth did both for every glyph on screen). False where it can't copy
+    /// (uploads still queued for the old one): it starts over larger.
+    fn grow_atlas(&mut self, size: u32) -> bool {
+        let old = self.atlas_size;
+        if !self.texture_uploads.is_empty() || size <= old || old < INITIAL_ATLAS {
+            return false;
+        }
+        let atlas = sampled_texture(&self.device, self.unified, size, size, "glyph atlas");
+        if !self.copy_atlas_cells(&atlas, size, std::iter::once((0, 0, old, old, 0, 0))) {
+            return false;
+        }
+        self.atlas = atlas;
+        self.atlas_size = size;
+        self.bind = self.texture_bind(&self.atlas.create_view(&Default::default()), "glyph atlas");
+        self.shelves.grow(size);
+        let k = old as f32 / size as f32;
+        let scale = |quads: &mut [TextQuad]| {
+            for quad in quads.iter_mut().filter(|q| q.paint[1] > 0.5) {
+                for uv in &mut quad.uv {
+                    *uv *= k;
+                }
+            }
+        };
+        let epoch = self.atlas_epoch;
+        for shaped in self.shapes.values_mut() {
+            if shaped.atlas_epoch == epoch {
+                scale(&mut shaped.quads);
+            }
+        }
+        if let Some(blurred) = &mut self.blurred {
+            for text in blurred.texts.values_mut() {
+                if text.atlas_epoch == epoch {
+                    for (_, quads) in &mut text.sigmas {
+                        scale(quads);
+                    }
+                }
+            }
+        }
+        // Its quads recorded with the old UVs.
+        self.kept = None;
+        #[cfg(debug_assertions)]
+        self.check_grown_quads();
+        true
+    }
+    /// After `grow_atlas`: a text's first glyph quad placed fresh from its
+    /// entry in the grown atlas reads, bit for bit, as the scaled one.
+    #[cfg(debug_assertions)]
+    fn check_grown_quads(&self) {
+        let size = self.atlas_size as f32;
+        for shaped in self.shapes.values() {
+            if shaped.atlas_epoch != self.atlas_epoch {
+                continue;
+            }
+            let before = shaped.decorations.iter().filter(|d| d.background).count();
+            let Some(entry) = shaped
+                .glyphs
+                .iter()
+                .find_map(|g| self.entries.get(&AtlasKey::from(g.key)).copied().flatten())
+            else {
+                continue;
+            };
+            let Some(quad) = shaped.quads.get(before) else {
+                continue;
+            };
+            let fresh = [
+                entry.x as f32 / size,
+                entry.y as f32 / size,
+                entry.width as f32 / size,
+                entry.height as f32 / size,
+            ];
+            assert_eq!(
+                quad.uv.map(f32::to_bits),
+                fresh.map(f32::to_bits),
+                "a grown atlas's quad as placed fresh"
+            );
+            return;
+        }
     }
     /// The atlas `shrink_atlas` copied into, `size` square, taken: the live
     /// glyphs and icons at their `origins` there.
@@ -7057,8 +7155,10 @@ impl GpuRenderer {
                         // Back to the size it had reached, not a doubling
                         // at a time, each of which rasterizes the frame's
                         // glyphs.
-                        let size = (self.atlas_size * 2).max(self.atlas_grew_to);
-                        self.reset_atlas(size.min(MAX_ATLAS));
+                        let size = (self.atlas_size * 2).max(self.atlas_grew_to).min(MAX_ATLAS);
+                        if !self.grow_atlas(size) {
+                            self.reset_atlas(size);
+                        }
                     } else if !self.atlas_spent {
                         self.atlas_spent = true;
                         self.recycle_atlas();
@@ -9968,7 +10068,10 @@ impl GpuRenderer {
             // leaves it filling does it start over.
             let thrashing = self.frame.wrapping_sub(self.atlas_recycled_at) < ATLAS_THRASH_FRAMES;
             if thrashing && self.atlas_size < MAX_ATLAS && self.entries.len() < 8192 {
-                self.reset_atlas((self.atlas_size * 2).min(MAX_ATLAS));
+                let size = (self.atlas_size * 2).min(MAX_ATLAS);
+                if !self.grow_atlas(size) {
+                    self.reset_atlas(size);
+                }
             } else if !self.evict_glyphs() {
                 self.recycle_atlas();
             }
