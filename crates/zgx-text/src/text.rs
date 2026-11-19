@@ -2,10 +2,11 @@
 pub use cosmic_text::Affinity;
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 
-/// `key`'s glyph image. On macOS, Core Text's, as macOS draws its own text
-/// (and the only one for a face whose shapes swash can't draw: macOS 26's
-/// PingFang, `hvgl` only), thickened as `key`'s `SMOOTHING` says; swash's
-/// for colour glyphs, and everywhere else. Asked only on a glyph cache
+/// `key`'s glyph image: swash's, on macOS thickened as `key`'s `SMOOTHING`
+/// says, exactly as CoreGraphics thickens macOS's own text (its outline
+/// dilated by `(0.0058 + 0.01 * level) * size` pixels, at most 0.3, read
+/// from CoreGraphics); Core Text's only for a face whose shapes swash can't
+/// draw (macOS 26's PingFang, `hvgl` only). Asked only on a glyph cache
 /// miss. None past `MAX_GLYPH_SIZE` pixels: its mask grows with the size
 /// squared, so a script's `size = 1e6` (or a canvas zoomed far in) would
 /// ask for more memory than there is.
@@ -19,11 +20,18 @@ pub fn glyph_image(
     if size.is_nan() || size > MAX_GLYPH_SIZE {
         return None;
     }
+    // swash's, thickened by `SMOOTHING` as CoreGraphics would (zgx's swash
+    // fork, `Render::dilate_box`); Core Text's only for a face whose shapes
+    // swash can't draw (macOS 26's PingFang, `hvgl` only).
+    let image = swash.get_image_uncached(fonts, key);
     #[cfg(target_os = "macos")]
-    if let Some(image) = crate::core_text_glyphs::glyph_image(fonts, key) {
-        return Some(image);
+    if image
+        .as_ref()
+        .is_none_or(|image| image.placement.width == 0 || image.placement.height == 0)
+    {
+        return crate::core_text_glyphs::glyph_image(fonts, key).or(image);
     }
-    swash.get_image_uncached(fonts, key)
+    image
 }
 /// How macOS's font smoothing thickens text of colour `color` (its alpha
 /// aside), for `smoothed`: 0 not at all (off macOS, and where the user
@@ -34,10 +42,18 @@ pub fn glyph_image(
 pub fn smoothing(color: zgx::scene::Color) -> u8 {
     #[cfg(target_os = "macos")]
     if font_smoothing() {
-        let luminance = (0.2126 * f32::from(color.0)
-            + 0.7152 * f32::from(color.1)
-            + 0.0722 * f32::from(color.2))
-            / 255.;
+        // As CoreGraphics buckets it (`CGFontRenderingGetCustomAntialiasingStyle`):
+        // the colour's linear-light luminance, in quarters.
+        let linear = |c: u8| {
+            let c = f32::from(c) / 255.;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance =
+            0.2126 * linear(color.0) + 0.7152 * linear(color.1) + 0.0722 * linear(color.2);
         return 1 + (4. * luminance + 0.5).floor().clamp(0., 4.) as u8;
     }
     let _ = color;

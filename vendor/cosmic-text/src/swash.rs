@@ -95,8 +95,24 @@ fn swash_image(
     } else {
         None
     })
+    // zgx: thickened as macOS's font smoothing does (`SMOOTHING`, set by the
+    // renderer from the text's colour; macOS only): CoreGraphics' dilation,
+    // read from its binary, of min(0.3, (0.0058 + 0.01 Lq) x size) pixels,
+    // Lq the colour's linear luminance in quarters (level - 1) / 4.
+    .dilate_box(smoothing_dilation(cache_key))
     // Render the image
     .render(&mut scaler, cache_key.glyph_id)
+}
+
+/// zgx: the dilation `cache_key`'s `SMOOTHING` level asks for, in pixels:
+/// 0 at level 0.
+fn smoothing_dilation(cache_key: CacheKey) -> f32 {
+    let level = (cache_key.flags & CacheKeyFlags::SMOOTHING).bits() >> 6;
+    if level == 0 {
+        return 0.;
+    }
+    let lq = (level.min(5) - 1) as f32 / 4.;
+    ((0.0058 + 0.01 * lq) * f32::from_bits(cache_key.font_size_bits)).min(0.3)
 }
 
 fn swash_outline_commands(

@@ -778,6 +778,8 @@ pub struct Render<'a> {
     offset: Point,
     transform: Option<Transform>,
     embolden: f32,
+    /// zgx: `Outline::dilate_box`'s amount, after the transform.
+    dilate: f32,
     foreground: [u8; 4],
     style: Style<'a>,
 }
@@ -793,6 +795,7 @@ impl<'a> Render<'a> {
             offset: Point::new(0., 0.),
             transform: None,
             embolden: 0.,
+            dilate: 0.,
             foreground: [128, 128, 128, 255],
             style: Style::default(),
         }
@@ -833,6 +836,14 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// zgx: dilates a mask outline as macOS's font smoothing does
+    /// (`Outline::dilate_box`), by `d` pixels, after any transform.
+    #[doc(hidden)]
+    pub fn dilate_box(&mut self, d: f32) -> &mut Self {
+        self.dilate = d;
+        self
+    }
+
     /// Specifies an RGBA color to use when rasterizing layers of a color
     /// outline that do not directly reference a palette color. Default is
     /// `[128, 128, 128, 255]`.
@@ -860,6 +871,9 @@ impl<'a> Render<'a> {
                         }
                         if let Some(transform) = &self.transform {
                             outline.transform(transform);
+                        }
+                        if self.dilate > 0. {
+                            outline.dilate_box(self.dilate);
                         }
                         let placement = Mask::with_scratch(outline.path(), rcx)
                             .format(self.format)

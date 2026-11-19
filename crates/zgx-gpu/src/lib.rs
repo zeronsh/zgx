@@ -2040,6 +2040,10 @@ struct Shaped {
     /// none until keyed for its colours (`smooth_glyphs`).
     #[cfg(target_os = "macos")]
     smoothing: Option<u8>,
+    /// The colour plain text's `smoothing` was taken from: the same again,
+    /// and its level isn't worked out again each frame.
+    #[cfg(target_os = "macos")]
+    smoothed_for: Option<zgx::scene::Color>,
     atlas_epoch: u64,
     last_used: u64,
     /// The prepared text these glyphs were laid out from, kept while drawn.
@@ -2067,6 +2071,9 @@ const PER_RUN: u8 = u8::MAX;
 /// quads then hold other glyphs, placed again from the new ones.
 #[cfg(target_os = "macos")]
 fn smooth_glyphs(shaped: &mut Shaped, color: zgx::scene::Color) {
+    if shaped.rich.is_none() && shaped.smoothing.is_some() && shaped.smoothed_for == Some(color) {
+        return;
+    }
     let want = match shaped.rich {
         Some(_) => PER_RUN,
         None => text::smoothing(color),
@@ -2077,10 +2084,20 @@ fn smooth_glyphs(shaped: &mut Shaped, color: zgx::scene::Color) {
     match &shaped.rich {
         Some(rich) => {
             let runs = rich.runs();
+            // A run's level worked out once, not per glyph (a colour's
+            // luminance takes three powers): glyphs come run by run.
+            let mut last: Option<(usize, u8)> = None;
             for glyph in &mut shaped.glyphs {
-                let level = runs
-                    .get(glyph.run)
-                    .map_or(0, |run| text::smoothing(run.color));
+                let level = match last {
+                    Some((run, level)) if run == glyph.run => level,
+                    _ => {
+                        let level = runs
+                            .get(glyph.run)
+                            .map_or(0, |run| text::smoothing(run.color));
+                        last = Some((glyph.run, level));
+                        level
+                    }
+                };
                 glyph.key = text::smoothed(glyph.key, level);
             }
         }
@@ -2091,6 +2108,7 @@ fn smooth_glyphs(shaped: &mut Shaped, color: zgx::scene::Color) {
         }
     }
     shaped.smoothing = Some(want);
+    shaped.smoothed_for = Some(color);
     shaped.atlas_epoch = u64::MAX;
 }
 /// The atlas's key: cosmic-text's, losslessly, with its scalar fields
@@ -7054,6 +7072,10 @@ impl GpuRenderer {
             let smoothing = text::font_smoothing_epoch();
             if smoothing != self.smoothing_epoch {
                 self.smoothing_epoch = smoothing;
+                // The level a colour keys to changed: each text's asked again.
+                for shaped in self.shapes.values_mut() {
+                    shaped.smoothed_for = None;
+                }
                 self.flush_pending();
                 self.layers.clear();
                 self.fresh = true;
@@ -11204,7 +11226,7 @@ impl GpuRenderer {
                             // and its glyphs with how they are thickened.)
                             let mut twin_colored = false;
                             #[cfg(target_os = "macos")]
-                            let mut twin_smoothing = None;
+                            let mut twin_smoothing = (None, None);
                             let twin = content
                                 .and_then(|content| self.shaped_like.get(&content))
                                 .and_then(|id| self.shapes.get(id))
@@ -11222,7 +11244,7 @@ impl GpuRenderer {
                                     spare_glyphs.extend_from_slice(&twin.glyphs);
                                     #[cfg(target_os = "macos")]
                                     {
-                                        twin_smoothing = twin.smoothing;
+                                        twin_smoothing = (twin.smoothing, twin.smoothed_for);
                                     }
                                     let placed = twin.atlas_epoch == self.atlas_epoch;
                                     if placed {
@@ -11347,7 +11369,9 @@ impl GpuRenderer {
                                 quads: spare_quads,
                                 colored: twin_colored,
                                 #[cfg(target_os = "macos")]
-                                smoothing: twin_smoothing,
+                                smoothing: twin_smoothing.0,
+                                #[cfg(target_os = "macos")]
+                                smoothed_for: twin_smoothing.1,
                                 atlas_epoch: epoch.unwrap_or(0),
                                 last_used: self.frame,
                                 prepared,
@@ -23323,6 +23347,8 @@ mod atlas_glyph_errors_tests {
             colored: false,
             #[cfg(target_os = "macos")]
             smoothing: None,
+            #[cfg(target_os = "macos")]
+            smoothed_for: None,
             atlas_epoch: 0,
             last_used: 0,
             prepared: None,
