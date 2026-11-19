@@ -99,6 +99,38 @@ impl Font {
         self.data.data.data()
     }
 
+    /// zgx: its x-height in EM, as Blink takes a font's: its OS/2 table's
+    /// (`sxHeight`), else the height of its `x`, else the platform's
+    /// (`set_x_height_source`: on macOS Core Text's, which Skia's Mac scaler
+    /// asks for a face without an `x`), else half an EM.
+    pub fn x_height_em(&self) -> f32 {
+        let m = self.metrics();
+        let upem = f32::from(m.units_per_em.max(1));
+        if let Some(x) = m.x_height.filter(|x| *x > 0.0) {
+            return x / upem;
+        }
+        let x = FontRef::from_index(self.data(), self.data.index)
+            .ok()
+            .and_then(|font| {
+                let glyph = font.charmap().map('x')?;
+                font.glyph_metrics(Size::unscaled(), LocationRef::default())
+                    .bounds(glyph)
+                    .map(|bounds| bounds.y_max)
+            });
+        if let Some(x) = x.filter(|x| *x > 0.0) {
+            return x / upem;
+        }
+        #[cfg(feature = "std")]
+        if let Some(x) = X_HEIGHT_SOURCE
+            .get()
+            .and_then(|source| source(self.data(), self.data.index))
+            .filter(|x| *x > 0.0)
+        {
+            return x;
+        }
+        0.5
+    }
+
     pub fn shaper(&self) -> &harfrust::Shaper<'_> {
         self.harfrust.borrow_dependent()
     }
@@ -340,6 +372,18 @@ impl Font {
             italic_or_oblique: info.style == Style::Italic || info.style == Style::Oblique,
         })
     }
+}
+
+/// zgx: where a face without an x-height in its OS/2 table takes one, in EM,
+/// from its data and its index in it (`Font::x_height_em`): the platform's.
+#[cfg(feature = "std")]
+static X_HEIGHT_SOURCE: std::sync::OnceLock<fn(&[u8], u32) -> Option<f32>> =
+    std::sync::OnceLock::new();
+/// zgx: say where a face without an x-height in its OS/2 table takes one
+/// (`Font::x_height_em`), once: on macOS, Core Text, as Chrome does.
+#[cfg(feature = "std")]
+pub fn set_x_height_source(source: fn(&[u8], u32) -> Option<f32>) {
+    let _ = X_HEIGHT_SOURCE.set(source);
 }
 
 /// zgx patch: the tables a glyph's image can come from, for swash: outlines

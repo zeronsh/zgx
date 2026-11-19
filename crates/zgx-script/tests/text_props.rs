@@ -140,6 +140,7 @@ fn a_span_keeps_every_option_it_is_given() {
             ui.span { "h", underline = false, underline_color = "#778899" },
             ui.span { "i", padding = { 4, 2 }, box = true },
             ui.span { "j", text_size = 13, line_height = 16, padding = { 4, 2 }, box = true },
+            ui.span { "k", padding = { 4, 1 }, box = true, vertical_align = "middle", margin = { 2, 3 } },
         }"##,
     );
     h.frames(1);
@@ -187,6 +188,31 @@ fn a_span_keeps_every_option_it_is_given() {
     // another span takes the paragraph's.
     assert_eq!(run("j").font.line_height.resolve(13.), 16.);
     assert_ne!(run("i").font.line_height.resolve(13.), 16.);
+    // A box aligned to its middle, with room beside it of the line's: runs of
+    // their own, no box and no background, half the room each end of each.
+    assert!(run("k").font.features.box_span_middle());
+    assert!(!run("i").font.features.box_span_middle());
+    let k = (text.runs().iter())
+        .position(|r| r.range.contains(&text.text().find('k').unwrap()))
+        .unwrap();
+    let (before, after) = (&text.runs()[k - 1], &text.runs()[k + 1]);
+    assert_eq!((before.padding, after.padding), ([1., 0.], [1.5, 0.]));
+    assert!(before.background.is_none() && after.background.is_none());
+    assert!(!before.font.features.is_box_span() && !after.font.features.is_box_span());
+}
+
+/// A span's `vertical_align` is "middle" or "baseline": anything else is said.
+#[test]
+fn a_spans_vertical_align_is_middle_or_baseline() {
+    use zgx_script::{ScriptHost, testing::TestApp};
+    let code = r##"return ui.rich { ui.span { "k", box = true, vertical_align = "top" } }"##;
+    let error = TestApp::try_new(|runtime| ScriptHost::inline(runtime, "app", code))
+        .err()
+        .expect("an error");
+    assert!(
+        error.contains("`vertical_align` is \"middle\" or \"baseline\""),
+        "{error}"
+    );
 }
 
 /// A span's table is read as an element's is, a plain table: what its

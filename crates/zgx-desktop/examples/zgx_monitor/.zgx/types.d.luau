@@ -5859,6 +5859,14 @@ export type SpanProps = {
 	-- Internal, and may change: its own line height, in points (a `box`
 	-- span's box is it and its `padding`), where the paragraph's is not.
 	line_height: number?,
+	-- Internal, and may change: where a `box` span sits in its line, as
+	-- CSS's `vertical-align`: "middle", its box's middle half the
+	-- paragraph's x-height above the baseline (a keycap in a sentence);
+	-- "baseline" (the default), its baseline on the line's.
+	vertical_align: ("middle" | "baseline")?,
+	-- Internal, and may change: room beside a `box` span, outside its
+	-- padding and background: a number (both sides) or `{ left, right }`.
+	margin: (number | { number })?,
 	-- An icon before the text, in the line (a file chip's file type):
 	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
 	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,

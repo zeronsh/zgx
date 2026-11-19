@@ -310,8 +310,10 @@ impl BufferLine {
             );
             font_system.shape_buffer.boxes = false;
             font_system.shape_buffer.leads = false;
-            // zgx: its lines' boxes, CSS's or not (laid out, not shaped).
+            // zgx: its lines' boxes, CSS's or not (laid out, not shaped), and the
+            // x-height a span aligned to its middle takes.
             line.css = self.css;
+            line.parent_x_height = crate::shape::parent_x_height(font_system, &self.attrs_list);
             self.shape_opt.set_used(line);
             self.layout_opt.set_unused();
         }

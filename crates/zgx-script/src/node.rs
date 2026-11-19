@@ -1782,6 +1782,13 @@ pub(crate) struct SpanRare {
     /// `line_height = 16`: its own line height, in points (a box span's
     /// box is it and its padding). Internal until its API is settled.
     pub line_height: Option<f32>,
+    /// `vertical_align = "middle"`: a box span's middle half its paragraph's
+    /// x-height above the baseline (`TextSpan::vertical_align`). Internal
+    /// until its API is settled.
+    pub middle: bool,
+    /// `margin = 2` or `{ left, right }`: room beside a box span, outside it
+    /// (`TextSpan::margin`). Internal until its API is settled.
+    pub margin: Option<[f32; 2]>,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -5533,6 +5540,29 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                     if let Some(height) = number(given)? {
                         rare_mut(&mut span).line_height = Some(height);
                     }
+                }
+                // `vertical_align = "middle"` or `"baseline"` (a box span's).
+                b"vertical_align" => match lua.unpack::<String>(given)?.as_str() {
+                    "middle" => rare_mut(&mut span).middle = true,
+                    "baseline" => {}
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "a span's `vertical_align` is \"middle\" or \"baseline\", not {other:?}"
+                        )));
+                    }
+                },
+                // `margin = 2` (both sides) or `{ left, right }`.
+                b"margin" => {
+                    let margin = match lua.unpack(given)? {
+                        Value::Num(x) => [x as f32; 2],
+                        Value::List(l) => {
+                            let at =
+                                |i: usize| l.get(i).and_then(Value::as_f64).unwrap_or(0.) as f32;
+                            [at(0), at(1)]
+                        }
+                        _ => [0.; 2],
+                    };
+                    rare_mut(&mut span).margin = Some(margin);
                 }
                 b"on_click" => span.click = Some(handler(given)?),
                 b"href" => span.href = Some(lua.unpack::<String>(given)?.into()),

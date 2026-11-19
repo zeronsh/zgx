@@ -1573,6 +1573,33 @@ fn build_boxed(
     }
 }
 
+/// zgx: the x-height of its paragraph a line whose spans have one aligned to
+/// its middle needs (`ShapeLine::parent_x_height`): of `attrs_list`'s default
+/// font, in EM, and that font's size if it gives one; none for a line
+/// without such a span.
+pub(crate) fn parent_x_height(
+    font_system: &mut FontSystem,
+    attrs_list: &AttrsList,
+) -> Option<(f32, Option<f32>)> {
+    if !attrs_list
+        .spans_iter()
+        .any(|(_, attrs)| attrs.cache_key_flags.contains(CacheKeyFlags::MIDDLE))
+    {
+        return None;
+    }
+    let defaults = attrs_list.defaults();
+    let (fonts, kept) = font_matches(font_system, &defaults);
+    let font = kept.or_else(|| {
+        fonts
+            .iter()
+            .find_map(|key| font_system.get_font(key.id, defaults.weight))
+    });
+    Some((
+        font.map_or(0.5, |font| font.x_height_em()),
+        defaults.metrics_opt.map(|m| Metrics::from(m).font_size),
+    ))
+}
+
 /// zgx: the glyphs of inline box `inline`'s characters `start..end` of
 /// `line` (U+FFFC, each a box), with the run attributes `attrs`: never
 /// shaped, each as wide as the box and drawing nothing (its font's space, or
@@ -2123,6 +2150,11 @@ pub struct ShapeLine {
     /// zgx: each of its lines takes CSS's line box
     /// (`BufferLine::set_css_line_box`), holding a box or not.
     pub css: bool,
+    /// zgx: its paragraph's x-height in EM of its default font, and that
+    /// font's size if its attributes give one, for spans whose middle is
+    /// half of it above the baseline (`CacheKeyFlags::MIDDLE`); none for a
+    /// line without one.
+    pub parent_x_height: Option<(f32, Option<f32>)>,
     pub spans: Vec<ShapeSpan>,
     pub metrics_opt: Option<Metrics>,
     ellipsis_span: Option<ShapeSpan>,
@@ -2265,6 +2297,7 @@ impl ShapeLine {
             rtl: false,
             boxes: false,
             css: false,
+            parent_x_height: None,
             spans: Vec::default(),
             metrics_opt: None,
             ellipsis_span: None,
@@ -3296,6 +3329,8 @@ impl ShapeLine {
         // it would without one.
         let snap = crate::buffer::baseline_scale();
         let (mut above, mut below, mut at_top, mut at_bottom) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        // Its middle-aligned glyphs (`CacheKeyFlags::MIDDLE`) by their start, and how far each moves down.
+        let mut middles: Vec<(usize, f32)> = Vec::new();
         for r in &visual_line.ranges {
             let words = match hyphenation {
                 Some(hyphenation) if r.span == HYPHEN_SPAN => &hyphenation.span.words[..],
@@ -3333,8 +3368,20 @@ impl ShapeLine {
                     } else {
                         let (a, d) = ((a * snap).round() / snap, (d * snap).round() / snap);
                         let half = ((line_height * snap - a * snap - d * snap) / 2.0).floor() / snap;
-                        above = above.max(a + half);
-                        below = below.max(line_height - a - half);
+                        if glyph.cache_key_flags.contains(CacheKeyFlags::MIDDLE) {
+                            // Its box's middle half the paragraph's x-height above the
+                            // baseline (on device pixels, as the line's), its text moved
+                            // with it.
+                            let (em, sized) = self.parent_x_height.unwrap_or((0.5, None));
+                            let x_height = em * sized.unwrap_or(font_size);
+                            let top = ((line_height + x_height) / 2.0 * snap).round() / snap;
+                            above = above.max(top);
+                            below = below.max(line_height - top);
+                            middles.push((glyph.start, a + half - top));
+                        } else {
+                            above = above.max(a + half);
+                            below = below.max(line_height - a - half);
+                        }
                     }
                 }
             }
@@ -3344,6 +3391,11 @@ impl ShapeLine {
         above = above.max(at_bottom - below);
         for glyph in glyphs.iter_mut() {
             let flags = glyph.cache_key_flags;
+            if flags.contains(CacheKeyFlags::MIDDLE) {
+                if let Some(&(_, down)) = middles.iter().find(|(start, _)| *start == glyph.start) {
+                    glyph.y_offset -= down / glyph.font_size.max(f32::MIN_POSITIVE);
+                }
+            }
             if !flags.contains(CacheKeyFlags::INLINE_BOX) {
                 continue;
             }

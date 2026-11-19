@@ -6026,28 +6026,32 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, rare, plain, room_after, boxed) = match span.extras.take() {
-                None => (None, None, None, false, -1., false),
-                Some(extras) => {
-                    let extras = *extras;
-                    let end = extras.padding_end.unwrap_or(span.padding[0]);
-                    let apart = extras.icon.is_some() || end != span.padding[0];
-                    // Its text's run comes next, after the room before it
-                    // when that's apart. Noted here, where only spans with
-                    // extras come, so a plain span pays nothing for fades.
-                    if let Some(fade) = extras.fade {
-                        fading.note(runs.len() + usize::from(apart), fade);
+            let (hover, icon, rare, plain, room_after, (boxed, middle, margin)) =
+                match span.extras.take() {
+                    None => (None, None, None, false, -1., (false, false, None)),
+                    Some(extras) => {
+                        let extras = *extras;
+                        let end = extras.padding_end.unwrap_or(span.padding[0]);
+                        let apart = extras.icon.is_some() || end != span.padding[0];
+                        // Its text's run comes next, after the room before it
+                        // when that's apart. Noted here, where only spans with
+                        // extras come, so a plain span pays nothing for fades.
+                        if let Some(fade) = extras.fade {
+                            // (After its margin before it, a run of its own.)
+                            let margin = extras.margin.is_some_and(|m| m[0] > 0.);
+                            fading
+                                .note(runs.len() + usize::from(apart) + usize::from(margin), fade);
+                        }
+                        (
+                            extras.hover,
+                            extras.icon,
+                            extras.link,
+                            extras.plain,
+                            if apart { end } else { -1. },
+                            (extras.boxed, extras.middle, extras.margin),
+                        )
                     }
-                    (
-                        extras.hover,
-                        extras.icon,
-                        extras.link,
-                        extras.plain,
-                        if apart { end } else { -1. },
-                        extras.boxed,
-                    )
-                }
-            };
+                };
             let hover = hover.as_ref();
             let styled_hover = hover.is_some();
             if link && !styled_hover && !plain {
@@ -6065,6 +6069,12 @@ fn paragraph_effect<const LOCATING: bool>(
                 crate::theme::resolve(&mut span.styles, &theme);
                 span.background = span.background.or(span.styles.background);
             }
+            // Its margin before it: a placeholder that wide, no part of it.
+            let margin_at = margin.filter(|m| m[0] > 0.).map(|_| {
+                let at = content.len();
+                content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                at..content.len()
+            });
             // An icon keeps its room before the text: a padded
             // placeholder run of its own. So does the room before the text
             // where it isn't the room after it (`padding_end`).
@@ -6124,7 +6134,11 @@ fn paragraph_effect<const LOCATING: bool>(
                 font.letter_spacing = value;
             }
             if boxed {
-                font.features = font.features.with_box_span();
+                font.features = if middle {
+                    font.features.with_box_span_middle()
+                } else {
+                    font.features.with_box_span()
+                };
                 box_spans = true;
             }
             // An underlined paragraph underlines its runs (CSS's
@@ -6142,6 +6156,28 @@ fn paragraph_effect<const LOCATING: bool>(
                 .styles
                 .text_color
                 .unwrap_or_else(|| base.color_in(Some(&theme)));
+            // A margin is room of the line's: its font's, no background.
+            let room = |range: std::ops::Range<usize>,
+                        width: f32,
+                        font: &crate::text_layout::FontStyle| {
+                crate::rich_text::TextRun {
+                    background: None,
+                    underline: None,
+                    strikethrough: None,
+                    padding: [width / 2., 0.],
+                    radius: 0.,
+                    range,
+                    font: crate::text_layout::FontStyle {
+                        features: font.features.without_box_span(),
+                        ..font.clone()
+                    },
+                    font_size,
+                    color,
+                }
+            };
+            if let (Some(range), Some([left, _])) = (margin_at, margin) {
+                runs.push(room(range, left, &font));
+            }
             // With an icon, the span's padding goes around both: its
             // room takes the padding before, a placeholder after the
             // text the padding after.
@@ -6242,6 +6278,10 @@ fn paragraph_effect<const LOCATING: bool>(
                 font_size,
                 color,
             });
+            // Its margin after it, past the room after its text.
+            let margin_after = margin
+                .filter(|m| m[1] > 0.)
+                .map(|[_, right]| room(0..0, right, &font));
             // The room after the text: a placeholder of its own.
             if room_after > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
@@ -6256,6 +6296,12 @@ fn paragraph_effect<const LOCATING: bool>(
                     font_size,
                     color,
                 });
+            }
+            if let Some(mut run) = margin_after {
+                let at = content.len();
+                content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                run.range = at..content.len();
+                runs.push(run);
             }
         }
         if LOCATING && let Some(kept) = &locating {

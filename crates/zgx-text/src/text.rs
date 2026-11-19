@@ -2249,6 +2249,13 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
         // its line height (CSS's inline-flex).
         if BOX_SPANS && run.font.features.is_box_span() {
             line_height += 2. * run.padding[1];
+            // Its middle half the paragraph's x-height above the baseline: a
+            // face without one in its OS/2 table takes the platform's.
+            if run.font.features.box_span_middle() {
+                attributes.cache_key_flags |= cosmic_text::CacheKeyFlags::MIDDLE;
+                #[cfg(target_os = "macos")]
+                cosmic_text::set_x_height_source(crate::core_text_glyphs::x_height);
+            }
         }
         let attributes = attributes
             .metrics(Metrics::new(run.font_size.max(1.), line_height))
@@ -2968,7 +2975,13 @@ fn box_span_above(
         (descent * snap).round() / snap,
     );
     let half = ((height * snap - ascent * snap - descent * snap) / 2.).floor() / snap;
-    ascent + half + run.padding[1]
+    // Aligned to its middle, its glyphs moved with its box (`y_offset`, up).
+    let moved = if run.font.features.box_span_middle() {
+        glyph.y_offset * glyph.font_size
+    } else {
+        0.
+    };
+    ascent + half + run.padding[1] + moved
 }
 /// Derive decoration geometry from shaped visual fragments, including bidi and wrapping.
 /// `fonts` are those it was shaped in: a span that is a box of its own
@@ -3396,6 +3409,153 @@ mod blink_baseline_tests {
                 (above - 14.).abs() < 0.01,
                 "the box's top at {scale}x: {above} above the baseline, Chrome 14"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod box_middle_tests {
+    use super::*;
+    use zgx::rich_text::{RichText, TextRun};
+    use zgx::text_layout::{FontFamily, FontStyle, LineHeight};
+
+    const FONTS: [&[u8]; 4] = [
+        include_bytes!("../../zgx-gpu/tests/fonts/GeistVariable-subset.ttf"),
+        include_bytes!("../../zgx-gpu/tests/fonts/ZgxLowX.ttf"),
+        include_bytes!("../../zgx-gpu/tests/fonts/ZgxNoX.ttf"),
+        include_bytes!("../../zgx-gpu/tests/fonts/ZgxEvery.ttf"),
+    ];
+
+    /// "go esc now" then "next", 13 pixels on 20-pixel lines in `family`,
+    /// "esc" a 12-pixel Geist keycap at 16-pixel lines with 2 of padding
+    /// (CSS's 1 and a border of 1), aligned to its middle, at `scale`: the
+    /// first line's baseline, the keycap's top, the second line's baseline.
+    fn keycap(family: &str, scale: f32) -> (f32, f32, f32) {
+        keycap_in(family, ["go ", " now", "next"], scale)
+    }
+    /// `keycap`, its sentence `words` (before the keycap, after it, the next
+    /// line) for a face that has none of "go now next".
+    fn keycap_in(family: &str, words: [&str; 3], scale: f32) -> (f32, f32, f32) {
+        cosmic_text::set_baseline_scale(scale);
+        let mut fonts = FontSystem::new();
+        for font in FONTS {
+            fonts.db_mut().load_font_data(font.to_vec());
+        }
+        let sentence = FontStyle {
+            family: FontFamily::Named(family.into()),
+            line_height: LineHeight::px(20.),
+            ..FontStyle::default()
+        };
+        let mut key = FontStyle {
+            family: FontFamily::Named("Geist".into()),
+            line_height: LineHeight::px(16.),
+            ..FontStyle::default()
+        };
+        key.features = key.features.with_box_span_middle();
+        let text = format!("{}esc{}\n{}", words[0], words[1], words[2]);
+        let (keycap, after) = (words[0].len(), words[0].len() + 3);
+        let run = |range: std::ops::Range<usize>, font: &FontStyle, size: f32, edge: f32| TextRun {
+            range,
+            font: font.clone(),
+            font_size: size,
+            padding: [edge; 2],
+            background: (edge > 0.).then_some(zgx::scene::Color(220, 220, 220, 255)),
+            ..Default::default()
+        };
+        let rich = RichText::new(
+            text.as_str(),
+            vec![
+                run(0..keycap, &sentence, 13., 0.),
+                run(keycap..after, &key, 12., 2.),
+                run(after..text.len(), &sentence, 13., 0.),
+            ],
+        )
+        .unwrap()
+        .with_box_spans();
+        let buffer = rich_buffer(&mut fonts, &rich, Some(600.), None);
+        let lines: Vec<f32> = buffer.layout_runs().map(|line| line.line_y).collect();
+        let top = rich_decorations(&buffer, &rich, &mut fonts)
+            .into_iter()
+            .find(|d| d.background && d.run == 1)
+            .expect("the keycap's background")
+            .bounds
+            .y;
+        cosmic_text::set_baseline_scale(1.);
+        (lines[0], top, lines[1])
+    }
+
+    /// As headless Chrome 157 lays out a `display: inline-flex;
+    /// vertical-align: middle` keycap (12-pixel Geist, `line-height: 16px`,
+    /// a pixel of padding and one of border) in a 13-pixel sentence on
+    /// 20-pixel lines: its middle half the sentence's x-height above the
+    /// baseline, its line grown below. In Geist (its OS/2 x-height) at 1x
+    /// the baseline is at 14, the keycap's top at 0.56, the next baseline at
+    /// 34.56; at 2x 14.5, 1.05 and 35.55. In ZgxLowX (no OS/2 x-height: its
+    /// `x`, 0.4 EM) 15, 2.41 and 37.41 at both. The box's middle is placed
+    /// on device pixels, as the line's baseline is: within half a device
+    /// pixel of Chrome's (which places it in 64ths of a pixel).
+    #[test]
+    fn a_keycap_aligned_to_its_middle_sits_where_chrome_puts_it() {
+        for (family, scale, chrome) in [
+            ("Geist", 1., (14., 0.5625, 34.5625)),
+            ("Geist", 2., (14.5, 1.0547, 35.5547)),
+            ("ZgxLowX", 1., (15., 2.4063, 37.4063)),
+            ("ZgxLowX", 2., (15., 2.3984, 37.3984)),
+        ] {
+            let (baseline, top, next) = keycap(family, scale);
+            // Half a device pixel: Chrome places it in 64ths of a pixel.
+            let within = 0.5 / scale;
+            assert_eq!(baseline, chrome.0, "{family} at {scale}x: the baseline");
+            assert!(
+                (top - chrome.1).abs() <= within && (next - chrome.2).abs() <= within,
+                "{family} at {scale}x: keycap top {top}, next baseline {next}; Chrome {chrome:?}"
+            );
+        }
+        // A face with neither an OS/2 x-height nor an `x`: on macOS, Core
+        // Text's, for a face without an `x` as Chrome there (ZgxNoX: 2.72 and
+        // 37.72; ZgxEvery's CJK: 1.09 and 36.09, at 1x and 2x); elsewhere half an
+        // EM, the box's middle 3.25 above the baseline (on 2x's pixels, its
+        // top 13.5 above).
+        #[cfg(target_os = "macos")]
+        for (family, words, scale, chrome) in [
+            (
+                "ZgxNoX",
+                ["go ", " now", "next"],
+                1.,
+                (15., 2.7188, 37.7188),
+            ),
+            (
+                "ZgxNoX",
+                ["go ", " now", "next"],
+                2.,
+                (15., 2.7266, 37.7266),
+            ),
+            (
+                "ZgxEvery",
+                ["日本 ", " 日本", "日本"],
+                1.,
+                (15., 1.0938, 36.0938),
+            ),
+            (
+                "ZgxEvery",
+                ["日本 ", " 日本", "日本"],
+                2.,
+                (15., 1.1016, 36.1016),
+            ),
+        ] {
+            let (baseline, top, next) = keycap_in(family, words, scale);
+            // Half a device pixel: Chrome places it in 64ths of a pixel.
+            let within = 0.5 / scale;
+            assert_eq!(baseline, chrome.0, "{family} at {scale}x: the baseline");
+            assert!(
+                (top - chrome.1).abs() <= within && (next - chrome.2).abs() <= within,
+                "{family} at {scale}x: keycap top {top}, next baseline {next}; Chrome {chrome:?}"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (baseline, top, _) = keycap("ZgxNoX", 2.);
+            assert_eq!(baseline - top, 13.5, "half an EM");
         }
     }
 }
