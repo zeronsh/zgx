@@ -7627,19 +7627,19 @@ fn open_element(
         );
     }
     if let Some(mut source) = svg_compute {
-        // The artwork fills its box from the start: laid out with it, in
-        // the frame's one pass (a size given it once the box had one was
-        // a second).
+        // The artwork fills its box from the start, as a replaced box's
+        // own drawing does (`Scene::set_drawing`): laid out with it, in the
+        // frame's one pass (a size given it once the box had one was a
+        // second), with no percentage for the layout above to weigh.
         let child = ui.container(
             root,
             Layout::Overlay,
             crate::scene::Style {
                 absolute: true,
-                width_percent: Some(1.),
-                height_percent: Some(1.),
                 ..Default::default()
             },
         );
+        ui.scene.borrow_mut().set_drawing(child);
         let scene = ui.scene.clone();
         let (typography, theme) = (environment.typography.clone(), environment.theme.clone());
         ui.bind(root, move || {
