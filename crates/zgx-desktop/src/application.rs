@@ -3535,6 +3535,9 @@ impl Host {
             if let Some(updated) = updated {
                 updated?;
             }
+            // What shows each popup, for `zgx inspect windows` (X11).
+            #[cfg(target_os = "linux")]
+            self.context.ui.set_popup_surfaces(self.popups.surfaces());
             crate::contain::report_issues(&self.context.ui.runtime);
             faults.extend(crate::contain::take_reported());
         }
