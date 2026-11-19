@@ -34,9 +34,6 @@ pub struct Raster {
     pub pixels: Vec<u32>,
     width: usize,
     height: usize,
-    /// The bundled font, shared with the mattes of the layers it draws
-    /// (`isolated`): its outlines are copied for none of them.
-    font: std::rc::Rc<Font>,
     styled_fonts: std::rc::Rc<std::cell::RefCell<Option<zgx_gpu::text::CpuTextRaster>>>,
     styled_glyphs: HashMap<StyledGlyphKey, StyledGlyphImages>,
     rich_glyphs: RichGlyphCache,
@@ -62,6 +59,26 @@ pub struct Raster {
     /// What the last frame changed: what it repainted and the views whose
     /// pixels it moved (`changed`).
     changed: Vec<Rect>,
+}
+/// The bundled font plain text falls back to (text a raster draws without
+/// its scene's text services, `share_text`), parsed the first time one
+/// draws with it, once for every raster in the process. Parsed, it holds
+/// every glyph's outline (about 17 MB); a window whose text goes through its
+/// scene's services may never need it.
+fn bundled_font() -> &'static Font {
+    BUNDLED.get_or_init(|| {
+        Font::from_bytes(
+            include_bytes!("../assets/DejaVuSans.ttf") as &[u8],
+            FontSettings::default(),
+        )
+        .expect("bundled font")
+    })
+}
+static BUNDLED: std::sync::OnceLock<Font> = std::sync::OnceLock::new();
+/// Whether the bundled font has been parsed (`bundled_font`): for tests.
+#[doc(hidden)]
+pub fn bundled_font_parsed() -> bool {
+    BUNDLED.get().is_some()
 }
 /// Text services a raster shares with its scene, and the glyph images it
 /// drew from them.
@@ -92,13 +109,6 @@ impl Raster {
             pixels: vec![0x10141c; width * height],
             width,
             height,
-            font: std::rc::Rc::new(
-                Font::from_bytes(
-                    include_bytes!("../assets/DejaVuSans.ttf") as &[u8],
-                    FontSettings::default(),
-                )
-                .expect("bundled font"),
-            ),
             styled_fonts: Default::default(),
             styled_glyphs: HashMap::new(),
             rich_glyphs: Vec::new(),
@@ -583,7 +593,6 @@ impl Raster {
             pixels: vec![background; width * height],
             width,
             height,
-            font: self.font.clone(),
             styled_fonts: self.styled_fonts.clone(),
             styled_glyphs: HashMap::new(),
             rich_glyphs: Vec::new(),
@@ -1438,7 +1447,7 @@ impl Raster {
             let (m, bitmap) = self
                 .glyphs
                 .entry((ch, size.to_bits()))
-                .or_insert_with(|| self.font.rasterize(ch, size));
+                .or_insert_with(|| bundled_font().rasterize(ch, size));
             if x + m.advance_width > bounds.x + bounds.width {
                 x = bounds.x;
                 baseline += line_height;
