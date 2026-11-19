@@ -2717,6 +2717,11 @@ pub(crate) struct UiStorage {
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Observed<Rect, crate::scene::ScrollAnchor>>>,
     observed_visibility: RefCell<crate::scene::NodeMap<Observed<bool, crate::scene::ShownAnchor>>>,
+    /// Of those, the ones observed since the frame last told them: a
+    /// preparation ahead of the frame's (spare time building rows) tells
+    /// these alone (`prepare_frame_once`), so a row built ahead knows
+    /// whether it is near the view by the frame that shows it.
+    fresh_visibility: RefCell<Vec<NodeId>>,
     /// Of those, the ones that count as shown within a margin of the view
     /// (`observe_visibility_within`): only nodes asked so are here.
     visibility_margins: RefCell<crate::scene::NodeMap<f32>>,
@@ -3109,6 +3114,7 @@ impl Ui {
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
+            fresh_visibility: RefCell::default(),
             visibility_margins: RefCell::default(),
             margins_checked: Cell::new(0),
             scroll_padding: RefCell::default(),
@@ -4706,6 +4712,45 @@ impl Ui {
         }
         self.storage.margins_checked.set(observed.len());
     }
+    /// Whether each node observed since the frame last told them shows now
+    /// (`fresh_visibility`), told, for a preparation ahead of the frame's.
+    /// Out of line: only spare time building observed rows comes here.
+    #[cold]
+    #[inline(never)]
+    fn tell_fresh_visibility(&self) {
+        let fresh = std::mem::take(&mut *self.storage.fresh_visibility.borrow_mut());
+        let changed: Vec<_> = {
+            let scene = self.scene.borrow();
+            let observed = self.storage.observed_visibility.borrow();
+            let margins = self.storage.visibility_margins.borrow();
+            let mut pass = crate::scene::ShownPass::default();
+            fresh
+                .into_iter()
+                .filter_map(|node| {
+                    let observed = observed.get(&node).filter(|_| scene.contains(node))?;
+                    let margin = margins.get(&node).copied();
+                    let mut kept = observed.kept.get();
+                    let now = scene.shows_within_kept(node, margin, &mut kept, &mut pass);
+                    observed.kept.set(kept);
+                    let signal = &observed.signal;
+                    signal
+                        .with_untracked(|told| *told != now)
+                        .then(|| (node, signal.clone(), now))
+                })
+                .collect()
+        };
+        // Outside every borrow, as the frame's: what hears it may mount.
+        self.runtime.batch(|| {
+            for (node, signal, now) in changed {
+                if self.scene.borrow().contains(node) {
+                    signal.mutate(|told| {
+                        *told = now;
+                        true
+                    });
+                }
+            }
+        });
+    }
     pub(crate) fn observe_visibility(&self, node: NodeId) -> Signal<bool> {
         if let Some(observed) = self.storage.observed_visibility.borrow().get(&node) {
             return observed.signal.clone();
@@ -4715,6 +4760,7 @@ impl Ui {
             .observed_visibility
             .borrow_mut()
             .insert(node, Observed::new(signal.clone()));
+        self.storage.fresh_visibility.borrow_mut().push(node);
         self.storage.bounds_geometry_revision.set(None);
         signal
     }
@@ -5686,6 +5732,11 @@ impl Ui {
                         }
                     }
                 }
+                // All told from here: none is new to a preparation ahead.
+                let mut fresh = self.storage.fresh_visibility.borrow_mut();
+                if !fresh.is_empty() {
+                    fresh.clear();
+                }
             }
             // Publish outside every storage/scene borrow: geometry subscribers can
             // mount, dispose, translate, or reenter frame preparation.
@@ -5725,6 +5776,13 @@ impl Ui {
                     }
                 }
             });
+            // Ahead of the frame's, those observed since it last told them
+            // (rows spare time just built) are told: one coming into view
+            // knows it by the frame that shows it. The rest wait for the
+            // frame's, as every observer does.
+            if AHEAD && !self.storage.fresh_visibility.borrow().is_empty() {
+                self.tell_fresh_visibility();
+            }
             if layout_changed {
                 let editors: Vec<_> = self.storage.editors.borrow().values().cloned().collect();
                 // One layout for all a size change reached: the first's draw
@@ -10354,6 +10412,59 @@ mod bounds_anchor_tests {
         offset.set(150.);
         ui.prepare_frame();
         assert!(as_walked(&ui) > shown);
+    }
+    /// A row's index and its observed visibility, kept as it mounts.
+    type ShownRow = (usize, Signal<bool>);
+    /// A row observed since the frame last told its observers (built, or
+    /// built again, as spare time runs ahead of the frame) is told whether
+    /// it shows by that preparation ahead: what it builds once near the view
+    /// is there by the frame that shows it. Observers told before wait for
+    /// the frame's, as every observer does.
+    #[test]
+    fn rows_observed_since_the_frame_are_told_whether_they_show_ahead_of_it() {
+        let mut ui = Ui::new(400., 100.);
+        let offset = ui.signal(0_f32);
+        let shown: Rc<RefCell<Vec<ShownRow>>> = Rc::default();
+        let keep = shown.clone();
+        ui.mount(
+            virtual_list(
+                offset.clone(),
+                20.,
+                0,
+                || 1000,
+                |i| i,
+                move |index, _, _| {
+                    let keep = keep.clone();
+                    div().w_full().h(20.).on_mount(move |handle| {
+                        let visible = handle.observe_visibility().expect("mounted");
+                        keep.borrow_mut().push((index.get(), visible));
+                    })
+                },
+            )
+            .w(400.)
+            .h(100.),
+        );
+        ui.prepare_frame();
+        let told = |row: usize| {
+            shown
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(i, _)| *i == row)
+                .map(|(_, v)| v.with_untracked(|v| *v))
+        };
+        assert_eq!(told(0), Some(true));
+        // Scrolled two rows on: rows 5 and 6 are built. Ahead of the frame,
+        // the new rows know they show.
+        offset.set(40.);
+        ui.try_prepare_frame_ahead().unwrap();
+        assert_eq!(told(5), Some(true), "built ahead, told ahead");
+        assert_eq!(told(6), Some(true), "built ahead, told ahead");
+        assert_eq!(told(2), Some(true));
+        // And the frame's preparation, which tells every observer, agrees.
+        ui.prepare_frame();
+        assert_eq!(told(5), Some(true));
+        assert_eq!(told(6), Some(true));
     }
     /// A row moved from one scroll view to another, a scroll view moved
     /// under a translated parent, and a row laid out again, each in the
