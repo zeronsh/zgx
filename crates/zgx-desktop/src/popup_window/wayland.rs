@@ -532,6 +532,9 @@ impl Popups {
         // and shows what `damage` changes under it.
         under: &GpuRenderer,
         damage: &[Rect],
+        // What each popup shows, for `Ui::snapshot`: each one drawn is kept
+        // with its bounds, and those gone go.
+        frames: &std::cell::RefCell<Vec<(NodeId, zgx_gpu::ShownFrame, f32, Rect)>>,
     ) -> Result<(), GpuError> {
         self.wake = None;
         if self.shown.is_empty() && scene.popups().is_empty() {
@@ -549,6 +552,9 @@ impl Popups {
                     .map(|bounds| (*root, whole_points(bounds, zoom)))
             })
             .collect();
+        frames
+            .borrow_mut()
+            .retain(|frame| wanted.iter().any(|(root, _)| *root == frame.0));
         let shown = std::mem::take(&mut self.shown);
         let limited = &mut self.limited;
         let flipped = &mut self.flipped;
@@ -778,6 +784,14 @@ impl Popups {
                     );
                     for issue in popup.renderer.take_issues() {
                         crate::contain::queue_issue(issue);
+                    }
+                    // What it shows now, for `Ui::snapshot`.
+                    if matches!(status, Some(Ok(_))) {
+                        let mut frames = frames.borrow_mut();
+                        frames.retain(|shown| shown.0 != *root);
+                        if let Some(shown) = popup.renderer.shown_frame() {
+                            frames.push((*root, shown, scale, *bounds));
+                        }
                     }
                     zgx_gpu::present_log::log(|| {
                         format!(

@@ -2672,9 +2672,17 @@ mod x11 {
         ) -> Result<(), GpuError> {
             reap();
             if !x11(parent) {
-                return self
-                    .wayland
-                    .update(parent, scene, context, scale, full, takes, under, damage);
+                return self.wayland.update(
+                    parent,
+                    scene,
+                    context,
+                    scale,
+                    full,
+                    takes,
+                    under,
+                    damage,
+                    &self.frames,
+                );
             }
             if self.shown.is_empty() && scene.popups().is_empty() {
                 return Ok(());

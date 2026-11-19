@@ -761,6 +761,77 @@ impl Device {
         }
     }
 
+    /// The region `x, y, width, height` of `texture` (`size` its size; the
+    /// region clipped to it) as BGRA rows, as stored, with its size: only
+    /// that region copied out (a snapshot of what a window showed,
+    /// `crate::ShownFrame::read`). `None` for a region outside it.
+    pub(crate) fn read_region(
+        &self,
+        texture: &ID3D11Texture2D,
+        size: (u32, u32),
+        (x, y, width, height): (u32, u32, u32, u32),
+    ) -> Result<Option<(u32, u32, Vec<u8>)>, GpuError> {
+        let (Some(w), Some(h)) = (
+            size.0.checked_sub(x).map(|room| width.min(room)),
+            size.1.checked_sub(y).map(|room| height.min(room)),
+        ) else {
+            return Ok(None);
+        };
+        if w == 0 || h == 0 {
+            return Ok(None);
+        }
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let area = D3D11_BOX {
+            left: x,
+            top: y,
+            front: 0,
+            right: x + w,
+            bottom: y + h,
+            back: 1,
+        };
+        let mut staging = None;
+        // SAFETY: A staging texture the CPU reads, the region's size in the
+        // texture's format (BGRA, `FORMAT`), the region copied into it and
+        // mapped while `mapped` is read.
+        unsafe {
+            self.device
+                .CreateTexture2D(&desc, None, Some(&mut staging))
+                .map_err(failed("region readback texture"))?;
+            let staging: ID3D11Texture2D =
+                staging.ok_or_else(|| GpuError("Direct3D 11 made no readback texture".into()))?;
+            self.context
+                .CopySubresourceRegion(&staging, 0, 0, 0, 0, texture, 0, Some(&area));
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(failed("region readback map"))?;
+            let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+            for row in 0..h as usize {
+                let start = mapped
+                    .pData
+                    .cast::<u8>()
+                    .add(row * mapped.RowPitch as usize);
+                pixels.extend_from_slice(std::slice::from_raw_parts(start, w as usize * 4));
+            }
+            self.context.Unmap(&staging, 0);
+            Ok(Some((w, h, pixels)))
+        }
+    }
+
     /// `cells` of `from` (x, y, width and height, then where each goes)
     /// copied into `to`: the glyph atlas shrunk at idle
     /// (`crate::GpuRenderer::shrink_atlas`), its glyphs kept.
