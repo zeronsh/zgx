@@ -390,6 +390,69 @@ fn streaming_output_is_read_at_most_once_a_refresh() {
     );
 }
 
+/// The rows' accessible labels, as assistive technology reads them.
+#[cfg(unix)]
+fn row_labels(app: &Harness) -> Vec<String> {
+    let semantics = app.ui.semantics.borrow();
+    let mut labels: Vec<String> = semantics
+        .iter()
+        .filter(|(_, node)| node.role == zgx::semantics::Role::Label)
+        .map(|(_, node)| node.label.clone())
+        .filter(|label| label.starts_with("line "))
+        .collect();
+    labels.sort();
+    labels
+}
+
+/// Output streaming far faster than a reader reads: the rows' labels follow
+/// it at most every tenth of a second, not at each refresh (each one sent
+/// put every changed row's text on assistive technology's bus), and say
+/// what the rows show once it stops.
+#[cfg(unix)]
+#[test]
+fn rows_tell_readers_their_text_at_most_every_tenth_of_a_second() {
+    let mut app = Harness::new();
+    app.ui.set_assistive_technology(true);
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            "i=1; while [ $i -le 300 ]; do echo \"line $i\"; i=$((i+1)); sleep 0.001; done; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("line 1", |app| !lines_shown(app).is_empty());
+    let start = Instant::now();
+    let (mut last, mut changes) = (row_labels(&app), 0);
+    app.until("line 300", |app| {
+        let labels = row_labels(app);
+        if labels != last {
+            changes += 1;
+            last = labels;
+        }
+        lines_shown(app).last().is_some_and(|last| last.0 == 300)
+    });
+    let tenths = start.elapsed().as_secs_f64() / 0.1;
+    assert!(
+        (changes as f64) <= tenths + 2.,
+        "the labels changed {changes} times in {tenths:.1} tenths of a second"
+    );
+    // Once it stops, they say what the rows show.
+    app.until("the last line's label", |app| {
+        row_labels(app).iter().any(|label| label == "line 300")
+    });
+    let shown: Vec<String> = lines_shown(&app)
+        .iter()
+        .map(|(n, _)| format!("line {n}"))
+        .collect();
+    let mut shown_sorted = shown.clone();
+    shown_sorted.sort();
+    assert_eq!(row_labels(&app), shown_sorted);
+}
+
 /// Every `line N` shown, with the top of its box on screen, in the order
 /// the scene paints them (which assistive technology reads).
 #[cfg(unix)]

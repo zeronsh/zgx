@@ -53,6 +53,10 @@ const FONT_SIZE: f32 = 13.;
 /// command starting or ending shows in its output, and a burst of output
 /// costs one check.
 const PROCESS_CHECK: Duration = Duration::from_millis(150);
+/// How often, at most, the rows' accessible labels follow their text while
+/// output streams (`Engine::labeled`): a tenth of a second behind at most,
+/// and at once after a quiet spell.
+const LABELS_EVERY: Duration = Duration::from_millis(100);
 
 /// A session drawn by zgx, behind a terminal controller (its backend).
 pub struct EngineTerminal(Rc<Engine>);
@@ -119,6 +123,15 @@ struct Engine {
     pending_news: RefCell<String>,
     news_wake: RefCell<Option<zgx::task::LatestSender<()>>>,
     news_task: RefCell<Option<TaskToken>>,
+    /// What the rows' accessible labels are read at (`row_view`): they say
+    /// their rows' text as of the latest count, counted at most every
+    /// `LABELS_EVERY` while output streams (`label_rows`). A reader reads a
+    /// row as it moves over it; each one sent as output changed it filled
+    /// assistive technology's bus, every refresh, with every row's text.
+    labeled: Signal<u64>,
+    labeled_at: Cell<Option<std::time::Instant>>,
+    labels_wake: RefCell<Option<zgx::task::LatestSender<()>>>,
+    labels_task: RefCell<Option<TaskToken>>,
     frames: RefCell<Option<zgx::frame::FrameClock>>,
     focused: Cell<bool>,
     /// The hidden editor, or the terminal's node (a press focuses it first),
@@ -239,6 +252,10 @@ impl EngineTerminal {
             pending_news: RefCell::new(String::new()),
             news_wake: RefCell::new(None),
             news_task: RefCell::new(None),
+            labeled: runtime.signal(0),
+            labeled_at: Cell::new(None),
+            labels_wake: RefCell::new(None),
+            labels_task: RefCell::new(None),
             frames: RefCell::new(None),
             focused: Cell::new(false),
             input_has: Cell::new(false),
@@ -364,6 +381,26 @@ impl Engine {
             }
         }));
         *self.news_task.borrow_mut() = Some(news_task);
+        // The rows' labels follow their text at once after a quiet spell, and
+        // while output streams, at most every `LABELS_EVERY`, as of then.
+        let (labels_wake, mut labels_woken) = zgx::task::latest::<()>();
+        *self.labels_wake.borrow_mut() = Some(labels_wake);
+        let weak = Rc::downgrade(self);
+        let labels_task = self.runner.borrow().spawn(Box::pin(async move {
+            while labels_woken.recv().await.is_some() {
+                let due = {
+                    let Some(engine) = weak.upgrade() else { return };
+                    engine.labeled_at.get().map(|at| at + LABELS_EVERY)
+                };
+                if let Some(due) = due.filter(|due| *due > std::time::Instant::now()) {
+                    zgx::timer::sleep_until(due).await;
+                }
+                let Some(engine) = weak.upgrade() else { return };
+                engine.labeled_at.set(Some(std::time::Instant::now()));
+                engine.labeled.update(|count| *count += 1);
+            }
+        }));
+        *self.labels_task.borrow_mut() = Some(labels_task);
         // A wake the last task didn't read: the session won't wake again
         // until it is read.
         self.refresh();
@@ -612,12 +649,17 @@ impl Engine {
             }
             let rows = self.rows.borrow();
             let slots = self.slots.borrow();
+            let mut relabel = scrolled != 0;
             for (row, paint) in changed {
                 if let Some(signal) = slots.get(row).map(|slot| &rows[*slot])
                     && signal.with_untracked(|shown| **shown != paint)
                 {
                     signal.set(Rc::new(paint));
+                    relabel = true;
                 }
+            }
+            if relabel {
+                self.label_rows();
             }
             self.caret.set(caret);
             if let Some(pictures) = self.pictures_due.take() {
@@ -659,6 +701,20 @@ impl Engine {
             .collect();
         if self.pictures.with_untracked(|shown| **shown != *pictures) {
             self.pictures.set(pictures);
+        }
+    }
+
+    /// The rows' labels to follow what they show now (`labeled`): at once,
+    /// or at the end of the `LABELS_EVERY` since they last did. Without the
+    /// task (no view started it), at once.
+    fn label_rows(&self) {
+        match &*self.labels_wake.borrow() {
+            Some(wake) => {
+                wake.send(());
+            }
+            None => {
+                self.labeled.update(|count| *count += 1);
+            }
         }
     }
 
@@ -2376,6 +2432,7 @@ fn row_view(engine: &Rc<Engine>, slot: usize) -> View {
     let mut font = engine.font.borrow().clone();
     font.letter_spacing = zgx::text_layout::LetterSpacing::cells(metrics.cell_width);
     let label = paint.clone();
+    let labeled = engine.labeled.clone();
     canvas(move |_| paint::draw(&paint.get(), metrics, &font))
         .absolute()
         .left(PAD_X)
@@ -2387,7 +2444,11 @@ fn row_view(engine: &Rc<Engine>, slot: usize) -> View {
         .w_full()
         .h(metrics.cell_height)
         .role(Role::Label)
-        .accessible_label_when(move || label.with(|paint| paint.text.clone()))
+        // What it shows as the labels were last counted (`label_rows`).
+        .accessible_label_when(move || {
+            labeled.get();
+            label.with_untracked(|paint| paint.text.clone())
+        })
 }
 
 /// How many lines the screen scrolled from `shown` to `rows` (every screen
