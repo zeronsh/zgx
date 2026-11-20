@@ -99,6 +99,11 @@ const BITS: &[&str] = &[
     "<div>\n",
     "</div>\n",
     "<b>",
+    "</b>",
+    "<br>",
+    "<a href=\"u\">",
+    "</a>",
+    "<code>",
     "&amp;",
     "&",
     "é",
@@ -427,13 +432,17 @@ fn a_reply_streamed_shows_what_it_shows_at_once() {
             breaks: true,
             ..Options::default()
         },
+        Options {
+            html_marks: true,
+            ..Options::default()
+        },
     ];
     let mut found = Vec::new();
     for seed in start..start + seeds {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let text = text(&mut rng);
         let pieces = pieces(&text, &mut rng);
-        let options = &options[(seed % 2) as usize];
+        let options = &options[(seed % 3) as usize];
         if disagreement(&pieces, options).is_some() {
             let small = smallest(pieces, options);
             found.push(format!(
@@ -451,6 +460,34 @@ fn a_reply_streamed_shows_what_it_shows_at_once() {
         found.len(),
         found.join("\n")
     );
+}
+
+/// A script asks for inline HTML's marks, and has none without asking.
+#[test]
+fn a_script_asks_for_html_marks() {
+    let mut h = Harness::inline(
+        r#"local function show(blocks: any): string
+    local out = {}
+    for _, r in blocks[1].s do
+        table.insert(out, r.x .. (if r.b then "+b" else "") .. (if r.a then ">" .. r.a else ""))
+    end
+    return table.concat(out, "|")
+end
+local text = 'a <b>b</b><br><a href="https://a.b">c</a>'
+local reply = ui.state("reply", text)
+local streamed = ui.markdown(reply, { key = "reply", html_marks = true })
+return ui.column {
+    ui.text { id = "on", show(ui.markdown(text, { html_marks = true })) },
+    ui.text { id = "off", show(ui.markdown(text)) },
+    ui.text { id = "keyed", function() return show(streamed:get()) end },
+    ui.markdown_view { text, html_marks = true },
+}
+"#,
+    );
+    h.settle();
+    assert_eq!(h.text("on"), "a |b+b|\n|c>https://a.b");
+    assert_eq!(h.text("off"), "a bc");
+    assert_eq!(h.text("keyed"), h.text("on"));
 }
 
 /// A Luau string of `text`, every byte escaped.

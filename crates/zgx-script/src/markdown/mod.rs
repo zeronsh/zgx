@@ -16,7 +16,8 @@
 //! A run is `{ x = text, b?, i?, c? (code), s? (strike), a? (link),
 //! f? (a repository file, with [`Options::paths`]) }`. A link whose address
 //! is still streaming has `a` = [`PENDING_LINK_URL`]: style it as a link,
-//! but it goes nowhere yet. Raw HTML is dropped.
+//! but it goes nowhere yet. Raw HTML is dropped, but for the inline marks
+//! [`Options::html_marks`] reads.
 //!
 //! Streaming text parses incrementally ([`Incremental`]): an append parses
 //! again only from the last top-level blocks, and the blocks before them
@@ -42,6 +43,13 @@ pub struct Options {
     /// Repository paths in text (`src/main.rs:12`), in code spans that are a
     /// path whole, and relative links that read as one, are files (`f`).
     pub paths: bool,
+    /// Inline HTML's few marks style their text, as a web chat showing
+    /// GitHub-sanitized HTML does: `b`/`strong` bold, `i`/`em` italic,
+    /// `s`/`del`/`strike` struck, `code`/`kbd`/`samp`/`tt` code, `a href`
+    /// a link, and `br` a line break. Other tags are dropped and their text
+    /// kept; block HTML is dropped either way.
+    #[doc(hidden)]
+    pub html_marks: bool,
     /// More fields for a code block, from its language and text (coloured
     /// lines, say): `(name, value)` pairs.
     pub code: Option<CodeFields>,
@@ -538,6 +546,7 @@ impl Call {
         let options = Options {
             breaks: flag("breaks")?,
             paths: flag("paths")?,
+            html_marks: flag("html_marks")?,
             code: None,
         };
         let key: Option<String> = match opts {
@@ -644,7 +653,11 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
         return Ok(Value::List(parse(&whole(), &call.options).into()));
     };
-    let flags = (call.options.breaks, call.options.paths);
+    let flags = (
+        call.options.breaks,
+        call.options.paths,
+        call.options.html_marks,
+    );
     Ok(match &call.key {
         Some(key) => {
             let mut streams = parsed.streams.borrow_mut();
@@ -850,8 +863,8 @@ const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
 
-/// `breaks` and `paths`, as a script asked for them.
-type Flags = (bool, bool);
+/// `breaks`, `paths` and `html_marks`, as a script asked for them.
+type Flags = (bool, bool, bool);
 type Texts = std::collections::HashMap<(String, Flags), Value>;
 /// Each keyed stream: its flags, its parse, and its last answer (whose
 /// table the next one's is derived from), with that table once a script
@@ -1074,6 +1087,7 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool, defs:
         deeper: 0,
         align: None,
         html: false,
+        marks: Vec::new(),
         named: Vec::new(),
         top: offset,
     };
@@ -1119,6 +1133,8 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool, defs:
                 Some(false) => Event::Text("~".into()),
                 _ => event,
             },
+            // A `<br>` breaks the line as a line's end of two spaces does.
+            Event::InlineHtml(html) if options.html_marks && is_break(&html) => Event::HardBreak,
             event => event,
         };
         let opens = matches!(event, Event::Start(_));
@@ -1418,6 +1434,161 @@ fn table_align(align: &[Alignment]) -> Value {
     )
 }
 
+/// What an inline HTML tag marks (`Options::html_marks`).
+#[derive(Clone, Copy)]
+enum HtmlMark {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    Link,
+}
+
+/// The tags whose marks show, as GitHub's sanitizing schema keeps them
+/// (`br` aside, a break: `is_break`). The rest (`sub`, `sup`, `span`,
+/// `u`, …) are dropped and their text kept.
+const HTML_MARKS: [(&str, HtmlMark); 12] = [
+    ("b", HtmlMark::Bold),
+    ("strong", HtmlMark::Bold),
+    ("i", HtmlMark::Italic),
+    ("em", HtmlMark::Italic),
+    ("s", HtmlMark::Strike),
+    ("del", HtmlMark::Strike),
+    ("strike", HtmlMark::Strike),
+    ("code", HtmlMark::Code),
+    ("kbd", HtmlMark::Code),
+    ("samp", HtmlMark::Code),
+    ("tt", HtmlMark::Code),
+    ("a", HtmlMark::Link),
+];
+
+/// An open inline HTML mark: its tag's name (`HTML_MARKS`'), which its
+/// closer names, and what it does.
+struct Mark {
+    name: &'static str,
+    kind: MarkKind,
+}
+
+enum MarkKind {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    /// An `a`: where its `href` goes, if it has one.
+    Link(Option<Link>),
+}
+
+/// An inline HTML tag, read: `<name attrs…>`, `</name>` or `<name …/>`.
+struct HtmlTag<'a> {
+    name: &'a str,
+    closing: bool,
+    /// Closed where it opens (`<b/>`).
+    empty: bool,
+    attrs: &'a str,
+}
+
+impl<'a> HtmlTag<'a> {
+    /// The tag `html` is, or `None` for a comment, a declaration or a
+    /// processing instruction.
+    fn read(html: &'a str) -> Option<Self> {
+        let inner = html.trim_end().strip_prefix('<')?.strip_suffix('>')?;
+        let (closing, inner) = match inner.strip_prefix('/') {
+            Some(rest) => (true, rest),
+            None => (false, inner),
+        };
+        let end = inner
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .unwrap_or(inner.len());
+        let name = &inner[..end];
+        if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        let attrs = inner[end..].trim_end();
+        let (empty, attrs) = match attrs.strip_suffix('/') {
+            Some(rest) => (true, rest),
+            None => (false, attrs),
+        };
+        Some(Self {
+            name,
+            closing,
+            empty,
+            attrs,
+        })
+    }
+
+    /// The value of its attribute `want` (any case), entities read.
+    fn attr(&self, want: &str) -> Option<String> {
+        let mut rest = self.attrs;
+        loop {
+            rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '/');
+            if rest.is_empty() {
+                return None;
+            }
+            let end = rest
+                .find(|c: char| c.is_ascii_whitespace() || c == '=' || c == '/')
+                .unwrap_or(rest.len())
+                .max(1);
+            let name = &rest[..end];
+            rest = rest[end..].trim_start();
+            let mut value = None;
+            if let Some(after) = rest.strip_prefix('=') {
+                let after = after.trim_start();
+                let (v, next) = match after.chars().next() {
+                    Some(q @ ('"' | '\'')) => {
+                        let body = &after[1..];
+                        let close = body.find(q).unwrap_or(body.len());
+                        (&body[..close], body.get(close + 1..).unwrap_or(""))
+                    }
+                    _ => {
+                        let close = after
+                            .find(|c: char| c.is_ascii_whitespace())
+                            .unwrap_or(after.len());
+                        (&after[..close], &after[close..])
+                    }
+                };
+                value = Some(v);
+                rest = next;
+            }
+            if name.eq_ignore_ascii_case(want) {
+                return value.map(html_entities);
+            }
+        }
+    }
+}
+
+/// Whether inline HTML is a line break: `<br>`, `<br/>`, `<br />`.
+fn is_break(html: &str) -> bool {
+    matches!(HtmlTag::read(html), Some(tag) if !tag.closing && tag.name.eq_ignore_ascii_case("br"))
+}
+
+/// An attribute's value with its common character references read.
+fn html_entities(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    value
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// Whether an `href` is one GitHub's schema keeps: relative, or `http`,
+/// `https`, `mailto`, `xmpp`, `irc` or `ircs` (never `javascript:`).
+fn safe_href(href: &str) -> bool {
+    let Some(colon) = href.find(':') else {
+        return true;
+    };
+    if href[..colon].contains(['/', '?', '#']) {
+        return true;
+    }
+    let scheme = href[..colon].trim();
+    ["http", "https", "mailto", "xmpp", "irc", "ircs"]
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(scheme))
+}
+
 /// What is being built at each level of nesting.
 enum Frame {
     /// Blocks of a container (the document, a list item, a quote).
@@ -1463,6 +1634,8 @@ struct Builder<'a> {
     align: Option<Box<[Alignment]>>,
     /// Inside raw HTML.
     html: bool,
+    /// The inline HTML marks open (`Options::html_marks`), innermost last.
+    marks: Vec<Mark>,
     /// The references its text's definitions resolved: label, where.
     named: Vec<(Label, usize)>,
     /// Where the top-level element being read starts in the whole text.
@@ -1513,6 +1686,9 @@ impl Builder<'_> {
     }
 
     fn push_text(&mut self, text: &str, code: bool) {
+        if !self.marks.is_empty() {
+            return self.push_marked(text, code);
+        }
         if let Some(image) = &mut self.image {
             image.1.push_str(text);
             return;
@@ -1653,6 +1829,9 @@ impl Builder<'_> {
         }
     }
     fn take_runs(&mut self) -> Value {
+        if !self.marks.is_empty() {
+            self.marks.clear();
+        }
         let mut runs = std::mem::take(&mut self.runs);
         // Its mark goes with them: read against the next block's words (a
         // tight list item starts no paragraph to set it), it would call them
@@ -1681,6 +1860,74 @@ impl Builder<'_> {
                 ("tight", Value::Bool(true)),
             ]));
         }
+    }
+
+    /// Text under inline HTML marks: theirs over the markdown's own.
+    #[cold]
+    #[inline(never)]
+    fn push_marked(&mut self, text: &str, code: bool) {
+        let marks = std::mem::take(&mut self.marks);
+        let mut style = self.style();
+        let mut code = code;
+        let mut link = None;
+        for mark in &marks {
+            match &mark.kind {
+                MarkKind::Bold => style.bold = true,
+                MarkKind::Italic => style.italic = true,
+                MarkKind::Strike => style.strike = true,
+                MarkKind::Code => code = true,
+                MarkKind::Link(to) => link = to.as_ref(),
+            }
+        }
+        // A markdown link around or inside it goes where it says.
+        let linked = link.is_some() && self.links.is_empty();
+        if let (true, Some(link)) = (linked, link) {
+            self.links.push(link.clone());
+        }
+        self.styles.push(style);
+        self.push_text(text, code);
+        self.styles.pop();
+        if linked {
+            self.links.pop();
+        }
+        self.marks = marks;
+    }
+
+    /// An inline HTML tag (`Options::html_marks`): a mark opens or closes.
+    /// A closer ends its own mark alone; a stray one does nothing.
+    #[cold]
+    #[inline(never)]
+    fn inline_html(&mut self, html: &str) {
+        let Some(tag) = HtmlTag::read(html) else {
+            return;
+        };
+        let Some(&(name, kind)) = HTML_MARKS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(tag.name))
+        else {
+            return;
+        };
+        if tag.closing {
+            if let Some(at) = self.marks.iter().rposition(|m| m.name == name) {
+                self.marks.remove(at);
+            }
+            return;
+        }
+        if tag.empty {
+            return;
+        }
+        let kind = match kind {
+            HtmlMark::Bold => MarkKind::Bold,
+            HtmlMark::Italic => MarkKind::Italic,
+            HtmlMark::Strike => MarkKind::Strike,
+            HtmlMark::Code => MarkKind::Code,
+            HtmlMark::Link => MarkKind::Link(
+                tag.attr("href")
+                    .filter(|href| safe_href(href))
+                    .map(|href| link_of(&href, self.options.paths)),
+            ),
+        };
+        self.marks.push(Mark { name, kind });
     }
 
     fn block(&mut self, block: Value) {
@@ -1804,6 +2051,8 @@ impl Builder<'_> {
                     if !(self.took && self.runs.is_empty()) {
                         let runs = self.take_runs();
                         self.block(map(vec![("t", "p".into()), ("s", runs)]));
+                    } else if !self.marks.is_empty() {
+                        self.marks.clear();
                     }
                     self.took = false;
                 }
@@ -1843,6 +2092,9 @@ impl Builder<'_> {
                 TagEnd::Item => {
                     // A tight item's text never became a paragraph.
                     self.flush_tight();
+                    if !self.marks.is_empty() {
+                        self.marks.clear();
+                    }
                     if let Some(Frame::Blocks(blocks)) = self.frames.pop()
                         && let Some(Frame::List { items, .. }) = self.frames.last_mut()
                     {
@@ -1921,6 +2173,7 @@ impl Builder<'_> {
                 self.mark_line();
             }
             Event::Rule => self.block(map(vec![("t", "hr".into())])),
+            Event::InlineHtml(html) if self.options.html_marks => self.inline_html(&html),
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::TaskListMarker(done) => self.push_text(if done { "☑ " } else { "☐ " }, false),
             Event::FootnoteReference(name) => self.push_text(&format!("[{name}]"), false),
@@ -2239,6 +2492,169 @@ mod tests {
             parse(" <div\n\n- item", &plain),
             parse("<div\n\n- item", &plain)
         );
+    }
+
+    fn html_marks() -> Options {
+        Options {
+            html_marks: true,
+            ..plain()
+        }
+    }
+
+    /// Each block's runs, as `text` and its marks: `+b`, `+i`, `+s`, `+c`,
+    /// `>where` for a link.
+    fn marked(text: &str, options: &Options) -> Vec<Vec<String>> {
+        parse(text, options)
+            .iter()
+            .map(|block| {
+                let runs = block.field("s").map(|s| s.list().to_vec());
+                runs.unwrap_or_default()
+                    .iter()
+                    .map(|r| {
+                        let mut s = match r.field("x") {
+                            Some(Value::Str(x)) => x.to_string(),
+                            _ => String::new(),
+                        };
+                        for flag in ["b", "i", "s", "c"] {
+                            if r.field(flag).is_some() {
+                                s.push('+');
+                                s.push_str(flag);
+                            }
+                        }
+                        if let Some(Value::Str(a)) = r.field("a") {
+                            s.push('>');
+                            s.push_str(a);
+                        }
+                        s
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[track_caller]
+    fn marks(text: &str, want: &[&str]) {
+        assert_eq!(marked(text, &html_marks()), [want], "{text:?}");
+    }
+
+    #[test]
+    fn inline_html_marks_style_their_text() {
+        marks("a <b>b</b> <strong>s</strong>", &["a ", "b+b", " ", "s+b"]);
+        marks("<i>i</i> <EM>e</EM>", &["i+i", " ", "e+i"]);
+        marks(
+            "<s>s</s> <del>d</del> <strike>k</strike>",
+            &["s+s", " ", "d+s", " ", "k+s"],
+        );
+        marks(
+            "<code>c</code> <kbd>k</kbd> <samp>s</samp> <tt>t</tt>",
+            &["c+c", " ", "k+c", " ", "s+c", " ", "t+c"],
+        );
+        // Case is no matter, in names and attributes.
+        marks("<B>x</b>", &["x+b"]);
+        marks(
+            "<A HREF='https://a.b/?q=1&amp;r=2'>go</A>",
+            &["go>https://a.b/?q=1&r=2"],
+        );
+    }
+
+    #[test]
+    fn inline_html_marks_nest_and_close_their_own() {
+        marks("<b>a <i>b</i> c</b>", &["a +b", "b+b+i", " c+b"]);
+        // A closer ends its own mark, not the innermost.
+        marks("<b>a<i>b</b>c</i>d", &["a+b", "b+b+i", "c+i", "d"]);
+        // With markdown's own: theirs and the tag's together.
+        marks(
+            "**a <i>b</i>** <b>*c*</b>",
+            &["a +b", "b+b+i", " ", "c+b+i"],
+        );
+        // A stray closer does nothing.
+        marks("a</b> b </i>c", &["a b c"]);
+    }
+
+    #[test]
+    fn an_unclosed_inline_html_mark_ends_with_its_paragraph() {
+        assert_eq!(
+            marked("<b>bold\n\nplain", &html_marks()),
+            [vec!["bold+b"], vec!["plain"]]
+        );
+        assert_eq!(
+            marked("# <i>head\n\nplain", &html_marks()),
+            [vec!["head+i"], vec!["plain"]]
+        );
+        let items = parse("- <b>one\n- two", &html_marks());
+        let items = items[0].field("items").unwrap().list();
+        let second = items[1].list()[0].field("s").unwrap().list();
+        assert!(second[0].field("b").is_none(), "{:?}", second[0].to_json());
+    }
+
+    #[test]
+    fn an_html_link_goes_where_its_href_does() {
+        marks(
+            "see <a href=\"https://a.b/c\">this</a> now",
+            &["see ", "this>https://a.b/c", " now"],
+        );
+        marks("<a title=\"t\" href=/docs/x>rel</a>", &["rel>/docs/x"]);
+        // No href, no link.
+        marks("see <a name=\"x\">this</a> now", &["see this now"]);
+        // Only the protocols GitHub's schema keeps.
+        marks("<a href=\"javascript:alert(1)\">x</a>", &["x"]);
+        marks("<a href=\"mailto:a@b.c\">m</a>", &["m>mailto:a@b.c"]);
+        // Inside markdown's own link, that one's.
+        marks(
+            "[<a href=\"https://x.y\">t</a>](https://a.b)",
+            &["t>https://a.b"],
+        );
+    }
+
+    #[test]
+    fn an_html_break_breaks_the_line_as_a_hard_break_does() {
+        let hard = marked("one  \ntwo", &plain());
+        for text in ["one<br>two", "one<br/>two", "one<br />two", "one<BR>two"] {
+            assert_eq!(marked(text, &html_marks()), hard, "{text:?}");
+        }
+        assert_eq!(hard, [vec!["one\ntwo"]]);
+    }
+
+    #[test]
+    fn other_inline_html_is_dropped_and_its_text_kept() {
+        marks("x<sup>2</sup> and H<sub>2</sub>O", &["x2 and H2O"]);
+        marks("<u>u</u> <span class=\"k\">s</span>", &["u s"]);
+        marks("a <!-- note --> b", &["a  b"]);
+        // Block HTML stays dropped.
+        assert_eq!(
+            marked("<div>\n<b>hidden</b>\n</div>\n\nlast", &html_marks()),
+            [vec!["last"]]
+        );
+    }
+
+    #[test]
+    fn without_html_marks_inline_html_is_dropped_as_ever() {
+        let text =
+            "Some <b>bold</b>, <a href=\"https://a.b\">a</a>, <code>c</code> and a <br> break.";
+        assert_eq!(
+            marked(text, &plain()),
+            [vec!["Some bold, a, c and a  break."]]
+        );
+        let on = marked(text, &html_marks());
+        assert_ne!(marked(text, &plain()), on);
+        // Text with no inline HTML parses the same either way.
+        let text = "a **b** *c* `d` [e](https://f.g)\n\n- one\n- two\n\n| a |\n|---|\n| b |";
+        assert_eq!(parse(text, &plain()), parse(text, &html_marks()));
+    }
+
+    #[test]
+    fn a_streaming_open_tag_marks_what_has_come() {
+        let mut parser = Incremental::new(html_marks());
+        parser.set_text("Some <b>bol");
+        let blocks = parser.blocks();
+        let runs = blocks[0].field("s").unwrap().list();
+        assert_eq!(runs.len(), 2);
+        assert!(runs[1].field("b").is_some());
+        parser.set_text("Some <b>bold</b> and");
+        let blocks = parser.blocks();
+        let runs = blocks[0].field("s").unwrap().list();
+        assert!(runs[2].field("b").is_none());
+        assert_eq!(runs[2].field("x"), Some(&Value::from(" and")));
     }
 
     #[test]
