@@ -16,38 +16,43 @@ use zgx::reactive::{Runtime, Signal};
 
 /// A script value. State holds these, so equal writes are suppressed like any
 /// other signal.
+// Its layout is stated, not left to the compiler: a byte saying which, then
+// what it holds (`repr(u8)`, each variant numbered). Native modules read
+// values where they are by it (`modules.rs`, `zgx_module::abi`), so a
+// variant's number never changes and new ones go at the end.
 #[derive(Debug, Default)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum Value {
     /// `nil`.
     #[default]
-    Nil,
+    Nil = 0,
     /// A boolean.
-    Bool(bool),
+    Bool(bool) = 1,
     /// A number.
-    Num(f64),
+    Num(f64) = 2,
     /// A string.
-    Str(Rc<str>),
+    Str(Rc<str>) = 3,
     /// A long string (over 64 KiB, as a document is), in chunks: shared
     /// with an editor bound to it and its edits, and a string to scripts.
-    Text(zgx::text::Text),
+    Text(zgx::text::Text) = 4,
     /// A table used as a list (keys 1 to n).
-    List(Rc<[Value]>),
+    List(Rc<[Value]>) = 5,
     /// A table with string keys, sorted by key so equal tables compare equal
     /// (and `field` finds them by halves): build one with
     /// [`Value::record`], which sorts them.
-    Map(Rc<[(Rc<str>, Value)]>),
+    Map(Rc<[(Rc<str>, Value)]>) = 6,
     /// An element a script keeps (`ui.use_state(el)`), or a folder a person
     /// picked (`ui.open_folder`): opaque to Rust, equal only to itself, and
     /// `null` as JSON. Sharing a variant keeps a rare handle off every
     /// conversion's match.
-    Element(ElementHandle),
+    Element(ElementHandle) = 7,
     /// An image a script keeps (a `Bitmap`: `ui.bitmap`'s, or the
     /// clipboard's): equal only to itself, and `null` as JSON.
-    Image(std::sync::Arc<zgx::image::ImageData>),
+    Image(std::sync::Arc<zgx::image::ImageData>) = 8,
     /// A table kept small until it's read (`Value::folded`): to a script, the
     /// table it opens to.
-    Folded(Rc<Folded>),
+    Folded(Rc<Folded>) = 9,
 }
 
 /// A list made from another by changing its end alone (a streamed reply's
