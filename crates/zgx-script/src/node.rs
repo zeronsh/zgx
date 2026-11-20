@@ -5928,27 +5928,34 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "markdown_view",
         lua.create_function(|lua, table: Table| {
-            // Its own options, read before the styles are.
-            let flag = |name: &str, default: bool| -> mlua::Result<bool> {
-                let value = table.get::<Option<bool>>(name)?.unwrap_or(default);
-                table.raw_set(name, mlua::Value::Nil)?;
-                Ok(value)
+            // Its own options, read (raw, by the VM's names for them) and
+            // taken out before the styles are.
+            let keys = crate::markdown::keys(lua)?;
+            let flag = |key: &mlua::LuaString, default: bool| -> mlua::Result<bool> {
+                Ok(match table.raw_get::<Option<bool>>(key)? {
+                    Some(value) => {
+                        table.raw_set(key, mlua::Value::Nil)?;
+                        value
+                    }
+                    None => default,
+                })
             };
             let on_math = table.get::<Option<Function>>("on_math")?;
             table.raw_set("on_math", mlua::Value::Nil)?;
             let options = crate::markdown::view::ViewOptions {
                 parse: crate::markdown::Options {
-                    breaks: flag("breaks", false)?,
-                    paths: flag("paths", false)?,
-                    html_marks: flag("html_marks", false)?,
-                    autolinks: flag("autolinks", false)?,
+                    breaks: flag(&keys.breaks, false)?,
+                    paths: flag(&keys.paths, false)?,
+                    html_marks: flag(&keys.html_marks, false)?,
+                    autolinks: flag(&keys.autolinks, false)?,
                     code: None,
                     math: on_math.is_some(),
                 },
-                copy: flag("copy", true)?,
+                copy: flag(&keys.copy, true)?,
                 math: None,
                 link_menu: None,
             };
+            drop(keys);
             let on_link = table.get::<Option<Function>>("on_link")?;
             table.raw_set("on_link", mlua::Value::Nil)?;
             let link_menu = table.get::<Option<Function>>("link_menu")?;
