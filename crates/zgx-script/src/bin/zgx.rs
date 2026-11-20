@@ -484,6 +484,10 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
   clock [freeze|thaw|advance <ms>]
+  gc [--top N] [--retained KIND] [--sample N] [--mark] [--since-mark]
+                       a full Luau collection: heap before and after, what is left; --retained
+                       State: the chains of holders from a root; --mark, then --since-mark: what
+                       survives after it
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
   record               record stop [--out gesture.tape]
@@ -541,7 +545,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--all" | "--full" | "--gone" | "--next" | "--prev" | "--close" | "--summary" => {
-                flags.push((arg[2..].to_string(), None))
+                flags.push((arg[2..].replace('-', "_"), None))
             }
             "--no-click" => flags.push(("no_click".into(), None)),
             "--hover-only" => flags.push(("hover_only".into(), None)),
@@ -571,7 +575,8 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 }
             },
             "--depth" | "--budget" | "--text" | "--timeout" | "--width" | "--runs" | "--since"
-            | "--until" | "--keep" | "--repeat" | "--every" | "--html" | "--image" => {
+            | "--until" | "--keep" | "--repeat" | "--every" | "--html" | "--image" | "--top"
+            | "--retained" | "--sample" => {
                 flags.push((arg[2..].to_string(), args.next()));
             }
             _ => words.push(arg),
@@ -1046,8 +1051,14 @@ const TOOLS: &[Tool] = &[
     (
         "zgx_gc",
         "gc",
-        &[("top", "number", false)],
-        "Run a full Luau collection in each script VM and report the heap before and after (garbage freed), and what is left by object type, userdata type and the chunk its code came from: tell garbage from a leak by running it again after the same actions.",
+        &[
+            ("top", "number", false),
+            ("retained", "string", false),
+            ("sample", "number", false),
+            ("mark", "boolean", false),
+            ("since_mark", "boolean", false),
+        ],
+        "Run a full Luau collection in each script VM and report the heap before and after (garbage freed), and what is left by object type, userdata type and the chunk its code came from: tell garbage from a leak by running it again after the same actions. `retained` names a kind (a userdata type such as State, `table`, `function`, or part of a function's name or chunk) and prints the chains of holders from a root to those objects (registry → .key → upvalue → …, each function with its chunk:line), the commonest `sample` of them with counts. `mark` remembers the objects there are now; after more actions, `since_mark` lists what survived a collection that wasn't there then, and with `retained` only holders of those.",
     ),
     (
         "zgx_clock",
