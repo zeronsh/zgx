@@ -775,6 +775,8 @@ jobs:
       # HTML and its text through the system pasteboard (ignored locally:
       # it replaces the clipboard of whoever runs it).
       - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard -- --ignored --exact
+      # Types of an app's own, as Chromium's web custom data, the same way.
+      - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::types_round_trip_through_the_system_clipboard -- --ignored --exact
       # The soak (an app used for a while holds what it did), on Metal.
       - run: cargo test -p zgx-script --test soak --locked
       - run: cargo test -p zgx-run --test audit --locked
@@ -784,6 +786,10 @@ jobs:
       # stopped at 157 ms of CPU), as an app's few threads never do.
       - run: cargo test -p zgx-script --test state --locked -- --test-threads=1 script::runaway script::a_script_short_of_its_budget script::garbage_from_builtins script::copies_of_state script::a_script_keeping_nodes
       - run: cargo test --workspace --doc --locked
+      # The CLI as `cargo install` builds it: zgx-script alone, with the
+      # formatters, so its feature set is not the workspace's.
+      - run: cargo install --path crates/zgx-script --locked --features "inspect i18n-intl" --root "$RUNNER_TEMP/zgx-cli" --debug
+      - run: '"$RUNNER_TEMP/zgx-cli/bin/zgx" --help > /dev/null'
       # Without ffmpeg, the tests of what it encodes pass by skipping: here it
       # must be there.
       - name: Video
@@ -897,6 +903,8 @@ jobs:
       # HTML (CF_HTML's fragment) and its text through the system clipboard
       # (ignored locally: it replaces the clipboard of whoever runs it).
       - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard -- --ignored --exact
+      # Types of an app's own, as Chromium's web custom data, the same way.
+      - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::types_round_trip_through_the_system_clipboard -- --ignored --exact
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # Real programs through ConPTY, from the image (zgx-terminal's ignored

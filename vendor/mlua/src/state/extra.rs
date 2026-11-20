@@ -283,6 +283,11 @@ impl ExtraData {
         self.weak.assume_init_ref()
     }
 
+    /// zgx patch: the auxiliary stack's slots holding a value now.
+    pub(super) fn live_ref_slots(&self) -> usize {
+        (self.ref_stack_top as usize).saturating_sub(self.ref_free.len())
+    }
+
     /// Like `try_ref_stack_pop`, but panics if the auxiliary stack cannot grow.
     pub(super) unsafe fn ref_stack_pop(&mut self) -> c_int {
         self.try_ref_stack_pop().unwrap_or_else(|_| {

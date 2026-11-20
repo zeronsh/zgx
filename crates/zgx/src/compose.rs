@@ -282,6 +282,10 @@ impl ListOptions {
     pub(crate) fn ahead(&self) -> Option<f32> {
         self.edges.as_ref().and_then(|edges| edges.ahead)
     }
+    /// `View::list_recycle`.
+    pub(crate) fn recycle(&self) -> bool {
+        self.edges.as_ref().is_some_and(|edges| edges.recycle)
+    }
 }
 /// What a virtual list reports of its edges: its end and its start coming
 /// in reach (`View::on_end`, `View::on_start`) and whether it rests at its
@@ -293,6 +297,8 @@ pub(crate) struct ListEdges {
     at_end: Option<Box<dyn FnMut(bool)>>,
     /// `View::list_ahead`.
     ahead: Option<f32>,
+    /// `View::list_recycle`.
+    recycle: bool,
     /// `View::scrollbar_style` (a scroll view's too): with what few views
     /// have, so `Rare` stays the size it was.
     scrollbar_style: Option<Rc<crate::compose_scrollbar::ScrollbarStyle>>,
@@ -356,6 +362,7 @@ pub(crate) fn watch_edges(
         mut at_end,
         ancestor: _,
         ahead: _,
+        recycle: _,
         scrollbar_style: _,
     } = edges;
     let runtime = ui.runtime.clone();
@@ -484,10 +491,21 @@ type EventListener = Box<dyn FnMut(&mut EventContext)>;
 #[derive(Default)]
 struct PortalOptions {
     placement: Option<crate::compose_popover::Placement>,
+    /// `keep_below`: placed as if the window began this far down (a titlebar band).
+    keep_below: f32,
+    /// `scrim_blur`: what lies behind a modal's backdrop blurs by this sigma.
+    scrim_blur: f32,
     /// `layer`: a non-modal layer (toasts).
     layer: bool,
     /// `top_layer`: a layer above every other, under the document root.
     top: bool,
+    /// `topmost`: that layer shown in a popup window above every other.
+    topmost: bool,
+    /// `hover_delay`: opens as the pointer rests on its trigger.
+    hover: Option<crate::compose_hover::HoverDelay>,
+    /// `initial_focus` and `final_focus`.
+    initial_focus: crate::compose_modal::FocusTarget,
+    final_focus: crate::compose_modal::FocusTarget,
     /// `hoist`: in that layer, over its parent.
     hoist: Option<Box<crate::compose_modal::Hoist>>,
     /// `View::autofocus`.
@@ -507,6 +525,8 @@ struct PortalOptions {
     /// its anchor for this long, and whether the pointer may enter it.
     #[cfg(feature = "dom")]
     dom_hover: Option<(std::time::Duration, bool)>,
+    /// `View::anchor_fill`: the anchor's slot takes its share of its row.
+    anchor_fill: bool,
 }
 /// A declarative view: a node to mount, its styles, children, handlers and
 /// semantics. Built with the functions here ([`column()`], [`text()`],
@@ -563,6 +583,8 @@ pub(crate) struct CodeOptions {
     atom_pointer: Option<Rc<crate::editor_atom_pointer::AtomPointer>>,
     /// `atom_style`: how its atoms show beyond a wash.
     atom_style: Option<crate::editor_atom_style::AtomStyle>,
+    /// `group_scrollbar`: its scroll groups' scrollbar.
+    group_scrollbar: bool,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -598,6 +620,8 @@ pub(crate) struct Rare {
     /// `View::active_descendant`: the id of the item it is on.
     active_descendant: Option<Box<dyn Fn() -> Option<String>>>,
     dismiss_backdrop: Option<bool>,
+    /// `View::on_dismiss`: runs as the person closes a modal or popover.
+    on_dismiss: Option<Rc<dyn Fn()>>,
     /// Where an overlay opens and a submenu's own trigger row: boxed, as
     /// few views have them (views are moved through the mount recursion).
     portal: Option<Box<PortalOptions>>,
@@ -632,6 +656,8 @@ pub(crate) struct Rare {
     secure: Option<bool>,
     input_mode: Option<crate::text_edit::InputMode>,
     spellcheck: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::inert_when`.
+    inert: Option<Box<dyn FnMut() -> bool>>,
     line_numbers: Option<bool>,
     /// `View::drop_caret`: whether dragged text moves a text area's caret.
     drop_caret: Option<bool>,
@@ -712,6 +738,9 @@ impl Rare {
         if self.dismiss_backdrop.is_some() {
             inner.dismiss_backdrop = self.dismiss_backdrop;
         }
+        if self.on_dismiss.is_some() {
+            inner.on_dismiss = self.on_dismiss;
+        }
         if self.portal.is_some() {
             inner.portal = self.portal;
         }
@@ -788,6 +817,9 @@ impl Rare {
         }
         if self.spellcheck.is_some() {
             inner.spellcheck = self.spellcheck;
+        }
+        if self.inert.is_some() {
+            inner.inert = self.inert;
         }
         if self.secure.is_some() {
             inner.secure = self.secure;
@@ -1053,7 +1085,8 @@ impl View {
         self.edges_mut().ancestor = true;
         self
     }
-    /// Show an interactive overlay scrollbar on a scroll viewport or virtual list.
+    /// Show an interactive overlay scrollbar on a scroll viewport, virtual list or text area (at its box's edge,
+    /// over its padding: it takes no room from the text).
     pub fn scrollbar(mut self, visible: bool) -> Self {
         self.rare_mut().scrollbar = Some(visible);
         self
@@ -1146,6 +1179,16 @@ impl View {
         self.edges_mut().ahead = Some(viewports);
         self
     }
+    /// A fixed-height virtual list hands a row scrolled out of what it
+    /// keeps to a key coming into view, its index signal set to the new
+    /// place, instead of dropping it and building another: a fast scroll
+    /// writes rows rather than building them. Only for rows that follow
+    /// their index (or item) in everything they show and do: what a row
+    /// read once as it was built stays with it.
+    pub fn list_recycle(mut self) -> Self {
+        self.edges_mut().recycle = true;
+        self
+    }
     fn edges_mut(&mut self) -> &mut ListEdges {
         self.rare_mut().edges.get_or_insert_default()
     }
@@ -1159,10 +1202,30 @@ impl View {
         self.rare_mut().dismiss_backdrop = Some(enabled);
         self
     }
+    /// Runs as the person closes a modal (Escape, or a press on the
+    /// backdrop), after it has closed: for what a closing owes the app when
+    /// its `open` is a plain signal the app also sets.
+    pub fn on_dismiss(mut self, handler: impl Fn() + 'static) -> Self {
+        self.rare_mut().on_dismiss = Some(Rc::new(handler));
+        self
+    }
     /// Where an anchored popover or menu opens against its trigger (below
     /// it, start-aligned, 4 points away unless set).
     pub fn placement(mut self, placement: crate::compose_popover::Placement) -> Self {
         self.rare_mut().portal.get_or_insert_default().placement = Some(placement);
+        self
+    }
+    /// Place this popover as if the window began `top` points down: it
+    /// flips below its trigger rather than reach into that band (a
+    /// titlebar's).
+    /// A modal's backdrop blurs what lies behind it by `sigma` points (CSS
+    /// `backdrop-filter: blur()` on a dialog's backdrop), its panel sharp.
+    pub fn scrim_blur(mut self, sigma: f32) -> Self {
+        self.rare_mut().portal.get_or_insert_default().scrim_blur = sigma.max(0.);
+        self
+    }
+    pub(crate) fn keep_below(mut self, top: f32) -> Self {
+        self.rare_mut().portal.get_or_insert_default().keep_below = top.max(0.);
         self
     }
     /// Hear a person's paste into this editor before it goes in, from a
@@ -1223,6 +1286,13 @@ impl View {
         self.rare_mut().active_descendant = Some(Box::new(id));
         self
     }
+    /// A popover's anchor slot is a child of its row like any other: it
+    /// grows and stretches with the row, so an anchor that grows or fills
+    /// its width has the room to, with no measuring.
+    pub fn anchor_fill(mut self) -> Self {
+        self.rare_mut().portal.get_or_insert_default().anchor_fill = true;
+        self
+    }
     /// A popover placed at the caret of the text editor in its trigger, not
     /// at the trigger's box, following it as it moves (typing, a click, a
     /// line wrapping, the editor scrolling, an input method's composition),
@@ -1255,6 +1325,53 @@ impl View {
         portal.layer = true;
         portal.top = true;
         self.w_full().h_full()
+    }
+    /// A layer over the whole window that nothing covers, as the web's top
+    /// layer: where the host shows popups in windows of their own (a
+    /// desktop window), it is drawn in one above the app's menus, popovers,
+    /// tooltips and a drag's preview, covering its window's content (its
+    /// root at 0, 0 there), following it as it moves, resizes and zooms.
+    /// Of two, the later is above. A `layer` (no focus taken, no backdrop,
+    /// the pointer passing through but for the controls in it), so a press
+    /// on one of them closes no menu. Where the host has no such windows it
+    /// is `top_layer`'s: the window's own topmost layer. Shown while its
+    /// window is, and drawn only while it paints something.
+    pub fn topmost(mut self) -> Self {
+        let portal = self.rare_mut().portal.get_or_insert_default();
+        portal.layer = true;
+        portal.top = true;
+        portal.topmost = true;
+        self.w_full().h_full()
+    }
+    /// Where focus goes as this modal, popover or menu opens, as Base UI's
+    /// `initialFocus`: `FocusTarget::Id(id)` (the node `View::id` names, in
+    /// it), `None` (the panel itself, no control), or by default its first
+    /// control.
+    pub fn initial_focus(mut self, target: FocusTarget) -> Self {
+        self.rare_mut().portal.get_or_insert_default().initial_focus = target;
+        self
+    }
+    /// Where focus goes as this modal, popover or menu closes, as Base UI's
+    /// `finalFocus`: `FocusTarget::Id(id)` (any node `View::id` names),
+    /// `None` (nothing focused), or by default what had focus before (else
+    /// its trigger, as it was opened from the keyboard).
+    pub fn final_focus(mut self, target: FocusTarget) -> Self {
+        self.rare_mut().portal.get_or_insert_default().final_focus = target;
+        self
+    }
+    /// Open this popover, menu or submenu as the pointer rests on its trigger
+    /// for `open`, and close it once the pointer has been off the trigger and
+    /// it for `close`, as Base UI's `openOnHover`, `delay` and `closeDelay`
+    /// do. Heading from the trigger to the popup, the pointer is held in the
+    /// triangle between them (a safe polygon: it closes as the pointer
+    /// strays out of it or rests in it 300 ms), so a diagonal crossing keeps
+    /// it open. One opened any other way (a click) stays until closed. A
+    /// submenu opens on hover by default after 100 ms and closes at once; this
+    /// sets its own.
+    pub fn hover_delay(mut self, open: std::time::Duration, close: std::time::Duration) -> Self {
+        self.rare_mut().portal.get_or_insert_default().hover =
+            Some(crate::compose_hover::HoverDelay { open, close });
+        self
     }
     /// Open a menu with its item `id` over the trigger, as a pop-up button's
     /// menu (a select's) opens with the chosen item over the button, rather
@@ -1568,7 +1685,7 @@ impl View {
             None => self.accessible_label(label),
         }
     }
-    fn accessibility_mut(&mut self) -> &mut Accessibility {
+    pub(crate) fn accessibility_mut(&mut self) -> &mut Accessibility {
         self.rare_mut()
             .accessibility
             .get_or_insert_with(Default::default)
@@ -1593,6 +1710,15 @@ impl View {
     #[doc(hidden)]
     pub fn level(mut self, level: usize) -> Self {
         self.accessibility_mut().level = Some(level.max(1));
+        self
+    }
+    /// What this is the current one of, followed (`aria-current`): none
+    /// while `current` says so.
+    pub fn current_when(
+        mut self,
+        current: impl FnMut() -> Option<crate::semantics::Current> + 'static,
+    ) -> Self {
+        self.accessibility_mut().current_when = Some(Box::new(current));
         self
     }
     /// [`View::level`], followed: a row whose depth changes in place (moved
@@ -1722,6 +1848,32 @@ impl View {
     /// (`aria-hidden`): decoration, or what is said elsewhere already.
     pub fn accessible_hidden(mut self) -> Self {
         self.accessibility_mut().hidden = true;
+        self
+    }
+    /// While `busy` says so this subtree is still being filled in
+    /// (`aria-busy`): assistive technology waits for it to settle rather than
+    /// announce each change.
+    pub fn busy_when(mut self, busy: impl FnMut() -> bool + 'static) -> Self {
+        self.accessibility_mut().busy_when = Some(Box::new(busy));
+        self
+    }
+    /// `accessible_hidden`, following the reactive values it reads
+    /// (`aria-hidden` as a state changes it).
+    pub fn accessible_hidden_when(mut self, hidden: impl FnMut() -> bool + 'static) -> Self {
+        self.accessibility_mut().hidden_when = Some(Box::new(hidden));
+        self
+    }
+    /// Take this subtree out of the pointer's reach, the focus order and
+    /// the accessibility tree while `inert` says so (HTML's `inert`): focus
+    /// inside it moves on as it goes inert, and no key activates it.
+    pub fn inert_when(mut self, inert: impl FnMut() -> bool + 'static) -> Self {
+        self.rare_mut().inert = Some(Box::new(inert));
+        self
+    }
+    /// What this control opens (`aria-haspopup`): a dialog, a menu, a list
+    /// box. A popover's or menu's trigger says so already, unless this does.
+    pub fn accessible_has_popup(mut self, kind: crate::semantics::PopupKind) -> Self {
+        self.accessibility_mut().has_popup = Some(kind);
         self
     }
     /// While this shows, assistive technology reads it alone, not what lies
@@ -2083,6 +2235,13 @@ impl View {
         self.code_mut().on_atoms = Some(Box::new(told));
         self
     }
+    /// A text area's scroll groups (`LineInset::scroll_group`, a code block's) get the scrollbar scroll views show:
+    /// one, across the bottom edge of the group that moved last, shown as it scrolls; its drag scrolls the group.
+    #[doc(hidden)]
+    pub fn group_scrollbar(mut self) -> Self {
+        self.code_mut().group_scrollbar = true;
+        self
+    }
     /// How a text area's atoms show beyond a wash: a mention's colour,
     /// weight, underline and leading icon (`EditorHandle::set_atom_style`).
     #[doc(hidden)]
@@ -2181,6 +2340,22 @@ impl View {
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.rare_mut().selectable = Some(selectable);
         self
+    }
+    /// Make this view a scope of its own for find in page, as a
+    /// document's pane or a chat's thread: find opened with focus in it
+    /// (else last pressed in it) looks only within the nearest such view,
+    /// its text, fields' values and lists' rows, mounted or not, its bar at
+    /// that view's top right. Without one, find looks in the whole window.
+    #[doc(hidden)]
+    pub fn find_scope(self, on: bool) -> Self {
+        if !on {
+            return self;
+        }
+        self.on_mount(|handle| {
+            if let Some(ui) = handle.ui.upgrade() {
+                crate::find::add_scope(&ui, handle.node);
+            }
+        })
     }
     /// The highlight behind this selectable region's selected text, in place
     /// of the theme's `selection` (and `selection.inactive`), as CSS's
@@ -3301,14 +3476,21 @@ pub fn text_message(message: crate::i18n::Message) -> View {
     text_signal(move || message.get())
 }
 pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
+pub use crate::compose_hover::HoverDelay;
+pub use crate::compose_modal::FocusTarget;
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
-pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
+pub use crate::compose_popover::{
+    Collision, Edge as PlacementEdge, Placement, Side as PlacementSide,
+};
 pub use crate::compose_rich::{
-    RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now, rich_text, text_span,
+    IconAlign, InlineSvg, RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now,
+    rich_text, text_span,
 };
 pub use crate::compose_scrollbar::{ScrollbarEase, ScrollbarStyle};
-pub use crate::compose_tooltip::{Tooltip, TooltipTiming, set_tooltip_timing};
+pub use crate::compose_tooltip::{
+    Tooltip, TooltipGroup, TooltipLook, TooltipTiming, set_tooltip_look, set_tooltip_timing,
+};
 #[doc(hidden)]
 pub use crate::scroll_reveal::ScrollIntoView;
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
@@ -4558,6 +4740,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 .list_ahead(options.ahead(), tick)
                 .map(|ahead| crate::spare::Kept::new(ahead, overscan));
             let overscan = if kept.is_some() { 0 } else { overscan };
+            let recycle = options.recycle();
             let ListOptions {
                 scrollbar,
                 keyboard_navigation,
@@ -4700,6 +4883,8 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 row_height,
             );
             let mut handled_reveal = 0;
+            // `recycle`: rows no key holds, hidden, for the next to come in.
+            let mut pool: Vec<(NodeId, Signal<usize>)> = Vec::new();
             ui.bind(root, move || {
                 #[cfg(debug_assertions)]
                 LIST_RUNS.with(|runs| runs.set(runs.get() + 1));
@@ -4776,10 +4961,11 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 // key repeated, and those left unstamped go below.
                 run += 1;
                 let mut fresh = 0;
+                let mut repeated = false;
                 for (key, _) in &keys {
                     match entries.get_mut(key) {
                         Some((.., placed)) => {
-                            assert!(placed.run != run, "duplicate virtual list child key");
+                            repeated |= placed.run == run;
                             placed.run = run;
                         }
                         None => fresh += 1,
@@ -4790,9 +4976,12 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         Default::default();
                     for (key, _) in &keys {
                         if !entries.contains_key(key) {
-                            assert!(new.insert(key), "duplicate virtual list child key");
+                            repeated |= !new.insert(key);
                         }
                     }
+                }
+                if repeated {
+                    variable::drop_repeated_keys(&mut keys, |(key, _)| key);
                 }
                 let Some(mut ui) = weak.upgrade() else {
                     return;
@@ -4822,6 +5011,9 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 runtime.untracked(|| {
                     let _theme = ui.enter_theme(&environment.theme);
                     let mut transaction = MountTransaction::new(&ui, content);
+                    if recycle && fresh != 0 {
+                        fresh -= recycle_rows(&ui, &mut entries, &mut pool, &keys, run);
+                    }
                     // Construct first: a failed row constructor leaves old rows intact.
                     if fresh != 0 {
                         let mut added = Vec::new();
@@ -4846,9 +5038,14 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                     let mut removed_focus = false;
                     if entries.len() > keys.len() {
-                        entries.retain(|_, (node, _, placed)| {
+                        let keep = if recycle { keys.len().max(16) } else { 0 };
+                        entries.retain(|_, (node, index, placed)| {
                             if placed.run == run {
                                 true
+                            } else if pool.len() < keep && !holds_focus(&ui, *node) {
+                                ui.scene.borrow_mut().set_style(*node, pooled_style());
+                                pool.push((*node, index.clone()));
+                                false
                             } else {
                                 if navigation.is_some()
                                     && let Some(focused) = ui.input.focused()
@@ -4912,6 +5109,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             }
                             order.push(*node);
                         }
+                        order.extend(pool.iter().map(|(node, _)| *node));
                         assert!(scene.reorder_children(content, &order));
                     }
                     transaction.commit();
@@ -4951,6 +5149,58 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     #[cfg(feature = "dom")]
     let view = __dom::attach(view, dom);
     view
+}
+/// Whether `node` holds the keyboard's focus or what is open from it: a row
+/// that does goes as it leaves, never written with another item.
+fn holds_focus(ui: &Ui, node: NodeId) -> bool {
+    ui.input.focused().is_some_and(|focused| ui.opened_from(focused, node))
+        || ui.input.focus_scope().is_some_and(|scope| ui.opened_from(scope, node))
+}
+/// A pooled row's style: out of layout, paint, hit testing and assistive
+/// technology until a key takes it and places it again.
+fn pooled_style() -> crate::scene::Style {
+    crate::scene::Style {
+        layout_options: Some(std::sync::Arc::new(crate::layout::LayoutOptions {
+            display: Some(crate::layout::Display::None),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+/// `View::list_recycle`: each key in `keys` without a row takes a row this
+/// pass leaves (`run` unstamped) not holding focus, else one from `pool`,
+/// placed afresh; its index is set with the rest. The rows it handed on.
+fn recycle_rows<K: Eq + std::hash::Hash + Clone>(
+    ui: &Ui,
+    entries: &mut HashMap<K, (NodeId, Signal<usize>, Placed), rustc_hash::FxBuildHasher>,
+    pool: &mut Vec<(NodeId, Signal<usize>)>,
+    keys: &[(K, usize)],
+    run: u64,
+) -> usize {
+    let mut leaving: Vec<K> = entries
+        .iter()
+        .filter(|(_, (node, _, placed))| placed.run != run && !holds_focus(ui, *node))
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut handed = 0;
+    for (key, _) in keys {
+        if entries.contains_key(key) {
+            continue;
+        }
+        let row = match leaving.pop() {
+            Some(from) => {
+                let (node, index, _) = entries.remove(&from).expect("a row leaving");
+                (node, index)
+            }
+            None => match pool.pop() {
+                Some(row) => row,
+                None => break,
+            },
+        };
+        entries.insert(key.clone(), (row.0, row.1, Placed { run, at: None }));
+        handed += 1;
+    }
+    handed
 }
 // Roll back newly appended roots if a component constructor or initial binding
 // panics. Existing siblings are never removed by this guard. This is ownership
@@ -5195,17 +5445,24 @@ fn mount_portal(
     is_submenu: bool,
 ) -> NodeId {
     let anchored = anchor.is_some();
+    let fill = anchored
+        && view
+            .rare
+            .as_ref()
+            .and_then(|r| r.portal.as_ref())
+            .is_some_and(|p| p.anchor_fill);
     let owner = ui.container(
         parent,
         Layout::Overlay,
         crate::scene::Style {
             absolute: !anchored,
-            align: if is_submenu {
+            flex_grow: if fill { 1. } else { 0. },
+            align: if is_submenu || fill {
                 crate::scene::Align::Stretch
             } else {
                 crate::scene::Align::Start
             },
-            justify: if is_submenu {
+            justify: if is_submenu || fill {
                 crate::scene::Justify::Stretch
             } else {
                 crate::scene::Justify::Start
@@ -5231,8 +5488,44 @@ fn mount_portal(
             || a.rare.as_ref().is_some_and(|r| r.wraps_bare_button)
     });
     let anchor = anchor.map(|anchor| mount(ui, owner, *anchor, environment.clone()));
+    // Filling its share of the row, the slot is the flex item: it takes the
+    // smallest width of what its anchor lays out as (CSS's `min-width: 0`
+    // on a field that may shrink below its text), or it would stop at what
+    // the anchor holds. Read once the anchor's style is in the scene: its
+    // binding, made before this one, runs first (a component, a script's
+    // field, has its styles only once built).
+    if fill && let Some(anchor) = anchor {
+        let weak = ui.downgrade();
+        ui.bind(owner, move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut scene = ui.scene.borrow_mut();
+            if !scene.contains(anchor) {
+                return;
+            }
+            let min_width = scene.style(scene.laid_out_as(anchor)).min_width;
+            let mut style = scene.style(owner);
+            if style.min_width != min_width {
+                style.min_width = min_width;
+                scene.set_style(owner, style);
+            }
+        });
+    }
     if let Some(anchor) = anchor {
         ui.listen_popup_soon(anchor);
+        // What the trigger opens, from the start (a lazy panel isn't built
+        // until it opens): a tooltip's trigger says nothing.
+        if !view.rare.as_ref().is_some_and(|r| r.panel_hidden) {
+            let kind = if is_menu {
+                crate::semantics::PopupKind::Menu
+            } else {
+                crate::semantics::PopupKind::Dialog
+            };
+            ui.semantics.borrow_mut().update(anchor, |node| {
+                node.has_popup.get_or_insert(kind);
+            });
+        }
     }
     // A bare button opening a menu (no handlers of its own) is a menu
     // button, as WAI-ARIA's: a press, Enter, Space or Down opens it, even
@@ -5268,6 +5561,24 @@ fn mount_portal(
         }
     }
     let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
+    // Opened as the pointer rests on its trigger (a submenu's own is
+    // mounted with its menu, `compose_menu::mount`): wired before a lazy
+    // panel is built, which is what the first hover opens.
+    let panel_cell: Rc<Cell<Option<NodeId>>> = Rc::default();
+    if let (Some(hover), Some(anchor)) = (options.and_then(|p| p.hover), anchor)
+        && !is_submenu
+    {
+        crate::compose_hover::mount(
+            ui,
+            owner,
+            anchor,
+            panel_cell.clone(),
+            open.clone(),
+            hover,
+            environment.services.get::<TaskRunner>(),
+        );
+    }
+    let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
     if !options.is_some_and(|p| p.lazy) {
         built.set(true);
         mount_portal_panel(
@@ -5280,6 +5591,7 @@ fn mount_portal(
             environment,
             is_menu,
             is_submenu,
+            panel_cell,
         );
         return owner;
     }
@@ -5308,6 +5620,7 @@ fn mount_portal(
                 environment,
                 is_menu,
                 is_submenu,
+                panel_cell.clone(),
             )
         });
     });
@@ -5325,6 +5638,7 @@ fn mount_portal_panel(
     mut environment: Environment,
     is_menu: bool,
     is_submenu: bool,
+    hover_panel: Rc<Cell<Option<NodeId>>>,
 ) {
     let anchored = anchor.is_some();
     let panel_hidden = view.rare.as_ref().is_some_and(|r| r.panel_hidden);
@@ -5388,6 +5702,9 @@ fn mount_portal_panel(
         .and_then(|r| r.portal.as_ref())
         .is_some_and(|p| p.layer || p.at_caret);
     if !anchored && !overlay_only {
+        let scrim_blur = (view.rare.as_ref())
+            .and_then(|r| r.portal.as_ref())
+            .map_or(0., |p| p.scrim_blur);
         // The theme's backdrop, following it.
         let (scene, theme, overlay) = (ui.scene.clone(), ui.theme_scope(), portal.overlay);
         ui.bind(overlay, move || {
@@ -5402,6 +5719,12 @@ fn mount_portal_panel(
                     },
                 },
             );
+            if scrim_blur > 0. {
+                let mut scene = scene.borrow_mut();
+                let mut effects = scene.effects(overlay);
+                effects.blur_radius = scrim_blur;
+                scene.set_effects(overlay, effects);
+            }
         });
     }
     // A modal (not a layer, nor a panel at a caret) opening closes the
@@ -5427,15 +5750,25 @@ fn mount_portal_panel(
         }
     }
     environment.portal = Some((portal.overlay, portal.visible.clone()));
+    let hover = (view.rare.as_ref())
+        .and_then(|r| r.portal.as_ref())
+        .and_then(|p| p.hover);
+    let focus_targets = (view.rare.as_ref())
+        .and_then(|r| r.portal.as_ref())
+        .map(|p| (p.initial_focus.clone(), p.final_focus.clone()));
     let menu_context = is_menu.then(|| {
         crate::compose_menu::MenuContext::new(open.clone(), environment.menu(), anchor, is_submenu)
     });
     if let Some(menu) = &menu_context {
+        if let Some(hover) = hover {
+            menu.hover.set(hover);
+        }
         environment.set_menu(Some(menu.clone()));
     }
 
     let options = view.rare.as_ref().and_then(|r| r.portal.as_ref());
     let is_layer = options.is_some_and(|p| p.layer);
+    let view_topmost = options.is_some_and(|p| p.topmost);
     // At an editor's caret: placed there, and focus left in the editor, as
     // a layer leaves it.
     let at_caret = options.is_some_and(|p| p.at_caret);
@@ -5475,6 +5808,7 @@ fn mount_portal_panel(
     };
     if is_menu {
         defaults = defaults.items_stretch();
+        defaults.merge(&menu_look().panel);
     }
     defaults.merge(&view.styles);
     view.styles = defaults;
@@ -5529,11 +5863,19 @@ fn mount_portal_panel(
     // items closes it); the parent's backdrop dismisses both.
     let mut rare = view.rare.as_mut();
     let dismiss_backdrop = rare.as_mut().and_then(|r| r.dismiss_backdrop.take());
+    let on_dismiss = rare.as_mut().and_then(|r| r.on_dismiss.take());
     let dismiss_backdrop = dismiss_backdrop.unwrap_or(!is_submenu);
-    let (placement, modal_placement, autofocus, over, arrow) = rare
+    let (placement, modal_placement, autofocus, over, arrow, keep_below) = rare
         .and_then(|r| r.portal.take())
-        .map_or((None, None, None, None, None), |p| {
-            (p.placement, p.modal_placement, p.autofocus, p.over, p.arrow)
+        .map_or((None, None, None, None, None, 0.), |p| {
+            (
+                p.placement,
+                p.modal_placement,
+                p.autofocus,
+                p.over,
+                p.arrow,
+                p.keep_below,
+            )
         });
     // The arrow is drawn as the panel is: a copy of its styles, and of what
     // its reactive style gives each time it runs (a background following
@@ -5581,6 +5923,7 @@ fn mount_portal_panel(
         view,
         environment.clone(),
     );
+    hover_panel.set(Some(panel));
     if let Some(menu) = menu_context.clone() {
         menu.panel.set(Some(panel));
         let viewport = ui.container(
@@ -5611,7 +5954,15 @@ fn mount_portal_panel(
         if !is_submenu {
             crate::compose_menu::mount_press(ui, trigger, portal.overlay, panel, open.clone());
         }
-        crate::compose_menu::mount(ui, panel, menu, trigger, portal.overlay, dismiss_backdrop);
+        crate::compose_menu::mount(
+            ui,
+            panel,
+            menu,
+            trigger,
+            portal.overlay,
+            dismiss_backdrop,
+            environment.services.get::<TaskRunner>(),
+        );
     }
     let mut over_focus = None;
     if let Some(anchor) = anchor {
@@ -5712,6 +6063,7 @@ fn mount_portal_panel(
                 placement,
                 over,
                 arrow,
+                keep_below,
             );
         }
     } else {
@@ -5727,6 +6079,21 @@ fn mount_portal_panel(
     let open_signal = open.clone();
     let popup_open = open.clone();
     let unnamed = label.is_empty();
+    let focus_hooks = focus_targets
+        .filter(|(initial, last)| *initial != FocusTarget::Default || *last != FocusTarget::Default)
+        .map(|(initial, last)| {
+            let registry = environment.registry.clone();
+            crate::compose_modal::FocusHooks {
+                initial,
+                last,
+                find: Rc::new(move |id: &str| {
+                    registry
+                        .borrow()
+                        .get(id)
+                        .and_then(|nodes| nodes.last().copied())
+                }),
+            }
+        });
     crate::compose_modal::activate(
         ui,
         owner,
@@ -5747,6 +6114,9 @@ fn mount_portal_panel(
         is_submenu,
         autofocus.unwrap_or(true),
         keeps_focus,
+        on_dismiss,
+        environment.services.get::<TaskRunner>(),
+        focus_hooks,
     );
     // An unnamed popover or menu is named by its trigger, as a browser's
     // popover target is (`aria-labelledby`).
@@ -5779,7 +6149,8 @@ fn mount_portal_panel(
         ui.bind(panel, move || {
             let expanded = popup_open.get();
             semantics.borrow_mut().update(anchor, |node| {
-                node.has_popup = Some(crate::semantics::PopupKind::Dialog);
+                node.has_popup
+                    .get_or_insert(crate::semantics::PopupKind::Dialog);
                 node.expanded = Some(expanded);
             });
         });
@@ -5801,16 +6172,24 @@ fn mount_portal_panel(
     // (`Ui::set_popup_screens`), an anchored popup is a popup root: drawn in
     // a window of its own (`Scene::set_popup`). Closed, it is none, so a
     // list's hundred row menus cost the host nothing.
-    if anchored {
+    let topmost = view_topmost;
+    if anchored || topmost {
         let (screens, visible, position) = (screens, portal.visible.clone(), portal.position);
+        let topmost_windows = ui.topmost_windows();
         let weak = ui.downgrade();
         let role = match (is_menu || is_submenu, is_layer) {
+            _ if topmost => crate::scene::PopupRole::Topmost,
             (true, _) => crate::scene::PopupRole::Menu,
             (_, true) => crate::scene::PopupRole::Tooltip,
             _ => crate::scene::PopupRole::Popover,
         };
+        if !topmost {
+            ui.register_popup(portal.position, open_signal.clone(), role);
+        }
         ui.bind(owner, move || {
-            let popup = visible.get() && screens.with(|screens| !screens.is_empty());
+            let popup = visible.get()
+                && screens.with(|screens| !screens.is_empty())
+                && (!topmost || topmost_windows.get());
             if let Some(ui) = weak.upgrade() {
                 let mut scene = ui.scene.borrow_mut();
                 if popup {
@@ -5823,7 +6202,6 @@ fn mount_portal_panel(
                 }
             }
         });
-        ui.register_popup(portal.position, open_signal);
     }
     // A submenu's layer lets the pointer through to its parent menu.
     if is_submenu {
@@ -5984,6 +6362,42 @@ fn inherit_disabled(
         None => None,
     }
 }
+/// The look an app gives every menu it doesn't style itself: the ones zgx
+/// builds (a link's, an editor's, a selection's) take it, so they look as the
+/// app's own. Each part lies under what a menu or item sets of its own.
+#[derive(Clone, Default)]
+pub struct MenuLook {
+    /// The panel of a menu, a submenu or a context menu.
+    pub panel: Styles,
+    /// Each item.
+    pub item: Styles,
+    /// An item under the pointer, in place of the platform's.
+    pub hover: Option<Styles>,
+    /// An item with keyboard focus, in place of the platform's.
+    pub focus: Option<Styles>,
+    /// A menu's panel fades in this long as it opens, and out as it closes,
+    /// as a web page's menus do: opened from the keyboard it shows at once,
+    /// and closed by choosing an item it goes at once.
+    pub fade: Option<std::time::Duration>,
+}
+thread_local! { static MENU_LOOK: RefCell<Rc<MenuLook>> = RefCell::default(); }
+/// Gives every menu built after it `look` (`ui.menu_look`).
+pub fn set_menu_look(look: MenuLook) {
+    MENU_LOOK.with(|now| *now.borrow_mut() = Rc::new(look));
+}
+fn menu_look() -> Rc<MenuLook> {
+    MENU_LOOK.with(|now| now.borrow().clone())
+}
+/// How long a menu fades (`MenuLook::fade`).
+pub(crate) fn menu_fade() -> Option<std::time::Duration> {
+    menu_look().fade
+}
+fn menu_hover_look() -> Styles {
+    menu_look()
+        .hover
+        .clone()
+        .unwrap_or_else(|| widget_style(|w| &w.menu_hover))
+}
 fn widget_style(pick: impl FnOnce(&WidgetStyles) -> &Styles) -> Styles {
     thread_local! { static STYLES: WidgetStyles = WidgetStyles::new(); }
     STYLES.with(|styles| pick(styles).clone())
@@ -6017,8 +6431,61 @@ fn paragraph_effect<const LOCATING: bool>(
         let mut links = Vec::new();
         let mut icons = Vec::new();
         let mut spanned = Vec::new();
+        let mut boxes = Vec::new();
+        let mut box_labels: Vec<std::sync::Arc<str>> = Vec::new();
         for (index, mut span) in spans.into_iter().enumerate() {
             if span.text.is_empty() {
+                continue;
+            }
+            if let Some(inline) = span.extras.as_mut().and_then(|extras| extras.inline.take()) {
+                if span.styles.has_tokens() {
+                    crate::theme::resolve(&mut span.styles, &theme);
+                }
+                let font_size = span
+                    .styles
+                    .text_size
+                    .get()
+                    .unwrap_or_else(|| base.size_in(Some(&theme)));
+                let color = span
+                    .styles
+                    .text_color
+                    .unwrap_or_else(|| base.color_in(Some(&theme)));
+                let at = content.len();
+                content.push_str(crate::rich_text::INLINE_BOX_TEXT);
+                box_labels.push(span.text.clone());
+                let (width, height) = (
+                    inline.width * font_size,
+                    (inline.height + inline.depth) * font_size,
+                );
+                boxes.push(crate::rich_text::InlineBox {
+                    width,
+                    height,
+                    baseline: inline.height * font_size,
+                    ..crate::rich_text::InlineBox::new(at)
+                });
+                runs.push(crate::rich_text::TextRun {
+                    background: None,
+                    underline: None,
+                    strikethrough: None,
+                    padding: [0., 0.],
+                    radius: 0.,
+                    outset: 0.,
+                    border: None,
+                    min_width: 0.,
+                    range: at..content.len(),
+                    font: base.font_in(Some(&theme)),
+                    font_size,
+                    color,
+                });
+                icons.push(crate::compose_rich::InlineIcon {
+                    range: at..content.len(),
+                    svg: std::sync::Arc::new(inline.svg.tinted(color)),
+                    size: width,
+                    inset: 0.,
+                    dy: 0.,
+                    well: None,
+                    boxed: Some(height),
+                });
                 continue;
             }
             let link = span.action.is_some() || span.href.is_some();
@@ -6026,12 +6493,30 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, rare, plain, room_after, boxed) = match span.extras.take() {
-                None => (None, None, None, false, -1., false),
+            let (
+                hover,
+                mut icon,
+                rare,
+                plain,
+                room_after,
+                outset,
+                border,
+                min_width,
+                trailing,
+                boxed,
+            ) = match span.extras.take() {
+                None => (None, None, None, false, -1., 0., None, 0., None, false),
                 Some(extras) => {
                     let extras = *extras;
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
-                    let apart = extras.icon.is_some() || end != span.padding[0];
+                    let apart = extras.icon.is_some()
+                        || extras.trailing_icon.is_some()
+                        || end != span.padding[0];
+                    let end = end
+                        + extras
+                            .trailing_icon
+                            .as_ref()
+                            .map_or(0., |t| t.size + t.gap + 2. * t.margin);
                     // Its text's run comes next, after the room before it
                     // when that's apart. Noted here, where only spans with
                     // extras come, so a plain span pays nothing for fades.
@@ -6044,33 +6529,64 @@ fn paragraph_effect<const LOCATING: bool>(
                         extras.link,
                         extras.plain,
                         if apart { end } else { -1. },
+                        extras.outset,
+                        extras.border,
+                        extras.min_width,
+                        extras.trailing_icon,
                         extras.boxed,
                     )
                 }
             };
-            let hover = hover.as_ref();
+            let mut hover = hover;
             let styled_hover = hover.is_some();
             if link && !styled_hover && !plain {
                 span.underline.get_or_insert_with(Default::default);
             }
-            if let Some(hover) = hover.filter(|_| link && hovered == Some(links.len())) {
+            let mut hover_background = None;
+            if let Some(hover) = hover
+                .as_mut()
+                .filter(|_| link && hovered == Some(links.len()))
+            {
+                if let Some(swap) = hover.icon.take() {
+                    icon = Some(swap);
+                }
+                if let Some(color) = hover.underline_color {
+                    span.underline_color = Some(color);
+                }
                 if let Some(underline) = hover.underline {
                     span.underline = Some(underline);
                 }
                 if let Some(color) = hover.text_color {
                     span.styles = std::mem::take(&mut span.styles).text_color(color);
                 }
+                hover_background = hover.background;
             }
             if span.styles.has_tokens() {
                 crate::theme::resolve(&mut span.styles, &theme);
                 span.background = span.background.or(span.styles.background);
             }
+            match hover_background {
+                Some(crate::theme::Themed::Value(color)) => span.background = Some(color),
+                Some(crate::theme::Themed::Token(token)) => {
+                    span.background = theme.get(token).color().or(span.background)
+                }
+                None => {}
+            }
             // An icon keeps its room before the text: a padded
             // placeholder run of its own. So does the room before the text
             // where it isn't the room after it (`padding_end`).
+            let on_baseline = icon
+                .as_ref()
+                .is_some_and(|icon| icon.align == crate::compose_rich::IconAlign::Baseline);
             let icon_at = (room_after >= 0.).then(|| {
                 let at = content.len();
-                content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                // On the baseline, an inline box holds its room, and the
+                // line grows to hold it; else a padded placeholder does.
+                content.push_str(if on_baseline {
+                    crate::rich_text::INLINE_BOX_TEXT
+                } else {
+                    crate::compose_rich::ICON_PLACEHOLDER
+                });
                 at..content.len()
             });
             let start = content.len();
@@ -6086,6 +6602,8 @@ fn paragraph_effect<const LOCATING: bool>(
             if link || rare.is_some() {
                 links.push(crate::compose_rich::Link {
                     range: start..content.len(),
+                    hit_start: icon_at.as_ref().map_or(start, |icon| icon.start),
+                    hit_end: content.len(),
                     action: span.action,
                     href: span.href,
                     styled_hover,
@@ -6153,24 +6671,32 @@ fn paragraph_effect<const LOCATING: bool>(
                     strikethrough: None,
                     padding: [span.padding[0] / 2., span.padding[1]],
                     radius: span.radius,
+                    outset: 0.,
+                    border: None,
+                    min_width: 0.,
                     range,
                     font: font.clone(),
                     font_size,
                     color,
                 }),
-                (Some(icon), Some(range)) => {
+                (Some(icon), Some(range)) if on_baseline => {
                     let lead = span.padding[0];
-                    // (A well takes its room round the icon too.)
-                    let pad = if icon.bg.is_some() { icon.pad } else { 0. };
+                    box_labels.push("".into());
+                    boxes.push(crate::rich_text::InlineBox {
+                        width: lead + icon.margin + icon.size + icon.gap + icon.margin,
+                        height: icon.size,
+                        baseline: icon.size,
+                        ..crate::rich_text::InlineBox::new(range.start)
+                    });
                     runs.push(crate::rich_text::TextRun {
-                        background: span.background,
+                        background: None,
                         underline: None,
                         strikethrough: None,
-                        padding: [
-                            (lead + icon.size + 2. * pad + icon.gap) / 2.,
-                            span.padding[1],
-                        ],
-                        radius: span.radius,
+                        padding: [0., 0.],
+                        radius: 0.,
+                        outset: 0.,
+                        border: None,
+                        min_width: 0.,
                         range: range.clone(),
                         font: font.clone(),
                         font_size,
@@ -6196,7 +6722,55 @@ fn paragraph_effect<const LOCATING: bool>(
                             None => icon.svg,
                         },
                         size: icon.size,
-                        inset: lead,
+                        inset: lead + icon.margin,
+                        dy: icon.dy,
+                        well: None,
+                        boxed: Some(icon.size),
+                    });
+                }
+                (Some(icon), Some(range)) => {
+                    let lead = span.padding[0];
+                    // (A well takes its room round the icon too.)
+                    let pad = if icon.bg.is_some() { icon.pad } else { 0. };
+                    runs.push(crate::rich_text::TextRun {
+                        background: span.background,
+                        underline: None,
+                        strikethrough: None,
+                        padding: [
+                            (lead + icon.size + 2. * pad + icon.gap + 2. * icon.margin) / 2.,
+                            span.padding[1],
+                        ],
+                        radius: span.radius,
+                        outset: 0.,
+                        border: None,
+                        min_width: 0.,
+                        range: range.clone(),
+                        font: font.clone(),
+                        font_size,
+                        color,
+                    });
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range,
+                        svg: match icon.tint {
+                            Some(crate::theme::Themed::Value(tint)) => {
+                                std::sync::Arc::new(icon.svg.tinted(tint))
+                            }
+                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                icon.svg.tinted(
+                                    theme
+                                        .get(token)
+                                        .color()
+                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                                ),
+                            ),
+                            None if icon.svg.follows_text_color() => {
+                                std::sync::Arc::new(icon.svg.tinted(color))
+                            }
+                            None => icon.svg,
+                        },
+                        size: icon.size,
+                        inset: lead + icon.margin,
+                        dy: icon.dy,
                         well: icon.bg.and_then(|bg| {
                             let color = match bg {
                                 crate::theme::Themed::Value(color) => Some(color),
@@ -6208,6 +6782,7 @@ fn paragraph_effect<const LOCATING: bool>(
                                 pad,
                             })
                         }),
+                        boxed: None,
                     });
                 }
                 _ => {}
@@ -6234,9 +6809,22 @@ fn paragraph_effect<const LOCATING: bool>(
                 padding: if room_after >= 0. {
                     [0., span.padding[1]]
                 } else {
-                    span.padding
+                    let edge = border.as_ref().map_or(0., |(width, _)| *width);
+                    [span.padding[0] + edge, span.padding[1] + edge]
                 },
                 radius: span.radius,
+                outset,
+                border: border.map(|(width, color)| {
+                    let color = match color {
+                        crate::theme::Themed::Value(color) => color,
+                        crate::theme::Themed::Token(token) => theme
+                            .get(token)
+                            .color()
+                            .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                    };
+                    (width, color)
+                }),
+                min_width,
                 range: start..text_end,
                 font: font.clone(),
                 font_size,
@@ -6245,12 +6833,46 @@ fn paragraph_effect<const LOCATING: bool>(
             // The room after the text: a placeholder of its own.
             if room_after > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
+                if let Some(link) = links.last_mut().filter(|l| l.range.end == text_end) {
+                    link.hit_end = content.len();
+                }
+                if let Some(icon) = trailing {
+                    let tint = match icon.tint {
+                        Some(crate::theme::Themed::Value(tint)) => {
+                            std::sync::Arc::new(icon.svg.tinted(tint))
+                        }
+                        Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                            icon.svg.tinted(
+                                theme
+                                    .get(token)
+                                    .color()
+                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                            ),
+                        ),
+                        None if icon.svg.follows_text_color() => {
+                            std::sync::Arc::new(icon.svg.tinted(color))
+                        }
+                        None => icon.svg,
+                    };
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range: text_end..content.len(),
+                        svg: tint,
+                        size: icon.size,
+                        inset: icon.gap + icon.margin,
+                        dy: icon.dy,
+                        well: None,
+                        boxed: None,
+                    });
+                }
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
                     strikethrough: None,
                     padding: [room_after / 2., span.padding[1]],
                     radius: span.radius,
+                    outset: 0.,
+                    border: None,
+                    min_width: 0.,
                     range: text_end..content.len(),
                     font,
                     font_size,
@@ -6263,7 +6885,9 @@ fn paragraph_effect<const LOCATING: bool>(
         }
         let mut rich = crate::rich_text::RichText::new(content.as_str(), runs)
             .expect("normalized inline spans")
-            .with_options(base.display);
+            .with_options(base.display)
+            .with_inline_boxes(boxes)
+            .expect("a box's character is a run of its own");
         if box_spans {
             rich = rich.with_box_spans();
         }
@@ -6302,7 +6926,18 @@ fn paragraph_effect<const LOCATING: bool>(
         let content = if icons.is_empty() {
             content
         } else {
-            content.replace(crate::compose_rich::ICON_PLACEHOLDER, "")
+            let mut labels = box_labels.iter();
+            content
+                .replace(crate::compose_rich::ICON_PLACEHOLDER, "")
+                .split(crate::rich_text::INLINE_BOX_CHAR)
+                .enumerate()
+                .fold(String::new(), |mut out, (i, piece)| {
+                    if i > 0 {
+                        out.push_str(labels.next().map_or("", |label| label));
+                    }
+                    out.push_str(piece);
+                    out
+                })
         };
         content_state.set(crate::compose_rich::Content { rich, links, icons });
         ui.semantics
@@ -6719,6 +7354,10 @@ fn mount_element(
         "dismiss_on_backdrop is only supported on modal and popover views"
     );
     assert!(
+        rare.as_ref().is_none_or(|r| r.on_dismiss.is_none()),
+        "on_dismiss is only supported on modal and popover views"
+    );
+    assert!(
         rare.as_ref()
             .is_none_or(|r| r.keyboard_navigation.is_none())
             || matches!(kind, Kind::VirtualList(_)),
@@ -6730,8 +7369,16 @@ fn mount_element(
         .unwrap_or(false);
     assert!(
         rare.as_ref().is_none_or(|r| r.scrollbar.is_none())
-            || matches!(kind, Kind::Scroll { .. } | Kind::VirtualList(_)),
-        "scrollbar is only supported on scroll, scroll_x, and virtual_list views"
+            || matches!(
+                kind,
+                Kind::Scroll { .. }
+                    | Kind::VirtualList(_)
+                    | Kind::Editor {
+                        multiline: true,
+                        ..
+                    }
+            ),
+        "scrollbar is only supported on scroll, scroll_x, virtual_list and text_area views"
     );
     let scrollbar = rare.as_ref().and_then(|r| r.scrollbar).unwrap_or(false);
     let follow_end = rare.as_ref().and_then(|r| r.follow_end).unwrap_or(false);
@@ -7017,18 +7664,27 @@ fn open_element(
             let mut defaults = widget_style(|w| &w.menu_item);
             // A height the app gives the item is its height: the platform's
             // least (GNOME's 32) is for items sized by their content.
-            if OVERLAY.menu_item_min_height.is_some()
-                && (view.styles.height.is_some() || view.styles.height_percent.is_some())
-            {
+            let sized = view.styles.height.is_some() || view.styles.height_percent.is_some();
+            if OVERLAY.menu_item_min_height.is_some() && sized {
                 defaults = defaults.min_h(0.);
             }
+            // Its height is the whole slot: the platform's gap between
+            // items (Windows' 2 above and below) is not added to it.
+            if sized && OVERLAY.menu_item_inset.1 > 0. {
+                defaults = defaults.my(0.);
+            }
+            let look = menu_look();
+            defaults.merge(&look.item);
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.hover.is_none() {
-                view.variants.defaults[0] = Some(|| widget_style(|w| &w.menu_hover));
+                view.variants.defaults[0] = Some(menu_hover_look);
             }
             if view.variants.focus.is_none() {
-                view.variants.defaults[2] = Some(menu_focus(&view.styles));
+                view.variants.defaults[2] = Some(match look.focus {
+                    Some(_) => || menu_look().focus.clone().unwrap_or_default(),
+                    None => menu_focus(&view.styles),
+                });
             }
             let root = ui.container(parent, Layout::Row, Default::default());
             let mut semantic = SemanticNode::new(Role::MenuItem, label.clone());
@@ -7286,6 +7942,20 @@ fn open_element(
     if as_child {
         ui.scene.borrow_mut().set_contents(root, true);
     }
+    if let Some(mut inert) = rare.as_deref_mut().and_then(|r| r.inert.take()) {
+        let weak = ui.downgrade();
+        ui.bind(root, move || {
+            let inert = inert();
+            if let Some(ui) = weak.upgrade()
+                && ui.scene.borrow().contains(root)
+            {
+                ui.scene.borrow_mut().set_inert(root, inert);
+                if inert {
+                    ui.input.leave_inert(&ui.scene);
+                }
+            }
+        });
+    }
     if let Some(active) = rare.as_deref_mut().and_then(|r| r.active_descendant.take()) {
         watch_active_descendant(ui, root, environment.registry.clone(), active);
     }
@@ -7307,7 +7977,7 @@ fn open_element(
     // Prepend in reverse so declaration order is preserved even when a primitive
     // constructor (such as an editor) already registered its default handlers.
     if let Some(preview) = rare.as_deref_mut().and_then(|r| r.drag_preview.take()) {
-        crate::compose_drag::mount(ui, root, preview);
+        crate::compose_drag::mount(ui, root, preview, environment.services.clone());
     }
     // A selectable region's own menu (Copy, Select All), or an editor's
     // (Cut, Copy, Paste, Select All), unless it has one.
@@ -7387,7 +8057,19 @@ fn open_element(
             .as_ref()
             .and_then(|_| environment.services.get::<TaskRunner>());
         let weak_ui = ui.downgrade();
+        // A submenu waits under the pointer before it opens (its menu's
+        // `hover_delay`: 100 ms, as Base UI's and AppKit's do), so a pointer
+        // passing over on its way to another item doesn't open it; a press or
+        // the keyboard opens it at once. Heading for an open submenu across
+        // the items between (its safe polygon) closes and opens nothing.
+        let hover_open: Rc<RefCell<Option<TaskToken>>> = Rc::default();
         ui.on_event(root, true, move |cx| {
+            if cx.phase != EventPhase::Capture
+                && matches!(cx.event, InputEvent::PointerLeave)
+                && cx.target == root
+            {
+                hover_open.borrow_mut().take();
+            }
             // Over a menu's item (or pressing it): a submenu trigger opens
             // its submenu, and any other submenu of that menu closes.
             if cx.phase != EventPhase::Capture
@@ -7402,12 +8084,33 @@ fn open_element(
                 && (cx.target == root || matches!(cx.event, InputEvent::PointerDown { .. }))
                 && let Some(menu) = &item_menu
             {
-                menu.close_children(menu_trigger.as_ref());
+                let heading = matches!(cx.event, InputEvent::PointerEnter) && menu.holding();
+                if !heading {
+                    menu.close_children(menu_trigger.as_ref());
+                }
                 // (A press opens it on activation, as a click always has.)
                 if let Some(open) = &menu_trigger
                     && matches!(cx.event, InputEvent::PointerEnter)
                 {
-                    open.set(true);
+                    let delay = menu.child_hover(open).open;
+                    match &runner {
+                        Some(runner) if !delay.is_zero() || heading => {
+                            let (open, menu) = (open.clone(), menu.clone());
+                            *hover_open.borrow_mut() = Some(runner.spawn(Box::pin(async move {
+                                crate::timer::sleep(delay).await;
+                                // Still heading for the one open: wait for the
+                                // pointer to arrive there, or stray.
+                                while menu.holding() {
+                                    crate::timer::sleep(std::time::Duration::from_millis(30)).await;
+                                }
+                                menu.close_children(Some(&open));
+                                open.set(true);
+                            })));
+                        }
+                        _ => {
+                            open.set(true);
+                        }
+                    }
                 }
             }
             if cx.phase != EventPhase::Capture
@@ -7682,7 +8385,11 @@ fn open_element(
                 atoms_when,
                 atom_pointer,
                 atom_style,
+                group_scrollbar,
             } = *code;
+            if group_scrollbar {
+                editor.mount_group_scrollbar(ui);
+            }
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
                 // Colours may be theme tokens: a new theme colours the lines
@@ -7759,6 +8466,7 @@ fn open_element(
         }
         let typography = environment.typography.clone();
         let theme = environment.theme.clone();
+        let mounted = editor.clone();
         ui.bind_input(root, move || {
             let style = typography.get();
             let theme = Some(&*theme);
@@ -7768,6 +8476,17 @@ fn open_element(
                 style.font_in(theme),
                 style.wrap,
             );
+        });
+        // Bound after its options, so their first runs come before it: the
+        // editor draws once as it mounts, not once each. That draw's reads
+        // (a custom shaper's) are this binding's: it draws again as they change.
+        let first = Cell::new(true);
+        ui.bind(root, move || {
+            if first.replace(false) {
+                mounted.finish_mount();
+            } else {
+                mounted.refresh();
+            }
         });
     }
     if let Some(id) = view.id {
@@ -7909,6 +8628,9 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
     }
     if let (Some(scroll), Some((viewport, content))) = (scroll_offset, scroll_nodes) {
         mount_scroll(ui, root, viewport, content, scroll, scrollbar, follow_end);
+    } else if scrollbar && let Some(editor) = ui.editor(root) {
+        // A text area's: over its box, once its own nodes are in it.
+        editor.mount_scrollbar(ui);
     }
     if let Some(mut compute) = compute {
         let weak = ui.downgrade();
@@ -8634,32 +9356,51 @@ fn mount_scroll(
         // it holds (its measured height would be its content's, circularly:
         // 0), or as a parent stretching it makes it: the viewport and the
         // content take all of a definite height, none of an indefinite one.
-        let fitted = horizontal && {
+        let (unsized_w, unsized_h, capped_w, capped_h) = {
             let style = scene.style(root);
-            style.height.is_none() && style.height_percent.is_none()
+            (
+                style.width.is_none() && style.width_percent.is_none(),
+                style.height.is_none() && style.height_percent.is_none(),
+                style.max_width.is_some(),
+                style.max_height.is_some(),
+            )
         };
+        let fitted = horizontal && unsized_h;
+        // Along an axis it has no size of its own on (given only a cap,
+        // `max_h`, `max_w`), it is as large as what it holds up to the cap:
+        // the viewport and its content are in flow there, taking their
+        // own size, and the cap cuts the root.
+        let (grows_w, grows_h) = (unsized_w && capped_w, unsized_h && capped_h && !horizontal);
         // (Fitted, it's as tall as what it holds: in its flow. As wide as a
         // scroll view that knows its width, with no word from here as that
         // changes; else what it holds is what sizes that.)
         let follows = fitted && scene.knows_its_size(root, (true, false), &sized_by_content);
         let style = Style {
-            width: (!follows).then_some(width),
+            width: (!follows && !grows_w).then_some(width),
             width_percent: follows.then_some(1.),
-            height: (!fitted).then_some(height),
+            height: (!fitted && !grows_h).then_some(height),
             height_percent: fitted.then_some(1.),
             clip: true,
-            absolute: !fitted,
+            absolute: !(fitted || grows_w || grows_h),
             ..Default::default()
         };
-        match fitted {
+        match fitted || grows_w || grows_h {
             true => scene.set_style(viewport, style),
             false => scene.set_style_within(viewport, style, root),
         }
         let mut content_style = scene.style(content);
-        content_style.width = (!horizontal).then_some(width);
+        content_style.width = (!horizontal && !grows_w).then_some(width);
         content_style.height = (horizontal && !fitted).then_some(height);
         content_style.height_percent = fitted.then_some(1.);
         content_style.flex_shrink = 0.;
+        let mut options = content_style
+            .layout_options
+            .as_deref()
+            .copied()
+            .unwrap_or_default();
+        options.percent_basis_width = horizontal.then_some(width);
+        content_style.layout_options =
+            (options != Default::default()).then(|| std::sync::Arc::new(options));
         scene.set_style(content, content_style);
         let rtl = rtl_of(&scene);
         // Fitting (resized, or its content shrank), it can't scroll and
@@ -8935,7 +9676,7 @@ fn mount_image(
         );
     });
 }
-fn fitted_image_size(
+pub(crate) fn fitted_image_size(
     width: f32,
     height: f32,
     source_width: f32,
@@ -9380,6 +10121,10 @@ pub(crate) struct Accessibility {
     checked: Option<Box<dyn FnMut() -> bool>>,
     radio_item: bool,
     expanded: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::accessible_has_popup` (`aria-haspopup`).
+    has_popup: Option<crate::semantics::PopupKind>,
+    /// Set by `View::context_menu` (`AXShowMenu`).
+    pub(crate) context_menu: bool,
     /// `View::pressed_when`: `checked` is whether it is pressed, a toggle
     /// button's state (`aria-pressed`), not a checkbox's.
     toggle: bool,
@@ -9391,6 +10136,12 @@ pub(crate) struct Accessibility {
     description_when: Option<Box<dyn FnMut() -> String>>,
     error: Option<Box<dyn FnMut() -> Option<String>>>,
     hidden: bool,
+    /// `View::accessible_hidden_when`.
+    hidden_when: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::busy_when`.
+    busy_when: Option<Box<dyn FnMut() -> bool>>,
+    /// `View::current_when`.
+    current_when: Option<Box<dyn FnMut() -> Option<crate::semantics::Current>>>,
     /// `View::accessible_modal`: while it shows, nothing else is read.
     modal: bool,
     focus_group: Option<crate::input::FocusGroup>,
@@ -9423,6 +10174,10 @@ impl Accessibility {
         if outer.expanded.is_some() {
             inner.expanded = outer.expanded;
         }
+        if outer.has_popup.is_some() {
+            inner.has_popup = outer.has_popup;
+        }
+        inner.context_menu |= outer.context_menu;
         inner.toggle |= outer.toggle;
         if outer.value.is_some() {
             inner.value = outer.value;
@@ -9438,6 +10193,15 @@ impl Accessibility {
         }
         if outer.description_when.is_some() {
             inner.description_when = outer.description_when;
+        }
+        if outer.hidden_when.is_some() {
+            inner.hidden_when = outer.hidden_when;
+        }
+        if outer.current_when.is_some() {
+            inner.current_when = outer.current_when;
+        }
+        if outer.busy_when.is_some() {
+            inner.busy_when = outer.busy_when;
         }
         if outer.error.is_some() {
             inner.error = outer.error;
@@ -9495,6 +10259,8 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         radio_item,
         toggle,
         expanded,
+        has_popup,
+        context_menu,
         value,
         numeric,
         live,
@@ -9502,6 +10268,9 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
         description_when,
         error,
         hidden,
+        hidden_when,
+        busy_when,
+        current_when,
         modal,
         focus_group,
         label,
@@ -9559,6 +10328,8 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             node.description = description.or(node.description.take());
             node.hidden |= hidden;
             node.modal |= modal;
+            node.has_popup = has_popup.or(node.has_popup);
+            node.context_menu |= context_menu;
         });
     }
     // A name or value worked out from state is read by assistive technology
@@ -9575,6 +10346,28 @@ fn apply_accessibility(ui: &mut Ui, root: NodeId, accessibility: Accessibility, 
             }
             let label = label();
             tree.borrow_mut().update(root, |node| node.label = label);
+        });
+    }
+    if let Some(mut current) = current_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let current = current();
+            tree.borrow_mut()
+                .update(root, |node| node.current = current);
+        });
+    }
+    if let Some(mut busy) = busy_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let busy = busy();
+            tree.borrow_mut().update(root, |node| node.busy = busy);
+        });
+    }
+    if let Some(mut hidden) = hidden_when {
+        let tree = ui.semantics.clone();
+        ui.bind(root, move || {
+            let hidden = hidden();
+            tree.borrow_mut().update(root, |node| node.hidden = hidden);
         });
     }
     if let Some(mut level) = level_when {
@@ -10260,6 +11053,12 @@ impl NodeHandle {
         };
         ui.input.lock_pointer(&ui.scene, self.node)
     }
+    /// If this is a scroll view or list (or inside one's root), how far it is
+    /// scrolled along its axis and how far it can scroll: `(offset, range)`.
+    pub fn scroll_extent(&self) -> Option<(f32, f32)> {
+        let (offset, range, _) = self.ui.upgrade()?.scroll_report(self.node)?;
+        Some((offset, range))
+    }
     /// Let the pointer go, if the node holds its lock.
     pub fn unlock_pointer(&self) {
         let Some(ui) = self.ui.upgrade() else {
@@ -10351,6 +11150,11 @@ impl ViewHandle {
 impl Ui {
     /// Mount a declarative tree under the document root. The document owns its lifetime.
     pub fn mount(&mut self, view: View) -> ViewHandle {
+        self.mount_scoped(view, ServiceScope::new())
+    }
+    /// [`Ui::mount`] with `services` provided to it: a subtree mounted apart
+    /// from its source (a drag preview) keeps the providers it was built under.
+    pub(crate) fn mount_scoped(&mut self, view: View, services: ServiceScope) -> ViewHandle {
         let registry = Registry::default();
         let theme = self.theme().root().clone();
         // Text shows the theme's body colour, size and family unless a view
@@ -10364,7 +11168,7 @@ impl Ui {
             family: Some(tok::FONT_SANS.into()),
         });
         let environment = Environment {
-            services: ServiceScope::new(),
+            services,
             typography,
             registry: registry.clone(),
             portal: None,

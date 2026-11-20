@@ -43,6 +43,8 @@ pub struct Placement {
     pub align: Edge,
     /// How far from the trigger, in points.
     pub offset: f32,
+    /// What it does where it would reach past the screen's edge.
+    pub collision: Collision,
 }
 impl Default for Placement {
     fn default() -> Self {
@@ -50,6 +52,36 @@ impl Default for Placement {
             side: Side::Bottom,
             align: Edge::Start,
             offset: 4.,
+            collision: Collision::default(),
+        }
+    }
+}
+/// How a popover or menu avoids the screen's edges (Base UI's
+/// `collisionPadding`, `collisionAvoidance` and `fallbackAxisSideDirection`;
+/// Floating UI's `flip`, `shift` and `fallbackStrategy`). The default is
+/// zgx's: flip to the other side when only it fits, slide to stay on screen,
+/// no margin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Collision {
+    /// Points kept between the popup and the screen's edges.
+    pub padding: f32,
+    /// Slide along the edge it is placed on to stay on screen (and inside the
+    /// padding). Off, it keeps its aligned position and may reach past.
+    pub shift: bool,
+    /// Where its alignment (start or end) would reach past the screen, line
+    /// up with the trigger's other edge when that fits.
+    pub flip_align: bool,
+    /// Where neither side has room, take the one with more, rather than
+    /// keeping the preferred side.
+    pub more_room: bool,
+}
+impl Default for Collision {
+    fn default() -> Self {
+        Self {
+            padding: 0.,
+            shift: true,
+            flip_align: false,
+            more_room: false,
         }
     }
 }
@@ -84,6 +116,7 @@ pub(crate) fn mount(
     // `View::open_over`'s item, if any.
     over: Option<Box<dyn Fn() -> Option<NodeId>>>,
     arrow: Option<Arrow>,
+    keep_below: f32,
 ) {
     mount_placement(
         screens,
@@ -96,6 +129,7 @@ pub(crate) fn mount(
         Some(at),
         over,
         arrow,
+        keep_below,
     );
 }
 
@@ -110,7 +144,7 @@ pub(crate) fn mount_submenu(
     panel: NodeId,
 ) {
     mount_placement(
-        screens, ui, owner, anchor, overlay, position, panel, None, None, None,
+        screens, ui, owner, anchor, overlay, position, panel, None, None, None, 0.,
     );
 }
 
@@ -172,8 +206,11 @@ pub(crate) fn mount_dismissing(
                 .input
                 .pointer_target(&scene, x, y)
                 .filter(|target| scene.contains(*target));
+            // (A topmost layer's control is the app's, not outside it.)
             let on_it = target.is_some_and(|target| {
-                scene.is_within(target, overlay) || scene.is_within(target, anchor)
+                scene.is_within(target, overlay)
+                    || scene.is_within(target, anchor)
+                    || scene.is_in_topmost(target)
             });
             in_panel || on_it
         };
@@ -214,6 +251,7 @@ fn mount_placement(
     at: Option<Placement>,
     over: Option<Box<dyn Fn() -> Option<NodeId>>>,
     arrow: Option<Arrow>,
+    keep_below: f32,
 ) {
     let anchor_bounds = ui.observe_bounds(anchor);
     let viewport = ui.observe_bounds(overlay);
@@ -224,9 +262,22 @@ fn mount_placement(
     let anchor_node = anchor;
     ui.bind(owner, move || {
         let anchor = anchor_bounds.get();
+        let window = viewport.get();
         let viewport = screens
             .with(|screens| screen_of(screens, anchor))
-            .unwrap_or_else(|| viewport.get());
+            .unwrap_or(window);
+        // the band is the window's top, wherever on screen the popup may go
+        let viewport = match keep_below > 0. {
+            true => {
+                let top = viewport.y.max(window.y + keep_below);
+                let bottom = viewport.y + viewport.height;
+                match top < bottom {
+                    true => Rect::new(viewport.x, top, viewport.width, bottom - top),
+                    false => viewport,
+                }
+            }
+            false => viewport,
+        };
         let panel = panel_bounds.get();
         let current = position_bounds.get();
         let Some(ui) = weak.upgrade() else {
@@ -447,11 +498,20 @@ fn placement(
     at: Placement,
     rtl: bool,
 ) -> (f32, f32) {
-    let right = viewport.x + viewport.width;
-    let bottom = viewport.y + viewport.height;
+    let Collision {
+        padding,
+        shift,
+        flip_align,
+        more_room,
+    } = at.collision;
+    let pad = padding.max(0.);
+    // The room it may take: the screen inside its padding.
+    let (left, top) = (viewport.x + pad, viewport.y + pad);
+    let right = (viewport.x + viewport.width - pad).max(left);
+    let bottom = (viewport.y + viewport.height - pad).max(top);
     let gap = at.offset;
     // Along the side's axis: the preferred side, or the other when only it
-    // has room.
+    // has room (or, with neither, the one with more).
     let along = |start: f32, end: f32, size: f32, before: bool, low: f32, high: f32| {
         let (first, second) = (start - size - gap, end + gap);
         let (preferred, other) = if before {
@@ -460,8 +520,18 @@ fn placement(
             (second, first)
         };
         let fits = |v: f32| v >= low && v + size <= high;
-        if !fits(preferred) && fits(other) {
+        if fits(preferred) {
+            preferred
+        } else if fits(other) {
             other
+        } else if more_room {
+            // Room before the trigger, and after it.
+            let (room_first, room_second) = (start - gap - low, high - end - gap);
+            if room_first > room_second {
+                first
+            } else {
+                second
+            }
         } else {
             preferred
         }
@@ -469,24 +539,39 @@ fn placement(
     // Across it: lined up with the trigger's start, centre or end. Below
     // or above the trigger, start is its right edge where text runs right
     // to left; beside it, its top either way.
-    let across = |start: f32, size: f32, extent: f32, horizontal: bool| {
+    let aligned = |start: f32, size: f32, extent: f32, horizontal: bool, align: Edge| {
         let flipped = horizontal && rtl;
-        match at.align {
+        match align {
             Edge::Start if flipped => start + extent - size,
             Edge::End if !flipped => start + extent - size,
             Edge::Center => start + (extent - size) / 2.,
             _ => start,
         }
     };
+    let across = |start: f32, size: f32, extent: f32, horizontal: bool, low: f32, high: f32| {
+        let first = aligned(start, size, extent, horizontal, at.align);
+        let fits = |v: f32| v >= low && v + size <= high;
+        let other = match at.align {
+            Edge::Start => Edge::End,
+            Edge::End => Edge::Start,
+            Edge::Center => return first,
+        };
+        let second = aligned(start, size, extent, horizontal, other);
+        if flip_align && !fits(first) && fits(second) {
+            second
+        } else {
+            first
+        }
+    };
     let (x, y) = match at.side {
         Side::Bottom | Side::Top => (
-            across(anchor.x, width, anchor.width, true),
+            across(anchor.x, width, anchor.width, true, left, right),
             along(
                 anchor.y,
                 anchor.y + anchor.height,
                 height,
                 at.side == Side::Top,
-                viewport.y,
+                top,
                 bottom,
             ),
         ),
@@ -496,15 +581,18 @@ fn placement(
                 anchor.x + anchor.width,
                 width,
                 at.side == Side::Left,
-                viewport.x,
+                left,
                 right,
             ),
-            across(anchor.y, height, anchor.height, false),
+            across(anchor.y, height, anchor.height, false, top, bottom),
         ),
     };
+    if !shift {
+        return (x, y);
+    }
     (
-        x.clamp(viewport.x, (right - width).max(viewport.x)),
-        y.clamp(viewport.y, (bottom - height).max(viewport.y)),
+        x.clamp(left, (right - width).max(left)),
+        y.clamp(top, (bottom - height).max(top)),
     )
 }
 
@@ -551,8 +639,9 @@ fn submenu_placement(
     rtl: bool,
 ) -> (f32, f32) {
     let right_edge = viewport.x + viewport.width;
-    let right = anchor.x + anchor.width + 4.;
-    let left = anchor.x - width - 4.;
+    // Base UI's submenu: 1 over its menu's edge (the item sits 4 in) and 4 up, so its first item meets the trigger
+    let right = anchor.x + anchor.width + 3.;
+    let left = anchor.x - width - 3.;
     let right_room = right_edge - right;
     let left_room = anchor.x - 4. - viewport.x;
     let x = match rtl {
@@ -563,7 +652,7 @@ fn submenu_placement(
     };
     (
         x.clamp(viewport.x, (right_edge - width).max(viewport.x)),
-        anchor.y.clamp(
+        (anchor.y - 4.).clamp(
             viewport.y,
             (viewport.y + viewport.height - height).max(viewport.y),
         ),
@@ -581,6 +670,7 @@ mod tests {
             side,
             align,
             offset: 4.,
+            ..Default::default()
         };
         // Below, start-aligned: the default, as before.
         assert_eq!(
@@ -642,6 +732,121 @@ mod tests {
         );
     }
     #[test]
+    fn collision_options_pad_shift_flip_alignment_and_pick_the_roomier_side() {
+        let viewport = Rect::new(0., 0., 400., 300.);
+        let with = |collision: Collision, side, align| Placement {
+            side,
+            align,
+            offset: 4.,
+            collision,
+        };
+        let plain = Collision::default();
+        // Padding keeps it off the edge: clamped 8 in, not flush.
+        let near_right = Rect::new(340., 50., 50., 20.);
+        assert_eq!(
+            placement(near_right, viewport, 120., 60., Placement::default(), false),
+            (280., 74.)
+        );
+        let padded = Collision {
+            padding: 8.,
+            ..plain
+        };
+        assert_eq!(
+            placement(
+                near_right,
+                viewport,
+                120.,
+                60.,
+                with(padded, Side::Bottom, Edge::Start),
+                false
+            ),
+            (272., 74.)
+        );
+        // Without shift it keeps its aligned place and reaches past.
+        let still = Collision {
+            shift: false,
+            ..plain
+        };
+        assert_eq!(
+            placement(
+                near_right,
+                viewport,
+                120.,
+                60.,
+                with(still, Side::Bottom, Edge::Start),
+                false
+            ),
+            (340., 74.)
+        );
+        // Alignment flips to the trigger's other edge when that one fits.
+        let flipping = Collision {
+            flip_align: true,
+            ..plain
+        };
+        assert_eq!(
+            placement(
+                near_right,
+                viewport,
+                120.,
+                60.,
+                with(flipping, Side::Bottom, Edge::Start),
+                false
+            ),
+            (270., 74.)
+        );
+        // Neither side fits (a panel taller than either): the preferred
+        // side by default, the roomier with `more_room`.
+        let tall = Rect::new(100., 120., 80., 20.);
+        let (above, below) = (
+            placement(
+                tall,
+                viewport,
+                120.,
+                200.,
+                with(plain, Side::Bottom, Edge::Start),
+                false,
+            ),
+            placement(
+                tall,
+                viewport,
+                120.,
+                200.,
+                with(
+                    Collision {
+                        more_room: true,
+                        shift: false,
+                        ..plain
+                    },
+                    Side::Bottom,
+                    Edge::Start,
+                ),
+                false,
+            ),
+        );
+        // Neither side holds it: the preferred side, slid on screen; with
+        // `more_room` (120 above, 156 below), the one with more, as laid out.
+        assert_eq!(above.1, 100.);
+        assert_eq!(below.1, 144.);
+        let roomy = placement(
+            Rect::new(100., 160., 80., 20.),
+            viewport,
+            120.,
+            200.,
+            with(
+                Collision {
+                    more_room: true,
+                    shift: false,
+                    ..plain
+                },
+                Side::Bottom,
+                Edge::Start,
+            ),
+            false,
+        );
+        // 156 above, 116 below: above, though below was asked for.
+        assert_eq!(roomy.1, 160. - 200. - 4.);
+    }
+    #[test]
     fn start_and_end_follow_the_triggers_direction() {
         let viewport = Rect::new(0., 0., 400., 300.);
         let trigger = Rect::new(100., 50., 80., 20.);
@@ -649,6 +854,7 @@ mod tests {
             side,
             align,
             offset: 4.,
+            ..Default::default()
         };
         // Right to left, start is the trigger's right edge, end its left.
         assert_eq!(
@@ -700,11 +906,11 @@ mod tests {
         let menu = Rect::new(10., 20., 300., 200.);
         assert_eq!(
             submenu_placement(Rect::new(230., 190., 60., 20.), menu, 100., 60., true),
-            (126., 160.)
+            (127., 160.)
         );
         assert_eq!(
             submenu_placement(Rect::new(30., 50., 80., 20.), menu, 100., 60., true),
-            (114., 50.)
+            (113., 46.)
         );
         // A pop-up button's item lines up with its right edge.
         let button = Rect::new(100., 150., 120., 24.);
@@ -779,11 +985,11 @@ mod tests {
         let viewport = Rect::new(10., 20., 300., 200.);
         assert_eq!(
             submenu_placement(Rect::new(30., 50., 80., 20.), viewport, 100., 60., false),
-            (114., 50.)
+            (113., 46.)
         );
         assert_eq!(
             submenu_placement(Rect::new(230., 190., 60., 20.), viewport, 100., 60., false),
-            (126., 160.)
+            (127., 160.)
         );
         // Both sides are too small; choose the more spacious side then clamp.
         assert_eq!(

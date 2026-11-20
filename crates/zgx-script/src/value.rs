@@ -591,6 +591,10 @@ impl Value {
                     .collect();
                 if unchanged {
                     old.clone()
+                } else if was.is_empty() {
+                    // Nothing of the old one's to reuse: the incoming list
+                    // itself, still shared with whoever else holds it.
+                    Value::List(new)
                 } else {
                     Value::List(items)
                 }
@@ -2059,6 +2063,62 @@ fn part_weight(value: &Value) -> usize {
     }
     if large(value) { 1 } else { all(value) }
 }
+thread_local! {
+    /// Lists a host republished (`Shared::set`), by identity, with the value
+    /// each replaced: a script's table for the new one is derived from the
+    /// old one's (`derive`), as after its own `set_key`, rather than every
+    /// row converted again. Few and recent; one the VM has no table for
+    /// converts whole.
+    static REPUBLISHED: RefCell<Vec<(usize, std::rc::Weak<[Value]>)>> = const { RefCell::new(Vec::new()) };
+}
+const REPUBLISHED_KEPT: usize = 16;
+fn host_base(id: usize) -> Option<Value> {
+    REPUBLISHED.with(|kept| {
+        kept.borrow()
+            .iter()
+            .find(|(at, _)| *at == id)
+            .and_then(|(_, old)| old.upgrade())
+            .map(Value::List)
+    })
+}
+/// Notes that `new` replaced `old` (reconciled, so its unchanged rows are
+/// `old`'s own): each large list in it that differs from the one it
+/// replaced, down through maps.
+fn note_republished(old: &Value, new: &Value, depth: u32) {
+    match (old, new) {
+        (Value::List(a), Value::List(b)) if !Rc::ptr_eq(a, b) => {
+            if large(new) {
+                REPUBLISHED.with(|kept| {
+                    let mut kept = kept.borrow_mut();
+                    if kept.len() >= REPUBLISHED_KEPT {
+                        kept.remove(0);
+                    }
+                    // Weakly: the cache's sweeps let go of an old list nothing holds.
+                    kept.push((identity(new), Rc::downgrade(a)));
+                });
+            }
+        }
+        (Value::Map(a), Value::Map(b)) if depth < 4 && !Rc::ptr_eq(a, b) => {
+            for (key, value) in b.iter() {
+                if let Some((_, was)) = a.iter().find(|(k, _)| k == key) {
+                    note_republished(was, value, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+/// `value` written to `signal` as a host's `Shared::set` writes it: the
+/// parts equal to the current value's kept, and the lists it replaced noted;
+/// whether anything changed.
+pub(crate) fn republish(signal: &Signal<Value>, value: Value) -> bool {
+    let next = signal.with_untracked(|old| {
+        let next = value.reconcile(old);
+        note_republished(old, &next, 0);
+        next
+    });
+    signal.set(next)
+}
 /// How many first items `list` shares with `from`, if it was grown from it
 /// (`Appended`): each the same value, none compared.
 pub(crate) fn shared_start(list: &Value, from: &Value) -> Option<usize> {
@@ -2150,10 +2210,21 @@ fn shared_part(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
     // Written since a script last read it: its table from the one read.
     let base = cache.bases.borrow_mut().remove(&id);
     drop(cache);
-    if let Some(base) = base {
+    if let Some(base) = base.or_else(|| host_base(id)) {
         derive(lua, &base, value)?;
         if let Some(t) = cached(lua, value)? {
             return Ok(mlua::Value::Table(t));
+        }
+    }
+    // A table holding republished lists: each from its old one's table.
+    if let Value::Map(fields) = value {
+        for (_, field) in fields.iter() {
+            if let Value::List(_) = field
+                && let Some(base) = host_base(identity(field))
+                && cached(lua, field)?.is_none()
+            {
+                derive(lua, &base, field)?;
+            }
         }
     }
     if !has_element(value) {
@@ -2799,8 +2870,7 @@ impl Shared {
     /// Sets the value, keeping the current one's parts where they are
     /// equal; whether anything changed.
     pub fn set(&self, value: Value) -> bool {
-        let next = self.0.with_untracked(|old| value.reconcile(old));
-        self.0.set(next)
+        republish(&self.0, value)
     }
     /// The signal itself (its `set` replaces without reconciling).
     pub fn signal(&self) -> Signal<Value> {
@@ -3535,6 +3605,9 @@ pub struct Store {
     /// Keys a plugin's default made (`shared`), which the app's own default
     /// replaces.
     provisional: RefCell<std::collections::HashSet<String>>,
+    /// What each state started at, so one nothing holds and nobody moved
+    /// can go (`sweep_unheld`).
+    initials: RefCell<HashMap<String, Value>>,
 }
 impl Store {
     /// An empty store on `runtime`.
@@ -3543,6 +3616,7 @@ impl Store {
             runtime: runtime.clone(),
             signals: RefCell::default(),
             provisional: RefCell::default(),
+            initials: RefCell::default(),
         }
     }
     /// Shared state `key` (`ui.shared`), as [`Store::state`], except that a
@@ -3568,11 +3642,40 @@ impl Store {
     }
     /// The existing state for `key`, or new state starting at `initial`.
     pub fn state(&self, key: &str, initial: Value) -> Signal<Value> {
-        self.signals
+        let mut signals = self.signals.borrow_mut();
+        if let Some(signal) = signals.get(key) {
+            return signal.clone();
+        }
+        self.initials
             .borrow_mut()
-            .entry(key.to_owned())
-            .or_insert_with(|| self.runtime.signal(initial))
-            .clone()
+            .insert(key.to_owned(), initial.clone());
+        let signal = self.runtime.signal(initial);
+        signals.insert(key.to_owned(), signal.clone());
+        signal
+    }
+    /// Drops the states nothing else holds that are nil or still at their first value:
+    /// a key declared for a tab that has since closed comes back the same.
+    /// One a live effect reads stays (its subscription holds it, as a
+    /// handle does): a reader that asks `ui.shared(key)` afresh on each run
+    /// keeps no handle, and the host's first publish must reach it. Once
+    /// those effects are gone it can go.
+    pub(crate) fn sweep_unheld(&self) -> usize {
+        let mut signals = self.signals.borrow_mut();
+        let mut initials = self.initials.borrow_mut();
+        let before = signals.len();
+        signals.retain(|key, s| {
+            s.handles() > 1
+                || s.is_observed()
+                || s.with_untracked(|v| !matches!(v, Value::Nil))
+                    && initials
+                        .get(key)
+                        .is_none_or(|first| !s.with_untracked(|v| v == first))
+        });
+        initials.retain(|k, _| signals.contains_key(k));
+        self.provisional
+            .borrow_mut()
+            .retain(|k| signals.contains_key(k));
+        before - signals.len()
     }
     /// `key` gone: a load that made it failed (`journal`).
     pub(crate) fn remove(&self, key: &str) {
@@ -3599,6 +3702,44 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A state a live effect reads stays through `sweep_unheld` with no
+    /// handle kept (its subscription holds it), and goes at the first
+    /// sweep after that effect is gone: nothing leaks.
+    #[test]
+    fn a_state_an_effect_reads_stays_until_the_effect_goes() {
+        let runtime = Runtime::new();
+        let store = Rc::new(Store::new(&runtime));
+        // Unread and unheld, at nil: swept, as before.
+        drop(store.shared("unread", Value::Nil, false));
+        // Read by an effect that asks for it afresh on each run.
+        drop(store.shared("note_open", Value::Nil, false));
+        let reads = Rc::new(std::cell::Cell::new(0));
+        let effect = {
+            let (store, reads) = (store.clone(), reads.clone());
+            runtime.effect(move || {
+                if let Some(state) = store.get("note_open") {
+                    state.get();
+                }
+                reads.set(reads.get() + 1);
+            })
+        };
+        assert_eq!(reads.get(), 1);
+        assert_eq!(store.sweep_unheld(), 1, "only the unread state went");
+        assert!(store.get("unread").is_none());
+        // The host's first publish reaches the effect.
+        store
+            .state("note_open", Value::Nil)
+            .set(Value::from("doc-1"));
+        runtime.flush();
+        assert_eq!(reads.get(), 2, "the effect heard the publish");
+        store.state("note_open", Value::Nil).set(Value::Nil);
+        runtime.flush();
+        // The effect gone, the state is unread, unheld and nil: it goes.
+        drop(effect);
+        assert_eq!(store.sweep_unheld(), 1);
+        assert!(store.get("note_open").is_none(), "no leak");
+    }
 
     /// A value is three words: every slot of every list and map holds one.
     #[test]

@@ -10,6 +10,9 @@ mod find_in_page;
 mod i18n;
 #[path = "../inspect.rs"]
 mod inspect;
+#[cfg(feature = "i18n-intl")]
+#[path = "../intl_parity.rs"]
+mod intl_parity;
 #[path = "../links.rs"]
 mod links;
 #[path = "../selectable_text.rs"]
@@ -18,14 +21,16 @@ mod selectable_text;
 mod selection_copy_hook;
 #[path = "../system_preferences.rs"]
 mod system_preferences;
-#[path = "../text_balance.rs"]
-mod text_balance;
+#[path = "../text_direction.rs"]
+mod text_direction;
 #[path = "../text_hyphens.rs"]
 mod text_hyphens;
 #[path = "../text_lang.rs"]
 mod text_lang;
 #[path = "../text_range_area.rs"]
 mod text_range_area;
+#[path = "../text_wrap.rs"]
+mod text_wrap;
 #[path = "../theme.rs"]
 mod theme;
 #[path = "../zoomed_text_geometry.rs"]

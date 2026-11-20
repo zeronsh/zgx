@@ -371,8 +371,12 @@ fn print_report(report: &Report) {
         println!("{d}");
     }
     let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let notes = match report.notes() {
+        0 => String::new(),
+        n => format!(", {}", plural(n, "note")),
+    };
     eprintln!(
-        "{}, {} in {}",
+        "{}, {}{notes} in {}",
         plural(report.errors(), "error"),
         plural(report.warnings(), "warning"),
         plural(report.files, "file")
@@ -426,6 +430,7 @@ fn lint(args: Vec<String>) -> ExitCode {
                         "line": d.line,
                         "column": d.column,
                         "rule": d.code,
+                        "severity": d.severity.to_string(),
                         "message": d.message,
                     })
                 })
@@ -434,7 +439,7 @@ fn lint(args: Vec<String>) -> ExitCode {
                 "{}",
                 serde_json::json!({ "files": report.files, "findings": findings })
             );
-            if report.diagnostics.is_empty() {
+            if report.passes() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -442,7 +447,7 @@ fn lint(args: Vec<String>) -> ExitCode {
         }
         Ok(report) => {
             print_report(&report);
-            if report.diagnostics.is_empty() {
+            if report.passes() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -476,13 +481,18 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   text-drop <target|x,y> --text T [--html H] [--hover-only]
                        text dragged in from another app, let go there
   prefers reduced-motion on|off|system   what zgx reads as the system's (never its setting)
-  scroll <target> <dy> command <id>
+  scroll <target|x,y> <dy> [dx]  command <id>
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--until MARK|FRAME] [--summary] [--keep N]
   reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
+  clock [freeze|thaw|advance <ms>]   text <target>
+  gc [--top N] [--retained KIND] [--sample N] [--mark] [--since-mark] [--lua-only]
+                       a full Luau collection: heap before and after, what is left; --retained
+                       State: the chains of holders from a root; --mark, then --since-mark: what
+                       survives after it
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
   record               record stop [--out gesture.tape]
@@ -491,6 +501,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   search [query] [--next] [--prev] [--all] [--close]
                        find in page: count, current, the first matches
   zoom [in|out|reset|150%]               the window's zoom and its viewport
+  full-screen [on|off|toggle]            the window into or out of full screen, as its green button
   clipboard [set --text T | --html H | --image file.png | --files PATH…]
                        the window's clipboard (its own under ZGX_CLIPBOARD=memory or ZGX_OFFSCREEN);
                        set it, then `key cmd+v` pastes it
@@ -540,7 +551,27 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--all" | "--full" | "--gone" | "--next" | "--prev" | "--close" | "--summary" => {
-                flags.push((arg[2..].to_string(), None))
+                flags.push((arg[2..].replace('-', "_"), None))
+            }
+            "--no-click" => flags.push(("no_click".into(), None)),
+            "--hover-only" => flags.push(("hover_only".into(), None)),
+            // Paths, up to the next flag.
+            "--files" => {
+                while args
+                    .as_slice()
+                    .first()
+                    .is_some_and(|a| !a.starts_with("--"))
+                {
+                    let path = args.next().unwrap_or_default();
+                    files.push(match std::path::absolute(&path) {
+                        Ok(path) => path.display().to_string(),
+                        Err(_) => path,
+                    });
+                }
+                if files.is_empty() {
+                    eprintln!("zgx inspect: --files takes one path or more");
+                    return ExitCode::from(2);
+                }
             }
             "--no-click" => flags.push(("no_click".into(), None)),
             "--hover-only" => flags.push(("hover_only".into(), None)),
@@ -570,7 +601,8 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 }
             },
             "--depth" | "--budget" | "--text" | "--timeout" | "--width" | "--runs" | "--since"
-            | "--until" | "--keep" | "--repeat" | "--every" | "--html" | "--image" => {
+            | "--until" | "--keep" | "--repeat" | "--every" | "--top" | "--retained"
+            | "--sample" | "--html" | "--image" => {
                 flags.push((arg[2..].to_string(), args.next()));
             }
             _ => words.push(arg),
@@ -692,6 +724,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
         "scroll" => {
             put("target", arg(1));
             put("dy", arg(2));
+            put("dx", arg(3));
         }
         "key" => put("keys", arg(1)),
         "clipboard" => put("action", arg(1)),
@@ -701,10 +734,17 @@ fn inspect(args: Vec<String>) -> ExitCode {
         "frames" => put("n", arg(1)),
         "search" => put("query", arg(1)),
         "zoom" => put("to", arg(1)),
+        "full-screen" => put("to", arg(1)),
         "mark" => put("name", arg(1)),
         "switch" => {
             put("name", arg(1));
             put("on", arg(2));
+        }
+        "text" => put("target", arg(1)),
+        "gc" => {}
+        "clock" => {
+            put("action", arg(1));
+            put("ms", arg(2));
         }
         "set" => {
             put("name", arg(1));
@@ -745,9 +785,10 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let fields: Vec<(String, Value)> = fields
         .into_iter()
         .map(|(k, v)| match (&*k, &v) {
-            ("dy" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every", Value::Str(s)) => {
-                (k, s.parse::<f64>().map(Value::Num).unwrap_or(v))
-            }
+            (
+                "dy" | "dx" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every",
+                Value::Str(s),
+            ) => (k, s.parse::<f64>().map(Value::Num).unwrap_or(v)),
             _ => (k, v),
         })
         .collect();
@@ -890,6 +931,12 @@ const TOOLS: &[Tool] = &[
         "What the app holds, by what holds it, one line each: the process's footprint and its allocator, each Luau VM's heap, decoded pictures shown and cached, text caches, the glyph atlas, GPU textures, layers and buffers, scene nodes and the frame log. Compare two answers to see which line grew.",
     ),
     (
+        "zgx_full_screen",
+        "full-screen",
+        &[("to", "string", false)],
+        "Ask the window into full screen (`on`), out of it (`off`), or the other way (`toggle`, the default), as its green button does. Read `ui.window.full_screen` after to see it there.",
+    ),
+    (
         "zgx_zoom",
         "zoom",
         &[("to", "string", false)],
@@ -977,7 +1024,11 @@ const TOOLS: &[Tool] = &[
     (
         "zgx_scroll",
         "scroll",
-        &[("target", "string", true), ("dy", "number", true)],
+        &[
+            ("target", "string", true),
+            ("dy", "number", true),
+            ("dx", "number", false),
+        ],
         "Scroll the viewport under a node by dy points (down is positive).",
     ),
     (
@@ -1035,6 +1086,31 @@ const TOOLS: &[Tool] = &[
         "mark",
         &[("name", "string", false)],
         "Mark now, so zgx_frames with since=name reads only the frames after.",
+    ),
+    (
+        "zgx_gc",
+        "gc",
+        &[
+            ("top", "number", false),
+            ("retained", "string", false),
+            ("sample", "number", false),
+            ("mark", "boolean", false),
+            ("since_mark", "boolean", false),
+            ("lua_only", "boolean", false),
+        ],
+        "Run a full Luau collection in each script VM and report the heap before and after (garbage freed), and what is left by object type, userdata type and the chunk its code came from: tell garbage from a leak by running it again after the same actions. `retained` names a kind (a userdata type such as State, `table`, `function`, or part of a function's name or chunk) and prints the chains of holders from a root to those objects (registry → .key → upvalue → …, each function with its chunk:line), the commonest `sample` of them with counts. `mark` remembers the objects there are now; after more actions, `since_mark` lists what survived a collection that wasn't there then, and with `retained` only holders of those. Every `retained` answer also says how many of the matches a Luau holder alone reaches (the rest are held through Rust's handles); `lua_only` shows those Luau holders' chains instead of the handle chains.",
+    ),
+    (
+        "zgx_text",
+        "text",
+        &[("target", "string", true)],
+        "How a text node was shaped: the family it asks for and what that resolves to, each line's baseline, ascent and descent (the strut included), and the face each run of glyphs used.",
+    ),
+    (
+        "zgx_clock",
+        "clock",
+        &[("action", "string", false), ("ms", "number", false)],
+        "Freeze every animation, timer, caret and frame at one time (action freeze), move it on by hand (advance with ms), or let it run again (thaw); no action says which. A screenshot run freezes it so spinners, carets and transitions are the same each time (also ZGX_FREEZE_TIME=1 at launch).",
     ),
     (
         "zgx_switch",

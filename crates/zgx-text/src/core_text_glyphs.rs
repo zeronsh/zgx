@@ -103,6 +103,10 @@ unsafe extern "C" {
         bitmap_info: u32,
     ) -> CFTypeRef;
     fn CGContextSetGrayFillColor(context: CFTypeRef, gray: f64, alpha: f64);
+    fn CGColorSpaceCreateDeviceRGB() -> CFTypeRef;
+    fn CGContextFillRect(context: CFTypeRef, rect: CGRect);
+    fn CGContextScaleCTM(context: CFTypeRef, sx: f64, sy: f64);
+    fn CGContextSetRGBFillColor(context: CFTypeRef, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetShouldAntialias(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSmoothFonts(context: CFTypeRef, on: bool);
     fn CGContextSetAllowsFontSubpixelPositioning(context: CFTypeRef, on: bool);
@@ -192,9 +196,13 @@ fn descriptor(fonts: &mut FontSystem, id: cosmic_text::fontdb::ID) -> Option<Own
         }
         // Core Text gives another font for a name it doesn't know: kept only
         // if its name is the face's.
-        let by_name = Owned(CTFontDescriptorCreateWithNameAndSize(cf_name.0, 0.));
-        if !by_name.0.is_null() && named(by_name.0, &name) {
-            return Some(Owned(CFRetain(by_name.0)));
+        // (A hidden system face, `.SFNS-Regular`, isn't found by name: Core Text
+        // logs that it gives Times, so its file is read instead.)
+        if !name.starts_with('.') {
+            let by_name = Owned(CTFontDescriptorCreateWithNameAndSize(cf_name.0, 0.));
+            if !by_name.0.is_null() && named(by_name.0, &name) {
+                return Some(Owned(CFRetain(by_name.0)));
+            }
         }
         let all = match path.as_deref().and_then(|path| path.to_str()) {
             Some(path) => CTFontManagerCreateFontDescriptorsFromURL(
@@ -372,4 +380,181 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
         image.data = data;
         Some(image)
     })
+}
+
+static SMOOTHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether glyphs draw with macOS's font smoothing (Chrome's default, `-webkit-font-smoothing:
+/// auto`: Core Graphics dilates the stems and Skia blends the mask through its
+/// luminance tables) rather than antialiased (what `-webkit-font-smoothing:
+/// antialiased` gives, and Anara's web build sets: the plain coverage, with no
+/// table). Set it once, before any text draws.
+pub fn set_font_smoothing(on: bool) {
+    SMOOTHING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+/// Whether glyphs draw with font smoothing (`set_font_smoothing`).
+pub fn font_smoothing() -> bool {
+    SMOOTHING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether Core Text draws glyphs of `face` through Chrome's recipe: any
+/// face but a colour one (emoji draw their own colours through swash).
+/// `key`'s glyph as Chrome draws it on macOS: Skia draws it through Core
+/// Graphics, black on white with font smoothing on, in a colour context at
+/// the point size under the device scale (so the font's optical size and
+/// tracking follow the point size), and blends it through a coverage table
+/// by the text's luminance (`key.flags`, `chrome_mask_tables`). Measured
+/// against Chrome's own pixels, this reproduces them to a level or two
+/// where swash's outlines are 13% lighter. `scale`: device pixels a point;
+/// `key`'s size is in device pixels.
+pub(crate) fn chrome_glyph(
+    fonts: &mut FontSystem,
+    key: CacheKey,
+    scale: f32,
+) -> Option<SwashImage> {
+    let mut key = key;
+    let k = f64::from(scale.max(1.));
+    key.font_size_bits = (f32::from_bits(key.font_size_bits) / scale.max(1.)).to_bits();
+    let table = crate::chrome_mask_tables::for_luminance_bucket(key.flags.luminance_bucket());
+    let smoothing = font_smoothing();
+    let identity = !smoothing;
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let font = font_for(&mut cache, fonts, key)?;
+        let glyph = key.glyph_id;
+        let (dx, dy) = (
+            f64::from(key.x_bin.as_float()),
+            f64::from(key.y_bin.as_float()),
+        );
+        let mut rect = CGRect::default();
+        // SAFETY: one glyph, one rect.
+        unsafe { CTFontGetBoundingRectsForGlyphs(font, HORIZONTAL, &glyph, &mut rect, 1) };
+        if rect.size.width <= 0. || rect.size.height <= 0. {
+            return None;
+        }
+        let left = (k * rect.origin.x + dx).floor() as i32 - 2;
+        let right = (k * (rect.origin.x + rect.size.width) + dx).ceil() as i32 + 2;
+        let bottom = (k * rect.origin.y + dy).floor() as i32 - 2;
+        let top = (k * (rect.origin.y + rect.size.height) + dy).ceil() as i32 + 2;
+        let (width, height) = ((right - left) as usize, (top - bottom) as usize);
+        let mut data = vec![0u8; width * height * 4];
+        // SAFETY: `data` is the context's `width` by `height` pixels of four
+        // bytes and outlives it; the context is released before it is read.
+        unsafe {
+            let space = Owned(CGColorSpaceCreateDeviceRGB());
+            // `kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little`.
+            let context = CGBitmapContextCreate(
+                data.as_mut_ptr().cast(),
+                width,
+                height,
+                8,
+                width * 4,
+                space.0,
+                2 | (2 << 12),
+            );
+            if context.is_null() {
+                return None;
+            }
+            let context = Owned(context);
+            CGContextSetRGBFillColor(context.0, 1., 1., 1., 1.);
+            CGContextFillRect(
+                context.0,
+                CGRect {
+                    origin: CGPoint { x: 0., y: 0. },
+                    size: CGSize {
+                        width: width as f64,
+                        height: height as f64,
+                    },
+                },
+            );
+            CGContextSetRGBFillColor(context.0, 0., 0., 0., 1.);
+            CGContextSetShouldAntialias(context.0, true);
+            CGContextSetShouldSmoothFonts(context.0, smoothing);
+            CGContextSetAllowsFontSubpixelPositioning(context.0, true);
+            CGContextSetShouldSubpixelPositionFonts(context.0, true);
+            CGContextSetAllowsFontSubpixelQuantization(context.0, false);
+            CGContextSetShouldSubpixelQuantizeFonts(context.0, false);
+            let at = CGPoint {
+                x: (dx - f64::from(left)) / k,
+                y: (dy - f64::from(bottom)) / k,
+            };
+            CGContextScaleCTM(context.0, k, k);
+            CTFontDrawGlyphs(font, &glyph, &at, 1, context.0);
+        }
+        let alpha: Vec<u8> = data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| {
+                let gray = (u32::from(px[0]) + u32::from(px[1]) + u32::from(px[2])) / 3;
+                if identity {
+                    255 - gray as u8
+                } else {
+                    table[usize::from(255 - gray as u8)]
+                }
+            })
+            .collect();
+        let mut image = SwashImage::new();
+        image.content = SwashContent::Mask;
+        image.placement = Placement {
+            left,
+            top,
+            width: width as u32,
+            height: height as u32,
+        };
+        image.data = alpha;
+        Some(image)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmic_text::{CacheKeyFlags, fontdb};
+
+    fn ink(fonts: &mut FontSystem, id: fontdb::ID, glyph: u16, size: f32, weight: u16) -> u64 {
+        let (key, _, _) = CacheKey::new(
+            id,
+            glyph,
+            size,
+            (0., 0.),
+            fontdb::Weight(weight),
+            0,
+            CacheKeyFlags::empty(),
+        );
+        let image = chrome_glyph(fonts, key, 2.).expect("Core Text draws the system font");
+        image.data.iter().map(|&a| u64::from(a)).sum()
+    }
+
+    // Chrome draws system-ui between Medium and Semibold on the weight axis alone: no fake-bold stroke.
+    #[test]
+    fn the_system_font_between_medium_and_semibold_is_drawn_on_its_axis_alone() {
+        let mut fonts = FontSystem::new();
+        let Some(id) = fonts
+            .db()
+            .faces()
+            .find(|f| f.post_script_name == ".SFNS-Regular")
+            .map(|f| f.id)
+        else {
+            return;
+        };
+        let glyph = fonts
+            .get_font(id, fontdb::Weight(400))
+            .unwrap()
+            .as_swash()
+            .charmap()
+            .map('N');
+        // 13 points, where the stroke was drawn (under 17.5), and 32.
+        for size in [13., 32.] {
+            let [w500, w550, w600] = [500, 550, 600].map(|w| ink(&mut fonts, id, glyph, size, w));
+            assert!(
+                w500 < w550 && w550 < w600,
+                "{size} pt: ink 500 {w500}, 550 {w550}, 600 {w600}"
+            );
+            let midpoint = (w500 + w600) / 2;
+            assert!(
+                w550.abs_diff(midpoint) * 20 < midpoint,
+                "{size} pt: 550 is {w550}, halfway is {midpoint}"
+            );
+        }
+    }
 }

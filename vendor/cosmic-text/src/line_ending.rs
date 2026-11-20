@@ -12,6 +12,8 @@ pub enum LineEnding {
     Cr,
     /// Use `\n\r` for line ending (some legacy systems)
     LfCr,
+    /// A record separator (U+001E): a line break inside one line of an editor
+    Rs,
     /// No line ending
     None,
 }
@@ -24,6 +26,7 @@ impl LineEnding {
             Self::CrLf => "\r\n",
             Self::Cr => "\r",
             Self::LfCr => "\n\r",
+            Self::Rs => "\u{1e}",
             Self::None => "",
         }
     }
@@ -52,7 +55,7 @@ impl Iterator for LineIter<'_> {
     type Item = (Range<usize>, LineEnding);
     fn next(&mut self) -> Option<Self::Item> {
         let start = self.start;
-        match self.string[start..self.end].find(['\r', '\n']) {
+        match self.string[start..self.end].find(['\r', '\n', '\u{1e}']) {
             Some(i) => {
                 let end = start + i;
                 self.start = end;
@@ -65,6 +68,8 @@ impl Iterator for LineIter<'_> {
                     LineEnding::Lf
                 } else if after.starts_with('\r') {
                     LineEnding::Cr
+                } else if after.starts_with('\u{1e}') {
+                    LineEnding::Rs
                 } else {
                     //TODO: this should not be possible
                     LineEnding::None

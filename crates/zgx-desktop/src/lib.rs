@@ -63,7 +63,11 @@ mod mimalloc_tag_tests {
             .expect("vmmap runs");
         let summary = String::from_utf8_lossy(&summary.stdout);
         drop(held);
-        assert!(summary.contains("Memory Tag 240"), "{summary}");
+        // macOS 27's vmmap names tag 240 "App-Specific Tag 1"
+        assert!(
+            summary.contains("Memory Tag 240") || summary.contains("App-Specific Tag 1 "),
+            "{summary}"
+        );
     }
 }
 pub mod app_menu;
@@ -77,6 +81,8 @@ pub mod file_dialog;
 mod linux_dbus;
 #[cfg(target_os = "linux")]
 mod linux_icon;
+#[cfg(target_os = "linux")]
+mod linux_kdialog;
 #[cfg(target_os = "linux")]
 mod linux_spelling;
 #[cfg(target_os = "linux")]
@@ -148,8 +154,8 @@ pub fn release_thread_heap() {
 }
 
 pub use app_menu::{
-    APPLICATION_MENU, AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, MenuAction,
-    StandardItem, app_menu_bar, has_native_app_menu,
+    APPLICATION_MENU, AppMenu, AppMenuEntry, AppMenuError, KEY_ONLY_MENU, MenuAccelerator,
+    MenuAction, StandardItem, app_menu_bar, has_native_app_menu, repeats, set_repeating,
 };
 #[cfg(feature = "audio")]
 pub use audio::{AudioEvent, AudioListening};

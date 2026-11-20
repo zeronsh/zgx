@@ -7,6 +7,7 @@ ui.webview(props: WebViewProps) -> Node
 ui.web(opts: WebOptions?) -> Web
 ui.web(id: string, opts: WebOptions?) -> Web
 ui.terminal(props: TerminalProps) -> Node
+ui.host_view(props: HostViewProps) -> Node
 ui.term(id: string, opts: TermOptions?) -> Term
 ui.command(opts: CommandOptions) -> ()
 ```
@@ -17,6 +18,7 @@ ui.command(opts: CommandOptions) -> ()
 | `web` | a page's controller, usable before and after its view mounts. `ui.web(opts)` makes a page for this run; `ui.web(id, opts)` returns the host's page for `id`, made with `opts` the first time, kept across reloads until `web:close()` |
 | `terminal` | shows a session (`term = ui.term(id)`) |
 | `term` | the session for `id`, started the first time with `opts`; later calls return the same session, their handlers replacing the previous run's |
+| `host_view` | a view the host made in Rust, registered by name with `zgx_script::host_view(name, || View)` and shown where `ui.host_view { name = … }` puts it. It mounts in the script's tree, so it lays out and clips like any element (give it `w`, `h`, or let it grow) and sits under the script's popups, dialogs and layers, which a view composed beside the script's can't. `make` runs each time the element mounts; a name nothing registered shows an empty box |
 | `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is |
 
 ## Web view options
@@ -170,7 +172,7 @@ ui.window.titlebar_area: State<WindowRect?>
 ui.window.controls: State<WindowRect?>
 ```
 
-Content under an inset or hidden title bar stays clear of the window's own buttons by reading where it may draw, as the web's Window Controls Overlay gives it. `ui.window.titlebar_area` is the strip the title bar leaves, less the window's buttons. `ui.window.controls` is the buttons. Each is `{ x, y, width, height }` in points from the window's top left, or nil for a standard title bar, in fullscreen, and where the platform does not say (macOS and Linux, for now). Both follow resizes, scale and fullscreen. `zgx run` keeps them; a Rust host passes its window's with `ScriptHost::window_chrome`.
+Content under an inset or hidden title bar stays clear of the window's own buttons by reading where it may draw, as the web's Window Controls Overlay gives it. `ui.window.titlebar_area` is the strip the title bar leaves, less the window's buttons. `ui.window.controls` is the buttons. Each is `{ x, y, width, height }` in points from the window's top left, or nil for a standard title bar and in fullscreen. On macOS they are AppKit's traffic lights where they are (a `zgx.json`'s `traffic_lights` places them) and the strip beside them, 40 points tall or as tall as centres the lights where they sit lower. Both follow resizes, scale and fullscreen. `zgx run` keeps them; a Rust host passes its window's with `ScriptHost::window_chrome`.
 
 ```lua
 return ui.row {
@@ -310,6 +312,20 @@ return ui.button {
 	end,
 }
 ```
+
+## Controls on screen
+
+```luau
+ui.controls(opts: { limit: number? }?) -> { Control }
+ui.press(handle: number) -> boolean
+```
+
+`ui.controls()` lists what a person could use in the window that has the keys (the active one) as the accessibility tree has it: in document order, with popups, menus and modals last, each as `{ role, name, x, y, w, h, disabled, selected, expanded, focused, handle }`. `role` is ARIA's name for it (`"button"`, `"link"`, `"menuitem"`, `"tab"`, `"dialog"`…), `name` its accessible name or else its text, and the box is the part of it that shows, in the window's points. A plain group, a text, a scroll view or a table's rows and cells are left out, and so is what is hidden or has no box. `selected` and `expanded` are nil where a control can't be. `limit` stops the list there. Nothing is built until it is called, and it costs nothing in a frame that doesn't.
+
+`ui.press(handle)` presses and releases the primary button at the middle of the control `handle` names, through the window's input as `zgx inspect click` does. It returns false, doing nothing, for a handle whose control is gone, hidden or covered there by something else. While a handler is handling input (a click's `on_click`) it returns false, doing nothing: press from a command, a timer or a task.
+
+A Rust host gives the window with `ScriptHost::window_controls(&ui)` (`zgx-run` does); without one both do nothing (`{}` and false). They are the app's own: a plugin that calls either gets an error.
+
 
 ## Example
 

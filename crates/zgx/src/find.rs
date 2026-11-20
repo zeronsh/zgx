@@ -13,6 +13,11 @@
 //! rows would show), a slice each frame until all are counted, so a list of
 //! a million rows never stalls one; nothing runs once the count is done, or
 //! while no find is open.
+//!
+//! A view can be a scope of its own (`View::find_scope`), as a document's
+//! pane or a chat's thread: find opened with focus (else the last press) in
+//! one looks only within the nearest, its bar at that view's top right.
+//! Opened again from another, it looks there.
 use crate::time::Instant;
 use crate::{
     compose::{View, ViewHandle},
@@ -109,8 +114,16 @@ pub(crate) struct Session {
     bar: Option<ViewHandle>,
     /// What had focus before the bar.
     previous_focus: Option<NodeId>,
+    /// The view find looks within (`View::find_scope`), else the window.
+    scope: Option<NodeId>,
+    /// Where the bar is: its top and right insets in the window, at its
+    /// scope's top right (`None`, the window's).
+    place: Signal<Option<(f32, f32)>>,
     /// The bar asked for this, to do once its event is done.
     asked: Option<Ask>,
+    /// The scene's content when the query was last looked for, and when:
+    /// text mounted since (a long document still building) is counted again.
+    searched: Option<(u64, Instant)>,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Ask {
@@ -159,13 +172,18 @@ impl Ui {
         if self.storage.find_off.get() {
             return false;
         }
-        if self.storage.find.borrow().is_none() {
+        let open = self.storage.find.borrow().is_some();
+        if open {
+            self.rescope();
+        } else {
             let status = self.signal(FindStatus {
                 open: true,
                 ..Default::default()
             });
             let typed = self.signal(String::new());
             let previous_focus = self.input.focused();
+            let scope = self.scope_around(previous_focus.or_else(|| self.press_target()));
+            let place = self.signal(self.place_of(scope));
             *self.storage.find.borrow_mut() = Some(Session {
                 query: String::new(),
                 folded: String::new(),
@@ -178,9 +196,12 @@ impl Ui {
                 typed: typed.clone(),
                 bar: None,
                 previous_focus,
+                scope,
+                place: place.clone(),
                 asked: None,
+                searched: None,
             });
-            let bar = self.mount(bar(self, status, typed));
+            let bar = self.mount(bar(self, status, typed, place));
             if let Some(session) = self.storage.find.borrow_mut().as_mut() {
                 session.bar = Some(bar);
             }
@@ -188,6 +209,113 @@ impl Ui {
         }
         self.focus_find_field();
         true
+    }
+    /// Find opened again: within the scope around what has focus (else
+    /// what was last pressed), outside the bar, if that is another, the
+    /// query found there.
+    fn rescope(&mut self) {
+        let Some((bar, scope)) = self
+            .storage
+            .find
+            .borrow()
+            .as_ref()
+            .map(|s| (s.bar.as_ref().map(ViewHandle::node), s.scope))
+        else {
+            return;
+        };
+        let outside = |id: &NodeId| {
+            let scene = self.scene.borrow();
+            bar.is_none_or(|bar| *id != bar && !scene.ancestors(*id).any(|a| a == bar))
+        };
+        let Some(from) =
+            (self.input.focused().filter(outside)).or_else(|| self.press_target().filter(outside))
+        else {
+            return;
+        };
+        let now = self.scope_around(Some(from));
+        if now == scope {
+            return;
+        }
+        let query = match self.storage.find.borrow_mut().as_mut() {
+            Some(session) => {
+                session.scope = now;
+                session.query.clone()
+            }
+            None => return,
+        };
+        self.place_bar();
+        if !query.is_empty() {
+            self.find_text(&query);
+        }
+    }
+    /// What the last press landed on: its target, else (a press on what
+    /// takes no input, plain text) the node where it was.
+    fn press_target(&self) -> Option<NodeId> {
+        let pressed = self.last_pressed();
+        if self.storage.find_scopes.borrow().is_empty() || self.scope_around(pressed).is_some() {
+            return pressed;
+        }
+        let Some((x, y)) = self.storage.last_press_at.get() else {
+            return pressed;
+        };
+        self.scene.borrow().hit_test(x, y).or(pressed)
+    }
+    /// The nearest find scope holding `node` (or it), if any.
+    fn scope_around(&self, node: Option<NodeId>) -> Option<NodeId> {
+        let scopes = self.storage.find_scopes.borrow();
+        if scopes.is_empty() {
+            return None;
+        }
+        let node = node?;
+        let scene = self.scene.borrow();
+        if !scene.contains(node) {
+            return None;
+        }
+        std::iter::once(node)
+            .chain(scene.ancestors(node))
+            .find(|id| scopes.contains(id))
+    }
+    /// The bar's place at `scope`'s top right, as much of it as shows,
+    /// and in the window however narrow the scope.
+    fn place_of(&self, scope: Option<NodeId>) -> Option<(f32, f32)> {
+        const INSET: f32 = 8.;
+        let bar = self
+            .storage
+            .find
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.bar.as_ref().map(ViewHandle::node));
+        let scene = self.scene.borrow();
+        let scope = scope.filter(|id| scene.contains(*id))?;
+        let shown = scene.visible_bounds(scope)?;
+        let window = scene.bounds(scene.root());
+        let width = bar
+            .filter(|id| scene.contains(*id))
+            .map_or(0., |id| scene.bounds(id).width);
+        let right = window.x + window.width - (shown.x + shown.width) + INSET;
+        Some((
+            shown.y - window.y + INSET,
+            right.min(window.width - width - INSET).max(INSET),
+        ))
+    }
+    /// The bar moved to where its scope now is.
+    fn place_bar(&self) {
+        let Some((scope, place)) =
+            (self.storage.find.borrow().as_ref()).map(|s| (s.scope, s.place.clone()))
+        else {
+            return;
+        };
+        let now = self.place_of(scope);
+        if place.with_untracked(|p| *p != now) {
+            place.set(now);
+        }
+    }
+    /// Where find looks: its scope while that is mounted, else the window.
+    fn find_root(&self, scene: &crate::scene::Scene) -> NodeId {
+        let scope = self.storage.find.borrow().as_ref().and_then(|s| s.scope);
+        scope
+            .filter(|id| scene.contains(*id))
+            .unwrap_or_else(|| scene.root())
     }
     fn focus_find_field(&mut self) {
         let field = self
@@ -243,6 +371,7 @@ impl Ui {
             session.segments = segments;
             session.current = None;
             session.marked_at = None;
+            session.searched = None;
             session.typed.clone()
         });
         // The bar shows what is looked for (its own search then finds it
@@ -255,6 +384,7 @@ impl Ui {
         // The first slice of the lists' rows now, so a short list is counted
         // at once.
         self.count_rows(Instant::now() + SLICE);
+        self.mark_searched();
         let any = self
             .storage
             .find
@@ -265,6 +395,47 @@ impl Ui {
             self.go_to(0);
         } else {
             self.after_find_change();
+        }
+    }
+    fn mark_searched(&self) {
+        let at = self.scene.borrow().content_revision();
+        if let Some(session) = self.storage.find.borrow_mut().as_mut() {
+            session.searched = Some((at, Instant::now()));
+        }
+    }
+    /// The query looked for again in text mounted since (`next_step`), the
+    /// current match kept: what was found before it is where it was.
+    fn recount(&mut self) {
+        let Some(folded) = self
+            .storage
+            .find
+            .borrow()
+            .as_ref()
+            .map(|s| s.folded.clone())
+        else {
+            return;
+        };
+        let segments = self.collect(&folded);
+        let first = {
+            let mut find = self.storage.find.borrow_mut();
+            let Some(session) = find.as_mut() else {
+                return;
+            };
+            session.segments = segments;
+            session.marked_at = None;
+            let count = session.count();
+            session.current = session.current.filter(|&at| at < count);
+            session.current.is_none() && count > 0
+        };
+        self.count_rows(Instant::now() + SLICE);
+        self.mark_searched();
+        if first {
+            self.go_to(0);
+        } else if let Some(session) = self.storage.find.borrow().as_ref() {
+            let status = status_of(session);
+            if session.status.with_untracked(|s| *s != status) {
+                session.status.set(status);
+            }
         }
     }
     /// Find what is selected (selected text, else a field's selection), as
@@ -403,7 +574,7 @@ impl Ui {
             .and_then(|s| s.bar.as_ref().map(ViewHandle::node));
         let mut segments = Vec::new();
         let mut found = Vec::new();
-        let mut pending = vec![scene.root()];
+        let mut pending = vec![self.find_root(&scene)];
         while let Some(id) = pending.pop() {
             if Some(id) == bar || !scene.contains(id) || !scene.shown_in_layout(id) {
                 continue;
@@ -750,7 +921,7 @@ impl Ui {
             let leaves: Vec<NodeId> = {
                 let scene = self.scene.borrow();
                 let mut leaves = Vec::new();
-                let mut pending = vec![scene.root()];
+                let mut pending = vec![self.find_root(&scene)];
                 while let Some(id) = pending.pop() {
                     if Some(id) == bar || !scene.shown_in_layout(id) {
                         continue;
@@ -920,21 +1091,51 @@ pub(crate) fn sync(ui: &Ui) {
         (scene.content_revision(), scene.layout_revision())
     };
     if marked_at != Some(now) {
+        ui.place_bar();
         ui.refresh_marks();
     }
 }
 
-/// While rows are left to count, now: the next slice is due.
+/// Make `node` a find scope (`View::find_scope`). Those gone are let go as
+/// the list fills, so it never holds more than twice those mounted.
+pub(crate) fn add_scope(ui: &Ui, node: NodeId) {
+    let mut scopes = ui.storage.find_scopes.borrow_mut();
+    if scopes.len() == scopes.capacity()
+        && let Ok(scene) = ui.scene.try_borrow()
+    {
+        scopes.retain(|id| scene.contains(*id));
+    }
+    scopes.push(node);
+}
+
+/// While rows are left to count, now: the next slice is due. Once counted,
+/// when text mounted since the search (a document still building): a
+/// recount, at most every `RECOUNT_EVERY`.
 pub(crate) fn next_step(ui: &Ui) -> Option<Instant> {
     let session = ui.storage.find.borrow();
     let session = session.as_ref()?;
-    (!session.done()).then(Instant::now)
+    if !session.done() {
+        return Some(Instant::now());
+    }
+    let (at, when) = session.searched?;
+    (!session.folded.is_empty() && at != ui.scene.borrow().content_revision())
+        .then(|| when + RECOUNT_EVERY)
 }
+/// How often an open search counts again while the page's text changes.
+const RECOUNT_EVERY: Duration = Duration::from_millis(250);
 
 /// Count the next slice of rows: whether any were.
 pub(crate) fn advance(ui: &Ui, now: Instant) -> bool {
-    if next_step(ui).is_none() {
+    let Some(due) = next_step(ui) else {
         return false;
+    };
+    let counting = ui.storage.find.borrow().as_ref().is_some_and(|s| !s.done());
+    if !counting {
+        if now < due {
+            return false;
+        }
+        ui.shared().recount();
+        return true;
     }
     let counted = ui.count_rows(now + SLICE);
     if counted {
@@ -995,10 +1196,84 @@ pub(crate) fn after_dispatch(ui: &Ui, event: &InputEvent, prevented: bool) -> bo
 /// The find field's id in the bar.
 const FIELD: &str = "zgx-find-field";
 
+/// The look an app gives find's bar (`ui.find_look`), so the bar zgx
+/// builds looks as the app's own search field. Each part merges over zgx's.
+#[derive(Clone, Default)]
+pub struct FindLook {
+    /// The floating bar.
+    pub panel: Styles,
+    /// What holds the icon, the field, the count and the steps; close sits
+    /// after it.
+    pub group: Styles,
+    /// The text field.
+    pub field: Styles,
+    /// The field with focus, in place of the focus ring.
+    pub field_focus: Option<Styles>,
+    /// How many matches.
+    pub count: Styles,
+    /// The previous, next and close buttons.
+    pub button: Styles,
+    /// A button under the pointer, in place of the platform's.
+    pub button_hover: Option<Styles>,
+    /// A button pressed, in place of the platform's.
+    pub button_active: Option<Styles>,
+    /// Each icon's box.
+    pub icon: Styles,
+    /// Icons in the text's colour, in place of the glyphs: the search one
+    /// leads the field.
+    pub icons: FindIcons,
+    /// The empty field's text.
+    pub placeholder: Option<String>,
+    /// "1/3" for "1 of 3", and "0/0" for "No results".
+    pub short_count: bool,
+    /// The count and the steps show once this many characters are typed.
+    pub navigator_after: usize,
+}
+/// `FindLook`'s icons.
+#[derive(Clone, Default)]
+pub struct FindIcons {
+    /// Leads the field.
+    pub search: Option<std::sync::Arc<crate::svg::SvgData>>,
+    /// Steps to the match before.
+    pub previous: Option<std::sync::Arc<crate::svg::SvgData>>,
+    /// Steps to the next match.
+    pub next: Option<std::sync::Arc<crate::svg::SvgData>>,
+    /// Closes the bar.
+    pub close: Option<std::sync::Arc<crate::svg::SvgData>>,
+}
+thread_local! { static FIND_LOOK: std::cell::RefCell<Rc<FindLook>> = Default::default(); }
+/// Gives find's bar, as it next opens, `look` (`ui.find_look`).
+pub fn set_find_look(look: FindLook) {
+    FIND_LOOK.with(|now| *now.borrow_mut() = Rc::new(look));
+}
+fn find_look() -> Rc<FindLook> {
+    FIND_LOOK.with(|now| now.borrow().clone())
+}
+
+/// The count as shown: "2 of 5", or "2/5" short; "+" while still counting.
+fn count_text(s: &FindStatus, short: bool) -> String {
+    if s.query.is_empty() {
+        return String::new();
+    }
+    let at = s.current.map_or(0, |c| c + 1);
+    let more = if s.done { "" } else { "+" };
+    match (short, s.count) {
+        (false, 0) if s.done => "No results".to_owned(),
+        (true, count) => format!("{at}/{count}{more}"),
+        (false, count) => format!("{at} of {count}{more}"),
+    }
+}
+
 /// Find's bar: a field, how many matches, the one before and the next, and
 /// close.
-fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
-    use crate::compose::{button, row, text, text_input, text_signal};
+fn bar(
+    ui: &Ui,
+    status: Signal<FindStatus>,
+    typed: Signal<String>,
+    place: Signal<Option<(f32, f32)>>,
+) -> View {
+    use crate::compose::{button, row, svg, text, text_input, text_signal};
+    let look = find_look();
     let ask = |ui: &Ui, what: Ask| {
         let weak = ui.downgrade();
         move || {
@@ -1027,8 +1302,14 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
             }
         }
     };
+    let after = look.navigator_after;
+    let navigating = {
+        let typed = typed.clone();
+        move || typed.with(|t| t.chars().count() >= after)
+    };
     let keys = {
         let (next, previous, close) = (next.clone(), previous.clone(), close.clone());
+        let navigating = navigating.clone();
         move |cx: &mut crate::input::EventContext| {
             if cx.phase == EventPhase::Capture {
                 return;
@@ -1037,6 +1318,7 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
                 return;
             };
             match key {
+                Key::Enter if !navigating() => {}
                 Key::Enter if modifiers.shift => previous(),
                 Key::Enter => next(),
                 Key::Escape => close(),
@@ -1046,26 +1328,77 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
             cx.stop_propagation();
         }
     };
-    let shown = move || {
-        let s = status.get();
-        match (s.query.is_empty(), s.count, s.current) {
-            (true, ..) => String::new(),
-            (false, 0, _) if s.done => "No results".to_owned(),
-            (false, count, current) => {
-                let at = current.map_or(0, |c| c + 1);
-                let more = if s.done { "" } else { "+" };
-                format!("{at} of {count}{more}")
-            }
-        }
+    let short = look.short_count;
+    let shown = move || count_text(&status.get(), short);
+    let icon = |source: &Option<std::sync::Arc<crate::svg::SvgData>>| {
+        source.as_ref().map(|source| {
+            svg("", std::sync::Arc::new(source.current_color()))
+                .size(16., 16.)
+                .accessible_hidden()
+                .merge_styles(&look.icon)
+        })
     };
-    let small = |label: &'static str, name: &'static str, act: Rc<dyn Fn()>| {
-        button()
-            .accessible_label(name)
+    let small = |glyph: &'static str,
+                 source: &Option<std::sync::Arc<crate::svg::SvgData>>,
+                 name: &'static str,
+                 act: Rc<dyn Fn()>| {
+        let mut b = button()
+            .accessible_label(crate::i18n::label(name))
             .px(6.)
             .py(2.)
             .on_click(move || act())
-            .child(text(label))
+            .merge_styles(&look.button)
+            .child(icon(source).unwrap_or_else(|| text(glyph)));
+        if let Some(hover) = look.button_hover.clone() {
+            b = b.hover(move |_| hover);
+        }
+        if let Some(active) = look.button_active.clone() {
+            b = b.active(move |_| active);
+        }
+        b
     };
+    let mut field = text_input(crate::i18n::label("Find"), typed)
+        .id(FIELD)
+        .w(180.)
+        .merge_styles(&look.field);
+    if let Some(placeholder) = look.placeholder.clone() {
+        field = field.placeholder(placeholder);
+    }
+    if let Some(focus) = look.field_focus.clone() {
+        field = field.focus(move |_| focus);
+    }
+    let navigator = {
+        let shows = navigating.clone();
+        row()
+            .gap(6.)
+            .items_center()
+            .reactive_style(move || {
+                let mut s = Styles::new();
+                if !shows() {
+                    s = s.opacity(0.);
+                }
+                s
+            })
+            .pointer_events_when(navigating)
+            .child(
+                text_signal(shown)
+                    .text_size(12.)
+                    .text_color(tok::TEXT_SECONDARY)
+                    .merge_styles(&look.count)
+                    .live(crate::semantics::Live::Polite),
+            )
+            .child(small(
+                "‹",
+                &look.icons.previous,
+                "Previous",
+                Rc::new(previous),
+            ))
+            .child(small("›", &look.icons.next, "Next", Rc::new(next)))
+    };
+    let mut group = row().gap(6.).items_center().merge_styles(&look.group);
+    if let Some(lead) = icon(&look.icons.search) {
+        group = group.child(lead);
+    }
     row()
         .absolute()
         .top(8.)
@@ -1077,20 +1410,16 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
         .bg(tok::POPOVER_BG)
         .border(1.)
         .border_color(tok::BORDER_SUBTLE)
-        .accessible_label("Find")
+        .merge_styles(&look.panel)
+        .accessible_label(crate::i18n::label("Find"))
         .reactive_style(move || {
             typing();
-            Styles::new()
+            match place.get() {
+                Some((top, right)) => Styles::new().top(top).right(right),
+                None => Styles::new(),
+            }
         })
         .on_event(keys)
-        .child(text_input("Find", typed).id(FIELD).w(180.))
-        .child(
-            text_signal(shown)
-                .text_size(12.)
-                .text_color(tok::TEXT_SECONDARY)
-                .live(crate::semantics::Live::Polite),
-        )
-        .child(small("‹", "Previous", Rc::new(previous)))
-        .child(small("›", "Next", Rc::new(next)))
-        .child(small("✕", "Close", Rc::new(close)))
+        .child(group.child(field).child(navigator))
+        .child(small("✕", &look.icons.close, "Close", Rc::new(close)))
 }

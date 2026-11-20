@@ -544,9 +544,9 @@ not scripts.
 A face the platform's fallback gave is tracked: its `trak` table applies at
 the optical size (pixels) as harfrust's point size (`Font::new_at`'s
 `track`), as Chrome's advances in those faces include it, and it is an
-instance a size (`Font::sized`). Other faces with a `trak` table (SF) are
-not tracked yet, though Chrome tracks them as HarfBuzz does: SF's tracking
-is a change of its own, which moves Latin text. Instances a size, tracked or
+instance a size (`Font::sized`). Every other face with a `trak` table
+(SF) is tracked too, as Chrome tracks it (the text-placement change's point
+size), and a face with one is an instance a size. Instances a size, tracked or
 with an optical size axis,
 are kept at most `SIZES` a face and weight, the size farthest from the one
 made going (`load_font_at`, out of line: a hit is the lookup it was, and

@@ -1095,9 +1095,13 @@ impl Ui {
     pub(crate) fn selection_layout(&self, scene: &Scene, id: NodeId) -> Option<Rc<dyn TextLayout>> {
         let source = Source::of(scene, id)?;
         let width = scene.layout_bounds(id).width;
-        // Its box's width, and the width it wraps at in it (balanced).
-        let widths =
-            (u64::from(width.to_bits()) << 32) | u64::from(scene.text_wrap(id, width).0.to_bits());
+        // Its box's width, and where its lines break in it (fitted).
+        let fitted = scene.fitted_breaks(id, width).map_or(0, |spaces| {
+            spaces.iter().fold(spaces.len() as u32, |acc, &at| {
+                acc.wrapping_mul(31).wrapping_add(at as u32)
+            })
+        });
+        let widths = (u64::from(width.to_bits()) << 32) | u64::from(fitted);
         let revision = scene.text_shaper_revision();
         let mut state = self.selection_state().borrow_mut();
         if let Some(index) = state.layouts.iter().position(|s| s.node == id) {
@@ -1654,7 +1658,10 @@ impl Ui {
     /// asked of a region without a hook. Whether the clipboard took it; no
     /// selection, nothing. (Pin line.)
     #[doc(hidden)]
-    pub fn copy_selection_from(&self, write: impl FnOnce(String, Option<String>) -> bool) -> bool {
+    pub fn copy_selection_from(
+        &self,
+        write: impl FnOnce(crate::widgets::ClipboardContent) -> bool,
+    ) -> bool {
         if !self.has_text_selection() {
             return false;
         }
@@ -1679,17 +1686,14 @@ impl Ui {
                 ui: self,
             })
         });
-        match content {
-            Some(content) => write(content.text, content.html),
-            None => write(text, Some(html)),
-        }
+        write(content.unwrap_or_else(|| crate::widgets::ClipboardContent::new(text, Some(html))))
     }
     /// Copy the selected display text to `platform`'s clipboard as the
     /// person would (`Ui::copy_selection_from`). Whether the clipboard took
     /// it. (Pin line.)
     #[doc(hidden)]
     pub fn copy_selection(&self, platform: &crate::platform::PlatformService) -> bool {
-        self.copy_selection_from(|text, html| crate::widgets::write_clipboard(platform, text, html))
+        self.copy_selection_from(|content| crate::widgets::write_clipboard(platform, content))
     }
     /// The rows of each virtual list the selection spans, mounted or not,
     /// in document order: what a Select All over rows scrolled away takes.
@@ -2275,6 +2279,9 @@ impl Ui {
         {
             window_active.set(active);
         }
+        if self.window_is_active() != active {
+            crate::caret_blink::window_active_changed(self, active);
+        }
         let changed = {
             let mut state = self.selection_state().borrow_mut();
             let changed = state.inactive == active;
@@ -2712,8 +2719,7 @@ fn stamp(scene: &Scene, id: NodeId) -> Option<(u32, u32, usize, usize, u64)> {
 }
 
 fn shape(scene: &Scene, id: NodeId, width: f32) -> Option<Rc<dyn TextLayout>> {
-    // As renderers lay it out: at its box's width (narrower, balanced),
-    // wrapping or not.
+    // As renderers lay it out: at its box's width, its lines fitted or not.
     scene.shape_node_text(id, width).map(Rc::from)
 }
 

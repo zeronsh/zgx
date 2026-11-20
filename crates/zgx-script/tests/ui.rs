@@ -187,6 +187,7 @@ fn rich_text_svg_and_canvas_render() {
                 c:rect(0, 0, w, h, "#222", 6)
                 c:stroke(ui.path():move(0, 0):line(w, h), "#fff", 2)
                 c:circle(w / 2, h / 2, 5, ui.linear(0, 0, w, 0, { "#f00", "#00f" }))
+                c:circle(w / 2, h / 2, 12, ui.radial(w / 2, h / 2, 12, { "#ff0000", "#ff000000" }))
             end },
         }"##,
     );
@@ -194,7 +195,10 @@ fn rich_text_svg_and_canvas_render() {
     assert!(h.kind("svg").starts_with("Svg"), "{}", h.kind("svg"));
     let canvas = h.kind("canvas");
     assert!(
-        canvas.starts_with("Canvas") && canvas.contains("Stroke") && canvas.contains("Linear"),
+        canvas.starts_with("Canvas")
+            && canvas.contains("Stroke")
+            && canvas.contains("Linear")
+            && canvas.contains("Radial"),
         "{canvas}"
     );
     assert_eq!(h.host.error().get(), None);
@@ -800,6 +804,9 @@ fn submenus_take_their_own_trigger_rows_and_open_on_hover() {
         y: b.y + 5.,
     });
     h.frames(3);
+    assert!(!shown(&mut h, "inner"), "not before the hover delay");
+    std::thread::sleep(std::time::Duration::from_millis(130));
+    h.frames(3);
     assert!(shown(&mut h, "inner"), "opened by hovering");
     let plain = h.find("plain").unwrap();
     let b = h.ui.scene.borrow().bounds(plain);
@@ -809,6 +816,21 @@ fn submenus_take_their_own_trigger_rows_and_open_on_hover() {
     });
     h.frames(3);
     assert!(!shown(&mut h, "inner"), "closed by hovering another item");
+    // a pointer passing over the trigger on its way elsewhere doesn't open it
+    let b = h.ui.scene.borrow().bounds(node);
+    h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+        x: b.x + 5.,
+        y: b.y + 5.,
+    });
+    h.frames(1);
+    let b = h.ui.scene.borrow().bounds(plain);
+    h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+        x: b.x + 5.,
+        y: b.y + 5.,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(130));
+    h.frames(3);
+    assert!(!shown(&mut h, "inner"), "passed over, not opened");
 }
 
 #[test]
@@ -1379,6 +1401,89 @@ fn an_image_takes_a_position() {
 }
 
 #[test]
+fn a_link_span_tells_its_hover_hook_where_it_is() {
+    let mut h = Harness::inline(
+        r##"local told = ui.state("told", "")
+return ui.column { w = 300,
+    ui.rich { id = "p",
+        ui.span { "Read ", literal = true },
+        ui.span { "[1]", literal = true, on_click = function() end, on_hover = function(inside, box)
+            told:set(`{inside}:{math.floor(box.x)}:{math.floor(box.w)}`)
+        end } },
+    ui.text { id = "told", function() return told:get() end } }"##,
+    );
+    h.frames(2);
+    let p = h.find("p").unwrap();
+    let b = h.ui.scene.borrow().bounds(p);
+    let mut entered = String::new();
+    for x in (20..120).step_by(3) {
+        h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+            x: b.x + x as f32,
+            y: b.y + b.height / 2.,
+        });
+        h.frames(1);
+        entered = h.text("told");
+        if entered.starts_with("true") {
+            break;
+        }
+    }
+    let parts: Vec<&str> = entered.split(':').collect();
+    assert_eq!(parts.first(), Some(&"true"), "{entered}");
+    let (x, w): (f32, f32) = (parts[1].parse().unwrap(), parts[2].parse().unwrap());
+    assert!(x > b.x + 10. && w > 5., "the link's own box: {entered}");
+    h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+        x: b.x + 1.,
+        y: b.y + b.height / 2.,
+    });
+    h.frames(1);
+    assert!(h.text("told").starts_with("false"), "{}", h.text("told"));
+}
+
+#[test]
+fn a_link_span_takes_its_hover_background_under_the_pointer() {
+    use zgx::scene::NodeKind;
+    let mut h = Harness::inline(
+        r##"return ui.column { w = 300, ui.rich { id = "p",
+            ui.span { "1", literal = true, on_click = function() end, bg = "#eeeeee",
+                padding = { 4, 2 }, hover = { bg = "#cccccc" } } } }"##,
+    );
+    h.frames(2);
+    let background = |h: &mut Harness| {
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![p];
+        while let Some(n) = stack.pop() {
+            if let NodeKind::RichText { text } = scene.kind(n) {
+                return text.runs().iter().find_map(|r| r.background);
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        panic!("no paragraph")
+    };
+    assert_eq!(
+        background(&mut h),
+        Some(zgx::scene::Color(0xee, 0xee, 0xee, 255))
+    );
+    let p = h.find("p").unwrap();
+    let b = h.ui.scene.borrow().bounds(p);
+    h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+        x: b.x + 5.,
+        y: b.y + b.height / 2.,
+    });
+    h.frames(2);
+    assert_eq!(
+        background(&mut h),
+        Some(zgx::scene::Color(0xcc, 0xcc, 0xcc, 255))
+    );
+    h.ui.dispatch(zgx::input::InputEvent::PointerLeave);
+    h.frames(2);
+    assert_eq!(
+        background(&mut h),
+        Some(zgx::scene::Color(0xee, 0xee, 0xee, 255))
+    );
+}
+
+#[test]
 fn a_link_span_underlines_under_the_pointer() {
     use zgx::scene::NodeKind;
     let mut h = Harness::inline(
@@ -1442,6 +1547,70 @@ fn a_link_span_underlines_under_the_pointer() {
     h.ui.dispatch(zgx::input::InputEvent::PointerLeave);
     h.frames(2);
     assert!(!runs(&mut h)[1].1, "back at rest once the pointer leaves");
+}
+
+/// A link span's `hover.icon` replaces its icon under the pointer, and
+/// `hover.underline_color` colours its underline there.
+#[test]
+fn a_link_span_swaps_its_icon_and_darkens_its_underline_under_the_pointer() {
+    use zgx::scene::NodeKind;
+    let mut h = Harness::inline(
+        r##"return ui.column { w = 300, ui.rich { id = "p", wrap = true, text_size = 14, line_height = 20,
+            ui.span { "file", literal = true, on_click = function() end,
+                underline = true, underline_color = "#808080",
+                icon = { code = "<svg viewBox='0 0 24 24'/>", size = 12, gap = 4, align = "baseline" },
+                hover = { underline = true, underline_color = "#000000",
+                    icon = { code = "<svg viewBox='0 0 24 24'/>", size = 56, gap = 4, align = "baseline" } } } } }"##,
+    );
+    h.frames(3);
+    let height = |h: &mut Harness| {
+        let p = h.find("p").unwrap();
+        h.ui.scene.borrow().bounds(p).height
+    };
+    let underline = |h: &mut Harness| {
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![p];
+        while let Some(n) = stack.pop() {
+            if let NodeKind::RichText { text } = scene.kind(n) {
+                return text
+                    .runs()
+                    .iter()
+                    .find_map(|r| r.underline)
+                    .and_then(|d| d.color);
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        None
+    };
+    assert!(height(&mut h) < 30.);
+    assert_eq!(
+        underline(&mut h),
+        Some(zgx::scene::Color(128, 128, 128, 255))
+    );
+    let p = h.find("p").unwrap();
+    let b = h.ui.scene.borrow().bounds(p);
+    let mut over = false;
+    for x in (2..60).step_by(3) {
+        h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+            x: b.x + x as f32,
+            y: b.y + 10.,
+        });
+        h.frames(2);
+        if underline(&mut h) == Some(zgx::scene::Color(0, 0, 0, 255)) {
+            over = true;
+            break;
+        }
+    }
+    assert!(over, "the underline darkens under the pointer");
+    assert!(height(&mut h) > 56., "the 56-point icon stands in");
+    h.ui.dispatch(zgx::input::InputEvent::PointerLeave);
+    h.frames(3);
+    assert!(height(&mut h) < 30.);
+    assert_eq!(
+        underline(&mut h),
+        Some(zgx::scene::Color(128, 128, 128, 255))
+    );
 }
 
 /// `ui.each` in a `scroll_x` lays out across, with the viewport's gap and as
@@ -4921,6 +5090,85 @@ fn a_list_of_data_takes_no_count() {
     assert!(error.contains("not with `count`"), "{error}");
 }
 
+/// Where the first shown text equal to `want` lies.
+fn text_place(h: &mut Harness, want: &str) -> zgx::scene::Rect {
+    h.texts();
+    let scene = h.ui.scene.borrow();
+    let mut stack = vec![scene.root()];
+    while let Some(n) = stack.pop() {
+        let text = match scene.kind(n) {
+            NodeKind::Text { text, .. } => Some(text.to_string()),
+            NodeKind::RichText { text, .. } => Some(text.text().to_owned()),
+            _ => None,
+        };
+        if text.as_deref() == Some(want) {
+            return scene.bounds(n);
+        }
+        stack.extend(scene.children(n).iter().copied());
+    }
+    panic!("no `{want}`")
+}
+
+/// A note's reading pane, 420 wide (356 inside its padding), showing `md`.
+fn note_pane(md: &str) -> Harness {
+    let h = Harness::inline(&format!(
+        r##"local md = ui.state("md", {md:?})
+        return ui.column {{ w = 420, h = 600, ui.scroll {{ grow = 1, w_full = true, min_h = 0,
+            ui.column {{ w_full = true, items = "center",
+                ui.column {{ w_full = true, max_w = 768, p = 32, text_size = 14, line_height = 22,
+                    ui.markdown_view {{ function() return md:get() end, w_full = true }} }} }} }} }}"##
+    ));
+    h.frames(1);
+    h
+}
+
+#[test]
+fn a_markdown_table_lays_out_as_the_web_notes_do() {
+    // Plate's fixed layout: equal columns sharing the width, none under 100, cells wrapping inside them.
+    let mut h = note_pane(
+        "| Model | Layers ($$N$$) | $$d_{model}$$ | $$d_{ff}$$ | Heads ($$h$$) | $$d_k = d_v$$ | $$P_{drop}$$ | $$\\epsilon_{ls}$$ | Params | Train steps | Step time | Wall time | FLOPs (EN-DE) |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+         | base | 6 | 512 | 2048 | 8 | 64 | 0.1 | 0.1 | 65M | 100K | 0.4 s | 12 h | $$3.3 \\times 10^{18}$$ |\n\
+         | big | 6 | 1024 | 4096 | 16 | 64 | 0.3 | 0.1 | 213M | 300K | 1.0 s | 3.5 days | $$2.3 \\times 10^{19}$$ |",
+    );
+    let base = text_place(&mut h, "base");
+    let second = text_place(&mut h, "6");
+    let big = text_place(&mut h, "big");
+    let flops = text_place(&mut h, "$$3.3 \\times 10^{18}$$");
+    // 13 columns can't share 356 at 100 each: every one keeps 100 (and the 12 gap), and the table scrolls.
+    let pitch = second.x - base.x;
+    assert!(
+        (pitch - 112.).abs() < 1.,
+        "columns 100 wide with their gap, {pitch} apart"
+    );
+    assert!(
+        flops.x > 420.,
+        "the last column lies past the view, to scroll to ({}pt)",
+        flops.x
+    );
+    assert!(
+        flops.width <= 100.5,
+        "its cell wraps inside its column ({}pt)",
+        flops.width
+    );
+    let line = base.height;
+    assert!(
+        big.y - base.y <= flops.height + 4.5 && flops.height < line * 3.,
+        "a row is as tall as its own cells"
+    );
+    assert_eq!(h.error(), None);
+
+    // Two columns share the width equally.
+    let mut h = note_pane("| A | B |\n| --- | --- |\n| left | right |");
+    let left = text_place(&mut h, "left");
+    let right = text_place(&mut h, "right");
+    assert!(
+        (right.x - left.x - 184.).abs() < 1.,
+        "two columns of (356 - 12) / 2, {} apart",
+        right.x - left.x
+    );
+}
+
 #[test]
 fn a_markdown_view_draws_blocks_and_builds_again_only_those_that_change() {
     let mut h = Harness::with_desktop(|runtime| {
@@ -5138,7 +5386,8 @@ fn a_long_markdown_reply_appended_to_shows_what_one_set_whole_does() {
     };
     let (mut streamed, reply) = app("");
     reply.set(zgx_script::Value::Text(zgx::text::Text::new(&prefix)));
-    streamed.frames(1);
+    // (A long text landing whole shows a chunk a frame: all of it by now.)
+    streamed.frames(60);
     let mut so_far = prefix.clone();
     for (i, piece) in document.as_bytes().chunks(9).enumerate() {
         let piece = std::str::from_utf8(piece).unwrap();
@@ -5151,7 +5400,7 @@ fn a_long_markdown_reply_appended_to_shows_what_one_set_whole_does() {
         );
         if i % 6 == 0 || so_far.len() == prefix.len() + document.len() {
             let (mut whole, _) = app(&so_far);
-            whole.frames(1);
+            whole.frames(60);
             assert_eq!(
                 scene_shown(&mut streamed),
                 scene_shown(&mut whole),
@@ -6670,6 +6919,116 @@ fn a_pointer_event_says_where_and_the_keys_held() {
         said.contains("wheel ") && said.contains("dx=number,dy=number"),
         "{said}"
     );
+}
+
+/// `anchor_fill`: a popover's anchor slot takes its share of the row, so an
+/// anchor that grows fills it (no `on_resize` measuring); without it the slot
+/// hugs its content.
+#[test]
+fn a_popover_anchor_fills_its_row_with_anchor_fill() {
+    let width = |fill: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"local open = ui.state("open", false)
+            local text = ui.state("text", "")
+            return ui.row {{ id = "row", w = 500, h = 40,
+                ui.text {{ "label" }},
+                ui.popover {{ open = open, {fill}
+                    anchor = ui.textarea {{ id = "ta", value = text, grow = 1, h = 30 }},
+                    ui.text {{ "panel" }} }},
+            }}"##
+        ));
+        h.frames(3);
+        let ta = h.find("ta").unwrap();
+        h.ui.scene.borrow().bounds(ta).width
+    };
+    let hug = width("");
+    let fill = width("anchor_fill = true,");
+    assert!(fill > 400., "filled: {fill}");
+    assert!(hug < fill - 100., "hugging: {hug}");
+}
+
+/// `ui.list { heights = ui.computed(...) }`: the computed's list gives the
+/// rows, as a state's or a function's does.
+#[test]
+fn a_list_takes_its_heights_from_a_computed() {
+    let rows = |heights: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"local n = ui.state("n", 3)
+            local computed = ui.computed(function() local t = {{}} for i = 1, n:get() do t[i] = 20 end return t end)
+            local fn = function() local t = {{}} for i = 1, n:get() do t[i] = 20 end return t end
+            return ui.list {{ id = "l", w = 100, h = 200, heights = {heights},
+                row = function(i) return ui.div {{ id = "r" .. i, h = 20 }} end }}"##
+        ));
+        h.frames(3);
+        (1..=5)
+            .filter(|i| h.find(&format!("r{i}")).is_some())
+            .count()
+    };
+    assert_eq!(rows("fn"), 3, "a function");
+    assert_eq!(rows("computed"), 3, "a computed");
+}
+
+/// `heights` that don't give a list of numbers say so, rather than showing
+/// no rows.
+#[test]
+fn a_list_whose_heights_are_no_list_of_numbers_says_so() {
+    for heights in [
+        "function() return nil end",
+        "function() return { \"a\" } end",
+        "function() return 20 end",
+    ] {
+        let h = Harness::inline(&format!(
+            r##"return ui.list {{ id = "l", w = 100, h = 200, heights = {heights},
+                row = function(i) return ui.div {{ h = 20 }} end }}"##
+        ));
+        h.frames(2);
+        let error = h.error();
+        assert!(
+            error.as_deref().is_some_and(|e| e.contains("`heights`")),
+            "{heights}: {error:?}"
+        );
+    }
+}
+
+/// A component's props carry nodes anywhere, in named slots.
+#[test]
+fn a_component_takes_nodes_nested_in_its_props() {
+    let mut h = Harness::inline(
+        r##"local Card = ui.component(function(props)
+            local items = {}
+            for i, n in props.attachments do items[i] = n end
+            return ui.column { id = "card", props.editor.input, ui.column(items) }
+        end)
+        return Card { attachments = { ui.text { id = "a1", "one" }, ui.text { id = "a2", "two" } },
+            editor = { input = ui.text { id = "in", "typed" } } }"##,
+    );
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    for id in ["in", "a1", "a2"] {
+        assert!(h.find(id).is_some(), "{id}");
+    }
+}
+
+/// A span's `border` and `min_w` parse and mount (their drawing is
+/// `zgx-gpu`'s `span_border` test).
+#[test]
+fn a_span_takes_a_border_and_a_least_width() {
+    let width = |extra: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.rich {{ id = "r", wrap = true, w = 300, text_size = 12, line_height = 20,
+                ui.span {{ "Press ", literal = true }},
+                ui.span {{ "K", literal = true, padding = {{ 4, 2 }}, radius = 7.5{extra} }},
+                ui.span {{ " to go", literal = true }} }}"##
+        ));
+        h.frames(2);
+        assert_eq!(h.error(), None, "{extra}");
+        let node = h.find("r").unwrap();
+        h.ui.scene.borrow().bounds(node).width
+    };
+    let plain = width("");
+    let _ = plain;
+    let boxed = width(", border = { width = 1, color = \"#ff0000\" }, min_w = 20");
+    assert!(boxed >= 0., "{boxed}");
 }
 
 /// `context_menu_open = state` on a node with a context menu: true as its

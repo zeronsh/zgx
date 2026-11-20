@@ -1447,6 +1447,7 @@ pub(crate) fn mount_style_with_intrinsic(
                         .letter_spacing
                         .unwrap_or(parent.font.letter_spacing),
                     masked: false,
+                    paragraph_rtl: false,
                     underline: {
                         let rare = resolved.rare();
                         let offset = rare
@@ -1785,6 +1786,18 @@ fn apply_resolved(
     if resolved.height.is_some() || resolved.height_percent.is_some() {
         style.intrinsic_height = false;
     }
+    // A scroll view given only a cap (`max_h`, `max_w`) is as large as its
+    // content up to it, as CSS's overflow box is: its default size (320 by
+    // 240) is no size it holds to there, which would make a short list as
+    // tall as the default, and a tall one as tall as the cap.
+    if style.intrinsic_height && style.max_height.is_some() {
+        style.height = None;
+        style.intrinsic_height = false;
+    }
+    if style.intrinsic_width && style.max_width.is_some() {
+        style.width = None;
+        style.intrinsic_width = false;
+    }
     if let Some(value) = rare.fade_edges {
         style.fade_edges = value;
     }
@@ -1928,8 +1941,12 @@ fn apply_resolved(
             }
             if let Some(value) = resolved.rare().outline {
                 quad.outline = value.map(|(width, color)| crate::scene::Outline {
-                    width,
-                    color,
+                    width: if width.is_nan() { 1. } else { width },
+                    color: if color == crate::style::OUTLINE_COLOR_UNSET {
+                        Color(0, 0, 0, 255)
+                    } else {
+                        color
+                    },
                     offset: 0.,
                 });
             }
@@ -2059,7 +2076,7 @@ fn apply_rare(
         scene.set_display_contents(node, cold.is_some_and(|cold| cold.display_contents));
         scene.set_sticky(node, cold.and_then(|cold| cold.sticky_top));
         scene.set_size_calcs(node, cold.and_then(|cold| cold.size_calcs.as_ref()));
-        if scene.set_text_balance(node, cold.and_then(|cold| cold.text_balance)) {
+        if scene.set_text_fit(node, cold.and_then(|cold| cold.text_fit)) {
             // Lines moved in boxes that did not: what follows their geometry
             // (links, icons) looks again.
             ui.text_geometry_moved();
@@ -2101,6 +2118,9 @@ fn apply_rare(
     }
     if let Some(direction) = rare.direction {
         scene.set_direction(node, Some(direction));
+    }
+    if rare.direction_auto || scene.has_auto_directions() {
+        scene.set_direction_auto(node, rare.direction_auto && rare.direction.is_none());
     }
     match rare.zoom {
         Some(crate::style::ZoomStyle::By(zoom)) => {

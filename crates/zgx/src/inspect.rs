@@ -91,6 +91,9 @@ struct Inner {
     hooks: RefCell<Vec<Hook>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     state: RefCell<State>,
+    /// Full screen asked of the window by devtools (`request_full_screen`):
+    /// on, off, or (`None`) the other way.
+    full_screen: Cell<Option<Option<bool>>>,
     /// The window's native views (pages, terminals), as its host shows them:
     /// where devtools ask where a point's input goes (`zgx inspect route`).
     natives: RefCell<Option<crate::native_view::NativeViews>>,
@@ -170,6 +173,7 @@ impl Inspector {
             labels: RefCell::default(),
             hooks: RefCell::default(),
             wake: RefCell::default(),
+            full_screen: Cell::new(None),
             state: RefCell::default(),
             natives: RefCell::default(),
         }))
@@ -245,6 +249,20 @@ impl Inspector {
     /// one (turned on from a task).
     pub fn set_wake(&self, wake: impl Fn() + 'static) {
         *self.0.wake.borrow_mut() = Some(Rc::new(wake));
+    }
+    /// Devtools ask the window into full screen (`Some(true)`), out of it,
+    /// or (`None`) the other way, as its green button does; the host takes
+    /// it on its next frame (`take_full_screen_request`).
+    pub fn request_full_screen(&self, on: Option<bool>) {
+        self.0.full_screen.set(Some(on));
+        let wake = self.0.wake.borrow().clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+    /// What `request_full_screen` asked, once.
+    pub fn take_full_screen_request(&self) -> Option<Option<bool>> {
+        self.0.full_screen.take()
     }
     /// Names `node` for the inspector and its warnings. Ignored unless
     /// recording.
@@ -1068,10 +1086,11 @@ fn check(ui: &Ui, labels: &HashMap<NodeId, Label>) -> Vec<Warning> {
         }
         // Content overflowing a clip that does not scroll.
         let (clip_x, clip_y) = scene.clips(id);
-        let scrolls = scene
-            .children(id)
-            .iter()
-            .any(|c| scene.is_scroll_content(*c));
+        let scrolls = scene.is_scroll_view(id)
+            || scene
+                .children(id)
+                .iter()
+                .any(|c| scene.is_scroll_content(*c));
         if (clip_x || clip_y) && !scrolls && !ui.is_editor(id) && children > 0 {
             let mut extent: Option<Rect> = None;
             for child in scene.children(id).iter().filter(in_flow) {
@@ -1162,4 +1181,24 @@ fn check(ui: &Ui, labels: &HashMap<NodeId, Label>) -> Vec<Warning> {
         !ui.is_editor(id)
     });
     warnings
+}
+
+#[cfg(test)]
+mod full_screen_tests {
+    use super::*;
+    /// Devtools' full-screen request wakes the window and is taken once.
+    #[test]
+    fn a_full_screen_request_wakes_the_window_and_is_taken_once() {
+        let inspector = Inspector::off();
+        let woken = Rc::new(Cell::new(0));
+        let count = woken.clone();
+        inspector.set_wake(move || count.set(count.get() + 1));
+        assert_eq!(inspector.take_full_screen_request(), None);
+        inspector.request_full_screen(Some(true));
+        assert_eq!(woken.get(), 1);
+        assert_eq!(inspector.take_full_screen_request(), Some(Some(true)));
+        assert_eq!(inspector.take_full_screen_request(), None);
+        inspector.request_full_screen(None);
+        assert_eq!(inspector.take_full_screen_request(), Some(None));
+    }
 }

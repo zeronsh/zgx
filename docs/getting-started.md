@@ -223,13 +223,13 @@ To ship it on Windows (an icon, a manifest, one instance per user, an installer)
 The same interface as a script, hot reloaded as you save it, without a Rust host of your own. Install the runner and the checker:
 
 ```sh
-LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-run
-LUAU_CXXFLAGS=-DNDEBUG cargo install zgx-script --bin zgx
+cargo install zgx-run
+cargo install zgx-script --bin zgx
 ```
 
 (For what is not released yet, `--git https://github.com/zeronsh/zgx` before the crate's name installs from the repository.)
 
-(`zgx-run` uses mimalloc as its allocator, for 6–10% less CPU on script, text and layout work at about 2 MB more memory; add `--no-default-features` to keep the system's. `LUAU_CXXFLAGS=-DNDEBUG` builds Luau without its asserts, a fifth faster: the repository's own builds set it in `.cargo/config.toml`, which an install doesn't read. Without it, `zgx-run` says so as it starts.)
+(`zgx-run` uses mimalloc as its allocator, for 6–10% less CPU on script, text and layout work at about 2 MB more memory; add `--no-default-features` to keep the system's. Luau is built without its asserts in release builds, a fifth faster, by zgx's copy of its build crate.)
 
 The quickest start is an app made for you:
 
@@ -334,7 +334,7 @@ return ui.text {
 
 ### Shipping
 
-A shipped app carries its scripts compiled into the binary: a build script bundles the directory, and a small Rust host runs it from the bundle ([shipping an app](scripting.md#shipping-an-app)). Build it with the `dist` profile, as a Rust app (above), and set `LUAU_CXXFLAGS=-DNDEBUG` for it ([cost](scripting.md#cost)). The mail example (`crates/zgx-script/examples/mail`) is a whole app written this way.
+A shipped app carries its scripts compiled into the binary: a build script bundles the directory, and a small Rust host runs it from the bundle ([shipping an app](scripting.md#shipping-an-app)). Build it with the `dist` profile, as a Rust app (above), (release builds run Luau without its asserts, [cost](scripting.md#cost)). The mail example (`crates/zgx-script/examples/mail`) is a whole app written this way.
 
 ## Next
 

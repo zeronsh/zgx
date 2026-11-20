@@ -27,6 +27,18 @@ pub(crate) use self::event_loop::{
 pub(crate) use self::monitor::{MonitorHandle, VideoModeHandle};
 pub(crate) use self::window::WindowId;
 pub(crate) use self::view::{set_navigation_swipes, set_selection_services};
+
+thread_local! {
+    static TERMINATE_GATE: std::cell::RefCell<Option<std::rc::Rc<dyn Fn() -> bool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+pub(crate) fn set_terminate_gate(gate: Option<std::rc::Rc<dyn Fn() -> bool>>) {
+    TERMINATE_GATE.with(|cell| *cell.borrow_mut() = gate);
+}
+fn terminate_gate_allows() -> bool {
+    let gate = TERMINATE_GATE.try_with(|cell| cell.borrow().clone()).ok().flatten();
+    gate.is_none_or(|gate| gate())
+}
 pub(crate) use self::window_delegate::PlatformSpecificWindowAttributes;
 use crate::event::DeviceId as RootDeviceId;
 

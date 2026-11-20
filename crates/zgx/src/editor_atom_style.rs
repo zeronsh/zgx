@@ -3,11 +3,7 @@
 //! styled lines (`editor_lines`), so its atoms shape, wrap, hit and select
 //! as the rest of the text does; a text area with no styled atom draws as it
 //! did.
-use crate::{
-    editor_lines::{SpanLook, SpanStyle},
-    scene::Color,
-    svg::SvgData,
-};
+use crate::{editor_lines::SpanStyle, scene::Color, svg::SvgData};
 use std::{ops::Range, sync::Arc};
 
 /// How an atom shows (`EditorHandle::set_atom_style` for a text area's,
@@ -129,27 +125,17 @@ impl AtomStyle {
         text: &str,
         range: Range<usize>,
         out: &mut Vec<(Range<usize>, SpanStyle)>,
-        name: &mut dyn FnMut(SpanLook) -> std::num::NonZeroU32,
     ) {
         if range.is_empty() || range.end > text.len() {
             return;
         }
-        // Its underline's colour and place and its picture, named once in
-        // the editor's looks: its spans stay small.
-        let look = SpanLook {
-            underline_color: self.underline.and_then(|line| line.color),
-            underline_offset: self.underline.and_then(|line| line.offset),
-            picture: self
-                .svg
-                .as_ref()
-                .map(|svg| (svg.svg.clone(), svg.extents())),
-            ..SpanLook::default()
-        };
         let style = SpanStyle {
             color: self.color,
             weight: self.weight,
             underline: self.underline.is_some(),
-            look: (!look.is_empty()).then(|| name(look.clone())),
+            underline_color: self.underline.and_then(|line| line.color),
+            underline_offset: self.underline.and_then(|line| line.offset),
+            boxed: self.svg.as_ref().map(AtomSvg::extents),
             ..SpanStyle::default()
         };
         if let Some(icon) = &self.icon {
@@ -157,11 +143,8 @@ impl AtomStyle {
                 .chars()
                 .next()
                 .map_or(range.end, |c| range.start + c.len_utf8());
-            let mut lead = style;
-            lead.look = Some(name(SpanLook {
-                lead: Some(icon.room()),
-                ..look
-            }));
+            let mut lead = style.clone();
+            lead.lead = Some(icon.room());
             out.push((range.start..first, lead));
         }
         if style != SpanStyle::default() {

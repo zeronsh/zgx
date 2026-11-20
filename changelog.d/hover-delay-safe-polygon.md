@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **Hover-opened popups and a submenu safe polygon** (zgx, zgx-script): `View::hover_delay(open, close)` (Luau `hover_delay = { open = ms, close = ms }` on `ui.popover`, `ui.menu` and `ui.submenu`) opens a popover or menu as the pointer rests on its trigger and closes it after the pointer has left the trigger and the popup, as Base UI's `openOnHover`, `delay` and `closeDelay`; one opened by a click stays. Heading for the popup, the pointer is held in the triangle from where it left the trigger to the popup's near edge (and the gap between), as Floating UI's `safePolygon`: it closes as the pointer strays out of it or rests in it 300 ms. A submenu uses the same: crossing the items between its trigger and its panel diagonally keeps it open and no sibling item closes or opens in the way, and its own `hover_delay` replaces the 100 ms open and instant close. `Tooltip::hover_delay` / `close_delay` give a tooltip or hover card the same close delay.

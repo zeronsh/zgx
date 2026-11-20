@@ -32,10 +32,14 @@ mod editor_caret_blink;
 mod editor_caret_width;
 #[path = "../editor_code.rs"]
 mod editor_code;
+#[path = "../editor_code_blocks.rs"]
+mod editor_code_blocks;
 #[path = "../editor_context_menu.rs"]
 mod editor_context_menu;
 #[path = "../editor_copy_hook.rs"]
 mod editor_copy_hook;
+#[path = "../editor_drag_source.rs"]
+mod editor_drag_source;
 #[path = "../editor_edge_caret.rs"]
 mod editor_edge_caret;
 #[path = "../editor_external_edits.rs"]
@@ -48,12 +52,18 @@ mod editor_gap_cursor;
 mod editor_hints;
 #[path = "../editor_ingress_normalization.rs"]
 mod editor_ingress_normalization;
+#[path = "../editor_inline_svgs.rs"]
+mod editor_inline_svgs;
 #[path = "../editor_input_mode.rs"]
 mod editor_input_mode;
 #[path = "../editor_layer_scroll.rs"]
 mod editor_layer_scroll;
+#[path = "../editor_line_images.rs"]
+mod editor_line_images;
 #[path = "../editor_long_documents.rs"]
 mod editor_long_documents;
+#[path = "../editor_mark_turn.rs"]
+mod editor_mark_turn;
 #[path = "../editor_model_normalization.rs"]
 mod editor_model_normalization;
 #[path = "../editor_native_caret.rs"]
@@ -68,12 +78,20 @@ mod editor_pointer_selection;
 mod editor_primary_paste;
 #[path = "../editor_read_only.rs"]
 mod editor_read_only;
+#[path = "../editor_rows.rs"]
+mod editor_rows;
+#[path = "../editor_scroll_groups.rs"]
+mod editor_scroll_groups;
+#[path = "../editor_scrollbar.rs"]
+mod editor_scrollbar;
 #[path = "../editor_selection_theme.rs"]
 mod editor_selection_theme;
 #[path = "../editor_shape_reuse.rs"]
 mod editor_shape_reuse;
 #[path = "../editor_spans.rs"]
 mod editor_spans;
+#[path = "../editor_stacked_cells.rs"]
+mod editor_stacked_cells;
 #[path = "../editor_streamed_value.rs"]
 mod editor_streamed_value;
 #[path = "../editor_streaming_history.rs"]
@@ -88,5 +106,7 @@ mod editor_theme_marks;
 mod editor_undo_keys;
 #[path = "../editor_wrap_navigation.rs"]
 mod editor_wrap_navigation;
+#[path = "../editor_wrap_width.rs"]
+mod editor_wrap_width;
 #[path = "../ime_clauses.rs"]
 mod ime_clauses;

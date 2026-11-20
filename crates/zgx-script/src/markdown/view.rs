@@ -23,7 +23,18 @@ pub(crate) struct ViewOptions {
     pub parse: Options,
     /// Code blocks get a Copy button.
     pub copy: bool,
+    /// Draws TeX (`Options::math`); without it, math shows as code.
+    pub math: Option<MathFn>,
+    /// A link's own menu, asked with its address and text; without it, a link's is Open Link and Copy Link.
+    pub link_menu: Option<LinkMenuFn>,
 }
+/// A scroller's viewport size, once it is mounted.
+type Viewport = Rc<RefCell<Option<Signal<(f32, f32)>>>>;
+
+/// TeX, inline or display, drawn as a picture in ems; `None` if it can't be.
+pub(crate) type MathFn = Rc<dyn Fn(&str, bool) -> Option<zgx::compose::InlineSvg>>;
+/// A link's menu at a press: its entries for the address and text (none lets the press through).
+pub(crate) type LinkMenuFn = Rc<dyn Fn(&zgx::compose::ContextMenuEvent, &str, &str) -> Vec<View>>;
 
 fn themed<T>(name: &str) -> Themed<T> {
     Themed::Token(token(name))
@@ -50,6 +61,8 @@ struct RunFields<'a> {
     strike: bool,
     code: bool,
     link: Option<&'a Value>,
+    /// Math: 1 inline, 2 display.
+    math: u8,
 }
 impl<'a> RunFields<'a> {
     /// Read in one pass over its fields, a run being a small map: not a
@@ -63,6 +76,7 @@ impl<'a> RunFields<'a> {
                 strike: flag(run, "s"),
                 code: flag(run, "c"),
                 link: run.field("a"),
+                math: run.field("m").and_then(Value::as_f64).unwrap_or(0.) as u8,
             };
         };
         let mut out = Self::default();
@@ -75,6 +89,7 @@ impl<'a> RunFields<'a> {
                 "s" => out.strike = on,
                 "c" => out.code = on,
                 "a" => out.link = Some(value),
+                "m" => out.math = value.as_f64().unwrap_or(0.) as u8,
                 _ => {}
             }
         }
@@ -83,9 +98,23 @@ impl<'a> RunFields<'a> {
 }
 
 /// A run of text as a span: bold, italic, struck, code or a link.
-fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
+fn span(run: &Value, bold: bool, options: &ViewOptions) -> zgx::compose::TextSpan {
+    let math = options.math.as_ref();
     let fields = RunFields::of(run);
-    let mut out = zgx::compose::text_span(text_of(fields.text));
+    let tex = text_of(fields.text);
+    if fields.math > 0
+        // among words a formula is inline, as KaTeX draws remark-math's inlineMath
+        && let Some(drawn) = math.and_then(|math| math(&tex, false))
+    {
+        return zgx::compose::text_span(tex).inline_svg(drawn);
+    }
+    let code = fields.code || fields.math > 0;
+    let label = if options.link_menu.is_some() && fields.link.is_some() {
+        tex.clone()
+    } else {
+        String::new()
+    };
+    let mut out = zgx::compose::text_span(tex);
     if bold || fields.bold {
         out = out.font_bold();
     }
@@ -95,7 +124,7 @@ fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
     if fields.strike {
         out = out.strikethrough(Default::default());
     }
-    if fields.code {
+    if code {
         out = out
             .font_family(FontFamily::Monospace)
             .background(themed("surface.sunken"))
@@ -107,16 +136,61 @@ fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
         // Still streaming its address: styled as a link, going nowhere.
         if &**href != PENDING_LINK_URL {
             out = out.href(href.to_string());
+            if let Some(menu) = &options.link_menu {
+                let (menu, href, text) = (menu.clone(), href.to_string(), label);
+                out = out.context_menu(move |e| menu(e, &href, &text));
+            }
         }
     }
     out
 }
 
+/// A formula on a line of its own, centred, scrolling sideways when wider
+/// than the view, as KaTeX's display math does.
+fn display_math(tex: &str, math: Option<&MathFn>, cx: &mut Context) -> View {
+    let Some(drawn) = math.and_then(|math| math(tex, true)) else {
+        return text(tex.to_owned()).font_family(FontFamily::Monospace);
+    };
+    let formula = zgx::compose::rich_text()
+        .children(vec![
+            zgx::compose::text_span(tex.to_owned()).inline_svg(drawn),
+        ])
+        .shrink_0();
+    let viewport: Viewport = Rc::default();
+    let mounted: Signal<bool> = cx.runtime().signal(false);
+    let (seen, told) = (viewport.clone(), mounted.clone());
+    let line = row()
+        .justify_center()
+        .shrink_0()
+        .reactive_style(move || {
+            mounted.get();
+            let view = seen.borrow().as_ref().map_or(0., |size| size.get().0);
+            Styles::new().min_w(view)
+        })
+        .child(formula);
+    zgx::compose::scroll_x(cx.state(0_f32))
+        .w_full()
+        .on_mount(move |handle| {
+            *viewport.borrow_mut() = handle.observe_size();
+            told.set(true);
+        })
+        .child(line)
+}
+
 /// A settled block (one before the last: a parse keeps it as it is),
 /// built as it is, without following anything: a paragraph of runs.
-fn static_runs(list: Option<&Value>, bold: bool) -> zgx::compose::RichTextView {
+fn static_runs(
+    list: Option<&Value>,
+    bold: bool,
+    options: &ViewOptions,
+) -> zgx::compose::RichTextView {
     let spans = list
-        .map(|l| l.list().iter().map(|r| span(r, bold)).collect::<Vec<_>>())
+        .map(|l| {
+            l.list()
+                .iter()
+                .map(|r| span(r, bold, options))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     zgx::compose::rich_text().children(spans).text_wrap(true)
 }
@@ -153,7 +227,7 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
             .grow(),
         );
     if options.copy {
-        let label: Signal<String> = cx.runtime().signal("Copy".to_string());
+        let label: Signal<bool> = cx.runtime().signal(false);
         let platform = cx.try_service::<zgx::platform::PlatformService>();
         let tasks = cx.tasks();
         let (shown, copied, body) = (label.clone(), label, body.clone());
@@ -167,16 +241,18 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                     if let Some(platform) = &platform {
                         platform.0.set_clipboard_text(body.clone());
                     }
-                    copied.set("Copied".into());
+                    copied.set(true);
                     let again = copied.clone();
                     tasks.spawn(async move {
                         zgx::timer::sleep(Duration::from_millis(1500)).await;
-                        again.set("Copy".into());
+                        again.set(false);
                     });
                 })
                 .child(
-                    zgx::compose::text_signal(move || shown.get())
-                        .text_size(themed("font.size.sm")),
+                    zgx::compose::text_signal(move || {
+                        zgx::i18n::label(if shown.get() { "Copied" } else { "Copy" })
+                    })
+                    .text_size(themed("font.size.sm")),
                 ),
         );
     }
@@ -184,9 +260,9 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
         .w_full()
         .role(Role::Group)
         .accessible_label(if lang.is_empty() {
-            "Code".to_string()
+            zgx::i18n::label("Code")
         } else {
-            format!("{lang} code")
+            zgx::i18n::label_args("{lang} code", &[("lang", lang.as_str().into())])
         })
         .bg(themed("surface.sunken"))
         .rounded(8.)
@@ -207,6 +283,54 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
         )
 }
 
+/// A table as the web app's notes lay one out (Plate's fixed layout): equal columns sharing the view, none
+/// narrower than 100, cells wrapping inside them; a table those minimums make wider than the view scrolls sideways.
+fn table(head: Vec<View>, rows: Vec<Vec<View>>, cx: &mut Context) -> View {
+    const MIN_COLUMN: f32 = 100.;
+    const GAP: f32 = 12.;
+    let columns = rows
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(head.len()))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let tracks = format!("repeat({columns}, 1fr)")
+        .parse()
+        .expect("a track list");
+    let least = columns as f32 * MIN_COLUMN + (columns - 1) as f32 * GAP;
+    // the viewport's width, once it has one: a scroller's content has none of its own to share
+    let viewport: Viewport = Rc::default();
+    let mounted: Signal<bool> = cx.runtime().signal(false);
+    let seen = viewport.clone();
+    let told = mounted.clone();
+    let mut grid = div()
+        .grid()
+        .grid_template_columns(tracks)
+        .gap_x(GAP)
+        .gap_y(4.)
+        .shrink_0()
+        .reactive_style(move || {
+            mounted.get();
+            let view = seen.borrow().as_ref().map_or(0., |size| size.get().0);
+            Styles::new().w(view.max(least))
+        });
+    let pad = |mut cells: Vec<View>| {
+        cells.resize_with(columns, div);
+        cells
+    };
+    for cell in pad(head).into_iter().chain(rows.into_iter().flat_map(pad)) {
+        grid = grid.child(column().min_w(0.).child(cell));
+    }
+    zgx::compose::scroll_x(cx.state(0_f32))
+        .w_full()
+        .on_mount(move |handle| {
+            *viewport.borrow_mut() = handle.observe_size();
+            told.set(true);
+        })
+        .child(grid)
+}
+
 fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
     let kind = text_of(b.field("t"));
     match kind.as_str() {
@@ -218,7 +342,7 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                 _ => "font.size.md",
             };
             View::from(
-                static_runs(b.field("s"), true)
+                static_runs(b.field("s"), true, options)
                     .text_size(themed(size))
                     .pt(4.),
             )
@@ -269,25 +393,26 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
             .children(static_blocks(b.field("b"), options, cx)),
         "hr" => div().w_full().h(1.).my(4.).bg(themed("border.subtle")),
         "table" => {
-            let line = |cells: Option<&Value>, bold: bool| {
-                let mut out = row().gap(12.);
-                for cell in cells.map(|c| c.list().to_vec()).unwrap_or_default() {
-                    out = out.child(column().w(160.).child(static_runs(Some(&cell), bold)));
-                }
-                out
+            let cells = |row: Option<&Value>, bold: bool| -> Vec<View> {
+                row.map(|c| c.list().to_vec())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|cell| static_runs(Some(cell), bold, options).into())
+                    .collect()
             };
-            let mut table = column().gap(4.).child(line(b.field("head"), true));
-            for cells in b
+            let rows = b
                 .field("rows")
                 .map(|r| r.list().to_vec())
-                .unwrap_or_default()
-            {
-                table = table.child(line(Some(&cells), false));
-            }
-            table
+                .unwrap_or_default();
+            table(
+                cells(b.field("head"), true),
+                rows.iter().map(|r| cells(Some(r), false)).collect(),
+                cx,
+            )
         }
         "img" => text(text_of(b.field("alt"))).text_color(themed("text.secondary")),
-        _ => static_runs(b.field("s"), false).into(),
+        "math" => display_math(&text_of(b.field("x")), options.math.as_ref(), cx),
+        _ => static_runs(b.field("s"), false, options).into(),
     }
 }
 
@@ -451,7 +576,7 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                 .grow(),
         );
     if options.copy {
-        let label: Signal<String> = cx.runtime().signal("Copy".to_string());
+        let label: Signal<bool> = cx.runtime().signal(false);
         let platform = cx.try_service::<zgx::platform::PlatformService>();
         let tasks = cx.tasks();
         let (shown, copied, body) = (label.clone(), label, cell.clone());
@@ -467,16 +592,18 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                             .0
                             .set_clipboard_text(body.with_untracked(|b| text_of(b.field("text"))));
                     }
-                    copied.set("Copied".into());
+                    copied.set(true);
                     let again = copied.clone();
                     tasks.spawn(async move {
                         zgx::timer::sleep(Duration::from_millis(1500)).await;
-                        again.set("Copy".into());
+                        again.set(false);
                     });
                 })
                 .child(
-                    zgx::compose::text_signal(move || shown.get())
-                        .text_size(themed("font.size.sm")),
+                    zgx::compose::text_signal(move || {
+                        zgx::i18n::label(if shown.get() { "Copied" } else { "Copy" })
+                    })
+                    .text_size(themed("font.size.sm")),
                 ),
         );
     }
@@ -487,9 +614,9 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         .accessible_label_when(move || {
             let lang = lang();
             if lang == "text" {
-                "Code".to_string()
+                zgx::i18n::label("Code")
             } else {
-                format!("{lang} code")
+                zgx::i18n::label_args("{lang} code", &[("lang", lang.as_str().into())])
             }
         })
         .bg(themed("surface.sunken"))
@@ -512,11 +639,16 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
 }
 
 /// A paragraph of the runs field `field` of `cell` holds, following it.
-fn runs_of(cell: Signal<Value>, field: &'static str, bold: bool) -> View {
+fn runs_of(cell: Signal<Value>, field: &'static str, bold: bool, options: ViewOptions) -> View {
     zgx::compose::rich_text_signal(move || {
         cell.with(|b| {
             b.field(field)
-                .map(|runs| runs.list().iter().map(|r| span(r, bold)).collect())
+                .map(|runs| {
+                    runs.list()
+                        .iter()
+                        .map(|r| span(r, bold, &options))
+                        .collect()
+                })
                 .unwrap_or_default()
         })
     })
@@ -534,7 +666,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                 2 => "font.size.lg",
                 _ => "font.size.md",
             };
-            runs_of(cell, "s", true)
+            runs_of(cell, "s", true, options.clone())
                 .text_size(themed(size))
                 .pt(4.)
                 .heading(level)
@@ -613,35 +745,40 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
             .child(block_list(field_cell(&cell, "b", cx), options)),
         "hr" => div().w_full().h(1.).my(4.).bg(themed("border.subtle")),
         "table" => {
-            let line = |cells: Option<&Value>, bold: bool| {
-                let mut out = row().gap(12.);
-                for cell in cells.map(|c| c.list().to_vec()).unwrap_or_default() {
-                    let runs = cell
-                        .list()
-                        .iter()
-                        .map(|r| span(r, bold))
-                        .collect::<Vec<_>>();
-                    out = out.child(
-                        column()
-                            .w(160.)
-                            .child(zgx::compose::rich_text().children(runs).text_wrap(true)),
-                    );
-                }
-                out
+            let cells = |row: Option<&Value>, bold: bool| -> Vec<View> {
+                row.map(|c| c.list().to_vec())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|cell| {
+                        let runs = cell
+                            .list()
+                            .iter()
+                            .map(|r| span(r, bold, options))
+                            .collect::<Vec<_>>();
+                        zgx::compose::rich_text()
+                            .children(runs)
+                            .text_wrap(true)
+                            .into()
+                    })
+                    .collect()
             };
-            let mut table = column().gap(4.).child(line(b.field("head"), true));
-            for cells in b
-                .field("rows")
-                .map(|r| r.list().to_vec())
-                .unwrap_or_default()
-            {
-                table = table.child(line(Some(&cells), false));
-            }
-            table
+            let (head, rows) = cell.with(|b| {
+                let rows: Vec<Value> = b
+                    .field("rows")
+                    .map(|r| r.list().to_vec())
+                    .unwrap_or_default();
+                (b.field("head").cloned(), rows)
+            });
+            table(
+                cells(head.as_ref(), true),
+                rows.iter().map(|r| cells(Some(r), false)).collect(),
+                cx,
+            )
         }
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),
-        _ => runs_of(cell, "s", false),
+        "math" => display_math(&text_of(b.field("x")), options.math.as_ref(), cx),
+        _ => runs_of(cell, "s", false, options.clone()),
     }
 }
 
@@ -658,21 +795,173 @@ pub(crate) enum Source {
 }
 pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOptions) -> View {
     zgx::compose::component(move |cx| {
-        let parser = RefCell::new(Incremental::new(options.parse.clone()));
+        let parser = Rc::new(RefCell::new(Incremental::new(options.parse.clone())));
         let top = cx.runtime().signal(Value::List(Vec::new().into()));
         let blocks = top.clone();
+        let reveal = Rc::new(Reveal::default());
+        let tasks = cx.tasks();
+        let frames = cx
+            .try_service::<zgx::frame::FrameClock>()
+            .map(|f| (*f).clone());
+        let revealing = reveal.clone();
         cx.retain(cx.runtime().effect(move || {
-            let mut parser = parser.borrow_mut();
-            match source() {
-                Source::Made(text) => parser.set_text(&text),
-                Source::Held(value) => parser.set_value(&value),
+            {
+                let mut parser = parser.borrow_mut();
+                match source() {
+                    Source::Made(text) => revealing.feed(&mut parser, text),
+                    // a long text landing whole (a document, not a reply growing) goes in a piece a frame too
+                    Source::Held(Value::Text(text))
+                        if text.len() >= FEED_FROM
+                            && (parser.source().is_empty()
+                                || !text.to_cow().starts_with(parser.source())) =>
+                    {
+                        revealing.feed(&mut parser, text.to_cow().into_owned())
+                    }
+                    Source::Held(value) => {
+                        if revealing.feeding.borrow().is_some()
+                            && let Value::Text(text) = &value
+                        {
+                            revealing.feed(&mut parser, text.to_cow().into_owned());
+                        } else {
+                            revealing.feeding.borrow_mut().take();
+                            parser.set_value(&value)
+                        }
+                    }
+                }
+                let shown = revealing.show(parser.blocks());
+                blocks.mutate(|was| {
+                    *was = Value::List(shown.into());
+                    true
+                });
             }
-            let parsed = parser.blocks();
-            blocks.mutate(|was| {
-                *was = Value::List(parsed.into());
-                true
-            });
+            if revealing.pending() && !revealing.ticking.replace(true) {
+                let (reveal, blocks, frames, parser) = (
+                    revealing.clone(),
+                    blocks.clone(),
+                    frames.clone(),
+                    parser.clone(),
+                );
+                tasks.spawn(async move {
+                    while reveal.pending() {
+                        match &frames {
+                            Some(frames) => drop(frames.next().await),
+                            None => zgx::timer::sleep(REVEAL_TICK).await,
+                        }
+                        let shown = reveal.more(&mut parser.borrow_mut());
+                        blocks.mutate(|was| {
+                            *was = Value::List(shown.into());
+                            true
+                        });
+                    }
+                    reveal.ticking.set(false);
+                });
+            }
         }));
         block_list(top, &options).gap(10.)
     })
+}
+
+/// A long text landing whole shows its first blocks at once and the rest a
+/// chunk a frame, so opening a long document never builds it in one frame;
+/// a very long one is parsed a piece a frame too. Appends (a reply streaming
+/// in) show at once.
+#[derive(Default)]
+struct Reveal {
+    all: RefCell<Vec<Value>>,
+    shown: std::cell::Cell<usize>,
+    ticking: std::cell::Cell<bool>,
+    /// A text landed whole, still being handed to the parser a piece at a time.
+    feeding: RefCell<Option<String>>,
+}
+/// Blocks shown at once when a long text lands: more than a screenful.
+const REVEAL_FIRST: usize = 20;
+/// Blocks added each frame after them, and how often without a frame clock.
+const REVEAL_CHUNK: usize = 60;
+const REVEAL_TICK: Duration = Duration::from_millis(8);
+/// Texts this long landing whole are parsed this much a frame.
+const FEED_FROM: usize = 256 * 1024;
+const FEED_CHUNK: usize = 128 * 1024;
+impl Reveal {
+    /// `text` to the parser: whole, unless it is very long and lands whole,
+    /// when it goes in a piece now and the rest a piece a frame (`more`).
+    fn feed(&self, parser: &mut Incremental, text: String) {
+        let mut feeding = self.feeding.borrow_mut();
+        if feeding.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let lands_whole = text.len() >= FEED_FROM
+            && (parser.source().is_empty() || !text.starts_with(parser.source()));
+        if lands_whole || (feeding.is_some() && text.starts_with(parser.source())) {
+            let from = if lands_whole {
+                0
+            } else {
+                parser.source().len()
+            };
+            let cut = piece_end(&text, from + FEED_CHUNK);
+            parser.set_text(&text[..cut]);
+            *feeding = (cut < text.len()).then_some(text);
+        } else {
+            *feeding = None;
+            parser.set_text(&text);
+        }
+    }
+    fn show(&self, all: Vec<Value>) -> Vec<Value> {
+        // Another text, not this one grown: from its start again.
+        if self.all.borrow().first() != all.first() {
+            self.shown.set(0);
+        }
+        let shown = self.shown.get().min(all.len());
+        let next = if all.len() > shown + REVEAL_FIRST || self.feeding.borrow().is_some() {
+            (shown.max(REVEAL_FIRST)).min(all.len())
+        } else {
+            all.len()
+        };
+        self.shown.set(next);
+        let out = all[..next].to_vec();
+        *self.all.borrow_mut() = all;
+        out
+    }
+    fn more(&self, parser: &mut Incremental) -> Vec<Value> {
+        let fed = {
+            let mut feeding = self.feeding.borrow_mut();
+            match feeding.as_deref() {
+                Some(text) => {
+                    let cut = piece_end(text, parser.source().len() + FEED_CHUNK);
+                    parser.set_text(&text[..cut]);
+                    if cut >= text.len() {
+                        *feeding = None;
+                    }
+                    true
+                }
+                None => false,
+            }
+        };
+        if fed {
+            *self.all.borrow_mut() = parser.blocks();
+        }
+        let all = self.all.borrow();
+        let next = (self.shown.get() + REVEAL_CHUNK).min(all.len());
+        self.shown.set(next);
+        all[..next].to_vec()
+    }
+    fn pending(&self) -> bool {
+        self.feeding.borrow().is_some() || self.shown.get() < self.all.borrow().len()
+    }
+}
+
+/// Where a piece of `text` about `at` bytes long ends: at a blank line
+/// outside a code fence, so no block is cut; the whole text if none.
+fn piece_end(text: &str, at: usize) -> usize {
+    if at >= text.len() {
+        return text.len();
+    }
+    let mut from = at;
+    while let Some(found) = text[from..].find("\n\n") {
+        let cut = from + found + 2;
+        if text[..cut].matches("```").count().is_multiple_of(2) {
+            return cut;
+        }
+        from = cut;
+    }
+    text.len()
 }

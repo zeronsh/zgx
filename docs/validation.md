@@ -112,6 +112,7 @@ Further native Linux probes, each on a private Xvfb/Openbox desktop or a nested 
 - An input method that is there but answers nothing (ibus-x11 stopped) as the app closes its focused window: the app exits, its hidden window making no input context round trip and its exit destroying no context one by one; before, it waited in `XUnsetICFocus` or `XDestroyIC` forever (`native_ime_smoke.py --server-stopped`, #564).
 - A password field takes no input method, as a browser's doesn't: pinyin typed into one types its letters (`nihao `), with no preedit and nothing composed (`native_ime_smoke.py --password`). On macOS the host also turns on secure keyboard entry while one has the keyboard (unit-tested; not probed: a probe would have to make its window key).
 - Rich text through the clipboard, on X11 (`xclip`) and as a Wayland client of Sway (`wl-copy`, `wl-paste`). In clipboard_html, Paste reads HTML another client offered as `text/html` (markup, an entity, a non-ASCII letter) exactly as offered (`Platform::clipboard_html`). Its Copy offers HTML as `text/html` and its text as plain text, both read back exactly. An offer of plain text alone pastes no HTML (`clipboard_html_smoke.py`). On macOS (`public.html`), Windows (CF_HTML's fragment) and X11, CI's `html_and_its_text_round_trip_through_the_system_clipboard` writes HTML and text through the system clipboard and reads both back; it's ignored locally, because it replaces the runner's clipboard.
+- Types of an app's own through the clipboard, as Chromium keeps a web page's (its web custom data), on X11 (`xclip`) and as a Wayland client of Sway (`wl-copy`, `wl-paste`). In clipboard_types, Paste reads a `chromium/x-web-custom-data` offer another client packed as Chromium's `WriteCustomDataToPickle` does (a page's copy that set two types: an emoji, a blank line, an empty value), and finds each type and value as the page set them (`Platform::clipboard_types`, `clipboard_typed`). Its Copy (`set_clipboard_typed`) offers the text, the HTML and the blob in one change. The other client reads all three back, and the blob is the bytes Chromium would write and reads back as Chromium reads it. An offer of plain text alone pastes no types (`clipboard_types_smoke.py`, `clipboard-types`). On macOS (`org.chromium.web-custom-data`), Windows (`Chromium Web Custom MIME Data Format`) and X11, CI's `types_round_trip_through_the_system_clipboard` writes types, text and HTML through the system clipboard, then reads them and the raw blob back. It's ignored locally, because it replaces the runner's clipboard. The blob's layout is checked byte for byte against Chromium's writer and its own unit test's cases (`types_encode_as_chromiums_pickle_does`, `chromiums_custom_data_cases_read_as_chromium_reads_them`). No copy captured from a real Chrome is checked in yet.
 - Images through the clipboard, on X11 (`xclip`) and as a Wayland client of Sway (`wl-copy`, `wl-paste`): clipboard_image's Paste takes a 30 by 20 PNG another client offered as `image/png`, its half-transparent columns' alpha straight, at its size and pixels (their digest); its Copy offers its 64 by 48 gradient as `image/png`, read back pixel for pixel, its transparent column included (`clipboard_image_smoke.py`).
 - `zgx inspect memory` from a real window on X11 (`inspect_memory_smoke.py`, on zgx-run): over its socket the app answers with the lines only its host knows (the process, its allocator, the glyph atlas) beside the script's and the scene's.
 - A declared window's own state follows the real window on X11 (`window_state_smoke.py`, on zgx-run under Openbox): a `ui.windows` window's `win.active`, `win.shown` and `win.size`, copied into the app's states, read over the devtools socket as the window is activated, another activated, resized, minimized and restored.
@@ -1339,6 +1340,22 @@ zoomed strip rather than staying where AppKit put them. A window opened
 zoomed or resized while zoomed keeps them there (zoom_probe `--inset --zoom
 2`, resized to 620×420: 40 points, read from screen captures). Passed on
 macOS 27 (M4), 2026-10-26.
+
+## macOS traffic lights placed by the app
+
+`scripts/macos_traffic_lights_probe.py` runs the traffic_lights_probe
+example with the close button asked at 18,22 and at 12,6
+(`WindowOptions::traffic_lights`). Through a resize, a dark and a light
+appearance, the app hidden and shown (focus lost and back), a zoom to 125%
+and back, and into and out of full screen by `toggleFullScreen:`, it reads
+the close button's top left from its own frame: there at every step, at
+125% where the zoomed content has it (22.5,29.25 for 18,22), and back after
+full screen rather than in AppKit's place. `WindowInfo::controls` says the
+same in the content's points, and `titlebar_area` is as tall as centres the
+lights (58 points for 18,22) or AppKit's 40. Screen captures of the window
+(`screencapture -l`) after the resize and after full screen show the
+lights 18 points in and 22 down, level with the mark in the probe's 60-point row.
+Passed on macOS 27 (arm64), 2026-11-11.
 
 ## macOS baked loops
 

@@ -6,7 +6,9 @@ use std::{
     time::Duration,
 };
 use zgx::input::{Key, Modifiers};
-use zgx_desktop::{AppMenu, AppMenuEntry, Application, MenuAccelerator, WindowOptions};
+use zgx_desktop::{
+    AppMenu, AppMenuEntry, Application, MenuAccelerator, StandardItem, WindowOptions,
+};
 use zgx_script::{Command, ScriptHost};
 
 pub mod audit;
@@ -33,8 +35,24 @@ pub fn install_connector(host: &ScriptHost) {
 
 /// Menus in the order the script first names them, items in its order.
 pub fn menus(commands: &[Command]) -> Vec<AppMenu> {
+    zgx_desktop::set_repeating(commands.iter().filter(|c| c.repeat).map(|c| c.id.clone()));
     let mut menus: Vec<AppMenu> = Vec::new();
+    let mut keys_only = AppMenu::new(zgx_desktop::KEY_ONLY_MENU, []);
     for command in commands {
+        // `menu = false`: no menu shows it, zgx's keymap runs it.
+        if command.menu.is_empty() {
+            if !command.separator {
+                let item = AppMenuEntry::item(command.title.clone(), command.id.as_str())
+                    .enabled(command.enabled);
+                keys_only
+                    .entries
+                    .push(match command.key.as_deref().and_then(accelerator) {
+                        Some(key) => item.accelerator(key),
+                        None => item,
+                    });
+            }
+            continue;
+        }
         let index = match menus.iter().position(|m| m.label == command.menu) {
             Some(index) => index,
             None => {
@@ -42,10 +60,14 @@ pub fn menus(commands: &[Command]) -> Vec<AppMenu> {
                 menus.len() - 1
             }
         };
+        if command.id.is_empty() && !command.separator {
+            continue;
+        }
         let entry = if command.separator {
             AppMenuEntry::Separator
         } else {
-            let item = AppMenuEntry::item(command.title.clone(), command.id.as_str());
+            let item = AppMenuEntry::item(command.title.clone(), command.id.as_str())
+                .enabled(command.enabled);
             match command.key.as_deref().and_then(accelerator) {
                 Some(key) => item.accelerator(key),
                 None => item,
@@ -53,7 +75,56 @@ pub fn menus(commands: &[Command]) -> Vec<AppMenu> {
         };
         menus[index].entries.push(entry);
     }
+    if !keys_only.entries.is_empty() {
+        menus.push(keys_only);
+    }
+    with_edit_items(&mut menus);
     menus
+}
+
+/// The platform's edit items (Undo, Cut, Copy, Paste…) atop the Edit menu, as
+/// every Mac app's: one the app names, else one after its first menu. An
+/// item whose shortcut a command of the app's has is left out.
+fn with_edit_items(menus: &mut Vec<AppMenu>) {
+    fn bound(entries: &[AppMenuEntry], shortcut: &str) -> bool {
+        entries.iter().any(|entry| match entry {
+            AppMenuEntry::Item {
+                accelerator: Some(a),
+                ..
+            } => a.label() == shortcut,
+            AppMenuEntry::Submenu(child) => bound(&child.entries, shortcut),
+            _ => false,
+        })
+    }
+    let taken = |item: StandardItem| {
+        item.shortcut_name()
+            .is_some_and(|shortcut| menus.iter().any(|m| bound(&m.entries, shortcut)))
+    };
+    let mut items: Vec<AppMenuEntry> = StandardItem::EDIT_MENU
+        .iter()
+        .filter(|item| item.is_none_or(|item| !taken(item)))
+        .map(|item| item.map_or(AppMenuEntry::Separator, AppMenuEntry::Standard))
+        .collect();
+    let index = match menus.iter().position(|m| m.label == "Edit") {
+        Some(index) => index,
+        None => {
+            let at = menus.len().min(1);
+            menus.insert(at, AppMenu::new("Edit", []));
+            at
+        }
+    };
+    // No separator first, two together, or last over nothing of the app's.
+    items.dedup_by(|b, a| {
+        matches!(a, AppMenuEntry::Separator) && matches!(b, AppMenuEntry::Separator)
+    });
+    if matches!(items.first(), Some(AppMenuEntry::Separator)) {
+        items.remove(0);
+    }
+    if menus[index].entries.is_empty() && matches!(items.last(), Some(AppMenuEntry::Separator)) {
+        items.pop();
+    }
+    items.append(&mut menus[index].entries);
+    menus[index].entries = items;
 }
 
 /// `cmd+shift+d`, `cmd+alt+arrowleft`, `cmd+1`, `cmd+[` as an accelerator.
@@ -110,7 +181,8 @@ pub fn accelerator(text: &str) -> Option<MenuAccelerator> {
 ///
 /// ```json
 /// { "title": "Mail", "width": 1100, "height": 720, "min_width": 640,
-///   "min_height": 400, "titlebar": "inset", "glass": true, "app_id": "mail" }
+///   "min_height": 400, "titlebar": "inset", "traffic_lights": { "x": 18, "y": 22 },
+///   "glass": true, "app_id": "mail" }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
@@ -149,6 +221,10 @@ struct WindowConfig {
     /// How tall `titlebar: "inset"`'s caption buttons are on Windows, in the
     /// content's points (`caption_height`; `WindowOptions::caption_height`).
     caption_height: Option<f64>,
+    /// Where `titlebar: "inset"`'s traffic lights go on macOS: the close
+    /// button's top left in the content's points (`traffic_lights`,
+    /// `{ "x": 18, "y": 22 }`; `WindowOptions::traffic_lights`).
+    traffic_lights: Option<(f64, f64)>,
 }
 impl AppConfig {
     /// The config for the script at `script`: its directory's `zgx.json`
@@ -194,6 +270,7 @@ impl AppConfig {
                     visible: true,
                     max_size: None,
                     caption_height: None,
+                    traffic_lights: None,
                 },
             ));
         };
@@ -232,6 +309,7 @@ impl AppConfig {
                 "min_height",
                 "titlebar",
                 "caption_height",
+                "traffic_lights",
                 "glass",
                 "app_id",
                 "application_id",
@@ -264,6 +342,25 @@ impl AppConfig {
                 return Err(fail(format!("`caption_height` is {height}: not positive")));
             }
             height => height,
+        };
+        // `{ "x": 18, "y": 22 }`: the close button's top left.
+        let traffic_lights = match object.get("traffic_lights") {
+            None => None,
+            Some(value) => {
+                let at = value.as_object().filter(|at| at.len() == 2);
+                let coordinate = |key: &str| {
+                    at.and_then(|at| at.get(key)?.as_f64())
+                        .filter(|v| v.is_finite())
+                };
+                match (coordinate("x"), coordinate("y")) {
+                    (Some(x), Some(y)) => Some((x, y)),
+                    _ => {
+                        return Err(fail(
+                            "`traffic_lights` is not `{ \"x\": <points>, \"y\": <points> }`".into(),
+                        ));
+                    }
+                }
+            }
         };
         config.titlebar = match string("titlebar")?.as_deref() {
             None | Some("standard") => zgx_desktop::Titlebar::Standard,
@@ -308,6 +405,7 @@ impl AppConfig {
                 visible,
                 max_size,
                 caption_height,
+                traffic_lights,
             },
         ))
     }
@@ -385,6 +483,7 @@ pub fn run_hosting(
         visible,
         max_size,
         caption_height,
+        traffic_lights,
     } = window_config;
     let options = WindowOptions {
         title: config.title.clone(),
@@ -394,6 +493,7 @@ pub fn run_hosting(
         max_size,
         titlebar: config.titlebar,
         caption_height,
+        traffic_lights,
         glass: config.glass.then(zgx_desktop::Glass::default),
         frame_autosave,
         visible,
@@ -450,6 +550,8 @@ pub fn run_hosting(
         );
         // `ui.window.zoom`: the window's zoom, as its keys or the script set it.
         host.window_zoom(&cx.ui);
+        // `ui.controls` and `ui.press`.
+        host.window_controls(&cx.ui);
         // `ui.window.active` and `ui.window.shown`.
         host.window_state(&cx.ui);
         // `ui.window.size`.
@@ -745,6 +847,99 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn command(id: &str, menu: &str, key: Option<&str>) -> Command {
+        Command {
+            id: id.into(),
+            title: id.into(),
+            menu: menu.into(),
+            key: key.map(Into::into),
+            separator: false,
+            repeat: false,
+            enabled: true,
+        }
+    }
+    fn shape(menu: &AppMenu) -> Vec<String> {
+        menu.entries
+            .iter()
+            .map(|entry| match entry {
+                AppMenuEntry::Standard(item) => item.label().to_owned(),
+                AppMenuEntry::Item { label, .. } => label.clone(),
+                AppMenuEntry::Separator => "---".into(),
+                AppMenuEntry::Submenu(child) => child.label.clone(),
+            })
+            .collect()
+    }
+    /// The Edit menu leads with the platform's edit items, as Electron's
+    /// `editMenu` and every Mac app's, the app's own under them.
+    #[test]
+    fn the_edit_menu_leads_with_the_standard_edit_items() {
+        let menus = menus(&[
+            command("new_tab", "File", Some("cmd+t")),
+            command("back", "Go", Some("cmd+[")),
+            command("find", "Edit", Some("cmd+f")),
+        ]);
+        let labels: Vec<_> = menus.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["File", "Go", "Edit"]);
+        assert_eq!(
+            shape(&menus[2]),
+            [
+                "Undo",
+                "Redo",
+                "---",
+                "Cut",
+                "Copy",
+                "Paste",
+                "Paste and Match Style",
+                "Delete",
+                "Select All",
+                "---",
+                "find"
+            ]
+        );
+    }
+    /// A menu named alone (no id, no entry) takes its place in the bar and
+    /// adds nothing to it.
+    #[test]
+    fn a_menu_named_alone_orders_the_bar_without_an_entry() {
+        let menus = menus(&[
+            command("", "Go", None),
+            command("", "File", None),
+            command("new_tab", "File", Some("cmd+t")),
+            command("back", "Go", Some("cmd+[")),
+        ]);
+        let labels: Vec<_> = menus.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Go", "Edit", "File"]);
+        assert_eq!(shape(&menus[0]), ["back"]);
+        assert_eq!(shape(&menus[2]), ["new_tab"]);
+    }
+    /// A command with no menu (`menu = false`) goes in the key-only menu,
+    /// last, which the menu bar leaves out; the rest keep their order.
+    #[test]
+    fn commands_with_no_menu_go_in_the_key_only_menu() {
+        let menus = menus(&[
+            command("settings", "", Some("cmd+,")),
+            command("new_tab", "File", Some("cmd+t")),
+            command("search", "", Some("cmd+k")),
+        ]);
+        let labels: Vec<_> = menus.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["File", "Edit", zgx_desktop::KEY_ONLY_MENU]);
+        assert_eq!(shape(&menus[2]), ["settings", "search"]);
+    }
+    /// With no Edit menu of its own, an app gets one after its first, and
+    /// an item whose shortcut the app binds is left to the app's command.
+    #[test]
+    fn an_app_without_an_edit_menu_gets_one_and_keeps_its_own_shortcuts() {
+        let menus = menus(&[
+            command("new", "File", Some("cmd+n")),
+            command("copy_link", "View", Some("cmd+c")),
+        ]);
+        let labels: Vec<_> = menus.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["File", "Edit", "View"]);
+        let edit = shape(&menus[1]);
+        assert!(!edit.contains(&"Copy".to_string()), "{edit:?}");
+        assert_eq!(edit.first().map(String::as_str), Some("Undo"));
+        assert_ne!(edit.last().map(String::as_str), Some("---"));
+    }
     #[test]
     fn a_zgx_json_configures_the_window_and_rejects_what_it_does_not_know() {
         let dir = std::env::temp_dir().join(format!("zgx-run-config-{}", std::process::id()));
@@ -836,6 +1031,36 @@ mod tests {
         .unwrap();
         let error = AppConfig::read(&script).unwrap_err();
         assert!(error.contains("is not a folder"), "{error}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_zgx_json_places_an_inset_title_bars_traffic_lights() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-lights-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        let lights = |script: &Path| AppConfig::read(script).map(|read| read.2.traffic_lights);
+        assert_eq!(lights(&script), Ok(None));
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "titlebar": "inset", "traffic_lights": { "x": 18, "y": 22.5 } }"#,
+        )
+        .unwrap();
+        assert_eq!(lights(&script), Ok(Some((18., 22.5))));
+        for wrong in [
+            r#"{ "traffic_lights": [18, 22] }"#,
+            r#"{ "traffic_lights": { "x": 18 } }"#,
+            r#"{ "traffic_lights": { "x": 18, "y": "22" } }"#,
+            r#"{ "traffic_lights": { "x": 18, "y": 22, "z": 1 } }"#,
+        ] {
+            std::fs::write(dir.join("zgx.json"), wrong).unwrap();
+            let error = lights(&script).unwrap_err();
+            assert!(
+                error.contains("`traffic_lights` is not"),
+                "{wrong}: {error}"
+            );
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 

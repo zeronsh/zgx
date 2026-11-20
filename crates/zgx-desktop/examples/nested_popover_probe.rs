@@ -58,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     side: PlacementSide::Right,
                                     align: PlacementEdge::Start,
                                     offset: 4.,
+                                    ..Default::default()
                                 })
                                 .w(140.)
                                 .h(80.)

@@ -10,6 +10,8 @@ mod atom_style;
 #[cfg(feature = "audio")]
 #[path = "../audio.rs"]
 mod audio;
+#[path = "../base_ui_props.rs"]
+mod base_ui_props;
 #[path = "../components.rs"]
 mod components;
 #[path = "../container_queries.rs"]
@@ -52,6 +54,8 @@ mod hit_target;
 mod host_surfaces;
 #[path = "../host_top_layer.rs"]
 mod host_top_layer;
+#[path = "../host_view.rs"]
+mod host_view;
 #[path = "../i18n_script.rs"]
 mod i18n_script;
 #[path = "../idle_gc.rs"]
@@ -92,6 +96,8 @@ mod list_key_field;
 mod list_keys_read;
 #[path = "../list_long_budget.rs"]
 mod list_long_budget;
+#[path = "../list_recycle.rs"]
+mod list_recycle;
 #[path = "../list_reindex.rs"]
 mod list_reindex;
 #[path = "../list_tab_rows.rs"]
@@ -100,8 +106,18 @@ mod list_tab_rows;
 mod list_thin_rows;
 #[path = "../markdown_lazy.rs"]
 mod markdown_lazy;
+#[path = "../markdown_links.rs"]
+mod markdown_links;
+#[path = "../markdown_math.rs"]
+mod markdown_math;
 #[path = "../mentions.rs"]
 mod mentions;
+#[path = "../menu_rows_width.rs"]
+mod menu_rows_width;
+#[path = "../modal_focus.rs"]
+mod modal_focus;
+#[path = "../panel_width_auto.rs"]
+mod panel_width_auto;
 #[path = "../pointer_lock.rs"]
 mod pointer_lock;
 #[path = "../pointer_through.rs"]
@@ -112,6 +128,8 @@ mod regions;
 mod reload_focus;
 #[path = "../render_canvas.rs"]
 mod render_canvas;
+#[path = "../rich_wrap.rs"]
+mod rich_wrap;
 #[path = "../rtl.rs"]
 mod rtl;
 #[cfg(feature = "scene3d")]
@@ -152,6 +170,8 @@ mod text_props;
 mod theme;
 #[path = "../ui.rs"]
 mod ui;
+#[path = "../ui_controls.rs"]
+mod ui_controls;
 #[path = "../ui_map.rs"]
 mod ui_map;
 #[path = "../variants.rs"]
@@ -162,3 +182,5 @@ mod wheel_across;
 mod wheel_phase;
 #[path = "../z_order.rs"]
 mod z_order;
+#[path = "../anchor_fill_text_area.rs"]
+mod anchor_fill_text_area;

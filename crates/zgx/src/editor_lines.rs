@@ -48,7 +48,7 @@ pub type Highlighter = Rc<dyn Fn(&str, u32) -> (LineColors, u32)>;
 /// Built from its default (or a colour) with its methods, so styles added
 /// later leave the code that builds these as it is:
 /// `SpanStyle::default().weight(600).italic()`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SpanStyle {
     /// Its text's colour (none: the editor's).
@@ -61,12 +61,35 @@ pub struct SpanStyle {
     pub strike: bool,
     /// A wash behind it (inline code).
     pub background: Option<crate::scene::Color>,
+    /// Its font size (a heading in a note): shaped so.
+    pub size: Option<f32>,
+    /// Its line pitch in points (a heading's): the line takes the tallest.
+    pub line_height: Option<f32>,
     /// A line under it (a link).
     pub underline: bool,
-    /// Its look beyond these, which few spans have (a mention's, an
-    /// equation's): its place in its editor's looks (`SpanLook`), from 1.
-    /// Four bytes, so a plain span pays for no more.
-    pub(crate) look: Option<std::num::NonZeroU32>,
+    /// In the monospaced font (inline code): shaped so.
+    pub mono: bool,
+    /// Room round its text inside its background, across and down (a chip): across, it takes room in the line.
+    pub padding: Option<[f32; 2]>,
+    /// Its background's corner radius.
+    pub radius: Option<f32>,
+    /// Its underline's colour, its thickness then the font's (a
+    /// mention's): an underline with neither this nor an offset is one
+    /// point thick in the text's colour.
+    pub underline_color: Option<crate::scene::Color>,
+    /// How far below the baseline its underline sits, in points.
+    pub underline_offset: Option<f32>,
+    /// Room before its text only, in points: where an atom's leading icon
+    /// draws (`AtomStyle::icon`); it moves with the text's first word.
+    pub lead: Option<f32>,
+    /// Its text shown as one box `[width, height, descent]` in EM (an
+    /// equation's picture, `AtomStyle::svg`): as wide as that, the line as
+    /// tall as it needs, its text kept for copy and search.
+    pub boxed: Option<[f32; 3]>,
+    /// A picture standing for each [`INLINE_BOX_CHAR`](crate::rich_text::INLINE_BOX_CHAR) in its range, sized in ems
+    /// of its text, its baseline on the line's (a formula): one atom to carets and hits, its line grown to hold it.
+    /// Drawn as given, not tinted.
+    pub inline_svg: Option<crate::compose::InlineSvg>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -102,16 +125,35 @@ impl SpanStyle {
         self.background = Some(color);
         self
     }
+    /// Its text `size` points large.
+    pub const fn size(mut self, size: f32) -> Self {
+        self.size = Some(size);
+        self
+    }
+    /// Its line `line_height` points high.
+    pub const fn line_height(mut self, line_height: f32) -> Self {
+        self.line_height = Some(line_height);
+        self
+    }
     /// A line under its text.
     pub const fn underline(mut self) -> Self {
         self.underline = true;
         self
     }
-    /// Its text shown as picture `id` (`EditorHandle::inline_svg`): each
-    /// U+FFFC character in it that picture's box, or other text one box.
-    #[doc(hidden)]
-    pub const fn inline_svg(mut self, id: std::num::NonZeroU32) -> Self {
-        self.look = Some(id);
+    /// Its background as a chip: `padding` across and down round its text, corners of `radius`.
+    pub const fn chip(mut self, padding: [f32; 2], radius: f32) -> Self {
+        self.padding = Some(padding);
+        self.radius = Some(radius);
+        self
+    }
+    /// `svg` in place of each inline box character in its range (`SpanStyle::inline_svg`).
+    pub fn inline_svg(mut self, svg: crate::compose::InlineSvg) -> Self {
+        self.inline_svg = Some(svg);
+        self
+    }
+    /// Its text in the monospaced font.
+    pub const fn mono(mut self) -> Self {
+        self.mono = true;
         self
     }
     fn merge(&mut self, style: &SpanStyle) {
@@ -120,8 +162,19 @@ impl SpanStyle {
         self.italic |= style.italic;
         self.strike |= style.strike;
         self.background = self.background.or(style.background);
+        self.size = self.size.or(style.size);
+        self.line_height = self.line_height.or(style.line_height);
         self.underline |= style.underline;
-        self.look = self.look.or(style.look);
+        self.mono |= style.mono;
+        self.padding = self.padding.or(style.padding);
+        self.radius = self.radius.or(style.radius);
+        self.underline_color = self.underline_color.or(style.underline_color);
+        self.underline_offset = self.underline_offset.or(style.underline_offset);
+        self.lead = self.lead.or(style.lead);
+        self.boxed = self.boxed.or(style.boxed);
+        if self.inline_svg.is_none() {
+            self.inline_svg.clone_from(&style.inline_svg);
+        }
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
@@ -129,53 +182,212 @@ impl SpanStyle {
             && !self.italic
             && !self.strike
             && self.background.is_none()
+            && self.size.is_none()
+            && self.line_height.is_none()
             && !self.underline
-            && self.look.is_none()
-    }
-    /// Whether it changes how its text is shaped (and so its width): a
-    /// look may (its lead, its picture).
-    fn shapes(&self) -> bool {
-        self.weight.is_some() || self.italic || self.look.is_some()
-    }
-}
-/// A span's look beyond its `SpanStyle`, which few spans have: kept once in
-/// its editor's looks (`LineCache::look`), which a span names
-/// (`SpanStyle::look`), so the spans of plain text stay small.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SpanLook {
-    /// Its underline's colour, its thickness then the font's (a
-    /// mention's): an underline with neither this nor an offset is one
-    /// point thick in the text's colour.
-    pub(crate) underline_color: Option<crate::scene::Color>,
-    /// How far below the baseline its underline sits, in points.
-    pub(crate) underline_offset: Option<f32>,
-    /// Room before its text only, in points: where an atom's leading icon
-    /// draws (`AtomStyle::icon`); it moves with the text's first word.
-    pub(crate) lead: Option<f32>,
-    /// Its text shown as a picture (an equation, an atom's): over U+FFFC
-    /// characters, each one that picture's box; over other text, the span's
-    /// text one box, its text kept for copy and search.
-    pub(crate) picture: Option<Picture>,
-}
-impl SpanLook {
-    /// Whether it adds nothing.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.underline_color.is_none()
-            && self.underline_offset.is_none()
+            && !self.mono
+            && self.padding.is_none()
+            && self.radius.is_none()
             && self.lead.is_none()
-            && self.picture.is_none()
+            && self.boxed.is_none()
+            && self.inline_svg.is_none()
     }
-    /// Whether it is `other` (the same picture, not an equal one).
-    fn same(&self, other: &SpanLook) -> bool {
-        self.underline_color == other.underline_color
-            && self.underline_offset == other.underline_offset
-            && self.lead == other.lead
-            && match (&self.picture, &other.picture) {
-                (Some((a, at)), Some((b, bt))) => std::sync::Arc::ptr_eq(a, b) && at == bt,
-                (a, b) => a.is_none() && b.is_none(),
-            }
+    /// Whether it changes how its text is shaped (and so its width or height).
+    fn shapes(&self) -> bool {
+        self.weight.is_some()
+            || self.italic
+            || self.size.is_some()
+            || self.line_height.is_some()
+            || self.mono
+            || self.padding.is_some()
+            || self.lead.is_some()
+            || self.boxed.is_some()
+            || self.inline_svg.is_some()
     }
 }
+/// Room around one line of a text area (`EditorHandle::set_line_insets`): a list item's indent, a heading's space
+/// above. The line wraps in what the indent leaves, and its carets, hits and selection move with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LineInset {
+    /// Points before the line's text.
+    pub left: f32,
+    /// Points above the line.
+    pub above: f32,
+    /// Points below the line.
+    pub below: f32,
+    /// Not shown and no room taken (a closed toggle's lines): the app keeps the caret out of it.
+    pub hidden: bool,
+    /// The width the line wraps in, from its `left` (a table's cell); none: what the editor's width leaves.
+    pub width: Option<f32>,
+    /// This line and the next share a row (a table's cells, side by side): both start at the row's top, each at its
+    /// own `left`, and the lines after the row start below its tallest line.
+    pub joins_next: bool,
+    /// This line and the next are one cell of a row (a table cell's paragraphs): the next starts under this one, at
+    /// its own `left`, and the cell is as tall as its lines together.
+    pub stacks_next: bool,
+    /// How its rows align in the width it wraps in (a centred caption); none: as the editor's text. Carets, hits and
+    /// selection follow where its text shows. An unwrapped line without its own `width` has no width to align in.
+    pub align: Option<crate::text_layout::TextAlign>,
+    /// Lines sharing an id scroll sideways together (a table wider than the note): their text and marks move by the
+    /// group's offset (`EditorHandle::set_group_scroll`) and show only inside the group's frame, from its first
+    /// line's `left` across `group_width`. Carets, hits and selection follow; nothing moves vertically.
+    pub scroll_group: Option<u32>,
+    /// The width a scroll group shows, read from its first line; none: what the editor's width leaves right of
+    /// that line's `left`.
+    pub group_width: Option<f32>,
+    /// It never wraps (a code block's line, the web's `white-space: pre`): shaped once at its full width, it shows
+    /// as far as its scroll group's frame and scrolls sideways with the group (`scroll_group`), which it belongs in.
+    #[doc(hidden)]
+    pub nowrap: bool,
+    /// How many rows its cell spans (a table cell's `rowspan`), on the cell's first line: the cell joins its row
+    /// (`joins_next`), but its height counts toward its rows together, not its first's. Each of them is as tall as
+    /// its own cells, and what the cell needs past them all goes to them in proportion to their heights (to the
+    /// last where all are empty), as Chrome shares it. The lines of the rows after its first lay out at their own
+    /// lefts beside it; carets, hits and selection follow it across them. 0 or 1: its own row's.
+    #[doc(hidden)]
+    pub spans_rows: u16,
+}
+/// A scroll group's frame set by the app (`EditorHandle::set_group_frame`): each part given overrides what its
+/// lines say (a table's cells, whose borders and fills sit outside their text). All `None`: as its lines say.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GroupFrame {
+    /// Where the frame starts, in points from the text area's left content edge; none: its first line's `left`.
+    pub left: Option<f32>,
+    /// How wide it shows; none: its first line's `group_width`, else what the editor's width leaves right of `left`.
+    pub width: Option<f32>,
+    /// How wide its lines reach from `left`, for how far it scrolls; none: as far as its lines reach.
+    pub content: Option<f32>,
+}
+impl LineInset {
+    /// Whether the next line is in its row.
+    fn links(&self) -> bool {
+        self.joins_next || self.stacks_next
+    }
+    /// The width the line wraps in when the text wraps at `wrap`: its own, or what its indent leaves.
+    fn wrap(&self, wrap: Option<f32>) -> Option<f32> {
+        if self.nowrap {
+            return None;
+        }
+        match self.width {
+            Some(width) => Some(width.max(1.)),
+            None if self.left > 0. => wrap.map(|w| (w - self.left).max(1.)),
+            None => wrap,
+        }
+    }
+    /// A line's height with its room: its text's `bare` height, or nothing when hidden.
+    fn height(&self, bare: f32) -> f32 {
+        if self.hidden {
+            0.
+        } else {
+            bare + self.above + self.below
+        }
+    }
+}
+/// Each line's room, by its index.
+pub type LineInsets = Rc<dyn Fn(usize) -> LineInset>;
+/// A shape drawn beside a line of a text area (`EditorHandle::set_line_marks`): a list item's bullet or number, a
+/// to-do's box, a quote's rule, the wash behind a code line. It scrolls with its line, under the text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineMark {
+    /// Its left edge, in points from the text area's left content edge.
+    pub x: f32,
+    /// Its top, in points from the top of the line's text (below the line's room above).
+    pub y: f32,
+    /// Its width; infinite: to the area's right edge (to its line's, where the line has a width: a cell's).
+    pub width: f32,
+    /// Its height; infinite: to the bottom of the line, its wrapped rows and its room below too (of its row, where
+    /// the line shares one: a cell's border is as tall as the row).
+    pub height: f32,
+    /// With an infinite height: how far above the line's bottom it ends.
+    pub bottom: f32,
+    /// The fill colour.
+    pub fill: crate::scene::Color,
+    /// The corner radius.
+    pub radius: f32,
+    /// The border's colour.
+    pub border_color: crate::scene::Color,
+    /// The border's width.
+    pub border_width: f32,
+    /// Its `x` is how far its right edge sits from the area's right edge (a code block's language); from its line's,
+    /// where the line has a width.
+    pub from_right: bool,
+    /// Its label in the monospaced font (a code block's line numbers).
+    pub mono: bool,
+    /// Text drawn from its top left (an ordinal), its colour and size; a finite height is its line pitch.
+    pub label: Option<(std::sync::Arc<str>, crate::scene::Color, f32)>,
+    /// A picture filling it (a note's image above its caption), its corners rounded by `radius`.
+    pub image: Option<MarkImage>,
+    /// Where it sits across the line's width (left, centre or right; `x` then offsets it); none: at `x` (or from the
+    /// right edge with `from_right`).
+    pub align: Option<crate::text_layout::TextAlign>,
+    /// A picture drawn as given in its box, in place of its fill and border.
+    pub svg: Option<std::sync::Arc<crate::svg::SvgData>>,
+    /// Per-side borders and per-corner radii (a table's outer cells), over `radius` and `border_width`.
+    pub decoration: Option<std::sync::Arc<crate::decoration::Decoration>>,
+    /// It stays where it is as its line's scroll group scrolls sideways (a code block's surface and line numbers):
+    /// only the text, and the marks not pinned, move.
+    #[doc(hidden)]
+    pub pinned: bool,
+    /// Drawn over the text, not under it (a code block's actions, which cover the code beneath): its fill's alpha
+    /// is how much it covers.
+    #[doc(hidden)]
+    pub over_text: bool,
+    /// Turned this far clockwise about its centre, in degrees (a toggle's
+    /// chevron, 90 open): a change eases there over `motion.duration.fast`,
+    /// easing out, unless the system reduces motion.
+    #[doc(hidden)]
+    pub rotate: f32,
+    /// Its label in tabular figures (OpenType's `tnum`), each digit a figure's width: an ordered list's numbers,
+    /// lined up as the web's are.
+    #[doc(hidden)]
+    pub tabular: bool,
+}
+/// A line mark's picture (`LineMark::image`): decoded pixels and how they fit the mark's box. A file is decoded by
+/// the app, as an image view's is (`zgx_gpu::assets::decode_image_kept`), and kept in its `ImageCache`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkImage {
+    /// The pixels.
+    pub image: std::sync::Arc<crate::image::ImageData>,
+    /// How they fit the mark's box ([`ObjectFit::Cover`](crate::style::ObjectFit::Cover): filling it, cropped).
+    pub fit: crate::style::ObjectFit,
+}
+impl MarkImage {
+    /// `image` filling the mark, cropped to its box.
+    pub fn cover(image: std::sync::Arc<crate::image::ImageData>) -> Self {
+        Self {
+            image,
+            fit: crate::style::ObjectFit::Cover,
+        }
+    }
+}
+impl Default for LineMark {
+    fn default() -> Self {
+        Self {
+            x: 0.,
+            y: 0.,
+            width: 0.,
+            height: 0.,
+            bottom: 0.,
+            from_right: false,
+            mono: false,
+            fill: crate::scene::Color(0, 0, 0, 0),
+            radius: 0.,
+            border_color: crate::scene::Color(0, 0, 0, 0),
+            border_width: 0.,
+            label: None,
+            image: None,
+            align: None,
+            svg: None,
+            decoration: None,
+            pinned: false,
+            over_text: false,
+            rotate: 0.,
+            tabular: false,
+        }
+    }
+}
+/// Each line's marks, by its index.
+pub type LineMarks = Rc<dyn Fn(usize) -> Vec<LineMark>>;
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
 pub type LineSpans = Vec<(Range<usize>, SpanStyle)>;
 /// A `Highlighter` that styles its ranges (`SpanStyle`) beyond colouring
@@ -211,7 +423,7 @@ fn atoms_on_line(
         .map(|(range, style)| {
             let start = range.start.max(line.start) - line.start;
             let end = range.end.min(line.end) - line.start;
-            (start..end, *style)
+            (start..end, style.clone())
         })
         .filter(|(range, _)| !range.is_empty())
         .collect();
@@ -237,7 +449,7 @@ fn runs(line: &str, spans: &LineSpans) -> Vec<(Range<usize>, Option<SpanStyle>)>
             if range.start > at {
                 runs.push((at..range.start, None));
             }
-            runs.push((range.clone(), Some(*style)));
+            runs.push((range.clone(), Some(style.clone())));
             at = range.end;
         }
         if at < line.len() {
@@ -282,7 +494,6 @@ pub(crate) fn styled_line(
     color: crate::scene::Color,
     size: f32,
     font: &crate::text_layout::FontStyle,
-    looks: &[SpanLook],
 ) -> Option<crate::rich_text::RichText> {
     if line.is_empty() || spans.is_empty() {
         return None;
@@ -316,140 +527,150 @@ pub(crate) fn styled_line(
         return crate::rich_text::RichText::new(line, runs).ok();
     }
     let mut styled = runs(line, spans);
-    let boxes = if styled
+    // A box is one run, whatever else styles parts of it.
+    styled.dedup_by(|next, run| match (&run.1, &next.1) {
+        (Some(a), Some(b))
+            if a.boxed.is_some() && a.boxed == b.boxed && run.0.end == next.0.start =>
+        {
+            run.0.end = next.0.end;
+            true
+        }
+        _ => false,
+    });
+    let mut boxes: Vec<crate::rich_text::InlineBox> = styled
         .iter()
-        .any(|(_, s)| s.is_some_and(|s| s.look.is_some()))
-    {
-        picture_runs(line, &mut styled, looks, size)
-    } else {
-        Vec::new()
-    };
+        .filter_map(|(range, style)| {
+            let [w, h, d] = style.as_ref()?.boxed?;
+            Some(crate::rich_text::InlineBox {
+                width: w * size,
+                height: h * size,
+                baseline: (h - d) * size,
+                ..crate::rich_text::InlineBox::new(range.start)
+            })
+        })
+        .collect();
     let runs: Vec<_> = styled
         .into_iter()
+        .flat_map(|(range, style)| boxed_runs(line, range, style))
         .map(|(range, style)| {
             let style = style.unwrap_or_default();
+            if let Some(svg) = &style.inline_svg
+                && &line[range.clone()] == crate::rich_text::INLINE_BOX_TEXT
+            {
+                let em = style.size.unwrap_or(size);
+                boxes.push(crate::rich_text::InlineBox {
+                    width: svg.width * em,
+                    height: (svg.height + svg.depth) * em,
+                    baseline: svg.height * em,
+                    ..crate::rich_text::InlineBox::new(range.start)
+                });
+            }
             let mut font = font.clone();
             if let Some(weight) = style.weight {
                 font.weight = weight.clamp(1, 1000);
             }
             font.italic |= style.italic;
-            let look = style.look.and_then(|id| look(looks, id));
+            if style.mono {
+                font.family = crate::text_layout::FontFamily::Monospace;
+            }
+            if let Some(line_height) = style.line_height {
+                font.line_height = crate::text_layout::LineHeight::px(line_height);
+            }
             // A lead is room before only: half of it across (its run is one
             // grapheme, so as much in all), negative down (`TextRun::padding`).
-            let padding = match look.and_then(|look| look.lead) {
-                Some(lead) if lead > 0. => [lead / 2., -1.],
+            let padding = match (style.padding, style.lead) {
+                (Some(padding), _) => padding,
+                (None, Some(lead)) if lead > 0. => [lead / 2., -1.],
                 _ => [0.; 2],
             };
             crate::rich_text::TextRun {
                 range,
                 font,
-                font_size: size,
+                font_size: style.size.unwrap_or(size),
                 color: style.color.unwrap_or(color),
                 background: style.background,
                 padding,
-                underline: style.underline.then(|| underline(look)),
+                radius: style.radius.unwrap_or_default(),
+                underline: style.underline.then(|| underline(&style)),
                 strikethrough: style.strike.then(|| crate::rich_text::Decoration::new(1.)),
                 ..Default::default()
             }
         })
         .collect();
-    crate::rich_text::RichText::new(line, runs)
-        .ok()?
-        .with_inline_boxes(boxes)
-        .ok()
-}
-/// A picture a span's text shows as (`SpanLook::picture`): its SVG and its
-/// `[width, height, descent]` in EM.
-pub(crate) type Picture = (std::sync::Arc<crate::svg::SvgData>, [f32; 3]);
-/// The look `id` names among `looks`.
-fn look(looks: &[SpanLook], id: std::num::NonZeroU32) -> Option<&SpanLook> {
-    looks.get(id.get() as usize - 1)
-}
-/// `styled`'s pictures (`SpanLook::picture`) as runs of their own and
-/// their boxes: each U+FFFC character a box of its own, other text the
-/// span's whole text one box. Rare, out of line.
-#[cold]
-#[inline(never)]
-fn picture_runs(
-    line: &str,
-    styled: &mut Vec<(Range<usize>, Option<SpanStyle>)>,
-    looks: &[SpanLook],
-    size: f32,
-) -> Vec<crate::rich_text::InlineBox> {
-    use crate::rich_text::{INLINE_BOX_CHAR, INLINE_BOX_TEXT, InlineBox};
-    let mut out: Vec<(Range<usize>, Option<SpanStyle>)> = Vec::with_capacity(styled.len());
-    let mut boxes = Vec::new();
-    // The last run out is a box over text, of this look.
-    let mut over_text = None;
-    for (range, style) in styled.drain(..) {
-        let pictured = style.and_then(|s| s.look).and_then(|id| {
-            let (_, [w, h, d]) = look(looks, id)?.picture.as_ref()?;
-            Some((id, [*w, *h, *d]))
-        });
-        let starts_boxed = line[range.clone()].starts_with(INLINE_BOX_CHAR);
-        let a_box = |at: usize, [w, h, d]: [f32; 3]| InlineBox {
-            width: w * size,
-            height: h * size,
-            baseline: (h - d) * size,
-            ..InlineBox::new(at)
-        };
-        match (pictured, out.last_mut()) {
-            // A box over text: one run, whatever else styles parts of it.
-            (Some((id, _)), Some((last, _)))
-                if !starts_boxed && over_text == Some(id) && last.end == range.start =>
-            {
-                last.end = range.end;
-            }
-            // Over replacement characters: each one a run and a box of its
-            // own, the text between them the span's but no box.
-            (Some((_, extents)), _) if starts_boxed => {
-                over_text = None;
-                let mut at = range.start;
-                for (offset, c) in line[range.clone()].char_indices() {
-                    let here = range.start + offset;
-                    if c == INLINE_BOX_CHAR {
-                        if at < here {
-                            out.push((at..here, style));
-                        }
-                        boxes.push(a_box(here, extents));
-                        out.push((here..here + INLINE_BOX_TEXT.len(), style));
-                        at = here + INLINE_BOX_TEXT.len();
-                    }
-                }
-                if at < range.end {
-                    out.push((at..range.end, style));
-                }
-            }
-            // Over text: one box, at its start.
-            (Some((id, extents)), _) => {
-                over_text = Some(id);
-                boxes.push(a_box(range.start, extents));
-                out.push((range, style));
-            }
-            _ => {
-                over_text = None;
-                out.push((range, style));
-            }
-        }
+    // An atom's box (`boxed`) and a span's pictures (`inline_svg`), in the
+    // text's order, as `with_inline_boxes` takes them.
+    boxes.sort_by_key(|b| b.at);
+    boxes.dedup_by_key(|b| b.at);
+    let rich = crate::rich_text::RichText::new(line, runs).ok()?;
+    if boxes.is_empty() {
+        Some(rich)
+    } else {
+        rich.with_inline_boxes(boxes).ok()
     }
-    *styled = out;
-    boxes
 }
-/// An underline in `look`'s colour and place: one point thick in its
-/// text's colour, or the font's thickness when it says either.
-fn underline(look: Option<&SpanLook>) -> crate::rich_text::Decoration {
-    let (color, offset) = look.map_or((None, None), |l| (l.underline_color, l.underline_offset));
-    if color.is_none() && offset.is_none() {
+/// `style`'s underline: one point thick in its text's colour, or the
+/// font's thickness in its own colour and place when it says them.
+fn underline(style: &SpanStyle) -> crate::rich_text::Decoration {
+    if style.underline_color.is_none() && style.underline_offset.is_none() {
         return crate::rich_text::Decoration::new(1.);
     }
     let mut line = crate::rich_text::Decoration::default();
-    if let Some(color) = color {
+    if let Some(color) = style.underline_color {
         line = line.color(color);
     }
-    if let Some(offset) = offset {
+    if let Some(offset) = style.underline_offset {
         line = line.offset(offset);
     }
     line
+}
+/// A run whose style has an inline SVG, cut so each inline box character in it is a run of its own.
+fn boxed_runs(
+    line: &str,
+    range: Range<usize>,
+    style: Option<SpanStyle>,
+) -> Vec<(Range<usize>, Option<SpanStyle>)> {
+    if style.as_ref().is_none_or(|s| s.inline_svg.is_none())
+        || !line[range.clone()].contains(crate::rich_text::INLINE_BOX_CHAR)
+    {
+        return vec![(range, style)];
+    }
+    let mut out = Vec::new();
+    let mut at = range.start;
+    for (i, _) in line[range.clone()].match_indices(crate::rich_text::INLINE_BOX_CHAR) {
+        let start = range.start + i;
+        let end = start + crate::rich_text::INLINE_BOX_TEXT.len();
+        if start > at {
+            out.push((at..start, style.clone()));
+        }
+        out.push((start..end, style.clone()));
+        at = end;
+    }
+    if at < range.end {
+        out.push((at..range.end, style));
+    }
+    out
+}
+/// Each inline SVG of a line (`SpanStyle::inline_svg`): its box character's byte offset, picture and text size.
+pub(crate) fn inline_svgs(
+    line: &str,
+    spans: &LineSpans,
+) -> Vec<(usize, crate::compose::InlineSvg, Option<f32>)> {
+    let mut out: Vec<(usize, crate::compose::InlineSvg, Option<f32>)> = Vec::new();
+    for (range, style) in spans {
+        let Some(svg) = &style.inline_svg else {
+            continue;
+        };
+        let Some(text) = line.get(range.clone()) else {
+            continue;
+        };
+        for (i, _) in text.match_indices(crate::rich_text::INLINE_BOX_CHAR) {
+            let at = range.start + i;
+            if !out.iter().any(|(seen, ..)| *seen == at) {
+                out.push((at, svg.clone(), style.size));
+            }
+        }
+    }
+    out
 }
 /// What shapes a styled line beyond its text: its runs' weights and
 /// slants (`None`: it shapes as its plain text does).
@@ -467,7 +688,20 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                     r.end as u32,
                     s.weight.unwrap_or(0),
                     s.italic,
-                    s.look.map_or(0, std::num::NonZeroU32::get),
+                    s.size.map_or(0, f32::to_bits),
+                    s.line_height.map_or(0, f32::to_bits),
+                    s.mono,
+                    s.lead.map_or(0, f32::to_bits)
+                        ^ s.boxed.map_or(0, |[w, h, d]| {
+                            w.to_bits().rotate_left(7) ^ h.to_bits().rotate_left(17) ^ d.to_bits()
+                        }),
+                    s.inline_svg.as_ref().map_or([0; 3], |svg| {
+                        [
+                            svg.width.to_bits(),
+                            svg.height.to_bits(),
+                            svg.depth.to_bits(),
+                        ]
+                    }),
                 )
             })
             .collect(),
@@ -516,12 +750,12 @@ pub(crate) struct LineCache {
     /// The editor's text revision `last` is of, if it is its committed text.
     last_revision: Cell<Option<u64>>,
     highlighter: RefCell<Option<SpanHighlighter>>,
-    /// Its atoms' spans and its spans' looks (`RareLines`): one pointer
-    /// until it has any.
-    rare: RefCell<crate::text_edit::RareBox<RareLines>>,
-    /// Whether `rare` holds anything: asked first, so a line of an editor
-    /// without atoms or looks reads no `RefCell` for them.
-    rare_set: Cell<bool>,
+    /// Spans its atoms' styles give (`AtomStyle`), over the whole text by
+    /// start: each line takes those it holds before the highlighter's.
+    atom_spans: RefCell<Option<Rc<LineSpans>>>,
+    /// Whether `atom_spans` holds any: asked first, so a line of an editor
+    /// without atoms reads no `RefCell` for them.
+    has_atom_spans: Cell<bool>,
     /// The highlighter has given a span that shapes its line (a weight,
     /// italics): only then is a line asked for its spans as it is shaped,
     /// so one that only colours costs what it did. `restyled`: it just
@@ -536,19 +770,50 @@ pub(crate) struct LineCache {
     tail: RefCell<Option<Tail>>,
     /// Highlighted lines, by their text and what the line before left.
     colored: RefCell<HashMap<(Box<str>, u32), Colored>>,
+    insets: RefCell<Option<LineInsets>>,
+    /// Each scroll group's sideways offset (`LineInset::scroll_group`), by its id: read as carets, hits and
+    /// drawing are, so moving one lays nothing out again.
+    group_scroll: RefCell<HashMap<u32, f32>>,
+    /// The scroll group that moved last: the one a text area's group scrollbar shows (`View::group_scrollbar`).
+    last_scrolled: Cell<Option<u32>>,
+    /// Told of each group's new offset (`EditorHandle::on_group_scroll`).
+    on_group_scroll: RefCell<Option<GroupListener>>,
+    /// Frames the app set for groups (`EditorHandle::set_group_frame`), by id: read as each frame is asked for,
+    /// so setting one lays nothing out again.
+    group_frames: RefCell<HashMap<u32, GroupFrame>>,
 }
-/// What few editors' lines have (`LineCache::rare`): their atoms' spans
-/// and their spans' looks.
-#[derive(Default)]
-struct RareLines {
-    /// Spans its atoms' styles give (`AtomStyle`), over the whole text by
-    /// start: each line takes those it holds before the highlighter's.
-    atom_spans: Option<Rc<LineSpans>>,
-    /// Its spans' looks (`SpanStyle::look` names one by its place here,
-    /// from 1): an atom's, a highlighter's picture. Only added to, so a
-    /// name stays the look's; `pictured`: one holds a picture.
-    looks: Vec<SpanLook>,
-    pictured: bool,
+/// What a scroll group's lines say of it (`LinesLayout::groups`), before the app's frame.
+#[derive(Clone, Copy, Debug)]
+struct GroupLines {
+    /// Its first line's `left` and `group_width`.
+    left: f32,
+    width: Option<f32>,
+    /// How far right its lines reach, from the area's left content edge.
+    right: f32,
+    /// Its first and last lines shown (for its scrollbar, at its bottom edge).
+    first: usize,
+    last: usize,
+}
+/// Told of a scroll group's id and new offset (`EditorHandle::on_group_scroll`).
+pub(crate) type GroupListener = Rc<dyn Fn(u32, f32)>;
+/// A scroll group's frame and extent (`LinesLayout::group`), in points from the area's left content edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Group {
+    /// Where it shows from: its first line's `left`.
+    pub(crate) left: f32,
+    /// How wide it shows.
+    pub(crate) view: f32,
+    /// How wide its lines are from `left`.
+    pub(crate) content: f32,
+    /// Its first and last lines shown.
+    pub(crate) first: usize,
+    pub(crate) last: usize,
+}
+impl Group {
+    /// The furthest it scrolls: its content past its view.
+    pub(crate) fn limit(&self) -> f32 {
+        (self.content - self.view).max(0.)
+    }
 }
 /// What the lines below an edit left before it (`LineCache::edited`).
 struct Tail {
@@ -561,7 +826,7 @@ struct Tail {
 /// A shaped line, and when it was last used.
 type Shaped = (Rc<dyn TextLayout>, u64);
 /// What shapes a styled line's runs: each one's range, weight and slant.
-type ShapeKey = Box<[(u32, u32, u16, bool, u32)]>;
+type ShapeKey = Box<[(u32, u32, u16, bool, u32, u32, bool, u32, [u32; 3])]>;
 /// A styled line's text and what shapes its runs (`shape_key`).
 type StyledKey = (Box<str>, ShapeKey);
 /// A highlighted line: its colours, what it leaves the next, when used.
@@ -708,6 +973,51 @@ impl LineCache {
         }
     }
     /// Style lines with `highlighter` (none: the editor's style).
+    pub(crate) fn set_insets(&self, insets: Option<LineInsets>) {
+        *self.insets.borrow_mut() = insets;
+        self.shaped.borrow_mut().clear();
+        self.styled.borrow_mut().clear();
+        self.heights.borrow_mut().clear();
+        self.forget_last();
+    }
+    /// Scroll group `group`'s offset (0 until set).
+    pub(crate) fn group_scroll(&self, group: u32) -> f32 {
+        self.group_scroll
+            .borrow()
+            .get(&group)
+            .copied()
+            .unwrap_or(0.)
+    }
+    /// The scroll group that moved last, if one has.
+    pub(crate) fn last_scrolled_group(&self) -> Option<u32> {
+        self.last_scrolled.get()
+    }
+    /// Move scroll group `group` to `x` (clamped by the caller); whether it moved. Its listener hears of it.
+    pub(crate) fn set_group_scroll(&self, group: u32, x: f32) -> bool {
+        let x = if x.is_finite() { x.max(0.) } else { 0. };
+        let previous = self.group_scroll.borrow_mut().insert(group, x);
+        if previous.unwrap_or(0.) == x {
+            return false;
+        }
+        self.last_scrolled.set(Some(group));
+        let listener = self.on_group_scroll.borrow().clone();
+        if let Some(listener) = listener {
+            listener(group, x);
+        }
+        true
+    }
+    /// Set scroll group `group`'s frame (an all-`None` one: as its lines say).
+    pub(crate) fn set_group_frame(&self, group: u32, frame: GroupFrame) {
+        let mut frames = self.group_frames.borrow_mut();
+        if frame == GroupFrame::default() {
+            frames.remove(&group);
+        } else {
+            frames.insert(group, frame);
+        }
+    }
+    pub(crate) fn on_group_scroll(&self, listener: Option<GroupListener>) {
+        *self.on_group_scroll.borrow_mut() = listener;
+    }
     pub(crate) fn set_highlighter(&self, highlighter: Option<SpanHighlighter>) {
         *self.highlighter.borrow_mut() = highlighter;
         self.shapes.set(false);
@@ -721,85 +1031,7 @@ impl LineCache {
         self.set_highlighter(highlighter);
     }
     pub(crate) fn highlighted(&self) -> bool {
-        self.highlighter.borrow().is_some()
-            || (self.rare_set.get()
-                && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.atom_spans.is_some()))
-    }
-    /// The name a span gives `look` (`SpanStyle::look`): the same for the
-    /// same look.
-    pub(crate) fn look(&self, look: SpanLook) -> std::num::NonZeroU32 {
-        let mut rare = self.rare.borrow_mut();
-        let rare = rare.get_or_insert_default();
-        self.rare_set.set(true);
-        let at = match rare.looks.iter().position(|known| known.same(&look)) {
-            Some(at) => at,
-            None => {
-                rare.pictured |= look.picture.is_some();
-                rare.looks.push(look);
-                rare.looks.len() - 1
-            }
-        };
-        std::num::NonZeroU32::new(at as u32 + 1).expect("a look's name")
-    }
-    /// The name a span gives `svg` at `extents` (`[width, height, descent]`
-    /// in EM) to show as a picture (`SpanStyle::inline_svg`): the same for
-    /// the same picture at the same size.
-    pub(crate) fn picture(
-        &self,
-        svg: std::sync::Arc<crate::svg::SvgData>,
-        extents: [f32; 3],
-    ) -> std::num::NonZeroU32 {
-        self.look(SpanLook {
-            picture: Some((svg, extents)),
-            ..SpanLook::default()
-        })
-    }
-    /// Its spans' looks, as `SpanStyle::look` names them.
-    pub(crate) fn looks(&self) -> std::cell::Ref<'_, [SpanLook]> {
-        std::cell::Ref::map(self.rare.borrow(), |rare| {
-            rare.as_ref().map_or(&[][..], |rare| &rare.looks[..])
-        })
-    }
-    /// Whether one of its looks is a picture.
-    pub(crate) fn pictured(&self) -> bool {
-        self.rare_set.get() && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.pictured)
-    }
-    /// Whether it has looks or atom spans at all (`looks` is empty without).
-    pub(crate) fn has_rare(&self) -> bool {
-        self.rare_set.get()
-    }
-    /// Where the pictures on the lines between `top` and `bottom` show,
-    /// in the area's points, and what each is: every box a span's picture
-    /// holds (an atom's, a highlighter's).
-    pub(crate) fn pictures_between(
-        &self,
-        layout: &LinesLayout,
-        top: f32,
-        bottom: f32,
-        size: f32,
-    ) -> Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> {
-        if !self.pictured() {
-            return Vec::new();
-        }
-        let mut shown = Vec::new();
-        for i in layout.lines_between(top, bottom) {
-            let Some(spans) = self.spans(layout, i) else {
-                continue;
-            };
-            for (at, x, y) in layout.line(i).inline_boxes() {
-                let looks = self.looks();
-                let Some((svg, [w, h, _])) = spans
-                    .iter()
-                    .filter(|(range, _)| range.contains(&at))
-                    .find_map(|(_, style)| look(&looks, style.look?)?.picture.as_ref())
-                else {
-                    continue;
-                };
-                let rect = layout.shift(i, Rect::new(x, y, w * size, h * size));
-                shown.push((rect, svg.clone()));
-            }
-        }
-        shown
+        self.highlighter.borrow().is_some() || self.has_atom_spans.get()
     }
     /// Its atoms' spans over the whole text, by start (none: no atom styled).
     pub(crate) fn set_atom_spans(&self, spans: Option<LineSpans>) {
@@ -810,11 +1042,8 @@ impl LineCache {
             self.shapes.set(true);
             self.restyled.set(true);
         }
-        let mut rare = self.rare.borrow_mut();
-        if spans.is_some() || rare.is_some() {
-            rare.get_or_insert_default().atom_spans = spans.map(Rc::new);
-            self.rare_set.set(true);
-        }
+        self.has_atom_spans.set(spans.is_some());
+        *self.atom_spans.borrow_mut() = spans.map(Rc::new);
     }
     /// Whether a line's spans shape it now that did not before: what was
     /// laid out without them is laid out again.
@@ -824,7 +1053,7 @@ impl LineCache {
     /// Line `i`'s spans, if it has a highlighter: what the lines above
     /// it leave found first (each once, until one changes).
     pub(crate) fn spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
-        if self.rare_set.get() {
+        if self.has_atom_spans.get() {
             return self.spans_with_atoms(layout, i);
         }
         self.highlighted_spans(layout, i)
@@ -834,7 +1063,7 @@ impl LineCache {
     #[cold]
     #[inline(never)]
     fn spans_with_atoms(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
-        let atoms = (self.rare.borrow().as_ref()).and_then(|rare| rare.atom_spans.clone());
+        let atoms = self.atom_spans.borrow().clone();
         let colors = self.highlighted_spans(layout, i);
         let Some(atoms) = atoms else {
             return colors;
@@ -920,12 +1149,19 @@ impl LineCache {
     }
     /// Line `i` shaped with the runs its spans give it, if they shape it
     /// (a weight, italics): `None` for a line shaped as its plain text.
-    fn styled(&self, layout: &LinesLayout, i: usize, text: &str) -> Option<Rc<dyn TextLayout>> {
+    fn styled(
+        &self,
+        layout: &LinesLayout,
+        i: usize,
+        text: &str,
+        wrap: Option<f32>,
+        key_text: &str,
+    ) -> Option<Rc<dyn TextLayout>> {
         if !self.shapes.get() {
             return None;
         }
         let spans = self.spans(layout, i)?;
-        let key = (Box::<str>::from(text), shape_key(&spans)?);
+        let key = (Box::<str>::from(key_text), shape_key(&spans)?);
         let tick = self.clock.get() + 1;
         self.clock.set(tick);
         if let Some((layout, used)) = self.styled.borrow_mut().get_mut(&key) {
@@ -937,32 +1173,89 @@ impl LineCache {
             let shaping = shaping.as_ref()?;
             (f32::from_bits(shaping.size), shaping.font.clone())
         };
-        let rich = styled_line(
-            text,
-            &spans,
-            crate::scene::Color(0, 0, 0, 255),
-            size,
-            &font,
-            &self.looks(),
-        )?;
-        let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, layout.wrap).into();
+        let rich = styled_line(text, &spans, crate::scene::Color(0, 0, 0, 255), size, &font)?;
+        let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, wrap).into();
         let mut styled = self.styled.borrow_mut();
         evict(&mut styled);
         styled.insert(key, (shaped.clone(), tick));
         Some(shaped)
     }
-    /// Line `text`, shaped (from the cache if it is there).
-    fn line(&self, text: &str, shape: &LineShaper, wrap: Option<f32>) -> Rc<dyn TextLayout> {
+    /// Line `i` shaped with its rows aligned `align` in `wrap` (`LineInset::align`): its spans' runs if they shape it,
+    /// else its text as one run, in the editor's font aligned so (kept apart from the same text unaligned).
+    fn aligned(
+        &self,
+        layout: &LinesLayout,
+        i: usize,
+        text: &str,
+        wrap: Option<f32>,
+        key_text: &str,
+        align: crate::text_layout::TextAlign,
+    ) -> Rc<dyn TextLayout> {
+        let spans = if self.shapes.get() {
+            self.spans(layout, i)
+        } else {
+            None
+        };
+        let key: Box<str> = format!(
+            "{align:?}\u{2}{:?}\u{2}{key_text}",
+            spans.as_deref().and_then(shape_key)
+        )
+        .into();
         let tick = self.clock.get() + 1;
         self.clock.set(tick);
-        if let Some((layout, used)) = self.shaped.borrow_mut().get_mut(text) {
+        if let Some((shaped, used)) = self.shaped.borrow_mut().get_mut(&key) {
+            *used = tick;
+            return shaped.clone();
+        }
+        let (size, mut font) = {
+            let shaping = self.shaping.borrow();
+            let shaping = shaping.as_ref().expect("a layout's shaping");
+            (f32::from_bits(shaping.size), shaping.font.clone())
+        };
+        font.align = align;
+        let color = crate::scene::Color(0, 0, 0, 255);
+        let rich = spans
+            .as_deref()
+            .filter(|spans| spans.iter().any(|(_, style)| style.shapes()))
+            .and_then(|spans| styled_line(text, spans, color, size, &font))
+            .or_else(|| {
+                crate::rich_text::RichText::new(
+                    text,
+                    vec![crate::rich_text::TextRun {
+                        range: 0..text.len(),
+                        font: font.clone(),
+                        font_size: size,
+                        color,
+                        ..Default::default()
+                    }],
+                )
+                .ok()
+            })
+            .expect("a line's text as one run");
+        let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, wrap).into();
+        let mut cache = self.shaped.borrow_mut();
+        evict(&mut cache);
+        cache.insert(key, (shaped.clone(), tick));
+        shaped
+    }
+    /// Line `text`, shaped (from the cache if it is there).
+    fn line(
+        &self,
+        text: &str,
+        shape: &LineShaper,
+        wrap: Option<f32>,
+        key: &str,
+    ) -> Rc<dyn TextLayout> {
+        let tick = self.clock.get() + 1;
+        self.clock.set(tick);
+        if let Some((layout, used)) = self.shaped.borrow_mut().get_mut(key) {
             *used = tick;
             return layout.clone();
         }
         let layout: Rc<dyn TextLayout> = shape(text, wrap).into();
         let mut shaped = self.shaped.borrow_mut();
         evict(&mut shaped);
-        shaped.insert(text.into(), (layout.clone(), tick));
+        shaped.insert(key.into(), (layout.clone(), tick));
         layout
     }
 }
@@ -981,9 +1274,71 @@ fn evict<K: Eq + std::hash::Hash>(shaped: &mut HashMap<K, Shaped>) {
 /// `O(log n)` (a Fenwick tree).
 struct Heights {
     tree: Vec<f64>,
+    /// What each line adds to the tops of those below it: its height, but in a row (`LineInset::joins_next`)
+    /// nothing for every line but the last, which adds the row's.
     each: Vec<f32>,
+    /// Each line's own height, where any share a row (empty where none does: `each` is it).
+    own: Vec<f32>,
+    /// The first lines of cells spanning rows (`LineInset::spans_rows`), in order, and how many: empty where
+    /// none does, each row then as tall as its tallest cell alone.
+    spans: Vec<(usize, u16)>,
 }
 impl Heights {
+    /// Of lines `own` high, those at `joins` (in order) sharing a row with the next, those at `stacks` (in order,
+    /// among `joins`) its cell, and those at `spans` (in order) the first lines of cells spanning rows.
+    fn with_rows(
+        own: Vec<f32>,
+        joins: &[usize],
+        stacks: &[usize],
+        spans: Vec<(usize, u16)>,
+    ) -> Self {
+        if !spans.is_empty() {
+            return Self::spanned(own, joins, stacks, spans);
+        }
+        if joins.is_empty() {
+            return Self::new(own);
+        }
+        let mut each = own.clone();
+        let mut k = 0;
+        while k < joins.len() {
+            let start = joins[k];
+            while k + 1 < joins.len() && joins[k + 1] == joins[k] + 1 {
+                k += 1;
+            }
+            let last = (joins[k] + 1).min(own.len() - 1);
+            k += 1;
+            let tallest = tallest_cell(&own, start..last + 1, |j| stacks.binary_search(&j).is_ok());
+            each[start..last].fill(0.);
+            each[last] = tallest;
+        }
+        let mut heights = Self::new(each);
+        heights.own = own;
+        heights
+    }
+    /// `with_rows` where cells span rows: every row settled together (`settle_rows`).
+    #[cold]
+    #[inline(never)]
+    fn spanned(own: Vec<f32>, joins: &[usize], stacks: &[usize], spans: Vec<(usize, u16)>) -> Self {
+        let mut each = vec![0.; own.len()];
+        let settled = settle_rows(
+            &own,
+            0..own.len(),
+            |j| joins.binary_search(&j).is_ok(),
+            |j| stacks.binary_search(&j).is_ok(),
+            |j| {
+                spans
+                    .binary_search_by_key(&j, |s| s.0)
+                    .map_or(1, |k| spans[k].1)
+            },
+        );
+        for (last, height) in settled {
+            each[last] = height;
+        }
+        let mut heights = Self::new(each);
+        heights.own = own;
+        heights.spans = spans;
+        heights
+    }
     fn new(each: Vec<f32>) -> Self {
         let mut tree: Vec<f64> = each.iter().map(|h| *h as f64).collect();
         for i in 0..tree.len() {
@@ -992,7 +1347,20 @@ impl Heights {
                 tree[parent] += tree[i];
             }
         }
-        Self { tree, each }
+        Self {
+            tree,
+            each,
+            own: Vec::new(),
+            spans: Vec::new(),
+        }
+    }
+    /// Line `i`'s own height.
+    fn own(&self, i: usize) -> f32 {
+        if self.own.is_empty() {
+            self.each[i]
+        } else {
+            self.own[i]
+        }
     }
     /// The heights of the lines above line `i`.
     fn above(&self, i: usize) -> f64 {
@@ -1033,6 +1401,76 @@ impl Heights {
     }
 }
 
+/// The heights rows of lines `lines` (whole rows, in order; `links`: a line and the next share a row, `stacks`: are
+/// one cell) add to the tops of those below, each at its row's last line: a row as tall as its tallest cell
+/// (`tallest_cell`), but a cell spanning rows (`spans`, on its first line: `LineInset::spans_rows`) counting toward
+/// its rows together. What it needs past their heights goes to them in proportion to those heights, all to the last
+/// where they are all empty, as Chrome shares a `rowspan` cell's height; cells in order, each on the rows the
+/// earlier left. A span reaching past `lines` is cut at their end.
+fn settle_rows(
+    own: &[f32],
+    lines: Range<usize>,
+    links: impl Fn(usize) -> bool,
+    stacks: impl Fn(usize) -> bool,
+    spans: impl Fn(usize) -> u16,
+) -> Vec<(usize, f32)> {
+    let mut rows: Vec<(usize, f32)> = Vec::new();
+    // Each spanning cell: its first row, how many it spans, its height.
+    let mut spanning: Vec<(usize, usize, f32)> = Vec::new();
+    let mut start = lines.start;
+    while start < lines.end {
+        let mut end = start + 1;
+        while end < lines.end && links(end - 1) {
+            end += 1;
+        }
+        let (mut tallest, mut cell, mut first) = (0f32, 0f32, start);
+        for (j, height) in own.iter().enumerate().take(end).skip(start) {
+            cell += height;
+            if j == end - 1 || !stacks(j) {
+                match usize::from(spans(first)) {
+                    n if n > 1 => spanning.push((rows.len(), n, cell)),
+                    _ => tallest = tallest.max(cell),
+                }
+                cell = 0.;
+                first = j + 1;
+            }
+        }
+        rows.push((end - 1, tallest));
+        start = end;
+    }
+    for (row, n, needs) in spanning {
+        let end = (row + n).min(rows.len());
+        let spanned = &mut rows[row..end];
+        let sum: f32 = spanned.iter().map(|r| r.1).sum();
+        if needs > sum {
+            let more = needs - sum;
+            if sum > 0. {
+                for r in spanned.iter_mut() {
+                    r.1 += more * r.1 / sum;
+                }
+            } else if let Some(last) = spanned.last_mut() {
+                last.1 += more;
+            }
+        }
+    }
+    rows
+}
+
+/// The height of the row of lines `row`, `own` high: its tallest cell's, a cell's lines (`stacks`: the line and the
+/// next are one cell) together.
+fn tallest_cell(own: &[f32], row: Range<usize>, stacks: impl Fn(usize) -> bool) -> f32 {
+    let (mut tallest, mut cell) = (0f32, 0f32);
+    let last = row.end - 1;
+    for j in row {
+        cell += own[j];
+        if j == last || !stacks(j) {
+            tallest = tallest.max(cell);
+            cell = 0.;
+        }
+    }
+    tallest
+}
+
 /// A long text laid out by its lines (see the module).
 pub(crate) struct LinesLayout {
     /// The text, shared with its editor (its lines, and where each starts).
@@ -1052,6 +1490,13 @@ pub(crate) struct LinesLayout {
     /// Lines across chunks, joined once (a long line's every draw would
     /// copy it): a few, by number.
     joined: RefCell<HashMap<usize, Arc<str>>>,
+    /// Whether any line is in a scroll group (`LineInset::scroll_group`): only then are the groups found.
+    grouped: bool,
+    /// Each scroll group's frame and extent, found once asked for.
+    groups: RefCell<Option<Rc<HashMap<u32, GroupLines>>>>,
+    /// How far each scroll group's unwrapped lines reach (`LineInset::nowrap`), as far as they are shaped: past
+    /// its estimate, a group scrolls that far.
+    group_reach: RefCell<HashMap<u32, f32>>,
 }
 /// A line's text: in its chunk, or joined across chunks and kept.
 pub(crate) enum LineText<'a> {
@@ -1102,20 +1547,47 @@ impl LinesLayout {
             rich,
             cache,
             joined: RefCell::default(),
+            grouped: false,
+            groups: RefCell::default(),
+            group_reach: RefCell::default(),
         };
-        if let Some(width) = wrap {
+        // every line's own height, unwrapped too: a heading's taller pitch and a line's room push the lines below
+        {
+            let width = wrap.unwrap_or(f32::INFINITY);
             let known = layout.cache.heights.borrow();
+            let mut joins = Vec::new();
+            let mut stacks = Vec::new();
+            let mut spans = Vec::new();
+            let mut grouped = false;
+            // Asked once, not each line's: without any, each line's is the default.
+            let insets = layout.cache.insets.borrow().clone();
             let each = (0..layout.line_count())
                 .map(|i| {
-                    let line = layout.line_text(i);
-                    known
-                        .get(&*line)
-                        .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width))
+                    let inset = match &insets {
+                        Some(insets) => {
+                            let inset = insets(i);
+                            grouped |= inset.scroll_group.is_some();
+                            inset
+                        }
+                        None => LineInset::default(),
+                    };
+                    if inset.joins_next || inset.stacks_next {
+                        joins.push(i);
+                    }
+                    if inset.stacks_next {
+                        stacks.push(i);
+                    }
+                    if inset.spans_rows > 1 {
+                        spans.push((i, inset.spans_rows));
+                    }
+                    layout.measured(i, &inset, &known, width)
                 })
                 .collect();
             drop(known);
-            layout.heights = Some(RefCell::new(Heights::new(each)));
+            layout.grouped = grouped;
+            layout.heights = Some(RefCell::new(Heights::with_rows(
+                each, &joins, &stacks, spans,
+            )));
         }
         layout
     }
@@ -1140,30 +1612,126 @@ impl LinesLayout {
             rich: old.rich.clone(),
             cache: old.cache.clone(),
             joined: RefCell::default(),
+            grouped: old.grouped,
+            groups: RefCell::default(),
+            group_reach: RefCell::default(),
         };
         // The edited lines' lengths count for the longest.
         for i in kept - 1..first_moved.min(layout.line_count()) {
             layout.longest = layout.longest.max(layout.line_range(i).len());
         }
-        if let (Some(width), Some(heights)) = (old.wrap, &old.heights) {
-            let old_each = &heights.borrow().each;
+        if let Some(heights) = &old.heights {
+            let width = old.wrap.unwrap_or(f32::INFINITY);
+            let old = heights.borrow();
             let known = layout.cache.heights.borrow();
-            let mut each = Vec::with_capacity(layout.line_count());
-            each.extend_from_slice(&old_each[..kept - 1]);
+            let count = layout.line_count();
+            let mut joined = !old.own.is_empty();
+            let mut spanned = !old.spans.is_empty();
+            let mut measured = Vec::with_capacity(first_moved + 1 - kept);
             for i in kept - 1..first_moved {
-                let line = layout.line_text(i);
-                each.push(
-                    known
-                        .get(&*line)
-                        .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width)),
-                );
+                let inset = layout.inset(i);
+                joined |= inset.joins_next || inset.stacks_next;
+                spanned |= inset.spans_rows > 1;
+                layout.grouped |= inset.scroll_group.is_some();
+                measured.push(layout.measured(i, &inset, &known, width));
             }
-            each.extend_from_slice(&old_each[moved..]);
             drop(known);
-            layout.heights = Some(RefCell::new(Heights::new(each)));
+            let spliced = |from: &[f32]| {
+                let mut all = Vec::with_capacity(count);
+                all.extend_from_slice(&from[..kept - 1]);
+                all.extend_from_slice(&measured);
+                all.extend_from_slice(&from[moved..]);
+                all
+            };
+            let mut each = spliced(&old.each);
+            let new = if spanned {
+                // Cells spanning rows: a row's height can hang on rows far from the edit, so all are settled again.
+                let own = if old.own.is_empty() {
+                    each
+                } else {
+                    spliced(&old.own)
+                };
+                layout.respanned(own)
+            } else if joined {
+                // The rows the edit touches take their heights again; the rest keep theirs.
+                let own = if old.own.is_empty() {
+                    each.clone()
+                } else {
+                    spliced(&old.own)
+                };
+                let joins = |i: usize| i + 1 < count && layout.inset(i).links();
+                let mut start = kept - 1;
+                while start > 0 && joins(start - 1) {
+                    start -= 1;
+                }
+                let mut end = first_moved.max(kept).min(count);
+                while end < count && joins(end - 1) {
+                    end += 1;
+                }
+                let mut row = start;
+                while row < end {
+                    let mut last = row;
+                    while joins(last) {
+                        last += 1;
+                    }
+                    let tallest =
+                        tallest_cell(&own, row..last + 1, |j| layout.inset(j).stacks_next);
+                    each[row..last].fill(0.);
+                    each[last] = tallest;
+                    row = last + 1;
+                }
+                let mut new = Heights::new(each);
+                new.own = own;
+                new
+            } else {
+                Heights::new(each)
+            };
+            drop(old);
+            layout.heights = Some(RefCell::new(new));
         }
         layout
+    }
+    /// Heights of lines `own` high, each line's inset asked again for its row and its span.
+    #[cold]
+    #[inline(never)]
+    fn respanned(&self, own: Vec<f32>) -> Heights {
+        let (mut joins, mut stacks, mut spans) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..self.line_count() {
+            let inset = self.inset(i);
+            if inset.links() {
+                joins.push(i);
+            }
+            if inset.stacks_next {
+                stacks.push(i);
+            }
+            if inset.spans_rows > 1 {
+                spans.push((i, inset.spans_rows));
+            }
+        }
+        Heights::with_rows(own, &joins, &stacks, spans)
+    }
+    /// Line `i`'s height with its room before it is shaped: the height its text had (`known`), else an estimate.
+    fn measured(
+        &self,
+        i: usize,
+        inset: &LineInset,
+        known: &HashMap<Box<str>, f32>,
+        width: f32,
+    ) -> f32 {
+        if inset.hidden {
+            return 0.;
+        }
+        let line = self.line_text(i);
+        // a cell wraps in its own width: its text's height elsewhere is not its; a line that never wraps is a row
+        let bare = match inset.width {
+            _ if inset.nowrap => self.row,
+            Some(own) => self.estimate(&line, own),
+            None => known
+                .get(&*line)
+                .copied()
+                .unwrap_or_else(|| self.estimate(&line, width)),
+        };
+        inset.height(bare)
     }
     /// A wrapped line's height before it is shaped: its rows at the
     /// estimated advance.
@@ -1206,29 +1774,251 @@ impl LinesLayout {
     /// Where line `i` starts down the layout.
     pub(crate) fn top(&self, i: usize) -> f32 {
         match &self.heights {
-            Some(heights) => heights.borrow().above(i) as f32,
+            Some(heights) => {
+                let row_top = heights.borrow().above(i) as f32;
+                row_top + self.cell_offset(i)
+            }
             None => i as f32 * self.row,
         }
     }
-    /// Line `i`'s height (as shaped, or estimated if it is not yet).
+    /// How far line `i` starts below its row's top: the heights of its cell's lines above it.
+    fn cell_offset(&self, i: usize) -> f32 {
+        if !self.has_rows() {
+            return 0.;
+        }
+        let mut below = 0.;
+        let mut j = i;
+        while j > 0 && self.inset(j - 1).stacks_next {
+            j -= 1;
+            below += self.height(j);
+        }
+        below
+    }
+    /// Line `i`'s height (as shaped, or estimated if it is not yet): its own, in a row too.
     pub(crate) fn height(&self, i: usize) -> f32 {
         match &self.heights {
-            Some(heights) => heights.borrow().each[i],
+            Some(heights) => heights.borrow().own(i),
             None => self.row,
         }
     }
-    /// The line at `y` down the layout.
-    pub(crate) fn line_at(&self, y: f32) -> usize {
+    /// Whether any lines share a row (`LineInset::joins_next`): only then is a line asked which row it is in.
+    fn has_rows(&self) -> bool {
+        self.heights
+            .as_ref()
+            .is_some_and(|heights| !heights.borrow().own.is_empty())
+    }
+    /// The lines of line `i`'s row: itself, or the run of lines joined to it.
+    pub(crate) fn row_of(&self, i: usize) -> Range<usize> {
+        let (mut start, mut end) = (i, i + 1);
+        if self.has_rows() {
+            let count = self.line_count();
+            while start > 0 && self.inset(start - 1).links() {
+                start -= 1;
+            }
+            while end < count && self.inset(end - 1).links() {
+                end += 1;
+            }
+        }
+        start..end
+    }
+    /// The cells spanning rows (`LineInset::spans_rows`): their first lines and how many rows each spans.
+    fn spans(&self) -> Vec<(usize, u16)> {
+        self.heights
+            .as_ref()
+            .map_or_else(Vec::new, |h| h.borrow().spans.clone())
+    }
+    /// The lines of the rows a cell starting at line `cell` spans, `n` of them (fewer at the text's end).
+    fn span_reach(&self, cell: usize, n: u16) -> Range<usize> {
+        let row = self.row_of(cell);
+        let mut end = row.end;
+        for _ in 1..n {
+            if end >= self.line_count() {
+                break;
+            }
+            end = self.row_of(end).end;
+        }
+        row.start..end
+    }
+    /// The lines of the rows line `i`'s cell spans, where it spans more than its own.
+    #[cold]
+    #[inline(never)]
+    fn spanning(&self, i: usize) -> Option<Range<usize>> {
+        let mut cell = i;
+        while cell > 0 && self.inset(cell - 1).stacks_next {
+            cell -= 1;
+        }
+        let n = self.inset(cell).spans_rows;
+        (n > 1).then(|| self.span_reach(cell, n))
+    }
+    /// Rows `lines`, grown to whole every span reaching into them (and every span reaching into those).
+    fn span_cluster(&self, mut lines: Range<usize>) -> Range<usize> {
+        let reaches: Vec<_> = self
+            .spans()
+            .into_iter()
+            .map(|(cell, n)| self.span_reach(cell, n))
+            .collect();
+        loop {
+            let before = lines.clone();
+            for reach in &reaches {
+                if reach.start < lines.end && lines.start < reach.end {
+                    lines = lines.start.min(reach.start)..lines.end.max(reach.end);
+                }
+            }
+            if lines == before {
+                return lines;
+            }
+        }
+    }
+    /// Line `i`, of row `row`, `height` high now, where cells span rows: the rows its height bears on settled again.
+    #[cold]
+    #[inline(never)]
+    fn settle_spanned(&self, row: Range<usize>, i: usize, height: f32) {
+        let Some(heights) = &self.heights else {
+            return;
+        };
+        let lines = self.span_cluster(row);
+        heights.borrow_mut().own[i] = height;
+        let settled = settle_rows(
+            &heights.borrow().own,
+            lines,
+            |j| self.inset(j).links(),
+            |j| self.inset(j).stacks_next,
+            |j| self.inset(j).spans_rows,
+        );
+        let mut heights = heights.borrow_mut();
+        for (last, height) in settled {
+            heights.set(last, height);
+        }
+    }
+    /// The height of line `i`'s row: its tallest line's (the line's own, alone); of a cell spanning rows, theirs
+    /// together.
+    pub(crate) fn row_height(&self, i: usize) -> f32 {
+        if !self.has_rows() {
+            return self.height(i);
+        }
+        if let Some(heights) = &self.heights
+            && !heights.borrow().spans.is_empty()
+            && let Some(reach) = self.spanning(i)
+        {
+            let heights = heights.borrow();
+            return (heights.above(reach.end) - heights.above(reach.start)) as f32;
+        }
+        let last = self.row_of(i).end - 1;
+        self.heights
+            .as_ref()
+            .map_or(self.row, |h| h.borrow().each[last])
+    }
+    /// The line at `y` down the layout: of a row, the last.
+    fn last_line_at(&self, y: f32) -> usize {
         let y = y.max(0.);
         match &self.heights {
             Some(heights) => heights.borrow().line_at(y as f64),
             None => ((y / self.row) as usize).min(self.line_count() - 1),
         }
     }
+    /// The line at `y` down the layout (of a row, the first).
+    pub(crate) fn line_at(&self, y: f32) -> usize {
+        let i = self.last_line_at(y);
+        if self.has_rows() {
+            self.row_of(i).start
+        } else {
+            i
+        }
+    }
+    /// In row `row`, beside cells spanning rows from above (`LineInset::spans_rows`): the line at `x`, `y` among
+    /// its cells and theirs, as `line_at_point` finds one (the cell whose room holds `x`, the first before them
+    /// all); `None` where no cell spans into it.
+    #[cold]
+    #[inline(never)]
+    fn spanned_at_point(&self, row: &Range<usize>, x: f32, y: f32) -> Option<usize> {
+        let mut lines = Vec::new();
+        for (cell, n) in self.spans() {
+            let reach = self.span_reach(cell, n);
+            if cell < row.start && row.start < reach.end {
+                // the cell's lines: its first and those stacked under it
+                let mut last = cell;
+                while last + 1 < self.line_count() && self.inset(last).stacks_next {
+                    last += 1;
+                }
+                lines.extend(cell..=last);
+            }
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        lines.extend(row.clone());
+        let x = self.within_group(row.start, x);
+        // the rightmost room starting at or before `x` (of a cell's lines, the last), else the leftmost
+        let mut found: Option<(usize, f32)> = None;
+        for j in lines {
+            let inset = self.inset(j);
+            if inset.hidden {
+                continue;
+            }
+            let left = self.left(&inset);
+            let better = match found {
+                None => true,
+                Some((_, at)) if at > x => left <= x || left < at,
+                Some((_, at)) => left <= x && left >= at,
+            };
+            if better {
+                found = Some((j, left));
+            }
+        }
+        let (mut found, _) = found?;
+        // of a cell's stacked lines, the one at `y` (the last below them)
+        while found > 0 && self.inset(found - 1).stacks_next && self.top(found) > y {
+            found -= 1;
+        }
+        Some(found)
+    }
+    /// The line at `x`, `y`: in a row, the one whose room holds `x` (the first before them all, the last after).
+    /// Whether it is a cell of a row.
+    fn line_at_point(&self, x: f32, y: f32) -> (usize, bool) {
+        let i = self.last_line_at(y);
+        if !self.has_rows() {
+            return (i, false);
+        }
+        let row = self.row_of(i);
+        if let Some(heights) = &self.heights
+            && !heights.borrow().spans.is_empty()
+            && let Some(found) = self.spanned_at_point(&row, x, y)
+        {
+            return (found, true);
+        }
+        if row.len() == 1 {
+            return (i, false);
+        }
+        let x = self.within_group(row.start, x);
+        let mut found = None;
+        for j in row {
+            let inset = self.inset(j);
+            if inset.hidden {
+                continue;
+            }
+            if found.is_none() || self.left(&inset) <= x {
+                found = Some(j);
+            }
+        }
+        let Some(mut found) = found else {
+            return (i, true);
+        };
+        // of a cell's stacked lines, the one at `y` (the last below them)
+        while found > 0 && self.inset(found - 1).stacks_next && self.top(found) > y {
+            found -= 1;
+        }
+        (found, true)
+    }
     /// The lines that show between `top` and `bottom`, shaped: their
     /// numbers, the first and the last but one.
     pub(crate) fn lines_between(&self, top: f32, bottom: f32) -> Range<usize> {
-        let first = self.line_at(top);
+        let mut first = self.line_at(top);
+        // A cell spanning rows from above shows beside them: from its row.
+        if let Some(heights) = &self.heights
+            && !heights.borrow().spans.is_empty()
+        {
+            first = self.span_cluster(self.row_of(first)).start.min(first);
+        }
         let mut end = first;
         // Shaping a wrapped line corrects its height, which moves those
         // below: each is placed after the one above it is shaped.
@@ -1239,24 +2029,109 @@ impl LinesLayout {
         first..end.max(first + 1).min(self.line_count())
     }
     /// Line `i`, shaped.
+    /// The width line `i` is drawn in when the text wraps at `wrap`: what its indent leaves, as it was wrapped.
+    #[cfg(test)]
+    pub(crate) fn draw_width(&self, i: usize, wrap: Option<f32>) -> Option<f32> {
+        Self::draw_width_in(&self.inset(i), wrap)
+    }
+    /// `draw_width`, for a line whose room is already asked for.
+    pub(crate) fn draw_width_in(inset: &LineInset, wrap: Option<f32>) -> Option<f32> {
+        if inset.nowrap {
+            return None;
+        }
+        inset
+            .width
+            .map(|w| w.max(1.))
+            .or(wrap.map(|w| (w - inset.left).max(1.)))
+    }
+    /// How line `i`'s rows align, where it has a width to align in (`LineInset::align`), given its room `inset`:
+    /// shaped so for its carets and hits (`line`), and drawn so.
+    pub(crate) fn align_in(
+        &self,
+        i: usize,
+        inset: &LineInset,
+    ) -> Option<crate::text_layout::TextAlign> {
+        Self::aligned(inset, inset.wrap(self.wrap), &self.line_text(i))
+    }
+    /// `align`, for a line whose room is already asked for: each asks it once.
+    fn aligned(
+        inset: &LineInset,
+        wrap: Option<f32>,
+        text: &str,
+    ) -> Option<crate::text_layout::TextAlign> {
+        let align = inset.align?;
+        (wrap.is_some() && !text.is_empty()).then_some(align)
+    }
+    /// Line `i`'s room (`LineCache::set_insets`).
+    pub(crate) fn inset(&self, i: usize) -> LineInset {
+        self.cache
+            .insets
+            .borrow()
+            .as_ref()
+            .map_or_else(LineInset::default, |insets| insets(i))
+    }
     pub(crate) fn line(&self, i: usize) -> Rc<dyn TextLayout> {
         let text = self.line_text(i);
-        let layout = match self.cache.styled(self, i, &text) {
-            Some(layout) => layout,
-            None => self.cache.line(&text, &self.shape, self.wrap),
+        let inset = self.inset(i);
+        // an indented line wraps narrower: kept apart from the same text unindented
+        let wrap = inset.wrap(self.wrap);
+        let key = if inset.nowrap {
+            // unwrapped: kept apart from the same text wrapped
+            std::borrow::Cow::Owned(format!("{}\u{2}{}", inset.left.to_bits(), &*text))
+        } else if let Some(width) = inset.width {
+            std::borrow::Cow::Owned(format!("{}\u{1}{}", width.to_bits(), &*text))
+        } else if inset.left > 0. {
+            std::borrow::Cow::Owned(format!("{}\u{0}{}", inset.left.to_bits(), &*text))
+        } else {
+            std::borrow::Cow::Borrowed(&*text)
+        };
+        // aligned in a width: its rows placed there as the text layout aligns them, carets and hits with them
+        let aligned = Self::aligned(&inset, wrap, &text);
+        let layout = match aligned {
+            Some(align) => self.cache.aligned(self, i, &text, wrap, &key, align),
+            None => match self.cache.styled(self, i, &text, wrap, &key) {
+                Some(layout) => layout,
+                None => self.cache.line(&text, &self.shape, wrap, &key),
+            },
         };
         let (width, height) = layout.size();
         if width > self.widest.get() {
             self.widest.set(width);
         }
+        if inset.nowrap
+            && let Some(group) = inset.scroll_group
+        {
+            let mut reach = self.group_reach.borrow_mut();
+            let far = reach.entry(group).or_insert(0.);
+            *far = far.max(inset.left + width);
+        }
         if let Some(heights) = &self.heights {
-            let height = height.max(self.row);
-            if heights.borrow().each[i] != height {
-                heights.borrow_mut().set(i, height);
-                self.cache
-                    .heights
-                    .borrow_mut()
-                    .insert((*text).into(), height);
+            // cached without its room: the same text elsewhere (or once its block changes) has its own
+            let bare = height.max(self.row);
+            let height = inset.height(bare);
+            if heights.borrow().own.is_empty() {
+                if heights.borrow().each[i] != height {
+                    heights.borrow_mut().set(i, height);
+                    self.cache.heights.borrow_mut().insert((*text).into(), bare);
+                }
+            } else if heights.borrow().own[i] != height {
+                // its row is as tall as its tallest line now
+                let row = self.row_of(i);
+                if !heights.borrow().spans.is_empty() {
+                    self.settle_spanned(row, i, height);
+                    if inset.width.is_none() {
+                        self.cache.heights.borrow_mut().insert((*text).into(), bare);
+                    }
+                    return layout;
+                }
+                let mut heights = heights.borrow_mut();
+                heights.own[i] = height;
+                let tallest =
+                    tallest_cell(&heights.own, row.clone(), |j| self.inset(j).stacks_next);
+                heights.set(row.end - 1, tallest);
+                if inset.width.is_none() {
+                    self.cache.heights.borrow_mut().insert((*text).into(), bare);
+                }
             }
         }
         layout
@@ -1270,7 +2145,144 @@ impl LinesLayout {
         }
     }
     fn shift(&self, i: usize, rect: Rect) -> Rect {
-        Rect::new(rect.x, rect.y + self.top(i), rect.width, rect.height)
+        let inset = self.inset(i);
+        Rect::new(
+            rect.x + self.left(&inset),
+            rect.y + self.top(i) + inset.above,
+            rect.width,
+            rect.height,
+        )
+    }
+    /// Where a line with room `inset` starts across: its `left`, less its scroll group's offset.
+    #[inline]
+    fn left(&self, inset: &LineInset) -> f32 {
+        match inset.scroll_group {
+            Some(group) => inset.left - self.cache.group_scroll(group),
+            None => inset.left,
+        }
+    }
+    /// Whether any line is in a scroll group.
+    #[inline]
+    pub(crate) fn grouped(&self) -> bool {
+        self.grouped
+    }
+    /// The clip that keeps a box from `x` across `width` (where it shows, as line `i`'s) inside line `i`'s scroll
+    /// group frame shown from `shown_left`: how much to cut from its left and right. None outside a group.
+    pub(crate) fn group_clip(
+        &self,
+        i: usize,
+        shown_left: f32,
+        x: f32,
+        width: f32,
+    ) -> Option<(f32, f32)> {
+        let (_, group) = self.group_of(i)?;
+        let width = width.max(0.);
+        let left = (shown_left - x).clamp(0., width);
+        let right = (x + width - (shown_left + group.view)).clamp(0., width - left);
+        Some((left, right))
+    }
+    /// Line `i`'s scroll group offset (0 outside one).
+    pub(crate) fn group_offset(&self, inset: &LineInset) -> f32 {
+        inset
+            .scroll_group
+            .map_or(0., |group| self.cache.group_scroll(group))
+    }
+    /// Each scroll group's frame and extent; none without groups.
+    fn groups(&self) -> Option<Rc<HashMap<u32, GroupLines>>> {
+        if !self.grouped {
+            return None;
+        }
+        if let Some(groups) = &*self.groups.borrow() {
+            return Some(groups.clone());
+        }
+        let mut groups: HashMap<u32, GroupLines> = HashMap::new();
+        for i in 0..self.line_count() {
+            let inset = self.inset(i);
+            let Some(id) = inset.scroll_group else {
+                continue;
+            };
+            let group = groups.entry(id).or_insert(GroupLines {
+                left: inset.left,
+                width: inset.group_width,
+                right: inset.left,
+                first: i,
+                last: i,
+            });
+            if inset.hidden {
+                continue;
+            }
+            group.last = i;
+            let width = match inset.width.or(self.wrap.map(|w| w - inset.left)) {
+                Some(width) if !inset.nowrap => width.max(1.),
+                _ => self.line_range(i).len() as f32 * self.advance,
+            };
+            group.right = group.right.max(inset.left + width);
+        }
+        let groups = Rc::new(groups);
+        *self.groups.borrow_mut() = Some(groups.clone());
+        Some(groups)
+    }
+    /// Scroll group `id`'s frame and extent, if a line is in it.
+    pub(crate) fn group(&self, id: u32) -> Option<Group> {
+        let lines = *self.groups()?.get(&id)?;
+        let frame = self
+            .cache
+            .group_frames
+            .borrow()
+            .get(&id)
+            .copied()
+            .unwrap_or_default();
+        let left = frame.left.unwrap_or(lines.left);
+        let view = frame
+            .width
+            .or(lines.width)
+            .or(self.wrap.map(|w| w - left))
+            .unwrap_or(f32::INFINITY)
+            .max(1.);
+        let reach = self.group_reach.borrow().get(&id).copied().unwrap_or(0.);
+        let content = frame
+            .content
+            .unwrap_or(lines.right.max(reach) - left)
+            .max(0.);
+        Some(Group {
+            left,
+            view,
+            content,
+            first: lines.first,
+            last: lines.last,
+        })
+    }
+    /// Line `i`'s scroll group: its id and frame.
+    pub(crate) fn group_of(&self, i: usize) -> Option<(u32, Group)> {
+        if !self.grouped {
+            return None;
+        }
+        let id = self.inset(i).scroll_group?;
+        Some((id, self.group(id)?))
+    }
+    /// `x`, inside line `i`'s scroll group frame when it has one: what is clipped is not hit.
+    fn within_group(&self, i: usize, x: f32) -> f32 {
+        match self.group_of(i) {
+            Some((_, group)) => {
+                x.clamp(group.left, (group.left + group.view - 0.5).max(group.left))
+            }
+            None => x,
+        }
+    }
+    /// The offset scroll group `id` needs for `rect` (where it shows now) to show inside its frame, if it moves.
+    pub(crate) fn reveal_in_group(&self, i: usize, rect: Rect) -> Option<(u32, f32)> {
+        let (id, group) = self.group_of(i)?;
+        let now = self.cache.group_scroll(id);
+        let right = group.left + group.view;
+        let wanted = if rect.x < group.left {
+            now - (group.left - rect.x)
+        } else if rect.x + rect.width > right {
+            now + (rect.x + rect.width - right)
+        } else {
+            return None;
+        };
+        let wanted = wanted.clamp(0., group.limit());
+        (wanted != now).then_some((id, wanted))
     }
     /// The selection of `range`, only on the lines between `top` and
     /// `bottom`: what an editor draws of a selection of the whole file.
@@ -1288,6 +2300,20 @@ impl LinesLayout {
         let lines = shown.start.max(self.line_of(start))..shown.end.min(self.line_of(end) + 1);
         self.selection_on(start..end, lines)
     }
+    /// Where the inline boxes on the lines between `top` and `bottom` are laid
+    /// out (an atom shown as a picture): each one's byte offset in the text,
+    /// and its left edge and top in the area's points.
+    pub(crate) fn inline_boxes_between(&self, top: f32, bottom: f32) -> Vec<(usize, f32, f32)> {
+        let mut boxes = Vec::new();
+        for i in self.lines_between(top, bottom) {
+            let start = self.line_range(i).start;
+            for (at, x, y) in self.line(i).inline_boxes() {
+                let shown = self.shift(i, Rect::new(x, y, 0., 0.));
+                boxes.push((start + at, shown.x, shown.y));
+            }
+        }
+        boxes
+    }
     /// The selection of `range` on `lines`, each shaped.
     fn selection_on(&self, range: Range<usize>, lines: Range<usize>) -> Vec<Rect> {
         let (start, end) = (range.start, range.end);
@@ -1301,19 +2327,40 @@ impl LinesLayout {
                     let row = self.line(i).caret_position(Default::default());
                     let width = crate::text_layout::empty_line_width(row.height);
                     let sliver = Rect::new(row.x, row.y, width, row.height);
+                    let at = rects.len();
                     rects.push(self.shift(i, sliver));
+                    self.clip_to_group(i, &mut rects, at);
                 }
                 continue;
             }
             let layout = self.line(i);
+            let at = rects.len();
             rects.extend(
                 layout
                     .selection(a - line.start..b - line.start)
                     .into_iter()
                     .map(|rect| self.shift(i, rect)),
             );
+            self.clip_to_group(i, &mut rects, at);
         }
         rects
+    }
+    /// `rects[from..]`, of line `i`, cut to its scroll group's frame: what is scrolled out of it shows nothing.
+    fn clip_to_group(&self, i: usize, rects: &mut Vec<Rect>, from: usize) {
+        let Some((_, group)) = self.group_of(i) else {
+            return;
+        };
+        let right = group.left + group.view;
+        let mut kept = from;
+        for k in from..rects.len() {
+            let r = rects[k];
+            let (l, r_edge) = (r.x.max(group.left), (r.x + r.width).min(right));
+            if r_edge > l {
+                rects[kept] = Rect::new(l, r.y, r_edge - l, r.height);
+                kept += 1;
+            }
+        }
+        rects.truncate(kept);
     }
 }
 impl TextLayout for LinesLayout {
@@ -1332,9 +2379,16 @@ impl TextLayout for LinesLayout {
         self.hit_position(x, y).byte_offset
     }
     fn hit_position(&self, x: f32, y: f32) -> TextPosition {
-        let i = self.line_at(y);
+        let (i, cell) = self.line_at_point(x, y);
+        let x = self.within_group(i, x);
         let layout = self.line(i);
-        let local = layout.hit_position(x, y.max(0.) - self.top(i));
+        let inset = self.inset(i);
+        let mut down = y.max(0.) - self.top(i) - inset.above;
+        if cell {
+            // under a cell shorter than its row: its last row at x, as beside it
+            down = down.min(layout.size().1 - 0.5);
+        }
+        let local = layout.hit_position(x - self.left(&inset), down);
         let range = self.line_range(i);
         TextPosition {
             byte_offset: range.start + local.byte_offset.min(range.len()),
@@ -1369,22 +2423,47 @@ impl TextLayout for LinesLayout {
     fn selection_within(&self, range: Range<usize>, top: f32, bottom: f32) -> Vec<Rect> {
         self.selection_between(range, top, bottom)
     }
+    fn vertical_step(&self, from: TextPosition, x: f32, down: bool) -> Option<TextPosition> {
+        if !self.has_rows() {
+            return None;
+        }
+        let i = self.line_of(from.byte_offset.min(self.text.len()));
+        let row = self.row_of(i);
+        if row.len() == 1 {
+            return None;
+        }
+        let layout = self.line(i);
+        let caret = layout.caret_position(self.local(i, from));
+        let to = caret.y
+            + if down {
+                caret.height * 1.5
+            } else {
+                -caret.height * 0.5
+            };
+        // Another of its own wrapped rows: found as in any line.
+        if to >= 0. && to < layout.size().1 {
+            return None;
+        }
+        // the next or the last of its cell's stacked lines
+        if down && self.inset(i).stacks_next {
+            return Some(self.hit_position(x, self.top(i + 1) + self.inset(i + 1).above + 0.5));
+        }
+        if !down && i > 0 && self.inset(i - 1).stacks_next {
+            return Some(self.hit_position(x, self.top(i) - 0.5));
+        }
+        let top = self.top(row.start);
+        if down {
+            let below = top + self.row_height(i);
+            (row.end < self.line_count()).then(|| self.hit_position(x, below + 0.5))
+        } else {
+            (row.start > 0 && top > 0.).then(|| self.hit_position(x, top - 0.5))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A highlighted line's spans are this big and no bigger: main's
-    /// sixteen bytes, an underline, and a four-byte name of the rare rest
-    /// (`SpanLook`: an underline's colour and place, a lead, a picture). A
-    /// span and its range stay forty bytes.
-    #[test]
-    fn span_style_stays_its_size() {
-        assert_eq!(std::mem::size_of::<Option<std::num::NonZeroU32>>(), 4);
-        assert_eq!(std::mem::size_of::<SpanStyle>(), 24);
-        assert_eq!(std::mem::size_of::<(Range<usize>, SpanStyle)>(), 40);
-    }
 
     /// Spans that only colour give their runs as before styles: in order,
     /// an earlier span keeping what a later one overlaps, the rest the
@@ -1399,13 +2478,49 @@ mod tests {
         );
         let spans: LineSpans = vec![(1..4, red.into()), (2..6, blue.into())];
         let font = crate::text_layout::FontStyle::default();
-        let rich = styled_line("abcdefgh", &spans, ink, 14., &font, &[]).unwrap();
+        let rich = styled_line("abcdefgh", &spans, ink, 14., &font).unwrap();
         let runs: Vec<_> = rich
             .runs()
             .iter()
             .map(|r| (r.range.clone(), r.color))
             .collect();
         assert_eq!(runs, [(0..1, ink), (1..4, red), (4..6, blue), (6..8, ink)]);
+    }
+    /// A note's heading and inline code: size, line pitch, underline and the monospaced font reach the runs.
+    #[test]
+    fn note_spans_set_size_pitch_underline_and_font() {
+        use crate::scene::Color;
+        let ink = Color(0, 0, 0, 255);
+        let spans: LineSpans = vec![
+            (
+                0..5,
+                SpanStyle::default().size(24.).line_height(32.).weight(600),
+            ),
+            (6..10, SpanStyle::default().mono()),
+            (11..15, SpanStyle::default().underline()),
+        ];
+        let font = crate::text_layout::FontStyle::default();
+        let rich = styled_line("Title code link", &spans, ink, 16., &font).unwrap();
+        let runs = rich.runs();
+        let title = runs.iter().find(|r| r.range == (0..5)).unwrap();
+        assert_eq!(title.font_size, 24.);
+        assert_eq!(title.font.line_height.pixels(), Some(32.));
+        assert_eq!(title.font.weight, 600);
+        let code = runs.iter().find(|r| r.range == (6..10)).unwrap();
+        assert_eq!(code.font.family, crate::text_layout::FontFamily::Monospace);
+        assert_eq!(code.font_size, 16.);
+        assert!(
+            runs.iter()
+                .find(|r| r.range == (11..15))
+                .unwrap()
+                .underline
+                .is_some()
+        );
+        assert!(
+            shape_key(&spans).is_some(),
+            "size and font reshape the line"
+        );
+        assert!(shape_key(&vec![(11..15, SpanStyle::default().underline())]).is_none());
     }
     use crate::text_layout::{FallbackTextLayout, FontStyle};
 
@@ -1428,6 +2543,724 @@ mod tests {
             0,
             shaper,
         )
+    }
+
+    /// An inset line keeps its carets, hits and selection inside its room, and wraps in what the indent leaves.
+    #[test]
+    fn insets_move_carets_hits_and_wrapping() {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| {
+            if i == 1 {
+                LineInset {
+                    left: 36.,
+                    above: 8.,
+                    below: 4.,
+                    ..LineInset::default()
+                }
+            } else {
+                LineInset::default()
+            }
+        })));
+        let text = "first\nsecond line that is long enough to wrap in a narrow box\nthird";
+        let layout = |cache: &Rc<LineCache>| {
+            cache.layout(
+                || Text::new(text),
+                None,
+                14.,
+                Some(200.),
+                &FontStyle::default(),
+                0,
+                shaper,
+            )
+        };
+        let inset = layout(&cache);
+        let plain = layout(&Rc::new(LineCache::default()));
+        let second = text.find("second").unwrap();
+        let (a, b) = (inset.caret(second), plain.caret(second));
+        assert_eq!(a.x, b.x + 36.);
+        assert_eq!(a.y, b.y + 8.);
+        assert_eq!(inset.hit_test(a.x + 1., a.y + 1.), second);
+        assert!(
+            inset.height(1) > plain.height(1) + 11.,
+            "above, below and a narrower wrap add height"
+        );
+        let third = text.find("third").unwrap();
+        assert!(inset.caret(third).y > plain.caret(third).y + 11.);
+        assert_eq!(inset.caret(0), plain.caret(0));
+    }
+
+    /// An indented line is drawn in the width it was wrapped to, not the whole text's: its rows end at the same edge.
+    #[test]
+    fn an_indented_line_draws_in_the_width_it_wraps_to() {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| {
+            if i == 1 {
+                LineInset {
+                    left: 36.,
+                    ..LineInset::default()
+                }
+            } else {
+                LineInset::default()
+            }
+        })));
+        let text = "first\nsecond line that is long enough to wrap in a narrow box";
+        let layout = cache.layout(
+            || Text::new(text),
+            None,
+            14.,
+            Some(200.),
+            &FontStyle::default(),
+            0,
+            shaper,
+        );
+        assert_eq!(layout.draw_width(1, Some(200.)), Some(164.));
+        assert_eq!(layout.draw_width(0, Some(200.)), Some(200.));
+        assert!(
+            layout.line(1).size().0 <= 164.,
+            "its rows fit the width it is drawn in"
+        );
+        assert_eq!(layout.draw_width(1, None), None);
+    }
+
+    /// A note's heading, then a paragraph and a list item: each line starts where the one above ends (its taller
+    /// pitch and its room included), wrapped or not, and a heading's line is as tall as its pitch (nothing clipped).
+    #[test]
+    fn a_heading_pushes_the_lines_below_it() {
+        for wrap in [None, Some(400.)] {
+            let cache = Rc::new(LineCache::default());
+            cache.set_highlighter(Some(Rc::new(|line: &str, state: u32| {
+                let spans: LineSpans = if state == 1 {
+                    vec![(
+                        0..line.len(),
+                        SpanStyle::default().size(24.).line_height(32.).weight(600),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                (spans, state + 1)
+            })));
+            cache.set_insets(Some(Rc::new(|i| match i {
+                1 => LineInset {
+                    above: 24.,
+                    ..LineInset::default()
+                },
+                2 => LineInset {
+                    above: 12.,
+                    ..LineInset::default()
+                },
+                3 => LineInset {
+                    left: 32.,
+                    above: 8.,
+                    ..LineInset::default()
+                },
+                _ => LineInset::default(),
+            })));
+            let text = "Title\nA heading\nbody text\nList item";
+            let lay = || {
+                cache.layout(
+                    || Text::new(text),
+                    None,
+                    14.,
+                    wrap,
+                    &FontStyle::default(),
+                    0,
+                    shaper,
+                )
+            };
+            // as the editor does: painting asks for the spans, a span that shapes lays the text out again
+            let first = lay();
+            for i in 0..4 {
+                cache.spans(&first, i);
+            }
+            assert!(cache.take_restyled());
+            cache.forget_last();
+            let layout = lay();
+            layout.lines_between(0., 1000.);
+            assert!(
+                layout.height(1) >= 32. + 24.,
+                "{wrap:?}: the heading's pitch and room: {}",
+                layout.height(1)
+            );
+            for i in 1..4 {
+                assert_eq!(
+                    layout.top(i),
+                    layout.top(i - 1) + layout.height(i - 1),
+                    "{wrap:?}: line {i} starts below line {}",
+                    i - 1
+                );
+            }
+            let heading = layout.caret(text.find("A heading").unwrap());
+            let body = layout.caret(text.find("body").unwrap());
+            let item = layout.caret(text.find("List item").unwrap());
+            assert_eq!(heading.y, layout.top(1) + 24.);
+            assert!(
+                body.y >= heading.y + 32. + 12.,
+                "{wrap:?}: the paragraph sits below the heading: {} vs {}",
+                body.y,
+                heading.y
+            );
+            assert!(
+                item.y >= body.y + 8. && item.x >= 32.,
+                "{wrap:?}: the list item, indented, below the paragraph"
+            );
+        }
+    }
+
+    /// A table of two rows of two cells between ordinary lines: `first` is its first cell's line. Each cell is 100
+    /// wide, the second column 110 in; the second column's cells have room above and below.
+    const TABLE: &str = "before\nA1 with text long enough to wrap in its cell\nB1\nA2\nB2\nafter";
+    fn table_insets(first: Rc<Cell<usize>>) -> LineInsets {
+        Rc::new(move |i| match i.checked_sub(first.get()) {
+            Some(0 | 2) => LineInset {
+                width: Some(100.),
+                joins_next: true,
+                ..LineInset::default()
+            },
+            Some(1 | 3) => LineInset {
+                left: 110.,
+                above: 2.,
+                below: 3.,
+                width: Some(100.),
+                ..LineInset::default()
+            },
+            _ => LineInset::default(),
+        })
+    }
+    fn table(text: &str, first: usize) -> (Rc<LineCache>, Rc<LinesLayout>, Rc<Cell<usize>>) {
+        let first = Rc::new(Cell::new(first));
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(table_insets(first.clone())));
+        let layout = relaid(&cache, text);
+        (cache, layout, first)
+    }
+    fn relaid(cache: &Rc<LineCache>, text: &str) -> Rc<LinesLayout> {
+        cache.layout(
+            || Text::new(text),
+            None,
+            14.,
+            Some(400.),
+            &FontStyle::default(),
+            0,
+            shaper,
+        )
+    }
+    /// A table four 300-point columns wide in a 680-point note, one scroll group (7) shown 680 wide: lines 1 to 4
+    /// are its cells, between ordinary lines.
+    const WIDE: &str = "before\nc1 one\nc2 two\nc3 three\nc4 four\nafter";
+    fn wide() -> (Rc<LineCache>, Rc<LinesLayout>) {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| match i {
+            1..=4 => LineInset {
+                left: 300. * (i - 1) as f32,
+                width: Some(300.),
+                joins_next: i < 4,
+                scroll_group: Some(7),
+                group_width: Some(680.),
+                ..LineInset::default()
+            },
+            _ => LineInset::default(),
+        })));
+        let layout = cache.layout(
+            || Text::new(WIDE),
+            None,
+            14.,
+            Some(680.),
+            &FontStyle::default(),
+            0,
+            shaper,
+        );
+        layout.lines_between(0., 10_000.);
+        (cache, layout)
+    }
+
+    /// A scroll group's frame is its first line's left across its width, its extent its cells'; its lines move
+    /// together by its offset, and the lines outside it don't.
+    #[test]
+    fn a_scroll_group_frames_its_lines_and_scrolls_them_together() {
+        let (cache, layout) = wide();
+        let frame = layout.group(7).unwrap();
+        assert_eq!((frame.left, frame.view, frame.content), (0., 680., 1200.));
+        assert_eq!(frame.limit(), 520.);
+        let at = |needle: &str| WIDE.find(needle).unwrap();
+        assert_eq!(layout.caret(at("c3")).x, 600.);
+        assert_eq!(layout.caret(at("c4")).x, 900.);
+        cache.set_group_scroll(7, 520.);
+        assert_eq!(layout.caret(at("c3")).x, 80.);
+        assert_eq!(layout.caret(at("c4")).x, 380.);
+        assert_eq!(
+            layout.caret(at("before")).x,
+            0.,
+            "a line outside the group stays"
+        );
+        assert_eq!(layout.caret(at("after")).x, 0.);
+    }
+
+    /// A click in the third column's text places the caret there however far the group is scrolled; the last
+    /// columns are reachable, and what the frame clips is not hit.
+    #[test]
+    fn a_click_in_a_scrolled_cell_places_the_caret_there() {
+        let (cache, layout) = wide();
+        let at = |needle: &str| WIDE.find(needle).unwrap();
+        let (c3, c4) = (layout.line_range(3), layout.line_range(4));
+        let y = layout.top(1) + 2.;
+        for offset in (0..=520).step_by(40) {
+            cache.set_group_scroll(7, offset as f32);
+            let x = 600. - offset as f32 + 1.;
+            let hit = layout.hit_test(x, y);
+            assert!(
+                c3.contains(&hit) || hit == c3.end,
+                "at {offset}: {hit} in column 3 ({c3:?})"
+            );
+            assert_eq!(
+                hit,
+                at("c3"),
+                "at {offset}: the caret at the column's start"
+            );
+        }
+        cache.set_group_scroll(7, 520.);
+        let hit = layout.hit_test(381., y);
+        assert_eq!(hit, at("c4"), "the last column, scrolled to");
+        cache.set_group_scroll(7, 0.);
+        let hit = layout.hit_test(700., y);
+        assert!(
+            c3.contains(&hit) || hit == c3.end,
+            "past the frame: its last column shown, not the clipped one"
+        );
+        assert!(!c4.contains(&hit));
+    }
+
+    /// A selection across the frame's edge shows only what the frame shows: none of a cell scrolled out of it.
+    #[test]
+    fn a_selection_across_the_clip_shows_only_what_the_frame_shows() {
+        let (cache, layout) = wide();
+        let range = WIDE.find("c3").unwrap()..WIDE.find("after").unwrap() - 1;
+        let shown = layout.selection(range.clone());
+        assert!(!shown.is_empty(), "the third column shows in part");
+        for rect in &shown {
+            assert!(
+                rect.x >= 0. && rect.x + rect.width <= 680. + 0.01,
+                "inside the frame: {rect:?}"
+            );
+            assert!(rect.x < 680., "{rect:?}");
+        }
+        let top_c4 = layout.top(4);
+        cache.set_group_scroll(7, 520.);
+        let scrolled = layout.selection(range);
+        assert!(
+            scrolled
+                .iter()
+                .any(|r| r.x >= 380. - 0.01 && r.y >= top_c4 - 0.01),
+            "scrolled, the last column's selection shows: {scrolled:?}"
+        );
+        for rect in &scrolled {
+            assert!(
+                rect.x >= 0. && rect.x + rect.width <= 680. + 0.01,
+                "{rect:?}"
+            );
+        }
+    }
+
+    /// A caret in a cell the frame clips asks the group to move just enough to show it, either way, within its
+    /// limit; one it shows asks nothing.
+    #[test]
+    fn a_caret_in_a_clipped_cell_is_revealed() {
+        let (cache, layout) = wide();
+        let at = |needle: &str| WIDE.find(needle).unwrap();
+        let caret = layout.caret(at("c4") + 2);
+        let (group, to) = layout
+            .reveal_in_group(4, caret)
+            .expect("the fourth column is clipped");
+        assert_eq!(group, 7);
+        assert!(
+            (to - (caret.x + caret.width - 680.)).abs() < 0.01,
+            "{to} for {caret:?}"
+        );
+        cache.set_group_scroll(7, to);
+        let shown = layout.caret(at("c4") + 2);
+        assert!(shown.x + shown.width <= 680. + 0.01, "{shown:?}");
+        assert_eq!(
+            layout.reveal_in_group(4, shown),
+            None,
+            "shown: nothing to move"
+        );
+        // Back to the first column: to 0.
+        cache.set_group_scroll(7, 520.);
+        let first = layout.caret(at("c1"));
+        assert_eq!(layout.reveal_in_group(1, first), Some((7, 0.)));
+        // A line outside the group asks nothing.
+        assert_eq!(layout.reveal_in_group(0, layout.caret(0)), None);
+    }
+
+    /// Lines in no scroll group lay out, hit and select as before whatever offsets are set, and finding groups
+    /// asks nothing of their insets.
+    #[test]
+    fn lines_without_a_scroll_group_ignore_group_offsets() {
+        let (cache, layout, _) = table(TABLE, 1);
+        layout.lines_between(0., 10_000.);
+        assert!(!layout.grouped());
+        assert_eq!(layout.group_of(2), None);
+        let carets: Vec<Rect> = (0..TABLE.len()).map(|i| layout.caret(i)).collect();
+        let hits: Vec<usize> = (0..40)
+            .map(|k| layout.hit_test(k as f32 * 6., layout.top(1) + 3.))
+            .collect();
+        cache.set_group_scroll(0, 50.);
+        cache.set_group_scroll(7, 120.);
+        assert_eq!(
+            carets,
+            (0..TABLE.len())
+                .map(|i| layout.caret(i))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits,
+            (0..40)
+                .map(|k| layout.hit_test(k as f32 * 6., layout.top(1) + 3.))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Every line's top, own height and row height, and the whole height, all shaped.
+    fn geometry(layout: &LinesLayout) -> Vec<(f32, f32, f32)> {
+        layout.lines_between(0., 10_000.);
+        let mut all: Vec<_> = (0..layout.line_count())
+            .map(|i| (layout.top(i), layout.height(i), layout.row_height(i)))
+            .collect();
+        all.push((layout.size().1, 0., 0.));
+        all
+    }
+
+    /// The cells of a row start at the row's top, each at its own left; the row is as tall as its tallest cell, and
+    /// the lines after it start below it.
+    #[test]
+    fn a_row_of_lines_shares_a_top_and_is_as_tall_as_its_tallest() {
+        let (_, layout, _) = table(TABLE, 1);
+        assert_eq!(layout.lines_between(0., 10_000.), 0..6);
+        let row = layout.row;
+        assert_eq!(layout.top(1), layout.height(0));
+        assert_eq!(layout.top(2), layout.top(1));
+        assert!(
+            layout.height(1) >= 2. * row,
+            "the first cell wraps: {}",
+            layout.height(1)
+        );
+        assert_eq!(
+            layout.height(2),
+            row + 5.,
+            "a cell's own height, its room included"
+        );
+        assert_eq!(layout.row_height(1), layout.height(1));
+        assert_eq!(layout.row_height(2), layout.height(1));
+        assert_eq!(layout.top(3), layout.top(1) + layout.row_height(1));
+        assert_eq!(layout.top(4), layout.top(3));
+        assert_eq!(
+            layout.row_height(3),
+            row + 5.,
+            "the second row: its cell with room is the tallest"
+        );
+        assert_eq!(layout.top(5), layout.top(3) + row + 5.);
+        assert_eq!(layout.size().1, layout.top(5) + layout.height(5));
+        assert_eq!(layout.row_of(1), 1..3);
+        assert_eq!(layout.row_of(4), 3..5);
+        assert_eq!(layout.row_of(5), 5..6);
+        assert_eq!(layout.draw_width(1, Some(400.)), Some(100.));
+        assert_eq!(layout.draw_width(2, Some(400.)), Some(100.));
+        assert!(layout.line(1).size().0 <= 100.);
+    }
+
+    /// A hit in a row finds the cell whose room holds its x (the first before them all, the last after), and carets
+    /// sit in their cells.
+    #[test]
+    fn hits_and_carets_in_a_row_follow_its_cells() {
+        let (_, layout, _) = table(TABLE, 1);
+        layout.lines_between(0., 10_000.);
+        let at = |needle: &str| TABLE.find(needle).unwrap();
+        let (a1, b1, a2, b2) = (at("A1"), at("B1"), at("A2"), at("B2"));
+        let (top, row) = (layout.top(1), layout.row);
+        assert_eq!(
+            layout.caret(a1),
+            Rect::new(0., top, layout.caret(a1).width, row)
+        );
+        assert_eq!((layout.caret(b1).x, layout.caret(b1).y), (110., top + 2.));
+        assert_eq!(
+            (layout.caret(b2).x, layout.caret(b2).y),
+            (110., layout.top(3) + 2.)
+        );
+        assert_eq!(layout.caret(a2).y, layout.top(3));
+        assert_eq!(layout.hit_test(1., top + 1.), a1);
+        assert_eq!(layout.hit_test(-20., top + 1.), a1);
+        assert_eq!(layout.hit_test(111., top + 3.), b1);
+        assert_eq!(
+            layout.hit_test(900., top + 3.),
+            b1 + 2,
+            "past the last cell: its end"
+        );
+        // between the cells: the cell before the gap
+        let gap = layout.hit_test(105., top + 1.);
+        assert!((a1..b1).contains(&gap), "{gap}");
+        // lower in the row than the short cell's text: still that cell
+        let low = layout.hit_position(111., top + layout.row_height(1) - 1.);
+        assert_eq!(low.byte_offset, b1, "its row at that x, not its end");
+        let wrapped = layout.hit_test(1., top + row * 1.5);
+        assert!(
+            wrapped > a1 && wrapped < b1,
+            "the first cell's second row: {wrapped}"
+        );
+        assert_eq!(layout.hit_test(1., layout.top(3) + 1.), a2);
+        assert_eq!(layout.hit_test(111., layout.top(3) + 3.), b2);
+        assert_eq!(layout.hit_test(1., layout.top(5) + 1.), at("after"));
+        assert_eq!(layout.hit_test(1., 1.), 0);
+        for offset in 0..=TABLE.len() {
+            let caret = layout.caret(offset);
+            assert_eq!(
+                layout.hit_test(caret.x + 0.5, caret.y + 1.),
+                offset,
+                "a hit at caret {offset} finds it"
+            );
+        }
+    }
+
+    /// A selection over two cells paints each cell's lines inside the cell, never a band across the row.
+    #[test]
+    fn a_selection_across_cells_stays_inside_each_cell() {
+        let (_, layout, _) = table(TABLE, 1);
+        let (a1, b1) = (TABLE.find("A1").unwrap(), TABLE.find("B1").unwrap());
+        let rects = layout.selection(a1 + 3..b1 + 2);
+        assert!(rects.len() >= 3, "{rects:?}");
+        let (top, bottom) = (layout.top(1), layout.top(1) + layout.row_height(1));
+        let (mut left, mut right) = (0, 0);
+        for r in &rects {
+            assert!(r.y >= top && r.y + r.height <= bottom, "in the row: {r:?}");
+            if r.x < 110. {
+                assert!(r.x + r.width <= 100.5, "in the first cell: {r:?}");
+                left += 1;
+            } else {
+                assert!(r.x + r.width <= 210.5, "in the second cell: {r:?}");
+                assert_eq!(r.y, top + 2.);
+                right += 1;
+            }
+        }
+        assert!(left >= 2 && right == 1, "{rects:?}");
+        assert_eq!(
+            layout.selection_between(a1 + 3..b1 + 2, top + 1., top + 2.),
+            rects
+        );
+        // into the next row: its first cell only
+        let a2 = TABLE.find("A2").unwrap();
+        let more = layout.selection(b1..a2 + 1);
+        assert!(
+            more.iter().any(|r| r.y == layout.top(3) && r.x == 0.),
+            "{more:?}"
+        );
+        assert!(more.iter().all(|r| r.x + r.width <= 210.5), "{more:?}");
+    }
+
+    /// A row in view shows all its lines, and the line at a y in it is its first.
+    #[test]
+    fn lines_between_gives_the_whole_row() {
+        let (_, layout, _) = table(TABLE, 1);
+        layout.lines_between(0., 10_000.);
+        let top = layout.top(1);
+        assert_eq!(layout.lines_between(top + 1., top + 2.), 1..3);
+        assert_eq!(layout.line_at(top + 1.), 1);
+        let second = layout.top(3);
+        assert_eq!(layout.lines_between(second + 1., second + 2.), 3..5);
+        assert_eq!(layout.lines_between(top + 1., second + 1.), 1..5);
+        assert_eq!(layout.line_at(layout.top(5) + 1.), 5);
+        assert_eq!(layout.line_at(0.), 0);
+    }
+
+    /// An edit that grows a cell makes its row taller and moves the lines below; edits around the table (which
+    /// move its lines) keep its rows: all as a layout of the text made has them.
+    #[test]
+    fn an_edit_in_a_row_lays_it_out_again() {
+        let (cache, layout, first) = table(TABLE, 1);
+        let before = geometry(&layout);
+        let mut text = String::from(TABLE);
+        let b1 = text.find("B1").unwrap();
+        text.insert_str(
+            b1 + 2,
+            " grows until it is the tallest cell of its row by far, three rows or more",
+        );
+        let grown = relaid(&cache, &text);
+        let after = geometry(&grown);
+        assert_eq!(after, geometry(&table(&text, 1).1));
+        assert!(
+            after[2].1 > before[1].1,
+            "the second cell is the tallest now"
+        );
+        assert_eq!(after[1].2, after[2].1);
+        assert_eq!(
+            after[3].0,
+            after[1].0 + after[2].1,
+            "the next row starts below it"
+        );
+        assert!(after[5].0 > before[5].0);
+        assert_eq!(
+            after[1].1, before[1].1,
+            "the first cell's own height is its own"
+        );
+        // a line break above the table: its lines move down one, their rows with them
+        text.insert_str(0, "new\n");
+        first.set(2);
+        let moved = relaid(&cache, &text);
+        assert_eq!(moved.row_of(2), 2..4);
+        assert_eq!(geometry(&moved), geometry(&table(&text, 2).1));
+        // the last cell of the table edited, then the line after it
+        let b2 = text.find("B2").unwrap();
+        text.insert_str(
+            b2,
+            "taller than the first cell beside it, wrapping onto a few rows ",
+        );
+        assert_eq!(
+            geometry(&relaid(&cache, &text)),
+            geometry(&table(&text, 2).1)
+        );
+        let end = text.len();
+        text.insert_str(end, "\nlast");
+        assert_eq!(
+            geometry(&relaid(&cache, &text)),
+            geometry(&table(&text, 2).1)
+        );
+        // and before any of it is shaped again, the heights the edit keeps are a fresh layout's
+        text.replace_range(0..4, "");
+        first.set(1);
+        let kept = relaid(&cache, &text);
+        assert_eq!(kept.row_of(1), 1..3);
+        assert_eq!(geometry(&kept), geometry(&table(&text, 1).1));
+    }
+
+    /// A hidden line takes no room in a text with rows, alone or as a cell.
+    #[test]
+    fn a_hidden_line_among_rows_takes_no_room() {
+        let text = "before\nA1\nB1 hidden cell with text long enough to wrap\nC1\nhidden\nafter";
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| match i {
+            1 => LineInset {
+                width: Some(100.),
+                joins_next: true,
+                ..LineInset::default()
+            },
+            2 => LineInset {
+                left: 110.,
+                width: Some(60.),
+                joins_next: true,
+                hidden: true,
+                ..LineInset::default()
+            },
+            3 => LineInset {
+                left: 110.,
+                width: Some(100.),
+                ..LineInset::default()
+            },
+            4 => LineInset {
+                hidden: true,
+                ..LineInset::default()
+            },
+            _ => LineInset::default(),
+        })));
+        let layout = relaid(&cache, text);
+        assert_eq!(layout.lines_between(0., 10_000.), 0..6);
+        let row = layout.row;
+        assert_eq!(layout.row_of(2), 1..4);
+        assert_eq!(
+            (layout.top(1), layout.top(2), layout.top(3)),
+            (row, row, row)
+        );
+        assert_eq!(layout.height(2), 0.);
+        assert_eq!(
+            layout.row_height(1),
+            row,
+            "the hidden cell's wrapped text adds nothing"
+        );
+        assert_eq!(layout.top(4), 2. * row);
+        assert_eq!(layout.top(5), 2. * row);
+        assert_eq!(layout.size().1, 3. * row);
+        assert_eq!(layout.hit_test(111., row + 1.), text.find("C1").unwrap());
+        assert_eq!(
+            layout.hit_test(1., 2. * row + 1.),
+            text.find("after").unwrap()
+        );
+    }
+
+    /// Up and down leave a row for the line above or below it at the caret's x (the cell under it, if that is a
+    /// row), once the cell's own wrapped rows are done; a text with no rows steps as it did.
+    #[test]
+    fn vertical_steps_leave_a_row() {
+        let (_, layout, _) = table(TABLE, 1);
+        layout.lines_between(0., 10_000.);
+        let at = |needle: &str| TABLE.find(needle).unwrap();
+        let step = |from: usize, x: f32, down: bool| {
+            let from = TextPosition {
+                byte_offset: from,
+                affinity: TextAffinity::After,
+            };
+            layout.vertical_step(from, x, down).map(|to| to.byte_offset)
+        };
+        assert_eq!(
+            step(at("B1"), 110., true),
+            Some(at("B2")),
+            "the cell below, not B1's end"
+        );
+        assert_eq!(
+            step(at("B2"), 110., true),
+            Some(TABLE.len()),
+            "the line below, at its x"
+        );
+        assert_eq!(step(at("B2"), 110., false), Some(at("B1")));
+        assert_eq!(step(at("A1"), 0., false), Some(0));
+        assert_eq!(step(at("A1"), 0., true), None, "its own second row first");
+        assert_eq!(
+            step(at("B1") - 1, 0., true),
+            Some(at("A2")),
+            "from the cell's last row"
+        );
+        assert_eq!(
+            step(at("A2"), 0., false).map(|to| layout.line_of(to)),
+            Some(1)
+        );
+        assert_eq!(
+            step(at("after"), 0., false),
+            None,
+            "an ordinary line steps by a hit"
+        );
+        let above = layout.hit_test(110., layout.top(5) - layout.row * 0.5);
+        assert_eq!(
+            layout.line_of(above),
+            4,
+            "which finds the cell above at its x"
+        );
+        let plain = lines(TABLE, Some(400.));
+        assert!(!plain.has_rows());
+        let from = TextPosition {
+            byte_offset: at("B1"),
+            affinity: TextAffinity::After,
+        };
+        assert_eq!(plain.vertical_step(from, 0., true), None);
+    }
+
+    /// A text with no rows asks each line's room no more than it did: once a line as it is laid out, and for a
+    /// hit or a caret only its own line's.
+    #[test]
+    fn a_text_without_rows_asks_no_more_of_its_insets() {
+        let asked = Rc::new(Cell::new(0usize));
+        let count = asked.clone();
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(move |_| {
+            count.set(count.get() + 1);
+            LineInset::default()
+        })));
+        let text: String = (0..1_000).map(|i| format!("line {i}\n")).collect();
+        let layout = relaid(&cache, &text);
+        assert_eq!(asked.get(), layout.line_count(), "once a line");
+        asked.set(0);
+        layout.hit_test(5., 500. * layout.row);
+        assert_eq!(asked.get(), 2, "the line shaped, and its room for the hit");
+        asked.set(0);
+        layout.line_at(300. * layout.row);
+        layout.top(700);
+        layout.height(700);
+        layout.row_height(700);
+        assert_eq!(asked.get(), 0);
     }
 
     /// Laid out by its lines, a text has the carets, hits and selections it
@@ -1570,5 +3403,166 @@ mod tests {
         let before = shaped.get();
         assert_eq!(layout.selection(at..at + 4).len(), 1);
         assert!(shaped.get() - before <= 1, "{}", shaped.get() - before);
+    }
+
+    /// A cell spanning three rows (`LineInset::spans_rows`) beside three rows of one cell each, between ordinary
+    /// lines: line 1 the spanning cell (100 wide, `tall` below its text), lines 2 to 4 the rows' cells, 110 in,
+    /// each with `room` below it (or hidden).
+    const SPANNED: &str = "before\nS\nA\nB\nC\nafter";
+    fn spanned_insets(tall: f32, room: [f32; 3], hidden: bool) -> LineInsets {
+        Rc::new(move |i| match i {
+            1 => LineInset {
+                width: Some(100.),
+                below: tall,
+                joins_next: true,
+                spans_rows: 3,
+                ..LineInset::default()
+            },
+            2..=4 => LineInset {
+                left: 110.,
+                width: Some(100.),
+                below: room[i - 2],
+                hidden,
+                ..LineInset::default()
+            },
+            _ => LineInset::default(),
+        })
+    }
+    fn spanned(tall: f32, room: [f32; 3], hidden: bool) -> (Rc<LineCache>, Rc<LinesLayout>) {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(spanned_insets(tall, room, hidden)));
+        let layout = relaid(&cache, SPANNED);
+        layout.lines_between(0., 10_000.);
+        (cache, layout)
+    }
+    /// The heights of the three spanned rows, and the span's.
+    fn spanned_rows(layout: &LinesLayout) -> ([f32; 3], f32) {
+        let tops = [1, 3, 4, 5].map(|i| layout.top(i));
+        (
+            [tops[1] - tops[0], tops[2] - tops[1], tops[3] - tops[2]],
+            layout.row_height(1),
+        )
+    }
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    /// As Chrome lays out a `rowspan` cell taller than its rows (headless Chrome 157: a 200-pixel cell beside three
+    /// rows 20, 20 and 20 high makes them 66.66, 66.66 and 66.69; beside 60, 20 and 20, 120, 40 and 40; beside three
+    /// empty rows, 0, 0 and 200): what it needs past its rows goes to them in proportion to their heights, all to the
+    /// last where they are all empty. Its own row height is theirs together; the line after them starts below.
+    #[test]
+    fn a_cell_spanning_rows_shares_its_height_among_them_as_chrome_does() {
+        let row = relaid(&Rc::new(LineCache::default()), "x").row;
+        let tall = 10. * row;
+        let cell = row + tall;
+        let (_, layout) = spanned(tall, [0.; 3], false);
+        let (rows, span) = spanned_rows(&layout);
+        assert!(
+            rows.iter().all(|&h| close(h, cell / 3.)),
+            "equal rows share it equally: {rows:?} of {cell}"
+        );
+        assert!(
+            close(span, cell),
+            "the cell's row height is its rows': {span}"
+        );
+        assert!(close(layout.row_height(2), cell / 3.));
+        assert_eq!(layout.row_of(1), 1..3);
+        assert_eq!(layout.row_of(3), 3..4);
+        let (_, layout) = spanned(tall, [2. * row, 0., 0.], false);
+        let (rows, _) = spanned_rows(&layout);
+        assert!(
+            close(rows[0], 0.6 * cell) && close(rows[1], 0.2 * cell) && close(rows[2], 0.2 * cell),
+            "rows of 3, 1 and 1 take 3/5, 1/5 and 1/5: {rows:?} of {cell}"
+        );
+        let (_, layout) = spanned(tall, [0.; 3], true);
+        let (rows, _) = spanned_rows(&layout);
+        assert!(
+            close(rows[0], 0.) && close(rows[1], 0.) && close(rows[2], cell),
+            "empty rows: all to the last: {rows:?}"
+        );
+        // A cell no taller than its rows leaves them as they are.
+        let (_, layout) = spanned(0., [row; 3], false);
+        let (rows, span) = spanned_rows(&layout);
+        assert!(rows.iter().all(|&h| close(h, 2. * row)), "{rows:?}");
+        assert!(close(span, 6. * row));
+        assert!(
+            close(layout.top(5), layout.top(1) + 6. * row),
+            "the next line below them all"
+        );
+    }
+
+    /// Beside a cell spanning rows, a row's hits find the spanning cell where `x` is in its room, and its own cell
+    /// past it; a caret moving down from a row's cell goes to the next; the spanning cell is shaped and shown with
+    /// any of its rows.
+    #[test]
+    fn hits_and_lines_shown_follow_a_cell_across_the_rows_it_spans() {
+        let (_, layout) = spanned(200., [0.; 3], false);
+        let line = |i: usize| layout.line_range(i);
+        for i in [3, 4] {
+            let y = layout.top(i) + 2.;
+            assert!(
+                line(1).contains(&layout.hit_test(50., y))
+                    || layout.hit_test(50., y) == line(1).end,
+                "row {i}: a hit in the spanning cell's room is in it: {}",
+                layout.hit_test(50., y)
+            );
+            let own = layout.hit_test(150., y);
+            assert!(
+                (line(i).start..=line(i).end).contains(&own),
+                "row {i}: past it, its own cell: {own}"
+            );
+        }
+        assert_eq!(
+            layout
+                .lines_between(layout.top(3) + 2., layout.top(3) + 4.)
+                .start,
+            1,
+            "the spanning cell's row shaped and shown with the row after it"
+        );
+        assert_eq!(
+            layout
+                .lines_between(layout.top(5) + 2., layout.top(5) + 4.)
+                .start,
+            5
+        );
+    }
+
+    /// Cells spanning one row (`spans_rows` 1, or 0, the default) lay out exactly as before.
+    #[test]
+    fn a_span_of_one_row_is_the_default() {
+        let (_, plain, _) = table(TABLE, 1);
+        let cache = Rc::new(LineCache::default());
+        let insets = table_insets(Rc::new(Cell::new(1)));
+        cache.set_insets(Some(Rc::new(move |i| LineInset {
+            spans_rows: 1,
+            ..insets(i)
+        })));
+        let ones = relaid(&cache, TABLE);
+        assert_eq!(geometry(&ones), geometry(&plain));
+        assert!(ones.heights.as_ref().unwrap().borrow().spans.is_empty());
+    }
+
+    /// An edit beside a cell spanning rows, or in it, lays them out as a layout of the text made new would.
+    #[test]
+    fn edits_beside_a_cell_spanning_rows_settle_its_rows_again() {
+        let (cache, _) = spanned(200., [0.; 3], false);
+        let fresh = |text: &str| {
+            let cache = Rc::new(LineCache::default());
+            cache.set_insets(Some(spanned_insets(200., [0.; 3], false)));
+            geometry(&relaid(&cache, text))
+        };
+        let mut text = String::from(SPANNED);
+        let b = text.find("\nB").unwrap() + 2;
+        text.insert_str(
+            b,
+            " now long enough to wrap in its cell, three rows or more of it by far",
+        );
+        let edited = relaid(&cache, &text);
+        assert_eq!(geometry(&edited), fresh(&text));
+        let s = text.find('S').unwrap() + 1;
+        text.insert_str(s, " and the spanning cell's text grown too");
+        let edited = relaid(&cache, &text);
+        assert_eq!(geometry(&edited), fresh(&text));
     }
 }

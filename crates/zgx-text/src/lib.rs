@@ -13,7 +13,13 @@ mod core_text_fallback;
 #[doc(hidden)]
 pub use core_text_fallback::{core_text_advance, install_core_text_fallback};
 #[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub mod chrome_mask_tables;
+#[cfg(target_os = "macos")]
 mod core_text_glyphs;
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use core_text_glyphs::{font_smoothing, set_font_smoothing};
 #[doc(hidden)]
 pub mod font_cache;
 pub mod prepared;
@@ -97,6 +103,17 @@ pub fn default_text_services(
         true
     })
 }
+/// A requested family as the report names it.
+fn family_name(family: &zgx::text_layout::FontFamily) -> String {
+    use zgx::text_layout::FontFamily;
+    match family {
+        FontFamily::SansSerif => "sans-serif".into(),
+        FontFamily::Serif => "serif".into(),
+        FontFamily::Monospace => "monospace".into(),
+        FontFamily::Named(name) => name.to_string(),
+    }
+}
+
 /// Install text services sharing `shared_fonts` and `shared_cache` on `scene`.
 #[doc(hidden)]
 pub fn install_text(
@@ -126,6 +143,31 @@ pub fn install_text(
             ))
         },
     );
+    let fonts = shared_fonts.clone();
+    scene.set_text_describer(move |what, width| {
+        use zgx::text_layout::TextDescription;
+        let mut fonts = fonts.borrow_mut();
+        let (shaped, asked) = match what {
+            TextDescription::Plain { text, size, font } => (
+                crate::text::ShapedText::with_font(&mut fonts, *text, *size, width, font),
+                vec![(family_name(&font.family), font.weight)],
+            ),
+            TextDescription::Rich(rich) => {
+                let mut asked: Vec<(String, u16)> = Vec::new();
+                for run in rich.runs() {
+                    let entry = (family_name(&run.font.family), run.font.weight);
+                    if !asked.contains(&entry) {
+                        asked.push(entry);
+                    }
+                }
+                (
+                    crate::text::ShapedText::with_runs(&mut fonts, rich, width),
+                    asked,
+                )
+            }
+        };
+        shaped.report(&fonts, &asked)
+    });
     let fonts = shared_fonts.clone();
     scene.set_rich_text_shaper(move |rich, width| {
         let _span = zgx::profile::nested(zgx::profile::Phase::Text);

@@ -511,3 +511,46 @@ fn a_reorder_damages_in_the_same_order_every_run() {
     };
     assert_eq!(run(), run());
 }
+
+/// Rows `a` and `b`, `a` renamed by `#rename`, built by `builder`.
+fn renaming(builder: &str) -> String {
+    format!(
+        r##"local rows = ui.state("rows", {{ {{ id = "a", name = "one" }}, {{ id = "b", name = "two" }} }})
+        return ui.column {{
+            ui.each(rows, {builder}, {{ key = function(r) return r.id end, {LINEAR} }}),
+            ui.button {{ id = "rename", w = 4, h = 4, on_click = function()
+                rows:set({{ {{ id = "a", name = "uno" }}, {{ id = "b", name = "two" }} }})
+            end }},
+        }}"##
+    )
+}
+
+/// A row whose item changes under its key is built again with it.
+#[test]
+fn an_animated_rows_changed_item_builds_the_row_again() {
+    let mut h = Harness::inline(&renaming(
+        r#"function(r) return ui.text { id = r.id, r.name } end"#,
+    ));
+    h.frames(2);
+    assert_eq!((h.text("a"), h.text("b")), ("one".into(), "two".into()));
+    h.change("rename");
+    h.run_ms(200.);
+    assert_eq!((h.text("a"), h.text("b")), ("uno".into(), "two".into()));
+    assert_eq!(h.error(), None);
+}
+
+/// With a third parameter the row gets its item as state and updates in place.
+#[test]
+fn an_animated_rows_third_parameter_is_its_item_kept_current() {
+    let mut h = Harness::inline(&renaming(
+        r#"function(r, i, item) return ui.text { id = r.id, function() return item:get().name end } end"#,
+    ));
+    h.frames(2);
+    assert_eq!((h.text("a"), h.text("b")), ("one".into(), "two".into()));
+    let node = h.find("a");
+    h.change("rename");
+    h.run_ms(200.);
+    assert_eq!((h.text("a"), h.text("b")), ("uno".into(), "two".into()));
+    assert_eq!(h.find("a"), node, "updated in place, not built again");
+    assert_eq!(h.error(), None);
+}

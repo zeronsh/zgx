@@ -489,7 +489,7 @@ impl Clip {
             return;
         };
         if crate::time::Instant::now() < from
-            || !zgx::switches::BAKED_LOOPS.on()
+            || !zgx::switches::baked_loops()
             || !self.can_bake()
         {
             return;

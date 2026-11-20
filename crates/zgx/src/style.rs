@@ -6,6 +6,21 @@
 //! last-write precedence, including individual padding and margin sides.
 use crate::scene::{Align, BoxShadow, Color, Insets, Justify, Layout, LocalTransform, Transform};
 
+static CORNER_SHAPE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// Sets the shape every rounded corner smaller than half its box takes, as CSS's
+/// `corner-shape: superellipse(k)`: 1 (the default) is round, 1.5 a continuous
+/// corner. Corners as large as half the box (pills, circles) stay round.
+pub fn set_corner_shape(k: f32) {
+    let k = if k.is_finite() { k.clamp(1., 8.) } else { 1. };
+    CORNER_SHAPE.store(k.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The corner shape `set_corner_shape` set.
+pub fn corner_shape() -> f32 {
+    f32::from_bits(CORNER_SHAPE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Where a stroke (`Styled::stroke`) lies against the box's edge, as a
 /// design tool aligns it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -759,8 +774,8 @@ pub(crate) struct ColdStyles {
     pub(crate) layers: Option<std::sync::Arc<LayerStyles>>,
     /// `Styled::w_calc` and the like.
     pub(crate) size_calcs: Option<std::sync::Arc<crate::size_calc::SizeCalcs>>,
-    /// `Styled::text_balance`.
-    pub(crate) text_balance: Option<bool>,
+    /// `Styled::text_balance` and `text_pretty`.
+    pub(crate) text_fit: Option<Option<crate::text_wrap::TextWrap>>,
     /// `Styled::lang`.
     pub(crate) lang: Option<std::sync::Arc<str>>,
 }
@@ -809,6 +824,17 @@ impl Default for ImagePlacement {
         }
     }
 }
+/// Whether `styles` takes its width and its height from a size expression.
+fn calc_sized(styles: &Styles) -> (bool, bool) {
+    styles
+        .rare()
+        .cold
+        .as_ref()
+        .and_then(|cold| cold.size_calcs.as_ref())
+        .map_or((false, false), |calcs| {
+            (calcs.width.is_some(), calcs.height.is_some())
+        })
+}
 /// What of `styles`' size is worked out from its containing block.
 fn size_calcs(styles: &mut Styles) -> &mut crate::size_calc::SizeCalcs {
     // A parent lays out what has options with taffy, the only layout that
@@ -839,6 +865,8 @@ pub(crate) struct RareStyles {
     pub(crate) snap: Option<bool>,
     /// `Styled::direction`: which way its lines run.
     pub(crate) direction: Option<crate::scene::Direction>,
+    /// `Styled::dir_auto`: its text sets which way it runs.
+    pub(crate) direction_auto: bool,
     pub(crate) border_style: Option<crate::decoration::BorderStyle>,
     /// `Styled::border_over`.
     pub(crate) border_over: Option<bool>,
@@ -895,6 +923,7 @@ impl RareStyles {
         fade_overflow: None,
         snap: None,
         direction: None,
+        direction_auto: false,
         border_style: None,
         border_over: None,
         outline: None,
@@ -952,11 +981,23 @@ impl RareStyles {
         if other.direction.is_some() {
             self.direction = other.direction;
         }
+        if other.direction_auto {
+            self.direction_auto = true;
+        }
         if other.border_over.is_some() {
             self.border_over = other.border_over;
         }
-        if other.outline.is_some() {
-            self.outline = other.outline;
+        if let Some(theirs) = other.outline {
+            // a width alone keeps the colour (or its token) already here
+            self.outline = Some(match (theirs, self.outline) {
+                (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => {
+                    Some((width, mine))
+                }
+                (Some((width, color)), Some(Some((mine, _)))) if width.is_nan() => {
+                    Some((mine, color))
+                }
+                _ => theirs,
+            });
         }
         if other.outline_offset.is_some() {
             self.outline_offset = other.outline_offset;
@@ -979,8 +1020,8 @@ impl RareStyles {
             if theirs.object_position.is_some() {
                 mine.object_position = theirs.object_position;
             }
-            if theirs.text_balance.is_some() {
-                mine.text_balance = theirs.text_balance;
+            if theirs.text_fit.is_some() {
+                mine.text_fit = theirs.text_fit;
             }
             if theirs.lang.is_some() {
                 mine.lang = theirs.lang.clone();
@@ -1192,6 +1233,35 @@ impl Styles {
         if other.set == 0 {
             return;
         }
+        // A width (or height) replaces the one here whatever its kind: points
+        // or a percentage over `"max-content"`, and the other way round.
+        let (their_calc_w, their_calc_h) = calc_sized(other);
+        let their_w = other.set & (bit::WIDTH | bit::WIDTH_PERCENT) != 0 && !their_calc_w;
+        let their_h = other.set & (bit::HEIGHT | bit::HEIGHT_PERCENT) != 0 && !their_calc_h;
+        let (mine_calc_w, mine_calc_h) = calc_sized(self);
+        if ((their_w && mine_calc_w) || (their_h && mine_calc_h))
+            && let Some(calcs) = self
+                .rare_mut()
+                .cold
+                .as_mut()
+                .and_then(|cold| cold.size_calcs.as_mut())
+        {
+            let calcs = std::sync::Arc::make_mut(calcs);
+            if their_w {
+                calcs.width = None;
+            }
+            if their_h {
+                calcs.height = None;
+            }
+        }
+        if their_calc_w {
+            self.fields_mut(bit::WIDTH).width = Opt32::none();
+            self.fields_mut(bit::WIDTH_PERCENT).width_percent = Opt32::none();
+        }
+        if their_calc_h {
+            self.fields_mut(bit::HEIGHT).height = Opt32::none();
+            self.fields_mut(bit::HEIGHT_PERCENT).height_percent = Opt32::none();
+        }
         if self.tokens.is_some() || other.tokens.is_some() {
             crate::theme::merge(self, other);
         }
@@ -1287,11 +1357,12 @@ impl Styles {
         if other.overflow().layout.is_some() {
             self.fields_mut(bit::LAYOUT).overflow_mut().layout = other.overflow().layout;
         }
-        if other.width.is_some() || other.width_percent.is_some() {
+        // Set, not only given: `auto` and a calculated width clear a width under them.
+        if other.set & (bit::WIDTH | bit::WIDTH_PERCENT) != 0 {
             self.fields_mut(bit::WIDTH).width = other.width;
             self.fields_mut(bit::WIDTH_PERCENT).width_percent = other.width_percent;
         }
-        if other.height.is_some() || other.height_percent.is_some() {
+        if other.set & (bit::HEIGHT | bit::HEIGHT_PERCENT) != 0 {
             self.fields_mut(bit::HEIGHT).height = other.height;
             self.fields_mut(bit::HEIGHT_PERCENT).height_percent = other.height_percent;
         }
@@ -1448,6 +1519,12 @@ pub(crate) fn merge_insets(target: &mut Insets, source: Insets, mask: u8) {
 /// value is written when the node is styled). A later value replaces the
 /// binding. One path through the setter keeps chained setters moving the
 /// style in place.
+/// An outline's colour while only its width is set: a patch carrying it keeps
+/// the colour (or theme token) it lands on, and alone it draws black.
+pub(crate) const OUTLINE_COLOR_UNSET: Color = Color(1, 2, 3, 0);
+/// An outline's width while only its colour is set: a patch carrying it keeps
+/// the width it lands on (0 included), and alone it draws 1 point.
+pub(crate) const OUTLINE_WIDTH_UNSET: f32 = f32::NAN;
 macro_rules! value_or_token {
     ($self:ident, $value:ident, $field:expr) => {
         let ($value, token) = crate::theme::split($value.into());
@@ -1947,6 +2024,18 @@ pub trait Styled: Sized {
         self.styles_mut().fields_mut(bit::ABSOLUTE).absolute = Some(true);
         self
     }
+    /// Present to assistive technology and nowhere else (Tailwind's
+    /// `sr-only`): a 1 by 1 clipped box, absolute, painting nothing, so it
+    /// takes no room and stays in the accessibility tree, as a live region's
+    /// text must (`invisible` leaves the tree, as `visibility: hidden` does,
+    /// and so does a node at no opacity: this keeps a thousandth, which no
+    /// pixel shows).
+    fn sr_only(self) -> Self {
+        self.absolute()
+            .size(1., 1.)
+            .overflow_hidden()
+            .opacity(0.001)
+    }
     /// Make the view the containing block of its `absolute` descendants
     /// (CSS `position: relative`), and keep it in normal flow (undoing
     /// `absolute`). It changes nothing about its own layout.
@@ -2065,6 +2154,23 @@ pub trait Styled: Sized {
     fn h(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
         value_or_token!(self, value, crate::theme::Field::Height);
         self.styles_mut().fields_mut(bit::HEIGHT).height = Some(value).into();
+        self.styles_mut()
+            .fields_mut(bit::HEIGHT_PERCENT)
+            .height_percent = Opt32::none();
+        self
+    }
+    /// The width the layout gives it from what it holds (CSS `auto`), over a
+    /// default or an earlier width.
+    fn w_auto(mut self) -> Self {
+        self.styles_mut().fields_mut(bit::WIDTH).width = Opt32::none();
+        self.styles_mut()
+            .fields_mut(bit::WIDTH_PERCENT)
+            .width_percent = Opt32::none();
+        self
+    }
+    /// The height the layout gives it from what it holds (CSS `auto`).
+    fn h_auto(mut self) -> Self {
+        self.styles_mut().fields_mut(bit::HEIGHT).height = Opt32::none();
         self.styles_mut()
             .fields_mut(bit::HEIGHT_PERCENT)
             .height_percent = Opt32::none();
@@ -2313,12 +2419,12 @@ pub trait Styled: Sized {
         self
     }
     /// The outline's colour, a value or a theme token, keeping its width
-    /// (1 point if none was set).
+    /// (1 point if none was set, also as a patch lands on a node's own).
     fn outline_color(mut self, value: impl Into<crate::theme::Themed<Color>>) -> Self {
         value_or_token!(self, value, crate::theme::Field::OutlineColor);
         let width = match self.styles_mut().rare_mut().outline {
             Some(Some((width, _))) => width,
-            _ => 1.,
+            _ => OUTLINE_WIDTH_UNSET,
         };
         self.styles_mut().rare_mut().outline = Some(Some((width, value)));
         self
@@ -2328,7 +2434,7 @@ pub trait Styled: Sized {
     fn outline_width(mut self, width: f32) -> Self {
         let color = match self.styles_mut().rare_mut().outline {
             Some(Some((_, color))) => color,
-            _ => Color(0, 0, 0, 255),
+            _ => OUTLINE_COLOR_UNSET,
         };
         self.styles_mut().rare_mut().outline = Some(Some((width.max(0.), color)));
         self
@@ -2850,15 +2956,25 @@ pub trait Styled: Sized {
         rare.cold.get_or_insert_default().lang = Some(language.into());
         self
     }
-    /// Wrap text with its lines balanced (CSS's `text-wrap: balance`): at
-    /// the narrowest width that keeps as many lines, so a heading's last line
-    /// isn't left short. For up to six lines; its box is as it was.
-    fn text_balance(mut self, balance: bool) -> Self {
-        if balance {
+    /// Wrap text with its lines balanced (CSS's `text-wrap: balance`), as
+    /// Chrome breaks them: evenly, for up to six lines. Its box is as it was.
+    fn text_balance(self, balance: bool) -> Self {
+        self.text_fit(balance.then_some(crate::text_wrap::TextWrap::Balance))
+    }
+    /// Wrap text so its last lines don't end on a short one (CSS's
+    /// `text-wrap: pretty`), as Chrome breaks them: the last four lines
+    /// of a paragraph fitted again.
+    fn text_pretty(self, pretty: bool) -> Self {
+        self.text_fit(pretty.then_some(crate::text_wrap::TextWrap::Pretty))
+    }
+    /// `text_balance` or `text_pretty`, or neither (`None`, which stops
+    /// what an ancestor asked).
+    fn text_fit(mut self, fit: Option<crate::text_wrap::TextWrap>) -> Self {
+        if fit.is_some() {
             self.styles_mut().fields_mut(bit::TEXT_WRAP).text_wrap = Some(true);
         }
         let cold = self.styles_mut().rare_mut().cold.get_or_insert_default();
-        cold.text_balance = Some(balance);
+        cold.text_fit = Some(fit);
         self
     }
     /// `w(width).h(height)`.
@@ -3295,6 +3411,15 @@ pub trait Styled: Sized {
         self.styles_mut().rare_mut().zoom = Some(ZoomStyle::Fixed);
         self
     }
+    /// Text that runs the way its first strong character does (HTML's
+    /// `dir=auto`): right to left for Arabic, Hebrew, Persian or Urdu
+    /// letters, so its lines start at the right and its mirrored edges follow;
+    /// text with no strong character, and what isn't text, take their
+    /// parent's. Re-decided as the text changes.
+    fn dir_auto(mut self) -> Self {
+        self.styles_mut().rare_mut().direction_auto = true;
+        self
+    }
     /// `direction(Direction::Rtl)`: Arabic, Hebrew, Persian, Urdu.
     fn rtl(self) -> Self {
         self.direction(crate::scene::Direction::Rtl)
@@ -3534,6 +3659,44 @@ mod tests {
     }
 
     use super::*;
+
+    /// A width merged over another replaces it whatever kind either is, as a
+    /// later CSS declaration does: a context menu's `"max-content"` over the
+    /// panel's default 240 points, and points back over an expression.
+    #[test]
+    fn a_merged_width_replaces_one_of_another_kind() {
+        let mut panel = Styles::new().w(240.).h(100.);
+        panel.merge(
+            &Styles::new().w_calc("max-content".parse::<crate::size_calc::SizeCalc>().unwrap()),
+        );
+        assert!(panel.width.is_none() && panel.width_percent.is_none());
+        assert_eq!(calc_sized(&panel), (true, false));
+        assert!(panel.height.is_some());
+        panel.merge(&Styles::new().w(200.));
+        assert_eq!(calc_sized(&panel), (false, false));
+        assert!(panel.width.is_some());
+        let mut tall =
+            Styles::new().h_calc("max-content".parse::<crate::size_calc::SizeCalc>().unwrap());
+        tall.merge(&Styles::new().h_percent(50.));
+        assert_eq!(calc_sized(&tall), (false, false));
+    }
+
+    #[test]
+    fn auto_and_a_calculated_width_replace_a_width_they_merge_over() {
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().w_auto());
+        assert!(base.width.is_none() && base.width_percent.is_none());
+        let mut base = Styles::new().h(40.);
+        base.merge(&Styles::new().h_auto());
+        assert!(base.height.is_none() && base.height_percent.is_none());
+        // A style that sets neither leaves them.
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().p(4.));
+        assert!(base.width.is_some());
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().w_percent(50.));
+        assert!(base.width.is_none() && base.width_percent.is_some());
+    }
 
     /// A style setting none of the properties few set (`Overflow`) holds
     /// no allocation for them, nor does one given their paint unset; one

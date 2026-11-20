@@ -23,6 +23,8 @@ zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 cosmic-text = { package = "zgx-cosmic-text", version = "0.19.14", path = "../../vendor/cosmic-text", features = ["shape-run-cache"] }
 unicode-segmentation = "1.12"
 rustc-hash = "2.1"
+# Fonts' OS/2 and post tables and glyph outlines (decorations as Blink places them).
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
 # fontconfig's configuration, read as fontdb reads it, for what the system
 # font cache watches (font_cache.rs); fontdb's own, already in the tree.

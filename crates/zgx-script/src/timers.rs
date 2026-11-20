@@ -33,6 +33,8 @@ pub(crate) struct Timers {
 struct Clocks {
     /// A test's time, in place of the wall clock.
     test: RefCell<Option<Rc<TestClock>>>,
+    /// A timer's callback is running (`Timers::start`).
+    firing: Cell<bool>,
 }
 impl Timers {
     /// Keep the test's time from now on: see [`TestClock`].
@@ -85,34 +87,79 @@ impl Timers {
         repeat: bool,
         mut fire: impl FnMut() -> bool + 'static,
     ) -> Stop {
+        // `ui.after(0)` from inside a timer's callback waits a millisecond, as a
+        // window's next-frame timer does: on a test or virtual clock a chain of
+        // them would otherwise run for ever inside one turn.
+        let period = if period.is_zero() && self.clocks.firing.get() {
+            Duration::from_millis(1)
+        } else {
+            period
+        };
         let alive = Rc::new(Cell::new(true));
+        let waker: Rc<RefCell<Option<Waker>>> = Rc::default();
         let running = alive.clone();
+        let wake = waker.clone();
         let clocks = self.clocks.clone();
         self.spawn(async move {
             let test = clocks.test.borrow().clone();
             loop {
-                match &test {
-                    Some(test) => test.sleep(period).await,
-                    // A window's next-frame timer is a millisecond's; a virtual
-                    // clock's frame hasn't ended, so `ui.after(0)` runs now.
-                    None if zgx::clock::is_virtual() => zgx::timer::sleep(period).await,
-                    None => zgx::timer::sleep(period.max(Duration::from_millis(1))).await,
+                {
+                    let sleep: Pin<Box<dyn Future<Output = ()> + '_>> = match &test {
+                        Some(test) => Box::pin(test.sleep(period)),
+                        // A window's next-frame timer is a millisecond's; a virtual
+                        // clock's frame hasn't ended, so `ui.after(0)` runs now.
+                        None if zgx::clock::is_virtual() => Box::pin(zgx::timer::sleep(period)),
+                        None => Box::pin(zgx::timer::sleep(period.max(Duration::from_millis(1)))),
+                    };
+                    let mut sleep = sleep;
+                    // A stopped timer ends as it is stopped, not when it falls
+                    // due: what its callback holds goes with it.
+                    poll_fn(|cx| {
+                        if !running.get() {
+                            return Poll::Ready(());
+                        }
+                        *wake.borrow_mut() = Some(cx.waker().clone());
+                        sleep.as_mut().poll(cx)
+                    })
+                    .await;
                 }
-                if !running.get() || !fire() || !repeat {
+                if !running.get() {
+                    return;
+                }
+                clocks.firing.set(true);
+                let keep = running.get() && fire();
+                clocks.firing.set(false);
+                if !keep || !repeat {
                     // (What keeps its `Stop` may let it go: `Stop::done`.)
                     running.set(false);
                     return;
                 }
             }
         });
-        Stop(alive)
+        Stop(alive, waker)
     }
 }
 /// Stops its timer when dropped (or `stop`ped).
-pub(crate) struct Stop(Rc<Cell<bool>>);
+pub(crate) struct Stop(Rc<Cell<bool>>, Rc<RefCell<Option<Waker>>>);
+/// A timer's flag and its waker, to stop it from a callback: it ends then,
+/// not when it next falls due.
+#[derive(Clone)]
+pub(crate) struct StopHandle(Rc<Cell<bool>>, Rc<RefCell<Option<Waker>>>);
+impl StopHandle {
+    #[cfg(test)]
+    pub fn get(&self) -> bool {
+        self.0.get()
+    }
+    pub fn set(&self, on: bool) {
+        self.0.set(on);
+        if !on && let Some(waker) = self.1.borrow_mut().take() {
+            waker.wake();
+        }
+    }
+}
 impl Stop {
-    pub fn handle(&self) -> Rc<Cell<bool>> {
-        self.0.clone()
+    pub fn handle(&self) -> StopHandle {
+        StopHandle(self.0.clone(), self.1.clone())
     }
     /// Its timer has ended, or been stopped: nothing here to keep.
     pub fn done(&self) -> bool {
@@ -121,7 +168,7 @@ impl Stop {
 }
 impl Drop for Stop {
     fn drop(&mut self) {
-        self.0.set(false);
+        self.handle().set(false);
     }
 }
 
@@ -190,7 +237,7 @@ mod ended {
     use std::any::Any;
 
     fn stop(alive: bool) -> Box<dyn Any> {
-        Box::new(Stop(Rc::new(Cell::new(alive))))
+        Box::new(Stop(Rc::new(Cell::new(alive)), Rc::default()))
     }
 
     #[test]

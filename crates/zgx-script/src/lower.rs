@@ -381,7 +381,6 @@ impl Assets {
         *self.source.borrow_mut() = Some(files);
     }
     /// Where its files come from: the disk, or the app's bundle.
-    #[cfg(feature = "gltf")]
     pub(crate) fn source(&self) -> crate::Files {
         self.source.borrow().clone().unwrap_or(crate::Files::Disk)
     }
@@ -1474,6 +1473,10 @@ fn decorated(mut view: View, node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>) -
     {
         view = tooltip(view, tip, low);
     }
+    // The tooltips under it, with their own delays and reshow.
+    if let Some(group) = node.rare().tooltip_group {
+        view = view.tooltip_group(group);
+    }
     if let Some(spec) = &node.rare().theme {
         view = themed(spec, vm, view);
     }
@@ -1510,10 +1513,121 @@ fn tooltip(anchor: View, tip: &crate::node::Tooltip, low: &Rc<Lowering>) -> View
     if let Some(delay) = tip.delay {
         core = core.delay(delay);
     }
+    if let Some(delay) = tip.close_delay {
+        core = core.close_delay(delay);
+    }
     anchor.tooltip(core.interactive(tip.interactive))
 }
 
 /// `view` under the theme scope `theme = …` asks for.
+/// An inline SVG's data by its source: the same picture keeps one identity,
+/// so a paragraph built again (a reply streaming) doesn't raster it again.
+fn inline_svg_data(source: &str) -> Option<Arc<zgx::svg::SvgData>> {
+    thread_local! {
+        static MADE: std::cell::RefCell<HashMap<String, Arc<zgx::svg::SvgData>>> = Default::default();
+    }
+    MADE.with_borrow_mut(|made| {
+        if let Some(found) = made.get(source) {
+            return Some(found.clone());
+        }
+        let data = Arc::new(zgx::svg::SvgData::new(source.as_bytes().to_vec()).ok()?);
+        if made.len() >= 512 {
+            made.clear();
+        }
+        made.insert(source.to_owned(), data.clone());
+        Some(data)
+    })
+}
+
+/// A markdown view's `on_math`, each formula asked once: the same SVG
+/// (one identity, so rasterized once) for every build that shows it.
+fn math_renderer(on_math: mlua::Function, vm: &Rc<Vm>) -> crate::markdown::view::MathFn {
+    let vm = vm.clone();
+    let drawn: std::cell::RefCell<HashMap<(String, bool), Option<zgx::compose::InlineSvg>>> =
+        Default::default();
+    Rc::new(move |tex: &str, display: bool| {
+        let key = (tex.to_owned(), display);
+        if let Some(found) = drawn.borrow().get(&key) {
+            return found.clone();
+        }
+        let made = match vm.call::<Option<mlua::Table>>(&on_math, (tex.to_owned(), display)) {
+            Ok(Some(t)) => (|| {
+                let svg = t.get::<mlua::LuaString>("svg").ok()?;
+                let svg = zgx::svg::SvgData::new(svg.as_bytes().to_vec()).ok()?;
+                let num = |k: &str| t.get::<f32>(k).ok().filter(|v| v.is_finite() && *v >= 0.);
+                Some(zgx::compose::InlineSvg {
+                    svg: std::sync::Arc::new(svg),
+                    width: num("w")?,
+                    height: num("h")?,
+                    depth: num("d").unwrap_or(0.),
+                })
+            })(),
+            Ok(None) => None,
+            Err(error) => {
+                vm.report(error);
+                None
+            }
+        };
+        let mut drawn = drawn.borrow_mut();
+        // A formula typed or streamed in asks for each prefix of it.
+        if drawn.len() >= 1024 {
+            drawn.clear();
+        }
+        drawn.insert(key, made.clone());
+        made
+    })
+}
+
+/// A markdown view's `link_menu`, told the link's address and text with the point, its entries lowered.
+fn link_menu_builder(
+    build: mlua::Function,
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+) -> crate::markdown::view::LinkMenuFn {
+    let (vm, low) = (vm.clone(), low.clone());
+    Rc::new(
+        move |e: &zgx::compose::ContextMenuEvent, href: &str, text: &str| {
+            let point = vm.lua.create_table().and_then(|t| {
+                t.set("x", e.x)?;
+                t.set("y", e.y)?;
+                t.set("local_x", e.local_x)?;
+                t.set("local_y", e.local_y)?;
+                t.set("href", href)?;
+                t.set("text", text)?;
+                Ok(t)
+            });
+            let items = point.and_then(|p| {
+                vm.runtime
+                    .clone()
+                    .batch(|| vm.call::<Option<mlua::Table>>(&build, p))
+            });
+            lowered_menu(&vm, &low, items)
+        },
+    )
+}
+
+/// A markdown view's `on_link`: asked first of its links; one it handles
+/// stays unopened, any other goes to the guard around it, if there is one.
+fn with_link_handler(view: View, on_link: mlua::Function, vm: &Rc<Vm>) -> View {
+    let vm = vm.clone();
+    zgx::compose::provide_with(
+        move |cx| {
+            let outer = cx.try_service::<zgx::platform::LinkGuard>();
+            zgx::platform::LinkGuard(Rc::new(move |url: &str| {
+                let handled = match vm.call::<Option<bool>>(&on_link, url.to_owned()) {
+                    Ok(handled) => handled == Some(true),
+                    Err(error) => {
+                        vm.report(error);
+                        true
+                    }
+                };
+                !handled && outer.as_ref().is_none_or(|guard| (guard.0)(url))
+            }))
+        },
+        view,
+    )
+}
+
 fn themed(spec: &crate::node::ThemeSpec, vm: &Rc<Vm>, view: View) -> View {
     use crate::node::ThemeSpec;
     let compute = |value: Value, vm: &Vm| {
@@ -1560,6 +1674,27 @@ fn themed(spec: &crate::node::ThemeSpec, vm: &Rc<Vm>, view: View) -> View {
                 view,
             )
         }
+    }
+}
+/// `view` with where focus goes as it opens and closes, if its props say.
+fn with_focus(view: View, focus: Option<&crate::node::FocusProps>) -> View {
+    match focus {
+        Some((initial, last)) => view
+            .initial_focus(initial.clone())
+            .final_focus(last.clone()),
+        None => view,
+    }
+}
+/// `view` opening as the pointer rests on its trigger, if its props say
+/// (`hover_delay`), `open` ms by default.
+fn with_hover(view: View, hover: Option<&crate::node::HoverProps>, open: f32) -> View {
+    let ms = |ms: f32| std::time::Duration::from_secs_f32(ms.max(0.) / 1000.);
+    match hover {
+        Some(hover) => view.hover_delay(
+            ms(hover.open.unwrap_or(open)),
+            ms(hover.close.unwrap_or(0.)),
+        ),
+        None => view,
     }
 }
 /// The style property a theme token in `prop` sets.
@@ -3052,25 +3187,36 @@ fn kind_view(
             }
         }
         Kind::Text(text) => lower_text(text, vm),
-        Kind::Markdown { text, options } => {
+        Kind::Markdown {
+            text,
+            options,
+            on_link,
+            on_math,
+            link_menu,
+        } => {
             use crate::markdown::view::Source;
+            let options = crate::markdown::view::ViewOptions {
+                math: on_math.clone().map(|on_math| math_renderer(on_math, vm)),
+                link_menu: link_menu
+                    .clone()
+                    .map(|build| link_menu_builder(build, vm, low)),
+                ..options.clone()
+            };
             // A state's text, as it is (`"{reply}"`): not copied into a
             // string, and a long one streamed in is parsed by its edits.
-            if let Text::Template(segments) = text
+            let view = if let Text::Template(segments) = text
                 && let [Segment::State(state, path)] = &segments[..]
                 && path.is_empty()
             {
                 let state = state.clone();
-                crate::markdown::view::view(
-                    move || Source::Held(state.with(Value::clone)),
-                    options.clone(),
-                )
+                crate::markdown::view::view(move || Source::Held(state.with(Value::clone)), options)
             } else {
                 let (text, vm) = (copy_text(text), vm.clone());
-                crate::markdown::view::view(
-                    move || Source::Made(render_text(&text, &vm)),
-                    options.clone(),
-                )
+                crate::markdown::view::view(move || Source::Made(render_text(&text, &vm)), options)
+            };
+            match on_link {
+                Some(on_link) => with_link_handler(view, on_link.clone(), vm),
+                None => view,
             }
         }
         Kind::Rich(spans) => lower_rich(spans, vm, low),
@@ -3108,6 +3254,7 @@ fn kind_view(
             .on_mount(move |handle| handle.retain(sweeper.sweeper()))
         }
         Kind::WebView(spec) => web_view_of(spec, vm, low),
+        Kind::Host(name) => crate::host_views::view(name),
         Kind::Terminal(term) => zgx::terminal::terminal(term),
         #[cfg(feature = "scene3d")]
         Kind::Scene3d(spec) => crate::scene3d::lower(spec, vm, &low.assets, need(&mut cx)),
@@ -3483,8 +3630,11 @@ fn kind_view(
         } => crate::motion::each(
             need(&mut cx),
             items.clone(),
-            row_builder(builder, vm, low),
-            key.clone(),
+            crate::motion::EachRows {
+                builder: row_builder(builder, vm, low),
+                key: key.clone(),
+                live: builder.info().num_params >= 3,
+            },
             motion.clone(),
             vm,
             low,
@@ -3671,7 +3821,11 @@ fn kind_view(
             placement,
             autofocus,
             layer,
+            topmost,
             dismiss,
+            scrim_blur,
+            on_close,
+            focus,
         } => {
             // Built when it first opens (`View::lazy`), as every script
             // overlay: closed, a list's menus and cards cost nothing.
@@ -3686,8 +3840,26 @@ fn kind_view(
                 view.autofocus(false)
             };
             let view = if *layer { view.layer() } else { view };
+            let view = if *topmost { view.topmost() } else { view };
+            let view = with_focus(view, focus.as_ref());
             let view = match dismiss {
                 Some(d) => view.dismiss_on_backdrop(*d),
+                None => view,
+            };
+            let view = match scrim_blur {
+                Some(sigma) if sigma.is_finite() && *sigma > 0. => view.scrim_blur(*sigma),
+                _ => view,
+            };
+            let view = match on_close {
+                Some(on_close) => {
+                    let (on_close, vm) = (on_close.clone(), Rc::downgrade(vm));
+                    view.on_dismiss(move || {
+                        let Some(vm) = vm.upgrade() else { return };
+                        if let Err(error) = vm.call::<()>(&on_close, ()) {
+                            vm.report(error);
+                        }
+                    })
+                }
                 None => view,
             };
             match placement {
@@ -3705,6 +3877,9 @@ fn kind_view(
             dismiss,
             match_anchor,
             at_caret,
+            anchor_fill,
+            hover,
+            focus,
         } => {
             let view = popover(
                 label.clone(),
@@ -3731,6 +3906,13 @@ fn kind_view(
                 view
             };
             let view = if *at_caret { view.at_caret() } else { view };
+            let view = if *anchor_fill {
+                view.anchor_fill()
+            } else {
+                view
+            };
+            let view = with_hover(view, hover.as_ref(), 300.);
+            let view = with_focus(view, focus.as_ref());
             match placement {
                 Some(at) => view.placement(*at),
                 None => view,
@@ -3744,6 +3926,8 @@ fn kind_view(
             autofocus,
             over,
             match_anchor,
+            hover,
+            focus,
         } => {
             let mut view = menu(
                 label.clone(),
@@ -3768,6 +3952,8 @@ fn kind_view(
             } else {
                 view.autofocus(false)
             };
+            let view = with_hover(view, hover.as_ref(), 300.);
+            let view = with_focus(view, focus.as_ref());
             match placement {
                 Some(at) => view.placement(*at),
                 None => view,
@@ -3796,11 +3982,13 @@ fn kind_view(
             label,
             open,
             trigger,
+            hover,
         } => {
             let view = submenu(
                 label.clone(),
                 bridge(need(&mut cx), open, Value::truthy, Value::Bool),
             );
+            let view = with_hover(view, hover.as_ref(), 100.);
             match trigger {
                 // A menu item is the row; anything else goes in one.
                 Some(node) if matches!(node.kind, Kind::MenuItem(..)) => {
@@ -3933,8 +4121,8 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
     styled(view, node, vm, low, cx, element)
 }
 
-/// `window_drag` and `focus_on_press`, rare: apart from the node's common
-/// path.
+/// `window_drag`, `focus_on_press` and `find_scope`, rare: apart from the
+/// node's common path.
 #[cold]
 #[inline(never)]
 fn press_flagged(mut view: View, flags: u8) -> View {
@@ -3943,6 +4131,9 @@ fn press_flagged(mut view: View, flags: u8) -> View {
     }
     if flags & crate::node::WINDOW_DRAG != 0 {
         view = view.window_drag();
+    }
+    if flags & crate::node::FIND_SCOPE != 0 {
+        view = view.find_scope(true);
     }
     view
 }
@@ -4589,6 +4780,22 @@ fn styled(
                 view.level(usize::from(level))
             };
         }
+        if let Some(current) = &a11y.current {
+            use zgx::semantics::Current;
+            let (current, vm) = (resolve_owned(current), vm.clone());
+            view = view.current_when(move || match resolve(&current, Ty::Str, None, &vm) {
+                Some(Lit::Str(kind)) => match &*kind {
+                    "true" => Some(Current::True),
+                    "page" => Some(Current::Page),
+                    "step" => Some(Current::Step),
+                    "location" => Some(Current::Location),
+                    "date" => Some(Current::Date),
+                    "time" => Some(Current::Time),
+                    _ => None,
+                },
+                _ => None,
+            });
+        }
         if let Some(level) = &a11y.level_of {
             let (level, vm) = (resolve_owned(level), vm.clone());
             view = view.level_when(move || match resolve(&level, Ty::Num, None, &vm) {
@@ -4639,8 +4846,27 @@ fn styled(
         if a11y.hidden {
             view = view.accessible_hidden();
         }
+        if let Some(hidden) = &a11y.hidden_of {
+            let (hidden, vm) = (resolve_owned(hidden), vm.clone());
+            view = view.accessible_hidden_when(move || {
+                resolve(&hidden, Ty::Bool, None, &vm) == Some(Lit::Bool(true))
+            });
+        }
+        if let Some(busy) = &a11y.busy {
+            let (busy, vm) = (resolve_owned(busy), vm.clone());
+            view = view
+                .busy_when(move || resolve(&busy, Ty::Bool, None, &vm) == Some(Lit::Bool(true)));
+        }
+        if let Some(inert) = &a11y.inert {
+            let (inert, vm) = (resolve_owned(inert), vm.clone());
+            view = view
+                .inert_when(move || resolve(&inert, Ty::Bool, None, &vm) == Some(Lit::Bool(true)));
+        }
         if a11y.modal {
             view = view.accessible_modal();
+        }
+        if let Some(kind) = a11y.has_popup {
+            view = view.accessible_has_popup(kind);
         }
         if let Some(axis) = a11y.focus_group {
             view = view.focus_group(axis);
@@ -5592,7 +5818,7 @@ pub(crate) fn try_load_image_in(
             assets.keep_image(src.to_owned(), image.clone());
             Ok(Some(image))
         }
-        Err(e) => Err(match literal_site(vm, src) {
+        Err(e) => Err(match literal_site(vm, assets.source(), src) {
             Some(site) => format!("{site}: {e}"),
             None => e,
         }),
@@ -5657,7 +5883,7 @@ fn try_load_plugin_image(
             assets.keep_image(key.into_owned(), image.clone());
             Ok(Some(image))
         }
-        Err(e) => Err(match literal_site(vm, src) {
+        Err(e) => Err(match literal_site(vm, assets.source(), src) {
             Some(site) => format!("{site}: {e}"),
             None => e,
         }),
@@ -5669,25 +5895,23 @@ fn try_load_plugin_image(
 /// load keep nothing of where they were named.
 #[cold]
 #[inline(never)]
-fn literal_site(vm: &Vm, src: &str) -> Option<String> {
+fn literal_site(vm: &Vm, source: crate::Files, src: &str) -> Option<String> {
     let base = vm.base.as_ref()?;
     let quoted = [format!("\"{src}\""), format!("'{src}'")];
     let mut dirs = vec![base.clone()];
     let mut files = Vec::new();
     while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        for path in source.list(&dir) {
             // Not tools' files (`.zgx/types.d.luau`) nor declarations: no
             // script line runs there.
-            let name = entry.file_name();
+            let Some(name) = path.file_name() else {
+                continue;
+            };
             let name = name.to_string_lossy();
             if name.starts_with('.') || name.ends_with(".d.luau") {
                 continue;
             }
-            if path.is_dir() {
+            if source.is_dir(&path) {
                 dirs.push(path);
             } else if path.extension().is_some_and(|e| e == "luau" || e == "lua") {
                 files.push(path);
@@ -5696,7 +5920,7 @@ fn literal_site(vm: &Vm, src: &str) -> Option<String> {
     }
     files.sort();
     files.iter().find_map(|file| {
-        let text = std::fs::read_to_string(file).ok()?;
+        let text = source.read_to_string(file).ok()?;
         let line = text
             .lines()
             .position(|line| quoted.iter().any(|q| line.contains(q.as_str())))?;
@@ -5745,7 +5969,7 @@ fn load_svg(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Arc<SvgData> {
             // As a picture's: the file's doing, warned of with the line.
             unshown(
                 vm,
-                match literal_site(vm, src) {
+                match literal_site(vm, low.assets.source(), src) {
                     Some(site) => format!("{site}: {e}"),
                     None => e,
                 },
@@ -6674,7 +6898,7 @@ fn code_editor(
     };
     let ranges = Rc::new(ranges);
     // A highlighter's `{ { from, to, color?, weight =, italic =, strike =,
-    // bg = } }`: positional as `ranges`, its styles by name.
+    // bg =, size =, line_height =, underline =, font = "mono" } }`: positional as `ranges`, its styles by name.
     let spans = {
         let color_of = color_of.clone();
         move |list: &mlua::Table| {
@@ -6722,6 +6946,22 @@ fn code_editor(
                         Some(b"bg") => {
                             style.background = value.as_str().and_then(&*color_of);
                             styled |= style.background.is_some();
+                        }
+                        Some(b"size") => {
+                            style.size = number(&value).map(|v| v.clamp(1., 512.) as f32);
+                            styled |= style.size.is_some();
+                        }
+                        Some(b"line_height") => {
+                            style.line_height = number(&value).map(|v| v.clamp(1., 1024.) as f32);
+                            styled |= style.line_height.is_some();
+                        }
+                        Some(b"underline") => {
+                            style.underline = yes(&value);
+                            styled |= style.underline;
+                        }
+                        Some(b"font") => {
+                            style.mono = value.as_str().is_some_and(|f| f == "mono");
+                            styled |= style.mono;
                         }
                         Some(_) => {}
                     }
@@ -7356,15 +7596,7 @@ fn lerp(a: &Lit, b: &Lit, t: f32) -> Option<Lit> {
         (Lit::Num(x), Lit::Num(y)) => Lit::Num(mix(*x, *y)),
         (Lit::Len(Length::Px(x)), Lit::Len(Length::Px(y))) => Lit::Len(Length::Px(mix(*x, *y))),
         (Lit::Pair(x0, y0), Lit::Pair(x1, y1)) => Lit::Pair(mix(*x0, *x1), mix(*y0, *y1)),
-        (Lit::Color(c0), Lit::Color(c1)) => {
-            let ch = |x: u8, y: u8| mix(x as f32, y as f32).round().clamp(0., 255.) as u8;
-            Lit::Color(Color(
-                ch(c0.0, c1.0),
-                ch(c0.1, c1.1),
-                ch(c0.2, c1.2),
-                ch(c0.3, c1.3),
-            ))
-        }
+        (Lit::Color(c0), Lit::Color(c1)) => Lit::Color(zgx::theme::mix(*c0, *c1, t)),
         (_, other) if t >= 0.5 => other.clone(),
         (other, _) => other.clone(),
     })
@@ -8106,6 +8338,9 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
     if let Some(ahead) = rare.ahead {
         list = list.list_ahead(ahead);
     }
+    if rare.recycle {
+        list = list.list_recycle();
+    }
     if let Some(padding) = &rare.scroll_padding {
         list = with_scroll_padding(list, padding, vm);
     }
@@ -8144,6 +8379,15 @@ fn list_heights(
                 .map_err(|e| heights_vm.report(e))
                 .unwrap_or_default(),
         };
+        if !matches!(value, Value::List(_)) {
+            heights_vm.report(mlua::Error::runtime(format!(
+                "ui.list: `heights` is a list of row heights (numbers), not {value:?}"
+            )));
+        } else if value.list().iter().any(|v| !matches!(v, Value::Num(_))) {
+            heights_vm.report(mlua::Error::runtime(
+                "ui.list: `heights` holds numbers only (a row's height in points)",
+            ));
+        }
         let values = value.list().iter().map(|v| match v {
             Value::Num(n) if n.is_finite() && *n > 0. => *n as f32,
             // No room, and not built (`heights` takes positive numbers).
@@ -8952,6 +9196,15 @@ fn context_menu_items(
             .clone()
             .batch(|| vm.call::<Option<mlua::Table>>(build, p))
     });
+    lowered_menu(vm, low, items)
+}
+
+/// A script's menu entries (`menu_item`s, `submenu`s, separators), lowered; an error reported and nothing shown.
+fn lowered_menu(
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    items: mlua::Result<Option<mlua::Table>>,
+) -> Vec<View> {
     match items {
         Ok(Some(items)) => items
             .sequence_values::<mlua::AnyUserData>()
@@ -9000,7 +9253,8 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         underline_style: Option<zgx::rich_text::LineStyle>,
         underline_color: Option<zgx::theme::Themed<Color>>,
         underline_thickness: Option<f32>,
-        hover: Option<(bool, Option<zgx::theme::Themed<Color>>)>,
+        underline_skip_ink: bool,
+        hover: Option<crate::node::HoverFill>,
     }
     // Whether any span fades in: known as they're taken, so a paragraph
     // none of whose spans does builds them as before, and only one that has
@@ -9042,6 +9296,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     underline_style: s.underline_style,
                     underline_color: s.underline_color,
                     underline_thickness: s.underline_thickness,
+                    underline_skip_ink: s.underline_skip_ink,
                     hover: s.hover,
                 },
                 font: s.font.clone(),
@@ -9127,16 +9382,19 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     underline_style,
                     underline_color,
                     underline_thickness,
+                    underline_skip_ink,
                     hover,
                 } = *style;
                 let decoration = || {
                     let d = zgx::rich_text::Decoration::new(underline_thickness.unwrap_or(1.))
-                        .line(underline_style.unwrap_or_default());
+                        .line(underline_style.unwrap_or_default())
+                        .skip_ink(underline_skip_ink);
                     match underline_offset {
                         Some(offset) => d.offset(offset),
                         None => d,
                     }
                 };
+                let rare = span.rare.as_deref();
                 let mut out: TextSpan = text_span(render_text(&span.text, &vm));
                 if let Some(c) = color {
                     out = out.text_color(c);
@@ -9162,10 +9420,15 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if let Some(color) = underline_color {
                     out = out.underline_color(color);
                 }
-                if let Some((underlined, color)) = hover {
+                if let Some((underlined, color, background, underline_color)) = hover {
                     out = out.hover(zgx::compose::SpanHover {
                         underline: underlined.then(decoration),
                         text_color: color,
+                        background,
+                        underline_color,
+                        icon: rare
+                            .and_then(|rare| rare.hover_icon.as_ref())
+                            .map(|icon| span_icon(&vm, &low, icon)),
                     });
                 }
                 if strike {
@@ -9194,10 +9457,43 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         out = out.no_underline();
                     }
                 }
-                let rare = span.rare.as_deref();
+                if let Some((svg, w, h, d)) = rare.and_then(|rare| rare.inline_svg.as_ref())
+                    && let Some(svg) = inline_svg_data(svg)
+                {
+                    out = out.inline_svg(zgx::compose::InlineSvg {
+                        svg,
+                        width: *w,
+                        height: *h,
+                        depth: *d,
+                    });
+                }
+                if let Some(hook) = rare.and_then(|rare| rare.on_hover.clone()) {
+                    let vm = vm.clone();
+                    out = out.on_hover(move |inside, b| {
+                        let told = vm.lua.create_table().and_then(|t| {
+                            t.set("x", b.x)?;
+                            t.set("y", b.y)?;
+                            t.set("w", b.width)?;
+                            t.set("h", b.height)?;
+                            vm.call::<()>(&hook, (inside, t))
+                        });
+                        if let Err(error) = told {
+                            vm.report(error);
+                        }
+                    });
+                }
                 if let Some(rare) = rare {
+                    if let Some((width, color)) = rare.border {
+                        out = out.border(width, color);
+                    }
+                    if let Some(width) = rare.min_w {
+                        out = out.min_width(width);
+                    }
                     if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
                         out = out.padding_end(end);
+                    }
+                    if let Some(outset) = rare.outset {
+                        out = out.outset(outset);
                     }
                     if rare.boxed {
                         out = out.inline_box();
@@ -9221,25 +9517,10 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                 }
                 if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
-                    // Tracked: a remote icon shows once it comes.
-                    let data = load_svg(&vm, &low, &icon.src);
-                    // `"currentColor"`: the span's text colour.
-                    let (svg, tint) = match &icon.tint {
-                        Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
-                            (Arc::new(data.current_color()), None)
-                        }
-                        Some(tint) => (data, crate::node::themed_color(tint)),
-                        None => (data, None),
-                    };
-                    out = out.icon(zgx::compose::SpanIcon {
-                        svg,
-                        size: icon.size,
-                        gap: icon.gap,
-                        tint,
-                        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
-                        radius: icon.radius,
-                        pad: icon.pad,
-                    });
+                    out = out.icon(span_icon(&vm, &low, icon));
+                }
+                if let Some(icon) = rare.and_then(|rare| rare.trailing_icon.as_ref()) {
+                    out = out.trailing_icon(span_icon(&vm, &low, icon));
                 }
                 out
             })
@@ -9250,6 +9531,40 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
             spans
         }
     })
+}
+
+/// A span's icon as the paragraph draws it.
+fn span_icon(
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    icon: &crate::node::SpanIcon,
+) -> zgx::compose::SpanIcon {
+    // Tracked: a remote icon shows once it comes.
+    let data = load_svg(vm, low, &icon.src);
+    // `"currentColor"`: the span's text colour.
+    let (svg, tint) = match &icon.tint {
+        Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
+            (Arc::new(data.current_color()), None)
+        }
+        Some(tint) => (data, crate::node::themed_color(tint)),
+        None => (data, None),
+    };
+    zgx::compose::SpanIcon {
+        svg,
+        size: icon.size,
+        gap: icon.gap,
+        margin: icon.margin,
+        dy: icon.dy,
+        tint,
+        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
+        radius: icon.radius,
+        pad: icon.pad,
+        align: if icon.baseline {
+            zgx::compose::IconAlign::Baseline
+        } else {
+            zgx::compose::IconAlign::Center
+        },
+    }
 }
 
 /// The translation and local transform a node's literals set, if any.
@@ -9431,6 +9746,142 @@ fn is_transform(prop: Prop) -> bool {
     )
 }
 
+/// Installs `ui.menu_look { panel, item, hover, focus }`: plain styles every
+/// menu the app doesn't style itself takes, zgx's own (a link's, an
+/// editor's) among them.
+pub(crate) fn install_menu_look(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
+    ui.set(
+        "menu_look",
+        lua.create_function(|lua, look: mlua::Table| {
+            let part = |name: &str| -> mlua::Result<Option<Styles>> {
+                match look.get::<mlua::Value>(name)? {
+                    mlua::Value::Nil => Ok(None),
+                    value => {
+                        let lits =
+                            crate::node::plain_styles(lua, value, &format!("menu_look.{name}"))?;
+                        Ok(Some(apply_all(Styles::new(), &lits)))
+                    }
+                }
+            };
+            zgx::compose::set_menu_look(zgx::compose::MenuLook {
+                panel: part("panel")?.unwrap_or_default(),
+                item: part("item")?.unwrap_or_default(),
+                hover: part("hover")?,
+                focus: part("focus")?,
+                fade: look
+                    .get::<Option<f64>>("fade")?
+                    .filter(|ms| ms.is_finite() && *ms > 0.)
+                    .map(|ms| std::time::Duration::from_secs_f64(ms / 1000.)),
+            });
+            Ok(())
+        })?,
+    )
+}
+
+/// Installs `ui.find_look { panel, group, field, field_focus, count, button,
+/// button_hover, button_active, icon, icons, placeholder, short_count,
+/// navigator_after }`: the look of the find bar zgx builds. `icons` are SVG
+/// paths from the script's folder, read from the host's files (the disk, or
+/// the app's bundle) as images are, or SVG markup.
+pub(crate) fn install_find_look(
+    lua: &mlua::Lua,
+    ui: &mlua::Table,
+    vm: std::rc::Weak<Vm>,
+    assets: Rc<Assets>,
+) -> mlua::Result<()> {
+    ui.set(
+        "find_look",
+        lua.create_function(move |lua, look: mlua::Table| {
+            let part = |name: &str| -> mlua::Result<Option<Styles>> {
+                match look.get::<mlua::Value>(name)? {
+                    mlua::Value::Nil => Ok(None),
+                    value => {
+                        let lits =
+                            crate::node::plain_styles(lua, value, &format!("find_look.{name}"))?;
+                        Ok(Some(apply_all(Styles::new(), &lits)))
+                    }
+                }
+            };
+            let icons = look.get::<Option<mlua::Table>>("icons")?;
+            let icon = |name: &str| -> mlua::Result<Option<Arc<SvgData>>> {
+                let Some(src) = icons
+                    .as_ref()
+                    .map(|t| t.get::<Option<String>>(name))
+                    .transpose()?
+                    .flatten()
+                else {
+                    return Ok(None);
+                };
+                let bytes = if src.trim_start().starts_with('<') {
+                    src.into_bytes()
+                } else {
+                    let vm = vm
+                        .upgrade()
+                        .ok_or_else(|| mlua::Error::runtime("find_look: the script has ended"))?;
+                    let path = resolve_path(&vm, &src).map_err(mlua::Error::runtime)?;
+                    assets.source().read(&path).map_err(|e| {
+                        mlua::Error::runtime(format!(
+                            "find_look.icons.{name}: {}: {e}",
+                            path.display()
+                        ))
+                    })?
+                };
+                SvgData::new(bytes)
+                    .map(|svg| Some(Arc::new(svg)))
+                    .map_err(|e| mlua::Error::runtime(format!("find_look.icons.{name}: {e}")))
+            };
+            zgx::find::set_find_look(zgx::find::FindLook {
+                panel: part("panel")?.unwrap_or_default(),
+                group: part("group")?.unwrap_or_default(),
+                field: part("field")?.unwrap_or_default(),
+                field_focus: part("field_focus")?,
+                count: part("count")?.unwrap_or_default(),
+                button: part("button")?.unwrap_or_default(),
+                button_hover: part("button_hover")?,
+                button_active: part("button_active")?,
+                icon: part("icon")?.unwrap_or_default(),
+                icons: zgx::find::FindIcons {
+                    search: icon("search")?,
+                    previous: icon("previous")?,
+                    next: icon("next")?,
+                    close: icon("close")?,
+                },
+                placeholder: look.get("placeholder")?,
+                short_count: look.get::<Option<bool>>("short_count")?.unwrap_or(false),
+                navigator_after: look.get::<Option<usize>>("navigator_after")?.unwrap_or(0),
+            });
+            Ok(())
+        })?,
+    )
+}
+
+/// Installs `ui.tooltip_look { panel, placement, keep_below }`: a text tip's
+/// panel in plain styles, where tips go unless their view says, and the band
+/// at the window's top (a titlebar) no tip reaches into.
+pub(crate) fn install_tooltip_look(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
+    ui.set(
+        "tooltip_look",
+        lua.create_function(|lua, look: mlua::Table| {
+            let panel = match look.get::<mlua::Value>("panel")? {
+                mlua::Value::Nil => None,
+                value => {
+                    let lits = crate::node::plain_styles(lua, value, "tooltip_look.panel")?;
+                    Some(apply_all(Styles::new(), &lits))
+                }
+            };
+            zgx::compose::set_tooltip_look(zgx::compose::TooltipLook {
+                panel,
+                placement: crate::node::placement_of(look.get("placement")?)?,
+                keep_below: look
+                    .get::<Option<f32>>("keep_below")?
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(0.),
+            });
+            Ok(())
+        })?,
+    )
+}
+
 /// Applies literal styles; translation and the local transform collect
 /// their parts first, so each is set once.
 fn apply_all<S: Styled>(mut s: S, lits: &[(Prop, Lit)]) -> S {
@@ -9564,8 +10015,10 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         match (prop, l) {
             (W, Length::Px(v)) => return s.w(v),
             (W, Length::Percent(p)) => return s.w_percent(pct(p)),
+            (W, Length::Auto) => return s.w_auto(),
             (H, Length::Px(v)) => return s.h(v),
             (H, Length::Percent(p)) => return s.h_percent(pct(p)),
+            (H, Length::Auto) => return s.h_auto(),
             (MinW, Length::Px(v)) => return s.min_w(v),
             (MinW, Length::Percent(p)) => return s.min_w_percent(pct(p)),
             (MaxW, Length::Px(v)) => return s.max_w(v),
@@ -9833,6 +10286,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Dir, Lit::Str(v)) => match &**v {
             "rtl" => s.rtl(),
             "ltr" => s.direction(zgx::scene::Direction::Ltr),
+            "auto" => s.dir_auto(),
             _ => s,
         },
         (TextSize, Lit::Num(v)) => s.text_size(*v),
@@ -9848,6 +10302,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         }),
         (Font, Lit::Str(v)) => s.font_family(font_family(v)),
         (Wrap, Lit::Bool(v)) => s.text_wrap(*v),
+        (Wrap, Lit::Str(v)) if &**v == "pretty" => s.text_pretty(true),
         (Wrap, Lit::Str(_)) => s.text_balance(true),
         // The ellipsis alone: text with one and no clamp keeps one line, so
         // `lines` wins however the two are set, in whichever order.
@@ -10343,8 +10798,9 @@ fn region_copy(view: View, node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>) -> 
 /// `on_copy` on a selectable region: handed `{ text, html, leaves }`, the
 /// selection's text and HTML and, for each text node it spans in order, the
 /// id of the element it is in (its own or the nearest around it, `false`
-/// for none), it returns `{ text, html }` for the clipboard (`text` the
-/// selection's where left out), or nil for the selection's own.
+/// for none), it returns `{ text, html, types }` for the clipboard (`text`
+/// the selection's where left out; `types` MIME types of the app's own and
+/// their text, `io::clipboard_types`), or nil for the selection's own.
 #[cold]
 #[inline(never)]
 fn on_selection_copy(
@@ -10390,9 +10846,16 @@ fn on_selection_copy(
             Ok(mlua::Value::Table(content)) => {
                 let text: Option<String> = content.get("text").unwrap_or(None);
                 let html: Option<String> = content.get("html").unwrap_or(None);
+                // Types of the app's own beside them; malformed, reported
+                // and left out.
+                let types = crate::io::clipboard_types(&content).unwrap_or_else(|error| {
+                    vm.report(error);
+                    Vec::new()
+                });
                 Some(zgx::widgets::ClipboardContent {
                     text: text.unwrap_or_else(|| request.text.to_owned()),
                     html,
+                    types,
                 })
             }
             Ok(_) => None,

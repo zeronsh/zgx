@@ -29,7 +29,7 @@ context_menu_open: State<boolean>? -- internal, subject to change
 | Option | Type | Default | |
 | --- | --- | --- | --- |
 | `open` | `State<boolean>`, or `() -> boolean` | required (not `menu_item`) | true while shown; written back as it closes. A function controls it: it shows while the function says so, and its closing (Escape, the backdrop, a choice) goes to `on_close` (a modal route, [routing](state.md#routing)) |
-| `on_close` | `() -> ()` | none | a controlled overlay's closing |
+| `on_close` | `() -> ()` | none | a controlled overlay's closing; on a `modal` whose `open` is a state, it runs as the person closes it (Escape, a press on the backdrop), after the state has been written, and not when the app sets the state itself |
 | `build` (`modal`, `popover`, `menu`) | `() -> Node` | none | its content, built each time it opens and kept while it closes: a form starts from what it edits, its components' state new (as React's conditionally rendered dialog). Children given as well come before it, built once |
 | `anchor` (`popover`, `menu`) | `Node` | required | the trigger, laid out where the popover is |
 | `autofocus` (`modal`, `popover`, `menu`) | `boolean` | `true` | focus its first control as it opens; `false` keeps the panel itself focused (keys still reach it) |
@@ -54,6 +54,10 @@ context_menu_open: State<boolean>? -- internal, subject to change
 | `context_menu_open` | `State<boolean>` | none | **Internal, subject to change.** Kept saying whether the node's context menu shows: true as it opens, false as it closes however it does (Escape, a pick, a click outside, Tab, the window losing focus, a newer menu, the node going). Writing it false closes the menu. For a floating panel that hides while the page's menu shows, as a browser's selection popover does |
 
 Panels start with 16 points of padding, the theme's surface color and rounded corners; a modal is 360 wide, a popover or menu 240, and each is as tall as its content, at most the window.
+
+`ui.menu_look { panel, item, hover, focus }` gives every menu that doesn't style itself a look of the app's, in plain values (as `context_menu_style`): `panel` for menu, submenu and context menu panels, `item` for each item, `hover` and `focus` in place of the platform's highlight. A menu's or item's own styles go over it, and the menus zgx builds itself (a link's Open Link and Copy Link, an editor's, a selection's) take it as they are. Set it once, before the menus it styles are built.
+
+A panel given `w = "max-content"` is as wide as its widest item, at least its `min_w`: a context menu sized to its labels.
 
 ## Behavior
 
@@ -238,7 +242,7 @@ return ui.sealed { w_full = true, h_full = true,
 
 ## toast
 
-`ui.toast { title, body?, kind?, duration?, action? }` shows a short message stacked in the window's bottom corner, at the end of the line (the left, right to left), over everything and taking no focus, as Radix's and the system's notifications; it returns the toast's id, which `ui.dismiss_toast(id)` dismisses. A toast goes after its `duration` (5000 ms, 7000 for a warning), paused while the pointer is over it, or at its ×; an error stays until dismissed. `action = { label = "Undo", run = fn }` puts a button on it, the toast going after `run`. Assistive technology hears each as it comes, an error at once. F8 moves focus into the stack, and Escape (or Delete) dismisses the focused toast. Four show at most; older ones wait. The stack is built while a toast shows, and is nothing otherwise.
+`ui.toast { title, body?, kind?, duration?, action? }` shows a short message stacked in the window's bottom corner, at the end of the line (the left, right to left), over everything and taking no focus, as Radix's and the system's notifications; it returns the toast's id, which `ui.dismiss_toast(id)` dismisses. A toast goes after its `duration` (5000 ms, 7000 for a warning), paused while the pointer is over it, or at its ×; an error stays until dismissed. `ui.toast_defaults { duration?, warning_duration?, error_duration? }` sets those for the toasts shown after it (an app's own, as Metal's: every toast 5000, errors too; `false` is until dismissed; what is not given stays), and a toast's own `duration` still wins. `action = { label = "Undo", run = fn }` puts a button on it, the toast going after `run`. Assistive technology hears each as it comes, an error at once. F8 moves focus into the stack, and Escape (or Delete) dismisses the focused toast. Four show at most; older ones wait. The stack is built while a toast shows, and is nothing otherwise.
 
 ```lua
 ui.command {
@@ -256,5 +260,5 @@ return ui.button {
 }
 ```
 
-In Rust (`zgx-components`), `Toaster::of(&runtime).show(Toast::new("Saved").kind(ToastKind::Success))`, with one `toast_host()` in the window.
+In Rust (`zgx-components`), `Toaster::of(&runtime).show(Toast::new("Saved").kind(ToastKind::Success))`, with one `toast_host()` in the window; `Toaster::set_defaults(ToastDefaults { .. })` sets the durations.
 

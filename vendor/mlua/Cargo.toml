@@ -129,12 +129,15 @@ optional = true
 
 [dependencies.ffi]
 version = "0.13.0"
-package = "mlua-sys"
+package = "zgx-mlua-sys"
+path = "../mlua-sys"
 
 
 # zgx patch: any Luau 0.22, 740 or 744 and later: Luau 744's bytecode
 # (version 13) loads through zgx's own check (ZGX_PATCH.md).
 [dependencies.luau0-src]
+package = "zgx-luau0-src"
+path = "../luau0-src"
 version = "0.22"
 optional = true
 

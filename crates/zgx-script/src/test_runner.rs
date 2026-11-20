@@ -90,6 +90,7 @@ pub fn run(
             dir.display()
         ));
     }
+    remove_stale_storage();
     let mut report = Report::default();
     for file in files {
         let mut record = |name: String, failure: Option<String>, duration| {
@@ -141,6 +142,55 @@ pub fn run(
         }
     }
     Ok(report)
+}
+
+/// The time budgets of an app under test: a test's fixtures can be heavy and
+/// the machine busy (CPU time grows under load too), so a call gets seconds
+/// where an app gets milliseconds; a loop that never ends is still stopped.
+fn test_limits() -> crate::Limits {
+    crate::Limits {
+        load: std::time::Duration::from_secs(30),
+        call: std::time::Duration::from_secs(5),
+        ..crate::Limits::default()
+    }
+}
+
+/// Removes the storage directories of runs that were killed (`SIGKILL`, a
+/// crash, a power cut), which could not remove their own: those of a process
+/// that is gone, or older than a day where that can't be told.
+fn remove_stale_storage() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("zgx-test-storage-"))
+        else {
+            continue;
+        };
+        let pid = rest.split('-').next().and_then(|p| p.parse::<u32>().ok());
+        let gone = match pid {
+            #[cfg(unix)]
+            // SAFETY: signal 0 only asks whether the process exists.
+            Some(pid) => unsafe {
+                libc::kill(pid as i32, 0) != 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            },
+            _ => false,
+        };
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > day);
+        if (gone || old) && pid != Some(std::process::id()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// The directories a run's tests made (each test's storage, each mount's
@@ -333,7 +383,9 @@ fn load(
                 .map_err(|error| mlua::Error::runtime(format!("mount: {error}")))?;
             let storage = launches.next();
             let app = TestApp::try_with_desktop(|runtime| {
-                host.apply(ScriptHost::new(runtime, &path)).storage(storage)
+                host.apply(ScriptHost::new(runtime, &path))
+                    .storage(storage)
+                    .limits(test_limits())
             })
             .map_err(|error| mlua::Error::runtime(format!("mount: {error}")))?;
             launches.hosts.borrow_mut().push(app.host.clone());
@@ -795,6 +847,57 @@ impl UserData for Mounted {
                 }
             },
         );
+        methods.add_method("states", |_, m, ()| {
+            Ok(m.app()?
+                .host
+                .states()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>())
+        });
+        methods.add_method("gc", |_, m, ()| {
+            let reports = m.app()?.host.gc_report(&Default::default());
+            Ok(reports.iter().map(|vm| vm.after).sum::<usize>() / 1024)
+        });
+        methods.add_method(
+            "gc_holders",
+            |lua, m, (kind, options): (Option<String>, Option<mlua::Table>)| {
+                let flag = |key: &str| {
+                    options
+                        .as_ref()
+                        .and_then(|o| o.get::<Option<bool>>(key).ok().flatten())
+                        .unwrap_or(false)
+                };
+                let query = crate::GcQuery {
+                    top: 10,
+                    retained: Some(kind.unwrap_or_else(|| "State".into())),
+                    sample: options
+                        .as_ref()
+                        .and_then(|o| o.get::<Option<usize>>("sample").ok().flatten())
+                        .unwrap_or(10),
+                    mark: flag("mark"),
+                    lua_only: flag("lua_only"),
+                    since_mark: flag("since_mark"),
+                };
+                let reports = m.app()?.host.gc_report(&query);
+                let out = lua.create_table()?;
+                for holder in reports.iter().flat_map(|vm| vm.found.holders.iter()) {
+                    let row = lua.create_table()?;
+                    row.set("count", holder.count)?;
+                    row.set("path", holder.path.clone())?;
+                    out.push(row)?;
+                }
+                Ok(out)
+            },
+        );
+        methods.add_method("retained_states", |_, m, ()| {
+            let query = crate::GcQuery {
+                retained: Some("State".into()),
+                ..Default::default()
+            };
+            let reports = m.app()?.host.gc_report(&query);
+            Ok(reports.iter().map(|vm| vm.found.matched).sum::<usize>())
+        });
         methods.add_method("state", |_, m, name: String| {
             let states = m.app()?.host.states();
             let suffix = format!("::{name}");

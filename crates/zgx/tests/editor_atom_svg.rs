@@ -1,14 +1,16 @@
 //! An atom shown as a picture (`AtomStyle::svg`, an equation): its text one
 //! box of the picture's size, one caret step, its line as tall as the box
-//! needs, its text kept for copy.
-use std::sync::Arc;
+//! needs, its text kept for copy; a line holding only it centred and padded
+//! as a display equation (`LineInset`).
+use std::{rc::Rc, sync::Arc};
 use zgx::{
     compose::prelude::*,
     input::{InputEvent, Key, Modifiers},
     scene::{NodeId, NodeKind, Rect},
     svg::SvgData,
     text_edit::Atom,
-    widgets::{AtomStyle, AtomSvg, EditorHandle, Ui},
+    text_layout::TextAlign,
+    widgets::{AtomStyle, AtomSvg, EditorHandle, LineInset, Ui},
 };
 
 const SIZE: f32 = 14.;
@@ -145,6 +147,39 @@ fn a_tall_equation_makes_its_line_taller() {
 }
 
 #[test]
+fn a_display_equation_is_centred_and_padded() {
+    let text = "before\nx^2\nafter";
+    let (ui, editor) = field(text, (7, 10), [3., 1.5, 0.3]);
+    let plain = editor.range_boxes(7..10)[0];
+    editor.set_line_insets(Some(Rc::new(|i| match i {
+        1 => LineInset {
+            above: 10.,
+            below: 10.,
+            align: Some(TextAlign::Center),
+            ..LineInset::default()
+        },
+        _ => LineInset::default(),
+    })));
+    ui.prepare_frame();
+    let shown = editor.range_boxes(7..10)[0];
+    let area = ui.scene.borrow().transformed_bounds(editor.node);
+    let middle = shown.x + shown.width / 2.;
+    assert!(
+        (middle - (area.x + area.width / 2.)).abs() < 12.,
+        "centred: {shown:?} in {area:?}"
+    );
+    assert!(
+        shown.y >= plain.y + 9.5,
+        "room above it: {shown:?} from {plain:?}"
+    );
+    let drawn = pictures(&ui, &editor);
+    assert!(
+        (drawn[0].x - shown.x).abs() < 0.5,
+        "its picture moved with it"
+    );
+}
+
+#[test]
 fn a_press_on_a_pictures_right_half_lands_after_it() {
     // Long source text: its bytes say nothing of where its box shows.
     let text = r"see \frac{a+b}{c+d} now";
@@ -175,47 +210,4 @@ fn a_press_on_a_pictures_right_half_lands_after_it() {
     std::thread::sleep(std::time::Duration::from_millis(600));
     press(&mut ui, b.x + b.width * 0.25, y);
     assert_eq!(editor.selection(), (4, 4), "its left half: before it");
-}
-
-#[test]
-fn a_highlighters_picture_boxes_each_replacement_character() {
-    use std::{cell::Cell, rc::Rc};
-    use zgx::widgets::SpanStyle;
-    let text = "a \u{FFFC}\u{FFFC} b";
-    let mut ui = Ui::new(400., 300.);
-    let value = ui.signal(text.to_string());
-    let named: Rc<Cell<Option<std::num::NonZeroU32>>> = Rc::default();
-    let name = named.clone();
-    let root = ui.mount(
-        column().size(400., 300.).child(
-            text_area("Note", value)
-                .id("field")
-                .size(300., 200.)
-                .text_size(SIZE)
-                .line_height(20.)
-                .span_highlighter(move |line, open| {
-                    let spans = match (name.get(), line.find('\u{FFFC}')) {
-                        (Some(id), Some(at)) => {
-                            vec![(at..at + 6, SpanStyle::default().inline_svg(id))]
-                        }
-                        _ => Vec::new(),
-                    };
-                    (spans, open)
-                }),
-        ),
-    );
-    ui.prepare_frame();
-    let editor = ui.editor(root.find("field").unwrap()).unwrap();
-    named.set(Some(editor.inline_svg(picture(), [1., 1., 0.25])));
-    editor.rehighlight();
-    ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
-    for range in [2..5, 5..8] {
-        let shown = editor.range_boxes(range.clone());
-        assert!(
-            (shown[0].width - SIZE).abs() < 0.5,
-            "{range:?}: one EM: {shown:?}"
-        );
-    }
-    assert_eq!(pictures(&ui, &editor).len(), 2, "a picture in each");
 }

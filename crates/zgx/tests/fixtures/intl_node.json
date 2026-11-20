@@ -1,0 +1,3035 @@
+{
+ "node": "v22.20.0",
+ "icu": "77.1",
+ "cldr": "47.0",
+ "cases": [
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a, b, and c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a and b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a, b, & c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a & b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b, c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a, b, or c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a or b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a, b, or c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a or b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b, or c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a or b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a, b, c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a, b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a, b, c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a, b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a b c"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a b"
+  },
+  {
+   "fn": "list",
+   "locale": "en",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 1234567.891,
+    "options": {}
+   },
+   "expected": "1,234,567.891"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 1234567.891,
+    "options": {
+     "maximumFractionDigits": 0
+    }
+   },
+   "expected": "1,234,568"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "minimumFractionDigits": 2
+    }
+   },
+   "expected": "1,234.50"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 1234567.891,
+    "options": {
+     "useGrouping": false
+    }
+   },
+   "expected": "1234567.891"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": -1234.5,
+    "options": {}
+   },
+   "expected": "-1,234.5"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 0.256,
+    "options": {
+     "style": "percent"
+    }
+   },
+   "expected": "26%"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 0.256,
+    "options": {
+     "style": "percent",
+     "maximumFractionDigits": 1
+    }
+   },
+   "expected": "25.6%"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "USD"
+    }
+   },
+   "expected": "$1,234.50"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "EUR"
+    }
+   },
+   "expected": "€1,234.50"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "JPY"
+    }
+   },
+   "expected": "¥1,235"
+  },
+  {
+   "fn": "number",
+   "locale": "en",
+   "args": {
+    "n": -1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "USD"
+    }
+   },
+   "expected": "-$1,234.50"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "full"
+    }
+   },
+   "expected": "Thursday, November 12, 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "long"
+    }
+   },
+   "expected": "November 12, 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "medium"
+    }
+   },
+   "expected": "Nov 12, 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "short"
+    }
+   },
+   "expected": "11/12/26"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "timeStyle": "short"
+    }
+   },
+   "expected": "3:30 PM"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "timeStyle": "medium"
+    }
+   },
+   "expected": "3:30:45 PM"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "medium",
+     "timeStyle": "short"
+    }
+   },
+   "expected": "Nov 12, 2026, 3:30 PM"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "month": "short",
+     "day": "numeric"
+    }
+   },
+   "expected": "Nov 12"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "year": "numeric",
+     "month": "long"
+    }
+   },
+   "expected": "November 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "weekday": "long"
+    }
+   },
+   "expected": "Thursday"
+  },
+  {
+   "fn": "date",
+   "locale": "en",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "month": "long",
+     "day": "numeric",
+     "year": "numeric"
+    }
+   },
+   "expected": "November 12, 2026"
+  },
+  {
+   "fn": "relative",
+   "locale": "en",
+   "args": {
+    "delta": -1,
+    "unit": "day",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "1 day ago"
+  },
+  {
+   "fn": "relative",
+   "locale": "en",
+   "args": {
+    "delta": 2,
+    "unit": "hour",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "in 2 hours"
+  },
+  {
+   "fn": "relative",
+   "locale": "en",
+   "args": {
+    "delta": -3,
+    "unit": "month",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "3 months ago"
+  },
+  {
+   "fn": "relative",
+   "locale": "en",
+   "args": {
+    "delta": 1,
+    "unit": "week",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "in 1 week"
+  },
+  {
+   "fn": "relative",
+   "locale": "en",
+   "args": {
+    "delta": -5,
+    "unit": "minute",
+    "options": {
+     "numeric": "always",
+     "style": "short"
+    }
+   },
+   "expected": "5 min. ago"
+  },
+  {
+   "fn": "relative",
+   "locale": "en",
+   "args": {
+    "delta": -1,
+    "unit": "day",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "yesterday"
+  },
+  {
+   "fn": "relative",
+   "locale": "en",
+   "args": {
+    "delta": 0,
+    "unit": "day",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "today"
+  },
+  {
+   "fn": "relative",
+   "locale": "en",
+   "args": {
+    "delta": 1,
+    "unit": "year",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "next year"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a, b und c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a und b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a, b und c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a und b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b und c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a und b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a, b oder c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a oder b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a, b oder c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a oder b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b oder c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a oder b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a, b und c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a, b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a, b und c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a, b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b und c"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b"
+  },
+  {
+   "fn": "list",
+   "locale": "de",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 1234567.891,
+    "options": {}
+   },
+   "expected": "1.234.567,891"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 1234567.891,
+    "options": {
+     "maximumFractionDigits": 0
+    }
+   },
+   "expected": "1.234.568"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "minimumFractionDigits": 2
+    }
+   },
+   "expected": "1.234,50"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 1234567.891,
+    "options": {
+     "useGrouping": false
+    }
+   },
+   "expected": "1234567,891"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": -1234.5,
+    "options": {}
+   },
+   "expected": "-1.234,5"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 0.256,
+    "options": {
+     "style": "percent"
+    }
+   },
+   "expected": "26 %"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 0.256,
+    "options": {
+     "style": "percent",
+     "maximumFractionDigits": 1
+    }
+   },
+   "expected": "25,6 %"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "USD"
+    }
+   },
+   "expected": "1.234,50 $"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "EUR"
+    }
+   },
+   "expected": "1.234,50 €"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "JPY"
+    }
+   },
+   "expected": "1.235 ¥"
+  },
+  {
+   "fn": "number",
+   "locale": "de",
+   "args": {
+    "n": -1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "USD"
+    }
+   },
+   "expected": "-1.234,50 $"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "full"
+    }
+   },
+   "expected": "Donnerstag, 12. November 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "long"
+    }
+   },
+   "expected": "12. November 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "medium"
+    }
+   },
+   "expected": "12.11.2026"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "short"
+    }
+   },
+   "expected": "12.11.26"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "timeStyle": "short"
+    }
+   },
+   "expected": "15:30"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "timeStyle": "medium"
+    }
+   },
+   "expected": "15:30:45"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "medium",
+     "timeStyle": "short"
+    }
+   },
+   "expected": "12.11.2026, 15:30"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "month": "short",
+     "day": "numeric"
+    }
+   },
+   "expected": "12. Nov."
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "year": "numeric",
+     "month": "long"
+    }
+   },
+   "expected": "November 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "weekday": "long"
+    }
+   },
+   "expected": "Donnerstag"
+  },
+  {
+   "fn": "date",
+   "locale": "de",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "month": "long",
+     "day": "numeric",
+     "year": "numeric"
+    }
+   },
+   "expected": "12. November 2026"
+  },
+  {
+   "fn": "relative",
+   "locale": "de",
+   "args": {
+    "delta": -1,
+    "unit": "day",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "vor 1 Tag"
+  },
+  {
+   "fn": "relative",
+   "locale": "de",
+   "args": {
+    "delta": 2,
+    "unit": "hour",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "in 2 Stunden"
+  },
+  {
+   "fn": "relative",
+   "locale": "de",
+   "args": {
+    "delta": -3,
+    "unit": "month",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "vor 3 Monaten"
+  },
+  {
+   "fn": "relative",
+   "locale": "de",
+   "args": {
+    "delta": 1,
+    "unit": "week",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "in 1 Woche"
+  },
+  {
+   "fn": "relative",
+   "locale": "de",
+   "args": {
+    "delta": -5,
+    "unit": "minute",
+    "options": {
+     "numeric": "always",
+     "style": "short"
+    }
+   },
+   "expected": "vor 5 Min."
+  },
+  {
+   "fn": "relative",
+   "locale": "de",
+   "args": {
+    "delta": -1,
+    "unit": "day",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "gestern"
+  },
+  {
+   "fn": "relative",
+   "locale": "de",
+   "args": {
+    "delta": 0,
+    "unit": "day",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "heute"
+  },
+  {
+   "fn": "relative",
+   "locale": "de",
+   "args": {
+    "delta": 1,
+    "unit": "year",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "nächstes Jahr"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a、b、c"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a、b"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a、b、c"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a、b"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a、b、c"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a、b"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a、b、またはc"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "aまたはb"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a、b、またはc"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "aまたはb"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a、b、またはc"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "aまたはb"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a b c"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a b"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a b c"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a b"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "abc"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "ab"
+  },
+  {
+   "fn": "list",
+   "locale": "ja",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 1234567.891,
+    "options": {}
+   },
+   "expected": "1,234,567.891"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 1234567.891,
+    "options": {
+     "maximumFractionDigits": 0
+    }
+   },
+   "expected": "1,234,568"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "minimumFractionDigits": 2
+    }
+   },
+   "expected": "1,234.50"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 1234567.891,
+    "options": {
+     "useGrouping": false
+    }
+   },
+   "expected": "1234567.891"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": -1234.5,
+    "options": {}
+   },
+   "expected": "-1,234.5"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 0.256,
+    "options": {
+     "style": "percent"
+    }
+   },
+   "expected": "26%"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 0.256,
+    "options": {
+     "style": "percent",
+     "maximumFractionDigits": 1
+    }
+   },
+   "expected": "25.6%"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "USD"
+    }
+   },
+   "expected": "$1,234.50"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "EUR"
+    }
+   },
+   "expected": "€1,234.50"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "JPY"
+    }
+   },
+   "expected": "￥1,235"
+  },
+  {
+   "fn": "number",
+   "locale": "ja",
+   "args": {
+    "n": -1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "USD"
+    }
+   },
+   "expected": "-$1,234.50"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "full"
+    }
+   },
+   "expected": "2026年11月12日木曜日"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "long"
+    }
+   },
+   "expected": "2026年11月12日"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "medium"
+    }
+   },
+   "expected": "2026/11/12"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "short"
+    }
+   },
+   "expected": "2026/11/12"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "timeStyle": "short"
+    }
+   },
+   "expected": "15:30"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "timeStyle": "medium"
+    }
+   },
+   "expected": "15:30:45"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "medium",
+     "timeStyle": "short"
+    }
+   },
+   "expected": "2026/11/12 15:30"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "month": "short",
+     "day": "numeric"
+    }
+   },
+   "expected": "11月12日"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "year": "numeric",
+     "month": "long"
+    }
+   },
+   "expected": "2026年11月"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "weekday": "long"
+    }
+   },
+   "expected": "木曜日"
+  },
+  {
+   "fn": "date",
+   "locale": "ja",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "month": "long",
+     "day": "numeric",
+     "year": "numeric"
+    }
+   },
+   "expected": "2026年11月12日"
+  },
+  {
+   "fn": "relative",
+   "locale": "ja",
+   "args": {
+    "delta": -1,
+    "unit": "day",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "1 日前"
+  },
+  {
+   "fn": "relative",
+   "locale": "ja",
+   "args": {
+    "delta": 2,
+    "unit": "hour",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "2 時間後"
+  },
+  {
+   "fn": "relative",
+   "locale": "ja",
+   "args": {
+    "delta": -3,
+    "unit": "month",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "3 か月前"
+  },
+  {
+   "fn": "relative",
+   "locale": "ja",
+   "args": {
+    "delta": 1,
+    "unit": "week",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "1 週間後"
+  },
+  {
+   "fn": "relative",
+   "locale": "ja",
+   "args": {
+    "delta": -5,
+    "unit": "minute",
+    "options": {
+     "numeric": "always",
+     "style": "short"
+    }
+   },
+   "expected": "5 分前"
+  },
+  {
+   "fn": "relative",
+   "locale": "ja",
+   "args": {
+    "delta": -1,
+    "unit": "day",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "昨日"
+  },
+  {
+   "fn": "relative",
+   "locale": "ja",
+   "args": {
+    "delta": 0,
+    "unit": "day",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "今日"
+  },
+  {
+   "fn": "relative",
+   "locale": "ja",
+   "args": {
+    "delta": 1,
+    "unit": "year",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "来年"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a, b ja c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a ja b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a, b ja c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a ja b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b ja c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a ja b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "conjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a, b tai c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a tai b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a, b tai c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a tai b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a, b tai c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a tai b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "disjunction",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a, b ja c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a ja b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "long"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a, b, c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a, b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "short"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b",
+     "c"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a b c"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a",
+     "b"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a b"
+  },
+  {
+   "fn": "list",
+   "locale": "fi",
+   "args": {
+    "items": [
+     "a"
+    ],
+    "options": {
+     "type": "unit",
+     "style": "narrow"
+    }
+   },
+   "expected": "a"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 1234567.891,
+    "options": {}
+   },
+   "expected": "1 234 567,891"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 1234567.891,
+    "options": {
+     "maximumFractionDigits": 0
+    }
+   },
+   "expected": "1 234 568"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "minimumFractionDigits": 2
+    }
+   },
+   "expected": "1 234,50"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 1234567.891,
+    "options": {
+     "useGrouping": false
+    }
+   },
+   "expected": "1234567,891"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": -1234.5,
+    "options": {}
+   },
+   "expected": "−1 234,5"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 0.256,
+    "options": {
+     "style": "percent"
+    }
+   },
+   "expected": "26 %"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 0.256,
+    "options": {
+     "style": "percent",
+     "maximumFractionDigits": 1
+    }
+   },
+   "expected": "25,6 %"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "USD"
+    }
+   },
+   "expected": "1 234,50 $"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "EUR"
+    }
+   },
+   "expected": "1 234,50 €"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": 1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "JPY"
+    }
+   },
+   "expected": "1 235 ¥"
+  },
+  {
+   "fn": "number",
+   "locale": "fi",
+   "args": {
+    "n": -1234.5,
+    "options": {
+     "style": "currency",
+     "currency": "USD"
+    }
+   },
+   "expected": "−1 234,50 $"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "full"
+    }
+   },
+   "expected": "torstai 12. marraskuuta 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "long"
+    }
+   },
+   "expected": "12. marraskuuta 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "medium"
+    }
+   },
+   "expected": "12.11.2026"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "short"
+    }
+   },
+   "expected": "12.11.2026"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "timeStyle": "short"
+    }
+   },
+   "expected": "15.30"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "timeStyle": "medium"
+    }
+   },
+   "expected": "15.30.45"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "dateStyle": "medium",
+     "timeStyle": "short"
+    }
+   },
+   "expected": "12.11.2026 klo 15.30"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "month": "short",
+     "day": "numeric"
+    }
+   },
+   "expected": "12.11."
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "year": "numeric",
+     "month": "long"
+    }
+   },
+   "expected": "marraskuu 2026"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "weekday": "long"
+    }
+   },
+   "expected": "torstai"
+  },
+  {
+   "fn": "date",
+   "locale": "fi",
+   "args": {
+    "t": 1794497445000,
+    "options": {
+     "month": "long",
+     "day": "numeric",
+     "year": "numeric"
+    }
+   },
+   "expected": "12. marraskuuta 2026"
+  },
+  {
+   "fn": "relative",
+   "locale": "fi",
+   "args": {
+    "delta": -1,
+    "unit": "day",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "1 päivä sitten"
+  },
+  {
+   "fn": "relative",
+   "locale": "fi",
+   "args": {
+    "delta": 2,
+    "unit": "hour",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "2 tunnin päästä"
+  },
+  {
+   "fn": "relative",
+   "locale": "fi",
+   "args": {
+    "delta": -3,
+    "unit": "month",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "3 kuukautta sitten"
+  },
+  {
+   "fn": "relative",
+   "locale": "fi",
+   "args": {
+    "delta": 1,
+    "unit": "week",
+    "options": {
+     "numeric": "always",
+     "style": "long"
+    }
+   },
+   "expected": "1 viikon päästä"
+  },
+  {
+   "fn": "relative",
+   "locale": "fi",
+   "args": {
+    "delta": -5,
+    "unit": "minute",
+    "options": {
+     "numeric": "always",
+     "style": "short"
+    }
+   },
+   "expected": "5 min sitten"
+  },
+  {
+   "fn": "relative",
+   "locale": "fi",
+   "args": {
+    "delta": -1,
+    "unit": "day",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "eilen"
+  },
+  {
+   "fn": "relative",
+   "locale": "fi",
+   "args": {
+    "delta": 0,
+    "unit": "day",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "tänään"
+  },
+  {
+   "fn": "relative",
+   "locale": "fi",
+   "args": {
+    "delta": 1,
+    "unit": "year",
+    "options": {
+     "numeric": "auto",
+     "style": "long"
+    }
+   },
+   "expected": "ensi vuonna"
+  }
+ ]
+}

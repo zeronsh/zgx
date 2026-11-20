@@ -52,6 +52,10 @@ pub struct LayoutRun<'a> {
     pub line_height: f32,
     /// Width of line
     pub line_w: f32,
+    /// zgx: the line's ascent and descent as its baseline took them
+    /// (rounded, the strut included).
+    pub ascent: f32,
+    pub descent: f32,
 }
 
 impl LayoutRun<'_> {
@@ -281,9 +285,14 @@ impl<'b> LayoutRunIter<'b> {
             self.total_height += line_height;
 
             let line_top = self.line_top - self.scroll;
-            let glyph_height = layout_line.max_ascent + layout_line.max_descent;
-            let centering_offset = (line_height - glyph_height) / 2.0;
-            let line_y = line_top + centering_offset + layout_line.max_ascent;
+            // zgx patch: the baseline sits where a browser's line box puts it: ascent
+            // and descent rounded to whole pixels, the half-leading floored (Blink).
+            let snap = baseline_scale();
+            let ascent = (layout_line.max_ascent * snap).round() / snap;
+            let descent = (layout_line.max_descent * snap).round() / snap;
+            let centering_offset =
+                ((line_height * snap - ascent * snap - descent * snap) / 2.0).floor() / snap;
+            let line_y = line_top + centering_offset + ascent;
             if let Some(height) = self.height_opt {
                 if line_y - layout_line.max_ascent > height {
                     return Some(None);
@@ -304,6 +313,8 @@ impl<'b> LayoutRunIter<'b> {
                 line_top,
                 line_height,
                 line_w: layout_line.w,
+                ascent,
+                descent,
             }));
         }
         None
@@ -1875,4 +1886,17 @@ impl BorrowedWithFontSystem<'_, Buffer> {
     {
         self.inner.draw(self.font_system, cache, color, f);
     }
+}
+
+thread_local! {
+    static BASELINE_SCALE: core::cell::Cell<f32> = const { core::cell::Cell::new(1.) };
+}
+/// zgx: the device pixels a point the baselines snap to (1 by default):
+/// a browser lays a line out in device pixels, rounding the font's ascent
+/// and descent and flooring the half-leading there, not in points.
+pub fn set_baseline_scale(scale: f32) {
+    BASELINE_SCALE.with(|s| s.set(if scale.is_finite() && scale >= 1. { scale } else { 1. }));
+}
+pub(crate) fn baseline_scale() -> f32 {
+    BASELINE_SCALE.with(core::cell::Cell::get)
 }

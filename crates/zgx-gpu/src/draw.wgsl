@@ -85,6 +85,21 @@ fn faded(b:vec4<f32>, f:vec4<f32>, p:vec2<f32>)->f32 {
  if v.options.z>1.5 {w=max(dot(v.border.zw,p)+1.,1e-4);}
  var o:Out; o.position=vec4(position.x/viewport.x*2.-w,w-position.y/viewport.y*2.,0.,w);o.uv=v.uv.xy+corner*v.uv.zw;o.color=v.color;o.point=p;o.fade=v.fade;o.options=v.options;o.shape=v.shape;o.border=v.border;o.mask=v.mask;return o;
 }
+// A rounded box's signed distance (x) and its gradient (yz) at `q`, the point's
+// offset past the corner's centre: a quarter circle, or for `k` above 1 the
+// superellipse |x|^2^k+|y|^2^k=r^2^k (CSS `corner-shape: superellipse(k)`).
+fn corner_sdf(q:vec2<f32>, radius:f32, k:f32)->vec3<f32> {
+ let o=max(q,vec2(0.));
+ if k>1.01 && o.x>0. && o.y>0. && radius>0. {
+   let n=exp2(k); let u=o/radius;
+   let s=pow(pow(u.x,n)+pow(u.y,n),1./n);
+   let g=pow(u/max(s,1e-6),vec2(n-1.)); let gl=max(length(g),1e-6);
+   return vec3((s-1.)*radius/gl,g/gl);
+ }
+ let reach=length(o);
+ let gradient=select(select(vec2(0.,1.),vec2(1.,0.),q.x>q.y),o/max(reach,1e-20),reach>0.);
+ return vec3(reach+min(max(q.x,q.y),0.)-radius,gradient);
+}
 fn shade(input:Out)->vec4<f32> { return shade_texel(input,vec4(0.),false); }
 // How far `at` (a pixel's centre, device pixels) lies from the middle of
 // `box` (logical), each way, in logical units: the box's middle on a 64th
@@ -109,19 +124,19 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
      corner=select(select(v.border.x,v.border.y,right),select(v.border.w,v.border.z,right),bottom);
    }
    let radius=clamp(corner,0.,min(v.fade.z,v.fade.w)*0.5);
+   // Pills and circles stay round, as Metal draws them.
+   let k=select(1.,v.shape.w,radius<min(v.fade.z,v.fade.w)*0.5-0.25);
    // From the pixel's own centre in device pixels (exact) to the box's,
    // on a 64th of a pixel: moved by whole pixels, the same numbers.
    let q=centred(v.position.xy,v.fade)-(v.fade.zw*0.5-vec2(radius));
-   let distance=length(max(q,vec2(0.)))+min(max(q.x,q.y),0.)-radius;
+   let sdf=corner_sdf(q,radius,k);
+   let distance=sdf.x;
    // Its slopes a device pixel across and down, from its gradient: what
    // fine derivatives estimate, the same at every pixel (they difference
    // with the neighbour in the pixel's 2×2 block, so a corner moved by an
    // odd number of pixels shaded otherwise, and a scroll's copy of it
    // differed from it drawn where it went).
-   let outside=max(q,vec2(0.));
-   let reach=length(outside);
-   let gradient=select(select(vec2(0.,1.),vec2(1.,0.),q.x>q.y),outside/max(reach,1e-20),reach>0.);
-   let slope=gradient/viewport.z;
+   let slope=abs(sdf.yz)/viewport.z;
    if v.shape.y<0. {
      // A ring (a border alone, `ring_quad`): side widths (top, right,
      // bottom, left) packed two to a lane in 16ths of a pixel; inside, the
@@ -133,7 +148,7 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
      let box=vec4(v.fade.xy+sides.wx,max(v.fade.zw-sides.wx-sides.yz,vec2(0.)));
      let inner_radius=clamp(radius-(across+down)*0.5,0.,min(box.z,box.w)*0.5);
      let iq=centred(v.position.xy,box)-(box.zw*0.5-vec2(inner_radius));
-     let inside=length(max(iq,vec2(0.)))+min(max(iq.x,iq.y),0.)-inner_radius;
+     let inside=corner_sdf(iq,inner_radius,k).x;
      // Its slopes (above), each pixel's own: Direct3D's `fwidth` is
      // coarse, one per 2×2 block, and softened rounded rings (a pixel 1.4 px
      // inside a 4 px border came out 94% covered).
@@ -144,10 +159,30 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
      // A box shadow (`shape.z` its sigma, half the CSS blur): the box
      // blurred covers 0.5·erfc(d/(sigma·√2)) at signed distance d, half at
      // its edge (not full: that read as a hard, dark band).
-     let x=distance/(v.shape.z*1.41421356);
+     // With a spread on a superellipse corner, its distance is the held
+     // box's less the spread (a true offset), not a corner `spread` larger:
+     // that one drifts off the box's own at the diagonals.
+     var reach=distance;
+     if v.shape.y>500. && k>1.01 {
+       let grown=v.shape.y-1000.;
+       let held=vec4(v.fade.xy+vec2(grown),max(v.fade.zw-vec2(2.*grown),vec2(0.)));
+       let held_radius=clamp(radius-grown,0.,min(held.z,held.w)*0.5);
+       let hq=centred(v.position.xy,held)-(held.zw*0.5-vec2(held_radius));
+       reach=corner_sdf(hq,held_radius,k).x-grown;
+     }
+     let x=reach/(v.shape.z*1.41421356);
      let x2=x*x;
      let e=sign(x)*sqrt(1.-exp(-x2*(1.27323954+0.147*x2)/(1.+0.147*x2)));
      color.a*=0.5-0.5*e;
+     // `shape.y` above 500: 1000 plus the spread, and `uv` the offset: cut out the box it is
+     // the shadow of, as CSS draws a box shadow only outside its border box.
+     if v.shape.y>500. {
+       let spread=v.shape.y-1000.;
+       let box=vec4(v.fade.xy-v.uv+vec2(spread),max(v.fade.zw-vec2(2.*spread),vec2(0.)));
+       let r0=clamp(radius-spread,0.,min(box.z,box.w)*0.5);
+       let q0=centred(v.position.xy,box)-(box.zw*0.5-vec2(r0));
+       color.a*=clamp(0.5+corner_sdf(q0,r0,k).x*viewport.z,0.,1.);
+     }
    }
    // A square box's corner on whole pixels is covered as its edges are:
    // `fwidth` (the slopes' sum) adds both axes' there when the pixel's 2×2

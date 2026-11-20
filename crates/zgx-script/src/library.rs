@@ -225,6 +225,7 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
         })
     };
     ui.set("toast", lua.create_function(toast)?)?;
+    ui.set("toast_defaults", lua.create_function(toast_defaults)?)?;
     ui.set(
         "dismiss_toast",
         lua.create_function(|lua, id: u64| {
@@ -233,6 +234,10 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    ui.set("controls", lua.create_function(controls)?)?;
+    ui.set("press", lua.create_function(press)?)?;
+    ui.set("scroll_into_view", lua.create_function(scroll_into_view)?)?;
+    ui.set("text_of", lua.create_function(text_of)?)?;
     ui.set(
         "tabs",
         lua.create_function(|lua, table: Table| {
@@ -1537,6 +1542,160 @@ fn toast(lua: &Lua, table: Table) -> mlua::Result<u64> {
         });
     }
     Ok(Toaster::of(&runtime).show(toast))
+}
+
+/// `ui.toast_defaults { duration?, warning_duration?, error_duration? }`: how
+/// long toasts shown from now on stay when they do not say, in milliseconds;
+/// `false` until dismissed. What is not given stays as it was.
+fn toast_defaults(lua: &Lua, table: Table) -> mlua::Result<()> {
+    let runtime = crate::node::env(lua)?.runtime.clone();
+    let toaster = Toaster::of(&runtime);
+    let mut defaults = toaster.defaults();
+    let read = |key: &str, slot: &mut Option<std::time::Duration>| -> mlua::Result<()> {
+        match table.get::<mlua::Value>(key)? {
+            mlua::Value::Nil => {}
+            mlua::Value::Boolean(false) => *slot = None,
+            mlua::Value::Boolean(true) => {
+                return Err(mlua::Error::runtime(format!(
+                    "ui.toast_defaults's `{key}` is milliseconds, or false for until dismissed"
+                )));
+            }
+            other => {
+                let ms: f64 = mlua::FromLua::from_lua(other, lua).map_err(|_| {
+                    mlua::Error::runtime(format!(
+                        "ui.toast_defaults's `{key}` takes milliseconds, or false"
+                    ))
+                })?;
+                *slot = Some(crate::duration_ms(
+                    &format!("ui.toast_defaults's {key}"),
+                    ms,
+                )?);
+            }
+        }
+        Ok(())
+    };
+    read("duration", &mut defaults.info)?;
+    read("warning_duration", &mut defaults.warning)?;
+    read("error_duration", &mut defaults.error)?;
+    toaster.set_defaults(defaults);
+    Ok(())
+}
+
+/// The window `ui.controls` and `ui.press` act on: the active one, else the
+/// last given (`ScriptHost::window_controls`); a plugin has none.
+fn control_window(lua: &Lua, what: &str) -> mlua::Result<Option<zgx::widgets::Ui>> {
+    let env = crate::node::env(lua)?;
+    if env.meter.is_some() {
+        return Err(mlua::Error::runtime(format!(
+            "{what} is not available to plugins"
+        )));
+    }
+    let windows: Vec<zgx::widgets::Ui> = env
+        .control_windows
+        .borrow()
+        .iter()
+        .filter_map(|window| window.upgrade())
+        .collect();
+    let at = windows
+        .iter()
+        .position(|ui| ui.window_is_active())
+        .unwrap_or(windows.len().saturating_sub(1));
+    Ok(windows.into_iter().nth(at))
+}
+
+/// `ui.controls { limit? }`: the controls on screen as a list, in document
+/// order with popups and modals last: `{ role, name, x, y, w, h, disabled,
+/// selected, checked, expanded, pressed, focused, handle }`, window points. `{}` where the
+/// host gave no window (`ScriptHost::window_controls`).
+fn controls(lua: &Lua, options: Option<Table>) -> mlua::Result<Table> {
+    let limit = match &options {
+        Some(options) => options
+            .get::<Option<f64>>("limit")?
+            .map(|n| n.max(0.) as usize),
+        None => None,
+    };
+    let out = lua.create_table()?;
+    let Some(ui) = control_window(lua, "ui.controls")? else {
+        return Ok(out);
+    };
+    for (i, control) in crate::driver::controls(&ui, limit).into_iter().enumerate() {
+        let item = lua.create_table()?;
+        item.set("role", control.role)?;
+        item.set("name", control.name)?;
+        item.set("x", control.bounds.x)?;
+        item.set("y", control.bounds.y)?;
+        item.set("w", control.bounds.width)?;
+        item.set("h", control.bounds.height)?;
+        item.set("disabled", control.disabled)?;
+        item.set("selected", control.selected)?;
+        item.set("checked", control.checked)?;
+        item.set("expanded", control.expanded)?;
+        item.set("pressed", control.pressed)?;
+        item.set("haspopup", control.has_popup)?;
+        if let Some((offset, range)) = control.scroll {
+            item.set("scroll_offset", offset)?;
+            item.set("scroll_range", range)?;
+            item.set("at_start", offset <= 0.5)?;
+            item.set("at_end", offset >= range - 0.5)?;
+        }
+        item.set("focused", control.focused)?;
+        // A number a script can hold exactly (2^53): a slot reused two million times wraps.
+        item.set("handle", (control.handle & ((1 << 53) - 1)) as f64)?;
+        out.raw_set(i + 1, item)?;
+    }
+    Ok(out)
+}
+
+/// `ui.press(handle)`: the press and release `zgx inspect click` makes at
+/// the middle of the control `handle` (from `ui.controls`) names, through
+/// the window's input; false, doing nothing, for a handle that is stale,
+/// hidden or covered, and while a handler is handling input (press from a
+/// command, a timer or a task).
+fn press(lua: &Lua, handle: f64) -> mlua::Result<bool> {
+    let Some(mut ui) = control_window(lua, "ui.press")? else {
+        return Ok(false);
+    };
+    // Input within input would go to what the outer press captured.
+    if ui.is_dispatching() {
+        return Ok(false);
+    }
+    if !(handle.is_finite() && handle >= 0. && handle.fract() == 0.) {
+        return Ok(false);
+    }
+    Ok(crate::driver::press_control(&mut ui, handle as u64))
+}
+
+/// `ui.scroll_into_view(handle, options?)`: the scroll views around the
+/// control `handle` (from `ui.controls`) names moved so it shows, as
+/// `el:scroll_into_view(options)` moves them; whether any moved. False,
+/// moving nothing, for a stale or malformed handle.
+fn scroll_into_view(
+    lua: &Lua,
+    (handle, options): (f64, Option<mlua::Table>),
+) -> mlua::Result<bool> {
+    let how = crate::element::scroll_into_view_options(options)?;
+    let Some(ui) = control_window(lua, "ui.scroll_into_view")? else {
+        return Ok(false);
+    };
+    if !(handle.is_finite() && handle >= 0. && handle.fract() == 0.) {
+        return Ok(false);
+    }
+    Ok(ui.scroll_node_into_view(zgx::scene::NodeId::from_bits(handle as u64), how))
+}
+
+/// `ui.text_of(handle, cap?)`: the text a control (`ui.controls`' `handle`)
+/// shows, a word apart, at most `cap` (400) characters; "" when it is gone.
+fn text_of(lua: &Lua, (handle, cap): (f64, Option<f64>)) -> mlua::Result<String> {
+    let Some(ui) = control_window(lua, "ui.text_of")? else {
+        return Ok(String::new());
+    };
+    if !(handle.is_finite() && handle >= 0. && handle.fract() == 0.) {
+        return Ok(String::new());
+    }
+    let cap = cap
+        .filter(|c| c.is_finite() && *c >= 0.)
+        .map_or(400, |c| c as usize);
+    Ok(crate::driver::subtree_text(&ui, handle as u64, cap).unwrap_or_default())
 }
 
 /// What a disclosure's summary shows: text, or a node of the app's.

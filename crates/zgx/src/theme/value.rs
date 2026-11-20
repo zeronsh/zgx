@@ -203,15 +203,25 @@ impl Expr {
 pub fn alpha(Color(r, g, b, a): Color, by: f32) -> Color {
     Color(r, g, b, (a as f32 * by.clamp(0., 1.)).round() as u8)
 }
-/// `t` of the way from `a` to `b`, per channel (straight alpha).
+/// `t` of the way from `a` to `b` with premultiplied alpha, as CSS transitions
+/// and `color-mix()` interpolate: an opaque colour easing to a translucent wash
+/// never passes through a darker middle.
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0., 1.);
-    let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    let (aa, ba) = (a.3 as f32 / 255., b.3 as f32 / 255.);
+    let alpha = aa + (ba - aa) * t;
+    if alpha <= 0. {
+        return Color(0, 0, 0, 0);
+    }
+    let channel = |x: u8, y: u8| {
+        let (px, py) = (x as f32 * aa, y as f32 * ba);
+        ((px + (py - px) * t) / alpha).round().clamp(0., 255.) as u8
+    };
     Color(
-        lerp(a.0, b.0),
-        lerp(a.1, b.1),
-        lerp(a.2, b.2),
-        lerp(a.3, b.3),
+        channel(a.0, b.0),
+        channel(a.1, b.1),
+        channel(a.2, b.2),
+        (alpha * 255.).round() as u8,
     )
 }
 /// `wash` composited over `base` (source over, straight alpha).

@@ -129,8 +129,8 @@ fn on_copy_decides_what_a_regions_copy_writes() {
     assert!(h.ui.select_all_text(region));
     let copy = |h: &mut Harness| {
         let mut written = None;
-        assert!(h.ui.copy_selection_from(|text, html| {
-            written = Some((text, html));
+        assert!(h.ui.copy_selection_from(|content| {
+            written = Some((content.text, content.html));
             true
         }));
         h.settle();
@@ -192,7 +192,7 @@ fn on_copy_hears_the_rows_of_the_lists_it_spans() {
     let region = h.find("region").unwrap();
     assert!(h.ui.select_all_text(region));
     h.ui.prepare_frame();
-    assert!(h.ui.copy_selection_from(|_, _| true));
+    assert!(h.ui.copy_selection_from(|_| true));
     h.settle();
     let heard = h
         .host
@@ -236,7 +236,7 @@ fn a_list_that_is_the_region_names_its_rows_by_its_own_id() {
     let list = h.find("transcript:scale").unwrap();
     assert!(h.ui.select_all_text(list));
     h.ui.prepare_frame();
-    assert!(h.ui.copy_selection_from(|_, _| true));
+    assert!(h.ui.copy_selection_from(|_| true));
     h.settle();
     let heard = h
         .host
@@ -284,4 +284,94 @@ fn inspect_says_what_a_reader_hears_of_a_paragraph_with_a_citation() {
         .find(|(k, _)| k == "value")
         .map(|(_, v)| v.as_str());
     assert_eq!(value, Some("step 1."), "its value is as zgx keeps it");
+}
+
+/// Types of the app's own (`types = { [mime] = text }`) go with what
+/// `on_copy` gives in one write; `ui.clipboard.write { text, html, types }`
+/// writes the same, `ui.clipboard.read_type` reads a type back (one a web
+/// page's copy set, too), and a plain write leaves none.
+#[test]
+fn types_go_with_a_copy_and_read_back() {
+    let mut h = Harness::with_desktop(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r##"local read = ui.state("read", "")
+            local function show()
+                read:set(`{ui.clipboard.read_type("application/x-notes") or "nil"} {ui.clipboard.read_type("text/x-none") or "nil"}`)
+            end
+            return ui.column {
+                ui.button { "Write", id = "write", on_click = function()
+                    local written = ui.clipboard.write {
+                        text = "t",
+                        html = "<b>t</b>",
+                        types = { ["application/x-notes"] = "n 😀\n\nn", ["application/x-more"] = "" },
+                    }
+                    assert(written)
+                    show()
+                end },
+                ui.button { "Plain", id = "plain", on_click = function()
+                    ui.clipboard.write("plain")
+                    show()
+                end },
+                ui.button { "Read", id = "read-type", on_click = show },
+                ui.text { read, id = "label" },
+                ui.column {
+                    selectable = true,
+                    id = "region",
+                    on_copy = function(request)
+                        return { html = "<cite>" .. request.text .. "</cite>", types = { ["application/x-notes"] = "[" .. request.text .. "]" } }
+                    end,
+                    ui.text { "Alpha", id = "a" },
+                },
+            }"##,
+        )
+    });
+    h.settle();
+    h.ui.prepare_frame();
+    let desktop = h.desktop.clone().unwrap();
+    h.click("write");
+    h.settle();
+    assert_eq!(h.text("label"), "n 😀\n\nn nil");
+    assert_eq!(desktop.clipboard(), "t");
+    assert_eq!(desktop.clipboard_html().as_deref(), Some("<b>t</b>"));
+    // In the order of their names.
+    let types = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        (pairs.iter())
+            .map(|(kind, value)| ((*kind).into(), (*value).into()))
+            .collect()
+    };
+    assert_eq!(
+        desktop.types(),
+        types(&[
+            ("application/x-more", ""),
+            ("application/x-notes", "n 😀\n\nn")
+        ])
+    );
+    h.click("plain");
+    h.settle();
+    assert_eq!(h.text("label"), "nil nil");
+    assert!(desktop.types().is_empty());
+    // A web page's copy with a type of its own.
+    desktop.copy_typed(
+        "page",
+        None,
+        types(&[("application/x-notes", "from a page")]),
+    );
+    h.click("read-type");
+    h.settle();
+    assert_eq!(h.text("label"), "from a page nil");
+    // A region's on_copy: its types beside the selection's own text.
+    let region = h.find("region").unwrap();
+    assert!(h.ui.select_all_text(region));
+    let mut written = None;
+    assert!(h.ui.copy_selection_from(|content| {
+        written = Some(content);
+        true
+    }));
+    let written = written.unwrap();
+    assert_eq!(written.text, "Alpha");
+    assert_eq!(written.html.as_deref(), Some("<cite>Alpha</cite>"));
+    assert_eq!(written.types, types(&[("application/x-notes", "[Alpha]")]));
+    assert_eq!(h.error(), None);
 }

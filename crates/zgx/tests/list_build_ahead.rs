@@ -13,6 +13,8 @@ fn spare(ui: &Ui) {
     while ui.spare_work_wanted() {
         ui.run_spare_work(Instant::now(), Duration::from_secs(60))
             .unwrap();
+        // (A list whose width just changed waits for it to stand still.)
+        std::thread::sleep(Duration::from_micros(200));
         turns += 1;
         assert!(turns < 10_000, "spare work never ends");
     }

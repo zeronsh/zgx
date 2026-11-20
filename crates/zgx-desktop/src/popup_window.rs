@@ -75,7 +75,7 @@ pub(crate) enum PopupInput {
     /// The screens changed (a monitor, the taskbar), or popups can have no
     /// windows of their own after all: `popup_screens` again. (Windows'; AppKit
     /// and X11 popups follow screens as their windows move.)
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     Screens,
 }
 
@@ -758,13 +758,29 @@ mod macos {
     /// shadow's ink, and the window server's shadow, which follows what the
     /// window shows, would outline the whole soft shadow (on macOS 26 a
     /// dark rim round it) besides the panel's own.
+    /// Whether the window server shadows a popup's window: never a topmost layer, nor a tooltip or hover card,
+    /// which draws whatever shadow it has (AppKit's would ring it, a dark rim on macOS 26).
+    fn system_shadow(scene: &Scene, root: NodeId) -> bool {
+        use zgx::scene::PopupRole;
+        !matches!(
+            scene.popup_role(root),
+            Some(PopupRole::Topmost | PopupRole::Tooltip)
+        ) && window_shadow(scene, root)
+    }
     fn window_shadow(scene: &Scene, root: NodeId) -> bool {
         let Some(panel) = panel_of(scene, root) else {
             return true;
         };
         match scene.kind(panel) {
             NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
-                quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
+                // A ring or border is its own edge (a dark theme's popover: no shadow, a 0.5 inset ring)
+                let ring = quad
+                    .decoration
+                    .as_ref()
+                    .and_then(|d| d.inset_shadows.as_deref())
+                    .is_some_and(|rings| rings.iter().any(|ring| ring.color.3 > 0));
+                let border = quad.border_width > 0. && quad.border_color.3 > 0;
+                !ring && !border && quad.shadows().iter().all(|shadow| shadow.color.3 == 0)
             }
             _ => true,
         }
@@ -1143,6 +1159,31 @@ mod macos {
                 send(PopupInput::Dismiss);
             }
         });
+        // A topmost layer shows with its window's Space: its popups'
+        // host looks again as the Space changes.
+        let spaces = block2::RcBlock::new(|_: std::ptr::NonNull<NSNotification>| {
+            let parents: Vec<Sink> = PARENTS.with(|parents| {
+                parents
+                    .borrow()
+                    .iter()
+                    .map(|(_, send)| send.clone())
+                    .collect()
+            });
+            for send in parents {
+                send(PopupInput::Screens);
+            }
+        });
+        let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: AppKit's own notification name, observed as below.
+        unsafe {
+            let observer = workspace.addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWorkspaceActiveSpaceDidChangeNotification),
+                None,
+                None,
+                &spaces,
+            );
+            std::mem::forget(observer);
+        }
         let center = NSNotificationCenter::defaultCenter();
         // SAFETY: AppKit's own notification names; with no queue given the
         // block runs where AppKit posts them (the main thread), and the
@@ -1260,6 +1301,16 @@ mod macos {
     }
     /// The level drag images show at (`kCGDraggingWindowLevel`), over menus.
     const DRAGGING_LEVEL: isize = 500;
+    /// The level of a topmost layer (`PopupRole::Topmost`): over a drag's
+    /// image, the highest of the app's other windows.
+    const TOPMOST_LEVEL: isize = DRAGGING_LEVEL + 1;
+    // A topmost layer is above every other window the app stacks: drag
+    // images, tooltips, then menus and popovers.
+    const _: () = assert!(
+        TOPMOST_LEVEL > DRAGGING_LEVEL
+            && DRAGGING_LEVEL > TOOLTIP_LEVEL
+            && TOOLTIP_LEVEL > NSPopUpMenuWindowLevel
+    );
     /// The level AppKit shows its tooltips at (`NSToolTipPanel`'s, read).
     const TOOLTIP_LEVEL: isize = 103;
     /// Move `window`'s top-left to `origin` (global, top-down from the
@@ -1534,6 +1585,11 @@ mod macos {
                 .iter()
                 .filter(|root| Some(**root) != unshown)
                 .filter_map(|root| scene.popup_bounds(*root).map(|bounds| (*root, bounds)))
+                .map(|(root, bounds)| match scene.popup_role(root) {
+                    // Its window's whole content, as the layer fills it.
+                    Some(zgx::scene::PopupRole::Topmost) => (root, scene.bounds(scene.root())),
+                    _ => (root, bounds),
+                })
                 .collect();
             self.frames
                 .borrow_mut()
@@ -1654,6 +1710,29 @@ mod macos {
                     Some((dx, dy, x, y)) => Rect::new(x + dx, y + dy, rect.width, rect.height),
                     None => rect,
                 };
+                let topmost = scene.popup_role(root) == Some(zgx::scene::PopupRole::Topmost);
+                // Shown while its window is: not on another Space, not
+                // minimised (a topmost layer is no child of it).
+                if topmost && !new {
+                    let shown = parent.isVisible() && parent.isOnActiveSpace();
+                    if shown != panel.window.isVisible() {
+                        if shown {
+                            if crate::window_chrome::may_show() {
+                                panel.window.orderFront(None);
+                            }
+                        } else {
+                            panel.window.orderOut(None);
+                        }
+                    }
+                }
+                // Its window moved.
+                if topmost && !new {
+                    let at = parent
+                        .convertRectToScreen(content.convertRect_toView(local(frame, zoom), None));
+                    if panel.window.frame() != at {
+                        panel.rect = None;
+                    }
+                }
                 let moved = panel.rect != Some(frame);
                 let material = Material::of(scene, semantics, root, preview.is_some())
                     .map(|material| material.moved(frame.x - rect.x, frame.y - rect.y));
@@ -1681,7 +1760,7 @@ mod macos {
                 panel.back(material, frame);
                 panel.place(&parent, &content, frame);
                 if panel.preview.is_none() {
-                    let shadow = window_shadow(scene, root);
+                    let shadow = system_shadow(scene, root);
                     if panel.window.hasShadow() != shadow {
                         panel
                             .window
@@ -1729,6 +1808,9 @@ mod macos {
                             }
                             Some(zgx::scene::PopupRole::Tooltip) => {
                                 panel.window.setLevel(TOOLTIP_LEVEL);
+                            }
+                            Some(zgx::scene::PopupRole::Topmost) => {
+                                panel.window.setLevel(TOPMOST_LEVEL);
                             }
                             _ => panel.window.setLevel(NSPopUpMenuWindowLevel),
                         }
@@ -1898,7 +1980,7 @@ mod macos {
 
     #[cfg(test)]
     mod tests {
-        use super::{Material, window_shadow};
+        use super::{Material, system_shadow, window_shadow};
         use objc2_app_kit::NSVisualEffectMaterial;
         use zgx::{compose::prelude::*, widgets::Ui};
 
@@ -1944,6 +2026,45 @@ mod macos {
             assert_eq!(radius, -1.);
             assert_eq!((bounds.y, bounds.height), (y - 10., h + 10.));
             assert_eq!(bounds.width, w);
+        }
+
+        #[test]
+        fn a_panel_ringed_or_bordered_takes_no_shadow_from_the_window_server() {
+            use zgx::scene::{BoxShadow, Transform};
+            let shadow = |view: View| {
+                let mut ui = Ui::new(400., 300.);
+                let handle = ui.mount(view);
+                ui.prepare_frame();
+                window_shadow(&ui.scene.borrow(), handle.node())
+            };
+            let ring = BoxShadow {
+                color: rgba(0x262626ff),
+                offset: Transform { x: 0., y: 0. },
+                blur_radius: 0.,
+                spread: 0.5,
+            };
+            assert!(
+                !shadow(div().child(chip().inset_shadows(vec![ring]))),
+                "a dark popover's inset ring"
+            );
+            assert!(
+                !shadow(div().child(chip().border(1.).border_color(rgb(0x303030)))),
+                "a bordered panel"
+            );
+        }
+
+        #[test]
+        fn a_tooltip_takes_no_shadow_from_the_window_server() {
+            use zgx::scene::PopupRole;
+            let mut ui = Ui::new(400., 300.);
+            let handle = ui.mount(div().child(chip()));
+            ui.prepare_frame();
+            let root = handle.node();
+            assert!(system_shadow(&ui.scene.borrow(), root), "a menu's rim");
+            ui.scene
+                .borrow_mut()
+                .set_popup_role(root, PopupRole::Tooltip);
+            assert!(!system_shadow(&ui.scene.borrow(), root));
         }
 
         #[test]

@@ -67,6 +67,10 @@ pub(super) struct Shape {
     pub glyphs: Box<[ShapeGlyph]>,
     pub blank: bool,
     pub width: f32,
+    /// The character after the word: its last glyph's pair kerning with it
+    /// (`cosmic_text::pair_kerning`) is in the shape, shared by the texts that
+    /// hold the word followed so.
+    pub next: Option<char>,
 }
 
 /// A plain paragraph's words: where each starts, and its shape.
@@ -194,6 +198,7 @@ pub(super) struct WordCache {
 pub(super) fn qualifies(font: &FontStyle) -> bool {
     font.fallbacks.is_empty()
         && !font.masked
+        && !font.paragraph_rtl
         && font.letter_spacing == zgx::text_layout::LetterSpacing::ZERO
         && !font
             .features
@@ -341,11 +346,35 @@ impl WordCache {
             id.hash(&mut hasher);
             blank.hash(&mut hasher);
             word.hash(&mut hasher);
+            // Its last character beside the next decides the kerning (below).
+            let next = text[end..].chars().next();
+            next.hash(&mut hasher);
             let hash = hasher.finish();
             let shape = match self.shapes.get(&hash) {
-                Some((font, text, shape)) if *font == id && **text == *word => shape.clone(),
+                Some((font, text, shape))
+                    if *font == id && **text == *word && shape.next == next =>
+                {
+                    shape.clone()
+                }
                 _ => {
-                    let shaped = ShapeWord::plain(fonts, word, &self.fonts[id as usize].1, blank);
+                    let mut shaped =
+                        ShapeWord::plain(fonts, word, &self.fonts[id as usize].1, blank);
+                    if let (Some(last), Some(next), Some(glyph)) =
+                        (word.chars().last(), next, shaped.glyphs.last().cloned())
+                    {
+                        let kern = cosmic_text::pair_kerning(
+                            fonts,
+                            &glyph,
+                            &self.fonts[id as usize].1,
+                            last,
+                            next,
+                        );
+                        if kern != 0.
+                            && let Some(glyph) = shaped.glyphs.last_mut()
+                        {
+                            glyph.x_advance += kern;
+                        }
+                    }
                     // A word whose glyphs set different line heights is
                     // measured from shaped lines (`Compact::of`).
                     let height = |glyph: &ShapeGlyph| glyph.metrics_opt.map(|m| m.line_height);
@@ -358,6 +387,7 @@ impl WordCache {
                         width: shaped.width(size),
                         blank: shaped.blank,
                         glyphs: shaped.glyphs.into_boxed_slice(),
+                        next,
                     });
                     let bytes = shape.glyphs.len() * size_of::<ShapeGlyph>() + word.len() + 64;
                     if self.bytes + bytes > BUDGET {

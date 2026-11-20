@@ -821,6 +821,51 @@ declare extern type Locale with
 	function get(self): string?
 	function peek(self): string?
 	function set(self, locale: string?): ()
+	-- `Intl`-style text in the locale shown, with ECMA-402's option names (and
+	-- Chrome's output for them). Times are milliseconds since 1970 (a JS
+	-- `Date`'s); `timeZone` is "UTC" or the machine's.
+	-- `{ type = "conjunction" | "disjunction" | "unit", style = "long" | "short" | "narrow" }`.
+	function format_list(self, items: { string }, options: { type: string?, style: string? }?): string
+	-- `style` "decimal", "percent" or "currency" (with `currency = "USD"`),
+	-- `minimumFractionDigits`, `maximumFractionDigits`, `useGrouping`.
+	function format_number(
+		self,
+		n: number,
+		options: {
+			style: string?,
+			currency: string?,
+			minimumFractionDigits: number?,
+			maximumFractionDigits: number?,
+			useGrouping: boolean?,
+		}?
+	): string
+	-- `dateStyle` / `timeStyle` ("full", "long", "medium", "short"), or the
+	-- components `weekday`, `year`, `month`, `day`, `hour`, `minute`,
+	-- `second` ("long", "short", "narrow", "numeric", "2-digit").
+	function format_date(
+		self,
+		t: number,
+		options: {
+			dateStyle: string?,
+			timeStyle: string?,
+			weekday: string?,
+			year: string?,
+			month: string?,
+			day: string?,
+			hour: string?,
+			minute: string?,
+			second: string?,
+			hour12: boolean?,
+			timeZone: string?,
+		}?
+	): string
+	-- `unit` "second" … "year"; `numeric` "always" or "auto" ("yesterday").
+	function format_relative(
+		self,
+		delta: number,
+		unit: string,
+		options: { numeric: string?, style: string? }?
+	): string
 end
 -- `ui.span { … }`: a run of rich text, used once.
 declare extern type Span with
@@ -1212,6 +1257,10 @@ declare extern type Element with
 	-- list of measured rows measures those around it as it lands, so it
 	-- ends where asked. False for elements that are not lists.
 	function scroll_to_row(self, i: number, options: { align: ("start" | "center" | "end" | "nearest")? }?): boolean
+	-- How far a scroll view or list is scrolled along its axis and how far it
+	-- can go, in points: `at_start` and `at_end` say whether it can still
+	-- scroll up or down (left or right). Nil for anything else.
+	function scroll_info(self): { offset: number, range: number, at_start: boolean, at_end: boolean }?
 	-- (Hidden until its API is settled.) The scroll views around it moved
 	-- so it shows, innermost first, as the web's scrollIntoView: `block`
 	-- down ("start" by default) and `inline` across ("nearest"), easing
@@ -1284,6 +1333,44 @@ declare extern type Ref with
 	function elements(self): { Element }
 end
 
+-- One control `ui.controls` lists, in window points.
+export type Control = {
+	-- ARIA's name for it: "button", "link", "checkbox", "menuitem", "tab", "dialog"…
+	role: string,
+	-- Its accessible name, else its text.
+	name: string,
+	-- The part of its box that shows.
+	x: number,
+	y: number,
+	w: number,
+	h: number,
+	disabled: boolean,
+	-- Nil where it cannot be selected, checked or opened. `checked`: a
+	-- checkbox, radio, switch, or a checked or radio menu item, on or off.
+	selected: boolean?,
+	checked: boolean?,
+	expanded: boolean?,
+	-- Pressed or not, a toggle button (`aria-pressed`); nil for any other.
+	pressed: boolean?,
+	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
+	haspopup: string?,
+	focused: boolean,
+	-- A menu's or list box's scroll view, when it has one: how far it is
+	-- scrolled and how far it can go, and whether it can still scroll up or
+	-- down (`at_start`, `at_end`).
+	scroll_offset: number?,
+	scroll_range: number?,
+	at_start: boolean?,
+	at_end: boolean?,
+	-- Names it for `ui.press` while it is there.
+	handle: number,
+}
+
+export type ControlsOptions = {
+	-- At most this many, in order.
+	limit: number?,
+}
+
 export type ToastOptions = {
 	title: string | UiError,
 	body: (string | UiError)?,
@@ -1291,6 +1378,14 @@ export type ToastOptions = {
 	duration: number?,
 	-- A button on it: "Undo"; the toast goes after `run`.
 	action: { label: string, run: () -> () }?,
+}
+
+export type ToastDefaults = {
+	-- Milliseconds toasts stay when they do not say (5000), a warning's
+	-- (7000) and an error's (until dismissed); `false` is until dismissed.
+	duration: number?,
+	warning_duration: (number | false)?,
+	error_duration: (number | false)?,
 }
 
 export type NumberOptions = {
@@ -1385,6 +1480,13 @@ export type MarkdownOptions = {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files: runs with `f`.
 	paths: boolean?,
+	-- Inline HTML's marks style their text, as GitHub-sanitized HTML
+	-- shows them: `b`/`strong`, `i`/`em`, `s`/`del`/`strike`,
+	-- `code`/`kbd`/`samp`/`tt`, `a href`, and `br` a line break.
+	html_marks: boolean?,
+	-- GFM's autolink literals are links: `https://…` as written, `www.…`
+	-- to `http://…`, an email to `mailto:` (no `ftp://`, as remark-gfm).
+	autolinks: boolean?,
 	-- With `key`: a text this long (true: 4 KB; or bytes) landing whole
 	-- comes back at once, its blocks not parsed yet `{ t = "pending" }`,
 	-- and is parsed over frames, the end first.
@@ -1664,14 +1766,17 @@ export type ClipboardReadRequest = {
 
 -- `ui.command(opts)`: an app command, shown as a menu item; its key
 -- reaches it wherever focus is (terminals and web pages included). `id`
--- and `run` are required unless `separator` is set (Luau checks table
--- unions poorly, so this is one table).
+-- and `run` are required unless `separator` is set, or `menu` alone names
+-- one (it declares the menu and its place in the bar, with no entry: fix
+-- the menu bar's order). Luau checks table unions poorly, so this is one
+-- table.
 export type CommandOptions = {
 	id: string?,
 	-- Defaults to the id.
 	title: string?,
-	-- "File" (the default), "Edit", "View", "Window" or any other menu.
-	menu: string?,
+	-- "File" (the default), "Edit", "View", "Window" or any other menu; false
+	-- for none: its key alone runs it, after what has focus.
+	menu: (string | false)?,
 	-- Modifiers and a key joined by "+": "cmd+shift+d", "cmd+alt+arrowleft".
 	-- A state or a function saying it follows what it reads: rebound (a
 	-- shortcuts setting), the menus have the new key at once, no reload.
@@ -1680,6 +1785,12 @@ export type CommandOptions = {
 	-- a focused web page or terminal, which otherwise get each key first
 	-- (as a browser keeps ⌘T from its pages). Not a plugin's to set.
 	reserved: boolean?,
+	-- Whether it can run now (true): a boolean, or a state or function saying
+	-- (followed, no reload). Off, its menu item is dimmed and its shortcut
+	-- does nothing.
+	enabled: (boolean | State<boolean> | (() -> boolean))?,
+	-- Held, its shortcut runs it again on each auto-repeat; without it, once a press.
+	["repeat"]: boolean?,
 	run: (() -> ...unknown)?,
 	-- A separator line in `menu` instead of a command.
 	separator: boolean?,
@@ -1779,6 +1890,9 @@ declare extern type WindowApi with
 	-- is false is worth a notification or a badge.
 	active: State<boolean>
 	shown: State<boolean>
+	-- The open menus, popovers and tooltips: `{ x, y, w, h, kind }` each, in
+	-- window points, kind "menu", "popover", "tooltip" or "topmost"; read-only.
+	popups: State<{ { x: number, y: number, w: number, h: number, kind: string, offset: number?, range: number?, at_start: boolean?, at_end: boolean? } }>
 	-- Whether the window is in full screen, read-only and followed, however
 	-- it went in or out (the green button, Ctrl+Cmd+F, the menu, Mission
 	-- Control, a script), turning as it begins to go; and while it goes
@@ -1885,10 +1999,14 @@ declare extern type SelectionCopy with
 	-- over rows scrolled away still names them.
 	rows: { { list: string | false, first: number, last: number } }
 end
--- What goes on the clipboard: text, and HTML beside it where given.
+-- What goes on the clipboard: text, and HTML beside it where given, and
+-- types of the app's own (`{ ["application/x-notes"] = "…" }`) beside them,
+-- which a web page's paste reads with `getData` (in Chrome, Edge and
+-- Electron apps) and `ui.clipboard.read_type` reads back.
 export type ClipboardContent = {
 	text: string?,
 	html: string?,
+	types: { [string]: string }?,
 }
 -- What a drag carries to other apps (`drag_export`): text, a link, files
 -- (absolute paths).
@@ -1960,7 +2078,10 @@ export type Styles = {
 	-- Which way lines run in it and what it holds (HTML's `dir`): "rtl"
 	-- for Arabic, Hebrew, Persian or Urdu runs rows from the right, starts
 	-- columns and text at the right, and turns `ps`, `ms`, `inset_start` round.
-	dir: ("ltr" | "rtl")?,
+	-- "auto" on text takes its first strong character's way (and one with
+	-- none, its parent's); on a container, set `dir` from
+	-- `ui.direction_of(text)` for the text it shows.
+	dir: ("ltr" | "rtl" | "auto")?,
 	grow: number?,
 	shrink: number?,
 	basis: Length?,
@@ -2121,7 +2242,7 @@ export type Styles = {
 	italic: boolean?,
 	align: TextAlign?,
 	font: Font?,
-	wrap: (boolean | "balance")?,
+	wrap: (boolean | "balance" | "pretty")?,
 	truncate: boolean?,
 	lines: number?,
 	line_height: Num?,
@@ -2203,7 +2324,7 @@ export type StyleProps = {
 	gap_y: Reactive<Length>?,
 	-- Flex and grid.
 	direction: Reactive<Direction>?,
-	dir: Reactive<"ltr" | "rtl">?,
+	dir: Reactive<"ltr" | "rtl" | "auto">?,
 	grow: Reactive<number>?,
 	shrink: Reactive<number>?,
 	basis: Reactive<Length>?,
@@ -2306,7 +2427,7 @@ export type StyleProps = {
 	italic: Reactive<boolean>?,
 	align: Reactive<TextAlign>?,
 	font: Reactive<Font>?,
-	wrap: Reactive<boolean | "balance">?,
+	wrap: Reactive<boolean | "balance" | "pretty">?,
 	truncate: Reactive<boolean>?,
 	lines: Reactive<number>?,
 	line_height: Reactive<Num>?,
@@ -2363,6 +2484,7 @@ export type AriaRole =
 	| "img"
 	| "tabpanel"
 	| "article"
+	| "region"
 	| "radiogroup"
 	| "radio"
 	| "slider"
@@ -2444,10 +2566,34 @@ export type NodeProps = {
 	error: (string | Readable<string?> | (() -> string?))?,
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
-	aria_hidden: boolean?,
+	aria_hidden: Reactive<boolean>?,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Reactive<number>?,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Reactive<string>?,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Reactive<boolean>?,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Reactive<boolean>?,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: boolean?,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Reactive<boolean>?,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: boolean?,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -2465,6 +2611,10 @@ export type NodeProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: ("target" | "shown")?,
 	window_drag: boolean?,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: boolean?,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -2491,6 +2641,13 @@ export type NodeProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: number?,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: number?,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: TooltipGroup?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -2563,7 +2720,7 @@ export type NodeProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: ((request: SelectionCopy) -> ...ClipboardContent?)?,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -2744,8 +2901,18 @@ export type MarkdownViewProps = Merge<Props, {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files.
 	paths: boolean?,
+	-- Inline HTML's marks style their text (`b`, `em`, `code`, `a href`,
+	-- `br`, …), as GitHub-sanitized HTML shows them.
+	html_marks: boolean?,
+	-- GFM's autolink literals (`https://…`, `www.…`, emails) are links.
+	autolinks: boolean?,
 	-- A Copy button on code blocks (true).
 	copy: boolean?,
+	-- Told of a link click (or its Open Link); true says it was handled, so the link isn't opened.
+	on_link: ((url: string) -> boolean?)?,
+	-- TeX between dollars drawn as an SVG with its width, height above the baseline and depth below, in ems; nil shows it as code.
+	on_math: ((tex: string, display: boolean) -> { svg: string, w: number, h: number, d: number }?)?,
+	link_menu: ((e: { x: number, y: number, local_x: number, local_y: number, href: string, text: string }) -> { Node }?)?,
 }>
 -- `ui.span`'s options are plain values.
 export type SpanProps = {
@@ -2770,6 +2937,21 @@ export type SpanProps = {
 	-- How far below the baseline the underline sits (CSS's
 	-- `text-underline-offset`).
 	underline_offset: number?,
+	-- The underline breaks around descenders (g, j, p, q, y), as CSS's
+	-- `text-decoration-skip-ink: auto` does.
+	underline_skip_ink: boolean?,
+	-- How far its background reaches past the text on each side, taking no
+	-- room (CSS's negative inline margin under the same padding): a search
+	-- match's mark.
+	outset: number?,
+	-- An outline round its box, as CSS's inline border: `width` points
+	-- (1) in `color`. It takes room all round, inside the padding's outside,
+	-- and follows `radius`: a keycap in a sentence.
+	border: { width: number?, color: Color }?,
+	-- The least width of its box, border and padding included (CSS's
+	-- border-box `min-width` on an inline-block): the text sits centred in
+	-- what room is over.
+	min_w: number?,
 	-- How the underline is drawn, its colour and its thickness; any of them
 	-- underlines the span (unless `underline = false`). `"wavy"` marks a
 	-- mistake or a diagnostic.
@@ -2786,7 +2968,27 @@ export type SpanProps = {
 	}?,
 	-- A link (`on_click`) under the pointer: underlined, recoloured. With
 	-- it, the link isn't underlined at rest unless `underline` says so.
-	hover: { underline: boolean?, color: Color? }?,
+	-- `bg` its background, `underline_color` its underline's colour, `icon`
+	-- another icon in place of the span's own (a file pill's download glyph).
+	hover: {
+		underline: boolean?,
+		color: Color?,
+		bg: Color?,
+		underline_color: Color?,
+		icon: {
+			src: string?,
+			code: string?,
+			size: number?,
+			gap: number?,
+			margin: number?,
+			dy: number?,
+			tint: Color?,
+			bg: Color?,
+			radius: number?,
+			pad: number?,
+			align: ("center" | "baseline")?,
+		}?,
+	}?,
 	-- Internal, and may change: a box of its own (CSS's `display:
 	-- inline-flex`), its line height and `padding` its box, which its
 	-- line's box holds (a badge taller than the text grows its line).
@@ -2806,10 +3008,32 @@ export type SpanProps = {
 		code: string?,
 		size: number?,
 		gap: number?,
+		-- Room on each side of it (0), inline only: no well, no taller line,
+		-- as CSS's `margin: 0 Npx` on an inline image.
+		margin: number?,
+		-- Moved down by this many points (negative: up): web's inline
+		-- icons sit at `vertical-align: -3px`, one below centre.
+		dy: number?,
 		tint: Color?,
 		bg: Color?,
 		radius: number?,
 		pad: number?,
+		-- "center" (the default): centred on the line, which it does not
+		-- make taller. "baseline": its bottom edge on the text's baseline,
+		-- as an inline image's is in CSS, the line growing to hold it (no
+		-- well).
+		align: ("center" | "baseline")?,
+	}?,
+	-- An icon after the text, in the line (a chip's arrow): `size` square,
+	-- centred on the line, `gap` from the text (the link's box includes it).
+	trailing_icon: {
+		src: string?,
+		code: string?,
+		size: number?,
+		gap: number?,
+		margin: number?,
+		dy: number?,
+		tint: Color?,
 	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
 	-- a link: told the keys held. Returning `true` handled it: its `href`
@@ -2838,6 +3062,13 @@ export type SpanProps = {
 	padding: (number | { number })?,
 	-- The background's corner radius.
 	radius: number?,
+	-- An SVG drawn in the line as a glyph: `w` by `h`, `d` below the baseline.
+	inline_svg: {
+		svg: string,
+		w: number,
+		h: number,
+		d: number,
+	}?,
 }
 -- Runs: spans, strings, functions, or span options. `literal`: the runs'
 -- strings as they are (a span's own `literal` wins).
@@ -3577,14 +3808,16 @@ export type ListProps = Merge<Props, {
 	-- as a state; built again when the item changes, or, taking a third
 	-- parameter, its item as a state kept current (it updates in place).
 	data: Readable<{ any }>?,
-	-- Builds row `index` (from 1); with `key`, the row of item `key`, given
-	-- its index as a state that follows where the row is. With `data`,
-	-- the row of an item.
+	-- Builds row `index` (from 1). With `key`, `row` is called with the key
+	-- (the value `key(index)` gave), not the index: `row(key, index)`, the
+	-- index a state that follows where the row is. With `data`, the row of
+	-- an item.
 	row: ((index: number) -> Node)
 		| ((key: any, index: State<number>) -> Node)
 		| ((item: any, index: State<number>, row: State<any>) -> Node),
 	-- Each row's item's key (a number, string or boolean), as a function of
-	-- its index (with `data`, of its item): a row follows its item as the
+	-- its index (with `data`, of its item); `row` then receives the key,
+	-- not the index (see `row`). A row follows its item as the
 	-- list changes, moved rather than written again (rows a removal or an
 	-- insertion shifts keep their nodes, text and layout). With `data`, a
 	-- field's name (`key = "id"`) is read without making any item a table.
@@ -3618,8 +3851,9 @@ export type ListProps = Merge<Props, {
 	-- a state or a function saying it is followed (a composer growing).
 	scroll_padding: (ScrollPadding | State<ScrollPadding> | (() -> ScrollPadding))?,
 	-- Each row's own height instead, in order: a list, a state holding one
-	-- (a host's shared value costs the script nothing), or a function
-	-- returning one (tracked). The row count is its length.
+	-- (a `ui.state` or `ui.computed`; a host's shared value costs the script
+	-- nothing), or a function returning one (tracked). The row count is its
+	-- length. Anything but a list of numbers is an error, not no rows.
 	heights: ({ number } | Readable<{ number }> | (() -> { number }))?,
 	-- Rows (from 1, in order) that stick to the top while their section
 	-- scrolls past, each pushed up by the next: section headers. With
@@ -3674,6 +3908,15 @@ export type ModalProps = Merge<ContainerProps, {
 	-- false: a click outside doesn't close it (a dialog that must be
 	-- answered; Escape still does).
 	dismiss_on_backdrop: boolean?,
+	-- What lies behind the backdrop blurs by this sigma, the panel sharp
+	-- (CSS `backdrop-filter: blur()` on a dialog's backdrop).
+	scrim_blur: number?,
+	-- Where focus goes as it opens: the `id` of a node in it, or false for
+	-- none (the panel itself); left out, its first control.
+	initial_focus: (string | false)?,
+	-- Where focus goes as it closes: the `id` of any node, or false for
+	-- nothing; left out, what had it before.
+	final_focus: (string | false)?,
 }>
 -- Where an anchored popover or menu opens: on `side` of its trigger
 -- (flipping when that side lacks room), lined up with its start, centre
@@ -3682,7 +3925,29 @@ export type Placement = {
 	side: ("bottom" | "top" | "left" | "right")?,
 	align: ("start" | "center" | "end")?,
 	offset: number?,
+	-- Points kept between it and the screen's edges (0).
+	padding: number?,
+	-- Slide along the edge to stay on screen (true); false keeps its
+	-- aligned place and lets it reach past.
+	shift: boolean?,
+	-- Where its alignment would reach past the screen, line up with the
+	-- trigger's other edge when that fits (false).
+	flip_align: boolean?,
+	-- Where neither side has room, take the one with more (false: keep the
+	-- preferred side).
+	more_room: boolean?,
 }
+-- The tooltips under a node (`tooltip_group`), in milliseconds.
+export type TooltipGroup = { delay: number?, close_delay: number?, reshow_within: number?, reshow_delay: number? }
+-- How long the pointer rests on a trigger before its popup opens, and how
+-- long after it leaves the trigger and the popup before it closes, in
+-- milliseconds (Base UI's `delay` and `closeDelay`); left out, a popover's
+-- or menu's opens at 300 and a submenu's at 100, and each closes at 0.
+-- Heading for the popup across the space between, the pointer is held in
+-- the triangle to it (a safe polygon), so a diagonal crossing keeps it open;
+-- out of it, or at rest in it for 300 ms, it closes. One opened by a click
+-- stays open.
+export type HoverDelay = { open: number?, close: number? }
 export type PopoverProps = Merge<ContainerProps, {
 	-- A state, written back as it closes; or, controlled, a function saying
 	-- whether it shows, its closing going to `on_close` (a modal route).
@@ -3705,8 +3970,21 @@ export type PopoverProps = Merge<ContainerProps, {
 	arrow: number?,
 	-- At least as wide as its trigger, as a select's list is.
 	match_anchor_width: boolean?,
+	-- The anchor's slot takes its share of its row like any child, so an
+	-- anchor that grows or fills its width (a composer's textarea) has the
+	-- room to, with no `on_resize` measuring. Popover only.
+	anchor_fill: boolean?,
 	-- A popover only: false keeps it open on a click outside.
 	dismiss_on_backdrop: boolean?,
+	-- Opens as the pointer rests on `anchor` (see `HoverDelay`).
+	hover_delay: HoverDelay?,
+	-- Where focus goes as it opens: the `id` of a node in it, or false for
+	-- none (the panel itself); left out, its first control.
+	initial_focus: (string | false)?,
+	-- Where focus goes as it closes: the `id` of any node, or false for
+	-- nothing; left out, what had it before (else the trigger, if it was
+	-- opened from the keyboard).
+	final_focus: (string | false)?,
 	-- A popover only: at the caret of the input in its `anchor`, following
 	-- it (typing, a new line, scrolling, an input method's composition),
 	-- and taking no focus: keys go on to the input, which drives it (a
@@ -3739,6 +4017,9 @@ export type SubmenuProps = Merge<ContainerProps, {
 	-- label, a value, a chevron); the label and a "›" otherwise. It opens
 	-- when the pointer moves onto it.
 	trigger: Node?,
+	-- How long it waits under the pointer before it opens (100) and, off
+	-- its trigger and itself, before it closes (0); see `HoverDelay`.
+	hover_delay: HoverDelay?,
 }>
 export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	-- A `ui.web()` controller, so the page outlives the node; the options
@@ -3762,6 +4043,8 @@ export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	on_download: ((d: Download) -> ...unknown)?,
 }>>
 export type TerminalProps = Merge<Props, { term: Term }>
+-- The name the host registered with `zgx_script::host_view`.
+export type HostViewProps = Merge<Props, { name: string }>
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = Merge<Props, { context: unknown?, from: string? }>
 -- What a plugin targets: an element by its `id` (`"#save"`), declared hook
@@ -3977,18 +4260,41 @@ declare ui: {
 	group: (props: GroupProps) -> Object3D,
 	model: (props: ModelProps) -> Object3D,
 	webview: (props: WebViewProps) -> Node,
+	-- A view the host makes in Rust (`host_view(name, make)`), laid out, clipped and stacked as the script's own.
+	host_view: (props: ContainerProps & { name: string }) -> Node,
 	-- `ui.web(opts)`: a page for this run. `ui.web(id, opts)`: the host's
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: (props: TerminalProps) -> Node,
+	-- A view the host made in Rust, mounted in this tree under its popups.
+	host_view: (props: HostViewProps) -> Node,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
 	command: (opts: CommandOptions) -> (),
+	-- Runs the command `id` as its shortcut would; whether there was one.
+	run_command: (id: string) -> boolean,
 	-- Keys ("cmd+shift+z") as this platform shows them: "⇧⌘Z" on macOS,
 	-- "Ctrl+Shift+Z" elsewhere (`cmd` is Command on macOS, Control
 	-- elsewhere); a lone modifier ("cmd") as itself, "⌘" or "Ctrl".
 	shortcut_text: (keys: string) -> string,
+	-- The look every menu takes that doesn't style itself, zgx's own (a link's, an editor's) among them: its
+	-- panel, each item, an item under the pointer and one with keyboard focus, in plain values.
+	-- `fade`: ms a menu fades in as it opens and out as it closes (at once from the keyboard, and when an item is chosen).
+	menu_look: (look: { panel: Styles?, item: Styles?, hover: Styles?, focus: Styles?, fade: number? }) -> (),
+	-- The look of the find bar zgx builds (Command-F), as the app's own search field: the floating panel,
+	-- the group holding the icon, field, count and steps (close sits after it), the field and its focus,
+	-- the count, the buttons and their hover and press, each icon's box, in plain values. `icons`: SVG
+	-- paths from the script's folder, or SVG markup, in the text's colour; `search` leads the field.
+	-- `short_count` shows "1/3" for "1 of 3"; the count and steps show once `navigator_after` characters are typed.
+	find_look: (look: { panel: Styles?, group: Styles?, field: Styles?, field_focus: Styles?, count: Styles?, button: Styles?, button_hover: Styles?, button_active: Styles?, icon: Styles?, icons: { search: string?, previous: string?, next: string?, close: string? }?, placeholder: string?, short_count: boolean?, navigator_after: number? }) -> (),
+	-- The look every text tip takes (`tooltip = "…"`): its panel in plain values, where tips go unless their
+	-- node sets `tooltip_placement`, and `keep_below`: points at the window's top (a titlebar) no tip reaches
+	-- into, a tip above its node flipping below it instead.
+	tooltip_look: (look: { panel: Styles?, placement: Placement?, keep_below: number? }) -> (),
+	-- Whether the last input was the keyboard's (a key that moves or types since the last press), as
+	-- `:focus-visible` reads it: what it opens can skip its fade, as a menu opened from the keyboard does.
+	keyboard_in_use: () -> boolean,
 	-- The id of the command (the app's or a plugin's) holding a shortcut
 	-- now, `Shift+Cmd+J` or `cmd+shift+j` alike; nil if none.
 	shortcut_owner: (keys: string) -> string?,
@@ -4035,6 +4341,17 @@ declare ui: {
 	-- a dialog holds focus. Raised over everything as it opens (`open`, a
 	-- state; open unless given).
 	layer: (props: LayerProps) -> Node,
+	-- A layer above everything the app shows: in a window of its own
+	-- where the host has them (macOS), over the app's menus, popovers,
+	-- selects, tooltips and a drag's preview, covering the window's content
+	-- (its root at 0, 0; it follows the window as it moves, resizes,
+	-- zooms and changes Space). A `ui.layer` otherwise: no focus, no
+	-- backdrop, the pointer passing through where a child has
+	-- `pointer_events = "none"` or holds nothing; a press on a control in
+	-- it closes no menu or popover. Of two, the later is above. Drawn only
+	-- while it paints something; shown while `open` (a state; open unless
+	-- given) and its window is. Elsewhere it is the window's own top layer.
+	topmost: (props: LayerProps) -> Node,
 	popover: (props: PopoverProps) -> Node,
 	menu: (props: PopoverProps) -> Node,
 	menu_item: (props: MenuItemProps) -> Node,
@@ -4243,10 +4560,14 @@ declare ui: {
 	-- its HTML (a browser's or word processor's copy; nil if it holds
 	-- none), and putting HTML on it with its text; its image as a `Bitmap`
 	-- (nil if it holds none), and putting one on it: promises, as a large
-	-- image is decoded and encoded off the main thread.
+	-- image is decoded and encoded off the main thread. `write` takes
+	-- `{ text, html?, types? }` too: HTML and types of the app's own beside
+	-- the text in one change, which `read_type` reads back (a web page's
+	-- copy's types too, in Chrome, Edge and Electron apps).
 	clipboard: {
 		read: () -> string?,
-		write: (text: string) -> boolean,
+		write: (content: string | { text: string, html: string?, types: { [string]: string }? }) -> boolean,
+		read_type: (mime: string) -> string?,
 		read_html: () -> string?,
 		write_html: (text: string, html: string) -> boolean,
 		read_image: () -> Promise<Bitmap?>,
@@ -4342,6 +4663,24 @@ declare ui: {
 	-- A toast in the window's corner: it goes after `duration` ms (5000;
 	-- 7000 a warning; an error stays), or at its ×. Returns its id.
 	toast: (opts: ToastOptions) -> number,
+	-- How long toasts shown from now on stay when they do not say.
+	toast_defaults: (opts: ToastDefaults) -> (),
+	-- The controls on screen, in document order with popups and modals last
+	-- (a plain group, a text, a scroll view or a table's rows are not
+	-- controls). Nothing is built until you ask. `{}` where the host gave
+	-- no window; an error in a plugin.
+	controls: (opts: ControlsOptions?) -> { Control },
+	-- Presses and releases the primary button at the middle of the control
+	-- `handle` names, as `zgx inspect click` does. False, doing nothing,
+	-- for a handle whose control is gone, hidden or covered.
+	press: (handle: number) -> boolean,
+	-- (Hidden until its API is settled.) The scroll views around the control
+	-- `handle` names moved so it shows, as `el:scroll_into_view(options)`
+	-- moves them. Whether any moved; false for a control that is gone.
+	scroll_into_view: (handle: number, options: { block: ("start" | "center" | "end" | "nearest")?, inline: ("start" | "center" | "end" | "nearest")?, animate: boolean? }?) -> boolean,
+	-- The text a control (`ui.controls`' `handle`) shows, a word apart, at most
+	-- `cap` (400) characters; "" once it is gone. A dialog's, for a notice.
+	text_of: (handle: number, cap: number?) -> string,
 	dismiss_toast: (id: number) -> (),
 	-- JSON: `encode(value, { pretty = true })` writes what state could hold
 	-- (lists as arrays, tables as objects, `ui.null` as null); `decode(text)`
@@ -4361,6 +4700,10 @@ declare ui: {
 	-- "1,234.50", `{ style = "percent" }` takes a fraction (0.05 is "5%"),
 	-- `{ notation = "compact" }` gives "1.2K", `{ sign = "always" }` "+3".
 	number: (n: number, opts: NumberOptions?) -> string,
+	-- The way text runs by its first strong character: "rtl" for Arabic,
+	-- Hebrew and the like, "ltr" for another letter, nil for none (HTML's
+	-- `dir=auto`): what `dir` takes for a container showing that text.
+	direction_of: (text: string) -> ("ltr" | "rtl")?,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
 	-- `draw` as a canvas would show it, as a PNG in base64, with no window:

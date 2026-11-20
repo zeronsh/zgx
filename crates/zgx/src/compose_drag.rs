@@ -269,7 +269,12 @@ impl Drop for Preview {
         }
     }
 }
-pub(crate) fn mount(ui: &mut Ui, source: NodeId, mut builder: PreviewBuilder) {
+pub(crate) fn mount(
+    ui: &mut Ui,
+    source: NodeId,
+    mut builder: PreviewBuilder,
+    services: crate::reactive::ServiceScope,
+) {
     let weak = ui.downgrade();
     let mut preview = Preview(None);
     let binding = ui.input.listen(source, move |cx| {
@@ -292,7 +297,7 @@ pub(crate) fn mount(ui: &mut Ui, source: NodeId, mut builder: PreviewBuilder) {
                     // preview whose root lays out as its children
                     // (`contents`, as a Luau component's does) has no box
                     // to take `absolute`, and would take room from the page.
-                    let view = ui.mount(crate::compose::div().child(view));
+                    let view = ui.mount_scoped(crate::compose::div().child(view), services.clone());
                     let node = view.node();
                     let mut style = ui.scene.borrow().style(node);
                     style.absolute = true;

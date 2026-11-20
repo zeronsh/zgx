@@ -66,6 +66,12 @@ declare_class!(
             self.did_finish_launching(notification)
         }
 
+        #[method(applicationShouldTerminate:)]
+        fn app_should_terminate(&self, _sender: &NSObject) -> usize {
+            // NSTerminateNow is 1, NSTerminateCancel 0.
+            usize::from(super::terminate_gate_allows())
+        }
+
         #[method(applicationWillTerminate:)]
         fn app_will_terminate(&self, notification: &NSNotification) {
             self.will_terminate(notification)

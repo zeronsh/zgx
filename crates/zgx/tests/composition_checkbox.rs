@@ -110,6 +110,12 @@ fn checkbox_inherits_typography_and_disabled_state_styles() {
     assert!(
         matches!(ui.scene.borrow().kind(label), NodeKind::Text { font_size, .. } if *font_size == 22.)
     );
+    // The keyboard was used: what takes focus shows it.
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::ArrowDown,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
     assert!(ui.input.focus(&ui.scene, Some(root)));
     assert!(
         matches!(ui.scene.borrow().kind(root), NodeKind::Panel { quad, .. } if quad.fill == rgb(0x123456))

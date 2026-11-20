@@ -132,6 +132,7 @@ fn details(open: Signal<bool>, name: Signal<String>) -> View {
             side: PlacementSide::Right,
             align: PlacementEdge::Center,
             offset: 4.,
+            ..Default::default()
         })
         .w(260.)
         .p(14.)

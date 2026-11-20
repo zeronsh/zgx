@@ -57,6 +57,31 @@ pub(crate) fn create(ui: &mut Ui, owner: NodeId, parent: NodeId) -> Portal {
         visible: ui.signal(false),
     }
 }
+/// Where focus goes as a modal, popover or menu opens (`View::initial_focus`)
+/// or closes (`View::final_focus`): Base UI's `initialFocus` and
+/// `finalFocus`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum FocusTarget {
+    /// As it is: opening, its first control (the panel for one that takes
+    /// none); closing, what had focus (else its trigger, from the keyboard).
+    #[default]
+    Default,
+    /// Nothing is picked: opening, the panel itself; closing, nothing is
+    /// focused.
+    None,
+    /// The node `id` names (`View::id`): one that is in it and takes focus,
+    /// opening; any, closing. As `Default` where there is none.
+    Id(String),
+}
+/// What `View::initial_focus` and `View::final_focus` say, and how to find a
+/// node by id.
+type FindById = std::rc::Rc<dyn Fn(&str) -> Option<NodeId>>;
+#[derive(Clone)]
+pub(crate) struct FocusHooks {
+    pub initial: FocusTarget,
+    pub last: FocusTarget,
+    pub find: FindById,
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn activate(
     ui: &mut Ui,
@@ -80,6 +105,12 @@ pub(crate) fn activate(
     autofocus: bool,
     // A non-modal layer (`View::layer`).
     layer: bool,
+    // Run as the person closes it (Escape, the backdrop).
+    on_dismiss: Option<std::rc::Rc<dyn Fn()>>,
+    // Runs a menu's fade (`MenuLook::fade`).
+    runner: Option<std::rc::Rc<crate::compose::TaskRunner>>,
+    // Where focus goes as it opens and closes, if the view says.
+    focus: Option<FocusHooks>,
 ) {
     if layer {
         ui.input.set_layer(portal.overlay, true);
@@ -111,6 +142,11 @@ pub(crate) fn activate(
     ui.on_event(panel, true, |_| {});
     let close = open.clone();
     let input = ui.input.clone();
+    let dismissed = move || {
+        if let Some(handler) = &on_dismiss {
+            handler();
+        }
+    };
     ui.on_event(overlay, false, move |cx| match cx.event {
         InputEvent::FocusScopeClosed if cx.phase == EventPhase::Target => {
             close.set(false);
@@ -122,6 +158,7 @@ pub(crate) fn activate(
             && input.focus_scope() == Some(overlay) =>
         {
             close.set(false);
+            dismissed();
             cx.prevent_default();
             cx.stop_propagation();
         }
@@ -134,6 +171,7 @@ pub(crate) fn activate(
         {
             if dismiss_backdrop {
                 close.set(false);
+                dismissed();
             }
             cx.prevent_default();
             cx.stop_propagation();
@@ -168,6 +206,15 @@ pub(crate) fn activate(
         .collect::<Vec<_>>();
     let weak = ui.downgrade();
     let visible = portal.visible.clone();
+    let fade = (role == Role::Menu)
+        .then(crate::compose::menu_fade)
+        .flatten()
+        .filter(|d| !d.is_zero());
+    let themes = crate::theme::Themes::of(&ui.runtime);
+    let shown = std::rc::Rc::new(std::cell::Cell::new(false));
+    let fading: std::rc::Rc<std::cell::RefCell<Option<crate::compose::TaskToken>>> =
+        Default::default();
+    ui.retain(owner, fading.clone());
     ui.bind(owner, move || {
         let blocked = disabled.iter().any(|disabled| disabled.get());
         let requested = open.get();
@@ -182,13 +229,77 @@ pub(crate) fn activate(
         if !ui.scene.borrow().contains(overlay) {
             return;
         }
-        ui.scene.borrow_mut().set_effects(
-            overlay,
-            Effects {
-                opacity: if desired { 1. } else { 0. },
-                ..Default::default()
-            },
-        );
+        // A menu fades in as it opens (at once from the keyboard) and out as
+        // it closes (at once when an item was chosen), as menu.tsx's does.
+        let was_shown = shown.replace(desired);
+        let picked = !desired && PICKED.with(|picked| picked.replace(false));
+        let fade = fade.filter(|_| !themes.system_preferences().reduced_motion);
+        fading.borrow_mut().take();
+        let fades = match (fade, &runner) {
+            (Some(duration), Some(runner))
+                if desired && !was_shown && !crate::input::keyboard_in_use() =>
+            {
+                Some((duration, runner, 0., 1.))
+            }
+            (Some(duration), Some(runner)) if !desired && was_shown && !picked => {
+                Some((duration, runner, 1., 0.))
+            }
+            _ => None,
+        };
+        let fading_out = fades.is_some() && !desired;
+        // Shown while focus moves into it (a scope pushes only into what shows);
+        // the fade starts once it has.
+        {
+            // its other effects (a backdrop's blur, `scrim_blur`) stay
+            let mut scene = ui.scene.borrow_mut();
+            let kept = scene.effects(overlay);
+            scene.set_effects(
+                overlay,
+                Effects {
+                    opacity: if desired || fading_out { 1. } else { 0. },
+                    ..kept
+                },
+            );
+        }
+        let start_fade = |ui: &Ui| {
+            let Some((duration, runner, from, to)) = fades else {
+                return;
+            };
+            {
+                let mut scene = ui.scene.borrow_mut();
+                let mut effects = scene.effects(overlay);
+                effects.opacity = from;
+                scene.set_effects(overlay, effects);
+            }
+            let (scene, visible) = (ui.scene.clone(), visible.clone());
+            let started = crate::clock::now();
+            *fading.borrow_mut() = Some(runner.spawn(Box::pin(async move {
+                loop {
+                    let done = (crate::clock::since(started).as_secs_f32()
+                        / duration.as_secs_f32())
+                    .min(1.);
+                    // Metal's ease-out, cubic-bezier(0.16, 1, 0.3, 1), near enough
+                    let eased = 1. - (1. - done).powi(4);
+                    let opacity = from + (to - from) * eased;
+                    {
+                        let mut scene = scene.borrow_mut();
+                        if !scene.contains(overlay) {
+                            return;
+                        }
+                        let mut effects = scene.effects(overlay);
+                        effects.opacity = opacity;
+                        scene.set_effects(overlay, effects);
+                    }
+                    if done >= 1. {
+                        break;
+                    }
+                    crate::timer::sleep(std::time::Duration::from_millis(8)).await;
+                }
+                if to == 0. {
+                    visible.set(false);
+                }
+            })));
+        };
         ui.input.set_options(
             overlay,
             NodeInput {
@@ -258,8 +369,37 @@ pub(crate) fn activate(
                     }
                     result
                 };
+                // `initial_focus`: a node it names, or none (the panel).
+                let autofocus = autofocus
+                    && focus
+                        .as_ref()
+                        .is_none_or(|focus| focus.initial != FocusTarget::None);
+                let named = focus.as_ref().and_then(|focus| match &focus.initial {
+                    FocusTarget::Id(id) => (focus.find)(id),
+                    _ => None,
+                });
+                let placed = named.is_some_and(|node| {
+                    let inside = {
+                        let scene = ui.scene.borrow();
+                        scene.contains(node)
+                            && (node == panel || scene.ancestors(node).any(|up| up == panel))
+                    };
+                    inside
+                        && ui
+                            .input
+                            .options(node)
+                            .is_some_and(|options| options.focusable)
+                        && (ui.input.focused() == Some(node)
+                            || ui.input.focus(&ui.scene, Some(node)))
+                });
                 // Not focusing a control: the panel holds focus (keys reach it).
-                let candidates = if autofocus { candidates } else { vec![panel] };
+                let candidates = if placed {
+                    Vec::new()
+                } else if autofocus {
+                    candidates
+                } else {
+                    vec![panel]
+                };
                 for candidate in candidates {
                     if candidate == panel && !autofocus {
                         if ui.input.focus(&ui.scene, Some(panel)) {
@@ -286,9 +426,29 @@ pub(crate) fn activate(
             }
             visible.set(ui.scene.borrow().contains(overlay));
         } else {
-            visible.set(false);
+            // Fading out, it stays shown until the fade ends (and takes no input).
+            if !fading_out {
+                visible.set(false);
+            }
             unwind(&ui, overlay);
+            // `final_focus`: where focus goes as it has closed.
+            if was_shown && let Some(focus) = &focus {
+                match &focus.last {
+                    FocusTarget::Default => {}
+                    FocusTarget::None => {
+                        ui.input.focus(&ui.scene, None);
+                    }
+                    FocusTarget::Id(id) => {
+                        if let Some(node) = (focus.find)(id)
+                            && ui.scene.borrow().contains(node)
+                        {
+                            ui.input.focus(&ui.scene, Some(node));
+                        }
+                    }
+                }
+            }
         }
+        start_fade(&ui);
     });
 }
 /// Synchronously close presentation during pointer handoff, even inside a batch.
@@ -463,4 +623,13 @@ pub(crate) fn place(ui: &mut Ui, owner: NodeId, position: NodeId, at: ModalPlace
             );
         }
     });
+}
+
+thread_local! {
+    static PICKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// The menu closing now closes because an item was chosen: it goes at once,
+/// not fading (`MenuLook::fade`), as menu.tsx's does.
+pub(crate) fn closing_by_pick() {
+    PICKED.with(|picked| picked.set(true));
 }

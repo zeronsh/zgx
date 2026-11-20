@@ -12,7 +12,7 @@ categories = ["gui"]
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["svg", "png", "jpeg", "gif", "private-api", "cjk-thai-words"]
+default = ["svg", "png", "jpeg", "gif", "webp", "private-api", "cjk-thai-words"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # Words break at their hyphenation points where text asks (zgx-gpu's
@@ -21,6 +21,7 @@ hyphens = ["zgx-gpu/hyphens"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
+webp = ["zgx-gpu/webp"]
 gif = ["zgx-gpu/gif"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]
@@ -73,7 +74,7 @@ winit = "0.30.13"
 softbuffer = "0.4.8"
 fontdue = "0.9.3"
 cosmic-text = { package = "zgx-cosmic-text", version = "0.19.14", path = "../../vendor/cosmic-text" }
-arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
+arboard = { package = "zgx-arboard", version = "3.6.2", path = "../../vendor/arboard", default-features = false, features = ["image-data"] }
 accesskit = "0.24.1"
 # The adapters' (through accesskit_winit), named for its `links` metadata:
 # with the repository's (vendor/accesskit_consumer) a field's error message

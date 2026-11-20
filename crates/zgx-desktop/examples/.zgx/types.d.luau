@@ -977,6 +977,51 @@ declare extern type Locale with
 	function get(self): string?
 	function peek(self): string?
 	function set(self, locale: string?): ()
+	-- `Intl`-style text in the locale shown, with ECMA-402's option names (and
+	-- Chrome's output for them). Times are milliseconds since 1970 (a JS
+	-- `Date`'s); `timeZone` is "UTC" or the machine's.
+	-- `{ type = "conjunction" | "disjunction" | "unit", style = "long" | "short" | "narrow" }`.
+	function format_list(self, items: { string }, options: { type: string?, style: string? }?): string
+	-- `style` "decimal", "percent" or "currency" (with `currency = "USD"`),
+	-- `minimumFractionDigits`, `maximumFractionDigits`, `useGrouping`.
+	function format_number(
+		self,
+		n: number,
+		options: {
+			style: string?,
+			currency: string?,
+			minimumFractionDigits: number?,
+			maximumFractionDigits: number?,
+			useGrouping: boolean?,
+		}?
+	): string
+	-- `dateStyle` / `timeStyle` ("full", "long", "medium", "short"), or the
+	-- components `weekday`, `year`, `month`, `day`, `hour`, `minute`,
+	-- `second` ("long", "short", "narrow", "numeric", "2-digit").
+	function format_date(
+		self,
+		t: number,
+		options: {
+			dateStyle: string?,
+			timeStyle: string?,
+			weekday: string?,
+			year: string?,
+			month: string?,
+			day: string?,
+			hour: string?,
+			minute: string?,
+			second: string?,
+			hour12: boolean?,
+			timeZone: string?,
+		}?
+	): string
+	-- `unit` "second" … "year"; `numeric` "always" or "auto" ("yesterday").
+	function format_relative(
+		self,
+		delta: number,
+		unit: string,
+		options: { numeric: string?, style: string? }?
+	): string
 end
 -- `ui.span { … }`: a run of rich text, used once.
 declare extern type Span with
@@ -1368,6 +1413,10 @@ declare extern type Element with
 	-- list of measured rows measures those around it as it lands, so it
 	-- ends where asked. False for elements that are not lists.
 	function scroll_to_row(self, i: number, options: { align: ("start" | "center" | "end" | "nearest")? }?): boolean
+	-- How far a scroll view or list is scrolled along its axis and how far it
+	-- can go, in points: `at_start` and `at_end` say whether it can still
+	-- scroll up or down (left or right). Nil for anything else.
+	function scroll_info(self): { offset: number, range: number, at_start: boolean, at_end: boolean }?
 	-- (Hidden until its API is settled.) The scroll views around it moved
 	-- so it shows, innermost first, as the web's scrollIntoView: `block`
 	-- down ("start" by default) and `inline` across ("nearest"), easing
@@ -1440,6 +1489,44 @@ declare extern type Ref with
 	function elements(self): { Element }
 end
 
+-- One control `ui.controls` lists, in window points.
+export type Control = {
+	-- ARIA's name for it: "button", "link", "checkbox", "menuitem", "tab", "dialog"…
+	role: string,
+	-- Its accessible name, else its text.
+	name: string,
+	-- The part of its box that shows.
+	x: number,
+	y: number,
+	w: number,
+	h: number,
+	disabled: boolean,
+	-- Nil where it cannot be selected, checked or opened. `checked`: a
+	-- checkbox, radio, switch, or a checked or radio menu item, on or off.
+	selected: boolean?,
+	checked: boolean?,
+	expanded: boolean?,
+	-- Pressed or not, a toggle button (`aria-pressed`); nil for any other.
+	pressed: boolean?,
+	-- What it opens, if anything: "dialog", "menu", "listbox", "tree" or "grid".
+	haspopup: string?,
+	focused: boolean,
+	-- A menu's or list box's scroll view, when it has one: how far it is
+	-- scrolled and how far it can go, and whether it can still scroll up or
+	-- down (`at_start`, `at_end`).
+	scroll_offset: number?,
+	scroll_range: number?,
+	at_start: boolean?,
+	at_end: boolean?,
+	-- Names it for `ui.press` while it is there.
+	handle: number,
+}
+
+export type ControlsOptions = {
+	-- At most this many, in order.
+	limit: number?,
+}
+
 export type ToastOptions = {
 	title: string | UiError,
 	body: (string | UiError)?,
@@ -1447,6 +1534,14 @@ export type ToastOptions = {
 	duration: number?,
 	-- A button on it: "Undo"; the toast goes after `run`.
 	action: { label: string, run: () -> () }?,
+}
+
+export type ToastDefaults = {
+	-- Milliseconds toasts stay when they do not say (5000), a warning's
+	-- (7000) and an error's (until dismissed); `false` is until dismissed.
+	duration: number?,
+	warning_duration: (number | false)?,
+	error_duration: (number | false)?,
 }
 
 export type NumberOptions = {
@@ -1541,6 +1636,13 @@ export type MarkdownOptions = {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files: runs with `f`.
 	paths: boolean?,
+	-- Inline HTML's marks style their text, as GitHub-sanitized HTML
+	-- shows them: `b`/`strong`, `i`/`em`, `s`/`del`/`strike`,
+	-- `code`/`kbd`/`samp`/`tt`, `a href`, and `br` a line break.
+	html_marks: boolean?,
+	-- GFM's autolink literals are links: `https://…` as written, `www.…`
+	-- to `http://…`, an email to `mailto:` (no `ftp://`, as remark-gfm).
+	autolinks: boolean?,
 	-- With `key`: a text this long (true: 4 KB; or bytes) landing whole
 	-- comes back at once, its blocks not parsed yet `{ t = "pending" }`,
 	-- and is parsed over frames, the end first.
@@ -1827,14 +1929,17 @@ export type ClipboardReadRequest = {
 
 -- `ui.command(opts)`: an app command, shown as a menu item; its key
 -- reaches it wherever focus is (terminals and web pages included). `id`
--- and `run` are required unless `separator` is set (Luau checks table
--- unions poorly, so this is one table).
+-- and `run` are required unless `separator` is set, or `menu` alone names
+-- one (it declares the menu and its place in the bar, with no entry: fix
+-- the menu bar's order). Luau checks table unions poorly, so this is one
+-- table.
 export type CommandOptions = {
 	id: string?,
 	-- Defaults to the id.
 	title: string?,
-	-- "File" (the default), "Edit", "View", "Window" or any other menu.
-	menu: string?,
+	-- "File" (the default), "Edit", "View", "Window" or any other menu; false
+	-- for none: its key alone runs it, after what has focus.
+	menu: (string | false)?,
 	-- Modifiers and a key joined by "+": "cmd+shift+d", "cmd+alt+arrowleft".
 	-- A state or a function saying it follows what it reads: rebound (a
 	-- shortcuts setting), the menus have the new key at once, no reload.
@@ -1843,6 +1948,12 @@ export type CommandOptions = {
 	-- a focused web page or terminal, which otherwise get each key first
 	-- (as a browser keeps ⌘T from its pages). Not a plugin's to set.
 	reserved: boolean?,
+	-- Whether it can run now (true): a boolean, or a state or function saying
+	-- (followed, no reload). Off, its menu item is dimmed and its shortcut
+	-- does nothing.
+	enabled: (boolean | State<boolean> | (() -> boolean))?,
+	-- Held, its shortcut runs it again on each auto-repeat; without it, once a press.
+	["repeat"]: boolean?,
 	run: (() -> ...unknown)?,
 	-- A separator line in `menu` instead of a command.
 	separator: boolean?,
@@ -1942,6 +2053,9 @@ declare extern type WindowApi with
 	-- is false is worth a notification or a badge.
 	active: State<boolean>
 	shown: State<boolean>
+	-- The open menus, popovers and tooltips: `{ x, y, w, h, kind }` each, in
+	-- window points, kind "menu", "popover", "tooltip" or "topmost"; read-only.
+	popups: State<{ { x: number, y: number, w: number, h: number, kind: string, offset: number?, range: number?, at_start: boolean?, at_end: boolean? } }>
 	-- Whether the window is in full screen, read-only and followed, however
 	-- it went in or out (the green button, Ctrl+Cmd+F, the menu, Mission
 	-- Control, a script), turning as it begins to go; and while it goes
@@ -2092,10 +2206,14 @@ declare extern type SelectionCopy with
 	-- over rows scrolled away still names them.
 	rows: { { list: string | false, first: number, last: number } }
 end
--- What goes on the clipboard: text, and HTML beside it where given.
+-- What goes on the clipboard: text, and HTML beside it where given, and
+-- types of the app's own (`{ ["application/x-notes"] = "…" }`) beside them,
+-- which a web page's paste reads with `getData` (in Chrome, Edge and
+-- Electron apps) and `ui.clipboard.read_type` reads back.
 export type ClipboardContent = {
 	text: string?,
 	html: string?,
+	types: { [string]: string }?,
 }
 -- What a drag carries to other apps (`drag_export`): text, a link, files
 -- (absolute paths).
@@ -2167,7 +2285,10 @@ export type Styles = {
 	-- Which way lines run in it and what it holds (HTML's `dir`): "rtl"
 	-- for Arabic, Hebrew, Persian or Urdu runs rows from the right, starts
 	-- columns and text at the right, and turns `ps`, `ms`, `inset_start` round.
-	dir: ("ltr" | "rtl")?,
+	-- "auto" on text takes its first strong character's way (and one with
+	-- none, its parent's); on a container, set `dir` from
+	-- `ui.direction_of(text)` for the text it shows.
+	dir: ("ltr" | "rtl" | "auto")?,
 	grow: number?,
 	shrink: number?,
 	basis: Length?,
@@ -2328,7 +2449,7 @@ export type Styles = {
 	italic: boolean?,
 	align: TextAlign?,
 	font: Font?,
-	wrap: (boolean | "balance")?,
+	wrap: (boolean | "balance" | "pretty")?,
 	truncate: boolean?,
 	lines: number?,
 	line_height: Num?,
@@ -2410,7 +2531,7 @@ export type StyleProps = {
 	gap_y: Reactive<Length>?,
 	-- Flex and grid.
 	direction: Reactive<Direction>?,
-	dir: Reactive<"ltr" | "rtl">?,
+	dir: Reactive<"ltr" | "rtl" | "auto">?,
 	grow: Reactive<number>?,
 	shrink: Reactive<number>?,
 	basis: Reactive<Length>?,
@@ -2513,7 +2634,7 @@ export type StyleProps = {
 	italic: Reactive<boolean>?,
 	align: Reactive<TextAlign>?,
 	font: Reactive<Font>?,
-	wrap: Reactive<boolean | "balance">?,
+	wrap: Reactive<boolean | "balance" | "pretty">?,
 	truncate: Reactive<boolean>?,
 	lines: Reactive<number>?,
 	line_height: Reactive<Num>?,
@@ -2570,6 +2691,7 @@ export type AriaRole =
 	| "img"
 	| "tabpanel"
 	| "article"
+	| "region"
 	| "radiogroup"
 	| "radio"
 	| "slider"
@@ -2651,10 +2773,34 @@ export type NodeProps = {
 	error: (string | Readable<string?> | (() -> string?))?,
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
-	aria_hidden: boolean?,
+	aria_hidden: Reactive<boolean>?,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Reactive<number>?,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Reactive<string>?,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Reactive<boolean>?,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Reactive<boolean>?,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: boolean?,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Reactive<boolean>?,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: boolean?,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -2672,6 +2818,10 @@ export type NodeProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: ("target" | "shown")?,
 	window_drag: boolean?,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: boolean?,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -2698,6 +2848,13 @@ export type NodeProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: number?,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: number?,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: TooltipGroup?,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: (boolean | Readable<boolean> | (() -> boolean) | Styles)?,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -2752,10 +2909,6 @@ export type NodeProps = {
 	layer_on: Reactive<boolean>?,
 	-- Events.
 	on_click: (ClickHandler | Handler | Action)?,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: SoundProp?,
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -2770,7 +2923,7 @@ export type NodeProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: ((request: SelectionCopy) -> ...ClipboardContent?)?,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -3112,9 +3265,33 @@ export type Props = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -3132,6 +3309,10 @@ export type Props = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -3158,6 +3339,13 @@ export type Props = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -3212,10 +3400,6 @@ export type Props = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -3230,7 +3414,7 @@ export type Props = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -3358,7 +3542,7 @@ export type Props_gap = Reactive<Num>?
 export type Props_gap_x = Reactive<Length>?
 export type Props_gap_y = Reactive<Length>?
 export type Props_direction = Reactive<Direction>?
-export type Props_dir = Reactive<"ltr" | "rtl">?
+export type Props_dir = Reactive<"ltr" | "rtl" | "auto">?
 export type Props_grow = Reactive<number>?
 export type Props_shrink = Reactive<number>?
 export type Props_basis = Reactive<Length>?
@@ -3456,7 +3640,7 @@ export type Props_bold = Reactive<boolean>?
 export type Props_italic = Reactive<boolean>?
 export type Props_align = Reactive<TextAlign>?
 export type Props_font = Reactive<Font>?
-export type Props_wrap = Reactive<boolean | "balance">?
+export type Props_wrap = Reactive<boolean | "balance" | "pretty">?
 export type Props_truncate = Reactive<boolean>?
 export type Props_lines = Reactive<number>?
 export type Props_line_height = Reactive<Num>?
@@ -3500,12 +3684,20 @@ export type Props_live = ("polite" | "assertive" | "off")?
 export type Props_description = (string | ReadOnlyState<string> | (() -> string))?
 export type Props_value_text = Reactive<string>?
 export type Props_error = (string | Readable<string?> | (() -> string?))?
-export type Props_aria_hidden = boolean?
+export type Props_aria_hidden = Reactive<boolean>?
+export type Props_level = Reactive<number>?
+export type Props_current = Reactive<string>?
+export type Props_busy = Reactive<boolean>?
+export type Props_inert = Reactive<boolean>?
+export type Props_sr_only = boolean?
+export type Props_pressed = Reactive<boolean>?
 export type Props_aria_modal = boolean?
+export type Props_haspopup = ("dialog" | "menu" | "listbox" | "tree" | "grid" | boolean)?
 export type Props_focus_group = ("vertical" | "horizontal" | "both")?
 export type Props_pointer_events = (PointerEvents | Readable<PointerEvents> | (() -> PointerEvents))?
 export type Props_hit = ("target" | "shown")?
 export type Props_window_drag = boolean?
+export type Props_find_scope = boolean?
 export type Props_hook = (string | boolean)?
 export type Props_private = boolean?
 export type Props_selectable = boolean?
@@ -3516,6 +3708,8 @@ export type Props_tooltip = (string | Node)?
 export type Props_tooltip_placement = Placement?
 export type Props_tooltip_interactive = boolean?
 export type Props_tooltip_delay = number?
+export type Props_tooltip_close_delay = number?
+export type Props_tooltip_group = TooltipGroup?
 export type Props_disabled = (boolean | Readable<boolean> | (() -> boolean) | Styles)?
 export type Props_dim = (boolean | Readable<boolean> | (() -> boolean))?
 export type Props_hover = Styles?
@@ -3540,7 +3734,6 @@ export type Props_layer_clock = boolean?
 export type Props_shader_clock = boolean?
 export type Props_layer_on = Reactive<boolean>?
 export type Props_on_click = (ClickHandler | Handler | Action)?
-export type Props_sound = SoundProp?
 export type Props_on_press = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_release = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_aux_click = (((e: AuxClickEvent) -> ...unknown) | Action)?
@@ -3827,9 +4020,33 @@ export type ContainerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -3847,6 +4064,10 @@ export type ContainerProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -3873,6 +4094,13 @@ export type ContainerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -3927,10 +4155,6 @@ export type ContainerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -3945,7 +4169,7 @@ export type ContainerProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -4301,9 +4525,33 @@ export type GlassProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -4321,6 +4569,10 @@ export type GlassProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -4347,6 +4599,13 @@ export type GlassProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -4401,10 +4660,6 @@ export type GlassProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -4419,7 +4674,7 @@ export type GlassProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -4784,9 +5039,33 @@ export type ScrollProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -4804,6 +5083,10 @@ export type ScrollProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -4830,6 +5113,13 @@ export type ScrollProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -4884,10 +5174,6 @@ export type ScrollProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -4902,7 +5188,7 @@ export type ScrollProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -5284,9 +5570,33 @@ export type TextProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -5304,6 +5614,10 @@ export type TextProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -5330,6 +5644,13 @@ export type TextProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -5384,10 +5705,6 @@ export type TextProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -5402,7 +5719,7 @@ export type TextProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -5743,9 +6060,33 @@ export type MarkdownViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -5763,6 +6104,10 @@ export type MarkdownViewProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -5789,6 +6134,13 @@ export type MarkdownViewProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -5843,10 +6195,6 @@ export type MarkdownViewProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -5861,7 +6209,7 @@ export type MarkdownViewProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -5953,8 +6301,18 @@ export type MarkdownViewProps = {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files.
 	paths: boolean?,
+	-- Inline HTML's marks style their text (`b`, `em`, `code`, `a href`,
+	-- `br`, …), as GitHub-sanitized HTML shows them.
+	html_marks: boolean?,
+	-- GFM's autolink literals (`https://…`, `www.…`, emails) are links.
+	autolinks: boolean?,
 	-- A Copy button on code blocks (true).
 	copy: boolean?,
+	-- Told of a link click (or its Open Link); true says it was handled, so the link isn't opened.
+	on_link: ((url: string) -> boolean?)?,
+	-- TeX between dollars drawn as an SVG with its width, height above the baseline and depth below, in ems; nil shows it as code.
+	on_math: ((tex: string, display: boolean) -> { svg: string, w: number, h: number, d: number }?)?,
+	link_menu: ((e: { x: number, y: number, local_x: number, local_y: number, href: string, text: string }) -> { Node }?)?,
 }
 -- `ui.span`'s options are plain values.
 export type SpanProps = {
@@ -5979,6 +6337,21 @@ export type SpanProps = {
 	-- How far below the baseline the underline sits (CSS's
 	-- `text-underline-offset`).
 	underline_offset: number?,
+	-- The underline breaks around descenders (g, j, p, q, y), as CSS's
+	-- `text-decoration-skip-ink: auto` does.
+	underline_skip_ink: boolean?,
+	-- How far its background reaches past the text on each side, taking no
+	-- room (CSS's negative inline margin under the same padding): a search
+	-- match's mark.
+	outset: number?,
+	-- An outline round its box, as CSS's inline border: `width` points
+	-- (1) in `color`. It takes room all round, inside the padding's outside,
+	-- and follows `radius`: a keycap in a sentence.
+	border: { width: number?, color: Color }?,
+	-- The least width of its box, border and padding included (CSS's
+	-- border-box `min-width` on an inline-block): the text sits centred in
+	-- what room is over.
+	min_w: number?,
 	-- How the underline is drawn, its colour and its thickness; any of them
 	-- underlines the span (unless `underline = false`). `"wavy"` marks a
 	-- mistake or a diagnostic.
@@ -5995,7 +6368,27 @@ export type SpanProps = {
 	}?,
 	-- A link (`on_click`) under the pointer: underlined, recoloured. With
 	-- it, the link isn't underlined at rest unless `underline` says so.
-	hover: { underline: boolean?, color: Color? }?,
+	-- `bg` its background, `underline_color` its underline's colour, `icon`
+	-- another icon in place of the span's own (a file pill's download glyph).
+	hover: {
+		underline: boolean?,
+		color: Color?,
+		bg: Color?,
+		underline_color: Color?,
+		icon: {
+			src: string?,
+			code: string?,
+			size: number?,
+			gap: number?,
+			margin: number?,
+			dy: number?,
+			tint: Color?,
+			bg: Color?,
+			radius: number?,
+			pad: number?,
+			align: ("center" | "baseline")?,
+		}?,
+	}?,
 	-- Internal, and may change: a box of its own (CSS's `display:
 	-- inline-flex`), its line height and `padding` its box, which its
 	-- line's box holds (a badge taller than the text grows its line).
@@ -6015,10 +6408,32 @@ export type SpanProps = {
 		code: string?,
 		size: number?,
 		gap: number?,
+		-- Room on each side of it (0), inline only: no well, no taller line,
+		-- as CSS's `margin: 0 Npx` on an inline image.
+		margin: number?,
+		-- Moved down by this many points (negative: up): web's inline
+		-- icons sit at `vertical-align: -3px`, one below centre.
+		dy: number?,
 		tint: Color?,
 		bg: Color?,
 		radius: number?,
 		pad: number?,
+		-- "center" (the default): centred on the line, which it does not
+		-- make taller. "baseline": its bottom edge on the text's baseline,
+		-- as an inline image's is in CSS, the line growing to hold it (no
+		-- well).
+		align: ("center" | "baseline")?,
+	}?,
+	-- An icon after the text, in the line (a chip's arrow): `size` square,
+	-- centred on the line, `gap` from the text (the link's box includes it).
+	trailing_icon: {
+		src: string?,
+		code: string?,
+		size: number?,
+		gap: number?,
+		margin: number?,
+		dy: number?,
+		tint: Color?,
 	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
 	-- a link: told the keys held. Returning `true` handled it: its `href`
@@ -6047,6 +6462,13 @@ export type SpanProps = {
 	padding: (number | { number })?,
 	-- The background's corner radius.
 	radius: number?,
+	-- An SVG drawn in the line as a glyph: `w` by `h`, `d` below the baseline.
+	inline_svg: {
+		svg: string,
+		w: number,
+		h: number,
+		d: number,
+	}?,
 }
 -- Runs: spans, strings, functions, or span options. `literal`: the runs'
 -- strings as they are (a span's own `literal` wins).
@@ -6299,9 +6721,33 @@ export type RichProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -6319,6 +6765,10 @@ export type RichProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -6345,6 +6795,13 @@ export type RichProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -6399,10 +6856,6 @@ export type RichProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -6417,7 +6870,7 @@ export type RichProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -6752,9 +7205,33 @@ export type ImageProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -6772,6 +7249,10 @@ export type ImageProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -6798,6 +7279,13 @@ export type ImageProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -6852,10 +7340,6 @@ export type ImageProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -6870,7 +7354,7 @@ export type ImageProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -7222,9 +7706,33 @@ export type SvgProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -7242,6 +7750,10 @@ export type SvgProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -7268,6 +7780,13 @@ export type SvgProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -7322,10 +7841,6 @@ export type SvgProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -7340,7 +7855,7 @@ export type SvgProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -7803,9 +8318,33 @@ export type Scene3DProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -7823,6 +8362,10 @@ export type Scene3DProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -7849,6 +8392,13 @@ export type Scene3DProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -7903,10 +8453,6 @@ export type Scene3DProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -7921,7 +8467,7 @@ export type Scene3DProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -8279,9 +8825,33 @@ export type CanvasProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -8299,6 +8869,10 @@ export type CanvasProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -8325,6 +8899,13 @@ export type CanvasProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -8379,10 +8960,6 @@ export type CanvasProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -8397,7 +8974,7 @@ export type CanvasProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -8764,9 +9341,33 @@ export type CheckboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -8784,6 +9385,10 @@ export type CheckboxProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -8810,6 +9415,13 @@ export type CheckboxProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -8864,10 +9476,6 @@ export type CheckboxProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -8882,7 +9490,7 @@ export type CheckboxProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -9227,9 +9835,33 @@ export type InputProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -9247,6 +9879,10 @@ export type InputProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -9273,6 +9909,13 @@ export type InputProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -9327,10 +9970,6 @@ export type InputProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -9345,7 +9984,7 @@ export type InputProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -9854,9 +10493,33 @@ export type ProgressProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -9874,6 +10537,10 @@ export type ProgressProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -9900,6 +10567,13 @@ export type ProgressProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -9954,10 +10628,6 @@ export type ProgressProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -9972,7 +10642,7 @@ export type ProgressProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -10305,9 +10975,33 @@ export type SliderProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -10325,6 +11019,10 @@ export type SliderProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -10351,6 +11049,13 @@ export type SliderProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -10405,10 +11110,6 @@ export type SliderProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -10423,7 +11124,7 @@ export type SliderProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -10777,9 +11478,33 @@ export type SegmentedProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -10797,6 +11522,10 @@ export type SegmentedProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -10823,6 +11552,13 @@ export type SegmentedProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -10877,10 +11613,6 @@ export type SegmentedProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -10895,7 +11627,7 @@ export type SegmentedProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -11242,9 +11974,33 @@ export type StepperProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -11262,6 +12018,10 @@ export type StepperProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -11288,6 +12048,13 @@ export type StepperProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -11342,10 +12109,6 @@ export type StepperProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -11360,7 +12123,7 @@ export type StepperProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -11708,9 +12471,33 @@ export type DisclosureProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -11728,6 +12515,10 @@ export type DisclosureProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -11754,6 +12545,13 @@ export type DisclosureProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -11808,10 +12606,6 @@ export type DisclosureProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -11826,7 +12620,7 @@ export type DisclosureProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -12185,9 +12979,33 @@ export type AccordionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -12205,6 +13023,10 @@ export type AccordionProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -12231,6 +13053,13 @@ export type AccordionProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -12285,10 +13114,6 @@ export type AccordionProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -12303,7 +13128,7 @@ export type AccordionProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -12636,9 +13461,33 @@ export type SectionProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -12656,6 +13505,10 @@ export type SectionProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -12682,6 +13535,13 @@ export type SectionProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -12736,10 +13596,6 @@ export type SectionProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -12754,7 +13610,7 @@ export type SectionProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -13112,9 +13968,33 @@ export type SeparatorProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -13132,6 +14012,10 @@ export type SeparatorProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -13158,6 +14042,13 @@ export type SeparatorProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -13212,10 +14103,6 @@ export type SeparatorProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -13230,7 +14117,7 @@ export type SeparatorProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -13571,9 +14458,33 @@ export type TabsProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -13591,6 +14502,10 @@ export type TabsProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -13617,6 +14532,13 @@ export type TabsProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -13671,10 +14593,6 @@ export type TabsProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -13689,7 +14607,7 @@ export type TabsProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -14052,9 +14970,33 @@ export type TreeProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -14072,6 +15014,10 @@ export type TreeProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -14098,6 +15044,13 @@ export type TreeProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -14152,10 +15105,6 @@ export type TreeProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -14170,7 +15119,7 @@ export type TreeProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -14529,9 +15478,33 @@ export type DataGridProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -14549,6 +15522,10 @@ export type DataGridProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -14575,6 +15552,13 @@ export type DataGridProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -14629,10 +15613,6 @@ export type DataGridProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -14647,7 +15627,7 @@ export type DataGridProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -15002,9 +15982,33 @@ export type CalendarProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -15022,6 +16026,10 @@ export type CalendarProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -15048,6 +16056,13 @@ export type CalendarProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -15102,10 +16117,6 @@ export type CalendarProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -15120,7 +16131,7 @@ export type CalendarProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -15468,9 +16479,33 @@ export type DatePickerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -15488,6 +16523,10 @@ export type DatePickerProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -15514,6 +16553,13 @@ export type DatePickerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -15568,10 +16614,6 @@ export type DatePickerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -15586,7 +16628,7 @@ export type DatePickerProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -15932,9 +16974,33 @@ export type TimeFieldProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -15952,6 +17018,10 @@ export type TimeFieldProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -15978,6 +17048,13 @@ export type TimeFieldProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -16032,10 +17109,6 @@ export type TimeFieldProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -16050,7 +17123,7 @@ export type TimeFieldProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -16395,9 +17468,33 @@ export type ComboboxProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -16415,6 +17512,10 @@ export type ComboboxProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -16441,6 +17542,13 @@ export type ComboboxProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -16495,10 +17603,6 @@ export type ComboboxProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -16513,7 +17617,7 @@ export type ComboboxProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -16866,9 +17970,33 @@ export type CommandPaletteProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -16886,6 +18014,10 @@ export type CommandPaletteProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -16912,6 +18044,13 @@ export type CommandPaletteProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -16966,10 +18105,6 @@ export type CommandPaletteProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -16984,7 +18119,7 @@ export type CommandPaletteProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -17325,9 +18460,33 @@ export type SelectProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -17345,6 +18504,10 @@ export type SelectProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -17371,6 +18534,13 @@ export type SelectProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -17425,10 +18595,6 @@ export type SelectProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -17443,7 +18609,7 @@ export type SelectProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -17791,9 +18957,33 @@ export type SplitProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -17811,6 +19001,10 @@ export type SplitProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -17837,6 +19031,13 @@ export type SplitProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -17891,10 +19092,6 @@ export type SplitProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -17909,7 +19106,7 @@ export type SplitProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -18313,9 +19510,33 @@ export type ListProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -18333,6 +19554,10 @@ export type ListProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -18359,6 +19584,13 @@ export type ListProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -18413,10 +19645,6 @@ export type ListProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -18431,7 +19659,7 @@ export type ListProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -18538,14 +19766,16 @@ export type ListProps = {
 	-- as a state; built again when the item changes, or, taking a third
 	-- parameter, its item as a state kept current (it updates in place).
 	data: Readable<{ any }>?,
-	-- Builds row `index` (from 1); with `key`, the row of item `key`, given
-	-- its index as a state that follows where the row is. With `data`,
-	-- the row of an item.
+	-- Builds row `index` (from 1). With `key`, `row` is called with the key
+	-- (the value `key(index)` gave), not the index: `row(key, index)`, the
+	-- index a state that follows where the row is. With `data`, the row of
+	-- an item.
 	row: ((index: number) -> Node)
 		| ((key: any, index: State<number>) -> Node)
 		| ((item: any, index: State<number>, row: State<any>) -> Node),
 	-- Each row's item's key (a number, string or boolean), as a function of
-	-- its index (with `data`, of its item): a row follows its item as the
+	-- its index (with `data`, of its item); `row` then receives the key,
+	-- not the index (see `row`). A row follows its item as the
 	-- list changes, moved rather than written again (rows a removal or an
 	-- insertion shifts keep their nodes, text and layout). With `data`, a
 	-- field's name (`key = "id"`) is read without making any item a table.
@@ -18579,8 +19809,9 @@ export type ListProps = {
 	-- a state or a function saying it is followed (a composer growing).
 	scroll_padding: (ScrollPadding | State<ScrollPadding> | (() -> ScrollPadding))?,
 	-- Each row's own height instead, in order: a list, a state holding one
-	-- (a host's shared value costs the script nothing), or a function
-	-- returning one (tracked). The row count is its length.
+	-- (a `ui.state` or `ui.computed`; a host's shared value costs the script
+	-- nothing), or a function returning one (tracked). The row count is its
+	-- length. Anything but a list of numbers is an error, not no rows.
 	heights: ({ number } | Readable<{ number }> | (() -> { number }))?,
 	-- Rows (from 1, in order) that stick to the top while their section
 	-- scrolls past, each pushed up by the next: section headers. With
@@ -18866,9 +20097,33 @@ export type LayerProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -18886,6 +20141,10 @@ export type LayerProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -18912,6 +20171,13 @@ export type LayerProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -18966,10 +20232,6 @@ export type LayerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -18984,7 +20246,7 @@ export type LayerProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -19339,9 +20601,33 @@ export type ModalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -19359,6 +20645,10 @@ export type ModalProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -19385,6 +20675,13 @@ export type ModalProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -19439,10 +20736,6 @@ export type ModalProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -19457,7 +20750,7 @@ export type ModalProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -19575,6 +20868,15 @@ export type ModalProps = {
 	-- false: a click outside doesn't close it (a dialog that must be
 	-- answered; Escape still does).
 	dismiss_on_backdrop: boolean?,
+	-- What lies behind the backdrop blurs by this sigma, the panel sharp
+	-- (CSS `backdrop-filter: blur()` on a dialog's backdrop).
+	scrim_blur: number?,
+	-- Where focus goes as it opens: the `id` of a node in it, or false for
+	-- none (the panel itself); left out, its first control.
+	initial_focus: (string | false)?,
+	-- Where focus goes as it closes: the `id` of any node, or false for
+	-- nothing; left out, what had it before.
+	final_focus: (string | false)?,
 }
 -- Where an anchored popover or menu opens: on `side` of its trigger
 -- (flipping when that side lacks room), lined up with its start, centre
@@ -19583,7 +20885,29 @@ export type Placement = {
 	side: ("bottom" | "top" | "left" | "right")?,
 	align: ("start" | "center" | "end")?,
 	offset: number?,
+	-- Points kept between it and the screen's edges (0).
+	padding: number?,
+	-- Slide along the edge to stay on screen (true); false keeps its
+	-- aligned place and lets it reach past.
+	shift: boolean?,
+	-- Where its alignment would reach past the screen, line up with the
+	-- trigger's other edge when that fits (false).
+	flip_align: boolean?,
+	-- Where neither side has room, take the one with more (false: keep the
+	-- preferred side).
+	more_room: boolean?,
 }
+-- The tooltips under a node (`tooltip_group`), in milliseconds.
+export type TooltipGroup = { delay: number?, close_delay: number?, reshow_within: number?, reshow_delay: number? }
+-- How long the pointer rests on a trigger before its popup opens, and how
+-- long after it leaves the trigger and the popup before it closes, in
+-- milliseconds (Base UI's `delay` and `closeDelay`); left out, a popover's
+-- or menu's opens at 300 and a submenu's at 100, and each closes at 0.
+-- Heading for the popup across the space between, the pointer is held in
+-- the triangle to it (a safe polygon), so a diagonal crossing keeps it open;
+-- out of it, or at rest in it for 300 ms, it closes. One opened by a click
+-- stays open.
+export type HoverDelay = { open: number?, close: number? }
 export type PopoverProps = {
 	-- Size and position.
 	w: Props_w,
@@ -19830,9 +21154,33 @@ export type PopoverProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -19850,6 +21198,10 @@ export type PopoverProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -19876,6 +21228,13 @@ export type PopoverProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -19930,10 +21289,6 @@ export type PopoverProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -19948,7 +21303,7 @@ export type PopoverProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -20074,8 +21429,21 @@ export type PopoverProps = {
 	arrow: number?,
 	-- At least as wide as its trigger, as a select's list is.
 	match_anchor_width: boolean?,
+	-- The anchor's slot takes its share of its row like any child, so an
+	-- anchor that grows or fills its width (a composer's textarea) has the
+	-- room to, with no `on_resize` measuring. Popover only.
+	anchor_fill: boolean?,
 	-- A popover only: false keeps it open on a click outside.
 	dismiss_on_backdrop: boolean?,
+	-- Opens as the pointer rests on `anchor` (see `HoverDelay`).
+	hover_delay: HoverDelay?,
+	-- Where focus goes as it opens: the `id` of a node in it, or false for
+	-- none (the panel itself); left out, its first control.
+	initial_focus: (string | false)?,
+	-- Where focus goes as it closes: the `id` of any node, or false for
+	-- nothing; left out, what had it before (else the trigger, if it was
+	-- opened from the keyboard).
+	final_focus: (string | false)?,
 	-- A popover only: at the caret of the input in its `anchor`, following
 	-- it (typing, a new line, scrolling, an input method's composition),
 	-- and taking no focus: keys go on to the input, which drives it (a
@@ -20327,9 +21695,33 @@ export type MenuItemProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -20347,6 +21739,10 @@ export type MenuItemProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -20373,6 +21769,13 @@ export type MenuItemProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -20427,10 +21830,6 @@ export type MenuItemProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -20445,7 +21844,7 @@ export type MenuItemProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -20789,9 +22188,33 @@ export type SubmenuProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -20809,6 +22232,10 @@ export type SubmenuProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -20835,6 +22262,13 @@ export type SubmenuProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -20889,10 +22323,6 @@ export type SubmenuProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -20907,7 +22337,7 @@ export type SubmenuProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -21021,6 +22451,9 @@ export type SubmenuProps = {
 	-- label, a value, a chevron); the label and a "›" otherwise. It opens
 	-- when the pointer moves onto it.
 	trigger: Node?,
+	-- How long it waits under the pointer before it opens (100) and, off
+	-- its trigger and itself, before it closes (0); see `HoverDelay`.
+	hover_delay: HoverDelay?,
 }
 export type WebViewProps = {
 	-- Size and position.
@@ -21268,9 +22701,33 @@ export type WebViewProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -21288,6 +22745,10 @@ export type WebViewProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -21314,6 +22775,13 @@ export type WebViewProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -21368,10 +22836,6 @@ export type WebViewProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -21383,7 +22847,7 @@ export type WebViewProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -21747,9 +23211,33 @@ export type TerminalProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -21767,6 +23255,10 @@ export type TerminalProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -21793,6 +23285,13 @@ export type TerminalProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -21847,10 +23346,6 @@ export type TerminalProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -21865,7 +23360,7 @@ export type TerminalProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -21953,6 +23448,491 @@ export type TerminalProps = {
 	context_menu_open: Props_context_menu_open,
 	[number]: never,
 	term: Term,
+}
+-- The name the host registered with `zgx_script::host_view`.
+export type HostViewProps = {
+	-- Size and position.
+	w: Props_w,
+	h: Props_h,
+	size: Props_size,
+	min_w: Props_min_w,
+	max_w: Props_max_w,
+	min_h: Props_min_h,
+	max_h: Props_max_h,
+	w_full: Props_w_full,
+	h_full: Props_h_full,
+	aspect: Props_aspect,
+	absolute: Props_absolute,
+	relative: Props_relative,
+	top: Props_top,
+	left: Props_left,
+	inset_start: Props_inset_start,
+	inset_end: Props_inset_end,
+	right: Props_right,
+	bottom: Props_bottom,
+	-- Spacing.
+	p: Props_p,
+	px: Props_px,
+	py: Props_py,
+	pt: Props_pt,
+	pr: Props_pr,
+	pb: Props_pb,
+	pl: Props_pl,
+	ps: Props_ps,
+	pe: Props_pe,
+	m: Props_m,
+	mx: Props_mx,
+	my: Props_my,
+	mt: Props_mt,
+	mr: Props_mr,
+	mb: Props_mb,
+	ml: Props_ml,
+	ms: Props_ms,
+	me: Props_me,
+	gap: Props_gap,
+	gap_x: Props_gap_x,
+	gap_y: Props_gap_y,
+	-- Flex and grid.
+	direction: Props_direction,
+	dir: Props_dir,
+	grow: Props_grow,
+	shrink: Props_shrink,
+	basis: Props_basis,
+	flex_wrap: Props_flex_wrap,
+	wrap_reverse: Props_wrap_reverse,
+	items: Props_items,
+	justify: Props_justify,
+	self: Props_self,
+	content: Props_content,
+	grid: Props_grid,
+	display: Props_display,
+	cols: Props_cols,
+	rows: Props_rows,
+	areas: Props_areas,
+	flow: Props_flow,
+	area: Props_area,
+	grid_column: Props_grid_column,
+	grid_row: Props_grid_row,
+	col_start: Props_col_start,
+	row_start: Props_row_start,
+	col_span: Props_col_span,
+	row_span: Props_row_span,
+	col_span_full: Props_col_span_full,
+	row_span_full: Props_row_span_full,
+	overflow: Props_overflow,
+	overflow_x: Props_overflow_x,
+	overflow_y: Props_overflow_y,
+	z: Props_z,
+	-- Inside a scroll view, hold this far below its top as it scrolls past,
+	-- inside the parent (CSS's `position: sticky` with `top`).
+	sticky_top: Props_sticky_top,
+	hidden: Props_hidden,
+	invisible: Props_invisible,
+	-- Paint.
+	bg: Props_bg,
+	gradient: Props_gradient,
+	radial: Props_radial,
+	mask_gradient: Props_mask_gradient,
+	mask_radial: Props_mask_radial,
+	text_gradient: Props_text_gradient,
+	text_radial: Props_text_radial,
+	color: Props_color,
+	bg_image: Props_bg_image,
+	bg_fit: Props_bg_fit,
+	rounded: Props_rounded,
+	corners: Props_corners,
+	rounded_tl: Props_rounded_tl,
+	rounded_tr: Props_rounded_tr,
+	rounded_br: Props_rounded_br,
+	rounded_bl: Props_rounded_bl,
+	border: Props_border,
+	border_sides: Props_border_sides,
+	border_color: Props_border_color,
+	border_over: Props_border_over,
+	-- A function may return nil: a solid border.
+	border_dash: Props_border_dash,
+	border_style: Props_border_style,
+	outline: Props_outline,
+	outline_color: Props_outline_color,
+	outline_offset: Props_outline_offset,
+	outline_style: Props_outline_style,
+	outline_dash: Props_outline_dash,
+	shadow: Props_shadow,
+	text_shadow: Props_text_shadow,
+	drop_shadow: Props_drop_shadow,
+	inset_shadow: Props_inset_shadow,
+	opacity: Props_opacity,
+	brightness: Props_brightness,
+	contrast: Props_contrast,
+	saturate: Props_saturate,
+	hue_rotate: Props_hue_rotate,
+	sepia: Props_sepia,
+	invert: Props_invert,
+	blend: Props_blend,
+	blur: Props_blur,
+	backdrop_blur: Props_backdrop_blur,
+	fade: Props_fade,
+	fade_x: Props_fade_x,
+	fade_sides: Props_fade_sides,
+	fade_overflow: Props_fade_overflow,
+	snap: Props_snap,
+	zoom: Props_zoom,
+	zoom_fixed: Props_zoom_fixed,
+	clip_inset: Props_clip_inset,
+	clip_feather: Props_clip_feather,
+	layer: Props_layer,
+	object_position: Props_object_position,
+	fit: Props_fit,
+	image_rendering: Props_image_rendering,
+	slice: Props_slice,
+	tint: Props_tint,
+	decode: Props_decode,
+	dither: Props_dither,
+	characters: Props_characters,
+	cursor: Props_cursor,
+	-- Text.
+	text_size: Props_text_size,
+	weight: Props_weight,
+	bold: Props_bold,
+	italic: Props_italic,
+	align: Props_align,
+	font: Props_font,
+	wrap: Props_wrap,
+	truncate: Props_truncate,
+	lines: Props_lines,
+	line_height: Props_line_height,
+	letter_spacing: Props_letter_spacing,
+	-- Tabular figures: every digit the same width.
+	tabular: Props_tabular,
+	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
+	-- a tag on, or `tag=value` (0 off). Replaces `tabular`: give "tnum" here too.
+	font_features: Props_font_features,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Props_underline,
+	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
+	-- Transforms: after layout, about `origin` (fractions of the node).
+	x: Props_x,
+	y: Props_y,
+	scale: Props_scale,
+	scale_x: Props_scale_x,
+	scale_y: Props_scale_y,
+	rotate: Props_rotate,
+	skew: Props_skew,
+	skew_x: Props_skew_x,
+	skew_y: Props_skew_y,
+	rotate_x: Props_rotate_x,
+	rotate_y: Props_rotate_y,
+	perspective: Props_perspective,
+	origin: Props_origin,
+	-- The subtree's theme: a theme's name (`"zgx-light"`), or tokens to
+	-- override (`{ accent = "#e5484d" }`, with `theme = name` to start from).
+	theme: Props_theme,
+	-- Values the components and rows built in this subtree read with
+	-- `ui.use_context(name)`, as React's context gives them: a state, a
+	-- table, a function. Nearer ones win.
+	provide: Props_provide,
+	-- Identity, for selectors, refs and animations.
+	id: Props_id,
+	-- Space-separated class names.
+	class: Props_class,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: Props_variants,
+	ref: Props_ref,
+	focusable: Props_focusable,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: Props_focus_on_press,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
+	-- What assistive technology takes it for (ARIA's `role`), instead of
+	-- what it is: a clickable row as an "option", a row of buttons as a
+	-- "toolbar". It keeps what it does.
+	role: Props_role,
+	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
+	-- list headings and move between them.
+	heading: Props_heading,
+	-- Internal, subject to change: a tree item's depth, 1 for the top
+	-- (`aria-level`), as virtualised rows are flat siblings a reader can't
+	-- infer it from. A state or function is followed: a row moved into
+	-- another branch is read at its new depth without a rebuild.
+	level: Props_level,
+	-- Whether this option, tab or item is the chosen one (`aria-selected`).
+	selected: Props_selected,
+	-- Whether a switch, checkbox or radio of the app's own is on
+	-- (`aria-checked`), and whether what a control opens shows
+	-- (`aria-expanded`): a custom disclosure's.
+	checked: Props_checked,
+	expanded: Props_expanded,
+	-- Whether a toggle button of the app's own is pressed (`aria-pressed`):
+	-- a toolbar's bold. It reads as a toggle button with its state.
+	pressed: Props_pressed,
+	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
+	-- note, a message arriving.
+	live: Props_live,
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
+	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
+	-- What is wrong with its value (`aria-invalid`), followed: nil while it
+	-- is fine. Assistive technology hears it with the field.
+	error: Props_error,
+	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
+	-- decoration, or what is said elsewhere.
+	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
+	-- While it shows, assistive technology reads it alone, not what lies behind
+	-- it (aria-modal): a sheet or dialog the app builds itself.
+	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
+	-- One Tab stop for the focusable things inside; the arrows along this
+	-- axis (and Home, End) move among them, as ARIA's composite widgets
+	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
+	-- horizontal, without asking.
+	focus_group: Props_focus_group,
+	-- A press on it (or on what inside takes no input) moves the window; a
+	-- double click zooms it. Buttons and inputs inside keep their clicks.
+	-- CSS pointer-events: "none" (or false) lets the pointer through to what
+	-- is under the node (presses, hover, the wheel, drops, a native view);
+	-- descendants with handlers still take it. A state or function follows.
+	pointer_events: Props_pointer_events,
+	-- "target": while `x`, `y`, `scale`, `rotate` or `opacity` animate
+	-- (`ui.tween`, `ui.spring`, `anime`) or a layout animation moves it, it and what
+	-- it holds take clicks and hover where they're going, not where they
+	-- show. "shown" (the default) hits where it shows.
+	hit: Props_hit,
+	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
+	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
+	-- a stable point the app declares. `false` keeps every plugin off the
+	-- element (a password field, a destructive confirm), as `private` does.
+	hook: Props_hook,
+	private: Props_private,
+	-- The pointer selects the text in it and everything it holds, as on a
+	-- web page (CSS `user-select: text`): drag, double/triple press, Shift,
+	-- ⌘A / Ctrl+A, ⌘C / Ctrl+C. `false` keeps a part out. Off unless set.
+	selectable: Props_selectable,
+	-- A selectable node's highlight and selected-text colours (CSS
+	-- `::selection`), over the theme's `$selection` and `$selection.text`
+	-- tokens; a state or function follows.
+	selection_color: Props_selection_color,
+	selected_text_color: Props_selected_text_color,
+	selection_radius: Props_selection_radius,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: Props_tooltip,
+	tooltip_placement: Props_tooltip_placement,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: Props_tooltip_interactive,
+	-- Milliseconds the pointer rests before it shows (300; once one
+	-- shows, the next shows at once). Keyboard focus shows it too.
+	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
+	-- A condition (true disables), or the styles it shows while disabled.
+	disabled: Props_disabled,
+	-- Internal, subject to change: whether it looks disabled (a control is
+	-- dimmed while disabled unless it styles itself). `false` keeps it as it
+	-- is; a state or function decides as it changes (a sending button stays
+	-- disabled but keeps its ink). It stays disabled to input and assistive
+	-- technology either way.
+	dim: Props_dim,
+	hover: Props_hover,
+	active: Props_active,
+	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
+	-- Size animation ("height", "width", "size"; `true` is "height") or
+	-- position animation ("position"). A `layout_id` node mounting as
+	-- another with the same id unmounts (or while it is mounted) moves and
+	-- scales from that one's box.
+	layout: Props_layout,
+	layout_id: Props_layout_id,
+	layout_ease: Props_layout_ease,
+	-- Milliseconds.
+	layout_duration: Props_layout_duration,
+	layout_enter: Props_layout_enter,
+	layout_clip: Props_layout_clip,
+	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
+	mask: Props_mask,
+	bg_shader: Props_bg_shader,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	shader_params: Props_shader_params,
+	-- The subtree, cached as a layer, composites through it: each pixel of
+	-- the box passes through its `layer` function.
+	layer_shader: Props_layer_shader,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
+	-- Events.
+	on_click: Props_on_click,
+	-- Primary pointer down and up.
+	on_press: Props_on_press,
+	on_release: Props_on_release,
+	-- The middle (or another extra) button pressed and released on it: a
+	-- browser tab closes on it, a link opens in the background.
+	on_aux_click: Props_on_aux_click,
+	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
+	on_double_click: Props_on_double_click,
+	-- Back or forward on the platform's gesture over it (a trackpad's swipe
+	-- between pages, where nothing under the fingers scrolls that way).
+	on_navigate: Props_on_navigate,
+	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
+	-- its context menu) puts on the clipboard. Handed the selection's text
+	-- and HTML and, for each text node it spans in order, the id of the
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
+	-- for the selection's own.
+	on_copy: Props_on_copy,
+	-- Files dropped on it from outside the window (Finder, Explorer): the
+	-- innermost node with one takes them.
+	on_file_drop: Props_on_file_drop,
+	-- Files dragged from outside the window come over it (true), then
+	-- leave, are dropped or the drag ends (false).
+	on_file_hover: Props_on_file_hover,
+	on_hover: Props_on_hover,
+	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
+	-- Return true to consume the key.
+	on_key: Props_on_key,
+	on_key_up: Props_on_key_up,
+	on_focus: Props_on_focus,
+	on_blur: Props_on_blur,
+	-- Return true to take the gesture from the scroll views around it.
+	on_wheel: Props_on_wheel,
+	on_pinch: Props_on_pinch,
+	-- Its zoom, bound to this state: Control-wheel or a pinch over it zooms it (0.25 to 5).
+	zoomable: Props_zoomable,
+	on_mount: Props_on_mount,
+	-- When layout gives it a new size, and at its first layout.
+	on_resize: Props_on_resize,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen. Told once a frame, before
+	-- paint, as an IntersectionObserver: a handler in the same frame reads
+	-- the frame before's; an element's `x`, `y`, `width` and `height` are
+	-- read fresh.
+	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
+	-- Drag and drop within the window. Payloads are what `on_drag`
+	-- returns: the script's own plain values, so they are `any` here.
+	-- A source: `on_drag` returns the payload once the pointer moves 4
+	-- points; `drag_preview` builds what follows the pointer.
+	on_drag: Props_on_drag,
+	drag_preview: Props_drag_preview,
+	-- Where the preview goes: its point `drag_preview_anchor` (fractions
+	-- of its size, `{ 0.5, 0 }` its top middle) `drag_preview_offset`
+	-- points from the pointer. `{ 0.5, 0 }` and `{ 0, 16 }` hang it below
+	-- the pointer, leaving what the drag is over in view; without either,
+	-- it keeps the grab point under the pointer.
+	drag_preview_anchor: Props_drag_preview_anchor,
+	drag_preview_offset: Props_drag_preview_offset,
+	on_drag_end: Props_on_drag_end,
+	-- What the drag carries to other apps as it leaves the window (macOS):
+	-- Finder takes files, Mail text, a browser links.
+	drag_export: Props_drag_export,
+	-- Released outside every window of the app (macOS): a tab torn off its
+	-- window. `grab_x`/`grab_y` are where the source was held.
+	on_drag_outside: Props_on_drag_outside,
+	-- The drag moves its window instead, with no preview (macOS): a
+	-- window's only tab. Dropped on another window's destination it drops
+	-- there; elsewhere the window stays where it was let go.
+	drag_moves_window: Props_drag_moves_window,
+	-- A destination: `drop_when` filters payloads (default: all).
+	drop_when: Props_drop_when,
+	on_drag_over: Props_on_drag_over,
+	on_drag_leave: Props_on_drag_leave,
+	on_drop: Props_on_drop,
+	-- Spring-loading: an accepted drag has rested on it for the system's
+	-- delay (0.5 s by default), or Space was pressed. Open what it stands
+	-- for (show a tab); return `false` to decline. Once per stay.
+	on_drag_spring: Props_on_drag_spring,
+	-- A secondary click (control-click on macOS) shows the returned
+	-- `menu_item`s, `submenu`s and separators as a menu at the pointer;
+	-- returning nil (or nothing) shows none.
+	context_menu: Props_context_menu,
+	-- The context menu panel's look: bg, rounded, p, gap, backdrop_blur,
+	-- border, shadow, w, …
+	context_menu_style: Props_context_menu_style,
+	-- Open the context menu under the node, from its left edge (a tab's),
+	-- rather than at the pointer.
+	context_menu_below: Props_context_menu_below,
+	-- Internal, subject to change: kept saying whether its context menu
+	-- shows (true as it opens; false as it closes, however it does: Escape,
+	-- a pick, a click outside, Tab, the window losing focus). Written false,
+	-- the menu closes: a floating panel hides while the menu shows.
+	context_menu_open: Props_context_menu_open,
+	[number]: never,
+	name: string,
 }
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = {
@@ -22201,9 +24181,33 @@ export type SlotProps = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -22221,6 +24225,10 @@ export type SlotProps = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -22247,6 +24255,13 @@ export type SlotProps = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -22301,10 +24316,6 @@ export type SlotProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -22319,7 +24330,7 @@ export type SlotProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -22706,9 +24717,33 @@ export type EachOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -22726,6 +24761,10 @@ export type EachOptions = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -22752,6 +24791,13 @@ export type EachOptions = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -22806,10 +24852,6 @@ export type EachOptions = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -22824,7 +24866,7 @@ export type EachOptions = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -23175,9 +25217,33 @@ export type PresenceOptions = {
 	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
 	-- decoration, or what is said elsewhere.
 	aria_hidden: Props_aria_hidden,
+	-- A tree item's depth, 1 for the top (`aria-level`): virtualised rows are
+	-- flat siblings, so a reader can't infer it. A state or function is
+	-- followed: a row moved into another branch is read at its new depth
+	-- without a rebuild.
+	level: Props_level,
+	-- What this is the current one of (`aria-current`): "page", "step",
+	-- "location", "date", "time" or "true"; anything else (or nil) is none.
+	current: Props_current,
+	-- Still being filled in (`aria-busy`): assistive technology waits for it
+	-- to settle instead of announcing each change.
+	busy: Props_busy,
+	-- Out of the pointer's reach, the focus order and the accessibility tree
+	-- while true (HTML's `inert`); focus inside it moves on as it goes inert.
+	inert: Props_inert,
+	-- Heard by assistive technology and nowhere else (Tailwind's `sr-only`):
+	-- a 1 by 1 clipped box painting nothing, still in the accessibility tree,
+	-- as a live region's text must be. `invisible` leaves the tree.
+	sr_only: Props_sr_only,
+	-- A toggle button's state (`aria-pressed`): it reads as a toggle button,
+	-- pressed or not.
+	pressed: Props_pressed,
 	-- While it shows, assistive technology reads it alone, not what lies behind
 	-- it (aria-modal): a sheet or dialog the app builds itself.
 	aria_modal: Props_aria_modal,
+	-- What it opens (aria-haspopup): a dialog, a menu, a list box, a tree or
+	-- a grid; `true` is a menu. A popover's or menu's trigger says so itself.
+	haspopup: Props_haspopup,
 	-- One Tab stop for the focusable things inside; the arrows along this
 	-- axis (and Home, End) move among them, as ARIA's composite widgets
 	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
@@ -23195,6 +25261,10 @@ export type PresenceOptions = {
 	-- show. "shown" (the default) hits where it shows.
 	hit: Props_hit,
 	window_drag: Props_window_drag,
+	-- Find in page opened with focus in it (else last pressed in it) looks
+	-- only within it, the nearest such node: its text, inputs' values and
+	-- lists' rows, mounted or not. Its bar sits at the node's top right.
+	find_scope: Props_find_scope,
 	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
 	-- a stable point the app declares. `false` keeps every plugin off the
 	-- element (a password field, a destructive confirm), as `private` does.
@@ -23221,6 +25291,13 @@ export type PresenceOptions = {
 	-- Milliseconds the pointer rests before it shows (300; once one
 	-- shows, the next shows at once). Keyboard focus shows it too.
 	tooltip_delay: Props_tooltip_delay,
+	-- Milliseconds it stays after the pointer leaves (0; a hover card, 120).
+	tooltip_close_delay: Props_tooltip_close_delay,
+	-- The tooltips under it are a group (Base UI's TooltipProvider): their
+	-- delays and reshow are its own, shared among them and with no tooltip
+	-- outside it. Milliseconds; left out, the app's (`delay` 300,
+	-- `reshow_within` 1000, `reshow_delay` 0, `close_delay` 0).
+	tooltip_group: Props_tooltip_group,
 	-- A condition (true disables), or the styles it shows while disabled.
 	disabled: Props_disabled,
 	-- Internal, subject to change: whether it looks disabled (a control is
@@ -23275,10 +25352,6 @@ export type PresenceOptions = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -23293,7 +25366,7 @@ export type PresenceOptions = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -23524,18 +25597,41 @@ declare ui: {
 	group: (props: GroupProps) -> Object3D,
 	model: (props: ModelProps) -> Object3D,
 	webview: (props: WebViewProps) -> Node,
+	-- A view the host makes in Rust (`host_view(name, make)`), laid out, clipped and stacked as the script's own.
+	host_view: (props: ContainerProps & { name: string }) -> Node,
 	-- `ui.web(opts)`: a page for this run. `ui.web(id, opts)`: the host's
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: (props: TerminalProps) -> Node,
+	-- A view the host made in Rust, mounted in this tree under its popups.
+	host_view: (props: HostViewProps) -> Node,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
 	command: (opts: CommandOptions) -> (),
+	-- Runs the command `id` as its shortcut would; whether there was one.
+	run_command: (id: string) -> boolean,
 	-- Keys ("cmd+shift+z") as this platform shows them: "⇧⌘Z" on macOS,
 	-- "Ctrl+Shift+Z" elsewhere (`cmd` is Command on macOS, Control
 	-- elsewhere); a lone modifier ("cmd") as itself, "⌘" or "Ctrl".
 	shortcut_text: (keys: string) -> string,
+	-- The look every menu takes that doesn't style itself, zgx's own (a link's, an editor's) among them: its
+	-- panel, each item, an item under the pointer and one with keyboard focus, in plain values.
+	-- `fade`: ms a menu fades in as it opens and out as it closes (at once from the keyboard, and when an item is chosen).
+	menu_look: (look: { panel: Styles?, item: Styles?, hover: Styles?, focus: Styles?, fade: number? }) -> (),
+	-- The look of the find bar zgx builds (Command-F), as the app's own search field: the floating panel,
+	-- the group holding the icon, field, count and steps (close sits after it), the field and its focus,
+	-- the count, the buttons and their hover and press, each icon's box, in plain values. `icons`: SVG
+	-- paths from the script's folder, or SVG markup, in the text's colour; `search` leads the field.
+	-- `short_count` shows "1/3" for "1 of 3"; the count and steps show once `navigator_after` characters are typed.
+	find_look: (look: { panel: Styles?, group: Styles?, field: Styles?, field_focus: Styles?, count: Styles?, button: Styles?, button_hover: Styles?, button_active: Styles?, icon: Styles?, icons: { search: string?, previous: string?, next: string?, close: string? }?, placeholder: string?, short_count: boolean?, navigator_after: number? }) -> (),
+	-- The look every text tip takes (`tooltip = "…"`): its panel in plain values, where tips go unless their
+	-- node sets `tooltip_placement`, and `keep_below`: points at the window's top (a titlebar) no tip reaches
+	-- into, a tip above its node flipping below it instead.
+	tooltip_look: (look: { panel: Styles?, placement: Placement?, keep_below: number? }) -> (),
+	-- Whether the last input was the keyboard's (a key that moves or types since the last press), as
+	-- `:focus-visible` reads it: what it opens can skip its fade, as a menu opened from the keyboard does.
+	keyboard_in_use: () -> boolean,
 	-- The id of the command (the app's or a plugin's) holding a shortcut
 	-- now, `Shift+Cmd+J` or `cmd+shift+j` alike; nil if none.
 	shortcut_owner: (keys: string) -> string?,
@@ -23582,6 +25678,17 @@ declare ui: {
 	-- a dialog holds focus. Raised over everything as it opens (`open`, a
 	-- state; open unless given).
 	layer: (props: LayerProps) -> Node,
+	-- A layer above everything the app shows: in a window of its own
+	-- where the host has them (macOS), over the app's menus, popovers,
+	-- selects, tooltips and a drag's preview, covering the window's content
+	-- (its root at 0, 0; it follows the window as it moves, resizes,
+	-- zooms and changes Space). A `ui.layer` otherwise: no focus, no
+	-- backdrop, the pointer passing through where a child has
+	-- `pointer_events = "none"` or holds nothing; a press on a control in
+	-- it closes no menu or popover. Of two, the later is above. Drawn only
+	-- while it paints something; shown while `open` (a state; open unless
+	-- given) and its window is. Elsewhere it is the window's own top layer.
+	topmost: (props: LayerProps) -> Node,
 	popover: (props: PopoverProps) -> Node,
 	menu: (props: PopoverProps) -> Node,
 	menu_item: (props: MenuItemProps) -> Node,
@@ -23790,10 +25897,14 @@ declare ui: {
 	-- its HTML (a browser's or word processor's copy; nil if it holds
 	-- none), and putting HTML on it with its text; its image as a `Bitmap`
 	-- (nil if it holds none), and putting one on it: promises, as a large
-	-- image is decoded and encoded off the main thread.
+	-- image is decoded and encoded off the main thread. `write` takes
+	-- `{ text, html?, types? }` too: HTML and types of the app's own beside
+	-- the text in one change, which `read_type` reads back (a web page's
+	-- copy's types too, in Chrome, Edge and Electron apps).
 	clipboard: {
 		read: () -> string?,
-		write: (text: string) -> boolean,
+		write: (content: string | { text: string, html: string?, types: { [string]: string }? }) -> boolean,
+		read_type: (mime: string) -> string?,
 		read_html: () -> string?,
 		write_html: (text: string, html: string) -> boolean,
 		read_image: () -> Promise<Bitmap?>,
@@ -23889,6 +26000,24 @@ declare ui: {
 	-- A toast in the window's corner: it goes after `duration` ms (5000;
 	-- 7000 a warning; an error stays), or at its ×. Returns its id.
 	toast: (opts: ToastOptions) -> number,
+	-- How long toasts shown from now on stay when they do not say.
+	toast_defaults: (opts: ToastDefaults) -> (),
+	-- The controls on screen, in document order with popups and modals last
+	-- (a plain group, a text, a scroll view or a table's rows are not
+	-- controls). Nothing is built until you ask. `{}` where the host gave
+	-- no window; an error in a plugin.
+	controls: (opts: ControlsOptions?) -> { Control },
+	-- Presses and releases the primary button at the middle of the control
+	-- `handle` names, as `zgx inspect click` does. False, doing nothing,
+	-- for a handle whose control is gone, hidden or covered.
+	press: (handle: number) -> boolean,
+	-- (Hidden until its API is settled.) The scroll views around the control
+	-- `handle` names moved so it shows, as `el:scroll_into_view(options)`
+	-- moves them. Whether any moved; false for a control that is gone.
+	scroll_into_view: (handle: number, options: { block: ("start" | "center" | "end" | "nearest")?, inline: ("start" | "center" | "end" | "nearest")?, animate: boolean? }?) -> boolean,
+	-- The text a control (`ui.controls`' `handle`) shows, a word apart, at most
+	-- `cap` (400) characters; "" once it is gone. A dialog's, for a notice.
+	text_of: (handle: number, cap: number?) -> string,
 	dismiss_toast: (id: number) -> (),
 	-- JSON: `encode(value, { pretty = true })` writes what state could hold
 	-- (lists as arrays, tables as objects, `ui.null` as null); `decode(text)`
@@ -23908,6 +26037,10 @@ declare ui: {
 	-- "1,234.50", `{ style = "percent" }` takes a fraction (0.05 is "5%"),
 	-- `{ notation = "compact" }` gives "1.2K", `{ sign = "always" }` "+3".
 	number: (n: number, opts: NumberOptions?) -> string,
+	-- The way text runs by its first strong character: "rtl" for Arabic,
+	-- Hebrew and the like, "ltr" for another letter, nil for none (HTML's
+	-- `dir=auto`): what `dir` takes for a container showing that text.
+	direction_of: (text: string) -> ("ltr" | "rtl")?,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
 	-- `draw` as a canvas would show it, as a PNG in base64, with no window:
@@ -24626,207 +26759,6 @@ declare extern type Scope with
 	function revert(self): ()
 end
 export type EaseMaker = (...number) -> AnimeEase
-
----------------------------------------------------------------------------
--- Sound (`audio`, zgx-script's `audio` feature; docs/reference/audio.md).
-
-export type Curve = "linear" | "equal_power" | "exponential"
--- Seconds, in straight steps, or along a curve.
-export type Fade = number | { seconds: number, curve: Curve? }
-
--- `audio.sound`'s: decoded on a thread of its own.
-declare extern type Sound with
-	ready: ReadOnlyState<boolean>
-	-- Why it couldn't be loaded, or nil.
-	error: ReadOnlyState<string?>
-	-- Seconds, once ready (else 0).
-	duration: number
-	-- This sound for `sound =`, at its own level and pitch.
-	function with(self, opts: { gain: number?, pitch: number? }?): SoundWith
-end
-
--- `sound:with { … }`'s: a sound for `sound =`, at a level and pitch.
-declare extern type SoundWith with
-end
-
--- `audio.choose(f)`'s: for `sound =`, `f` called as its control is
--- activated, answering the sound to play, or none.
-declare extern type SoundChoice with
-end
-
-export type SoundOptions = {
-	-- false: it loads at its first play.
-	preload: boolean?,
-}
-
-export type PlayOptions = {
-	-- A bus's name or the bus: `"world"` for `audio.play`, `"music"` for
-	-- `audio.music`.
-	bus: (string | Bus)?,
-	gain: Reactive<number>?,
-	-- -1 left to 1 right, as a balance.
-	pan: Reactive<number>?,
-	-- Speed and pitch together: 2 is an octave up.
-	pitch: Reactive<number>?,
-	-- A time on `audio.now()`'s clock: it starts on that exact frame.
-	at: number?,
-	loop: boolean?,
-	-- Seconds into the sound: an intro, then the loop between them.
-	loop_start: number?,
-	loop_end: number?,
-	-- Kept over lower priorities when 64 voices play.
-	priority: number?,
-	fade_in: Fade?,
-}
-
-declare extern type Voice with
-	-- True until it has ended or been stopped.
-	playing: ReadOnlyState<boolean>
-	-- Fades out and stops (5 ms if not given).
-	function stop(self, seconds: number?): ()
-	function fade(self, gain: number, seconds: number, curve: Curve?): ()
-	function gain(self, value: Reactive<number>): ()
-	function pan(self, value: Reactive<number>): ()
-	function pitch(self, value: Reactive<number>): ()
-	-- The same voice, for the next call to land on that frame.
-	function at(self, time: number): Voice
-	-- Fades this voice out (and stops it) and `to`, started silent, up to
-	-- `gain` (1), along equal-power curves over `seconds`.
-	function crossfade(self, to: Voice, seconds: number, gain: number?): ()
-end
-
--- A stock effect described (`audio.low_pass { … }`), to put on a bus with
--- `bus:add_effect`. Every parameter is a number, a state, a function or a
--- binding, followed with no script per frame.
-declare extern type EffectSpec with
-end
-
-export type FilterOptions = {
-	-- Hz, 10 to 24000.
-	cutoff: Reactive<number>?,
-	-- Q, 0.1 to 20: 0.707 is flat.
-	resonance: Reactive<number>?,
-	-- dB an octave: 12 or 24.
-	slope: number?,
-}
-export type PeakingOptions = {
-	frequency: Reactive<number>?,
-	q: Reactive<number>?,
-	-- dB, -36 to 36.
-	gain: Reactive<number>?,
-}
-export type DelayOptions = {
-	-- Seconds, up to `longest`.
-	time: Reactive<number>?,
-	-- 0 to 0.98.
-	feedback: Reactive<number>?,
-	wet: Reactive<number>?,
-	dry: Reactive<number>?,
-	-- The longest time it will be given, in seconds (1, or `time` if
-	-- longer; 10 at most): what its line holds.
-	longest: number?,
-}
-export type ReverbOptions = {
-	-- 0.25 to 2.
-	size: Reactive<number>?,
-	-- Seconds to fall 60 dB, 0.1 to 20.
-	decay: Reactive<number>?,
-	-- 0 to 1: how much the highs fade first.
-	damping: Reactive<number>?,
-	-- Seconds, up to 0.25.
-	pre_delay: Reactive<number>?,
-	wet: Reactive<number>?,
-	dry: Reactive<number>?,
-}
-export type CompressorOptions = {
-	-- dB, -60 to 0.
-	threshold: Reactive<number>?,
-	ratio: Reactive<number>?,
-	-- Seconds.
-	attack: Reactive<number>?,
-	release: Reactive<number>?,
-	-- dB.
-	knee: Reactive<number>?,
-	makeup: Reactive<number>?,
-}
-export type DuckOptions = {
-	-- dB the bus goes down by, -60 to 0.
-	depth: Reactive<number>?,
-	-- dB the other bus's level must pass.
-	threshold: Reactive<number>?,
-	attack: Reactive<number>?,
-	release: Reactive<number>?,
-}
-
--- An effect on a bus (`bus:add_effect`, `bus:duck`).
-declare extern type AudioEffect with
-	-- A parameter by its name: a number, or a state, function or binding
-	-- it follows.
-	function set(self, name: string, value: Reactive<number>): ()
-	function fade(self, name: string, value: number, seconds: number, curve: Curve?): ()
-	-- Takes it off its bus (its tail cut).
-	function remove(self): ()
-	function at(self, time: number): AudioEffect
-end
-
-declare extern type Bus with
-	-- Read by the mixer each block, gliding over 10 ms: no message, even
-	-- for a binding.
-	function gain(self, value: Reactive<number>): ()
-	function fade(self, gain: number, seconds: number, curve: Curve?): ()
-	function mute(self, value: Reactive<boolean>): ()
-	function solo(self, value: Reactive<boolean>): ()
-	function at(self, time: number): Bus
-	-- After the bus's other effects, before its gain: 8 at most.
-	function add_effect(self, effect: EffectSpec): AudioEffect
-	-- Ducks this bus under `side` (music under dialogue).
-	function duck(self, side: Bus, opts: DuckOptions?): AudioEffect
-end
-
-export type AudioStats = {
-	voices: number,
-	stolen: number,
-	dropped: number,
-	late: number,
-	dry: number,
-	streams: number,
-	underruns: number,
-	running: boolean,
-	starts: number,
-	stops: number,
-	peak: number,
-}
-
--- `sound =` on a control: a sound, `sound:with`'s, `audio.choose`'s, or
--- none. Extern types and false alone: a table or a function among them, in
--- a property every element has, made props built a field at a time too
--- complex for luau-lsp 1.70.1 to check.
-export type SoundProp = Sound | SoundWith | SoundChoice | false
-
-declare audio: {
-	sound: (src: string, opts: SoundOptions?) -> Sound,
-	music: (src: string, opts: PlayOptions?) -> Voice,
-	play: (sound: Sound, opts: PlayOptions?) -> Voice,
-	-- For `sound =`: `f` chooses the sound as the control is activated.
-	choose: (f: () -> Sound | SoundWith | false | nil) -> SoundChoice,
-	-- A plugin's `audio.bus()` is its own bus, the only one it reaches.
-	bus: (name: string?) -> Bus?,
-	-- Under `master` unless `parent` says.
-	add_bus: (name: string, opts: { parent: string? }?) -> Bus,
-	-- The mixer's clock, in seconds: still while nothing plays.
-	now: () -> number,
-	prewarm: () -> (),
-	stats: () -> AudioStats,
-	low_pass: (opts: FilterOptions?) -> EffectSpec,
-	high_pass: (opts: FilterOptions?) -> EffectSpec,
-	-- A band of EQ.
-	peaking: (opts: PeakingOptions?) -> EffectSpec,
-	delay: (opts: DelayOptions?) -> EffectSpec,
-	reverb: (opts: ReverbOptions?) -> EffectSpec,
-	compressor: (opts: CompressorOptions?) -> EffectSpec,
-	-- The user's interface-sound setting, which the `ui` bus follows.
-	ui_sounds_enabled: ReadOnlyState<boolean>,
-}
 
 -- Besides elements, animations and utils target a state's or a plain
 -- table's fields: the script's own data, so `{ [string]: any }`.

@@ -359,7 +359,7 @@ fn failed_row_constructor_rolls_back_partial_rows_and_can_recover() {
 }
 
 #[test]
-fn duplicate_visible_keys_preserve_existing_rows_and_ownership() {
+fn duplicate_visible_keys_keep_the_first_row_and_leave_the_repeat_out() {
     let mut ui = Ui::new(200., 100.);
     let heights = VariableHeights::new(&ui.runtime, 3, 20.);
     let order = ui.signal(vec![10, 11, 12]);
@@ -384,24 +384,21 @@ fn duplicate_visible_keys_preserve_existing_rows_and_ownership() {
     let retained = view.find("key-10").unwrap();
     let focused = row(&ui, retained);
     ui.input.focus(&ui.scene, Some(focused));
-    let node_count = ui.scene.borrow().len();
-    let effect_count = ui.runtime.effect_count();
-    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        order.set(vec![10, 10, 12]);
-    }));
-    assert!(failed.is_err());
+    // A key given twice is no panic: the first row keeps it, the repeat is
+    // left out, and the rows around stay as they were.
+    order.set(vec![10, 10, 12]);
+    ui.prepare_frame();
     assert_eq!(view.find("key-10"), Some(retained));
-    assert!(view.find("key-11").is_some());
+    assert!(view.find("key-11").is_none(), "the repeat is left out");
+    assert!(view.find("key-12").is_some());
     assert_eq!(ui.input.focused(), Some(focused));
-    assert_eq!(ui.scene.borrow().len(), node_count);
-    assert_eq!(ui.runtime.effect_count(), effect_count);
-    assert_eq!(drops.get(), 0);
+    assert_eq!(drops.get(), 1, "only the row that left is disposed");
     order.set(vec![11, 10, 12]);
     ui.prepare_frame();
     assert_eq!(view.find("key-10"), Some(retained));
     assert_eq!(position(&ui), Some(2));
     view.unmount();
-    assert_eq!(drops.get(), 3);
+    assert_eq!(drops.get(), 4);
 }
 
 #[test]

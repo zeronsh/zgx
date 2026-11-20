@@ -18,6 +18,20 @@ impl NodeId {
     pub fn number(self) -> u32 {
         self.index
     }
+    /// A handle for it that outlives it: the slot and the generation in one
+    /// number, which `from_bits` turns back into this node's id, and which
+    /// `Scene::contains` then says is gone once the node is (a slot a later
+    /// node reuses has another generation).
+    pub fn to_bits(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+    /// The id `to_bits` made.
+    pub fn from_bits(bits: u64) -> Self {
+        Self {
+            index: bits as u32,
+            generation: (bits >> 32) as u32,
+        }
+    }
     /// Its slot: no other node in the scene has it while this one is there.
     pub(crate) fn slot(self) -> usize {
         self.index as usize
@@ -1475,6 +1489,14 @@ impl QuadStyle {
             None => painted,
         }
     }
+    /// `paint_bounds` without its shadows: where the box itself and its
+    /// outline paint.
+    pub fn body_bounds(&self, bounds: Rect) -> Rect {
+        match self.outline.filter(Outline::visible) {
+            Some(outline) => bounds.union(outline.outer(bounds)),
+            None => bounds,
+        }
+    }
     /// Whether it paints nothing at all: a box held for its layout or clip.
     pub fn paints_nothing(&self) -> bool {
         self.fill.3 == 0
@@ -1994,6 +2016,11 @@ pub enum PopupRole {
     Popover,
     /// A tooltip or a hover card.
     Tooltip,
+    /// A layer over the whole window that no other window covers
+    /// (`View::topmost`): above menus, popovers, tooltips and a drag's
+    /// preview, filling its window's content, the pointer passing through
+    /// where it holds nothing.
+    Topmost,
 }
 const POPUPS_BIT: usize = 1usize << (usize::BITS - 2);
 const _: () = assert!(std::mem::size_of::<Slot>() > 2);
@@ -2086,6 +2113,11 @@ struct Node {
     text_size: TextSizeCache,
     advanced_layout: Option<Box<advanced_layout::AdvancedLayoutCache>>,
     arrange_dirty: bool,
+    /// Another kept result was promoted since it was placed: placed again
+    /// only if the current one isn't the one it was placed from.
+    swapped: bool,
+    /// The serial of the result it was last placed from.
+    arranged_serial: u32,
     /// Whether its size can depend on the available width and height it is
     /// measured under (`Scene::reads_available`): `READS_KNOWN` once worked
     /// out, cleared with its layout.
@@ -2173,6 +2205,10 @@ struct PlainLook {
     read: u64,
 }
 /// What few scenes have, by node; each entry goes with its node.
+type TextDescriber =
+    std::rc::Rc<dyn Fn(&crate::text_layout::TextDescription<'_>, Option<f32>) -> Vec<String>>;
+/// A fitted text's key, and the spaces it breaks at (`Scene::fitted_breaks`).
+type FittedSpaces = (u64, Option<Arc<[usize]>>);
 #[derive(Default)]
 struct ColdMaps {
     /// Absolute nodes moved by an inset alone since the last layout
@@ -2211,12 +2247,12 @@ struct ColdMaps {
     column_kept: Vec<KeptChildren>,
     /// Sizes worked out from the containing block (`set_size_calcs`).
     size_calcs: NodeMap<std::sync::Arc<crate::size_calc::SizeCalcs>>,
-    /// Nodes that balance their text's lines, or not (`set_text_balance`),
-    /// for what they hold.
-    balanced: NodeMap<bool>,
-    /// The width each balanced text wraps at, for what it was worked out
-    /// from.
-    balanced_widths: std::cell::RefCell<NodeMap<(u64, f32)>>,
+    /// Nodes that fit their text's lines (`set_text_fit`), or are said not
+    /// to, for what they hold.
+    balanced: NodeMap<Option<crate::text_wrap::TextWrap>>,
+    /// Where each fitted text breaks its lines (the spaces that become line
+    /// breaks), for what it was worked out from.
+    balanced_widths: std::cell::RefCell<NodeMap<FittedSpaces>>,
     /// The min-content and max-content widths of those of them that size
     /// themselves by what they hold, as their parent last measured them.
     content_widths: NodeMap<(f32, f32)>,
@@ -2657,6 +2693,9 @@ struct Measurement {
     /// Layout pass that produced this result. A dirty node may reuse only
     /// results from the pass in progress.
     pass: u64,
+    /// Which result this is (`Scene::next_serial`): a node placed from it
+    /// and promoted back to it needs no placing again.
+    serial: u32,
 }
 #[inline(never)]
 fn promote_measurement(
@@ -3524,6 +3563,8 @@ pub struct Scene {
     pending_layout_nodes: usize,
     layout_revision: u64,
     layout_pass: u64,
+    /// The last `Measurement::serial` given.
+    measurement_serial: u32,
     /// How deep the measure running now is (`crate::deep`).
     measure_depth: u32,
     /// Measures' working sets, one per level deep (`Scratch`).
@@ -3571,6 +3612,8 @@ pub struct Scene {
     /// `measure` calls, for tests of how much work layout does.
     #[cfg(test)]
     pub(crate) measure_calls: u64,
+    #[cfg(test)]
+    pub(crate) fresh_measures: u64,
     /// `arrange` calls, for tests of how much work layout does.
     #[cfg(test)]
     pub(crate) arrange_calls: u64,
@@ -3702,6 +3745,18 @@ pub struct Scene {
     cold: Option<Box<ColdMaps>>,
     /// Directions nodes set themselves (`set_direction`); others inherit.
     directions: NodeMap<Direction>,
+    /// Text whose direction is its first strong character's (`set_direction_auto`).
+    auto_directions: NodeMap<()>,
+    /// A right to left paragraph's rich text with its base level set
+    /// (`fit_rich`), for the text it was made from.
+    /// What says how text was shaped (`set_text_describer`).
+    text_describer: Option<TextDescriber>,
+    rtl_rich: std::cell::RefCell<
+        NodeMap<(
+            Arc<crate::rich_text::RichText>,
+            Arc<crate::rich_text::RichText>,
+        )>,
+    >,
     /// Layer shaders and their uniforms, by node (`set_layer_shader`):
     /// usually none.
     layer_shaders: NodeMap<LayerShader>,
@@ -3793,6 +3848,8 @@ impl Scene {
                     text_size: Default::default(),
                     advanced_layout: None,
                     arrange_dirty: true,
+                    swapped: false,
+                    arranged_serial: 0,
                     reads: std::cell::Cell::new(0),
                     isolated: false,
                     local: None,
@@ -3874,6 +3931,7 @@ impl Scene {
             pending_layout_nodes: 0,
             layout_revision: 0,
             layout_pass: 0,
+            measurement_serial: 0,
             measure_depth: 0,
             scratch: Vec::new(),
             content_revision: 0,
@@ -3890,6 +3948,8 @@ impl Scene {
             escaped: Vec::new(),
             #[cfg(test)]
             measure_calls: 0,
+            #[cfg(test)]
+            fresh_measures: 0,
             #[cfg(test)]
             arrange_calls: 0,
             #[cfg(test)]
@@ -3935,6 +3995,9 @@ impl Scene {
             given_styles: Default::default(),
             cold: None,
             directions: Default::default(),
+            auto_directions: Default::default(),
+            rtl_rich: Default::default(),
+            text_describer: None,
             layer_shaders: Default::default(),
             inert: Vec::new(),
             selectable: Default::default(),
@@ -4012,6 +4075,12 @@ impl Scene {
         self.damage_subtree(id);
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
         self.invalidate(id, COMPOSITE);
+    }
+    /// Every popup root wanted (`set_popup`), those held back while the app
+    /// is at the back (`set_popups_held`) too: what `popups` lists is what a
+    /// host shows.
+    pub fn wanted_popups(&self) -> &[NodeId] {
+        &self.popups
     }
     /// Roots shown in popup windows (`set_popup`), in the order set; those
     /// held while the app is at the back (`set_popups_held`) aren't listed.
@@ -4105,6 +4174,20 @@ impl Scene {
         self.ink_alone(id)
             .map(|ink| ink.translated(offset))
             .filter(|ink| ink.width > 0. && ink.height > 0.)
+    }
+    /// Whether `id` is in a popup that is wanted but held back, not shown
+    /// nor hit while the app is at the back (`set_popups_held`).
+    pub fn in_held_popup(&self, id: NodeId) -> bool {
+        self.popups_held
+            && self
+                .popup_holding(id)
+                .is_some_and(|root| self.popup_held(root))
+    }
+    /// Whether `id` is in a topmost layer shown in a popup window
+    /// (`PopupRole::Topmost`).
+    pub fn is_in_topmost(&self, id: NodeId) -> bool {
+        self.popup_holding(id)
+            .is_some_and(|root| self.popup_role(root) == Some(PopupRole::Topmost))
     }
     /// Whether `id` shows in a popup window of its own (`set_popup`).
     pub fn is_popup(&self, id: NodeId) -> bool {
@@ -5726,6 +5809,9 @@ impl Scene {
     }
     /// Whether `id` is a scroll view or a list: its viewport, its first
     /// child, holds its scrolled content.
+    pub fn is_scroll_view(&self, id: NodeId) -> bool {
+        self.scrolls(id)
+    }
     fn scrolls(&self, id: NodeId) -> bool {
         let node = self.node(id);
         let Some(viewport) = self.children_raw(node).first() else {
@@ -6355,6 +6441,60 @@ impl Scene {
             .is_some_and(|parent| self.node(parent).rtl);
         self.refresh_direction::<true>(id, inherited, false);
     }
+    /// Whether any node's direction is its text's (`set_direction_auto`).
+    pub fn has_auto_directions(&self) -> bool {
+        !self.auto_directions.is_empty()
+    }
+    /// Run text `id` the way its first strong character does (`on`), or not:
+    /// right to left for Arabic, Hebrew and the like, else left to right,
+    /// and its parent's where it has none. Decided again, before layout, as
+    /// its text changes.
+    pub fn set_direction_auto(&mut self, id: NodeId, on: bool) {
+        if on == self.auto_directions.contains_key(&id) {
+            return;
+        }
+        if on {
+            self.auto_directions.insert(id, ());
+            self.resolve_auto_direction(id);
+        } else {
+            self.auto_directions.remove(&id);
+            self.set_direction(id, None);
+        }
+    }
+    /// `id`'s direction from its text, or the first of its descendants' that
+    /// has a strong character, if any does.
+    fn resolve_auto_direction(&mut self, id: NodeId) {
+        let mut found = None;
+        let mut stack = vec![id];
+        let mut visited = 0;
+        while let Some(at) = stack.pop() {
+            visited += 1;
+            let strong = match &self.node(at).kind {
+                NodeKind::Text { text, .. } => crate::text_layout::first_strong_direction(text),
+                NodeKind::RichText { text } => {
+                    crate::text_layout::first_strong_direction(text.text())
+                }
+                _ => {
+                    stack.extend(self.children(at).iter().rev().copied());
+                    None
+                }
+            };
+            if strong.is_some() || visited > 2000 {
+                found = strong;
+                break;
+            }
+        }
+        self.set_direction(id, found);
+    }
+    /// The nodes that take their direction from their text, decided again.
+    fn resolve_auto_directions(&mut self) {
+        let ids: Vec<NodeId> = self.auto_directions.keys().copied().collect();
+        for id in ids {
+            if self.contains(id) {
+                self.resolve_auto_direction(id);
+            }
+        }
+    }
     /// Which way `id` and its parent run.
     fn way(&self, id: NodeId) -> Way {
         let node = self.node(id);
@@ -6399,7 +6539,13 @@ impl Scene {
             let given = self.style(id);
             self.restyle(id, given, true);
         }
-        if turned && let Some(logical) = self.node(id).align_logical {
+        if turned && matches!(self.node(id).kind, NodeKind::Text { .. }) {
+            let mut font = self.node(id).font.clone();
+            if let Some(logical) = self.node(id).align_logical {
+                font.align = logical;
+            }
+            self.set_font(id, font);
+        } else if turned && let Some(logical) = self.node(id).align_logical {
             let mut font = self.node(id).font.clone();
             font.align = logical;
             self.set_font(id, font);
@@ -7469,6 +7615,7 @@ impl Scene {
         use crate::text_layout::TextAlign;
         let logical = matches!(font.align, TextAlign::Start | TextAlign::End).then_some(font.align);
         let rtl = self.node(id).rtl;
+        font.paragraph_rtl = rtl;
         font.align = match font.align {
             TextAlign::Start if rtl => TextAlign::Right,
             TextAlign::End if rtl => TextAlign::Left,
@@ -7533,6 +7680,45 @@ impl Scene {
         for id in ids {
             self.invalidate(id, PAINT);
             self.invalidate_layout(id);
+        }
+    }
+    /// Install what says how text was shaped (`describe_text`): for each
+    /// line, its baseline, ascent and descent, and the face each run used.
+    pub fn set_text_describer(
+        &mut self,
+        describer: impl Fn(&crate::text_layout::TextDescription<'_>, Option<f32>) -> Vec<String>
+        + 'static,
+    ) {
+        self.text_describer = Some(std::rc::Rc::new(describer));
+    }
+    /// How text `id` shapes in a box `width` wide: the family it asks for and
+    /// what that resolves to, and each line's baseline, ascent and descent and
+    /// the faces its runs use. `None` where the node isn't text or no shaper
+    /// that can say is installed.
+    pub fn describe_text(&self, id: NodeId, width: f32) -> Option<Vec<String>> {
+        let describer = self.text_describer.as_ref()?;
+        match self.kind(id) {
+            NodeKind::Text {
+                text, font_size, ..
+            } => {
+                let fitted = self.fit_str(id, width, text);
+                Some(describer(
+                    &crate::text_layout::TextDescription::Plain {
+                        text: &fitted,
+                        size: *font_size,
+                        font: self.font(id),
+                    },
+                    Some(width),
+                ))
+            }
+            NodeKind::RichText { text } => {
+                let fitted = self.fit_rich(id, width, text);
+                Some(describer(
+                    &crate::text_layout::TextDescription::Rich(&fitted),
+                    Some(width),
+                ))
+            }
+            _ => None,
         }
     }
     /// Install rich paragraph geometry for inline selection and interactive spans.
@@ -7984,6 +8170,10 @@ impl Scene {
             shaper.shape(text, size, width, font)
         } else if font.line_height != crate::text_layout::LineHeight::NORMAL
             || font.letter_spacing != crate::text_layout::LetterSpacing::ZERO
+            || !matches!(
+                font.align,
+                crate::text_layout::TextAlign::Start | crate::text_layout::TextAlign::Left
+            )
         {
             self.shape_text_with_metrics(text, size, width, font)
         } else {
@@ -7991,8 +8181,8 @@ impl Scene {
         }
     }
     /// `shape_text_with_font` with no font shaper and explicit metrics
-    /// (letter spacing, a line height): apart, so the common call stays as
-    /// small as it is.
+    /// (letter spacing, a line height) or an alignment: apart, so the common
+    /// call stays as small as it is.
     #[inline(never)]
     fn shape_text_with_metrics(
         &self,
@@ -8002,8 +8192,12 @@ impl Scene {
         font: &crate::text_layout::FontStyle,
     ) -> Box<dyn crate::text_layout::TextLayout> {
         match self.text_shaper.as_deref() {
-            // A shaper taking no font: its advances, spaced as the GPU's.
-            Some(shaper) if font.letter_spacing != crate::text_layout::LetterSpacing::ZERO => {
+            // A shaper taking no font: its advances, spaced as the GPU's, or
+            // aligned (its rows moved as the font says) at its own line height.
+            Some(shaper)
+                if font.letter_spacing != crate::text_layout::LetterSpacing::ZERO
+                    || font.line_height == crate::text_layout::LineHeight::NORMAL =>
+            {
                 Box::new(crate::text_layout::FallbackTextLayout::spaced(
                     shaper, text, size, width, font,
                 ))
@@ -8380,6 +8574,8 @@ impl Scene {
             text_size: Default::default(),
             advanced_layout: None,
             arrange_dirty: true,
+            swapped: false,
+            arranged_serial: 0,
             reads: std::cell::Cell::new(0),
             isolated: false,
             local: None,
@@ -8720,6 +8916,9 @@ impl Scene {
         if !self.directions.is_empty() {
             self.directions.remove(&id);
         }
+        if !self.auto_directions.is_empty() {
+            self.auto_directions.remove(&id);
+        }
         if !self.layer_shaders.is_empty()
             && let Some(layer) = self.layer_shaders.remove(&id)
             && layer.shader.is_some()
@@ -9023,7 +9222,11 @@ impl Scene {
     /// asked; `None` takes its parent's. Whether it changed anything.
     #[cold]
     #[inline(never)]
-    pub fn set_text_balance(&mut self, id: NodeId, balance: Option<bool>) -> bool {
+    pub fn set_text_fit(
+        &mut self,
+        id: NodeId,
+        balance: Option<Option<crate::text_wrap::TextWrap>>,
+    ) -> bool {
         let held = (self.cold.as_ref()).and_then(|cold| cold.balanced.get(&id).copied());
         if held == balance || !self.contains(id) {
             return false;
@@ -9198,86 +9401,105 @@ impl Scene {
     pub fn language_revision(&self) -> u64 {
         self.cold.as_ref().map_or(0, |cold| cold.language_revision)
     }
-    /// The width text `id` wraps at in a box `width` wide, and how far right
-    /// of the box's left edge its lines start: `(width, 0)`, unless its lines
-    /// are balanced (`set_text_balance`), when they wrap narrower and, centred
-    /// or right-aligned, are aligned in the box, not in that narrower width.
-    /// Renderers, and the layouts selection, find and accessibility read,
-    /// lay text out at the width and draw it the inset to the right.
-    #[inline]
-    pub fn text_wrap(&self, id: NodeId, width: f32) -> (f32, f32) {
-        match &self.cold {
-            Some(cold) if !cold.balanced.is_empty() => self.balanced_wrap(cold, id, width),
-            _ => (width, 0.),
-        }
+    /// The spaces of text `id` that break its lines in a box `width` wide, if
+    /// it is fitted (`set_text_fit`) and Chrome's fit differs from greedy
+    /// breaking: their byte offsets. Layout and renderers lay the text out
+    /// with a line feed at each, the box and its line count as they were.
+    pub fn fitted_breaks(&self, id: NodeId, width: f32) -> Option<Arc<[usize]>> {
+        let cold = self
+            .cold
+            .as_ref()
+            .filter(|cold| !cold.balanced.is_empty())?;
+        self.fitted_spaces(cold, id, width)
     }
-    #[cold]
-    #[inline(never)]
-    fn balanced_wrap(&self, cold: &ColdMaps, id: NodeId, width: f32) -> (f32, f32) {
-        use crate::text_layout::TextAlign;
-        let wrap = self.balanced_width(cold, id, width);
-        if wrap >= width {
-            return (width, 0.);
-        }
-        let align = match &self.node(id).kind {
-            NodeKind::Text { .. } => self.node(id).font.align,
-            NodeKind::RichText { text } => {
-                (text.runs().first()).map_or(TextAlign::Start, |run| run.font.align)
-            }
-            _ => return (width, 0.),
+    /// Rich text `id` as it shows in a box `width` wide: `rich` with its
+    /// fitted breaks (`fitted_breaks`), if it has any.
+    pub fn fit_rich(
+        &self,
+        id: NodeId,
+        width: f32,
+        rich: &Arc<crate::rich_text::RichText>,
+    ) -> Arc<crate::rich_text::RichText> {
+        let rich = match self.fitted_breaks(id, width) {
+            Some(spaces) => Arc::new(rich.with_line_feeds(&spaces)),
+            None => rich.clone(),
         };
-        let inset = (width - wrap)
-            * match align {
-                TextAlign::Center => 0.5,
-                TextAlign::Right | TextAlign::End => 1.,
-                TextAlign::Start | TextAlign::Left => 0.,
-            };
-        (wrap, inset)
+        // Right to left, its paragraphs take that base level whatever their
+        // first strong character is (kept for as long as the paragraph is).
+        if self.node(id).rtl
+            && !rich
+                .runs()
+                .first()
+                .is_some_and(|run| run.font.paragraph_rtl)
+        {
+            let mut kept = self.rtl_rich.borrow_mut();
+            if let Some((from, directed)) = kept.get(&id)
+                && (Arc::ptr_eq(from, &rich) || **from == *rich)
+            {
+                return directed.clone();
+            }
+            let directed = Arc::new(rich.with_paragraph_rtl());
+            if kept.len() >= 256 {
+                kept.clear();
+            }
+            kept.insert(id, (rich.clone(), directed.clone()));
+            return directed;
+        }
+        rich
     }
-    /// Text `id` shaped as it shows in a box `width` wide: at its wrap
-    /// width, its lines where they are drawn (`text_wrap`).
+    /// Plain text `id` as it shows in a box `width` wide (`fit_rich`'s).
+    pub fn fit_str(&self, id: NodeId, width: f32, text: &Arc<str>) -> Arc<str> {
+        match self.fitted_breaks(id, width) {
+            Some(spaces) => crate::rich_text::line_feeds(text, &spaces),
+            None => text.clone(),
+        }
+    }
+    /// Text `id` shaped as it shows in a box `width` wide: with its fitted
+    /// breaks.
     pub(crate) fn shape_node_text(
         &self,
         id: NodeId,
         width: f32,
     ) -> Option<Box<dyn crate::text_layout::TextLayout>> {
-        let (wrap, inset) = self.text_wrap(id, width);
-        let layout = match self.kind(id) {
+        Some(match self.kind(id) {
             NodeKind::Text {
                 text, font_size, ..
-            } => self.shape_text_with_font(text, *font_size, Some(wrap), self.font(id)),
-            NodeKind::RichText { text } => self.shape_rich_text(text, Some(wrap)),
+            } => self.shape_text_with_font(
+                &self.fit_str(id, width, text),
+                *font_size,
+                Some(width),
+                self.font(id),
+            ),
+            NodeKind::RichText { text } => {
+                self.shape_rich_text(&self.fit_rich(id, width, text), Some(width))
+            }
             _ => return None,
-        };
-        Some(crate::text_layout::Inset::around(layout, inset))
+        })
     }
-    fn balanced_width(&self, cold: &ColdMaps, id: NodeId, width: f32) -> f32 {
+    #[cold]
+    #[inline(never)]
+    fn fitted_spaces(&self, cold: &ColdMaps, id: NodeId, width: f32) -> Option<Arc<[usize]>> {
         use std::hash::{Hash, Hasher};
         if !matches!(
             self.node(id).kind,
             NodeKind::Text { .. } | NodeKind::RichText { .. }
         ) {
-            return width;
+            return None;
         }
         // As the nearest of it and its ancestors that says.
-        let mut at = Some(id);
-        let balanced = loop {
-            match at {
-                Some(node) => match cold.balanced.get(&node) {
-                    Some(balanced) => break *balanced,
-                    None => at = self.node(node).parent,
-                },
-                None => break false,
+        let mut at = id;
+        let wrap = loop {
+            if let Some(wrap) = cold.balanced.get(&at) {
+                break (*wrap)?;
             }
+            at = self.node(at).parent?;
         };
-        if !balanced {
-            return width;
-        }
         // What it was worked out from: the box's width, the shaper, and the
         // text with its font.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         width.to_bits().hash(&mut hasher);
         self.text_shaper_revision.hash(&mut hasher);
+        wrap.hash(&mut hasher);
         match &self.node(id).kind {
             NodeKind::Text {
                 text, font_size, ..
@@ -9287,80 +9509,47 @@ impl Scene {
                 self.node(id).font.hash(&mut hasher);
             }
             NodeKind::RichText { text } => (Arc::as_ptr(text) as usize).hash(&mut hasher),
-            _ => return width,
+            _ => return None,
         }
         let key = hasher.finish();
-        if let Some((at, balanced)) = cold.balanced_widths.borrow().get(&id)
+        if let Some((at, spaces)) = cold.balanced_widths.borrow().get(&id)
             && *at == key
         {
-            return *balanced;
+            return spaces.clone();
         }
-        let balanced = self.balance_lines(id, width);
+        let spaces = self.fit_spaces(id, width, wrap).map(Arc::from);
         let mut widths = cold.balanced_widths.borrow_mut();
         // Those of texts long gone go too, now and then.
         if widths.len() >= 1024 {
             widths.clear();
         }
-        widths.insert(id, (key, balanced));
-        balanced
+        widths.insert(id, (key, spaces.clone()));
+        spaces
     }
-    /// The narrowest width under `width` at which text `id` takes as many
-    /// lines as at `width` (`width` itself for one line, or more than six).
-    fn balance_lines(&self, id: NodeId, width: f32) -> f32 {
-        let height = |limit: Option<f32>| self.wrapped_size(id, limit).1;
-        let (full, line) = (height(Some(width)), height(None));
-        if !(width.is_finite() && width > 0.) || line <= 0. {
-            return width;
-        }
-        let lines = (full / line).round();
-        if !(2. ..=6.).contains(&lines) {
-            return width;
-        }
-        // As narrow as the longest line, unwrapped, over the lines: no
-        // narrower keeps their count.
-        let single = self.wrapped_size(id, None).0;
-        let (mut narrow, mut wide) = ((single / lines).min(width), width);
-        while wide - narrow > 0.5 {
-            let middle = (narrow + wide) * 0.5;
-            if height(Some(middle)) <= full + 0.01 {
-                wide = middle;
-            } else {
-                narrow = middle;
-            }
-        }
-        wide
-    }
-    /// Text `id` laid out at `limit` (`None`: unwrapped), as layout measures it.
-    fn wrapped_size(&self, id: NodeId, limit: Option<f32>) -> (f32, f32) {
-        let node = self.node(id);
-        match &node.kind {
+    /// Where Chrome breaks text `id`'s lines in `width`, from its layout
+    /// unwrapped.
+    fn fit_spaces(
+        &self,
+        id: NodeId,
+        width: f32,
+        wrap: crate::text_wrap::TextWrap,
+    ) -> Option<Vec<usize>> {
+        let (text, layout, size): (&str, _, f32) = match &self.node(id).kind {
             NodeKind::Text {
                 text, font_size, ..
-            } => {
-                if node.style.text_options != Default::default() {
-                    let runs = if text.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![crate::rich_text::TextRun {
-                            range: 0..text.len(),
-                            font: node.font.clone(),
-                            font_size: *font_size,
-                            ..Default::default()
-                        }]
-                    };
-                    let rich = crate::rich_text::RichText::new(text.clone(), runs)
-                        .unwrap()
-                        .with_options(node.style.text_options);
-                    return self.rich_measurer.measure_mounted(&rich, limit);
-                }
-                match &self.font_measurer {
-                    Some(measure) => measure(text, *font_size, limit, &node.font),
-                    None => self.measure_text_with_font(text, *font_size, limit, &node.font),
-                }
-            }
-            NodeKind::RichText { text } => self.rich_measurer.measure_mounted(text, limit),
-            _ => (0., 0.),
-        }
+            } => (
+                text,
+                self.shape_text_with_font(text, *font_size, None, self.font(id)),
+                *font_size,
+            ),
+            NodeKind::RichText { text } => (
+                text.text(),
+                self.shape_rich_text(text, None),
+                text.runs().first().map_or(16., |run| run.font_size),
+            ),
+            _ => return None,
+        };
+        crate::text_wrap::fitted_spaces(text, &*layout, width, size, wrap)
     }
     /// Work what `sizes` sets of `id`'s size out from its containing block,
     /// over its style's. Such a node has layout options, which a parent lays
@@ -13385,7 +13574,7 @@ impl Scene {
             // Checked just above.
             let node = self.tree_node_mut(id);
             let size = promote_measurement(&mut node.measurement, &mut node.alternates, index);
-            node.arrange_dirty = true;
+            node.swapped = true;
             return size;
         }
         if !full
@@ -13409,6 +13598,10 @@ impl Scene {
     fn measure_uncached(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
         // Timed for devtools' layout attribution while they trace.
         let _traced = crate::profile::layout_span(id);
+        #[cfg(test)]
+        {
+            self.fresh_measures += 1;
+        }
         // Checked by `measured`, its one caller.
         let node = self.tree_node(id);
         // Not `laid_out` here: joined to this test it's a mask on every
@@ -14270,7 +14463,7 @@ impl Scene {
     fn check_kept_in_place(&self, id: NodeId, at: Rect) {
         let node = self.tree_node(id);
         // Not arranged this pass (a probe's result, its own still current).
-        if node.arrange_dirty || node.dirty & LAYOUT != 0 || node.rtl {
+        if node.arrange_dirty || node.swapped || node.dirty & LAYOUT != 0 || node.rtl {
             return;
         }
         let Some(last) = node.measurement.as_ref() else {
@@ -14579,6 +14772,7 @@ impl Scene {
         // As `measure_uncached` leaves it: no advanced layout, and the last
         // result's lists, when this pass replaces it, kept for this one.
         let pass = self.layout_pass;
+        let serial = self.next_serial();
         // Most boxes never had an advanced result: one compare, nothing
         // dropped.
         let node = self.tree_node_mut(id);
@@ -14597,6 +14791,7 @@ impl Scene {
             last.constraints = constraints;
             last.size = size;
             last.pass = pass;
+            last.serial = serial;
             last.children.clear();
             node.arrange_dirty = true;
             return Some(size);
@@ -14647,6 +14842,31 @@ impl Scene {
     /// image's pixels, or none. Reads the kind in place: cloning it took an
     /// atomic count on every measure of text, images and decorated paint.
     fn leaf_size(&self, id: NodeId, style: &Style, available_w: Option<f32>) -> (f32, f32) {
+        let size = self.leaf_size_at(id, style, available_w);
+        let wraps = match &self.node(id).kind {
+            NodeKind::Text { font_size, .. } => {
+                let line = self.node(id).font.line_height.resolve(*font_size);
+                (style.text_wrap || style.text_options != Default::default()) && size.1 > line * 1.5
+            }
+            NodeKind::RichText { text } => {
+                (style.text_wrap || text.options() != Default::default()) && size.1 > 0.
+            }
+            _ => false,
+        };
+        let limit = match available_w {
+            Some(limit) if wraps && limit > 0. && size.0 < limit => limit,
+            _ => return size,
+        };
+        // Wrapped text fills the room it wrapped in, as CSS's does: a box
+        // shrinking to it takes its cap, not its widest line.
+        let unwrapped = self.leaf_size_at(id, style, None);
+        if unwrapped.0 > limit {
+            (limit, size.1)
+        } else {
+            size
+        }
+    }
+    fn leaf_size_at(&self, id: NodeId, style: &Style, available_w: Option<f32>) -> (f32, f32) {
         match &self.node(id).kind {
             NodeKind::Text {
                 text, font_size, ..
@@ -14721,7 +14941,10 @@ impl Scene {
                                 .measure_mounted(&text.min_content_lines(), None),
                         }
                     } else {
-                        self.rich_measurer.measure_mounted(text, limit)
+                        let (w, h) = self.rich_measurer.measure_mounted(text, limit);
+                        // As a CSS block's lines: an inline box wider than the room overflows it, and the lines
+                        // stay wrapped at the room rather than at that box's width.
+                        (limit.map_or(w, |room| w.min(room)), h)
                     };
                     TextSizes::remember(&self.node(id).text_size, limit, revision, size);
                     size
@@ -14924,6 +15147,12 @@ impl Scene {
         Some(outer)
     }
     /// Make a new result current, keeping earlier ones that are still valid.
+    /// A new `Measurement::serial`, never 0 (no result placed yet).
+    #[inline(always)]
+    fn next_serial(&mut self) -> u32 {
+        self.measurement_serial = self.measurement_serial.wrapping_add(1).max(1);
+        self.measurement_serial
+    }
     fn store_measurement(
         &mut self,
         id: NodeId,
@@ -14933,6 +15162,7 @@ impl Scene {
     ) {
         // `constraints` are as `measure` looks results up (`relevant`).
         let pass = self.layout_pass;
+        let serial = self.next_serial();
         let node = self.node_mut(id);
         let dirty = node.dirty & LAYOUT != 0;
         // A changed node's result from an earlier pass is stale (the retain
@@ -14981,6 +15211,7 @@ impl Scene {
             size,
             children,
             pass,
+            serial,
         });
         if overfull {
             self.overfull.push(id);
@@ -15019,7 +15250,7 @@ impl Scene {
         let cache = node.measurement.as_ref().unwrap();
         let bounds = Rect::new(x, y, cache.size.0, cache.size.1);
         let (arrange_dirty, rtl, childless) = (
-            node.arrange_dirty,
+            node.arrange_dirty || (node.swapped && cache.serial != node.arranged_serial),
             node.rtl,
             self.children_raw(node).is_empty(),
         );
@@ -15128,6 +15359,8 @@ impl Scene {
         let node = self.tree_node_mut(id);
         node.dirty &= !LAYOUT;
         node.arrange_dirty = false;
+        node.swapped = false;
+        node.arranged_serial = node.measurement.as_ref().map_or(0, |m| m.serial);
     }
     /// Whether `node`, laid out at `bounds` where its box was elsewhere,
     /// only grew or shrank in place, and nothing it paints itself depends
@@ -15186,7 +15419,8 @@ impl Scene {
         // A leaf's result places no children: measured as it is now.
         debug_assert!(cache.children.is_empty());
         let bounds = Rect::new(x, y, cache.size.0, cache.size.1);
-        if !node.arrange_dirty && node.bounds == bounds {
+        let swapped = node.swapped && cache.serial != node.arranged_serial;
+        if !node.arrange_dirty && !swapped && node.bounds == bounds {
             return;
         }
         let changed = node.bounds != bounds;
@@ -15219,6 +15453,8 @@ impl Scene {
         let node = self.tree_node_mut(id);
         node.dirty &= !LAYOUT;
         node.arrange_dirty = false;
+        node.swapped = false;
+        node.arranged_serial = node.measurement.as_ref().map_or(0, |m| m.serial);
     }
     /// A `snap` node placed at `x`, `y`: its edges on whole points, laid
     /// out again at the size between them if that differs.
@@ -15482,6 +15718,9 @@ impl Scene {
             false => full,
         };
         self.settle_children();
+        if !self.auto_directions.is_empty() {
+            self.resolve_auto_directions();
+        }
         let _span = crate::profile::span(crate::profile::Phase::Layout);
         self.layout_pass = self.layout_pass.wrapping_add(1);
         let mut report = FrameReport::default();
@@ -20205,6 +20444,101 @@ mod tests {
             assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
         }
     }
+    /// A content-height column held by a one-cell grid (a script `presence`
+    /// with sizing of its own, through its `display: contents` wrappers)
+    /// lays out only its end as it grows, as it does in a plain column.
+    #[test]
+    fn a_column_in_a_one_cell_grid_lays_out_only_its_end() {
+        let build = |grid: bool| {
+            let mut scene = Scene::new(300.0, 2000.0);
+            scene.set_text_measurer(|text: &str, _: f32, limit: Option<f32>| {
+                let width = text.len() as f32 * 7.0;
+                let room = limit.unwrap_or(width).max(7.0);
+                (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+            });
+            let holder = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(240.0),
+                    layout_options: grid.then(|| {
+                        Arc::new(crate::layout::LayoutOptions {
+                            display: Some(crate::layout::Display::Grid),
+                            columns: Some(1),
+                            rows: Some(1),
+                            ..Default::default()
+                        })
+                    }),
+                    align: Align::Stretch,
+                    ..Style::default()
+                },
+            );
+            let region = scene.append(
+                holder,
+                NodeKind::Container(Layout::Column),
+                Style::default(),
+            );
+            scene.set_display_contents(region, true);
+            let entry = scene.append(
+                region,
+                NodeKind::Container(Layout::Column),
+                Style::default(),
+            );
+            scene.set_display_contents(entry, true);
+            let column = scene.append(
+                entry,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    gap: 8.0,
+                    ..Style::default()
+                },
+            );
+            let wrap = Style {
+                text_wrap: true,
+                ..Style::default()
+            };
+            let ids: Vec<_> = (0..200)
+                .map(|i| {
+                    scene.append(
+                        column,
+                        text(&format!("block {i} says a little")),
+                        wrap.clone(),
+                    )
+                })
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        // The most nodes placed and measured afresh by any one change.
+        let grows = |grid: bool| {
+            let (mut scene, column, ids) = build(grid);
+            let mut last = "the block a reply streams into".to_string();
+            let (mut placed, mut fresh) = (0, 0);
+            for _ in 0..3 {
+                last.push_str(" and then a good deal more of it");
+                scene.set_text(*ids.last().unwrap(), last.as_str());
+                let before = scene.fresh_measures;
+                placed = placed.max(scene.flush().layout_nodes);
+                fresh = fresh.max(scene.fresh_measures - before);
+            }
+            scene.append(column, text("a new block arrives"), Style::default());
+            let before = scene.fresh_measures;
+            placed = placed.max(scene.flush().layout_nodes);
+            (placed, fresh.max(scene.fresh_measures - before))
+        };
+        let plain = grows(false);
+        let in_grid = grows(true);
+        assert!(
+            plain.0 < 10 && plain.1 < 10,
+            "{plain:?} placed and measured in a plain column"
+        );
+        // Its probes (min- and max-content, then its width) measure the
+        // changed column, not the blocks it keeps, and place nothing again.
+        assert!(
+            in_grid.0 < 10 && in_grid.1 < 20,
+            "{in_grid:?} placed and measured of 200 blocks in a one-cell grid"
+        );
+    }
     /// A column streamed into every way its end can change: appended to,
     /// its last child growing, a child before it changing (laid out from
     /// there), its last removed, padded so its sums carry far: each time
@@ -22275,6 +22609,7 @@ mod measure_work_tests {
             size: (size, 0.),
             children: Vec::new(),
             pass: 0,
+            serial: 0,
         };
         let sizes = |list: &[Measurement]| list.iter().map(|m| m.size.0).collect::<Vec<_>>();
         for len in 1..=64 {

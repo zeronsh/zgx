@@ -1089,6 +1089,18 @@ impl Lua {
         }
     }
 
+    /// zgx patch: how many Lua values Rust holds handles to now (`Function`,
+    /// `Table`, `AnyUserData`… not yet dropped): the live slots of the
+    /// auxiliary stack. A count that climbs after full collections is a
+    /// Rust holder keeping Lua values alive.
+    pub fn handles_alive(&self) -> usize {
+        let lua = self.lock();
+        unsafe {
+            let extra = &*lua.extra.get();
+            extra.live_ref_slots()
+        }
+    }
+
     /// Returns the amount of memory (in bytes) currently used inside this Lua state.
     pub fn used_memory(&self) -> usize {
         let lua = self.lock();

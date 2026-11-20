@@ -134,6 +134,19 @@ impl DraggedText {
             .filter(|(of, node, _)| *of == scene && *node == editor)
             .map(|(.., range)| range)
     }
+    /// Where in `editor` it was selected, when it was dragged out of that
+    /// very editor (that window's): none from another editor, another
+    /// window's, selectable text or another app. For an app moving it
+    /// itself in its `on_drop` on the editor (a move keeping structure the
+    /// plain text drops); a drop it takes leaves the source to it, nothing
+    /// deleted as the drag ends. (Pin line.)
+    #[doc(hidden)]
+    pub fn source_range(
+        &self,
+        editor: &crate::widgets::EditorHandle,
+    ) -> Option<std::ops::Range<usize>> {
+        self.taken_from(editor.scene_identity, editor.node).cloned()
+    }
     /// The text.
     pub fn text(&self) -> &str {
         &self.text

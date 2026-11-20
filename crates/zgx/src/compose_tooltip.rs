@@ -26,6 +26,7 @@ pub struct Tooltip {
     placement: Option<Placement>,
     interactive: bool,
     delay: Option<Duration>,
+    close_delay: Option<Duration>,
 }
 enum Content {
     Text(String),
@@ -43,6 +44,7 @@ impl From<String> for Tooltip {
             placement: None,
             interactive: false,
             delay: None,
+            close_delay: None,
         }
     }
 }
@@ -53,6 +55,7 @@ impl From<View> for Tooltip {
             placement: None,
             interactive: false,
             delay: None,
+            close_delay: None,
         }
     }
 }
@@ -76,6 +79,17 @@ impl Tooltip {
         self.delay = Some(delay);
         self
     }
+    /// How long it stays after the pointer leaves the view (and, for an
+    /// interactive card, the card): none by default, and for a card 120
+    /// ms to cross to it.
+    pub fn close_delay(mut self, delay: Duration) -> Self {
+        self.close_delay = Some(delay);
+        self
+    }
+    /// `delay` and `close_delay` together, as `View::hover_delay` names them.
+    pub fn hover_delay(self, open: Duration, close: Duration) -> Self {
+        self.delay(open).close_delay(close)
+    }
 }
 
 impl View {
@@ -96,12 +110,78 @@ impl View {
 /// A tooltip showing: its number, what closes it, and whether it is an
 /// interactive card.
 type Showing = (u64, Rc<dyn Fn()>, bool);
+/// What tooltips that reshow together share: how many show and when the last
+/// closed (within a second of one, the next opens at once), and when the last
+/// opened (`TooltipTiming::reshow_from_open`). One group is the thread's; a
+/// `TooltipGroup` (`View::tooltip_group`) is a group of its own, with its own
+/// timing.
+pub(crate) struct GroupState {
+    /// Its own timing; none: the thread's (`set_tooltip_timing`).
+    timing: Option<TooltipTiming>,
+    /// How long a tooltip of it stays after the pointer leaves, unless its
+    /// own says.
+    close: Option<Duration>,
+    shown: Cell<(usize, Option<Instant>)>,
+    opened: Cell<Option<Instant>>,
+}
+impl GroupState {
+    /// The thread's, which tooltips outside any group share.
+    fn thread() -> Rc<Self> {
+        thread_local! {
+            static THREAD: Rc<GroupState> = Rc::new(GroupState {
+                timing: None,
+                close: None,
+                shown: Cell::new((0, None)),
+                opened: Cell::new(None),
+            });
+        }
+        THREAD.with(Rc::clone)
+    }
+    fn timing(&self) -> TooltipTiming {
+        self.timing.unwrap_or_else(|| TIMING.with(Cell::get))
+    }
+}
+/// What tooltips in a group (`View::tooltip_group`) wait, apart from the
+/// thread's (`set_tooltip_timing`): Base UI's `TooltipProvider`, with its
+/// `delay` and `closeDelay`. Tooltips of one group reshow together (within
+/// `reshow_within` of another closing, after `reshow_delay`); another group
+/// has its own, as does a tooltip outside any.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TooltipGroup {
+    /// How long the pointer rests on a view before its tooltip shows.
+    pub delay: Option<Duration>,
+    /// How long a tooltip stays after the pointer leaves, unless its own says
+    /// (`Tooltip::close_delay`).
+    pub close_delay: Option<Duration>,
+    /// How soon after another of the group the next is a reshow.
+    pub reshow_within: Option<Duration>,
+    /// How long a reshow waits (zero: none).
+    pub reshow_delay: Option<Duration>,
+}
+impl View {
+    /// Group the tooltips in this view (`TooltipGroup`): their delay,
+    /// close delay and reshow are the group's, shared among them and with no
+    /// tooltip outside it.
+    pub fn tooltip_group(self, group: TooltipGroup) -> View {
+        let base = TIMING.with(Cell::get);
+        let timing = TooltipTiming {
+            delay: group.delay.unwrap_or(base.delay),
+            reshow_within: group.reshow_within.unwrap_or(base.reshow_within),
+            reshow_delay: group.reshow_delay.unwrap_or(base.reshow_delay),
+            reshow_from_open: base.reshow_from_open,
+        };
+        crate::compose::provide(
+            GroupState {
+                timing: Some(timing),
+                close: group.close_delay,
+                shown: Cell::new((0, None)),
+                opened: Cell::new(None),
+            },
+            self,
+        )
+    }
+}
 thread_local! {
-    /// Tooltips showing, and when the last one closed: within a second of
-    /// one, the next opens at once.
-    static TOOLTIPS: Cell<(usize, Option<Instant>)> = const { Cell::new((0, None)) };
-    /// When the last tooltip opened (`TooltipTiming::reshow_from_open`).
-    static OPENED: Cell<Option<Instant>> = const { Cell::new(None) };
     /// The tooltip showing (one at most): its number, and what closes it.
     static SHOWING: RefCell<Option<Showing>> = const { RefCell::new(None) };
     static NEXT: Cell<u64> = const { Cell::new(0) };
@@ -125,16 +205,16 @@ fn on_key(event: &InputEvent) {
 }
 
 /// Tooltip `open`'s showing ends (`shown` says whether it was showing).
-fn hide(open: &crate::reactive::Signal<bool>, shown: &Cell<bool>) {
+fn hide(open: &crate::reactive::Signal<bool>, shown: &Cell<bool>, group: &GroupState) {
     if !shown.replace(false) {
         return;
     }
-    let left = TOOLTIPS.with(|t| {
-        let (count, _) = t.get();
+    let left = {
+        let (count, _) = group.shown.get();
         let left = count.saturating_sub(1);
-        t.set((left, Some(crate::clock::now())));
+        group.shown.set((left, Some(crate::clock::now())));
         left
-    });
+    };
     if left == 0 {
         let keys = KEYS.with(|k| k.borrow_mut().take());
         drop(keys);
@@ -208,6 +288,27 @@ fn after(
     }
 }
 
+/// The look an app gives every tip: a text tip's panel in place of the
+/// platform's, where tips go unless their view says, and a band at the
+/// window's top (a titlebar) they keep out of, flipping below their view.
+#[derive(Clone, Default)]
+pub struct TooltipLook {
+    /// A text tip's panel: padding, fill, corners, type.
+    pub panel: Option<Styles>,
+    /// Where a tip goes unless its view sets `placement`.
+    pub placement: Option<Placement>,
+    /// Points at the window's top no tip reaches into.
+    pub keep_below: f32,
+}
+thread_local! { static TOOLTIP_LOOK: RefCell<Rc<TooltipLook>> = RefCell::default(); }
+/// Gives every tip mounted after it `look` (`ui.tooltip_look`).
+pub fn set_tooltip_look(look: TooltipLook) {
+    TOOLTIP_LOOK.with(|now| *now.borrow_mut() = Rc::new(look));
+}
+fn tooltip_look() -> Rc<TooltipLook> {
+    TOOLTIP_LOOK.with(|now| now.borrow().clone())
+}
+
 fn wrap(anchor: View, tip: Tooltip) -> View {
     #[cfg(feature = "dom")]
     if crate::compose::__dom::DOM_ONLY {
@@ -221,17 +322,28 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             placement,
             interactive,
             delay,
+            close_delay,
         } = tip;
-        let timing = TIMING.with(Cell::get);
+        let group: Rc<GroupState> = cx
+            .try_service::<GroupState>()
+            .unwrap_or_else(GroupState::thread);
+        let timing = group.timing();
         let delay = delay.unwrap_or(timing.delay);
+        let close_delay = close_delay.or(group.close);
         // A text tip describes the view to assistive technology, which
         // doesn't see the tip itself; a view tip is the app's to name.
         let description = match &content {
             Content::Text(text) => Some(text.clone()),
             Content::View(_) => None,
         };
+        let app_look = tooltip_look();
         let content = match content {
             Content::View(view) => *view,
+            Content::Text(text) if app_look.panel.is_some() => crate::compose::column()
+                .max_w(320.)
+                .text_wrap(true)
+                .merge_styles(app_look.panel.as_ref().expect("checked"))
+                .child(crate::compose::text(text)),
             Content::Text(text) => {
                 let look = &crate::compose::OVERLAY;
                 let (x, above, below) = look.tooltip_padding;
@@ -296,12 +408,13 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             n.get()
         });
         let set = {
-            let (open, shown, fade, fading, ui) = (
+            let (open, shown, fade, fading, ui, group) = (
                 open.clone(),
                 shown.clone(),
                 fade.clone(),
                 fading.clone(),
                 ui.clone(),
+                group.clone(),
             );
             move |on: bool, instant: bool| {
                 if !on {
@@ -314,18 +427,23 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                     if !shown.get() {
                         return;
                     }
-                    let (open, shown) = (open.clone(), shown.clone());
-                    let close: Rc<dyn Fn()> = Rc::new(move || hide(&open, &shown));
+                    let (open, shown, group) = (open.clone(), shown.clone(), group.clone());
+                    let close: Rc<dyn Fn()> = Rc::new(move || hide(&open, &shown, &group));
                     animate(0., if instant { 0. } else { 100. }, Some(close));
                     return;
                 }
                 let close: Rc<dyn Fn()> = {
-                    let (open, shown, fade, fading) =
-                        (open.clone(), shown.clone(), fade.clone(), fading.clone());
+                    let (open, shown, fade, fading, group) = (
+                        open.clone(),
+                        shown.clone(),
+                        fade.clone(),
+                        fading.clone(),
+                        group.clone(),
+                    );
                     Rc::new(move || {
                         fading.borrow_mut().take();
                         fade.set(0.);
-                        hide(&open, &shown);
+                        hide(&open, &shown, &group);
                     })
                 };
                 // One shows at a time: this one closes the last, at once.
@@ -336,12 +454,12 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                     close_last();
                 }
                 if !shown.replace(true) {
-                    let first = TOOLTIPS.with(|t| {
-                        let (count, last) = t.get();
-                        t.set((count + 1, last));
-                        OPENED.with(|o| o.set(Some(crate::clock::now())));
+                    let first = {
+                        let (count, last) = group.shown.get();
+                        group.shown.set((count + 1, last));
+                        group.opened.set(Some(crate::clock::now()));
                         count == 0
-                    });
+                    };
                     if first && let Some(ui) = ui.get().and_then(WeakUi::upgrade) {
                         let keys: Box<dyn Any> = Box::new(ui.listen_document(on_key));
                         KEYS.with(|k| *k.borrow_mut() = Some(keys));
@@ -359,14 +477,15 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             let (set, runner, waiting) = (set.clone(), runner.clone(), waiting.clone());
             let (over_anchor, over_card) = (over_anchor.clone(), over_card.clone());
             move || {
-                if !interactive || runner.is_none() {
+                if (!interactive && close_delay.is_none()) || runner.is_none() {
                     waiting.borrow_mut().take();
                     set(false, false);
                     return;
                 }
                 let (set, over_anchor, over_card) =
                     (set.clone(), over_anchor.clone(), over_card.clone());
-                *waiting.borrow_mut() = after(&runner, Duration::from_millis(120), move || {
+                let grace = close_delay.unwrap_or(Duration::from_millis(120));
+                *waiting.borrow_mut() = after(&runner, grace, move || {
                     if !over_anchor.get() && !over_card.get() {
                         set(false, false);
                     }
@@ -394,16 +513,16 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
                             // Back while it shows, or another just showed: a
                             // reshow, at once or after its own wait.
                             let reshow = match timing.reshow_from_open {
-                                true => OPENED.with(Cell::get).is_some_and(|at| {
+                                true => group.opened.get().is_some_and(|at| {
                                     crate::clock::since(at) < timing.reshow_within
                                 }),
-                                false => TOOLTIPS.with(|t| {
-                                    let (count, last) = t.get();
+                                false => {
+                                    let (count, last) = group.shown.get();
                                     count > 0
                                         || last.is_some_and(|at| {
                                             crate::clock::since(at) < timing.reshow_within
                                         })
-                                }),
+                                }
                             };
                             let now = shown.get() || (reshow && timing.reshow_delay.is_zero());
                             if reshow && !now && runner.is_some() {
@@ -471,10 +590,11 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
         } else {
             content
         };
-        let placement = placement.unwrap_or(Placement {
+        let placement = placement.or(app_look.placement).unwrap_or(Placement {
             side: PlacementSide::Top,
             align: PlacementEdge::Center,
             offset: 6.,
+            ..Default::default()
         });
         let content = crate::compose::column()
             .child(content)
@@ -484,6 +604,7 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             .lazy()
             .autofocus(false)
             .placement(placement)
+            .keep_below(app_look.keep_below)
             .pointer_events(interactive)
             .child(content);
         // A plain tip is the view's description, not a dialog of its own.

@@ -84,6 +84,10 @@ pub struct WindowOptions {
     /// example to save power. Input-driven redraws are not limited. `None`
     /// follows the display.
     pub max_frame_rate: Option<f64>,
+    /// Whether a contained failure shows zgx's own banner over the content
+    /// (the default). An app that says failures its own way turns it off:
+    /// they are still logged and still reach `zgx::issues` listeners.
+    pub error_banner: bool,
     /// The title bar's style (macOS and Windows; other platforms keep theirs).
     pub titlebar: crate::Titlebar,
     /// A frosted desktop behind the window (macOS; Windows 11 as Acrylic or
@@ -137,6 +141,15 @@ pub struct WindowOptions {
     /// software one): the GPU's, or the raster always.
     #[doc(hidden)]
     pub renderer: Option<crate::RendererChoice>,
+    /// Where `Titlebar::Inset`'s traffic lights go on macOS: the close
+    /// button's top left, in the content's points from the window's top
+    /// left (Electron's `trafficLightPosition`), so they line up with a
+    /// title bar of the app's own height. They stay there as the window
+    /// resizes, changes focus or appearance and comes back from full
+    /// screen, and move with the window's zoom as the content does. `None`
+    /// (the default) is AppKit's place, centred in a 40-point strip. Other
+    /// platforms and title bars place their own.
+    pub traffic_lights: Option<(f64, f64)>,
 }
 /// A window's smallest and largest sizes are the same.
 #[cfg(any(windows, test))]
@@ -164,6 +177,7 @@ impl Default for WindowOptions {
             bounds: None,
             display: None,
             max_frame_rate: None,
+            error_banner: true,
             titlebar: crate::Titlebar::Standard,
             glass: None,
             under_pointer: None,
@@ -176,12 +190,20 @@ impl Default for WindowOptions {
             visible: true,
             caption_height: None,
             renderer: None,
+            traffic_lights: None,
         }
     }
 }
+/// Some window has an `on_close_requested`: a quit waits for it.
+#[cfg(all(target_os = "macos", zgx_winit_patched))]
+static CLOSE_HANDLERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[derive(Debug)]
 enum Event {
     Quit,
+    /// ⌘Q or the app menu's Quit (macOS): every window's `on_close_requested`
+    /// is asked before the app exits.
+    #[cfg_attr(not(all(target_os = "macos", zgx_winit_patched)), allow(dead_code))]
+    QuitRequested,
     /// An event, with the token of the launch that sent it (Linux).
     Application(crate::ApplicationEvent, Option<String>),
     MenuAction(u64, crate::MenuAction),
@@ -956,7 +978,12 @@ impl WindowContext {
     }
 
     /// Return false to keep the window open, for example while asking about unsaved data.
+    ///
+    /// The app menu's Quit (⌘Q) asks every window's handler too, and quits
+    /// only if all agree.
     pub fn on_close_requested(&mut self, handler: impl FnMut() -> bool + 'static) {
+        #[cfg(all(target_os = "macos", zgx_winit_patched))]
+        CLOSE_HANDLERS.store(true, std::sync::atomic::Ordering::Relaxed);
         self.close_requested = Some(Box::new(handler));
     }
     /// Called once before UI state is disposed. Pending tasks are cancelled
@@ -1106,6 +1133,12 @@ impl Application {
     /// return once the application quits.
     pub fn run(self, build: impl FnOnce(&mut WindowContext)) -> Result<(), Box<dyn Error>> {
         zgx::profile::mark("run");
+        // `ZGX_FREEZE_TIME=1`: every animation, timer, caret and frame stands
+        // at one time until `zgx inspect clock advance` moves it, so a
+        // screenshot run is the same each time.
+        if zgx::env::var_os("ZGX_FREEZE_TIME").is_some_and(|v| !v.is_empty() && v != "0") {
+            zgx::clock::freeze();
+        }
         // Who the app is to the system's notifications and badge.
         crate::notify::set_identity(crate::notify::Identity {
             application_id: self.application_id.clone(),
@@ -1155,6 +1188,17 @@ impl Application {
         zgx::profile::mark("event loop");
         zgx::memory::set_hosted();
         let proxy = event_loop.create_proxy();
+        #[cfg(all(target_os = "macos", zgx_winit_patched))]
+        {
+            let quit = proxy.clone();
+            winit::platform::macos::set_terminate_gate(Some(Rc::new(move || {
+                if !CLOSE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed) {
+                    return true;
+                }
+                let _ = quit.send_event(Event::QuitRequested);
+                false
+            })));
+        }
         let native_events = if let Some(id) = &self.application_id {
             let wake = proxy.clone();
             let events = crate::native_events::NativeApplicationEvents::new(
@@ -1176,11 +1220,22 @@ impl Application {
         {
             let wake = proxy.clone();
             muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
+                // AppKit runs a key equivalent again on each auto-repeat
+                if key_repeat_now() && !crate::app_menu::repeats(&event.id.0) {
+                    return;
+                }
                 if let Ok(mut chosen) = NATIVE_MENU_CHOSEN.lock() {
                     chosen.push_back(crate::MenuAction(event.id.0));
                 }
                 let _ = wake.send_event(Event::NativeMenuAction);
             }));
+            let wake = proxy.clone();
+            edit_selectors::sink(move |action| {
+                if let Ok(mut chosen) = NATIVE_MENU_CHOSEN.lock() {
+                    chosen.push_back(action);
+                }
+                let _ = wake.send_event(Event::NativeMenuAction);
+            });
             // With none of the app's own, still the application and Window
             // menus every Mac app has: checked now, made once the first frame
             // shows (`WindowManager::install_menu_bar`).
@@ -2834,6 +2889,17 @@ impl Host {
         if phase.settles()
             && let Some(window) = &self.window
         {
+            // Out of full screen AppKit lays the traffic lights out in its
+            // own places again, as the inset toolbar shows.
+            let (zoom, traffic_lights) = (self.context.ui.zoom(), self.options.traffic_lights);
+            if zoom != 1. || traffic_lights.is_some() {
+                crate::window_chrome::place_buttons(
+                    window,
+                    self.options.titlebar,
+                    zoom,
+                    traffic_lights,
+                );
+            }
             info.refresh(window, self.options.titlebar);
             // Covered after all, once the transition is over: an occlusion
             // it went on drawing through is counted now.
@@ -3072,6 +3138,13 @@ impl Host {
             self.context.ui.cancel_interactions();
             return Ok(());
         };
+        // Devtools' `full-screen`, as the green button.
+        if let Some(on) = self.context.inspector.take_full_screen_request() {
+            let full = window.fullscreen().is_some();
+            if on.unwrap_or(!full) != full {
+                self.context.window.set_fullscreen(!full);
+            }
+        }
         #[cfg(target_os = "macos")]
         let size = *self
             .reported_size
@@ -3923,8 +3996,8 @@ impl Host {
     /// toggles the window. Whether anything took it.
     fn standard_edit(&mut self, item: crate::app_menu::StandardItem) -> bool {
         use crate::app_menu::StandardItem;
-        let undo = |shift| InputEvent::KeyDown {
-            key: Key::Character("z".into()),
+        let primary = |key: &str, shift: bool| InputEvent::KeyDown {
+            key: Key::Character(key.into()),
             modifiers: zgx::input::Modifiers {
                 shift,
                 control: !cfg!(target_os = "macos"),
@@ -3933,17 +4006,33 @@ impl Host {
             },
             repeat: false,
         };
-        match item {
+        let taken = match item {
             StandardItem::Copy => self.clipboard_command("c"),
             StandardItem::Cut => self.clipboard_command("x"),
-            StandardItem::Paste => self.clipboard_command("v"),
+            // The clipboard's text alone either way: zgx's editors take no styles.
+            StandardItem::Paste | StandardItem::PasteAndMatchStyle => self.clipboard_command("v"),
             // The focused editor's text, else a selectable region's, as ⌘A.
             StandardItem::SelectAll => self.context.ui.select_all(),
             StandardItem::Undo | StandardItem::Redo => {
                 self.context.ui.focused_editor().is_some()
                     && self
-                        .dispatch_prevented(undo(item == StandardItem::Redo))
+                        .dispatch_prevented(primary("z", item == StandardItem::Redo))
                         .unwrap_or(false)
+            }
+            // The selection goes, as Backspace takes it; with none, nothing does.
+            StandardItem::Delete => {
+                return self
+                    .context
+                    .ui
+                    .focused_editor()
+                    .is_some_and(|editor| !editor.copy().is_empty())
+                    && self
+                        .dispatch_prevented(InputEvent::KeyDown {
+                            key: Key::Backspace,
+                            modifiers: zgx::input::Modifiers::default(),
+                            repeat: false,
+                        })
+                        .unwrap_or(false);
             }
             StandardItem::ToggleFullScreen => {
                 let Some(window) = &self.window else {
@@ -3952,9 +4041,25 @@ impl Host {
                 self.context
                     .window
                     .set_fullscreen(window.fullscreen().is_none());
-                true
+                return true;
             }
+        };
+        if taken {
+            return true;
         }
+        // Nothing of zgx's took it: its shortcut, as pressing it does, for
+        // what handles keys itself (a host's view copying its selection).
+        let key = match item {
+            StandardItem::Copy => ("c", false),
+            StandardItem::Cut => ("x", false),
+            StandardItem::Paste => ("v", false),
+            StandardItem::SelectAll => ("a", false),
+            StandardItem::Undo => ("z", false),
+            StandardItem::Redo => ("z", true),
+            _ => return false,
+        };
+        self.dispatch_prevented(primary(key.0, key.1))
+            .unwrap_or(false)
     }
     fn clipboard_key(&mut self, key: &Key) -> bool {
         #[cfg(windows)]
@@ -3990,14 +4095,8 @@ impl Host {
             // Through the region's `View::on_selection_copy`, the clipboard
             // taken only to write.
             let clipboard = self.clipboard.clone();
-            self.context.ui.copy_selection_from(|text, html| {
-                clipboard
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|clipboard| match html {
-                        Some(html) => clipboard.set_rich_text(text, html).is_ok(),
-                        None => clipboard.set_text(text).is_ok(),
-                    })
+            self.context.ui.copy_selection_from(|content| {
+                (clipboard.borrow_mut().as_mut()).is_some_and(|clipboard| clipboard.write(content))
             });
             return true;
         };
@@ -4023,14 +4122,8 @@ impl Host {
             &self.context.ui,
             &editor,
             k.eq_ignore_ascii_case("x"),
-            |text, html| {
-                clipboard
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|clipboard| match html {
-                        Some(html) => clipboard.set_rich_text(text, html).is_ok(),
-                        None => clipboard.set_text(text).is_ok(),
-                    })
+            |content| {
+                (clipboard.borrow_mut().as_mut()).is_some_and(|clipboard| clipboard.write(content))
             },
         );
         true
@@ -4055,6 +4148,21 @@ impl Host {
             accesskit::Action::ScrollIntoView => {
                 self.context.ui.scroll_into_view(node);
                 self.accessibility_revealed = true;
+            }
+            accesskit::Action::ShowContextMenu => {
+                self.context
+                    .ui
+                    .input
+                    .focus(&self.context.ui.scene, Some(node));
+                self.context.ui.input.dispatch_to(
+                    &self.context.ui.scene,
+                    node,
+                    InputEvent::KeyDown {
+                        key: zgx::input::Key::ContextMenu,
+                        modifiers: Default::default(),
+                        repeat: false,
+                    },
+                );
             }
             accesskit::Action::Click => {
                 self.context.ui.input.dispatch_to(
@@ -4245,7 +4353,11 @@ impl Host {
     /// what the renderer went on without (`IssueKind::Degraded`) there in
     /// debug builds alone; release builds have logged them, once.
     fn show_issues(&mut self) {
-        for message in crate::contain::banner(&self.issues, cfg!(debug_assertions)) {
+        for message in crate::contain::banner(
+            &self.issues,
+            cfg!(debug_assertions),
+            self.options.error_banner,
+        ) {
             self.show_error(&message);
         }
     }
@@ -4424,6 +4536,7 @@ impl Host {
         #[cfg(target_os = "macos")]
         {
             content_never_moves_window();
+            edit_selectors::answer();
             mouse_down::watch();
         }
         let sized = self.options.bounds;
@@ -4444,10 +4557,16 @@ impl Host {
             self.options.glass,
             self.options.caption_height,
         );
-        // Opened zoomed: its buttons where the zoomed title bar has them.
+        // Opened zoomed or with its buttons placed: where its title bar has them.
         let zoom = self.context.ui.zoom();
-        if zoom != 1. {
-            crate::window_chrome::zoom_buttons(&window, self.options.titlebar, zoom);
+        let traffic_lights = self.options.traffic_lights;
+        if zoom != 1. || traffic_lights.is_some() {
+            crate::window_chrome::place_buttons(
+                &window,
+                self.options.titlebar,
+                zoom,
+                traffic_lights,
+            );
         }
         // A saved frame keeps its size.
         if self.options.titlebar != crate::Titlebar::Standard && !placed.restored {
@@ -4709,6 +4828,10 @@ impl Host {
         self.context
             .ui
             .set_popup_screens(self.popup_screens(&window));
+        // Only AppKit's panels stack above every other popup window.
+        self.context
+            .ui
+            .set_topmost_windows(cfg!(target_os = "macos") && crate::popup_window::enabled());
         self.content_origin = crate::popup_window::content_origin(&window);
         self.window_number = crate::popup_window::window_number(&window);
         self.frame_paced = matches!(
@@ -4767,6 +4890,7 @@ impl Host {
                 let _ = proxy.send_event(Event::Zoom(token));
             });
         }
+        self.context.ui.set_window_active(window.has_focus());
         self.window = Some(window);
         #[cfg(target_os = "macos")]
         {
@@ -5289,6 +5413,10 @@ impl Host {
                 | WindowEvent::ScaleFactorChanged { .. }
         ) && let Some(window) = &self.window
         {
+            // A topmost layer follows its window as it moves.
+            if matches!(event, WindowEvent::Moved(_)) && self.popups.showing() {
+                window.request_redraw();
+            }
             let held = self.chrome_held();
             self.context
                 .window_info
@@ -5395,22 +5523,28 @@ impl Host {
                 {
                     self.reported_size = Some(size);
                 }
-                // AppKit lays the window's buttons out again: zoomed, they go
-                // back where the title bar has them, now and once its layout
-                // for the new size is done.
+                // AppKit lays the window's buttons out again: zoomed or placed,
+                // they go back where the title bar has them, now and once its
+                // layout for the new size is done.
                 let zoom = self.context.ui.zoom();
-                if zoom != 1.
+                let traffic_lights = self.options.traffic_lights;
+                if (zoom != 1. || traffic_lights.is_some())
                     && let Some(window) = &self.window
                 {
                     let titlebar = self.options.titlebar;
-                    crate::window_chrome::zoom_buttons(window, titlebar, zoom);
+                    crate::window_chrome::place_buttons(window, titlebar, zoom, traffic_lights);
                     self.context.window_info.refresh(window, titlebar);
                     #[cfg(target_os = "macos")]
                     {
                         let window = window.clone();
                         dispatch2::DispatchQueue::main().exec_async(move || {
                             let zoom = crate::popup_window::zoom_of(window.id());
-                            crate::window_chrome::zoom_buttons(&window, titlebar, zoom);
+                            crate::window_chrome::place_buttons(
+                                &window,
+                                titlebar,
+                                zoom,
+                                traffic_lights,
+                            );
                         });
                     }
                 }
@@ -6331,10 +6465,11 @@ impl Host {
                 scale,
             );
             // The platform's buttons where the zoomed title bar has them.
-            crate::window_chrome::zoom_buttons(
+            crate::window_chrome::place_buttons(
                 &window,
                 self.options.titlebar,
                 self.context.ui.zoom(),
+                self.options.traffic_lights,
             );
             // And where scripts read them (`ui.window.controls`).
             self.context
@@ -6509,6 +6644,8 @@ impl Host {
                     self.context
                         .ui
                         .set_popup_screens(self.popup_screens(window));
+                    // A topmost layer's panel follows its window's Space.
+                    window.request_redraw();
                 }
                 Ok(())
             }
@@ -8318,6 +8455,17 @@ impl WindowManager {
             Event::Quit => event_loop.exit(),
             #[cfg(feature = "audio")]
             Event::AudioVoicesEnded => crate::audio::voices_ended(),
+            Event::QuitRequested => {
+                let allowed = self.hosts.values_mut().all(|host| {
+                    host.context
+                        .close_requested
+                        .as_mut()
+                        .is_none_or(|callback| callback())
+                });
+                if allowed {
+                    event_loop.exit();
+                }
+            }
             #[cfg(target_os = "macos")]
             Event::FullScreen => self.apply_full_screen(),
             Event::Application(event, token) => {
@@ -8718,7 +8866,14 @@ impl WindowManager {
         if !std::mem::take(&mut self.focus_moved) {
             return;
         }
-        let active = self.hosts.values().any(|host| host.native_focused);
+        // A session that renders as covered (`ZGX_RENDER_WHEN_COVERED`,
+        // `ZGX_OFFSCREEN`) takes no focus and is meant to be driven all the
+        // same: its popups open, rather than wait for an app that never
+        // comes forward.
+        let active = app_is_active(
+            *RENDER_WHEN_COVERED,
+            self.hosts.values().any(|host| host.native_focused),
+        );
         if self.app_was_active != active {
             self.app_was_active = active;
             // The interface-sound setting, changed in another app meanwhile.
@@ -9560,6 +9715,75 @@ fn release_freed_heap() {
         }
     }
 }
+/// AppKit's standard Edit items (Copy, Paste…) go to the first responder by
+/// selector. winit's view answers them here, each its item's action to the
+/// key window (`standard_edit`), so the items are enabled and do what their
+/// shortcuts do while zgx's view has the keyboard; a native view in the
+/// window (a web page) answers them itself.
+#[cfg(target_os = "macos")]
+mod edit_selectors {
+    use crate::app_menu::StandardItem;
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use std::cell::RefCell;
+
+    type Sink = Box<dyn Fn(crate::MenuAction)>;
+    thread_local! {
+        static SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
+    }
+    const SELECTORS: [(&std::ffi::CStr, StandardItem); 8] = [
+        (c"undo:", StandardItem::Undo),
+        (c"redo:", StandardItem::Redo),
+        (c"cut:", StandardItem::Cut),
+        (c"copy:", StandardItem::Copy),
+        (c"paste:", StandardItem::Paste),
+        (c"pasteAsPlainText:", StandardItem::PasteAndMatchStyle),
+        (c"delete:", StandardItem::Delete),
+        (c"selectAll:", StandardItem::SelectAll),
+    ];
+    /// Where the items' actions go (the event loop).
+    pub(super) fn sink(send: impl Fn(crate::MenuAction) + 'static) {
+        SINK.with(|sink| *sink.borrow_mut() = Some(Box::new(send)));
+    }
+    /// The item the selector `name` is, if one of these.
+    pub(super) fn item(name: &std::ffi::CStr) -> Option<StandardItem> {
+        SELECTORS
+            .iter()
+            .find(|(s, _)| *s == name)
+            .map(|(_, item)| *item)
+    }
+    extern "C-unwind" fn edit(_this: *mut AnyObject, cmd: Sel, _sender: *mut AnyObject) {
+        if let Some(item) = item(cmd.name()) {
+            SINK.with(|sink| {
+                if let Some(send) = &*sink.borrow() {
+                    send(item.action());
+                }
+            });
+        }
+    }
+    /// winit's view answers the selectors (once its class is made: its first window's).
+    pub(super) fn answer() {
+        let Some(class) = AnyClass::get(c"WinitView") else {
+            return;
+        };
+        for (name, _) in SELECTORS {
+            // Added once; later calls find it there and change nothing.
+            // SAFETY: `edit` has an action method's C signature (self, _cmd,
+            // sender; void), which "v@:@" states; the transmute only erases
+            // the function pointer's type. `class_addMethod` is thread-safe.
+            unsafe {
+                let imp: objc2::runtime::Imp = std::mem::transmute(
+                    edit as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+                );
+                objc2::ffi::class_addMethod(
+                    class as *const AnyClass as *mut AnyClass,
+                    Sel::register(name),
+                    imp,
+                    c"v@:@".as_ptr(),
+                );
+            }
+        }
+    }
+}
 /// zgx content never moves its window by itself (a custom titlebar's tabs
 /// and buttons drag and click; `WindowHandle::drag_window` moves it). AppKit
 /// otherwise moves the window from any press on a non-opaque view in a
@@ -9786,6 +10010,26 @@ impl WindowCursor {
     }
 }
 
+/// Whether the event AppKit is handling is a held key's auto-repeat (a menu's key equivalent runs on each).
+#[cfg(target_os = "macos")]
+fn key_repeat_now() -> bool {
+    use objc2_app_kit::{NSApplication, NSEventType};
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    NSApplication::sharedApplication(mtm)
+        .currentEvent()
+        .is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat())
+}
+
+/// Whether the app counts as forward for its popups (`Ui::set_app_active`):
+/// one of its windows is focused, or the session renders as covered
+/// (`ZGX_RENDER_WHEN_COVERED`, `ZGX_OFFSCREEN`), which takes no focus and is
+/// driven all the same.
+fn app_is_active(renders_when_covered: bool, focused: bool) -> bool {
+    renders_when_covered || focused
+}
+
 /// ⌘C or ⌘X (Ctrl elsewhere), and the Edit menu's Copy and Cut, which come
 /// as them (`clipboard_command`), in a focused editor: through the app's
 /// `View::on_copy` (`Ui::copy_from`), what it gives or the selection's text
@@ -9794,7 +10038,7 @@ fn copy_or_cut_editor(
     ui: &zgx::widgets::Ui,
     editor: &zgx::widgets::EditorHandle,
     cut: bool,
-    write: impl FnOnce(String, Option<String>) -> bool,
+    write: impl FnOnce(zgx::widgets::ClipboardContent) -> bool,
 ) -> bool {
     ui.copy_from(editor, cut, write)
 }
@@ -9850,10 +10094,10 @@ mod tests {
                 .w(200.)
                 .h(30.)
                 .on_copy(|request| {
-                    Some(ClipboardContent {
-                        text: request.text.to_uppercase(),
-                        html: Some(format!("<i>{}</i>", request.text)),
-                    })
+                    Some(ClipboardContent::new(
+                        request.text.to_uppercase(),
+                        Some(format!("<i>{}</i>", request.text)),
+                    ))
                 }),
         );
         ui.prepare_frame();
@@ -9864,8 +10108,8 @@ mod tests {
             &ui,
             &editor,
             false,
-            |text, html| {
-                written = Some((text, html));
+            |content: ClipboardContent| {
+                written = Some((content.text, content.html));
                 true
             }
         ));
@@ -9879,8 +10123,8 @@ mod tests {
             &ui,
             &editor,
             true,
-            |text, html| {
-                written = Some((text, html));
+            |content: ClipboardContent| {
+                written = Some((content.text, content.html));
                 true
             }
         ));
@@ -9891,7 +10135,7 @@ mod tests {
         assert_eq!(value.get(), " world", "\u{2318}X deletes the selection");
         editor.set_secure(true);
         editor.set_selection(0, 6);
-        assert!(!super::copy_or_cut_editor(&ui, &editor, false, |_, _| {
+        assert!(!super::copy_or_cut_editor(&ui, &editor, false, |_| {
             panic!("a password field writes nothing")
         }));
     }
@@ -11664,6 +11908,15 @@ mod tests {
         assert!(!probe.held_after_wait, "and the loop's wait");
     }
 
+    #[test]
+    fn a_session_rendering_as_covered_is_forward_for_its_popups_without_focus() {
+        assert!(super::app_is_active(true, false));
+        assert!(super::app_is_active(false, true));
+        assert!(
+            !super::app_is_active(false, false),
+            "an app at the back holds its popups"
+        );
+    }
     #[test]
     fn window_handles_can_close_from_worker_threads() {
         fn assert_send_sync<T: Send + Sync>() {}

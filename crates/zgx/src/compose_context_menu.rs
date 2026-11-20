@@ -69,6 +69,7 @@ impl View {
         let rare = self.rare_mut();
         rare.context_menu = Some(Box::new(move |event, _| build(event)));
         rare.context_menu_spans = false;
+        self.accessibility_mut().context_menu = true;
         self
     }
     /// `context_menu`, told the run of the paragraph it was asked for on
@@ -80,6 +81,7 @@ impl View {
         mut self,
         mut build: impl FnMut(&ContextMenuEvent, Option<&ContextMenuSpan>) -> Vec<View> + 'static,
     ) -> Self {
+        self.accessibility_mut().context_menu = true;
         #[cfg(feature = "dom")]
         if crate::compose::__dom::DOM_ONLY {
             // The run is the DOM's (`__dom::DomMenu`); a link with nothing
@@ -279,7 +281,14 @@ pub(crate) fn mount(
                 .h(origin.height)
                 .child(panel)
         } else {
-            div().absolute().left(x).top(y).w(0.).h(0.).child(panel)
+            // Base UI's context menu: 2 along from the pointer, its side offset under it (the 1pt anchor sits 1 above)
+            div()
+                .absolute()
+                .left(x + 2.)
+                .top(y - 1.)
+                .w(0.)
+                .h(0.)
+                .child(panel)
         };
         let root = ui.root();
         let mounted = crate::compose::mount(&mut ui, root, view, environment.clone());
