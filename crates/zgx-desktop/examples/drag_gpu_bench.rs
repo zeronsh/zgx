@@ -11,7 +11,8 @@
 //! cargo run --release -p zgx-desktop --example drag_gpu_bench
 //! ```
 //! `TICKS` sets the frames (240), `SCALE` the device scale (2), `ROWS` the
-//! rows a pane holds (80), `STEP` the points a frame (6).
+//! rows a pane holds (80), `STEP` the points a frame (6), `FADE=0` leaves out
+//! the lists' edge fades (10 and 16 points, as the app's transcript has).
 use std::sync::Arc;
 use zgx::{compose::prelude::*, image::ImageData, scene::BoxShadow, scene::Color, widgets::Ui};
 use zgx_gpu::GpuRenderer;
@@ -108,8 +109,15 @@ fn row_of(kind: usize, i: usize, images: &[Arc<ImageData>]) -> View {
     }
 }
 
+/// The conversation list's edge fade (`FADE=0` leaves it out): 10 points at
+/// the top and 16 at the bottom, as the app's transcript has.
+fn fade_edges(view: View, on: bool) -> View {
+    if on { view.fade_edges(10., 16.) } else { view }
+}
+
 fn pane(name: &'static str, rows: usize, images: Vec<Arc<ImageData>>, ui: &Ui) -> View {
     let offset = ui.signal(0.);
+    let fade = env("FADE", 1) != 0;
     column()
         .min_w(0.)
         .h_full()
