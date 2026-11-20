@@ -311,12 +311,23 @@ impl Deadline {
     }
     /// A budget from now, read exactly: one that will shift another.
     fn start(budget: Duration) -> Self {
+        // One reading: the CPU's stand-in is the wall's (`thread_cpu`).
+        #[cfg(not(any(unix, windows)))]
+        {
+            let now = Instant::now();
+            Self {
+                wall: now,
+                cpu: thread_cpu_at(now),
+                budget,
+                #[cfg(target_arch = "wasm32")]
+                lazy: false,
+            }
+        }
+        #[cfg(any(unix, windows))]
         Self {
             wall: Instant::now(),
             cpu: thread_cpu(),
             budget,
-            #[cfg(target_arch = "wasm32")]
-            lazy: false,
         }
     }
     /// Whether its clock has yet to start (`lazy`).
@@ -324,10 +335,15 @@ impl Deadline {
     pub(crate) fn lazy(&self) -> bool {
         self.lazy
     }
-    /// The same budget, its clock started now.
+    /// The same budget, its clock started at `now` (a reading just made).
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn started_now(self) -> Self {
-        Self::start(self.budget)
+    pub(crate) fn started_at(self, now: Instant) -> Self {
+        Self {
+            wall: now,
+            cpu: thread_cpu_at(now),
+            budget: self.budget,
+            lazy: false,
+        }
     }
     /// The same budget with the time `other` has run since it started
     /// taken off the clock.
@@ -337,12 +353,23 @@ impl Deadline {
         if self.lazy {
             return self;
         }
+        // One reading: the CPU's stand-in is the wall's (`thread_cpu`).
+        #[cfg(not(any(unix, windows)))]
+        {
+            let now = Instant::now();
+            Self {
+                wall: self.wall + now.saturating_duration_since(other.wall),
+                cpu: self.cpu + thread_cpu_at(now).saturating_sub(other.cpu),
+                budget: self.budget,
+                #[cfg(target_arch = "wasm32")]
+                lazy: false,
+            }
+        }
+        #[cfg(any(unix, windows))]
         Self {
             wall: self.wall + other.wall.elapsed(),
             cpu: self.cpu + thread_cpu().saturating_sub(other.cpu),
             budget: self.budget,
-            #[cfg(target_arch = "wasm32")]
-            lazy: false,
         }
     }
     /// When its wall time passes its budget: it is exceeded from then on,
@@ -354,6 +381,7 @@ impl Deadline {
     pub(crate) fn cpu_used(&self) -> Duration {
         thread_cpu().saturating_sub(self.cpu)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn exceeded(&self) -> bool {
         #[cfg(any(unix, windows))]
         let (wall, cpu) = (self.wall.elapsed(), thread_cpu().saturating_sub(self.cpu));
@@ -363,6 +391,12 @@ impl Deadline {
             let now = Instant::now();
             (now - self.wall, thread_cpu_at(now).saturating_sub(self.cpu))
         };
+        past_budget(wall, cpu, self.budget, CPU_GRAIN)
+    }
+    /// `exceeded` as of `now`, a reading of the wall clock just made.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn exceeded_at(&self, now: Instant) -> bool {
+        let (wall, cpu) = (now - self.wall, thread_cpu_at(now).saturating_sub(self.cpu));
         past_budget(wall, cpu, self.budget, CPU_GRAIN)
     }
 }
