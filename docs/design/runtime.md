@@ -1,6 +1,6 @@
 # zgx as a runtime
 
-Status: design, with its first stage built and measured (native modules: `crates/zgx-module`, zgx-script's `modules` feature). Everything else here is proposed.
+Status: design, with its first stage built and measured (native modules: `crates/zgx-module`, zgx-script's `modules` feature, `Value`'s stated layout). Everything else here is proposed.
 
 An app written in Luau should ship without compiling zgx. Today an app with any Rust of its own links zgx into its binary, so a change to its Rust, or to zgx, rebuilds and relinks the whole program, and a release is a full Rust build. This design makes zgx a prebuilt, versioned runtime, makes an app's own Rust a set of native modules the runtime loads, and makes a release packaging.
 
@@ -95,32 +95,51 @@ Rejected: building zgx as a Rust `dylib` and linking modules against it. Calls w
 
 ### Values
 
-The host API's one data type is `zgx_script::Value` (`crates/zgx-script/src/value.rs:21`): strings, lists and maps held in `Rc`s, which state shares rather than copies. A module must not copy them either, or a function returning a 2,000-item list would cost 2,000 items a call.
+The host API's one data type is `zgx_script::Value` (`crates/zgx-script/src/value.rs`): strings, lists and maps held in `Rc`s, which state shares rather than copies. A module must neither copy them nor pay a call to read them: code linked into an app reads a row's field with a few loads, and a module has to cost the same.
 
-A value crosses as three words (`abi::Raw`: a tag and two `u64`s):
+So what crosses is the value's own layout. A module is lent a pointer to a `Value` where the runtime holds it, and reads it there.
 
-| Value | In the three words |
+| | Where |
 | --- | --- |
-| `nil`, a boolean, a number | the value itself |
-| a string | a pointer to its UTF-8 and its length: the module reads the text where it is |
-| a list, a map | the runtime's pointer and its length |
-| anything else (an image, an element, a folded row, a long text) | a pointer the module passes on |
+| which kind | the value's first byte (`Value` is `#[repr(u8)]`, its variants numbered) |
+| a boolean, a number | in the value |
+| a string | a counted pointer and a length: its UTF-8 is 16 bytes past the pointer |
+| a list | the same: its items, each a value, 24 bytes apart |
+| a map | the same: its fields, each a key and a value, 40 bytes apart, sorted by key |
+| how many hold a string, a list or a map | the word at the counted pointer |
 
-These are the same `Rc`s: `give` and `take` (`modules.rs`) turn a `Value` into its raw pointer and back with `Rc::into_raw` and `Rc::from_raw`, so crossing allocates nothing and copies nothing. A test holds this: a list handed to a module and back is the same allocation (`values_cross_counted_not_copied`).
+With that a module, with no call into the runtime:
 
-A module reads through the runtime's functions (`abi::Api`), each lending values for as long as their owner lives:
+- reads a string's text, a list's items and a map's fields in place;
+- finds a field by name as zgx-script's own lookup does (`find_key`, `key_eq`: the same code, in `zgx-module`);
+- holds a string, a list or a map once more, or lets go of a hold that isn't the last, by its count, as `Rc` does.
 
-- `fields`: several named fields of a map, in one call (`Ref::get(["id", "text"])`);
-- `items`: a list's items, 32 at a time (`Ref::items`);
-- `entries`: all of a map's fields (`Ref::record`);
-- `slice`, `list`, `map`, `string`: values made by the runtime;
-- `clone`, `release`: counting.
+It calls the runtime (`abi::Api`) to make a string, a list or a map, to free the last hold on one, and for the kinds it can't read: a row kept folded (`open`), a string past 64 KiB, which the runtime holds in pieces (`flat`, a copy), an image or an element (passed on, cloned and freed by the runtime).
+
+**What stating the layout cost zgx-script.** Nothing measurable. The whole change against main, in retired instructions on zgx's perf scenes (`scripts/perf/suite.py ab`, and the gate's Luau cells run by hand at the gate's settings, the least of 5 runs each):
+
+| Cell | Against main |
+| --- | --- |
+| mount | -0.06% |
+| script-update | 0.00% (the suite's), +0.01% (the gate's settings) |
+| micro-state-luau, micro-vscroll-fixed-luau, micro-vscroll-variable-luau | 0.00%, +0.03%, 0.00% |
+| library-scroll, library-scroll-lazy | -0.03%, -0.06% |
+| anime, script-layout, list-state, list-estimate | +0.02%, +0.01%, +0.01%, 0.00% |
+| spans-plain, spans-follow, spans-md | -0.23%, +0.01%, +0.02% |
+| md-stream, md-stream-text | -0.02%, -0.08% |
+| app-mail, app-dashboard, app-sketch, app-code | +0.11%, 0.00%, -0.02%, 0.00% |
+
+None is outside its own spread between runs (app-mail's was 0.19%). These are the kernel's counts, not the gate's own (cachegrind, which the machine didn't have), so CI's gate on the branch is the exact check.
+
+**What this rests on.** `Value`'s layout is stated in its source and tested. The layout of an `Rc` of a slice (a pointer to two counts and then the contents, with a length beside it) and of a map's field (a key, then a value) is the compiler's, the same in every Rust so far but promised by none. So the runtime measures its own as it loads a module (`measured`, `crates/zgx-script/src/modules.rs`): it makes a string, a list and a map, and checks where their parts lie. If that isn't the layout modules read (`abi::LAYOUT`), no module loads, with an error that says so, and a module refuses a runtime that reports another layout. A compiler that changed one would fail zgx-script's own test of it first (`this_build_lays_values_out_as_modules_read_them`). The lasting fix, if that day comes, is a map's field as a `#[repr(C)]` struct and zgx's own counted slice; neither is needed now. 64-bit targets only.
 
 A function's argument is lent for the call. What it returns is owned by the runtime from then.
 
 ### What a module registers
 
-Built: `function` (`ui.call_sync`) and `action` (`ui.action`, `ui.invoke`), the same registrations as `ScriptHost::function` (`crates/zgx-script/src/lib.rs:2735`) and `ScriptHost::action` (`lib.rs:2723`).
+Built: `function` (`ui.call_sync`) and `action` (`ui.action`, `ui.invoke`), the same registrations as `ScriptHost::function` (`crates/zgx-script/src/lib.rs:2735`) and `ScriptHost::action` (`lib.rs:2723`); and `Host::state::<T>()`, a module's own state.
+
+A module's state is one per thread, kept by the runtime and handed over as the module loads. Hosts run on more than one thread (tests, render workers), so a plain static would be shared between them, and a `thread_local!` in a library is a call each time it is read. The handle a module keeps is a pointer: reading its state is a load.
 
 To build, in this order, each already a method of `ScriptHost`:
 
@@ -148,43 +167,44 @@ A panic in a module ends the process: nothing unwinds across an `extern "C"` fun
 
 ## 3. What a module call costs
 
-The requirement is no measurable cost. Measured on Zeron, the first stage does not meet it everywhere, and this section says where.
+The requirement is no measurable cost. As built, the first stage meets it: a call into a loaded module costs 7 instructions more than the same function linked into the program, a module's reads cost what linked-in reads cost, and Zeron's module costs no more than the code it replaced.
 
-The module: Zeron's code that sets a long reply's blocks aside from its row and hands the transcript one run of them at a time (three functions scripts call while a chat is built and scrolled, and the pass that cuts a reply into runs). Its code was moved to a module line for line, and both ways are in one binary, chosen at launch. Instructions are the calling thread's, in user mode, the median of 21 rounds; times are medians of the same rounds. A release build.
+Two measurements, both in retired instructions (user mode), release builds.
 
-| | Linked in | Loaded | Difference |
+**The same function, linked in and loaded** (`crates/zgx-script/examples/module_call_bench.rs`): a script calls it a million times (rows: 100,000), each arm run three times, the process's setup subtracted.
+
+| A script's `ui.call_sync` of | Linked in | Loaded | Difference |
 | --- | --- | --- | --- |
-| `ui.call_sync("chat.reply_blocks", id)`: a string in, a held list out | 2,359 instr, 176 ns | 2,407 instr, 179 ns | +48 instr (+2.0%); the times' ranges overlap |
-| `ui.call_sync("chat.reply_run", { id, key })`: two fields read, a held list out | 7,138 instr, 567 ns | 7,301 instr, 593 ns | +163 instr (+2.3%), +26 ns (+4.6%) |
-| Setting a 2,001-block reply aside, once as its row is built | 3.44 M instr, 234 µs | 3.81 M instr, 277 µs | +10.7% instr, +43 µs (+18%) |
+| a function of a string, returning a number | 2,460.1 instr | 2,467.1 instr | +7.0 (+0.28%) |
+| a function reading four fields of each of 200 rows | 71,467 instr | 71,615 instr | +148 (+0.21%) |
+| a function returning its argument | 3,915 instr | 3,965 instr | +50 (+1.3%) |
 
-Each number is the median of 5 runs of the process, the two ways interleaved, each run itself the median of 21 rounds (a round is 20,000 calls, or one setting aside). Instructions moved by under 3 a call between runs. Times ranged 556–592 ns linked in against 584–612 ns loaded for `reply_run`, and 229–237 µs against 272–279 µs for the setting aside.
+- **Entering a module costs 7 instructions**: one more indirect call than a host's own function, which is itself called through a pointer. Runs agreed to within 0.01 of an instruction a call.
+- **Reading costs what linked-in code's reading costs**: under one instruction a row.
+- **Returning the argument itself costs 50**, the one case that differs by design: a module is lent its argument and counts it to keep it, where a linked-in function is handed it. A function that hands back what it was given is rare; one that needs to can be given its argument owned, a change to the interface not made here.
 
-Where it goes:
+**Zeron's long-reply code, as its own Rust and as a module** (section 2's proof; both in one binary, chosen at launch; medians of 5 runs of the process, the two ways interleaved, each run the median of 21 rounds of 20,000 calls or one setting aside):
 
-- **Entering a module** is an indirect call and a table lookup the compiler can't inline: about 48 instructions with a string argument and a counted list returned.
-- **Each read through the runtime** is a call where linked-in code reads in place. A function reading two fields pays about 115 instructions more for them.
-- **A pass over many rows** pays that per row. Reading a field at a time, the 2,001-block pass cost 55% more than linked in (5.33 M). All of a row's fields at once: 23% more. The fields it names, in one call: 10.7% more. That is the interface as built.
+| | Linked in | Loaded |
+| --- | --- | --- |
+| `ui.call_sync("chat.reply_blocks", id)`: a string in, a held list out | 2,359 instr, 171 ns (166–176) | 2,358 instr, 161 ns (158–167) |
+| `ui.call_sync("chat.reply_run", { id, key })`: two fields read, a held list out | 7,138 instr, 568 ns (550–582) | 7,013 instr, 554 ns (533–580) |
+| Setting a 2,001-block reply aside, once as its row is built | 3.45 M instr, 227 µs (220–233) | 1.94 M instr, 152 µs (148–155) |
 
-Most of a `ui.call_sync` is neither: 6,760 of `reply_run`'s 7,138 instructions are the script's call, its argument table becoming a value, and the result becoming a table, the same either way.
+Instructions agreed between runs to within 2 a call.
 
-What would close the rest, not built:
+The module is the app's code moved line for line, with two differences that explain why it comes out under the linked-in code rather than level with it: it reads each block's fields once where the original reads some twice, and it borrows strings the original clones. Neither is the boundary; both are what a port to borrowed values does. What the boundary itself costs is the first table.
 
-- **Reading maps and lists in place.** If `Value` had a layout the interface could state (`#[repr(C)]`, its `Rc`s as pointer and length), a module would read a list's items and a map's fields with no call. This is a change to zgx-script's central type, with its own measurements to pass.
-- **Keys named once.** A module's field names are constants; the runtime compares them as strings on every call. Keys registered at load and passed as numbers would make each lookup what linked-in code's is.
-
-Not profiled: the machine had no `perf` for its kernel, so the split above is from the differences between the three rows and between the three stages of the interface, not from a profile.
-
-Until then, the rule for an app is the one zgx-script already has for scripts: keep a boundary out of an inner loop. A module should do a whole piece of work per call (parse this text, lay out this formula, build this row), not be called per item by another module or by the host.
+How it got here, on the 2,001-block pass, as each version of the interface was measured: a call for each field read, +55%; a row's fields in one call, +23%; the fields named, in one call, +10.7%; reading in place, the table above.
 
 ## 4. Building modules, and the cache
 
-A module is its own cargo workspace, so nothing of the app or of zgx is in its build. Measured on Zeron's module (253 lines, one small dependency):
+A module is its own cargo workspace, so nothing of the app or of zgx is in its build. Measured on Zeron's module (258 lines, one small dependency):
 
 | After a one-line edit | The module | The app, today |
 | --- | --- | --- |
-| Dev build | 0.17 s (0.17–0.20, n=5) | 3.13 s |
-| Release build (thin LTO, one codegen unit) | 1.93 s (1.91–1.97, n=5) | 101.1 s |
+| Dev build | 0.18 s (0.16–0.21, n=5) | 3.13 s |
+| Release build (thin LTO, one codegen unit) | 2.21 s (1.95–2.26, n=5) | 101.1 s |
 | The app's own build afterwards | nothing (0.33 s of cargo finding nothing to do) | |
 | Clean build | 0.46 s dev, 2.05 s release | 147.6 s, 228.2 s |
 
@@ -194,7 +214,7 @@ The app picks the new library up at its next launch (hot reload of modules is se
 - **The key** is a hash of the module's sources, its `Cargo.lock`, the compiler's version, the target, the profile and `abi::ABI`. A module whose key is in the cache isn't built. CI restores the cache by the same keys, so a release where no module changed compiles no Rust.
 - **`zgx run`** builds what is stale before it starts and, watching, as a module's sources change.
 
-Granularity is a real cost. Each library links its own copy of Rust's standard library and of every crate it uses: Zeron's small module is 343 KB stripped. A module's dependencies are compiled into it, so two modules that both use a large crate both carry it and both link it. A module made to carry what an app's model code does (JSON, SQLite, a WebSocket, HTTPS, an async runtime) is 4.1 MB stripped, takes 44.5 s to build clean, and after a one-line edit rebuilds in 0.56 s in dev (n=5) and 3.63 s in release (3.57–6.56, n=5): still seconds, but its dependencies' 4 MB and 44 s are paid again by each module that uses them. So: a few coarse modules, split where the code changes at different rates, not one per file.
+Granularity is a real cost. Each library links its own copy of Rust's standard library and of every crate it uses: Zeron's small module is 341 KB stripped. A module's dependencies are compiled into it, so two modules that both use a large crate both carry it and both link it. A module made to carry what an app's model code does (JSON, SQLite, a WebSocket, HTTPS, an async runtime) is 4.1 MB stripped, takes 44.5 s to build clean, and after a one-line edit rebuilds in 0.56 s in dev (n=5) and 3.63 s in release (3.57–6.56, n=5): still seconds, but its dependencies' 4 MB and 44 s are paid again by each module that uses them. So: a few coarse modules, split where the code changes at different rates, not one per file.
 
 ## 5. The bundle
 
@@ -281,8 +301,8 @@ Zeron's host goes past functions and state in six places. The target is a generi
 
 ## 9. Costs and risks
 
-- **The boundary is not free yet** (section 3): 2% a call, 11% on a pass over two thousand rows.
-- **Size.** Each module carries its own standard library and dependencies. Zeron's small module is 343 KB stripped; one with an app's usual dependencies 4.1 MB (section 4).
+- **The layout modules read is partly the compiler's** (section 2): checked as a module loads, and a mismatch loads nothing rather than misreading. A module is also bound to 64-bit targets.
+- **Size.** Each module carries its own standard library and dependencies. Zeron's small module is 341 KB stripped; one with an app's usual dependencies 4.1 MB (section 4).
 - **Two allocators.** A module frees what it allocates and the runtime what it allocates; values are always the runtime's, so nothing crosses to be freed by the other. A module that wants mimalloc sets it itself.
 - **A module is trusted code.** It runs in the app's process with the app's rights. The sandbox is for scripts and plugins; nothing here extends it to modules, which is why only the app may name one.
 - **Signing.** macOS's hardened runtime loads only libraries signed by the app's team (section 6, step 5). Windows and Linux ask nothing.
@@ -292,13 +312,12 @@ Zeron's host goes past functions and state in six places. The target is a generi
 
 ## 10. Order of work
 
-1. **Functions and actions; loading at start.** Built and measured here.
+1. **Functions, actions and a module's state; values read in place; loading at start.** Built and measured here.
 2. **Shared state, the thread hand-off, async actions, timers, images** (section 2's table). With these an app's model code can be a module, not only its pure functions.
 3. **`zgx.json`'s `modules`, `zgx module build`, the cache** (section 4).
 4. **The bundle and its trust** (section 5), and `zgx build` (section 6).
 5. **The script-level pieces of section 8**, each of which removes a reason for an app-specific runtime build.
 6. **Published runtimes** (section 1). From here an app with no setup code of its own builds no zgx.
 7. **Module hot reload** (section 7).
-8. **The boundary's remaining cost** (section 3), if stage 2's larger modules show it.
 
 For Zeron the same order moves its host across: its pure functions first, its chat and session models after stage 2, and its window setup after stage 5, at which point its release is the pipeline of section 6.
