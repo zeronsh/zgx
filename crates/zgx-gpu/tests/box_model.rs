@@ -292,6 +292,10 @@ fn an_inset_shadow_starts_at_the_padding_edge_inside_the_border() {
     // The border's pixel is the border's; the shadow's ring is the next one in.
     assert_eq!(at(70, 20).2, 255, "the border row: {:?}", at(70, 20));
     assert!(at(70, 20).0 < 50, "the border is not red: {:?}", at(70, 20));
-    assert!(at(70, 21).0 > 200 && at(70, 21).1 < 60, "the ring row: {:?}", at(70, 21));
+    assert!(
+        at(70, 21).0 > 200 && at(70, 21).1 < 60,
+        "the ring row: {:?}",
+        at(70, 21)
+    );
     assert_eq!(at(70, 22), (255, 255, 255), "clear inside the ring");
 }

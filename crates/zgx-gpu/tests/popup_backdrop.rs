@@ -296,7 +296,10 @@ fn an_unshadowed_panel_shows_its_fill_alone() {
     // Box shadows draw outside their box alone, as CSS's do: under the fill
     // there is none to darken it, shadowed or not.
     let unshadowed = alpha(Some(panel));
-    assert!((60..=68).contains(&unshadowed), "the fill alone: {unshadowed}");
+    assert!(
+        (60..=68).contains(&unshadowed),
+        "the fill alone: {unshadowed}"
+    );
     let shadowed = alpha(None);
     assert_eq!(shadowed, unshadowed, "no shadow under the fill");
 }
