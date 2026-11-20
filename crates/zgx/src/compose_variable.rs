@@ -616,8 +616,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 scrollbar,
                 keyboard_navigation,
                 contain,
-                edges,
+                mut edges,
             } = options;
+            // A list that animates its rows' moves (`View::on_row_moves`).
+            let moves = edges.as_mut().and_then(|edges| edges.moves.take());
             *mounted_in.borrow_mut() = Some((ui.runtime.clone(), environment.clone()));
             if measured {
                 let changed = heights.index.borrow_mut().enforce_minimum(1.);
@@ -729,6 +731,15 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             // Each run's number, which the rows it shows are stamped with.
             let mut run = 0_u64;
             let mut order = Vec::new();
+            // Where the last pass scrolled its content to (`moves`): a row's
+            // place as it showed counts it out.
+            let mut shown_at = 0_f32;
+            // Rows moved out of view, still sliding out (`moves`), and what
+            // releases one once it has.
+            let held: Rc<RefCell<Vec<NodeId>>> = Rc::default();
+            let release = moves
+                .as_ref()
+                .map(|_| crate::compose::row_release(ui, &held));
             let mounted_revision = ui.signal(0_u64);
             // With spare time its overscan is spare time's too: the frame
             // builds what shows alone. (Its turn wakes the pass by this.)
@@ -1198,6 +1209,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     let added_measurements = measured && !added.is_empty();
                     entries.extend(added);
                     let mut removed_focus = false;
+                    // Rows out of view now, and where each showed: kept until
+                    // the pass knows whether rows moved (`moves` alone).
+                    let mut leaving = moves.as_ref().map(|_| Vec::new());
                     entries.retain(|_, entry| {
                         let node = &entry.node;
                         if entry.run == run {
@@ -1213,7 +1227,12 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                                             .ancestors(focused)
                                             .any(|ancestor| ancestor == *node));
                             }
-                            ui.remove_in_effect(*node);
+                            match (&mut leaving, entry.at) {
+                                (Some(leaving), Some((top, ..))) => {
+                                    leaving.push((*node, f32::from_bits(top) - shown_at));
+                                }
+                                _ => ui.remove_in_effect(*node),
+                            }
                             false
                         }
                     });
@@ -1228,6 +1247,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     if reindexed && measured {
                         mounted_revision.update(|value| *value = value.wrapping_add(1));
                     }
+                    // Each row's place before and now, for `moves` alone.
+                    let mut placed = moves.as_ref().map(|_| Vec::with_capacity(keys.len()));
                     {
                         let mut scene = ui.scene.borrow_mut();
                         // Scrolled with the view around it: as tall as its
@@ -1248,10 +1269,18 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             ),
                         }
                         scene.set_style(content, crate::widgets::fixed(width, total));
-                        stretch.place(&mut scene, if ancestor { 0. } else { position });
+                        let scrolled = if ancestor { 0. } else { position };
+                        stretch.place(&mut scene, scrolled);
                         order.clear();
                         for (key, _, top, row_height) in &keys {
                             let entry = entries.get_mut(key).expect("a row");
+                            if let Some(placed) = &mut placed {
+                                // Where it showed, this pass's scroll counted
+                                // in: kept rows a scroll carries don't move.
+                                let before = entry.at.map(|(top, ..)| f32::from_bits(top));
+                                let shown = before.unwrap_or(*top) - shown_at + scrolled;
+                                placed.push((entry.node, shown, *top, before.is_none()));
+                            }
                             // A row placed as it was, at the same width, stays.
                             let at = Some((top.to_bits(), row_height.to_bits(), width.to_bits()));
                             if entry.at != at {
@@ -1265,9 +1294,37 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             }
                             order.push(entry.node);
                         }
+                        // Rows leaving, and those still sliding out, stay
+                        // its children until released (after those in view).
+                        if let Some(leaving) = &leaving {
+                            order.extend(leaving.iter().map(|(node, _)| *node));
+                            order.extend(held.borrow().iter().copied());
+                        }
                         assert!(scene.reorder_children(content, &order));
+                        shown_at = scrolled;
                     }
                     transaction.commit();
+                    // Told once the scene is free: it may start their moves.
+                    if let (Some(placed), Some(moves), Some(release)) = (placed, &moves, &release) {
+                        let leaving: Vec<_> = leaving
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(node, shown)| (node, shown + shown_at))
+                            .collect();
+                        let mut moved = crate::compose::row_moves(&placed);
+                        let out = crate::compose::leaving_moves(&placed, &leaving);
+                        // Rows a scroll took out of view go at once.
+                        for (node, _) in &leaving {
+                            if !out.iter().any(|m| m.node == *node) {
+                                ui.remove_in_effect(*node);
+                            }
+                        }
+                        held.borrow_mut().extend(out.iter().map(|m| m.node));
+                        moved.extend(out);
+                        if !moved.is_empty() {
+                            moves(&moved, release);
+                        }
+                    }
                     if added_measurements {
                         // Subscribe to observations registered during this
                         // untracked mount transaction on the next effect pass.

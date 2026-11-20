@@ -18382,6 +18382,12 @@ export type ListProps = {
 	-- rows, building only those that view shows. With `height` or
 	-- `heights`, not `measured`.
 	virtualize: "ancestor"?,
+	-- Internal, subject to change: rows it places elsewhere (a row growing
+	-- above them, one coming in between) slide from where they showed, as
+	-- `ui.each`'s `animate` slides its rows: those coming into view from
+	-- where they would have been, those leaving it before they go. Off
+	-- unless set; reduced motion places them at once.
+	animate: Motion?,
 	-- The list its rows show, as `ui.each`'s (not with `count` or
 	-- `heights`): `key` is given an item, and `row` an item and its index
 	-- as a state; built again when the item changes, or, taking a third

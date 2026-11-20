@@ -8270,6 +8270,39 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
             build_scoped(&vm, cx, &low, &builder, (key.value(), state))
         }
     };
+    // `animate`: each row made to move, and the list told to report moves.
+    let motion = rare
+        .as_ref()
+        .and_then(|rare| rare.moves.clone())
+        .map(|timing| crate::motion::ListMotion::new(timing, vm, low));
+    let fills = !*measured;
+    let plain_row = {
+        let (motion, low) = (motion.clone(), low.clone());
+        move |index: Signal<usize>, key: usize, cx: &mut Context| -> View {
+            let view = plain_row(index, key, cx);
+            match &motion {
+                Some(motion) => motion.row(view, fills, cx, &low),
+                None => view,
+            }
+        }
+    };
+    let row = {
+        let (motion, low) = (motion.clone(), low.clone());
+        move |index: Signal<usize>, key: ListKey, cx: &mut Context| -> View {
+            let view = row(index, key, cx);
+            match &motion {
+                Some(motion) => motion.row(view, fills, cx, &low),
+                None => view,
+            }
+        }
+    };
+    let moved = |list: View| match &motion {
+        Some(motion) => {
+            let motion = motion.clone();
+            list.on_row_moves(move |moves, release| motion.moved(moves, release))
+        }
+        None => list,
+    };
     let keyboard = *keyboard;
     let mut cx = cx.as_deref_mut();
     let offset = match offset {
@@ -8344,7 +8377,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
                 measured_rows(offset, rows, *overscan, keys, estimate, row)
             }
         };
-        return list
+        return moved(list)
             .keyboard_navigation(keyboard)
             .row_text_counted(rows_count, copy);
     }
@@ -8353,14 +8386,14 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
         let rows = list_heights(heights, *height, *follow, vm, cx);
         let (sticky_key, sticky_row, sticky_plain) =
             (list_key.clone(), row.clone(), plain_row.clone());
-        let list = match key {
+        let list = moved(match key {
             None => {
                 variable_virtual_list(offset.clone(), rows.clone(), *overscan, |i| i, plain_row)
             }
             Some(_) => {
                 variable_virtual_list(offset.clone(), rows.clone(), *overscan, list_key, row)
             }
-        }
+        })
         .keyboard_navigation(keyboard)
         .row_text_counted(rows_count, copy);
         match sticky {
@@ -8387,10 +8420,10 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
         }
     } else {
         // Each row owns what it makes, as `each` rows do.
-        match key {
+        moved(match key {
             None => virtual_list(offset, *height, *overscan, count, |i| i, plain_row),
             Some(_) => virtual_list(offset, *height, *overscan, count, list_key, row),
-        }
+        })
         .keyboard_navigation(keyboard)
         .row_text_counted(rows_count, copy)
     }
@@ -8653,6 +8686,28 @@ fn lower_item_list(
             .contents()
         }
     };
+    // `animate`: each row made to move, and the list told to report moves.
+    let motion = rare
+        .as_ref()
+        .and_then(|rare| rare.moves.clone())
+        .map(|timing| crate::motion::ListMotion::new(timing, vm, low));
+    let row = {
+        let (motion, low, fills) = (motion.clone(), low.clone(), !*measured);
+        move |index: Signal<usize>, key: ListKey, cx: &mut Context| -> View {
+            let view = row(index, key, cx);
+            match &motion {
+                Some(motion) => motion.row(view, fills, cx, &low),
+                None => view,
+            }
+        }
+    };
+    let moved = |list: View| match &motion {
+        Some(motion) => {
+            let motion = motion.clone();
+            list.on_row_moves(move |moves, release| motion.moved(moves, release))
+        }
+        None => list,
+    };
     let keyboard = *keyboard;
     let mut cx = cx.as_deref_mut();
     let offset = match offset {
@@ -8791,7 +8846,7 @@ fn lower_item_list(
                 }
             }
         };
-        return list
+        return moved(list)
             .keyboard_navigation(keyboard)
             .row_text_counted(rows_count, copy);
     }
@@ -8799,7 +8854,8 @@ fn lower_item_list(
         let cx = need(&mut cx);
         let rows = list_heights(heights, *height, *follow, vm, cx);
         let (sticky_key, sticky_row) = (list_key.clone(), row.clone());
-        let list = variable_virtual_list(offset.clone(), rows.clone(), *overscan, list_key, row)
+        let list = variable_virtual_list(offset.clone(), rows.clone(), *overscan, list_key, row);
+        let list = moved(list)
             .keyboard_navigation(keyboard)
             .row_text_counted(rows_count, copy);
         let Some(sticky) = rare.as_ref().and_then(|rare| rare.sticky.as_ref()) else {
@@ -8811,9 +8867,11 @@ fn lower_item_list(
             list, sticky, inset, offset, rows, sticky_key, sticky_row, vm, cx,
         );
     }
-    virtual_list(offset, *height, *overscan, count, list_key, row)
-        .keyboard_navigation(keyboard)
-        .row_text_counted(rows_count, copy)
+    moved(virtual_list(
+        offset, *height, *overscan, count, list_key, row,
+    ))
+    .keyboard_navigation(keyboard)
+    .row_text_counted(rows_count, copy)
 }
 
 /// A variable list with sticky rows: the list, and over it the sticky row

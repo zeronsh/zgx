@@ -299,6 +299,109 @@ pub(crate) struct ListEdges {
     /// `View::virtualize_in_ancestor`: it scrolls with the scroll view
     /// around it, building the rows that view shows.
     pub(crate) ancestor: bool,
+    /// `View::on_row_moves`.
+    pub(crate) moves: Option<RowMovesHook>,
+}
+/// What a list that animates its rows' moves is told (`View::on_row_moves`):
+/// the moves, and what to call with each leaving row's node once it has
+/// left, to release it.
+pub(crate) type RowMovesHook = Rc<dyn Fn(&[RowMove], &Rc<dyn Fn(NodeId)>)>;
+/// A row a virtual list placed elsewhere than it showed (`View::on_row_moves`):
+/// its root, and where it was and is, in its list's content (points down
+/// from its top). `from` is where it showed, the list's own scroll since
+/// counted out: rows a scroll or an anchored insertion carries along don't
+/// move. A row built by the pass that moved others starts where it would
+/// have been, shifted as the kept row nearest it was. A row the pass moved
+/// out of view (`leaving`) is kept, where it was, until released: it slides
+/// to `to` first.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowMove {
+    /// The row's root node.
+    pub node: NodeId,
+    /// Where it showed.
+    pub from: f32,
+    /// Where it is now placed, or for a leaving row where it goes.
+    pub to: f32,
+    /// Moved out of view: kept until released.
+    pub leaving: bool,
+}
+/// What releases a row a list keeps while it slides out of view (`held`,
+/// the list's): removed from the list, and from the scene unless the list
+/// went first (with it). Once each.
+pub(crate) fn row_release(ui: &Ui, held: &Rc<RefCell<Vec<NodeId>>>) -> Rc<dyn Fn(NodeId)> {
+    let (weak, held) = (ui.downgrade(), Rc::downgrade(held));
+    Rc::new(move |node| {
+        let Some(held) = held.upgrade() else {
+            return;
+        };
+        let was = {
+            let mut held = held.borrow_mut();
+            let before = held.len();
+            held.retain(|n| *n != node);
+            held.len() != before
+        };
+        if let (true, Some(mut ui)) = (was, weak.upgrade())
+            && ui.scene.borrow().contains(node)
+        {
+            ui.remove(node);
+        }
+    })
+}
+/// Rows a pass moved out of view (`leaving`: node and where it showed),
+/// when kept rows moved too (`placed`, as `row_moves` takes them): each goes
+/// as the kept row that showed nearest it did. None when no kept row moved:
+/// a scroll, whose rows go at once. Out of line, as `row_moves`.
+#[inline(never)]
+pub(crate) fn leaving_moves(
+    placed: &[(NodeId, f32, f32, bool)],
+    leaving: &[(NodeId, f32)],
+) -> Vec<RowMove> {
+    let kept = || placed.iter().filter(|row| !row.3);
+    if !kept().any(|row| (row.1 - row.2).abs() >= 0.01) {
+        return Vec::new();
+    }
+    leaving
+        .iter()
+        .filter_map(|&(node, shown)| {
+            let near = kept().min_by(|a, b| (a.1 - shown).abs().total_cmp(&(b.1 - shown).abs()))?;
+            Some(RowMove {
+                node,
+                from: shown,
+                to: shown + (near.2 - near.1),
+                leaving: true,
+            })
+        })
+        .collect()
+}
+/// A pass's rows, kept and new, and where each was and is: what a list
+/// with `on_row_moves` reports. `rows` holds (node, before, now, new), in
+/// order, `before` its place as it showed (scroll counted out) for a kept
+/// row. Rows that didn't move are left out, and a new row takes the shift
+/// of the kept row nearest it (above it first). Out of line: only lists
+/// that animate their moves come here.
+#[inline(never)]
+pub(crate) fn row_moves(rows: &[(NodeId, f32, f32, bool)]) -> Vec<RowMove> {
+    let shift = |i: usize| {
+        let kept = |j: &usize| !rows[*j].3;
+        let near = (0..i)
+            .rev()
+            .find(kept)
+            .or_else(|| (i + 1..rows.len()).find(kept));
+        near.map_or(0., |j| rows[j].1 - rows[j].2)
+    };
+    rows.iter()
+        .enumerate()
+        .filter_map(|(i, &(node, before, now, new))| {
+            let from = if new { now + shift(i) } else { before };
+            ((from - now).abs() >= 0.01).then_some(RowMove {
+                node,
+                from,
+                to: now,
+                leaving: false,
+            })
+        })
+        .collect()
 }
 impl ListEdges {
     /// Whether its start is watched (`View::on_start`): rows coming in
@@ -357,6 +460,8 @@ pub(crate) fn watch_edges(
         ancestor: _,
         ahead: _,
         scrollbar_style: _,
+        // Taken by the list's pass before its edges come here.
+        moves: _,
     } = edges;
     let runtime = ui.runtime.clone();
     let weak = ui.downgrade();
@@ -1144,6 +1249,18 @@ impl View {
     /// overscan alone, and drops the rest.
     pub fn list_ahead(mut self, viewports: f32) -> Self {
         self.edges_mut().ahead = Some(viewports);
+        self
+    }
+    /// Told, after a virtual list's pass, of the rows it placed elsewhere
+    /// than they showed (a row growing above them, a row coming in between):
+    /// for a list that animates its rows' moves (`RowMove`). Scrolling moves
+    /// none. Without it the list keeps nothing for this.
+    #[doc(hidden)]
+    pub fn on_row_moves(
+        mut self,
+        moved: impl Fn(&[RowMove], &Rc<dyn Fn(NodeId)>) + 'static,
+    ) -> Self {
+        self.edges_mut().moves = Some(Rc::new(moved));
         self
     }
     fn edges_mut(&mut self) -> &mut ListEdges {
@@ -4562,8 +4679,10 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 scrollbar,
                 keyboard_navigation,
                 contain,
-                edges,
+                mut edges,
             } = options;
+            // A list that animates its rows' moves (`View::on_row_moves`).
+            let moves = edges.as_mut().and_then(|edges| edges.moves.take());
             *mounted_in.borrow_mut() = Some((ui.runtime.clone(), environment.clone()));
             let size = ui.observe_content_size(root);
             let extent = ui.signal(0.0_f32);
@@ -4691,6 +4810,13 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             // Each run's number, which the rows it shows are stamped with.
             let mut run = 0_u64;
             let (mut keys, mut order) = (Vec::new(), Vec::new());
+            // Where the last pass scrolled its content to (`moves`): a row's
+            // place as it showed counts it out.
+            let mut shown_at = 0_f32;
+            // Rows moved out of view, still sliding out (`moves`), and what
+            // releases one once it has.
+            let held: Rc<RefCell<Vec<NodeId>>> = Rc::default();
+            let release = moves.as_ref().map(|_| row_release(ui, &held));
             let mut handled_request = 0;
             // Scroll-to-row requests (`NodeHandle::scroll_to_row`).
             let reveal = list_reveal(
@@ -4845,6 +4971,9 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                         entries.extend(added);
                     }
                     let mut removed_focus = false;
+                    // Rows out of view now, and where each showed: kept until
+                    // the pass knows whether rows moved (`moves` alone).
+                    let mut leaving = moves.as_ref().map(|_| Vec::new());
                     if entries.len() > keys.len() {
                         entries.retain(|_, (node, _, placed)| {
                             if placed.run == run {
@@ -4860,7 +4989,13 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                                                 .ancestors(focused)
                                                 .any(|ancestor| ancestor == *node));
                                 }
-                                ui.remove(*node);
+                                match (&mut leaving, placed.at) {
+                                    (Some(leaving), Some((index, _))) => {
+                                        let top = model.row_offset(index);
+                                        leaving.push((*node, top - shown_at));
+                                    }
+                                    _ => ui.remove(*node),
+                                }
                                 false
                             }
                         });
@@ -4868,6 +5003,8 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     for (key, index) in &keys {
                         entries[key].1.set(*index);
                     }
+                    // Each row's place before and now, for `moves` alone.
+                    let mut moving = moves.as_ref().map(|_| Vec::with_capacity(keys.len()));
                     {
                         let mut scene = ui.scene.borrow_mut();
                         // Scrolled with the view around it: as tall as its
@@ -4886,10 +5023,19 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             content,
                             crate::widgets::fixed(width, model.content_height()),
                         );
-                        stretch.place(&mut scene, if ancestor { 0. } else { position });
+                        let scrolled = if ancestor { 0. } else { position };
+                        stretch.place(&mut scene, scrolled);
                         order.clear();
                         for (key, index) in &keys {
                             let (node, _, placed) = entries.get_mut(key).expect("a row");
+                            if let Some(moving) = &mut moving {
+                                // Where it showed, this pass's scroll counted
+                                // in: kept rows a scroll carries don't move.
+                                let now = model.row_offset(*index);
+                                let before = placed.at.map(|(index, _)| model.row_offset(index));
+                                let shown = before.unwrap_or(now) - shown_at + scrolled;
+                                moving.push((*node, shown, now, before.is_none()));
+                            }
                             // A row placed as it was, at the same width, stays.
                             let at = Some((*index, width.to_bits()));
                             if placed.at != at {
@@ -4912,9 +5058,37 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             }
                             order.push(*node);
                         }
+                        // Rows leaving, and those still sliding out, stay
+                        // its children until released (after those in view).
+                        if let Some(leaving) = &leaving {
+                            order.extend(leaving.iter().map(|(node, _)| *node));
+                            order.extend(held.borrow().iter().copied());
+                        }
                         assert!(scene.reorder_children(content, &order));
+                        shown_at = scrolled;
                     }
                     transaction.commit();
+                    // Told once the scene is free: it may start their moves.
+                    if let (Some(moving), Some(moves), Some(release)) = (moving, &moves, &release) {
+                        let leaving: Vec<_> = leaving
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(node, shown)| (node, shown + shown_at))
+                            .collect();
+                        let mut moved = row_moves(&moving);
+                        let out = leaving_moves(&moving, &leaving);
+                        // Rows a scroll took out of view go at once.
+                        for (node, _) in &leaving {
+                            if !out.iter().any(|m| m.node == *node) {
+                                ui.remove(*node);
+                            }
+                        }
+                        held.borrow_mut().extend(out.iter().map(|m| m.node));
+                        moved.extend(out);
+                        if !moved.is_empty() {
+                            moves(&moved, release);
+                        }
+                    }
                     extent.set(model.content_height());
                     let unchanged_request = offset.get().to_bits() == requested.to_bits();
                     if unchanged_request && !ancestor {
