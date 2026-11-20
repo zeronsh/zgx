@@ -137,6 +137,16 @@ pub struct WindowOptions {
     /// software one): the GPU's, or the raster always.
     #[doc(hidden)]
     pub renderer: Option<crate::RendererChoice>,
+    /// Where `Titlebar::Inset`'s traffic lights go on macOS: the close
+    /// button's top left, in the content's points from the window's top
+    /// left (Electron's `trafficLightPosition`), so they line up with a
+    /// title bar of the app's own height. They stay there as the window
+    /// resizes, changes focus or appearance and comes back from full
+    /// screen, and move with the window's zoom as the content does. `None`
+    /// (the default) is AppKit's place, centred in a 40-point strip. Other
+    /// platforms and title bars place their own.
+    #[doc(hidden)]
+    pub traffic_lights: Option<(f64, f64)>,
 }
 /// A window's smallest and largest sizes are the same.
 #[cfg(any(windows, test))]
@@ -176,6 +186,7 @@ impl Default for WindowOptions {
             visible: true,
             caption_height: None,
             renderer: None,
+            traffic_lights: None,
         }
     }
 }
@@ -2834,6 +2845,17 @@ impl Host {
         if phase.settles()
             && let Some(window) = &self.window
         {
+            // Out of full screen AppKit lays the traffic lights out in its
+            // own places again, as the inset toolbar shows.
+            let (zoom, traffic_lights) = (self.context.ui.zoom(), self.options.traffic_lights);
+            if zoom != 1. || traffic_lights.is_some() {
+                crate::window_chrome::place_buttons(
+                    window,
+                    self.options.titlebar,
+                    zoom,
+                    traffic_lights,
+                );
+            }
             info.refresh(window, self.options.titlebar);
             // Covered after all, once the transition is over: an occlusion
             // it went on drawing through is counted now.
@@ -4432,10 +4454,16 @@ impl Host {
             self.options.glass,
             self.options.caption_height,
         );
-        // Opened zoomed: its buttons where the zoomed title bar has them.
+        // Opened zoomed or with its buttons placed: where its title bar has them.
         let zoom = self.context.ui.zoom();
-        if zoom != 1. {
-            crate::window_chrome::zoom_buttons(&window, self.options.titlebar, zoom);
+        let traffic_lights = self.options.traffic_lights;
+        if zoom != 1. || traffic_lights.is_some() {
+            crate::window_chrome::place_buttons(
+                &window,
+                self.options.titlebar,
+                zoom,
+                traffic_lights,
+            );
         }
         // A saved frame keeps its size.
         if self.options.titlebar != crate::Titlebar::Standard && !placed.restored {
@@ -5383,22 +5411,28 @@ impl Host {
                 {
                     self.reported_size = Some(size);
                 }
-                // AppKit lays the window's buttons out again: zoomed, they go
-                // back where the title bar has them, now and once its layout
-                // for the new size is done.
+                // AppKit lays the window's buttons out again: zoomed or placed,
+                // they go back where the title bar has them, now and once its
+                // layout for the new size is done.
                 let zoom = self.context.ui.zoom();
-                if zoom != 1.
+                let traffic_lights = self.options.traffic_lights;
+                if (zoom != 1. || traffic_lights.is_some())
                     && let Some(window) = &self.window
                 {
                     let titlebar = self.options.titlebar;
-                    crate::window_chrome::zoom_buttons(window, titlebar, zoom);
+                    crate::window_chrome::place_buttons(window, titlebar, zoom, traffic_lights);
                     self.context.window_info.refresh(window, titlebar);
                     #[cfg(target_os = "macos")]
                     {
                         let window = window.clone();
                         dispatch2::DispatchQueue::main().exec_async(move || {
                             let zoom = crate::popup_window::zoom_of(window.id());
-                            crate::window_chrome::zoom_buttons(&window, titlebar, zoom);
+                            crate::window_chrome::place_buttons(
+                                &window,
+                                titlebar,
+                                zoom,
+                                traffic_lights,
+                            );
                         });
                     }
                 }
@@ -6319,10 +6353,11 @@ impl Host {
                 scale,
             );
             // The platform's buttons where the zoomed title bar has them.
-            crate::window_chrome::zoom_buttons(
+            crate::window_chrome::place_buttons(
                 &window,
                 self.options.titlebar,
                 self.context.ui.zoom(),
+                self.options.traffic_lights,
             );
             // And where scripts read them (`ui.window.controls`).
             self.context
