@@ -29,6 +29,11 @@ pub struct BufferLine {
     /// zgx: each of its lines takes CSS's line box, a span in it being a
     /// box (inline-flex) of its own (`set_css_line_box`).
     css: bool,
+    /// zgx: the scale its laid out lines' baselines were worked out at
+    /// (`LayoutLine::settle_baseline`; `baseline_scale_key`'s id, 0: none),
+    /// which `LayoutRunIter` reads them at while it holds. In its padding: no
+    /// line is bigger for it.
+    pub(crate) settled: u16,
 }
 
 impl BufferLine {
@@ -53,6 +58,7 @@ impl BufferLine {
             boxes: false,
             leads: false,
             css: false,
+            settled: 0,
         }
     }
 
@@ -333,6 +339,7 @@ impl BufferLine {
         &mut self,
         font_system: &mut FontSystem,
         font_size: f32,
+        line_height: f32,
         width_opt: Option<f32>,
         wrap: Wrap,
         ellipsize: Ellipsize,
@@ -368,6 +375,12 @@ impl BufferLine {
                 match_mono_width,
                 hinting,
             );
+            // zgx: each line's baseline, as runs of it read it.
+            let (snap, id) = crate::buffer::baseline_scale_key();
+            for line in &mut layout {
+                line.settle_baseline(line_height, snap);
+            }
+            self.settled = id;
             self.layout_opt.set_used(layout);
         }
         self.layout_opt.get().expect("layout not found")
@@ -410,6 +423,7 @@ impl BufferLine {
             boxes: false,
             leads: false,
             css: false,
+            settled: 0,
         }
     }
 

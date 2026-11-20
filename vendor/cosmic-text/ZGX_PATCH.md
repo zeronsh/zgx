@@ -371,7 +371,7 @@ needs of this crate, all additions:
   its Han characters are in, as `build_hinted` takes it, for text measured
   apart from its line: zgx-gpu's min-content copy of a line (a word to a
   line, a word of kanji alone) takes it as `FontFeatures::HAN`.
-- `LayoutRunIter::from_paragraph(text, layout, height_opt, line_height)`: the
+- `LayoutRunIter::from_paragraph(text, layout, settled, height_opt, line_height)`: the
   runs of such a paragraph's `LayoutLine`s, as `from_lines` gives a buffer
   line's (`next` shares their walk, `next_in`).
 

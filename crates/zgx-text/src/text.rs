@@ -893,7 +893,9 @@ impl Default for CpuTextRaster {
 }
 /// What a text is laid out from: its text, size, box's width and height
 /// (their bits) and font.
-type LayoutKey = (String, u32, u32, u32, zgx::text_layout::FontStyle);
+/// A layout's text, size, width, height, font, and the baseline scale it was laid out at
+/// (`cosmic_text::baseline_scale`): its lines' baselines are rounded there.
+type LayoutKey = (String, u32, u32, u32, zgx::text_layout::FontStyle, u32);
 /// A line of laid-out text: its index, baseline and glyphs, in points.
 #[doc(hidden)]
 pub struct LaidLine {
@@ -1066,6 +1068,7 @@ impl CpuTextRaster {
             width.to_bits(),
             height.to_bits(),
             font.clone(),
+            cosmic_text::baseline_scale().to_bits(),
         );
         let fonts = &mut self.fonts;
         self.layouts.get(
@@ -2938,7 +2941,10 @@ fn joined_wash<'o>(
 }
 /// How far the box of `run`, a span that is a box of its own, reaches above
 /// the baseline: its line height's half-leading above its font's ascent
-/// (`glyph`'s font), then its padding, as `inline_line_box` lays it out.
+/// (`glyph`'s font), then its padding, as `inline_line_box` lays it out:
+/// the ascent and descent rounded to device pixels and the half-leading
+/// floored (`cosmic_text::baseline_scale`, as the line's baseline was), as
+/// Blink has them, so the box sits where Chrome's inline-flex does.
 #[cold]
 #[inline(never)]
 fn box_span_above(
@@ -2956,7 +2962,13 @@ fn box_span_above(
                 let upem = f32::from(m.units_per_em.max(1));
                 (m.ascent / upem * size, -m.descent / upem * size)
             });
-    ascent + (height - ascent - descent) / 2. + run.padding[1]
+    let snap = cosmic_text::baseline_scale();
+    let (ascent, descent) = (
+        (ascent * snap).round() / snap,
+        (descent * snap).round() / snap,
+    );
+    let half = ((height * snap - ascent * snap - descent * snap) / 2.).floor() / snap;
+    ascent + half + run.padding[1]
 }
 /// Derive decoration geometry from shaped visual fragments, including bidi and wrapping.
 /// `fonts` are those it was shaped in: a span that is a box of its own
@@ -3301,5 +3313,131 @@ mod wash_tests {
         )
         .unwrap();
         assert_eq!(washes(&apart).len(), 2, "two spans side by side: two");
+    }
+}
+
+#[cfg(test)]
+mod blink_baseline_tests {
+    use super::*;
+    use zgx::rich_text::{RichText, TextRun};
+    use zgx::text_layout::{FontFamily, FontStyle, LineHeight};
+
+    const GEIST: &[u8] = include_bytes!("../../zgx-gpu/tests/fonts/GeistVariable-subset.ttf");
+
+    /// A paragraph's two baselines in 12-pixel Geist on 18-pixel lines, at
+    /// `scale` device pixels a point, and, with a box span (CSS's
+    /// inline-flex, line height 16, a pixel of padding and one of border:
+    /// 2 of padding, the border's width part of it), how far the box's top
+    /// is above the first.
+    fn baselines(scale: f32, keycap: bool) -> (f32, f32, Option<f32>) {
+        cosmic_text::set_baseline_scale(scale);
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(GEIST.to_vec());
+        let font = FontStyle {
+            family: FontFamily::Named("Geist".into()),
+            line_height: LineHeight::px(18.),
+            ..FontStyle::default()
+        };
+        let mut boxed = FontStyle {
+            line_height: LineHeight::px(16.),
+            ..font.clone()
+        };
+        boxed.features = boxed.features.with_box_span();
+        let text = "hello esc to go\nsecond";
+        let run = |range: std::ops::Range<usize>, font: FontStyle, edge: f32| TextRun {
+            range,
+            font,
+            font_size: 12.,
+            padding: [edge; 2],
+            background: (edge > 0.).then_some(zgx::scene::Color(220, 220, 220, 255)),
+            ..Default::default()
+        };
+        let runs = if keycap {
+            vec![
+                run(0..6, font.clone(), 0.),
+                run(6..9, boxed, 2.),
+                run(9..text.len(), font, 0.),
+            ]
+        } else {
+            vec![run(0..text.len(), font, 0.)]
+        };
+        let rich = RichText::new(text, runs).unwrap().with_box_spans();
+        let buffer = rich_buffer(&mut fonts, &rich, Some(600.), None);
+        let lines: Vec<f32> = buffer.layout_runs().map(|line| line.line_y).collect();
+        let above = keycap.then(|| {
+            let boxed = rich_decorations(&buffer, &rich, &mut fonts)
+                .into_iter()
+                .find(|d| d.background && d.run == 1)
+                .expect("the box's background");
+            lines[0] - boxed.bounds.y
+        });
+        cosmic_text::set_baseline_scale(1.);
+        (lines[0], lines[1], above)
+    }
+
+    /// Lines laid out at one scale and read at another (a buffer kept across
+    /// a move to another screen, a layer drawn at its own) take the other's
+    /// baselines, as lines laid out at it do; a line keeps its baseline in
+    /// its padding, no bigger for it.
+    #[test]
+    fn lines_read_at_another_scale_take_its_baselines() {
+        assert_eq!(std::mem::size_of::<cosmic_text::LayoutLine>(), 72);
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(GEIST.to_vec());
+        let font = FontStyle {
+            family: FontFamily::Named("Geist".into()),
+            line_height: LineHeight::px(18.),
+            ..FontStyle::default()
+        };
+        let text = "hello esc to go\nsecond";
+        let rich = RichText::new(
+            text,
+            vec![TextRun {
+                range: 0..text.len(),
+                font,
+                font_size: 12.5,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let read = |buffer: &cosmic_text::Buffer| -> Vec<f32> {
+            buffer.layout_runs().map(|line| line.line_y).collect()
+        };
+        let mut moved = 0;
+        for scale in [1.25, 1.5, 3.] {
+            cosmic_text::set_baseline_scale(1.);
+            let kept = rich_buffer(&mut fonts, &rich, Some(600.), None);
+            let at_one = read(&kept);
+            cosmic_text::set_baseline_scale(scale);
+            let fresh = read(&rich_buffer(&mut fonts, &rich, Some(600.), None));
+            assert_eq!(read(&kept), fresh, "laid out at 1, read at {scale}");
+            moved += usize::from(fresh != at_one);
+        }
+        cosmic_text::set_baseline_scale(1.);
+        assert!(moved > 0, "some scale moves a baseline");
+    }
+
+    /// As headless Chrome 157 lays out 12-pixel Geist on 18-pixel lines, at
+    /// 1x and 2x alike: baselines at 13 and 31; with a box span holding
+    /// "esc" (`display: inline-flex; line-height: 16px`, a pixel of padding
+    /// and one of border), its top 14 above the baseline, which moves to
+    /// 14, and the next line's to 33. Unrounded, the plain baseline was
+    /// 13.25 and the box's top 14.26 above it.
+    #[test]
+    fn baselines_and_a_box_spans_top_are_where_chrome_puts_them() {
+        for scale in [1., 2.] {
+            assert_eq!(
+                baselines(scale, false),
+                (13., 31., None),
+                "plain at {scale}x"
+            );
+            let (first, second, above) = baselines(scale, true);
+            assert_eq!((first, second), (14., 33.), "with a box span at {scale}x");
+            let above = above.unwrap();
+            assert!(
+                (above - 14.).abs() < 0.01,
+                "the box's top at {scale}x: {above} above the baseline, Chrome 14"
+            );
+        }
     }
 }

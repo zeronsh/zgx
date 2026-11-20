@@ -203,7 +203,7 @@ pub struct LayoutRunIter<'b> {
     lines: &'b [BufferLine],
     /// zgx patch: a paragraph laid out outside a buffer line, in place of
     /// `lines` (`from_paragraph`).
-    paragraph: Option<(&'b str, &'b [LayoutLine])>,
+    paragraph: Option<(&'b str, &'b [LayoutLine], u16)>,
     height_opt: Option<f32>,
     line_height: f32,
     scroll: f32,
@@ -211,10 +211,15 @@ pub struct LayoutRunIter<'b> {
     layout_i: usize,
     total_height: f32,
     line_top: f32,
+    /// zgx: the device pixels a point baselines snap to (`baseline_scale`),
+    /// read once for its lines, and its id as their keepers have it
+    /// (`baseline_scale_key`; one none has for a scale without).
+    snap: f32,
+    snap_id: u16,
 }
 
 impl<'b> LayoutRunIter<'b> {
-    pub const fn new(buffer: &'b Buffer) -> Self {
+    pub fn new(buffer: &'b Buffer) -> Self {
         Self::from_lines(
             buffer.lines.as_slice(),
             buffer.height_opt,
@@ -224,13 +229,14 @@ impl<'b> LayoutRunIter<'b> {
         )
     }
 
-    pub const fn from_lines(
+    pub fn from_lines(
         lines: &'b [BufferLine],
         height_opt: Option<f32>,
         line_height: f32,
         scroll: f32,
         start: usize,
     ) -> Self {
+        let (snap, _, snap_id) = BASELINE_SCALE.with(core::cell::Cell::get);
         Self {
             lines,
             paragraph: None,
@@ -241,21 +247,27 @@ impl<'b> LayoutRunIter<'b> {
             layout_i: 0,
             total_height: 0.0,
             line_top: 0.0,
+            snap,
+            snap_id,
         }
     }
 
     /// zgx patch: the visual lines of one left-to-right paragraph, `text`,
     /// laid out outside a buffer line (zgx's plain text from its words), as
-    /// `from_lines` gives a buffer line's.
-    pub const fn from_paragraph(
+    /// `from_lines` gives a buffer line's: their baselines worked out at the
+    /// scale `settled` says (`baseline_scale_key`'s id; 0: not), at
+    /// `line_height`.
+    pub fn from_paragraph(
         text: &'b str,
         layout: &'b [LayoutLine],
+        settled: u16,
         height_opt: Option<f32>,
         line_height: f32,
     ) -> Self {
+        let (snap, _, snap_id) = BASELINE_SCALE.with(core::cell::Cell::get);
         Self {
             lines: &[],
-            paragraph: Some((text, layout)),
+            paragraph: Some((text, layout, settled)),
             height_opt,
             line_height,
             scroll: 0.0,
@@ -263,50 +275,103 @@ impl<'b> LayoutRunIter<'b> {
             layout_i: 0,
             total_height: 0.0,
             line_top: 0.0,
+            snap,
+            snap_id,
         }
     }
 
     /// The next of `layout`'s visual lines that shows, of buffer line
-    /// `text` (`next`).
+    /// `text` (`next`), their baselines worked out at the scale `settled`
+    /// says (`baseline_scale_key`'s id).
     fn next_in(
+        &mut self,
+        text: &'b str,
+        rtl: bool,
+        layout: &'b [LayoutLine],
+        settled: u16,
+    ) -> Option<Option<LayoutRun<'b>>> {
+        // zgx patch: the baseline sits where a browser's line box puts it: ascent
+        // and descent rounded to whole device pixels (`baseline_scale`), the
+        // half-leading floored (Blink). Worked out as the lines were laid out
+        // (at the line height they're read at: a buffer's new metrics lay its
+        // lines out again), while the scale holds; lines read at another are
+        // handed to `next_in_unsettled`, out of line, so this loop makes no call.
+        if settled != self.snap_id {
+            return self.next_in_unsettled(text, rtl, layout);
+        }
+        while let Some(layout_line) = layout.get(self.layout_i) {
+            let line_height = layout_line.line_height_opt.unwrap_or(self.line_height);
+            let below = layout_line.baseline;
+            if let Some(found) = self.place(text, rtl, layout_line, line_height, below) {
+                return found;
+            }
+        }
+        None
+    }
+
+    /// zgx: `next_in` from a line read at a scale or height other than the one
+    /// it was laid out at, each line's baseline worked out (rare).
+    #[cold]
+    #[inline(never)]
+    fn next_in_unsettled(
         &mut self,
         text: &'b str,
         rtl: bool,
         layout: &'b [LayoutLine],
     ) -> Option<Option<LayoutRun<'b>>> {
         while let Some(layout_line) = layout.get(self.layout_i) {
-            self.layout_i += 1;
-
             let line_height = layout_line.line_height_opt.unwrap_or(self.line_height);
-            self.total_height += line_height;
-
-            let line_top = self.line_top - self.scroll;
-            let glyph_height = layout_line.max_ascent + layout_line.max_descent;
-            let centering_offset = (line_height - glyph_height) / 2.0;
-            let line_y = line_top + centering_offset + layout_line.max_ascent;
-            if let Some(height) = self.height_opt {
-                if line_y - layout_line.max_ascent > height {
-                    return Some(None);
-                }
-            }
-            self.line_top += line_height;
-            if line_y + layout_line.max_descent < 0.0 {
-                continue;
-            }
-
-            return Some(Some(LayoutRun {
-                line_i: self.line_i,
-                text,
-                rtl,
-                glyphs: &layout_line.glyphs,
-                decorations: &layout_line.decorations,
-                line_y,
-                line_top,
+            let below = baseline_below_top(
+                layout_line.max_ascent,
+                layout_line.max_descent,
                 line_height,
-                line_w: layout_line.w,
-            }));
+                self.snap,
+            );
+            if let Some(found) = self.place(text, rtl, layout_line, line_height, below) {
+                return found;
+            }
         }
         None
+    }
+
+    /// `layout_line`, `line_height` high, its baseline `below` its top, as
+    /// `next_in` takes it: what `next_in` returns, or none to go on to the
+    /// next (a line above the view).
+    #[inline(always)]
+    fn place(
+        &mut self,
+        text: &'b str,
+        rtl: bool,
+        layout_line: &'b LayoutLine,
+        line_height: f32,
+        below: f32,
+    ) -> Option<Option<Option<LayoutRun<'b>>>> {
+        self.layout_i += 1;
+        self.total_height += line_height;
+
+        let line_top = self.line_top - self.scroll;
+        let line_y = line_top + below;
+        if let Some(height) = self.height_opt {
+            if line_y - layout_line.max_ascent > height {
+                return Some(Some(None));
+            }
+        }
+        self.line_top += line_height;
+        if line_y + layout_line.max_descent < 0.0 {
+            return None;
+        }
+
+        Some(Some(Some(LayoutRun {
+            line_i: self.line_i,
+            text,
+            rtl,
+            glyphs: &layout_line.glyphs,
+            decorations: &layout_line.decorations,
+            line_y,
+            line_top,
+            line_height,
+            line_w: layout_line.w,
+        })))
     }
 }
 
@@ -314,13 +379,13 @@ impl<'b> Iterator for LayoutRunIter<'b> {
     type Item = LayoutRun<'b>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((text, layout)) = self.paragraph {
-            return self.next_in(text, false, layout).flatten();
+        if let Some((text, layout, settled)) = self.paragraph {
+            return self.next_in(text, false, layout, settled).flatten();
         }
         while let Some(line) = self.lines.get(self.line_i) {
             let shape = line.shape_opt()?;
             let layout = line.layout_opt()?;
-            if let Some(found) = self.next_in(line.text(), shape.rtl, layout) {
+            if let Some(found) = self.next_in(line.text(), shape.rtl, layout, line.settled) {
                 return found;
             }
             self.line_i += 1;
@@ -750,6 +815,7 @@ impl Buffer {
         Some(line.layout(
             font_system,
             self.metrics.font_size,
+            self.metrics.line_height,
             self.width_opt,
             self.wrap,
             self.ellipsize,
@@ -1874,5 +1940,138 @@ impl BorrowedWithFontSystem<'_, Buffer> {
         F: FnMut(i32, i32, u32, u32, Color),
     {
         self.inner.draw(self.font_system, cache, color, f);
+    }
+}
+
+thread_local! {
+    /// zgx: the scale baselines snap to now, and its id (`baseline_scale_key`)
+    /// as lines laid out at it keep it and as runs read it.
+    static BASELINE_SCALE: core::cell::Cell<(f32, u16, u16)> =
+        const { core::cell::Cell::new((1., 1, 1)) };
+    /// zgx: each scale baselines have snapped to on this thread, by its bits:
+    /// its id is one past its place.
+    static BASELINE_SCALES: core::cell::RefCell<Vec<u32>> = const { core::cell::RefCell::new(Vec::new()) };
+}
+/// zgx: the device pixels a point the baselines snap to (1 by default):
+/// a browser lays a line out in device pixels, rounding the font's ascent
+/// and descent and flooring the half-leading there, not in points.
+pub fn set_baseline_scale(scale: f32) {
+    let scale = if scale.is_finite() && scale >= 1. {
+        scale
+    } else {
+        1.
+    };
+    let id = BASELINE_SCALES.with(|known| {
+        let mut known = known.borrow_mut();
+        if known.is_empty() {
+            known.push(1_f32.to_bits());
+        }
+        match known.iter().position(|&bits| bits == scale.to_bits()) {
+            Some(at) => at + 1,
+            None if known.len() < usize::from(u16::MAX - 1) => {
+                known.push(scale.to_bits());
+                known.len()
+            }
+            None => 0,
+        }
+    }) as u16;
+    // A scale past as many as an id tells apart: lines keep none (0), runs
+    // read it as one no line keeps (`u16::MAX`).
+    BASELINE_SCALE.with(|s| s.set((scale, id, if id == 0 { u16::MAX } else { id })));
+}
+/// zgx: the device pixels a point the baselines snap to now (`set_baseline_scale`).
+pub fn baseline_scale() -> f32 {
+    BASELINE_SCALE.with(|s| s.get().0)
+}
+/// zgx: `baseline_scale` and the id lines laid out at it keep as the scale
+/// their baselines were worked out at (`LayoutLine::settle_baseline`; 0 for a
+/// scale past as many as an id tells apart, which no run reads as settled).
+pub fn baseline_scale_key() -> (f32, u16) {
+    BASELINE_SCALE.with(|s| {
+        let (scale, id, _) = s.get();
+        (scale, id)
+    })
+}
+/// zgx: how far below a line's top its baseline is, as a browser's line box
+/// puts it: its `ascent` and `descent` rounded to whole device pixels at
+/// `snap` a point, its half-leading floored (Blink). A line works it out as
+/// it is laid out (`LayoutLine::settle_baseline`).
+pub fn baseline_below_top(ascent: f32, descent: f32, line_height: f32, snap: f32) -> f32 {
+    let (ascent, descent) = (rounded(ascent * snap), rounded(descent * snap));
+    (floored((line_height * snap - ascent - descent) / 2.0) + ascent) / snap
+}
+/// zgx: past this, `floored` and `rounded` leave it to `floor` and `round`
+/// (and not a number): below it, adding `MAGIC` rounds to a whole number.
+const EXACT: f32 = 4_194_304.0;
+/// zgx: 1.5 × 2^23: a number under `EXACT` plus this is a whole number, the
+/// nearest (ties to even), and minus it again exactly that.
+const MAGIC: f32 = 12_582_912.0;
+/// zgx: `x.floor()` in a few instructions (`floorf` is a call on x86-64's
+/// baseline, and a line's baseline is worked out each time it's laid out):
+/// the nearest whole number, one less where that's above.
+#[inline(always)]
+fn floored(x: f32) -> f32 {
+    if !(x.abs() < EXACT) {
+        return x.floor();
+    }
+    let r = (x + MAGIC) - MAGIC;
+    if r > x {
+        r - 1.0
+    } else {
+        r
+    }
+}
+/// zgx: `x.round()` (halves away from zero) as `floored` is: the nearest
+/// whole number to its size, one more where it was a half rounded down to
+/// even, signed as it.
+#[inline(always)]
+fn rounded(x: f32) -> f32 {
+    let a = x.abs();
+    if !(a < EXACT) {
+        return x.round();
+    }
+    let r = (a + MAGIC) - MAGIC;
+    let r = if a - r == 0.5 { r + 1.0 } else { r };
+    r.copysign(x)
+}
+
+#[cfg(test)]
+mod baseline_rounding_tests {
+    use super::{floored, rounded};
+
+    /// `floored` and `rounded` are `floor` and `round` for every number: each
+    /// f32 bit pattern in steps, every half and its neighbours up to past
+    /// where they hand over, and the edge cases.
+    #[test]
+    fn floored_and_rounded_are_std_s() {
+        // (A zero's sign aside: `floored(-0.0)` is 0, which no baseline tells apart.)
+        let check = |x: f32| {
+            let floor = floored(x);
+            assert!(floor == x.floor() || (x.is_nan() && floor.is_nan()), "floor {x:e}");
+            assert_eq!(rounded(x).to_bits(), x.round().to_bits(), "round {x:e}");
+        };
+        let mut bits = 0_u32;
+        loop {
+            check(f32::from_bits(bits));
+            match bits.checked_add(4099) {
+                Some(next) => bits = next,
+                None => break,
+            }
+        }
+        for whole in -70_000..70_000 {
+            let half = whole as f32 + 0.5;
+            for x in [half, half.next_up(), half.next_down(), whole as f32] {
+                check(x);
+            }
+        }
+        for x in [4_194_304.0_f32, 8_388_608.0, 16_777_216.0, 0.49999997, -0.49999997] {
+            for x in [x, -x, x.next_up(), x.next_down()] {
+                check(x);
+            }
+        }
+        for x in [0.0, -0.0, f32::INFINITY, f32::NEG_INFINITY, f32::MIN_POSITIVE, f32::MAX] {
+            check(x);
+        }
+        assert!(floored(f32::NAN).is_nan() && rounded(f32::NAN).is_nan());
     }
 }
