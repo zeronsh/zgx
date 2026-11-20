@@ -476,7 +476,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   text-drop <target|x,y> --text T [--html H] [--hover-only]
                        text dragged in from another app, let go there
   prefers reduced-motion on|off|system   what zgx reads as the system's (never its setting)
-  scroll <target> <dy> command <id>
+  scroll <target> <dy> [dx] command <id>
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
@@ -692,6 +692,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
         "scroll" => {
             put("target", arg(1));
             put("dy", arg(2));
+            put("dx", arg(3));
         }
         "key" => put("keys", arg(1)),
         "clipboard" => put("action", arg(1)),
@@ -745,7 +746,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let fields: Vec<(String, Value)> = fields
         .into_iter()
         .map(|(k, v)| match (&*k, &v) {
-            ("dy" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every", Value::Str(s)) => {
+            ("dy" | "dx" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every", Value::Str(s)) => {
                 (k, s.parse::<f64>().map(Value::Num).unwrap_or(v))
             }
             _ => (k, v),
@@ -977,7 +978,7 @@ const TOOLS: &[Tool] = &[
     (
         "zgx_scroll",
         "scroll",
-        &[("target", "string", true), ("dy", "number", true)],
+        &[("target", "string", true), ("dy", "number", true), ("dx", "number", false)],
         "Scroll the viewport under a node by dy points (down is positive).",
     ),
     (
