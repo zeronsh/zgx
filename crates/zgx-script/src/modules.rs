@@ -299,6 +299,61 @@ unsafe extern "C" fn register_action(
     });
 }
 
+/// A module's state on this thread: its memory, and what frees it.
+struct ModuleState {
+    at: *mut u8,
+    layout: std::alloc::Layout,
+    free: unsafe extern "C" fn(*mut u8),
+}
+impl Drop for ModuleState {
+    fn drop(&mut self) {
+        // SAFETY: What `state` made: the module's own value, dropped by its
+        // own function, then its memory.
+        unsafe {
+            (self.free)(self.at);
+            if self.layout.size() != 0 {
+                std::alloc::dealloc(self.at, self.layout);
+            }
+        }
+    }
+}
+thread_local! {
+    /// Modules' states on this thread, by the names they gave.
+    static STATES: std::cell::RefCell<std::collections::HashMap<String, ModuleState>> = Default::default();
+}
+unsafe extern "C" fn state(
+    _host: *mut c_void,
+    name: *const u8,
+    len: usize,
+    size: usize,
+    align: usize,
+    init: unsafe extern "C" fn(*mut u8),
+    free: unsafe extern "C" fn(*mut u8),
+) -> *mut u8 {
+    // SAFETY: The module's `&str`.
+    let name = unsafe { name_of(name, len) };
+    STATES.with_borrow_mut(|states| {
+        if let Some(state) = states.get(&name) {
+            return state.at;
+        }
+        let layout =
+            std::alloc::Layout::from_size_align(size, align).expect("a module's state's layout");
+        // SAFETY: A layout of the module's own type; `init` writes it.
+        let at = unsafe {
+            let at = if size == 0 {
+                std::ptr::without_provenance_mut(align)
+            } else {
+                std::alloc::alloc(layout)
+            };
+            assert!(!at.is_null(), "no memory for a module's state");
+            init(at);
+            at
+        };
+        states.insert(name, ModuleState { at, layout, free });
+        at
+    })
+}
+
 impl ScriptHost {
     /// Loads a native module (a library built with the `zgx-module` crate)
     /// and lets it register its functions and actions with this host, as
@@ -338,6 +393,7 @@ impl ScriptHost {
             host: std::ptr::from_ref(self) as *mut c_void,
             function: register_function,
             action: register_action,
+            state,
         };
         // SAFETY: The tables an entry is called with, `registrar` alive
         // through the call.
