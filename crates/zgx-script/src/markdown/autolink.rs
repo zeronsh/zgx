@@ -10,6 +10,27 @@
 //! files and pictures are left as they are.
 
 use super::Run;
+use std::cell::RefCell;
+
+thread_local! {
+    /// The markdown being read with autolinks, and where it starts in the
+    /// whole text (`read_from`): kept apart from the parse's own state, so
+    /// a parse without them reads as it did.
+    static SOURCE: RefCell<(String, usize)> = const { RefCell::new((String::new(), 0)) };
+}
+
+/// The markdown a parse with autolinks is about to read, from `offset` in
+/// the whole text: what its links read of what was written
+/// (`entity_in_source`).
+#[cold]
+#[inline(never)]
+pub(super) fn read_from(text: &str, offset: usize) {
+    SOURCE.with_borrow_mut(|(source, at)| {
+        source.clear();
+        source.push_str(text);
+        *at = offset;
+    });
+}
 
 /// A link found in text: its bytes and where it goes.
 #[derive(Debug, PartialEq)]
@@ -27,8 +48,10 @@ fn opens_after(c: char) -> bool {
 
 /// The autolink literals in `text`. A literal may start at a byte in
 /// `edges` too (where a run of other marks starts: a delimiter the parser
-/// took was there).
-pub(super) fn find(text: &str, edges: &[usize]) -> Vec<Found> {
+/// took was there). `source` is the markdown it was read from, for what
+/// the text alone can't say: whether a link's last character was an
+/// entity there (`&amp;`), which GFM leaves out of it as written.
+pub(super) fn find(text: &str, edges: &[usize], source: &str) -> Vec<Found> {
     let mut found = Vec::new();
     let bytes = text.as_bytes();
     let mut at = 0;
@@ -42,8 +65,8 @@ pub(super) fn find(text: &str, edges: &[usize]) -> Vec<Found> {
                 || text[..at].chars().next_back().is_some_and(opens_after)
         };
         let link = match b {
-            b'h' | b'H' if opens() => url(text, at),
-            b'w' | b'W' if opens() => www(text, at),
+            b'h' | b'H' if opens() => url(text, at, source),
+            b'w' | b'W' if opens() => www(text, at, source),
             b'@' => email(text, floor, at),
             _ => None,
         };
@@ -59,14 +82,16 @@ pub(super) fn find(text: &str, edges: &[usize]) -> Vec<Found> {
     found
 }
 
-/// `http://` or `https://` (any case) and a valid domain at `at`.
-fn url(text: &str, at: usize) -> Option<Found> {
+/// `http://` or `https://` (any case) and a valid domain at `at`, a
+/// period in it or not (`https://localhost:3000`, as micromark's
+/// `domainAfter`, remark-gfm's, links it).
+fn url(text: &str, at: usize, source: &str) -> Option<Found> {
     let rest = &text[at..];
     let scheme = ["https://", "http://"].into_iter().find(|s| {
         rest.get(..s.len())
             .is_some_and(|r| r.eq_ignore_ascii_case(s))
     })?;
-    let end = at + scheme.len() + extent(&rest[scheme.len()..])?;
+    let end = at + extent(text, at, scheme.len(), false, source)?;
     Some(Found {
         start: at,
         end,
@@ -75,7 +100,7 @@ fn url(text: &str, at: usize) -> Option<Found> {
 }
 
 /// `www.` (any case) and a valid domain at `at`: linked to `http://`.
-fn www(text: &str, at: usize) -> Option<Found> {
+fn www(text: &str, at: usize, source: &str) -> Option<Found> {
     let rest = &text[at..];
     if !rest
         .get(..4)
@@ -83,7 +108,7 @@ fn www(text: &str, at: usize) -> Option<Found> {
     {
         return None;
     }
-    let end = at + extent(rest)?;
+    let end = at + extent(text, at, 0, true, source)?;
     Some(Found {
         start: at,
         end,
@@ -91,10 +116,13 @@ fn www(text: &str, at: usize) -> Option<Found> {
     })
 }
 
-/// How far a URL from its domain (`text`'s start) reaches, trailing
-/// punctuation, an unbalanced `)` and an entity left out; `None` if its
-/// domain isn't valid.
-fn extent(text: &str) -> Option<usize> {
+/// How far a URL starting at `at` in `all` reaches (from there), its
+/// domain `domain` bytes on: trailing punctuation, an unbalanced `)` and
+/// an entity left out, whether in the text (`&hl;`) or in its `source`
+/// (`&amp;`, read as `&`). `None` if its domain isn't valid (needing a
+/// period with `dot`).
+fn extent(all: &str, at: usize, domain: usize, dot: bool, source: &str) -> Option<usize> {
+    let text = &all[at..];
     // To a space or a `<`.
     let mut end = text
         .find(|c: char| c.is_whitespace() || c == '<')
@@ -104,6 +132,11 @@ fn extent(text: &str) -> Option<usize> {
         let Some(last) = link.chars().next_back() else {
             break;
         };
+        let cut = end - last.len_utf8();
+        if cut > domain && entity_in_source(source, &text[..cut]) {
+            end = cut;
+            continue;
+        }
         let unbalanced = || link.matches(')').count() > link.matches('(').count();
         if matches!(last, '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~')
             || (last == ')' && unbalanced())
@@ -121,18 +154,38 @@ fn extent(text: &str) -> Option<usize> {
             break;
         }
     }
-    let domain_end = text[..end]
+    let host = &text[domain..end];
+    let host_end = host
         .find(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
-        .unwrap_or(end);
-    valid_domain(&text[..domain_end]).then_some(end)
+        .unwrap_or(host.len());
+    valid_domain(&host[..host_end], dot).then_some(end)
+}
+
+/// Whether, in `source`, the text `before` is followed by an entity-like
+/// `&name;` or `&#…;` (so the character after `before` in the text is that
+/// entity, read). The first place `before` is written decides.
+fn entity_in_source(source: &str, before: &str) -> bool {
+    let Some(at) = source.find(before) else {
+        return false;
+    };
+    let rest = &source[at + before.len()..];
+    let Some(name) = rest.strip_prefix('&') else {
+        return false;
+    };
+    let name = name.strip_prefix('#').unwrap_or(name);
+    let len = name
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(name.len());
+    len > 0 && name[len..].starts_with(';')
 }
 
 /// GFM's valid domain: segments of letters, digits, `_` and `-` between
-/// periods, at least one period, and no `_` in the last two segments.
-fn valid_domain(domain: &str) -> bool {
+/// periods, at least one period (with `dot`), and no `_` in the last two
+/// segments.
+fn valid_domain(domain: &str, dot: bool) -> bool {
     let domain = domain.trim_end_matches('.');
     let segments: Vec<&str> = domain.split('.').collect();
-    segments.len() >= 2
+    segments.len() >= if dot { 2 } else { 1 }
         && segments.iter().all(|s| !s.is_empty())
         && segments.iter().rev().take(2).all(|s| !s.contains('_'))
 }
@@ -177,8 +230,18 @@ fn plain(run: &Run) -> bool {
 
 /// A block's runs with their autolink literals linked: each stretch of
 /// plain runs is read as one text, and its runs split where a link starts
-/// or ends, keeping their marks.
-pub(super) fn link_runs(runs: &mut Vec<Run>) {
+/// or ends, keeping their marks. `top` is where the block's top-level
+/// element starts in the whole text: its links read the markdown from
+/// there (`read_from`).
+pub(super) fn link_runs(runs: &mut Vec<Run>, top: usize) {
+    SOURCE.with_borrow(|(text, offset)| {
+        let source = text.get(top.saturating_sub(*offset)..).unwrap_or(text);
+        link_runs_in(runs, source);
+    });
+}
+
+/// `link_runs`, reading `source` for what was written.
+fn link_runs_in(runs: &mut Vec<Run>, source: &str) {
     let mut out: Vec<Run> = Vec::with_capacity(runs.len());
     let mut i = 0;
     while i < runs.len() {
@@ -200,7 +263,7 @@ pub(super) fn link_runs(runs: &mut Vec<Run>) {
             }
             text.push_str(&run.text);
         }
-        let found = find(&text, &edges);
+        let found = find(&text, &edges, source);
         if found.is_empty() {
             out.extend(stretch.iter_mut().map(std::mem::take));
             continue;
@@ -240,7 +303,7 @@ mod tests {
     fn shown(text: &str) -> String {
         let mut out = String::new();
         let mut at = 0;
-        for f in find(text, &[]) {
+        for f in find(text, &[], text) {
             out.push_str(&text[at..f.start]);
             out.push_str(&format!("[{}]({})", &text[f.start..f.end], f.to));
             at = f.end;
@@ -351,8 +414,16 @@ mod tests {
         links("xwww.a.com", "xwww.a.com");
         links("*www.a.com*", "*[www.a.com](http://www.a.com)*");
         links("~https://a.b~", "~[https://a.b](https://a.b)~");
-        // Its domain needs a period, and no `_` in its last two parts.
-        links("https://localhost/x", "https://localhost/x");
+        // No domain needs a period, as micromark's (remark-gfm's) has it:
+        // `domainAfter` refuses only an empty domain or a `_` in its last
+        // two parts. Nothing after `www.` is no domain.
+        links(
+            "https://localhost:3000/x",
+            "[https://localhost:3000/x](https://localhost:3000/x)",
+        );
+        links("www.localhost x", "[www.localhost](http://www.localhost) x");
+        links("www. x", "www. x");
+        links("http://a_b.c x", "http://a_b.c x");
         links("www.a_b.com", "www.a_b.com");
         links("www.a_b.c.com", "[www.a_b.c.com](http://www.a_b.c.com)");
         links("http:// a.b and www.", "http:// a.b and www.");

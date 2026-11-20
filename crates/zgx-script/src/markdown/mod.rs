@@ -1118,6 +1118,9 @@ struct Made {
 /// `text` (which starts at `offset` in the whole) parsed into its top-level
 /// elements, a reference to a definition ahead of it in `defs` following it.
 fn parse_at(text: &str, offset: usize, options: &Options, defs: &Defs) -> Made {
+    if options.autolinks {
+        autolink::read_from(text, offset);
+    }
     parse_or_scan(text, offset, options, false, defs)
 }
 /// `parse_at`, or with `scan` its top-level elements alone (`scan_tops`):
@@ -1679,8 +1682,8 @@ fn safe_href(href: &str) -> bool {
 /// test.
 #[cold]
 #[inline(never)]
-fn link_runs(runs: &mut Vec<Run>) {
-    autolink::link_runs(runs);
+fn link_runs(runs: &mut Vec<Run>, top: usize) {
+    autolink::link_runs(runs, top);
 }
 
 /// What is being built at each level of nesting.
@@ -1957,7 +1960,7 @@ impl Builder<'_> {
             }
         }
         if self.options.autolinks {
-            link_runs(&mut runs);
+            link_runs(&mut runs, self.top);
         }
         runs_value(&runs)
     }
@@ -2926,6 +2929,64 @@ mod tests {
             marked("# www.a.com", &autolinks()),
             [vec!["www.a.com>http://www.a.com"]]
         );
+    }
+
+    #[test]
+    fn an_autolinks_trailing_entity_stays_out_as_written() {
+        // Anara's case: the source's `&amp;` is an entity GFM leaves out,
+        // though the text reads `&`.
+        links(
+            "Ends https://example.com/a&amp; here.",
+            &[
+                "Ends ",
+                "https://example.com/a>https://example.com/a",
+                "& here.",
+            ],
+        );
+        links(
+            "See www.a.com/x.&#38; now",
+            &["See ", "www.a.com/x>http://www.a.com/x", ".& now"],
+        );
+        // A `&` written as itself is no entity: it stays in.
+        links(
+            "Ends https://example.com/a& here.",
+            &[
+                "Ends ",
+                "https://example.com/a&>https://example.com/a&",
+                " here.",
+            ],
+        );
+        // In a later paragraph, the source read is that paragraph's own.
+        assert_eq!(
+            marked(
+                "x https://e.com/a\n\ny https://e.com/a&amp; z",
+                &autolinks()
+            ),
+            [
+                vec!["x ", "https://e.com/a>https://e.com/a"],
+                vec!["y ", "https://e.com/a>https://e.com/a", "& z"],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_schemes_domain_needs_no_period() {
+        // Anara's case, as micromark (remark-gfm) links it: its domains
+        // need no period, `www.`'s neither.
+        links(
+            "Open https://localhost:3000/x now",
+            &[
+                "Open ",
+                "https://localhost:3000/x>https://localhost:3000/x",
+                " now",
+            ],
+        );
+        links(
+            "www.localhost now",
+            &["www.localhost>http://www.localhost", " now"],
+        );
+        links("www. now", &["www. now"]);
+        links("http://x now", &["http://x>http://x", " now"]);
     }
 
     #[test]
