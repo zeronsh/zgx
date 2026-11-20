@@ -9,6 +9,7 @@ exclude = [
     "vendor/accesskit_unix",
     "vendor/accesskit_windows",
     "vendor/alacritty-terminal",
+    "vendor/arboard",
     "vendor/cosmic-text",
     "vendor/harfrust",
     "vendor/swash",

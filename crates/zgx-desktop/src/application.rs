@@ -3823,14 +3823,8 @@ impl Host {
             // Through the region's `View::on_selection_copy`, the clipboard
             // taken only to write.
             let clipboard = self.clipboard.clone();
-            self.context.ui.copy_selection_from(|text, html| {
-                clipboard
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|clipboard| match html {
-                        Some(html) => clipboard.set_rich_text(text, html).is_ok(),
-                        None => clipboard.set_text(text).is_ok(),
-                    })
+            self.context.ui.copy_selection_from(|content| {
+                (clipboard.borrow_mut().as_mut()).is_some_and(|clipboard| clipboard.write(content))
             });
             return true;
         };
@@ -3856,14 +3850,8 @@ impl Host {
             &self.context.ui,
             &editor,
             k.eq_ignore_ascii_case("x"),
-            |text, html| {
-                clipboard
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|clipboard| match html {
-                        Some(html) => clipboard.set_rich_text(text, html).is_ok(),
-                        None => clipboard.set_text(text).is_ok(),
-                    })
+            |content| {
+                (clipboard.borrow_mut().as_mut()).is_some_and(|clipboard| clipboard.write(content))
             },
         );
         true
@@ -9493,7 +9481,7 @@ fn copy_or_cut_editor(
     ui: &zgx::widgets::Ui,
     editor: &zgx::widgets::EditorHandle,
     cut: bool,
-    write: impl FnOnce(String, Option<String>) -> bool,
+    write: impl FnOnce(zgx::widgets::ClipboardContent) -> bool,
 ) -> bool {
     ui.copy_from(editor, cut, write)
 }
@@ -9518,10 +9506,10 @@ mod tests {
                 .w(200.)
                 .h(30.)
                 .on_copy(|request| {
-                    Some(ClipboardContent {
-                        text: request.text.to_uppercase(),
-                        html: Some(format!("<i>{}</i>", request.text)),
-                    })
+                    Some(ClipboardContent::new(
+                        request.text.to_uppercase(),
+                        Some(format!("<i>{}</i>", request.text)),
+                    ))
                 }),
         );
         ui.prepare_frame();
@@ -9532,8 +9520,8 @@ mod tests {
             &ui,
             &editor,
             false,
-            |text, html| {
-                written = Some((text, html));
+            |content: ClipboardContent| {
+                written = Some((content.text, content.html));
                 true
             }
         ));
@@ -9547,8 +9535,8 @@ mod tests {
             &ui,
             &editor,
             true,
-            |text, html| {
-                written = Some((text, html));
+            |content: ClipboardContent| {
+                written = Some((content.text, content.html));
                 true
             }
         ));
@@ -9559,7 +9547,7 @@ mod tests {
         assert_eq!(value.get(), " world", "\u{2318}X deletes the selection");
         editor.set_secure(true);
         editor.set_selection(0, 6);
-        assert!(!super::copy_or_cut_editor(&ui, &editor, false, |_, _| {
+        assert!(!super::copy_or_cut_editor(&ui, &editor, false, |_| {
             panic!("a password field writes nothing")
         }));
     }

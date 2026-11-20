@@ -2088,17 +2088,13 @@ impl EditorHandle {
     /// Whether the clipboard took it. (Pin line.)
     #[doc(hidden)]
     pub fn copy_to_clipboard(&self, ui: &Ui, platform: &crate::platform::PlatformService) -> bool {
-        ui.copy_from(self, false, |text, html| {
-            write_clipboard(platform, text, html)
-        })
+        ui.copy_from(self, false, |content| write_clipboard(platform, content))
     }
     /// Cut the selection to `platform`'s clipboard as the person would
     /// (`Ui::copy_from`). Whether the clipboard took it. (Pin line.)
     #[doc(hidden)]
     pub fn cut_to_clipboard(&self, ui: &Ui, platform: &crate::platform::PlatformService) -> bool {
-        ui.copy_from(self, true, |text, html| {
-            write_clipboard(platform, text, html)
-        })
+        ui.copy_from(self, true, |content| write_clipboard(platform, content))
     }
     /// Replace the selection with `text`, as typed: what a text service
     /// (Windows' emoji panel, dictation, touch keyboard) inserts. A
@@ -2271,13 +2267,39 @@ pub enum EditCommand {
     /// Select all the text there is to select.
     SelectAll,
 }
-/// What goes on the clipboard: text, and HTML beside it where given.
-/// (Pin line.)
+/// What goes on the clipboard: text, and HTML beside it where given, and
+/// types of the app's own beside them. (Pin line.)
 #[doc(hidden)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClipboardContent {
     pub text: String,
     pub html: Option<String>,
+    /// MIME types of the app's own and their text
+    /// (`Platform::set_clipboard_typed`), in one change with the text and
+    /// HTML; none writes them as ever.
+    pub types: Vec<(String, String)>,
+}
+impl ClipboardContent {
+    /// `text`, with `html` beside it where given, and no types.
+    pub fn new(text: String, html: Option<String>) -> Self {
+        Self {
+            text,
+            html,
+            types: Vec::new(),
+        }
+    }
+    /// Put it on `platform`'s clipboard: its types, where it has some, in
+    /// one change with the text and HTML; else the text, and the HTML
+    /// beside it, as ever. Whether the clipboard took it.
+    pub fn write(self, platform: &dyn crate::platform::Platform) -> bool {
+        if !self.types.is_empty() {
+            return platform.set_clipboard_typed(self.text, self.html, &self.types);
+        }
+        match self.html {
+            Some(html) => platform.set_clipboard_rich_text(self.text, html),
+            None => platform.set_clipboard_text(self.text),
+        }
+    }
 }
 /// What `View::on_copy` gives an editor: what goes on the clipboard for a
 /// copy or a cut, or none for the selection's plain text.
@@ -2312,16 +2334,12 @@ pub struct SelectedRows {
 /// What `View::on_selection_copy` gives a region: what goes on the
 /// clipboard, or none for the selection's own text and HTML.
 pub(crate) type SelectionCopyHook = Rc<dyn Fn(&SelectionCopyRequest) -> Option<ClipboardContent>>;
-/// `text` on `platform`'s clipboard, with `html` beside it where given.
+/// `content` on `platform`'s clipboard (`ClipboardContent::write`).
 pub(crate) fn write_clipboard(
     platform: &crate::platform::PlatformService,
-    text: String,
-    html: Option<String>,
+    content: ClipboardContent,
 ) -> bool {
-    match html {
-        Some(html) => platform.0.set_clipboard_rich_text(text, html),
-        None => platform.0.set_clipboard_text(text),
-    }
+    content.write(&*platform.0)
 }
 /// The layout and notification passes a frame takes to settle.
 const LAYOUT_PASSES: usize = 64;
@@ -5124,7 +5142,7 @@ impl Ui {
     /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`,
     /// `clipboard_shortcut`): its
     /// `View::on_copy` says what goes on the clipboard, else its selection's
-    /// text, and `write` puts it there (text, and HTML beside it). A
+    /// text, and `write` puts it there (text, HTML and types beside it). A
     /// password field gives nothing and asks no hook; nor does an empty
     /// selection. A cut the clipboard took deletes the selection, one undo
     /// step, unless the editor is read-only (a cut there is a copy).
@@ -5134,7 +5152,7 @@ impl Ui {
         &self,
         editor: &EditorHandle,
         cut: bool,
-        write: impl FnOnce(String, Option<String>) -> bool,
+        write: impl FnOnce(ClipboardContent) -> bool,
     ) -> bool {
         if editor.is_secure() {
             return false;
@@ -5154,12 +5172,10 @@ impl Ui {
             range,
             text: &text,
         };
-        let content = hook.and_then(|hook| hook(&request));
-        let (text, html) = match content {
-            Some(content) => (content.text, content.html),
-            None => (text, None),
-        };
-        if !write(text, html) {
+        let content = hook
+            .and_then(|hook| hook(&request))
+            .unwrap_or_else(|| ClipboardContent::new(text, None));
+        if !write(content) {
             return false;
         }
         if cut {
@@ -5205,10 +5221,7 @@ impl Ui {
         command: EditCommand,
         platform: &dyn crate::platform::Platform,
     ) -> bool {
-        let write = |text: String, html: Option<String>| match html {
-            Some(html) => platform.set_clipboard_rich_text(text, html),
-            None => platform.set_clipboard_text(text),
-        };
+        let write = |content: ClipboardContent| content.write(platform);
         if command == EditCommand::SelectAll {
             return self.select_all();
         }

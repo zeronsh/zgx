@@ -154,7 +154,7 @@ zgx inspect sleep 500                                  # let the app run
 ## Clipboard
 
 ```sh
-zgx inspect clipboard                                  # its text, HTML, image's size and files
+zgx inspect clipboard                                  # its text, HTML, image's size, files and types (a copy's `types`)
 zgx inspect clipboard set --text "hello"               # or --html "<p>hi</p>" (with --text: a rich copy)
 zgx inspect clipboard set --image shot.png
 zgx inspect clipboard set --files notes.pdf shot.png   # as a file manager copies them: a paste hears them as files
