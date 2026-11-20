@@ -11,12 +11,14 @@ static CORNER_SHAPE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32
 /// Sets the shape every rounded corner smaller than half its box takes, as CSS's
 /// `corner-shape: superellipse(k)`: 1 (the default) is round, 1.5 a continuous
 /// corner. Corners as large as half the box (pills, circles) stay round.
+#[doc(hidden)]
 pub fn set_corner_shape(k: f32) {
     let k = if k.is_finite() { k.clamp(1., 8.) } else { 1. };
     CORNER_SHAPE.store(k.to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The corner shape `set_corner_shape` set.
+#[doc(hidden)]
 pub fn corner_shape() -> f32 {
     f32::from_bits(CORNER_SHAPE.load(std::sync::atomic::Ordering::Relaxed))
 }
@@ -1467,17 +1469,17 @@ pub(crate) fn merge_insets(target: &mut Insets, source: Insets, mask: u8) {
         target.left = source.left;
     }
 }
-/// Take a setter's value; a theme token stands for a placeholder value the
-/// setter writes as any other, and the property is bound to the token (its
-/// value is written when the node is styled). A later value replaces the
-/// binding. One path through the setter keeps chained setters moving the
-/// style in place.
 /// An outline's colour while only its width is set: a patch carrying it keeps
 /// the colour (or theme token) it lands on, and alone it draws black.
 pub(crate) const OUTLINE_COLOR_UNSET: Color = Color(1, 2, 3, 0);
 /// An outline's width while only its colour is set: a patch carrying it keeps
 /// the width it lands on (0 included), and alone it draws 1 point.
 pub(crate) const OUTLINE_WIDTH_UNSET: f32 = f32::NAN;
+/// Take a setter's value; a theme token stands for a placeholder value the
+/// setter writes as any other, and the property is bound to the token (its
+/// value is written when the node is styled). A later value replaces the
+/// binding. One path through the setter keeps chained setters moving the
+/// style in place.
 macro_rules! value_or_token {
     ($self:ident, $value:ident, $field:expr) => {
         let ($value, token) = crate::theme::split($value.into());
