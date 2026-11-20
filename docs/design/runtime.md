@@ -95,45 +95,61 @@ Rejected: building zgx as a Rust `dylib` and linking modules against it. Calls w
 
 ### Values
 
-The host API's one data type is `zgx_script::Value` (`crates/zgx-script/src/value.rs`): strings, lists and maps held in `Rc`s, which state shares rather than copies. A module must neither copy them nor pay a call to read them: code linked into an app reads a row's field with a few loads, and a module has to cost the same.
+The host API's one data type is `zgx_script::Value` (`crates/zgx-script/src/value.rs`): strings, lists and maps shared rather than copied. A module must neither copy them nor pay a call to read them: code linked into an app reads a row's field with a few loads, and a module has to cost the same.
 
 So what crosses is the value's own layout. A module is lent a pointer to a `Value` where the runtime holds it, and reads it there.
 
-| | Where |
-| --- | --- |
-| which kind | the value's first byte (`Value` is `#[repr(u8)]`, its variants numbered) |
-| a boolean, a number | in the value |
-| a string | a counted pointer and a length: its UTF-8 is 16 bytes past the pointer |
-| a list | the same: its items, each a value, 24 bytes apart |
-| a map | the same: its fields, each a key and a value, 40 bytes apart, sorted by key |
-| how many hold a string, a list or a map | the word at the counted pointer |
+| | Where | Stated by |
+| --- | --- | --- |
+| which kind | the value's first byte | `Value`: `#[repr(u8)]`, its variants numbered |
+| a boolean, a number | in the value | the same |
+| a string | a pointer to its UTF-8, then its length | `Str`: `#[repr(C)]` |
+| a list | a pointer to its items, each a value, then its length | `Slice<Value>` (`List`): `#[repr(C)]` |
+| a map | the same; its fields 40 bytes apart, sorted by key | `Slice<Field>` (`Map`) |
+| a field | its key, a string, then its value | `Field(Str, Value)`: `#[repr(C)]` |
+| how many hold a list or a map | the word 16 bytes before its items | `Slice`'s counts: `#[repr(C)]` |
+
+Every row is a layout zgx states in its own types (`crates/zgx-script/src/counted.rs`). None is the compiler's choice, so none can move with a compiler: zgx-script fails to build if its types stop matching the numbers a module reads by (`const` assertions in `crates/zgx-script/src/modules.rs`), and a test reads the words themselves (`the_layout_is_the_one_stated`).
+
+- **A list and a map are zgx's own counted slice** (`Slice<T>`), as `Rc<[T]>` is but with its counts and items at stated places. It points at its items with its counts before them, as an `Rc<str>`'s text has its own: holding and letting go of a string, a list and a map are then the same instructions, which the compiler folds into one path as it did when all three were `Rc`s. (With the counts first, each clone and drop of a list or a map cost 3 instructions more than `Rc`'s.)
+- **A string is std's own `Rc<str>`**, held as a pointer to its text and a length and made and let go of through `Rc`'s documented raw functions alone (`into_raw`, `from_raw`, `increment_strong_count`). So a `Str` and an `Rc<str>` turn into each other with no copy, and a value's string still shares its text with everything in zgx that holds an `Rc<str>`: ids, row identities, a text's source.
 
 With that a module, with no call into the runtime:
 
 - reads a string's text, a list's items and a map's fields in place;
 - finds a field by name as zgx-script's own lookup does (`find_key`, `key_eq`: the same code, in `zgx-module`);
-- holds a string, a list or a map once more, or lets go of a hold that isn't the last, by its count, as `Rc` does.
+- holds a list or a map once more, or lets go of a hold that isn't the last, by its count.
 
-It calls the runtime (`abi::Api`) to make a string, a list or a map, to free the last hold on one, and for the kinds it can't read: a row kept folded (`open`), a string past 64 KiB, which the runtime holds in pieces (`flat`, a copy), an image or an element (passed on, cloned and freed by the runtime).
+It calls the runtime (`abi::Api`) to make a string, a list or a map; to hold or let go of a string (where std keeps an `Rc`'s count is std's, so a module doesn't touch it); to free the last hold on a list or a map; and for the kinds it can't read: a row kept folded (`open`), a string past 64 KiB, which the runtime holds in pieces (`flat`, a copy), an image or an element (passed on, cloned and freed by the runtime). 64-bit targets only.
 
-**What stating the layout cost zgx-script.** Nothing measurable. The whole change against main, in retired instructions on zgx's perf scenes (`scripts/perf/suite.py ab`, and the gate's Luau cells run by hand at the gate's settings, the least of 5 runs each):
+**What stating the layout cost zgx-script.** The whole change against main, in retired instructions on zgx's perf scenes (`scripts/perf/suite.py ab`, and the gate's Luau cells run by hand at the gate's settings, the least of 5 runs each):
 
 | Cell | Against main |
 | --- | --- |
-| mount | -0.06% |
-| script-update | 0.00% (the suite's), +0.01% (the gate's settings) |
-| micro-state-luau, micro-vscroll-fixed-luau, micro-vscroll-variable-luau | 0.00%, +0.03%, 0.00% |
-| library-scroll, library-scroll-lazy | -0.03%, -0.06% |
-| anime, script-layout, list-state, list-estimate | +0.02%, +0.01%, +0.01%, 0.00% |
-| spans-plain, spans-follow, spans-md | -0.23%, +0.01%, +0.02% |
-| md-stream, md-stream-text | -0.02%, -0.08% |
-| app-mail, app-dashboard, app-sketch, app-code | +0.11%, 0.00%, -0.02%, 0.00% |
+| mount | -0.04% |
+| script-update | +0.12% (the suite's), +0.11% (the gate's settings) |
+| micro-state-luau, micro-vscroll-fixed-luau, micro-vscroll-variable-luau | -0.01%, +0.03%, +0.03% |
+| library-scroll, library-scroll-lazy | +0.08%, +0.02% |
+| anime, script-layout, list-estimate | +0.04%, +0.05%, -0.02% |
+| list-state | -0.42% |
+| spans-plain, spans-follow, spans-md | -0.05%, +0.02%, -0.02% |
+| md-stream, md-stream-text | +0.22%, +0.04% |
+| app-mail | -0.17% (the suite's), -0.24% (the gate's settings) |
+| app-dashboard, app-sketch, app-code | -0.07%, -0.02%, -0.01% |
 
-None is outside its own spread between runs (app-mail's was 0.19%). These are the kernel's counts, not the gate's own (cachegrind, which the machine didn't have), so CI's gate on the branch is the exact check.
+Within 0.1% but for four cells. Two are better: `list-state` and `app-mail`, because a table's items now move into a list in one copy. Two are worse and not explained to the instruction: `script-update` by 0.12% and `md-stream` by 0.22%. Both make and free many short strings and small maps. What is known of the difference: a string made and freed costs 205 instructions where an `Rc<str>`'s costs 202 (its last hold is found by reading its count first), a string held and let go of costs the same 22, and a list or a map held and let go of costs the same 33.
 
-**What this rests on.** `Value`'s layout is stated in its source and tested. The layout of an `Rc` of a slice (a pointer to two counts and then the contents, with a length beside it) and of a map's field (a key, then a value) is the compiler's, the same in every Rust so far but promised by none. So the runtime measures its own as it loads a module (`measured`, `crates/zgx-script/src/modules.rs`): it makes a string, a list and a map, and checks where their parts lie. If that isn't the layout modules read (`abi::LAYOUT`), no module loads, with an error that says so, and a module refuses a runtime that reports another layout. A compiler that changed one would fail zgx-script's own test of it first (`this_build_lays_values_out_as_modules_read_them`). The lasting fix, if that day comes, is a map's field as a `#[repr(C)]` struct and zgx's own counted slice; neither is needed now. 64-bit targets only.
+The first cut of the layout was far from this (`list-state` +2.66%), from causes each since removed:
 
-A function's argument is lent for the call. What it returns is owned by the runtime from then.
+- a vector moved into a slice item by item, where `Rc` copied it whole;
+- pairs turned into fields one at a time;
+- a slice pointing at its counts, which cost each clone and drop of a list or a map 3 instructions;
+- a table's items drained into a list through an iterator, with a check for each;
+- a string's drop making room on the stack for its last hold on every drop (about 7 instructions each).
+
+These are the kernel's counts, not the gate's own (cachegrind, which the machine didn't have), so CI's gate on the branch is the exact check.
+
+A function's argument is lent for the call, and what it returns is owned by the runtime from then. One that keeps or returns what it is given registers as `Host::function_taking` and is handed its argument instead: nothing is counted. That is the exception, not the default, because a function handed its argument must free it, and a table fresh from a script is held once, so freeing it is a call into the runtime on every invocation.
 
 ### What a module registers
 
@@ -167,31 +183,31 @@ A panic in a module ends the process: nothing unwinds across an `extern "C"` fun
 
 ## 3. What a module call costs
 
-The requirement is no measurable cost. As built, the first stage meets it: a call into a loaded module costs 7 instructions more than the same function linked into the program, a module's reads cost what linked-in reads cost, and Zeron's module costs no more than the code it replaced.
+The requirement is no measurable cost. As built it is close and not there: a call into a loaded module costs 16 instructions more than the same function linked into the program (0.65% of the smallest call a script can make), a module's reads cost what linked-in reads cost, and Zeron's module costs less than the code it replaced.
 
 Two measurements, both in retired instructions (user mode), release builds.
 
-**The same function, linked in and loaded** (`crates/zgx-script/examples/module_call_bench.rs`): a script calls it a million times (rows: 100,000), each arm run three times, the process's setup subtracted.
+**The same function, linked in and loaded** (`crates/zgx-script/examples/module_call_bench.rs`): a script calls it a million times (rows: 100,000), each arm the least of three runs, the process's setup subtracted.
 
 | A script's `ui.call_sync` of | Linked in | Loaded | Difference |
 | --- | --- | --- | --- |
-| a function of a string, returning a number | 2,460.1 instr | 2,467.1 instr | +7.0 (+0.28%) |
-| a function reading four fields of each of 200 rows | 71,467 instr | 71,615 instr | +148 (+0.21%) |
-| a function returning its argument | 3,915 instr | 3,965 instr | +50 (+1.3%) |
+| a function of a string, returning a number | 2,466.1 instr | 2,482.1 instr | +16.0 (+0.65%) |
+| a function reading four fields of each of 200 rows | 71,437 instr | 71,614 instr | +177 (+0.25%) |
+| a function returning its argument, lent it | 3,927 instr | 3,988 instr | +62 (+1.6%) |
 
-- **Entering a module costs 7 instructions**: one more indirect call than a host's own function, which is itself called through a pointer. Runs agreed to within 0.01 of an instruction a call.
+- **Entering a module costs 16 instructions.** One more indirect call than a host's own function, which is itself called through a pointer; and the runtime frees the lent argument by `Value`'s general drop, where a linked-in function that knows it was handed a string frees it in place. With the layout measured from `Rc` this was 7; the stated layout's string is 4 instructions longer to let go of on this path, and the rest of the difference is not attributed.
 - **Reading costs what linked-in code's reading costs**: under one instruction a row.
-- **Returning the argument itself costs 50**, the one case that differs by design: a module is lent its argument and counts it to keep it, where a linked-in function is handed it. A function that hands back what it was given is rare; one that needs to can be given its argument owned, a change to the interface not made here.
+- **Returning the argument costs 62** when the function is lent it: it counts the string to keep it, through the runtime, where a linked-in function is handed it. A function registered as `function_taking` is handed its argument too; that case was not measured.
 
 **Zeron's long-reply code, as its own Rust and as a module** (section 2's proof; both in one binary, chosen at launch; medians of 5 runs of the process, the two ways interleaved, each run the median of 21 rounds of 20,000 calls or one setting aside):
 
 | | Linked in | Loaded |
 | --- | --- | --- |
-| `ui.call_sync("chat.reply_blocks", id)`: a string in, a held list out | 2,359 instr, 171 ns (166–176) | 2,358 instr, 161 ns (158–167) |
-| `ui.call_sync("chat.reply_run", { id, key })`: two fields read, a held list out | 7,138 instr, 568 ns (550–582) | 7,013 instr, 554 ns (533–580) |
-| Setting a 2,001-block reply aside, once as its row is built | 3.45 M instr, 227 µs (220–233) | 1.94 M instr, 152 µs (148–155) |
+| `ui.call_sync("chat.reply_blocks", id)`: a string in, a held list out | 2,367 instr, 181 ns (179–218) | 2,366 instr, 172 ns (171–174) |
+| `ui.call_sync("chat.reply_run", { id, key })`: two fields read, a held list out | 7,085 instr, 589 ns (574–610) | 6,959 instr, 570 ns (563–586) |
+| Setting a 2,001-block reply aside, once as its row is built | 3.45 M instr, 249 µs (247–278) | 2.00 M instr, 156 µs (150–241) |
 
-Instructions agreed between runs to within 2 a call.
+Instructions agreed between runs to within 1 a call.
 
 The module is the app's code moved line for line, with two differences that explain why it comes out under the linked-in code rather than level with it: it reads each block's fields once where the original reads some twice, and it borrows strings the original clones. Neither is the boundary; both are what a port to borrowed values does. What the boundary itself costs is the first table.
 
@@ -301,7 +317,7 @@ Zeron's host goes past functions and state in six places. The target is a generi
 
 ## 9. Costs and risks
 
-- **The layout modules read is partly the compiler's** (section 2): checked as a module loads, and a mismatch loads nothing rather than misreading. A module is also bound to 64-bit targets.
+- **Modules are bound to 64-bit targets**, and to the layout section 2 states: changing it is a new interface number.
 - **Size.** Each module carries its own standard library and dependencies. Zeron's small module is 341 KB stripped; one with an app's usual dependencies 4.1 MB (section 4).
 - **Two allocators.** A module frees what it allocates and the runtime what it allocates; values are always the runtime's, so nothing crosses to be freed by the other. A module that wants mimalloc sets it itself.
 - **A module is trusted code.** It runs in the app's process with the app's rights. The sandbox is for scripts and plugins; nothing here extends it to modules, which is why only the app may name one.
@@ -321,3 +337,40 @@ Zeron's host goes past functions and state in six places. The target is a generi
 7. **Module hot reload** (section 7).
 
 For Zeron the same order moves its host across: its pure functions first, its chat and session models after stage 2, and its window setup after stage 5, at which point its release is the pipeline of section 6.
+
+## Appendix: what stating the layout changed for apps
+
+`Value`'s variants hold other types than they did, so Rust that matches on them or builds them by hand changes. `Value`'s functions are as they were: `Value::record`, `Value::from`, `field`, `list`, `items`, `at`, `set_path`, `to_json`, `from_json`.
+
+| | Was | Is |
+| --- | --- | --- |
+| `Value::Str` | `Rc<str>` | `Str` |
+| `Value::List` | `Rc<[Value]>` | `List` (`Slice<Value>`) |
+| `Value::Map` | `Rc<[(Rc<str>, Value)]>` | `Map` (`Slice<Field>`) |
+| a map's field | `(Rc<str>, Value)` | `Field(Str, Value)` |
+
+What keeps compiling: reading a string as `&str` (`&**s`, `s.len()`, comparing with a `&str`), a list as a slice (`items.iter()`, `items[i]`, `items.len()`), `field.0` and `field.1`, `Value::List(vec.into())`, `Value::List(iter.collect())`, `Value::Str(text.into())` from a `&str`, a `String` or an `Rc<str>`, and `Value::Map(vec![("key".into(), value)].into())`.
+
+What changes, each a compile error with the fix beside it:
+
+| Pattern | Before | After |
+| --- | --- | --- |
+| an `Rc<str>` out of a value | `Value::Str(s) => s.clone()` | `Value::Str(s) => s.rc()` (or `.into()`; held once more, not copied) |
+| a value from an `Rc<str>` by the variant as a function | `label.map_or(Value::Nil, Value::Str)` | `label.map_or(Value::Nil, Value::from)` |
+| a pair pattern over a map's fields | `for (key, value) in fields.iter()` | `for Field(key, value) in fields.iter()` |
+| a field built as a pair where a `Field` is wanted | `fields.push((key, value))` | `fields.push(Field(key, value))` |
+| `Rc`'s functions on a list or a map | `Rc::ptr_eq(a, b)`, `Rc::get_mut(items)`, `Rc::strong_count`, `Rc::downgrade` | `Slice::ptr_eq(a, b)`, `Slice::get_mut(items)`, … (`Str::ptr_eq` for strings) |
+| a list or a map made through `Rc` | `Value::List(Rc::from(rows))` | `Value::List(rows.into())` |
+| a type naming the old payload | `Rc<[Value]>`, `Vec<(Rc<str>, Value)>` | `List`, `Vec<Field>` (or `Vec<(Str, Value)>`) |
+| fields kept as `(Rc<str>, Value)` pairs, into a map | `Value::Map(pairs.into())` | keys as `Str` (`Str::from(rc)`, no copy), or `Value::record(pairs)` |
+
+One conversion does copy and is there only so old code keeps working: `Slice::from(Rc<[T]>)` clones the items into a slice of zgx's own. Code on a hot path holds a `List` from the start.
+
+How many sites, counted from the changes themselves:
+
+| | Lines changed | Of |
+| --- | --- | --- |
+| zgx's own crates, outside the new types (zgx-script, its tests and examples, zgx-desktop's examples) | 302 | about 634,000 lines of Rust |
+| Zeron's host (`apps/zgx/src`, 11 files) | 98 | 71,796 |
+
+In Zeron 81 of its first 124 errors were fixed by rule (a pattern becomes `Field(…)`, `.clone()` becomes `.rc()`, `Rc::from` becomes `Slice::from`) and 14 sites by hand: a struct holding `Rc<[Value]>`, a function taking `&mut Rc<str>`, three places building fields as pairs.

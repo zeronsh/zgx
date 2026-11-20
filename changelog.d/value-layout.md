@@ -1,0 +1,4 @@
+---
+section: changed
+---
+- **A value's strings, lists and maps have types of zgx's own** (zgx-script): `Value::Str` holds a `Str`, `Value::List` a `List`, and `Value::Map` a `Map` of `Field(Str, Value)`, where they held `Rc<str>`, `Rc<[Value]>` and `Rc<[(Rc<str>, Value)]>`. Their layout is stated, which is what lets a native module read a value where it is. Reading them is as it was (a `Str` is a `&str`, a `List` a slice, a field's `.0` and `.1`), and so are `Value::record`, `Value::from`, `field` and the rest. Code that matched a field as a pair, took an `Rc<str>` out of a value, or called `Rc`'s functions on a list changes: [the design's appendix](docs/design/runtime.md#appendix-what-stating-the-layout-changed-for-apps) has each case, before and after. A `Str` and an `Rc<str>` turn into each other with no copy.
