@@ -762,6 +762,43 @@ impl Diagnostics {
     }
 }
 pub(crate) type SharedWarnings = Rc<Diagnostics>;
+/// What a host registers by name (`ScriptHost::action`, `function`,
+/// `async_action`): each kind its own names.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Registration {
+    Action,
+    Function,
+    AsyncAction,
+}
+#[cfg(debug_assertions)]
+impl Registration {
+    fn describe(self) -> (&'static str, &'static str) {
+        match self {
+            Registration::Action => ("action", "replace_action"),
+            Registration::Function => ("function", "replace_function"),
+            Registration::AsyncAction => ("async action", "replace_async_action"),
+        }
+    }
+}
+/// A place in the host's code a name was registered from.
+#[cfg(debug_assertions)]
+type Site = &'static std::panic::Location<'static>;
+/// Where a debug build's host registered each name from (`#[track_caller]`):
+/// a name registered again from a site it hasn't been registered from
+/// replaces the earlier handler silently, which apps have shipped as bugs
+/// (two handlers named alike, the later one answering both), so it warns.
+/// Sites a name was registered from before (a host rebuilt, a reload)
+/// don't, nor does `replace_*`. A release build records nothing.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct Registrations {
+    /// Each name's sites so far, and the latest of them.
+    sites: HashMap<(Registration, String), (Vec<Site>, Site)>,
+    /// What those warnings said, for the debug strip (`lint_findings`): the
+    /// scripts' lint, run at each load, shows them first.
+    findings: Vec<String>,
+}
 /// Where script warnings go: stderr and the host's list
 /// ([`ScriptHost::warnings`]). Everything that warns comes through here, so
 /// a host can show them elsewhere too.
@@ -975,6 +1012,15 @@ fn banner(text: &str, dismiss: impl Fn() + 'static) -> View {
 /// show: over any modal or popover, its × taking its own clicks while a
 /// dialog holds focus (a click there reached the dialog's backdrop), and
 /// the pointer passing through the rest. Made only while an error shows.
+/// The lint strip's text: `zgx lint: 3 findings`, then each, a line apiece.
+fn lint_text(found: &[String]) -> String {
+    format!(
+        "zgx lint: {} finding{}\n{}",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" },
+        found.join("\n")
+    )
+}
 /// A debug build's lint findings (`zgx lint: 3 findings` and the first of
 /// them), in the window's lower corner with a dismiss button: no modal, no
 /// error, and only its own area takes the pointer. The rest are in
@@ -1966,6 +2012,9 @@ struct Inner {
     type_errors: Signal<Option<String>>,
     /// What `zgx lint` finds in the scripts as loaded (debug builds).
     lint: Signal<Option<String>>,
+    /// Where each name was registered from (debug builds).
+    #[cfg(debug_assertions)]
+    registrations: RefCell<Registrations>,
     /// The theme file error shown, if any (cleared when the file reads).
     theme_error: RefCell<Option<String>>,
     /// Collects the VMs' garbage as the host goes idle (`zgx::idle`).
@@ -2151,6 +2200,8 @@ impl ScriptHost {
             checker: RefCell::default(),
             type_errors: runtime.signal(None),
             lint: runtime.signal(None),
+            #[cfg(debug_assertions)]
+            registrations: RefCell::default(),
             theme_error: RefCell::default(),
             idle: RefCell::default(),
             #[cfg(feature = "audio")]
@@ -2720,39 +2771,171 @@ impl ScriptHost {
         }
     }
     /// Registers a Rust function scripts can bind with `ui.action(name, arg)`.
+    /// A name registered again replaces the first; in a debug build, from
+    /// a place in the code it wasn't registered from before, that warns
+    /// (stderr, [`warnings`](Self::warnings), the lint strip): use
+    /// `replace_action` to replace one on purpose.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
-        self.0
-            .actions
-            .borrow_mut()
-            .insert(name.into(), Rc::new(action));
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Action,
+            &name,
+            std::panic::Location::caller(),
+            false,
+        );
+        self.0.actions.borrow_mut().insert(name, Rc::new(action));
+    }
+    /// `action`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn replace_action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Action,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        self.0.actions.borrow_mut().insert(name, Rc::new(action));
     }
     /// Registers a Rust function scripts call for its value now, with
     /// `ui.call_sync(name, arg)`: a read of data the host keeps (the rows a
     /// virtualized list shows of a large diff), so the data never has to
     /// be copied into the script whole. It runs on the UI thread: keep it
     /// quick (no I/O; `async_action` is for that). Plugins reach it as
-    /// they reach actions (`expose_action`).
+    /// they reach actions (`expose_action`). A name registered twice warns
+    /// as [`action`](Self::action)'s does (`replace_function` doesn't).
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn function(&self, name: impl Into<String>, function: impl Fn(Value) -> Value + 'static) {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Function,
+            &name,
+            std::panic::Location::caller(),
+            false,
+        );
         self.0
             .functions
             .borrow_mut()
-            .insert(name.into(), Rc::new(function));
+            .insert(name, Rc::new(function));
+    }
+    /// `function`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn replace_function(
+        &self,
+        name: impl Into<String>,
+        function: impl Fn(Value) -> Value + 'static,
+    ) {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Function,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        self.0
+            .functions
+            .borrow_mut()
+            .insert(name, Rc::new(function));
     }
     /// Registers an async Rust function scripts call with `ui.call(name,
     /// arg)`, getting a promise of its result: `Ok` settles it with the
     /// value, `Err` rejects it with the message. The future runs on the
     /// window's tasks (the main thread, so it need not be `Send`), woken by
     /// what it waits for; hand blocking work to a thread and await its
-    /// answer (`zgx::task::latest`).
+    /// answer (`zgx::task::latest`). A name registered twice warns as
+    /// [`action`](Self::action)'s does (`replace_async_action` doesn't).
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn async_action<F, Fut>(&self, name: impl Into<String>, action: F)
     where
         F: Fn(Value) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Value, String>> + 'static,
     {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::AsyncAction,
+            &name,
+            std::panic::Location::caller(),
+            false,
+        );
         self.0.async_actions.borrow_mut().insert(
-            name.into(),
+            name,
             Rc::new(move |arg| -> calls::Call { Box::pin(action(arg)) }),
         );
+    }
+    /// `async_action`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn replace_async_action<F, Fut>(&self, name: impl Into<String>, action: F)
+    where
+        F: Fn(Value) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<Value, String>> + 'static,
+    {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::AsyncAction,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        self.0.async_actions.borrow_mut().insert(
+            name,
+            Rc::new(move |arg| -> calls::Call { Box::pin(action(arg)) }),
+        );
+    }
+    /// A debug build's record of `name` registered from `site`: from a site
+    /// it wasn't registered from before, and not on purpose (`replace`),
+    /// it warns, naming that site and the one it replaces. Each site once.
+    #[cfg(debug_assertions)]
+    #[cold]
+    #[inline(never)]
+    fn registered(&self, kind: Registration, name: &str, site: Site, replace: bool) {
+        let warned = {
+            let mut registrations = self.0.registrations.borrow_mut();
+            let (sites, latest) = registrations
+                .sites
+                .entry((kind, name.to_owned()))
+                .or_insert_with(|| (Vec::new(), site));
+            let new = !sites.contains(&site);
+            let earlier = *latest;
+            *latest = site;
+            if new {
+                sites.push(site);
+            }
+            if !new || replace || sites.len() < 2 {
+                return;
+            }
+            let (what, replace) = kind.describe();
+            let message = format!(
+                "{what} \"{name}\" registered again at {site} replaces the one registered at \
+                 {earlier}: only the later one runs (`{replace}` replaces one on purpose)"
+            );
+            registrations.findings.push(message.clone());
+            message
+        };
+        warning(Some(&self.0.warnings), warned.clone());
+        // Shown with the lint's findings, until the next load lists both.
+        self.0.lint.mutate(|text| {
+            let lines: Vec<&str> = match text.as_deref() {
+                Some(text) => text.lines().skip(1).collect(),
+                None => Vec::new(),
+            };
+            let mut lines: Vec<String> = lines.into_iter().map(str::to_owned).collect();
+            lines.push(warned.clone());
+            *text = Some(lint_text(&lines));
+            true
+        });
     }
     /// An image the app made (a picture it decoded, rendered or processed),
     /// shown by `ui.image { src = "host:<name>" }` and `bg_image =
@@ -3715,14 +3898,12 @@ impl ScriptHost {
             warning(Some(&self.0.warnings), line.clone());
             found.push(line);
         }
-        self.0.lint.set((!found.is_empty()).then(|| {
-            format!(
-                "zgx lint: {} finding{}\n{}",
-                found.len(),
-                if found.len() == 1 { "" } else { "s" },
-                found.join("\n")
-            )
-        }));
+        // The host's own (a name registered twice), first.
+        #[cfg(debug_assertions)]
+        found.splice(0..0, self.0.registrations.borrow().findings.iter().cloned());
+        self.0
+            .lint
+            .set((!found.is_empty()).then(|| lint_text(&found)));
     }
     fn start_check(&self) {
         if self.0.check.get() != Some(true) {
