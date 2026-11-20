@@ -186,6 +186,7 @@ thread_local! {
 /// when its frames were made): every animation, timer, caret and frame reads
 /// the time it stands at until [`advance_frozen`] moves it, on 1 January
 /// 2000 UTC. Does nothing where a virtual clock already runs.
+#[doc(hidden)]
 pub fn freeze() {
     if is_virtual() {
         return;
@@ -193,15 +194,18 @@ pub fn freeze() {
     FROZEN.with_borrow_mut(|frozen| *frozen = Some(VirtualClock::new()));
 }
 /// Whether [`freeze`] holds this thread's time.
+#[doc(hidden)]
 pub fn is_frozen() -> bool {
     FROZEN.with_borrow(Option::is_some)
 }
 /// Let this thread's time run again.
+#[doc(hidden)]
 pub fn thaw() {
     FROZEN.with_borrow_mut(Option::take);
 }
 /// Move frozen time on by `by`, waking each timer due by then at its own
 /// time, in order, and calling `settle` after each. Whether it was frozen.
+#[doc(hidden)]
 pub fn advance_frozen(by: Duration, settle: impl FnMut()) -> bool {
     FROZEN
         .with_borrow(|frozen| {
@@ -213,6 +217,7 @@ pub fn advance_frozen(by: Duration, settle: impl FnMut()) -> bool {
         .is_some()
 }
 /// How long frozen time has run, if it is frozen.
+#[doc(hidden)]
 pub fn frozen_elapsed() -> Option<Duration> {
     FROZEN.with_borrow(|frozen| frozen.as_ref().map(VirtualClock::elapsed))
 }

@@ -110,6 +110,7 @@ Shown as a labelled placeholder box, or left out:
 - **Rich text**: a link's middle click.
 - **Input**: `drag_preview` builders (a copy of the source stands for them), file drops, `drag_export` and pinch; text and IME stay the browser's own in `<input>` and `<textarea>`. `reactive_interaction` isn't applied.
 - **Lists**: the `_watched` variants' watchers aren't called.
+- **Windows**: `ui.window.popups` stays empty (the browser's top layer holds popups); `zgx inspect` and `zgx test`'s heap tools (`gc`, `app:retained_states`) are desktop devtools.
 - **Canvas**: a canvas view's pan and zoom (`canvas_view`) isn't applied.
 - **Also not yet mapped**: SVG, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.

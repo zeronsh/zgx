@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 /// What `zgx inspect gc` asks of the heap beyond its totals.
 #[derive(Debug, Clone, Default)]
+#[doc(hidden)]
 pub struct GcQuery {
     /// Rows to show in each list.
     pub top: usize,
@@ -25,6 +26,7 @@ pub struct GcQuery {
 
 /// A group of retained objects sharing one holder path.
 #[derive(Debug, Clone, Default)]
+#[doc(hidden)]
 pub struct GcHolder {
     /// How many objects have this path.
     pub count: usize,
@@ -34,6 +36,7 @@ pub struct GcHolder {
 
 /// What a query found in one VM.
 #[derive(Debug, Clone, Default)]
+#[doc(hidden)]
 pub struct GcFound {
     /// Objects the mark remembered (when asked to mark).
     pub marked: Option<usize>,

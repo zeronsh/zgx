@@ -222,6 +222,14 @@ AppKit animates a snapshot of the window through the transition, and shows the w
 
 `zgx run` keeps both; a Rust host passes its window's with `ScriptHost::window_full_screen` (`WindowInfo::fullscreen` and `WindowContext::full_screen_transition`).
 
+### Popups open
+
+```luau
+ui.window.popups: State<{ { x: number, y: number, w: number, h: number, kind: string } }>
+```
+
+The menus, popovers and tooltips open, each with its box in window points and its `kind` (`"menu"`, `"popover"` or `"tooltip"`), followed as they open, close and move: for placing something clear of an open menu. Read-only; `zgx run` keeps it, and a Rust host with `ScriptHost::window_state`. In the browser (zgx-dom) the browser's top layer holds popups, and the list stays empty.
+
 ### Zoom
 
 ```luau

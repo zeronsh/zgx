@@ -68,6 +68,7 @@ pub static BAKED_LOOPS: Switch = Switch::new(
 /// Whether declared loops play from frames drawn once (`BAKED_LOOPS`): not
 /// under a virtual or frozen clock (`crate::clock`), whose time they would
 /// not follow: they draw each tick, at that time.
+#[doc(hidden)]
 pub fn baked_loops() -> bool {
     BAKED_LOOPS.on() && !crate::clock::is_virtual()
 }

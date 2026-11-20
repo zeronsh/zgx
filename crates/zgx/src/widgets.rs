@@ -2177,6 +2177,7 @@ impl Drop for FramePreparationGuard<'_> {
 
 /// An open popup: where its window is, in window coordinates, and what it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[doc(hidden)]
 pub struct PopupInfo {
     /// Its window's rectangle.
     pub rect: Rect,
@@ -4066,6 +4067,7 @@ impl Ui {
     }
     /// The open popups' windows, menus, popovers and tooltips, in window
     /// coordinates, as of the last layout.
+    #[doc(hidden)]
     pub fn observe_popups(&self) -> Signal<Vec<PopupInfo>> {
         let existing = self.storage.popups_observed.borrow().clone();
         existing.unwrap_or_else(|| {
