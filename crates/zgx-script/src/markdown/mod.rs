@@ -1576,6 +1576,20 @@ impl<'a> HtmlTag<'a> {
     }
 }
 
+/// What inline HTML after a picture says of its place: `None` for a
+/// closer (the picture's place is left to what follows), else whether it
+/// is a `<br>`, ending the picture's line. (Out of line, with the text
+/// read here: the hot event loop stays as it was.)
+#[cold]
+#[inline(never)]
+fn picture_tag(html: &pulldown_cmark::CowStr) -> Option<bool> {
+    match HtmlTag::read(html) {
+        Some(tag) if tag.closing => None,
+        Some(tag) => Some(tag.name.eq_ignore_ascii_case("br")),
+        None => Some(false),
+    }
+}
+
 /// An attribute's value with its common character references read.
 fn html_entities(value: &str) -> String {
     if !value.contains('&') {
@@ -1802,7 +1816,11 @@ impl Builder<'_> {
     /// The picture read (`picture`), placed by `event`, what follows it:
     /// alone on its line, the words before it are a paragraph and it a
     /// block (the words after it the next paragraph); else a run among the
-    /// words. Whether the event was the line's end it took.
+    /// words. Whether the event was the line's end it took. (Out of line:
+    /// a picture is rare, and `event`'s hot arms stay as small as they
+    /// were.)
+    #[cold]
+    #[inline(never)]
     fn place_picture(&mut self, event: &Event) -> bool {
         // Inline tags closing after it (a link around a badge) leave its
         // place to what follows them.
@@ -1814,14 +1832,13 @@ impl Builder<'_> {
         }
         // So do inline HTML marks' (`Options::html_marks`), and a `<br>`
         // ends its line as a hard break does.
-        let tag = match event {
-            Event::InlineHtml(html) if self.options.html_marks => HtmlTag::read(html),
-            _ => None,
+        let br = match event {
+            Event::InlineHtml(html) if self.options.html_marks => match picture_tag(html) {
+                None => return false,
+                Some(br) => br,
+            },
+            _ => false,
         };
-        if tag.as_ref().is_some_and(|t| t.closing) {
-            return false;
-        }
-        let br = tag.is_some_and(|t| t.name.eq_ignore_ascii_case("br"));
         let Some((src, alt, blank, link)) = self.picture.take() else {
             return false;
         };
@@ -1978,8 +1995,8 @@ impl Builder<'_> {
     /// mark alone; a stray one does nothing.
     #[cold]
     #[inline(never)]
-    fn inline_html(&mut self, html: &str) {
-        let Some(tag) = HtmlTag::read(html) else {
+    fn inline_html(&mut self, html: pulldown_cmark::CowStr) {
+        let Some(tag) = HtmlTag::read(&html) else {
             return;
         };
         if !tag.closing && tag.name.eq_ignore_ascii_case("br") {
@@ -2286,7 +2303,7 @@ impl Builder<'_> {
                 self.mark_line();
             }
             Event::Rule => self.block(map(vec![("t", "hr".into())])),
-            Event::InlineHtml(html) if self.options.html_marks => self.inline_html(&html),
+            Event::InlineHtml(html) if self.options.html_marks => self.inline_html(html),
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::TaskListMarker(done) => self.push_text(if done { "☑ " } else { "☐ " }, false),
             Event::FootnoteReference(name) => self.push_text(&format!("[{name}]"), false),
