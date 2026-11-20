@@ -20,7 +20,8 @@ svg = ["dep:resvg"]
 png = ["image/png"]
 # (Decoding with zune-jpeg; encoding, as `canvas::jpeg`, with image.)
 jpeg = ["dep:zune-jpeg", "image/jpeg"]
-# Encoding only (`canvas::webp`, lossless).
+# WebP: decoding (lossy and lossless, an animated one plays) and encoding
+# (`canvas::webp`, lossless), through `image`'s pure-Rust codec.
 webp = ["image/webp"]
 gif = ["dep:gif"]
 # Words break at their hyphenation points where text asks (zgx-text's).
@@ -110,7 +111,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 # build these.
 [dev-dependencies]
 # Tests encode JPEGs, and check ours against `image`'s decode of them.
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 # Shaping with and without its kept advances (tests/variable_advances.rs).
 harfrust = { package = "zgx-harfrust", version = "0.5.4", path = "../../vendor/harfrust" }
 # wgpu's own counts of what it holds (textures, samplers, bind groups), for
