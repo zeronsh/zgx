@@ -242,10 +242,11 @@ fn email(text: &str, floor: usize, at: usize) -> Option<Found> {
     })
 }
 
-/// Whether a run's text may hold a literal: not code, a link, a file or a
-/// picture.
+/// Whether a run's text may hold a literal: not code, a link, a file, a
+/// picture or math.
 fn plain(run: &Run) -> bool {
-    !run.code && run.link.is_none() && run.file.is_none() && run.img.is_none()
+    // (Nor math: its TeX is no text to link, `$$https://a.b$$` included.)
+    !run.code && run.link.is_none() && run.file.is_none() && run.img.is_none() && run.math == 0
 }
 
 /// A block's runs with their autolink literals linked: each stretch of

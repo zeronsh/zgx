@@ -2956,6 +2956,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn math_holds_no_autolinks() {
+        let options = Options {
+            autolinks: true,
+            math: true,
+            ..plain()
+        };
+        let blocks = parse("see $$https://a.b/c$$ and https://d.e now", &options);
+        let runs = blocks[0].field("s").unwrap().list();
+        let math: Vec<_> = runs.iter().filter(|r| r.field("m").is_some()).collect();
+        assert_eq!(math.len(), 1, "one math run");
+        assert!(math[0].field("a").is_none(), "{:?}", math[0].to_json());
+        assert!(
+            runs.iter()
+                .any(|r| r.field("a") == Some(&Value::from("https://d.e"))),
+            "the words' URL still links"
+        );
+    }
+
     #[track_caller]
     fn links(text: &str, want: &[&str]) {
         assert_eq!(marked(text, &autolinks()), [want], "{text:?}");
