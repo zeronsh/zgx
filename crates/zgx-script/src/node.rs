@@ -430,11 +430,11 @@ pub(crate) fn from_json(v: serde_json::Value) -> Value {
             Value::List(a.into_iter().map(from_json).collect::<Vec<_>>().into())
         }
         // Empty, still an object: a script sending it back sends `{}`.
-        serde_json::Value::Object(o) if o.is_empty() => Value::Map(Rc::new([])),
+        serde_json::Value::Object(o) if o.is_empty() => Value::Map(crate::Map::default()),
         serde_json::Value::Object(o) => {
-            let mut fields: Vec<(Rc<str>, Value)> = o
+            let mut fields: Vec<crate::Field> = o
                 .into_iter()
-                .map(|(k, v)| (k.into(), from_json(v)))
+                .map(|(k, v)| crate::Field(k.into(), from_json(v)))
                 .collect();
             // Sorted, as maps are, whatever order serde_json keeps.
             fields.sort_by(|a, b| a.0.cmp(&b.0));
@@ -3126,7 +3126,7 @@ fn refused_lit(value: &Value, ty: Ty, name: &str) -> mlua::Result<Lit> {
             .map(|why| format!("`{name}`: {why}")),
         (Ty::Radial, _) => return Err(mlua::Error::runtime(RADIAL_STOPS)),
         (Ty::Len, Value::Str(s)) => match s.parse::<SizeCalc>() {
-            Ok(_) if takes_size_math(name) => return Ok(Lit::Str(s.clone())),
+            Ok(_) if takes_size_math(name) => return Ok(Lit::Str(s.rc())),
             Ok(_) => Some(format!(
                 "`{name}`: calc(…), min(…), max(…) and clamp(…) size w, h and their limits"
             )),
@@ -3149,7 +3149,7 @@ fn takes_size_math(name: &str) -> bool {
 pub(crate) fn size_math(value: &Value) -> Option<Lit> {
     let Value::Str(text) = value else { return None };
     text.parse::<SizeCalc>().ok()?;
-    Some(Lit::Str(text.clone()))
+    Some(Lit::Str(text.rc()))
 }
 /// A grid's other texts (`areas`, `grid_column`, `flow`), checked and kept
 /// as strings, as a track list is.
@@ -3171,18 +3171,18 @@ fn grid_lit(value: &Value, ty: Ty) -> Option<Lit> {
         }
         (Ty::Areas, Value::Str(s)) => {
             s.parse::<zgx::grid_tracks::GridAreas>().ok()?;
-            Lit::Str(s.clone())
+            Lit::Str(s.rc())
         }
         (Ty::GridLines, Value::Str(s)) => {
             s.parse::<zgx::grid_tracks::GridLines>().ok()?;
-            Lit::Str(s.clone())
+            Lit::Str(s.rc())
         }
         (Ty::GridLines, Value::Num(n)) if n.fract() == 0. && *n != 0. => {
             Lit::Str(format!("{n}").into())
         }
         (Ty::GridFlow, Value::Str(s)) => {
             s.parse::<zgx::grid_tracks::GridFlow>().ok()?;
-            Lit::Str(s.clone())
+            Lit::Str(s.rc())
         }
         _ => return None,
     })
@@ -3201,12 +3201,12 @@ pub(crate) fn lit(value: &Value, ty: Ty) -> Option<Lit> {
         (Ty::Num, v) => Lit::Num(v.as_f64()? as f32),
         (Ty::Bool, v) => Lit::Bool(v.truthy()),
         // `wrap = "balance"`: wrapped, its lines balanced.
-        (Ty::Wrap, Value::Str(s)) if &**s == "balance" => Lit::Str(s.clone()),
+        (Ty::Wrap, Value::Str(s)) if &**s == "balance" => Lit::Str(s.rc()),
         (Ty::Wrap, v) => Lit::Bool(v.truthy()),
         // An SVG's `tint`: the text colour the node inherits (see `lower`).
-        (Ty::Color, Value::Str(s)) if s.eq_ignore_ascii_case("currentcolor") => Lit::Str(s.clone()),
+        (Ty::Color, Value::Str(s)) if s.eq_ignore_ascii_case("currentcolor") => Lit::Str(s.rc()),
         (Ty::Color, v) => Lit::Color(color_of(v)?),
-        (Ty::Str, Value::Str(s)) => Lit::Str(s.clone()),
+        (Ty::Str, Value::Str(s)) => Lit::Str(s.rc()),
         (Ty::Str, Value::Text(t)) => Lit::Str(t.to_cow().into()),
         (Ty::Pair, Value::List(items)) if items.len() == 2 => {
             Lit::Pair(items[0].as_f64()? as f32, items[1].as_f64()? as f32)
@@ -3215,7 +3215,7 @@ pub(crate) fn lit(value: &Value, ty: Ty) -> Option<Lit> {
         (Ty::Len, v) => Lit::Len(length(v)?),
         (Ty::Tracks, Value::Str(s)) => {
             s.parse::<zgx::grid_tracks::GridTracks>().ok()?;
-            Lit::Str(s.clone())
+            Lit::Str(s.rc())
         }
         (Ty::Tracks, v) => Lit::Num(v.as_f64()? as f32),
         // A grid's other texts, out of line: every literal comes this way.
@@ -5472,12 +5472,12 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"strike" => span.strike = lua.unpack::<Value>(given)?.truthy(),
                 b"font" => {
                     if let Value::Str(font) = lua.unpack(given)? {
-                        span.font = Some(font);
+                        span.font = Some(font.into());
                     }
                 }
                 b"lang" => {
                     if let Value::Str(lang) = lua.unpack(given)? {
-                        span.lang = Some(lang);
+                        span.lang = Some(lang.into());
                     }
                 }
                 // `padding = 4` (across) or `{ 4, 0.5 }` (across, down).

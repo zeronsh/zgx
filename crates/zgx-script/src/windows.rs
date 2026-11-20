@@ -549,13 +549,13 @@ pub(crate) const FULL_SCREEN_TRANSITION: &str = "zgx.window.full_screen_transiti
 /// going in (`true`) or out, over `duration` seconds; nil for none.
 pub(crate) fn full_screen_transition(transition: Option<(bool, f64)>) -> Value {
     transition.map_or(Value::Nil, |(entering, duration)| {
-        Value::Map(Rc::from([
-            (Rc::from("duration"), Value::Num(duration)),
+        Value::record([
+            ("duration", Value::Num(duration)),
             (
-                Rc::from("phase"),
+                "phase",
                 Value::from(if entering { "entering" } else { "leaving" }),
             ),
-        ]))
+        ])
     })
 }
 
@@ -571,10 +571,7 @@ pub(crate) const VISIBLE: &str = "zgx.window.visible";
 /// A window's size as `ui.window.size` holds it.
 pub(crate) fn size(width: f32, height: f32) -> Value {
     let n = |v: f32| Value::Num(f64::from(v));
-    Value::Map(Rc::from([
-        (Rc::from("height"), n(height)),
-        (Rc::from("width"), n(width)),
-    ]))
+    Value::record([("height", n(height)), ("width", n(width))])
 }
 
 /// Installs `ui.window`: called, it declares a window; its

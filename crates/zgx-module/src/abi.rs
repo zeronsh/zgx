@@ -2,16 +2,17 @@
 //! layout of a value, which a module reads where the runtime holds it.
 //!
 //! A value is three words ([`Raw`]): a byte saying which kind, then what it
-//! holds. A string, a list and a map hold a counted pointer and a length;
-//! a module reads their bytes, items and fields in place, and counts them
-//! in place. It asks the runtime only to make a value, to free one it held
-//! last, and to open a value held some other way.
+//! holds. A string holds a pointer to its text and its length; a list and
+//! a map hold a pointer to their items, their count before them, and how
+//! many. A module reads text, items and fields in place, and counts a list
+//! or a map in place. It asks the runtime to make a value, to count or
+//! free a string, to free a list or a map it held last, and to open a
+//! value held some other way.
 //!
-//! The layout is the runtime's `Value` (`#[repr(u8)]`, its variants
-//! numbered), Rust's `Rc` of a slice (a pointer to its two counts and its
-//! contents, then a length) and a map's field (a key and a value). The
-//! runtime measures its own as it loads a module and refuses one built to
-//! another ([`Layout`], [`REFUSED_LAYOUT`]). 64-bit targets only.
+//! Every part of that layout is stated in zgx-script's own types (`Value`
+//! is `#[repr(u8)]`; its string, its counted slice and a map's field are
+//! `#[repr(C)]`), none left to the compiler, and zgx-script fails to build
+//! if they stop matching the numbers here. 64-bit targets only.
 
 use std::{ffi::c_void, mem::MaybeUninit};
 
@@ -30,14 +31,15 @@ pub const NIL: u8 = 0;
 pub const BOOL: u8 = 1;
 /// A number: an `f64` at [`HELD_AT`].
 pub const NUM: u8 = 2;
-/// A string: a counted pointer at [`HELD_AT`], its length in bytes after it.
+/// A string: a pointer to its UTF-8 at [`HELD_AT`], its length in bytes
+/// after it. Counted by the runtime ([`Api::clone`], [`Api::release`]).
 pub const STR: u8 = 3;
 /// A long string, held in pieces: [`Api::flat`] gives it as one.
 pub const TEXT: u8 = 4;
-/// A list: a counted pointer to its items (each a [`Raw`]) and how many.
+/// A list: a pointer to its items (each a [`Raw`]) and how many.
 pub const LIST: u8 = 5;
-/// A map with string keys, sorted by key: a counted pointer to its fields
-/// (each [`FIELD_SIZE`] bytes) and how many.
+/// A map with string keys, sorted by key: a pointer to its fields (each
+/// [`FIELD_SIZE`] bytes) and how many.
 pub const MAP: u8 = 6;
 /// A row kept folded until it is read: [`Api::open`] gives what it opens
 /// to.
@@ -50,47 +52,19 @@ pub const FOLDED: u8 = 9;
 pub const VALUE_SIZE: usize = 24;
 /// Where a boolean's byte is in a value.
 pub const BOOL_AT: usize = 1;
-/// Where a value holds its number, or its counted pointer; a length is a
-/// word after.
+/// Where a value holds its number, or its pointer; a length is a word
+/// after.
 pub const HELD_AT: usize = 8;
-/// From a counted pointer, where its count is: how many hold it.
-pub const COUNT_AT: usize = 0;
-/// From a counted pointer, where its contents begin: a string's UTF-8, a
-/// list's items, a map's fields.
-pub const DATA_AT: usize = 16;
+/// How far before a list's items or a map's fields its count is: how many
+/// hold it. (A list and a map point at their items, as a string at its
+/// text.)
+pub const COUNT_BEFORE: usize = 16;
 /// A map's field's size in bytes, and a map's stride.
 pub const FIELD_SIZE: usize = 40;
-/// Where a field's key is: a counted pointer to its UTF-8, then its length.
+/// Where a field's key is: a pointer to its UTF-8, then its length.
 pub const FIELD_KEY_AT: usize = 0;
 /// Where a field's value is, a [`Raw`].
 pub const FIELD_VALUE_AT: usize = 16;
-
-/// The layout a runtime has, measured: each the constant of the same name
-/// here, or the module doesn't load.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Layout {
-    pub value_size: u16,
-    pub bool_at: u16,
-    pub held_at: u16,
-    pub count_at: u16,
-    pub data_at: u16,
-    pub field_size: u16,
-    pub field_key_at: u16,
-    pub field_value_at: u16,
-}
-
-/// The layout this crate reads values by.
-pub const LAYOUT: Layout = Layout {
-    value_size: VALUE_SIZE as u16,
-    bool_at: BOOL_AT as u16,
-    held_at: HELD_AT as u16,
-    count_at: COUNT_AT as u16,
-    data_at: DATA_AT as u16,
-    field_size: FIELD_SIZE as u16,
-    field_key_at: FIELD_KEY_AT as u16,
-    field_value_at: FIELD_VALUE_AT as u16,
-};
 
 /// A value's three words. Owned (given back once, or handed to the
 /// runtime) or lent (read while what lent it lives): which one is by where
@@ -118,8 +92,6 @@ pub struct Api {
     /// This struct's size in bytes, as the runtime built it: a module
     /// built against a longer one reads no further than this.
     pub size: u32,
-    /// How this runtime lays values out.
-    pub layout: Layout,
     /// A string of these bytes (UTF-8).
     pub string: unsafe extern "C" fn(ptr: *const u8, len: usize, out: *mut Raw),
     /// A list of these `len` owned values, which it takes.
@@ -131,12 +103,12 @@ pub struct Api {
     /// the items counted, not copied. `nil` if it isn't a list or they
     /// aren't in it.
     pub slice: unsafe extern "C" fn(list: *const Raw, from: usize, to: usize, out: *mut Raw),
-    /// The same value once more: counted, not copied. (A string, a list
-    /// and a map a module counts itself, at [`COUNT_AT`]; this is for the
+    /// The same value once more: counted, not copied. (A list and a map a
+    /// module counts itself, at [`COUNT_BEFORE`]; this is for a string and the
     /// kinds it can't read.)
     pub clone: unsafe extern "C" fn(value: *const Raw, out: *mut Raw),
-    /// Gives an owned value back: the last hold on a string, a list or a
-    /// map (a module lets go of any other hold itself, at [`COUNT_AT`]),
+    /// Gives an owned value back: a string, the last hold on a list or a
+    /// map (a module lets go of any other hold itself, at [`COUNT_BEFORE`]),
     /// or a kind it can't read.
     pub release: unsafe extern "C" fn(value: *mut Raw),
     /// What a [`FOLDED`] value opens to, lent for as long as it is, kept
@@ -151,6 +123,11 @@ pub struct Api {
 /// lent for the call (a function that keeps it clones it), and what it
 /// writes to `out` is owned, the runtime's from then.
 pub type Function = unsafe extern "C" fn(user: *mut c_void, arg: *const Raw, out: *mut Raw);
+/// A function handed its argument: `arg` is owned by the function, which
+/// frees it or hands it on (what it writes to `out` may be `arg` itself).
+/// For one that keeps or returns what it is given; any other is cheaper
+/// lent its argument ([`Function`]), which the runtime then frees in place.
+pub type FunctionTaking = unsafe extern "C" fn(user: *mut c_void, arg: *mut Raw, out: *mut Raw);
 /// A module's action, as `ui.action(name, arg)` and `ui.invoke` call it:
 /// `arg` lent, as a function's.
 pub type Action = unsafe extern "C" fn(user: *mut c_void, arg: *const Raw);
@@ -171,6 +148,16 @@ pub struct Registrar {
         name: *const u8,
         len: usize,
         call: Function,
+        user: *mut c_void,
+        free: Free,
+    ),
+    /// Registers a function scripts call with `ui.call_sync(name, arg)`,
+    /// handed its argument.
+    pub function_taking: unsafe extern "C" fn(
+        host: *mut c_void,
+        name: *const u8,
+        len: usize,
+        call: FunctionTaking,
         user: *mut c_void,
         free: Free,
     ),
@@ -206,6 +193,3 @@ pub type Entry = unsafe extern "C" fn(api: *const Api, registrar: *const Registr
 /// The runtime speaks another [`ABI`], or a shorter [`Api`] than this
 /// module needs.
 pub const REFUSED_ABI: u32 = 1;
-/// The runtime lays values out another way than this module reads them
-/// ([`Layout`]).
-pub const REFUSED_LAYOUT: u32 = 2;

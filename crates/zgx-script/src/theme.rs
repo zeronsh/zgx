@@ -5,6 +5,7 @@
 //! from the token, following theme changes without calling the script. The
 //! runtime's themes (`zgx::theme::Themes`) are shared with the Rust
 //! application, so a theme a script sets applies to Rust views too.
+use crate::Field;
 use crate::{node::env, value::Value};
 use mlua::{Lua, Table};
 use std::{path::PathBuf, rc::Rc};
@@ -18,7 +19,7 @@ pub(crate) fn override_of(value: &Value) -> Result<ThemeOverride, String> {
         Value::Str(name) => Ok(ThemeOverride::new().theme(&**name)),
         Value::Map(fields) => {
             let mut over = ThemeOverride::new();
-            for (key, value) in fields.iter() {
+            for Field(key, value) in fields.iter() {
                 if &**key == "theme" || &**key == "extends" {
                     match value {
                         Value::Str(name) => over = over.theme(&**name),
@@ -47,7 +48,7 @@ fn inputs(name: &str, value: &Value) -> Result<Vec<(String, TokenInput)>, String
         Value::Num(n) => Ok(vec![(name.to_owned(), TokenInput::from(*n as f32))]),
         Value::Map(fields) => {
             let mut out = Vec::new();
-            for (key, value) in fields.iter() {
+            for Field(key, value) in fields.iter() {
                 out.extend(inputs(&format!("{name}.{key}"), value)?);
             }
             Ok(out)
@@ -76,12 +77,12 @@ fn script_value(value: TokenValue) -> Value {
                 .map(|s| {
                     let zgx::scene::Color(r, g, b, a) = s.color;
                     let color = format!("#{r:02x}{g:02x}{b:02x}{a:02x}");
-                    let mut fields: Vec<(Rc<str>, Value)> = vec![
-                        ("blur".into(), Value::Num((s.blur_radius * 2.) as f64)),
-                        ("color".into(), Value::Str(color.into())),
-                        ("spread".into(), Value::Num(s.spread as f64)),
-                        ("x".into(), Value::Num(s.offset.x as f64)),
-                        ("y".into(), Value::Num(s.offset.y as f64)),
+                    let mut fields: Vec<Field> = vec![
+                        Field("blur".into(), Value::Num((s.blur_radius * 2.) as f64)),
+                        Field("color".into(), Value::Str(color.into())),
+                        Field("spread".into(), Value::Num(s.spread as f64)),
+                        Field("x".into(), Value::Num(s.offset.x as f64)),
+                        Field("y".into(), Value::Num(s.offset.y as f64)),
                     ];
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     Value::Map(fields.into())
@@ -313,7 +314,7 @@ pub(crate) fn install(
                 return Err(fail("ui.theme.tokens takes a table of token defaults"));
             };
             let mut declared = Vec::new();
-            for (key, value) in fields.iter() {
+            for Field(key, value) in fields.iter() {
                 declared.extend(inputs(key, value).map_err(fail)?);
             }
             let themes = themes(lua)?;
@@ -455,8 +456,8 @@ mod tests {
         assert_eq!(over, ThemeOverride::new().theme("zgx-light"));
         let table = Value::Map(
             vec![
-                (Rc::from("accent"), Value::Str("#e5484d".into())),
-                (Rc::from("theme"), Value::Str("zgx-light".into())),
+                (crate::Str::from("accent"), Value::Str("#e5484d".into())),
+                (crate::Str::from("theme"), Value::Str("zgx-light".into())),
             ]
             .into(),
         );

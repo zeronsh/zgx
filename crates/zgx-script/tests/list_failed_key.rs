@@ -2,14 +2,14 @@
 //! nodes and states stay.
 mod common;
 use common::Harness;
-use std::rc::Rc;
+use zgx_script::Slice;
 use zgx_script::Value;
 
 fn long_rows(n: usize) -> Value {
     let rows: Vec<Value> = (0..n)
         .map(|i| Value::record([("id", Value::from(format!("row-{i}").as_str()))]))
         .collect();
-    Value::List(Rc::from(rows))
+    Value::List(Slice::from(rows))
 }
 
 const FAILS: &str = r#"

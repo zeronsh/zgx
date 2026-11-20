@@ -3,6 +3,8 @@
 //! host's own, its values the runtime's, counted not copied. The same
 //! module linked in (`enter_module`) answers the same.
 use std::{path::PathBuf, rc::Rc};
+use zgx_script::List;
+use zgx_script::Slice;
 use zgx_script::{ScriptHost, Value, testing::TestApp};
 
 const APP: &str = r#"
@@ -76,7 +78,7 @@ fn library() -> PathBuf {
 }
 
 fn rows() -> Value {
-    Value::List(Rc::from(vec![
+    Value::List(zgx_script::Slice::from(vec![
         Value::record([("id", Value::from("a")), ("n", Value::Num(1.))]),
         Value::record([("id", Value::from("b")), ("n", Value::Num(2.))]),
     ]))
@@ -139,7 +141,7 @@ fn values_cross_counted_not_copied() {
     let Value::List(list) = &rows else {
         unreachable!()
     };
-    let before = Rc::strong_count(list);
+    let before = Slice::strong_count(list);
     let given = rows.clone();
     let mut app = TestApp::new(move |runtime| {
         let host = ScriptHost::inline(
@@ -161,10 +163,10 @@ fn values_cross_counted_not_copied() {
     app.click("go");
     assert_eq!(app.error(), None);
     // Held by `rows` here and the state: the module kept none.
-    assert!(Rc::strong_count(list) > before);
+    assert!(Slice::strong_count(list) > before);
     drop(app);
     assert_eq!(
-        Rc::strong_count(list),
+        Slice::strong_count(list),
         before,
         "a module's values are given back"
     );
@@ -190,7 +192,7 @@ fn rust_calls_what_a_module_registered() {
         // SAFETY: This workspace's own fixture.
         unsafe { host.load_module(library()) }.unwrap();
         let words = host.registered_function("fixture.words").unwrap();
-        let counted = words(Value::List(Rc::from(vec![
+        let counted = words(Value::List(zgx_script::Slice::from(vec![
             Value::from("a b"),
             Value::from("c"),
         ])));
@@ -270,29 +272,27 @@ fn a_module_reads_a_long_string() {
 /// the module lets go of it.
 #[test]
 fn a_module_frees_what_it_held_last() {
-    let list: Rc<[Value]> = Rc::from(vec![Value::from("held")]);
+    let text: Rc<str> = Rc::from("held");
+    let list = List::from(vec![Value::Str(text.clone().into())]);
     let given = list.clone();
     let app = TestApp::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", "return ui.column {}");
         // SAFETY: This workspace's own fixture.
         unsafe { host.load_module(library()) }.unwrap();
         let keep = host.registered_action("fixture.keep").unwrap();
-        let weak = Rc::downgrade(&given);
+        let weak = List::downgrade(&given);
         keep(Value::List(given));
         assert_eq!(weak.strong_count(), 2, "held here and by the module");
-        // (The item, held by the list alone: freed with it, by the runtime.)
-        let item = match &weak.upgrade().unwrap()[0] {
-            Value::Str(text) => Rc::downgrade(text),
-            _ => unreachable!(),
-        };
         keep(Value::Nil);
         assert_eq!(weak.strong_count(), 1);
-        assert_eq!(item.strong_count(), 1);
         host
     });
     assert_eq!(app.error(), None);
     drop(app);
-    assert_eq!(Rc::strong_count(&list), 1);
+    assert_eq!(List::strong_count(&list), 1);
+    // Its item, held by the list alone: freed with it, by the runtime.
+    drop(list);
+    assert_eq!(Rc::strong_count(&text), 1);
 }
 
 /// A module's state is its thread's: two hosts on a thread share it, and a

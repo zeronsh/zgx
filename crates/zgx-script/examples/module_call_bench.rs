@@ -16,7 +16,6 @@
 //!   cargo build --release -p zgx-module-fixture
 //!   ARM=linked CASE=echo perf stat -e instructions:u target/release/examples/module_call_bench
 //!   ARM=module MODULE=target/release/libzgx_module_fixture.so CASE=echo perf stat …
-use std::rc::Rc;
 
 use zgx_script::{ScriptHost, Value, testing::TestApp};
 
@@ -81,10 +80,7 @@ fn main() {
                 ("at", Value::Num(1_794_000_000_000.)),
             ])
         };
-        host.shared(
-            "rows",
-            Value::List((0..200).map(row).collect::<Rc<[Value]>>()),
-        );
+        host.shared("rows", Value::List((0..200).map(row).collect()));
         if module {
             let path = std::env::var("MODULE").expect("MODULE=<the fixture's library>");
             // SAFETY: This workspace's own fixture, named by who runs this.

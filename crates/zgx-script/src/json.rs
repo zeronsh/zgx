@@ -2,6 +2,7 @@
 //! between, and each object key one string however many objects name it
 //! (10,000 messages' `id` share one).
 
+use crate::Field;
 use crate::value::Value;
 use rustc_hash::FxHashMap;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -31,7 +32,7 @@ pub(crate) fn parse_bytes(text: &[u8]) -> serde_json::Result<Value> {
 struct Keys {
     known: FxHashMap<Box<str>, Rc<str>>,
     items: Vec<Value>,
-    fields: Vec<(Rc<str>, Value)>,
+    fields: Vec<Field>,
 }
 impl Keys {
     fn get(&mut self, key: &str) -> Rc<str> {
@@ -79,13 +80,13 @@ impl<'de> Visitor<'de> for Json<'_> {
         while let Some(item) = items.next_element_seed(Json(&mut *self.0))? {
             self.0.items.push(item);
         }
-        Ok(Value::List(self.0.items.drain(from..).collect()))
+        Ok(Value::List(crate::List::taken(&mut self.0.items, from)))
     }
     fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Value, A::Error> {
         let from = self.0.fields.len();
         while let Some(key) = entries.next_key_seed(Key(&mut *self.0))? {
             let value = entries.next_value_seed(Json(&mut *self.0))?;
-            self.0.fields.push((key, value));
+            self.0.fields.push(Field(key.into(), value));
         }
         let fields = &mut self.0.fields[from..];
         // Sorted, as maps are (often they come so); a key given twice keeps
@@ -94,17 +95,17 @@ impl<'de> Visitor<'de> for Json<'_> {
         if !fields.is_sorted_by(|a, b| a.0 < b.0) {
             fields.sort_by(|a, b| a.0.cmp(&b.0));
             if fields.windows(2).any(|w| w[0].0 == w[1].0) {
-                let mut kept: Vec<(Rc<str>, Value)> = Vec::with_capacity(fields.len());
-                for (key, value) in self.0.fields.drain(from..) {
+                let mut kept: Vec<Field> = Vec::with_capacity(fields.len());
+                for Field(key, value) in self.0.fields.drain(from..) {
                     match kept.last_mut() {
                         Some(last) if last.0 == key => last.1 = value,
-                        _ => kept.push((key, value)),
+                        _ => kept.push(Field(key, value)),
                     }
                 }
                 return Ok(Value::Map(kept.into()));
             }
         }
-        Ok(Value::Map(self.0.fields.drain(from..).collect()))
+        Ok(Value::Map(crate::Map::taken(&mut self.0.fields, from)))
     }
 }
 

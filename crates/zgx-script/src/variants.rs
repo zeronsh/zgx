@@ -105,7 +105,7 @@ impl Recipe {
         let axis = &self.axes[axis];
         let name: Rc<str> = match value {
             Value::Nil => return Ok(axis.default),
-            Value::Str(s) => s.clone(),
+            Value::Str(s) => s.rc(),
             Value::Bool(b) => if *b { "true" } else { "false" }.into(),
             other => {
                 return Err(format!(

@@ -182,10 +182,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 labels: Rc::new(RefCell::new(files::LabelReader::new(
                     std::env::temp_dir().join("zgx-monitor"),
                 ))),
-                procs: host.shared("procs", Value::List(Rc::new([]))),
+                procs: host.shared("procs", Value::List(zgx_script::Slice::from([]))),
                 summary: host.shared("summary", Value::Nil),
-                counts: host.shared("counts", Value::List(Rc::new([]))),
-                watch: host.shared("watch", Value::List(Rc::new([]))),
+                counts: host.shared("counts", Value::List(zgx_script::Slice::from([]))),
+                watch: host.shared("watch", Value::List(zgx_script::Slice::from([]))),
             };
             // A panel opening on a process shows its last minute at once,
             // not at the next sample.
@@ -287,10 +287,15 @@ fn map<const N: usize>(fields: [(&'static str, Value); N]) -> Value {
     thread_local! {
         static KEYS: RefCell<HashMap<&'static str, Rc<str>>> = RefCell::default();
     }
-    let mut fields: Vec<(Rc<str>, Value)> = KEYS.with_borrow_mut(|keys| {
+    let mut fields: Vec<(zgx_script::Str, Value)> = KEYS.with_borrow_mut(|keys| {
         fields
             .into_iter()
-            .map(|(key, value)| (keys.entry(key).or_insert_with(|| key.into()).clone(), value))
+            .map(|(key, value)| {
+                (
+                    keys.entry(key).or_insert_with(|| key.into()).clone().into(),
+                    value,
+                )
+            })
             .collect()
     });
     fields.sort_by(|a, b| a.0.cmp(&b.0));
@@ -340,7 +345,7 @@ impl Sampler {
             .map(|(owner, label, count)| {
                 map([
                     ("owner", num(owner as f32)),
-                    ("label", Value::Str(label)),
+                    ("label", Value::Str(label.into())),
                     ("count", num(count)),
                 ])
             })
@@ -357,8 +362,8 @@ impl Sampler {
                 map([
                     ("pid", num(pid as f32)),
                     ("ppid", num(parent as f32)),
-                    ("name", Value::Str(name)),
-                    ("label", label.map_or(Value::Nil, Value::Str)),
+                    ("name", Value::Str(name.into())),
+                    ("label", label.map_or(Value::Nil, Value::from)),
                     ("cpu", num(cpu)),
                     ("gpu", num(gpu)),
                     ("mem", num(memory_mb)),
@@ -385,8 +390,8 @@ impl Sampler {
                 Value::List(track.samples.iter().map(|s| num(read(s))).collect())
             };
             let history = map([
-                ("name", Value::Str(track.name.clone())),
-                ("label", track.label.clone().map_or(Value::Nil, Value::Str)),
+                ("name", Value::Str(track.name.clone().into())),
+                ("label", track.label.clone().map_or(Value::Nil, Value::from)),
                 ("cpu", series(|s| s.cpu)),
                 ("gpu", series(|s| s.gpu)),
                 ("mem", series(|s| s.memory_mb)),
