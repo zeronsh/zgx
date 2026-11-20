@@ -1129,9 +1129,21 @@ struct Made {
 /// elements, a reference to a definition ahead of it in `defs` following it.
 fn parse_at(text: &str, offset: usize, options: &Options, defs: &Defs) -> Made {
     if options.autolinks {
-        autolink::read_from(text, offset);
+        return parse_with_source(text, offset, options, defs);
     }
     parse_or_scan(text, offset, options, false, defs)
+}
+
+/// `parse_at` with autolinks: the markdown kept for their link pass while
+/// it parses, and let go after (`autolink::read_from`, `release`). Out of
+/// line, so a parse without them is a flag's test away from what it was.
+#[cold]
+#[inline(never)]
+fn parse_with_source(text: &str, offset: usize, options: &Options, defs: &Defs) -> Made {
+    autolink::read_from(text, offset);
+    let made = parse_or_scan(text, offset, options, false, defs);
+    autolink::release();
+    made
 }
 /// `parse_at`, or with `scan` its top-level elements alone (`scan_tops`):
 /// one loop over the parser's events, so the parser's iterator has the one
