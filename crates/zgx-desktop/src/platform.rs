@@ -195,6 +195,33 @@ impl Platform for Desktop {
             .as_mut()
             .is_some_and(|clipboard| clipboard.set_rich_text(text, html).is_ok())
     }
+    fn set_clipboard_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+    ) -> bool {
+        let content = zgx::widgets::ClipboardContent {
+            text,
+            html,
+            types: types.to_vec(),
+        };
+        self.clipboard
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|clipboard| clipboard.write(content))
+    }
+    fn clipboard_types(&self) -> Vec<String> {
+        let types = self.clipboard.borrow_mut().as_mut().map(|c| c.get_types());
+        let types = types.and_then(Result::ok).unwrap_or_default();
+        types.into_iter().map(|(kind, _)| kind).collect()
+    }
+    fn clipboard_typed(&self, mime: &str) -> Option<String> {
+        let types = self.clipboard.borrow_mut().as_mut()?.get_types().ok()?;
+        types
+            .into_iter()
+            .find_map(|(kind, value)| (kind == mime).then_some(value))
+    }
     fn clipboard_image(&self) -> Pending<Option<zgx::image::ImageData>> {
         let images = self.images();
         Box::pin(async move {

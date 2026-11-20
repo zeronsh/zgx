@@ -1936,10 +1936,14 @@ declare extern type SelectionCopy with
 	-- over rows scrolled away still names them.
 	rows: { { list: string | false, first: number, last: number } }
 end
--- What goes on the clipboard: text, and HTML beside it where given.
+-- What goes on the clipboard: text, and HTML beside it where given, and
+-- types of the app's own (`{ ["application/x-notes"] = "…" }`) beside them,
+-- which a web page's paste reads with `getData` (in Chrome, Edge and
+-- Electron apps) and `ui.clipboard.read_type` reads back.
 export type ClipboardContent = {
 	text: string?,
 	html: string?,
+	types: { [string]: string }?,
 }
 -- What a drag carries to other apps (`drag_export`): text, a link, files
 -- (absolute paths).
@@ -2614,7 +2618,7 @@ export type NodeProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: ((request: SelectionCopy) -> ...ClipboardContent?)?,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -3074,7 +3078,7 @@ export type Props = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -3789,7 +3793,7 @@ export type ContainerProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -4263,7 +4267,7 @@ export type GlassProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -4746,7 +4750,7 @@ export type ScrollProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -5246,7 +5250,7 @@ export type TextProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -5705,7 +5709,7 @@ export type MarkdownViewProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -6261,7 +6265,7 @@ export type RichProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -6714,7 +6718,7 @@ export type ImageProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -7184,7 +7188,7 @@ export type SvgProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -7765,7 +7769,7 @@ export type Scene3DProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -8241,7 +8245,7 @@ export type CanvasProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -8726,7 +8730,7 @@ export type CheckboxProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -9189,7 +9193,7 @@ export type InputProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -9816,7 +9820,7 @@ export type ProgressProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -10267,7 +10271,7 @@ export type SliderProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -10739,7 +10743,7 @@ export type SegmentedProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -11204,7 +11208,7 @@ export type StepperProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -11670,7 +11674,7 @@ export type DisclosureProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -12147,7 +12151,7 @@ export type AccordionProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -12598,7 +12602,7 @@ export type SectionProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -13074,7 +13078,7 @@ export type SeparatorProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -13533,7 +13537,7 @@ export type TabsProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -14014,7 +14018,7 @@ export type TreeProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -14491,7 +14495,7 @@ export type DataGridProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -14964,7 +14968,7 @@ export type CalendarProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -15430,7 +15434,7 @@ export type DatePickerProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -15894,7 +15898,7 @@ export type TimeFieldProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -16357,7 +16361,7 @@ export type ComboboxProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -16828,7 +16832,7 @@ export type CommandPaletteProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -17287,7 +17291,7 @@ export type SelectProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -17753,7 +17757,7 @@ export type SplitProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -18275,7 +18279,7 @@ export type ListProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -18828,7 +18832,7 @@ export type LayerProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -19301,7 +19305,7 @@ export type ModalProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -19792,7 +19796,7 @@ export type PopoverProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -20289,7 +20293,7 @@ export type MenuItemProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -20751,7 +20755,7 @@ export type SubmenuProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -21227,7 +21231,7 @@ export type WebViewProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -21709,7 +21713,7 @@ export type TerminalProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -22163,7 +22167,7 @@ export type SlotProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -22666,7 +22670,7 @@ export type EachOptions = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -23135,7 +23139,7 @@ export type PresenceOptions = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
@@ -23632,10 +23636,14 @@ declare ui: {
 	-- its HTML (a browser's or word processor's copy; nil if it holds
 	-- none), and putting HTML on it with its text; its image as a `Bitmap`
 	-- (nil if it holds none), and putting one on it: promises, as a large
-	-- image is decoded and encoded off the main thread.
+	-- image is decoded and encoded off the main thread. `write` takes
+	-- `{ text, html?, types? }` too: HTML and types of the app's own beside
+	-- the text in one change, which `read_type` reads back (a web page's
+	-- copy's types too, in Chrome, Edge and Electron apps).
 	clipboard: {
 		read: () -> string?,
-		write: (text: string) -> boolean,
+		write: (content: string | { text: string, html: string?, types: { [string]: string }? }) -> boolean,
+		read_type: (mime: string) -> string?,
 		read_html: () -> string?,
 		write_html: (text: string, html: string) -> boolean,
 		read_image: () -> Promise<Bitmap?>,

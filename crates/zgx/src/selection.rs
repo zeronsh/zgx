@@ -1654,7 +1654,10 @@ impl Ui {
     /// asked of a region without a hook. Whether the clipboard took it; no
     /// selection, nothing. (Pin line.)
     #[doc(hidden)]
-    pub fn copy_selection_from(&self, write: impl FnOnce(String, Option<String>) -> bool) -> bool {
+    pub fn copy_selection_from(
+        &self,
+        write: impl FnOnce(crate::widgets::ClipboardContent) -> bool,
+    ) -> bool {
         if !self.has_text_selection() {
             return false;
         }
@@ -1679,17 +1682,14 @@ impl Ui {
                 ui: self,
             })
         });
-        match content {
-            Some(content) => write(content.text, content.html),
-            None => write(text, Some(html)),
-        }
+        write(content.unwrap_or_else(|| crate::widgets::ClipboardContent::new(text, Some(html))))
     }
     /// Copy the selected display text to `platform`'s clipboard as the
     /// person would (`Ui::copy_selection_from`). Whether the clipboard took
     /// it. (Pin line.)
     #[doc(hidden)]
     pub fn copy_selection(&self, platform: &crate::platform::PlatformService) -> bool {
-        self.copy_selection_from(|text, html| crate::widgets::write_clipboard(platform, text, html))
+        self.copy_selection_from(|content| crate::widgets::write_clipboard(platform, content))
     }
     /// The rows of each virtual list the selection spans, mounted or not,
     /// in document order: what a Select All over rows scrolled away takes.

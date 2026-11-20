@@ -8,7 +8,7 @@ use crate::{
     calls::{PromiseUd, pending, settle_failing, settle_with},
     value::Value,
 };
-use mlua::{IntoLua, Lua, Table};
+use mlua::{FromLua, IntoLua, Lua, Table};
 use std::{
     cell::RefCell,
     collections::HashSet,
@@ -92,6 +92,15 @@ pub(crate) fn later(shared: &SharedPlatform, what: &str) -> Result<PlatformServi
     shared.borrow().clone().ok_or_else(|| {
         format!("{what}: no platform here (the clipboard and file dialogs need a desktop window)")
     })
+}
+/// A copy's `types` (`ui.clipboard.write`, a region's `on_copy`): MIME
+/// types of the app's own and their text, `{ [mime] = text }`, in the
+/// order of their names; none where it has none.
+pub(crate) fn clipboard_types(content: &Table) -> mlua::Result<Vec<(String, String)>> {
+    let types: Option<std::collections::BTreeMap<String, String>> = content
+        .get("types")
+        .map_err(|_| mlua::Error::runtime("types is { [mime] = text }, each a string"))?;
+    Ok(types.unwrap_or_default().into_iter().collect())
 }
 pub(crate) fn denied(what: &str, capability: &str) -> mlua::Error {
     mlua::Error::runtime(format!(
@@ -393,14 +402,24 @@ pub(crate) fn install(
         let shared = shared.clone();
         board.set(
             "write",
-            lua.create_function(move |lua, text: String| {
+            // Text, or `{ text, html?, types? }`: HTML and types of the
+            // app's own beside the text, in one change of the clipboard.
+            lua.create_function(move |lua, content: mlua::Value| {
                 if !clipboard {
                     return Err(denied("ui.clipboard.write", "Clipboard"));
                 }
                 crate::rules::guard(lua, crate::GuardKind::Clipboard, "write")?;
-                Ok(platform(&shared, "ui.clipboard.write")?
-                    .0
-                    .set_clipboard_text(text))
+                let platform = platform(&shared, "ui.clipboard.write")?;
+                let content = match content {
+                    mlua::Value::Table(table) => {
+                        let text: String = table.get("text")?;
+                        let html: Option<String> = table.get("html")?;
+                        let types = clipboard_types(&table)?;
+                        zgx::widgets::ClipboardContent { text, html, types }
+                    }
+                    text => return Ok(platform.0.set_clipboard_text(String::from_lua(text, lua)?)),
+                };
+                Ok(content.write(&*platform.0))
             })?,
         )?;
     }
@@ -416,6 +435,21 @@ pub(crate) fn install(
                 Ok(platform(&shared, "ui.clipboard.read_html")?
                     .0
                     .clipboard_html())
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        board.set(
+            "read_type",
+            lua.create_function(move |lua, mime: String| {
+                if !clipboard {
+                    return Err(denied("ui.clipboard.read_type", "Clipboard"));
+                }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read")?;
+                Ok(platform(&shared, "ui.clipboard.read_type")?
+                    .0
+                    .clipboard_typed(&mime))
             })?,
         )?;
     }

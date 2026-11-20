@@ -1166,6 +1166,27 @@ return ui.column {
     std::fs::remove_file(png).unwrap();
 }
 
+/// The clipboard's readback lists the types of an app's own it holds (a
+/// copy's `types`, a web page's copy's), each with its value.
+#[test]
+fn the_clipboard_readback_lists_its_types() {
+    let app =
+        TestApp::with_desktop(|runtime| ScriptHost::inline(runtime, "app", "return ui.column {}"));
+    let session = Session::new(&app.ui, app.handle.clone(), &app.host, None);
+    let read = text(&ask(&app, &session, r#"{"cmd":"clipboard"}"#));
+    assert!(read.ends_with("types: none"), "{read}");
+    let types = vec![("application/x-notes".to_owned(), "n <source />".to_owned())];
+    app.desktop.as_ref().unwrap().copy_typed("t", None, types);
+    let answer = ask(&app, &session, r#"{"cmd":"clipboard"}"#);
+    let read = text(&answer);
+    assert!(
+        read.ends_with("type application/x-notes: \"n <source />\""),
+        "{read}"
+    );
+    let data = answer.field("data").and_then(|data| data.field("types"));
+    assert!(data.is_some_and(|types| types.to_json().contains("application/x-notes")));
+}
+
 /// A frame's writes to states no `ui.state` names say where the script made
 /// them, one line for each place however many rows made one there: forty
 /// rows' `ui.use_state`, `ui.computed` and `ui.tween` written, not "40

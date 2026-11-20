@@ -44,7 +44,7 @@ enum Backend {
 }
 
 /// A clipboard of the process's own (`ZGX_CLIPBOARD=memory`): text, HTML,
-/// files, an image and the primary selection held in memory, for test and
+/// types, files, an image and the primary selection held in memory, for test and
 /// QA sessions (an off-screen one driven by `zgx inspect`) to copy and paste
 /// through the app's own paths without touching the person's clipboard.
 /// Writing one kind replaces the others, as a system clipboard's write does.
@@ -54,6 +54,8 @@ pub(crate) struct Memory(std::sync::Arc<std::sync::Mutex<Held>>);
 struct Held {
     text: Option<String>,
     html: Option<String>,
+    /// MIME types of the app's own and their text, as written.
+    types: Vec<(String, String)>,
     files: Vec<std::path::PathBuf>,
     image: Option<zgx::image::ImageData>,
     primary: Option<String>,
@@ -67,11 +69,16 @@ impl Memory {
     }
     /// Replace what it holds with `text` and `html` (either may be none).
     fn set(&self, text: Option<String>, html: Option<String>) {
+        self.set_typed(text, html, Vec::new());
+    }
+    /// Replace what it holds with `text`, `html` and `types`.
+    fn set_typed(&self, text: Option<String>, html: Option<String>, types: Vec<(String, String)>) {
         self.with(|held| {
             let primary = held.primary.take();
             *held = Held {
                 text,
                 html,
+                types,
                 primary,
                 ..Held::default()
             };
@@ -135,6 +142,63 @@ impl Clipboard {
             Backend::Wayland(clipboard) => clipboard.store_rich(text, html)?,
         }
         Ok(())
+    }
+
+    /// Put `content` on the clipboard: with types, in one change with its
+    /// text and HTML (`set_typed`); without, as `set_rich_text` and
+    /// `set_text` ever have. Whether it took it.
+    pub(crate) fn write(&mut self, content: zgx::widgets::ClipboardContent) -> bool {
+        let zgx::widgets::ClipboardContent { text, html, types } = content;
+        if !types.is_empty() {
+            return self.set_typed(text, html, &types).is_ok();
+        }
+        match html {
+            Some(html) => self.set_rich_text(text, html).is_ok(),
+            None => self.set_text(text).is_ok(),
+        }
+    }
+
+    /// Put `text`, `html` beside it where given, and `types` (MIME types
+    /// of the app's own and their text) on the clipboard in one change.
+    /// The types go where a browser's page reads its own: Chromium's web
+    /// custom data (`web_custom`), which Chrome, Edge and Electron apps
+    /// write a page's `setData` into and read its `getData` from.
+    pub(crate) fn set_typed(
+        &mut self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+    ) -> Result<()> {
+        match &mut self.backend {
+            Backend::Native(clipboard) => {
+                let custom = web_custom::encode(types);
+                clipboard.set().formats(
+                    platform_text(text).into(),
+                    html.map(Into::into),
+                    &[(web_custom::FORMAT, &custom)],
+                )?
+            }
+            Backend::Memory(memory) => memory.set_typed(Some(text), html, types.to_vec()),
+            #[cfg(target_os = "linux")]
+            Backend::Wayland(clipboard) => {
+                clipboard.store_custom(text, html, web_custom::encode(types))?
+            }
+        }
+        Ok(())
+    }
+
+    /// The clipboard's types of an app's own and their text (what
+    /// `set_typed` wrote, or a web page's copy in Chromium did), in the
+    /// order its web custom data holds them. An error where it holds none.
+    pub(crate) fn get_types(&mut self) -> Result<Vec<(String, String)>> {
+        let custom = match &mut self.backend {
+            Backend::Native(clipboard) => clipboard.get().raw(web_custom::FORMAT)?,
+            Backend::Memory(memory) => return Ok(memory.with(|held| held.types.clone())),
+            #[cfg(target_os = "linux")]
+            Backend::Wayland(clipboard) => clipboard.load_custom()?,
+        };
+        web_custom::decode(&custom)
+            .ok_or_else(|| "the clipboard's web custom data is malformed".into())
     }
 
     pub(crate) fn get_text(&mut self) -> Result<String> {
@@ -256,6 +320,105 @@ impl Clipboard {
             Backend::Memory(memory) => memory.with(|held| held.primary = Some(text)),
         }
         Ok(())
+    }
+}
+
+/// Chromium's web custom data: every type a web page's copy `setData`s
+/// beyond text, HTML and the like, packed into one format of the
+/// platform's, which a page's paste `getData`s back out of. Chrome, Edge
+/// and Electron apps share it; Firefox has one of its own, and Safari keeps
+/// a page's types to its own origin.
+///
+/// The layout is a `base::Pickle` as `ui/base/clipboard/custom_data_helper.cc`
+/// writes it (`WriteCustomDataToPickle`): a header of the payload's length
+/// in bytes (a `uint32`), then the payload: the number of types (a
+/// `uint32`), then each type and its value as `WriteString16` writes a
+/// string, its length in UTF-16 code units (an `int32`) and those units,
+/// zeros after them to a multiple of 4 bytes. All of it in the machine's
+/// byte order, little-endian on every platform zgx runs on.
+pub(crate) mod web_custom {
+    /// The format Chromium keeps it in: a pasteboard type on macOS, a
+    /// registered clipboard format on Windows, a target or MIME type on X11
+    /// and Wayland (`kUTTypeChromiumDataTransferCustomData`,
+    /// `DataTransferCustomType`, `kMimeTypeDataTransferCustomData`).
+    #[cfg(target_os = "macos")]
+    pub(crate) const FORMAT: &str = "org.chromium.web-custom-data";
+    #[cfg(windows)]
+    pub(crate) const FORMAT: &str = "Chromium Web Custom MIME Data Format";
+    #[cfg(not(any(target_os = "macos", windows)))]
+    pub(crate) const FORMAT: &str = "chromium/x-web-custom-data";
+
+    /// `types`, each a type and its value, as Chromium's pickle holds them.
+    pub(crate) fn encode(types: &[(String, String)]) -> Vec<u8> {
+        let mut out = vec![0; 4];
+        out.extend((types.len() as u32).to_le_bytes());
+        let mut string = |text: &str| {
+            let start = out.len();
+            out.extend([0; 4]);
+            let mut units = 0u32;
+            for unit in text.encode_utf16() {
+                out.extend(unit.to_le_bytes());
+                units += 1;
+            }
+            out[start..start + 4].copy_from_slice(&units.to_le_bytes());
+            out.resize(out.len().next_multiple_of(4), 0);
+        };
+        for (kind, value) in types {
+            string(kind);
+            string(value);
+        }
+        let payload = (out.len() - 4) as u32;
+        out[..4].copy_from_slice(&payload.to_le_bytes());
+        out
+    }
+
+    /// The types and values in Chromium's pickle `data`, in its order; none
+    /// where it is malformed (Chromium then reads no types at all).
+    /// Its payload is the last `payload size` bytes, as Chromium's
+    /// `PickleIterator::WithData` finds it; where that leaves a header of
+    /// another size, a block with slack past the pickle (a clipboard's
+    /// memory can be rounded up), right after the 4-byte header.
+    pub(crate) fn decode(data: &[u8]) -> Option<Vec<(String, String)>> {
+        let payload = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+        let header = data.len().checked_sub(payload)?;
+        if header < 4 {
+            return None;
+        }
+        let at = |start: usize| read(data.get(start..start.checked_add(payload)?)?);
+        match header {
+            4 => at(4),
+            _ if header % 4 == 0 => at(header).or_else(|| at(4)),
+            _ => at(4),
+        }
+    }
+
+    fn read(mut payload: &[u8]) -> Option<Vec<(String, String)>> {
+        let word = |payload: &mut &[u8]| -> Option<u32> {
+            let (bytes, rest) = payload.split_first_chunk::<4>()?;
+            *payload = rest;
+            Some(u32::from_le_bytes(*bytes))
+        };
+        let count = word(&mut payload)?;
+        let string = |payload: &mut &[u8]| -> Option<String> {
+            let units = i32::try_from(word(payload)?).ok()? as usize;
+            let bytes = units.checked_mul(2)?;
+            let padded = bytes.checked_next_multiple_of(4)?;
+            let text = payload.get(..bytes)?;
+            // Padding cut short at the end, as Chromium's reads allow.
+            *payload = payload.get(padded..).unwrap_or_default();
+            let units: Vec<u16> = (text.as_chunks::<2>().0.iter())
+                .map(|unit| u16::from_le_bytes(*unit))
+                .collect();
+            Some(String::from_utf16_lossy(&units))
+        };
+        // Each entry takes at least 8 bytes: a count past that is malformed.
+        let mut types = Vec::with_capacity((count as usize).min(payload.len() / 8));
+        for _ in 0..count {
+            let kind = string(&mut payload)?;
+            let value = string(&mut payload)?;
+            types.push((kind, value));
+        }
+        Some(types)
     }
 }
 
@@ -563,6 +726,220 @@ mod tests {
             clipboard.set_text("again".into()).unwrap();
             assert_eq!(clipboard.get_primary_text().unwrap(), "selected");
         }
+    }
+
+    /// Types and their text through the system clipboard (macOS, Windows,
+    /// X11), as Chromium's web custom data: what `set_typed` writes,
+    /// `get_types` reads back, with the text and HTML beside them, and the
+    /// blob as Chromium's format names it. Ignored: it replaces the
+    /// clipboard of whoever runs it. CI runs it on each (`--ignored
+    /// --exact`; Linux as `clipboard-types-x11`).
+    #[test]
+    #[ignore]
+    fn types_round_trip_through_the_system_clipboard() {
+        let mut clipboard = super::Clipboard {
+            backend: super::Backend::Native(arboard::Clipboard::new().expect("the clipboard")),
+        };
+        let types = vec![
+            (
+                "application/x-anara-citations".to_owned(),
+                "Cited <source id=\"s1\" /> é".to_owned(),
+            ),
+            ("application/x-zgx-test".to_owned(), String::new()),
+        ];
+        clipboard
+            .set_typed(
+                "Cited [1] é".into(),
+                Some("<p>Cited [1] é</p>".into()),
+                &types,
+            )
+            .expect("types written");
+        assert_eq!(clipboard.get_types().expect("types read back"), types);
+        assert_eq!(clipboard.get_text().expect("its text"), "Cited [1] é");
+        let html = clipboard.get_html().expect("its HTML");
+        assert!(html.contains("<p>Cited [1] é</p>"), "{html:?}");
+        // The blob itself, as a browser reads it.
+        let super::Backend::Native(native) = &mut clipboard.backend else {
+            unreachable!()
+        };
+        let blob = native
+            .get()
+            .raw(super::web_custom::FORMAT)
+            .expect("the blob");
+        assert_eq!(super::web_custom::decode(&blob), Some(types));
+        // Plain text written over them: no types are left to read.
+        clipboard.set_text("plain".into()).expect("text written");
+        assert!(
+            clipboard.get_types().is_err(),
+            "types left behind plain text"
+        );
+    }
+
+    /// The memory clipboard keeps types as written, and any other write
+    /// replaces them as the system's does.
+    #[test]
+    fn the_memory_clipboard_keeps_types_until_the_next_write() {
+        let mut clipboard = super::Clipboard {
+            backend: super::Backend::Memory(super::Memory::default()),
+        };
+        assert_eq!(clipboard.get_types().unwrap(), []);
+        let types = vec![("application/x-notes".to_owned(), "n".to_owned())];
+        let content = zgx::widgets::ClipboardContent {
+            text: "t".into(),
+            html: Some("<b>t</b>".into()),
+            types: types.clone(),
+        };
+        assert!(clipboard.write(content));
+        assert_eq!(clipboard.get_types().unwrap(), types);
+        assert_eq!(clipboard.get_text().unwrap(), "t");
+        assert_eq!(clipboard.get_html().unwrap(), "<b>t</b>");
+        // No types: text and HTML as ever, and the old types are gone.
+        assert!(clipboard.write(zgx::widgets::ClipboardContent::new("u".into(), None)));
+        assert_eq!(clipboard.get_types().unwrap(), []);
+        assert!(clipboard.get_html().is_err());
+    }
+
+    /// One type and its value as Chromium's `WriteCustomDataToPickle`
+    /// writes them: the payload's length, the count, then each string's
+    /// length in UTF-16 units and its units, zeros to a 4-byte boundary.
+    const ONE_TYPE: [u8; 28] = [
+        24, 0, 0, 0, // the payload's length in bytes
+        1, 0, 0, 0, // one type
+        3, 0, 0, 0, b'a', 0, b'/', 0, b'b', 0, 0, 0, // "a/b", 2 bytes of padding
+        2, 0, 0, 0, b'h', 0, 0xe9, 0, // "hé", none
+    ];
+
+    #[test]
+    fn types_encode_as_chromiums_pickle_does() {
+        use super::web_custom::{decode, encode};
+        let one = vec![("a/b".to_owned(), "hé".to_owned())];
+        assert_eq!(encode(&one), ONE_TYPE);
+        assert_eq!(decode(&ONE_TYPE), Some(one));
+        // None: a pickle of a count of 0.
+        assert_eq!(encode(&[]), [4, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(decode(&encode(&[])), Some(vec![]));
+        // Astral characters are two units each; empty strings none.
+        let many = vec![
+            (
+                "application/x-anara-citations".to_owned(),
+                "😀 <source id=\"1\" />".to_owned(),
+            ),
+            ("x".to_owned(), String::new()),
+            (String::new(), "only a value".to_owned()),
+        ];
+        let blob = encode(&many);
+        assert_eq!(blob.len() % 4, 0);
+        assert_eq!(
+            u32::from_le_bytes(blob[..4].try_into().unwrap()) as usize,
+            blob.len() - 4
+        );
+        assert_eq!(decode(&blob), Some(many));
+    }
+
+    /// A clipboard's block may be longer than the pickle (Windows rounds a
+    /// global's size up): the payload still reads. Anything malformed reads
+    /// as no types at all, as Chromium reads it.
+    #[test]
+    fn web_custom_data_with_slack_reads_and_malformed_data_does_not() {
+        use super::web_custom::decode;
+        let one = vec![("a/b".to_owned(), "hé".to_owned())];
+        for slack in [1, 2, 4, 8] {
+            let padded = [ONE_TYPE.to_vec(), vec![0; slack]].concat();
+            assert_eq!(decode(&padded), Some(one.clone()), "{slack} bytes of slack");
+        }
+        assert_eq!(decode(&[]), None);
+        assert_eq!(decode(&ONE_TYPE[..3]), None);
+        // Cut short: a payload longer than the data.
+        assert_eq!(decode(&ONE_TYPE[..20]), None);
+        // A count past the entries there.
+        let mut more = ONE_TYPE;
+        more[4] = 2;
+        assert_eq!(decode(&more), None);
+        // A negative length.
+        let mut negative = ONE_TYPE;
+        negative[8..12].copy_from_slice(&(-1i32).to_le_bytes());
+        assert_eq!(decode(&negative), None);
+        // A count of billions over a few bytes neither reads nor allocates.
+        let huge = [8, 0, 0, 0, 0xff, 0xff, 0xff, 0x7f, 0, 0, 0, 0];
+        assert_eq!(decode(&huge), None);
+    }
+
+    /// A `base::Pickle` as Chromium's tests write one, a call at a time:
+    /// `WriteUInt32` and `WriteString16`, then the header.
+    #[derive(Default)]
+    struct Pickle(Vec<u8>);
+    impl Pickle {
+        fn uint32(mut self, value: u32) -> Self {
+            self.0.extend(value.to_le_bytes());
+            self
+        }
+        fn string16(mut self, text: &str) -> Self {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            self.0.extend((units.len() as i32).to_le_bytes());
+            units
+                .iter()
+                .for_each(|unit| self.0.extend(unit.to_le_bytes()));
+            self.0.resize(self.0.len().next_multiple_of(4), 0);
+            self
+        }
+        fn bytes(self) -> Vec<u8> {
+            [(self.0.len() as u32).to_le_bytes().to_vec(), self.0].concat()
+        }
+    }
+
+    /// Chromium's own cases (`custom_data_helper_unittest.cc`): its test
+    /// data reads and writes as there, and its malformed pickles (a count
+    /// past the strings there, a type without its value) read as none.
+    #[test]
+    fn chromiums_custom_data_cases_read_as_chromium_reads_them() {
+        use super::web_custom::{decode, encode};
+        let data = vec![
+            ("abc".to_owned(), String::new()),
+            ("de".to_owned(), "1".to_owned()),
+            ("f".to_owned(), "23".to_owned()),
+        ];
+        let written = Pickle::default()
+            .uint32(3)
+            .string16("abc")
+            .string16("")
+            .string16("de")
+            .string16("1")
+            .string16("f")
+            .string16("23")
+            .bytes();
+        assert_eq!(encode(&data), written);
+        assert_eq!(decode(&written), Some(data));
+        assert_eq!(decode(&Pickle::default().uint32(0).bytes()), Some(vec![]));
+        let past = Pickle::default()
+            .uint32(1000)
+            .string16("hello")
+            .string16("world");
+        assert_eq!(decode(&past.bytes()), None);
+        let alone = Pickle::default().uint32(1).string16("hello");
+        assert_eq!(decode(&alone.bytes()), None);
+    }
+
+    /// What Anara's chat copies (its web app's three entries), astral
+    /// characters, entities and blank lines and all, through the blob.
+    #[test]
+    fn a_cited_chat_selection_round_trips_through_the_blob() {
+        use super::web_custom::{decode, encode};
+        let citations = "Sleep helps memory <source id=\"aa11111\" passageId=\"aa11111\" \
+            title=\"Sleep deprivation and vigilant attention\" sourceType=\"library\" \
+            sourceId=\"doc-a\" authors=\"Julian Lim&#124;David F. Dinges\" year=\"2010\" \
+            sdType=\"document\" sdPage=\"4\" sdMimeType=\"application/pdf\" />.\n\n😴 Caffeine \
+            does not.";
+        let types = vec![(
+            "application/x-anara-citations".to_owned(),
+            citations.to_owned(),
+        )];
+        let blob = encode(&types);
+        // The emoji is a surrogate pair: two units of the value's length.
+        let units = citations.encode_utf16().count();
+        assert_eq!(units, citations.chars().count() + 1);
+        let at = 4 + 4 + 4 + "application/x-anara-citations".len() * 2 + 2;
+        assert_eq!(&blob[at..at + 4], &(units as u32).to_le_bytes());
+        assert_eq!(decode(&blob), Some(types));
     }
 
     #[test]
