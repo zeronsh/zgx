@@ -9357,15 +9357,16 @@ impl Scene {
                 text, font_size, ..
             } => {
                 if node.style.text_options != Default::default() {
-                    let runs = if text.is_empty() {
-                        Vec::new()
+                    // The runs' room made once, in place: a `Vec` was copied.
+                    let runs: Arc<[crate::rich_text::TextRun]> = if text.is_empty() {
+                        Arc::from([])
                     } else {
-                        vec![crate::rich_text::TextRun {
+                        Arc::from([crate::rich_text::TextRun {
                             range: 0..text.len(),
                             font: node.font.clone(),
                             font_size: *font_size,
                             ..Default::default()
-                        }]
+                        }])
                     };
                     let rich = crate::rich_text::RichText::new(text.clone(), runs)
                         .unwrap()
@@ -14693,15 +14694,16 @@ impl Scene {
                             }
                         }
                     } else if style.text_options != Default::default() {
-                        let runs = if text.is_empty() {
-                            Vec::new()
+                        // The runs' room made once, in place: a `Vec` was copied.
+                        let runs: Arc<[crate::rich_text::TextRun]> = if text.is_empty() {
+                            Arc::from([])
                         } else {
-                            vec![crate::rich_text::TextRun {
+                            Arc::from([crate::rich_text::TextRun {
                                 range: 0..text.len(),
                                 font: self.node(id).font.clone(),
                                 font_size: *font_size,
                                 ..Default::default()
-                            }]
+                            }])
                         };
                         let rich = crate::rich_text::RichText::new(text.clone(), runs)
                             .unwrap()
