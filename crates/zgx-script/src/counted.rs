@@ -36,7 +36,7 @@ pub struct Str {
 }
 
 impl Str {
-    #[inline]
+    #[inline(always)]
     fn raw(&self) -> *const str {
         std::ptr::slice_from_raw_parts(self.text.as_ptr().cast_const(), self.len) as *const str
     }
@@ -170,7 +170,7 @@ impl Drop for Str {
 }
 impl Deref for Str {
     type Target = str;
-    #[inline]
+    #[inline(always)]
     fn deref(&self) -> &str {
         // SAFETY: The text an `Rc<str>` holds for as long as `self` lives.
         unsafe { &*self.raw() }
@@ -583,7 +583,7 @@ impl<T> Drop for Slice<T> {
 }
 impl<T> Deref for Slice<T> {
     type Target = [T];
-    #[inline]
+    #[inline(always)]
     fn deref(&self) -> &[T] {
         // SAFETY: `len` items, alive as long as `self`.
         unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.len) }
