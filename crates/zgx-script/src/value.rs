@@ -586,22 +586,21 @@ impl Value {
                 let mut unchanged = new.len() == was.len();
                 // Straight into the shared slice: one allocation, not a
                 // vector's and then a copy of it.
-                let items: List = new
-                    .iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        let prior = match &ids {
-                            Some(ids) => id_of(item).and_then(|id| ids.get(&id).copied()),
-                            None => was.get(i),
-                        };
-                        let item = match prior {
-                            Some(prior) => item.clone().reconcile(prior),
-                            None => item.clone(),
-                        };
-                        unchanged = unchanged && was.get(i).is_some_and(|w| same(&item, w));
-                        item
-                    })
-                    .collect();
+                // (Each written in its place as it is made, with nothing
+                // checked between them: a long list's every item.)
+                let items: List = List::filled(new.len(), |i| {
+                    let item = &new[i];
+                    let prior = match &ids {
+                        Some(ids) => id_of(item).and_then(|id| ids.get(&id).copied()),
+                        None => was.get(i),
+                    };
+                    let item = match prior {
+                        Some(prior) => item.clone().reconcile(prior),
+                        None => item.clone(),
+                    };
+                    unchanged = unchanged && was.get(i).is_some_and(|w| same(&item, w));
+                    item
+                });
                 if unchanged {
                     old.clone()
                 } else {
@@ -617,26 +616,24 @@ impl Value {
                 // Both sorted by key: walk them together.
                 let mut unchanged = new.len() == was.len();
                 let mut at = 0;
-                let fields: Map = new
-                    .iter()
-                    .map(|Field(key, value)| {
-                        // Most often the same keys: equal is told first.
-                        while at < was.len() && !key_eq(&was[at].0, key) && *was[at].0 < **key {
-                            at += 1;
+                let fields: Map = Map::filled(new.len(), |i| {
+                    let Field(key, value) = &new[i];
+                    // Most often the same keys: equal is told first.
+                    while at < was.len() && !key_eq(&was[at].0, key) && *was[at].0 < **key {
+                        at += 1;
+                    }
+                    match was.get(at) {
+                        Some(Field(k, v)) if key_eq(k, key) => {
+                            let value = value.clone().reconcile(v);
+                            unchanged = unchanged && same(&value, v);
+                            Field(k.clone(), value)
                         }
-                        match was.get(at) {
-                            Some(Field(k, v)) if key_eq(k, key) => {
-                                let value = value.clone().reconcile(v);
-                                unchanged = unchanged && same(&value, v);
-                                (k.clone(), value)
-                            }
-                            _ => {
-                                unchanged = false;
-                                (key.clone(), value.clone())
-                            }
+                        _ => {
+                            unchanged = false;
+                            Field(key.clone(), value.clone())
                         }
-                    })
-                    .collect();
+                    }
+                });
                 if unchanged {
                     old.clone()
                 } else {
