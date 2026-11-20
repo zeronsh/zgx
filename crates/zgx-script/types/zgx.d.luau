@@ -23158,7 +23158,7 @@ export type HostViewProps = {
 	-- On a `selectable` region: what a copy out of it (⌘C, the Edit menu,
 	-- its context menu) puts on the clipboard. Handed the selection's text
 	-- and HTML and, for each text node it spans in order, the id of the
-	-- element it is in (`false` for none); returns `{ text, html }`, or nil
+	-- element it is in (`false` for none); returns `{ text, html, types }`, or nil
 	-- for the selection's own.
 	on_copy: Props_on_copy,
 	-- Files dropped on it from outside the window (Finder, Explorer): the
