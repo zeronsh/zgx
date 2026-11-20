@@ -1,7 +1,5 @@
 //! A native module for zgx-script's tests (`tests/native_modules.rs`).
 
-use std::{cell::RefCell, rc::Rc};
-
 use zgx_module::{Host, Value};
 
 zgx_module::module!(|host: &Host| {
@@ -87,11 +85,13 @@ zgx_module::module!(|host: &Host| {
         }
         Value::from(sum)
     });
-    // A value kept by an action, read by a function: a module's own state.
-    let kept: Rc<RefCell<Value>> = Rc::default();
-    let keep = kept.clone();
+    // A value kept by an action, read by a function: a module's own state,
+    // one for each thread.
+    let kept = host.state::<Value>();
     host.action("fixture.keep", move |arg| {
-        *keep.borrow_mut() = arg.to_owned()
+        // (What it held is freed outside `with`.)
+        let was = kept.with(|kept| std::mem::replace(kept, arg.to_owned()));
+        drop(was);
     });
-    host.function("fixture.kept", move |_| kept.borrow().clone());
+    host.function("fixture.kept", move |_| kept.with(|kept| kept.clone()));
 });

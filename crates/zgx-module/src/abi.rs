@@ -183,6 +183,20 @@ pub struct Registrar {
         user: *mut c_void,
         free: Free,
     ),
+    /// A module's state for this thread, by a name of the module's own:
+    /// `size` bytes at `align`, made the first time the thread asks (`init`
+    /// writes it) and the same pointer each time after, for every host on
+    /// the thread; freed (`free`) as the thread ends. A module asks once as
+    /// it loads and keeps the pointer, so reading its state is a load.
+    pub state: unsafe extern "C" fn(
+        host: *mut c_void,
+        name: *const u8,
+        len: usize,
+        size: usize,
+        align: usize,
+        init: unsafe extern "C" fn(state: *mut u8),
+        free: unsafe extern "C" fn(state: *mut u8),
+    ) -> *mut u8,
 }
 
 /// A module's entry, exported as [`ENTRY`]: called once per host it is

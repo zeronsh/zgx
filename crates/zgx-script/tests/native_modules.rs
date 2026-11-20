@@ -294,3 +294,36 @@ fn a_module_frees_what_it_held_last() {
     drop(app);
     assert_eq!(Rc::strong_count(&list), 1);
 }
+
+/// A module's state is its thread's: two hosts on a thread share it, and a
+/// host on another thread has its own.
+#[test]
+fn a_modules_state_is_one_per_thread() {
+    let kept = |keep: Option<&str>| {
+        let mut seen = Value::Nil;
+        let app = TestApp::new(|runtime| {
+            let host = ScriptHost::inline(runtime, "app", "return ui.column {}");
+            // SAFETY: This workspace's own fixture.
+            unsafe { host.load_module(library()) }.unwrap();
+            if let Some(keep) = keep {
+                host.registered_action("fixture.keep").unwrap()(Value::from(keep));
+            }
+            seen = host.registered_function("fixture.kept").unwrap()(Value::Nil);
+            host
+        });
+        assert_eq!(app.error(), None);
+        seen
+    };
+    assert_eq!(kept(Some("here")), Value::from("here"));
+    // Another host, the same thread: the same state.
+    assert_eq!(kept(None), Value::from("here"));
+    // Another thread: its own, and this thread's as it was.
+    let there = std::thread::spawn(move || {
+        (
+            kept(None) == Value::Nil,
+            kept(Some("there")) == Value::from("there"),
+        )
+    });
+    assert_eq!(there.join().unwrap(), (true, true));
+    assert_eq!(kept(None), Value::from("here"));
+}

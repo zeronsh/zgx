@@ -29,7 +29,7 @@ compile_error!("zgx-module reads values by their 64-bit layout");
 pub mod abi;
 
 use std::{
-    cell::UnsafeCell,
+    cell::RefCell,
     ffi::c_void,
     marker::PhantomData,
     mem::MaybeUninit,
@@ -565,31 +565,27 @@ fn key_eq(a: &str, b: &str) -> bool {
     }
 }
 
-/// A module's own state, for the interface's thread: a `static` read with
-/// no lookup (`static HELD: Local<Held> = Local::new();`). A `thread_local!`
-/// in a library is a call each time it's read; this is a load.
-///
-/// Everything a module registers is called on the interface's thread, the
-/// one that loaded it, and that is the only thread that may use a `Local`:
-/// a module's own threads must not touch one.
-pub struct Local<T>(UnsafeCell<Option<T>>);
-// SAFETY: Used from the interface's thread alone (the type's contract).
-unsafe impl<T> Sync for Local<T> {}
-impl<T: Default> Local<T> {
-    pub const fn new() -> Self {
-        Local(UnsafeCell::new(None))
-    }
-    /// Runs `read` with the state, made on its first use. Not re-entrant:
-    /// `read` must not use this `Local` again.
-    #[inline]
-    pub fn with<R>(&self, read: impl FnOnce(&mut T) -> R) -> R {
-        // SAFETY: One thread, and no `with` inside another's `read`.
-        read(unsafe { &mut *self.0.get() }.get_or_insert_with(T::default))
+/// A module's own state ([`Host::state`]): one per thread, the same for
+/// every host on it, kept by the runtime and handed to the module as it
+/// loads. A function keeps the handle and reads the state through it with
+/// no lookup, where a `thread_local!` in a library is a call each time.
+pub struct State<T: 'static> {
+    at: *const RefCell<T>,
+}
+impl<T> Clone for State<T> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
-impl<T: Default> Default for Local<T> {
-    fn default() -> Self {
-        Self::new()
+impl<T> Copy for State<T> {}
+impl<T> State<T> {
+    /// Runs `read` with the state. As a `RefCell`: `read` using this state
+    /// again panics.
+    #[inline]
+    pub fn with<R>(self, read: impl FnOnce(&mut T) -> R) -> R {
+        // SAFETY: The runtime keeps it for as long as the thread runs, and
+        // a handle never leaves its thread (it holds a raw pointer).
+        read(&mut unsafe { &*self.at }.borrow_mut())
     }
 }
 
@@ -600,6 +596,37 @@ pub struct Host<'a> {
 }
 
 impl Host<'_> {
+    /// This module's state of type `T` for this thread: made (`T::default`)
+    /// the first time a host on the thread asks, the same for each after,
+    /// so every host a module loads into on a thread shares it, and another
+    /// thread's hosts have their own.
+    pub fn state<T: Default + 'static>(&self) -> State<T> {
+        unsafe extern "C" fn init<T: Default>(state: *mut u8) {
+            // SAFETY: Room for a `RefCell<T>`, unwritten.
+            unsafe { state.cast::<RefCell<T>>().write(RefCell::default()) }
+        }
+        unsafe extern "C" fn free<T>(state: *mut u8) {
+            // SAFETY: What `init` wrote, dropped once.
+            unsafe { state.cast::<RefCell<T>>().drop_in_place() }
+        }
+        // (By this library's own address too: two modules may name a type
+        // alike.)
+        let name = format!("{:p} {}", &raw const API, std::any::type_name::<T>());
+        let r = self.registrar;
+        // SAFETY: The registrar's own host, inside the entry call.
+        let at = unsafe {
+            (r.state)(
+                r.host,
+                name.as_ptr(),
+                name.len(),
+                size_of::<RefCell<T>>(),
+                align_of::<RefCell<T>>(),
+                init::<T>,
+                free::<T>,
+            )
+        };
+        State { at: at.cast() }
+    }
     /// Registers a function scripts call for its value now, with
     /// `ui.call_sync(name, arg)` (`ScriptHost::function`): on the
     /// interface's thread, so quick, with no I/O. Its argument is lent for
