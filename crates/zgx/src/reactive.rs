@@ -164,6 +164,9 @@ struct Inner {
     next: Cell<u64>,
     /// Effects stopped whose handles still live (`Effect::stop`).
     stopped: Cell<usize>,
+    /// Effects with no handle not yet run and gone (`effect_detached`):
+    /// not counted as alive.
+    detached: Cell<usize>,
     batch_depth: Cell<usize>,
     flushing: Cell<bool>,
     /// One value per type that belongs to this runtime (`Runtime::extension`).
@@ -452,6 +455,47 @@ impl Runtime {
     /// the effects there are.
     pub(crate) fn rest(&self) {
         self.inner.effects.borrow_mut().rest();
+    }
+    /// [`Runtime::effect_callback`] with no handle: kept until it forgets
+    /// itself as it runs (`forget_active`), for what runs once in a mount's
+    /// order and follows nothing (a style that can't change).
+    pub(crate) fn effect_detached(&self, mount_pure: bool, callback: Callback) {
+        let born = self.inner.next.get();
+        self.inner.next.set(born + 1);
+        let id = self.inner.effects.borrow_mut().insert(
+            born,
+            EffectRecord {
+                callback,
+                dependencies: Default::default(),
+                run: 0,
+                queued: true,
+                stopped: false,
+                mount_pure,
+                owns: false,
+            },
+        );
+        self.inner.detached.set(self.inner.detached.get() + 1);
+        // `Inner::queue`, written out: a second caller would take it out of
+        // line from `effect_callback`.
+        match self.inner.flushing.get() {
+            true => self.inner.pending.borrow_mut().push(Reverse(id)),
+            false => self.inner.queued.borrow_mut().push(id),
+        }
+        self.flush();
+    }
+    /// The `effect_detached` running now gone, as its dropped handle would
+    /// take it, once this run ends: what it read no longer runs it.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn forget_active(&self) {
+        let Some(id) = self.inner.active.get() else {
+            return;
+        };
+        self.inner.detached.set(self.inner.detached.get() - 1);
+        drop(Effect {
+            id,
+            runtime: Rc::downgrade(&self.inner),
+        });
     }
     #[cfg_attr(feature = "trace", track_caller)]
     pub(crate) fn effect_callback(&self, mount_pure: bool, callback: Callback) -> Effect {
@@ -900,7 +944,7 @@ impl Runtime {
     }
     /// How many effects are alive (not stopped).
     pub fn effect_count(&self) -> usize {
-        self.inner.effects.borrow().len() - self.inner.stopped.get()
+        self.inner.effects.borrow().len() - self.inner.stopped.get() - self.inner.detached.get()
     }
     /// What `idle::on_idle` registered.
     pub(crate) fn idle_trims(&self) -> &RefCell<Vec<std::rc::Weak<dyn Fn()>>> {
