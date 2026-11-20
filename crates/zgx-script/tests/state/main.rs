@@ -25,6 +25,8 @@ mod large_data;
 mod load_font;
 #[path = "../markdown_incremental.rs"]
 mod markdown_incremental;
+#[path = "../memory_limit_stamps.rs"]
+mod memory_limit_stamps;
 #[path = "../module_overrides.rs"]
 mod module_overrides;
 #[path = "../notify.rs"]

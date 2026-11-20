@@ -122,7 +122,7 @@ pub(crate) fn compiled(code: &[u8]) -> (Rc<Compiled>, bool) {
         let entry = Rc::new(Compiled {
             source: code.into(),
             bytecode: mlua::chunk::Compiler::new()
-                .compile(code)
+                .compile(&*crate::templates::for_compile(code))
                 .ok()
                 .map(Into::into),
             home: None,
@@ -178,7 +178,7 @@ pub(crate) fn package_compiled(code: &[u8]) -> (std::sync::Arc<Compiled>, bool) 
             Compiled {
                 source: code.into(),
                 bytecode: mlua::chunk::Compiler::new()
-                    .compile(code)
+                    .compile(&*crate::templates::for_compile(code))
                     .ok()
                     .map(Into::into),
                 home: None,
@@ -506,7 +506,7 @@ pub(crate) fn prefetch(entry: &Path, packages: Vec<(String, std::path::PathBuf)>
                 }
             }
             let bytecode = mlua::chunk::Compiler::new()
-                .compile(&code)
+                .compile(&*crate::templates::for_compile(&code))
                 .ok()
                 .map(Into::into);
             let mut ahead = ahead();
