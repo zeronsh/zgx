@@ -2206,6 +2206,14 @@ fn edges(css: &mut String, property: &str, insets: crate::scene::Insets, sides: 
     }
 }
 
+/// The app's corner shape `k` (`style::set_corner_shape`) as CSS's
+/// `corner-shape: superellipse(k)`, the same curve. Out of line: only an
+/// app that sets a shape has one.
+#[cold]
+#[inline(never)]
+fn corner_shape_css(css: &mut String, k: f32) {
+    let _ = write!(css, "corner-shape:superellipse({});", num(k));
+}
 /// `styles` as CSS declarations, appended to `css`.
 pub fn styles_css(styles: &Styles, text: bool, css: &mut String) {
     styles_css_on(styles, text, false, css);
@@ -2333,7 +2341,7 @@ pub fn styles_css_on(styles: &Styles, text: bool, snap: bool, css: &mut String) 
     if s.overflow().italic == Some(true) {
         css.push_str("font-style:italic;");
     }
-    match s.corners {
+    let rounded = match s.corners {
         Some(Some(c)) => {
             let _ = write!(
                 css,
@@ -2343,12 +2351,17 @@ pub fn styles_css_on(styles: &Styles, text: bool, snap: bool, css: &mut String) 
                 num(c.bottom_right),
                 num(c.bottom_left)
             );
+            true
         }
-        _ => {
-            if let Some(radius) = s.radius.get() {
-                let _ = write!(css, "border-radius:{}px;", num(radius));
-            }
-        }
+        _ => s.radius.get().is_some_and(|radius| {
+            let _ = write!(css, "border-radius:{}px;", num(radius));
+            radius > 0.
+        }),
+    };
+    // Round corners (the default) say nothing more.
+    let k = crate::style::corner_shape();
+    if rounded && k > 1.01 {
+        corner_shape_css(css, k);
     }
     let border_style = s
         .rare
@@ -2855,4 +2868,32 @@ fn tracks_css(tracks: &crate::grid_tracks::GridTracks) -> String {
         })
         .collect();
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::style::{Styled, Styles};
+
+    /// A rounded box takes the app's corner shape as CSS's `corner-shape`;
+    /// a square one, and every box while corners are round, say nothing.
+    #[test]
+    fn a_rounded_box_takes_the_apps_corner_shape() {
+        let css = |styles: Styles| {
+            let mut css = String::new();
+            super::styles_css(&styles, false, &mut css);
+            css
+        };
+        assert!(!css(Styles::new().rounded(8.)).contains("corner-shape"));
+        crate::style::set_corner_shape(1.5);
+        let rounded = css(Styles::new().rounded(8.));
+        crate::style::set_corner_shape(1.);
+        assert!(
+            rounded.contains("border-radius:8px;corner-shape:superellipse(1.5);"),
+            "{rounded}"
+        );
+        crate::style::set_corner_shape(1.5);
+        let square = css(Styles::new().w(10.));
+        crate::style::set_corner_shape(1.);
+        assert!(!square.contains("corner-shape"), "{square}");
+    }
 }
