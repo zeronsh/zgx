@@ -228,8 +228,24 @@ impl XConnection {
 
     fn query_monitor_list(&self) -> Result<Vec<MonitorHandle>, X11Error> {
         let root = self.default_root();
+        // No RandR: the root window is the one monitor, at its size.
+        let Some(randr_version) = self.randr_version() else {
+            let dimensions = (root.width_in_pixels.into(), root.height_in_pixels.into());
+            let millimeters = (root.width_in_millimeters.into(), root.height_in_millimeters.into());
+            return Ok(vec![MonitorHandle {
+                id: root.root,
+                name: "screen".into(),
+                scale_factor: self.scale_factor_for(dimensions, millimeters),
+                dimensions,
+                position: (0, 0),
+                refresh_rate_millihertz: None,
+                primary: true,
+                rect: util::AaRect::new((0, 0), dimensions),
+                video_modes: Vec::new(),
+            }]);
+        };
         let resources =
-            ScreenResources::from_connection(self.xcb_connection(), root, self.randr_version())?;
+            ScreenResources::from_connection(self.xcb_connection(), root, randr_version)?;
 
         // Pipeline all of the get-crtc requests.
         let mut crtc_cookies = Vec::with_capacity(resources.crtcs().len());

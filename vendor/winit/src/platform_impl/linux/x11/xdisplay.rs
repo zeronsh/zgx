@@ -9,7 +9,7 @@ use crate::window::CursorIcon;
 use super::atoms::Atoms;
 use super::ffi;
 use super::monitor::MonitorHandle;
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{self, ConnectionExt};
 use x11rb::resource_manager;
@@ -53,8 +53,8 @@ pub struct XConnection {
     /// The resource database.
     database: RwLock<resource_manager::Database>,
 
-    /// RandR version.
-    randr_version: (u32, u32),
+    /// RandR version, if the server has the extension.
+    randr_version: Option<(u32, u32)>,
 
     /// Atom for the XSettings screen.
     xsettings_screen: Option<xproto::Atom>,
@@ -110,12 +110,18 @@ impl XConnection {
         let database = resource_manager::new_from_default(&xcb)
             .map_err(|e| XNotSupported::XcbConversionError(Arc::new(e)))?;
 
-        // Load the RandR version.
+        // Load the RandR version: none on a server without the extension
+        // (`Xvfb -extension RANDR`), where the root window is the one
+        // monitor (`available_monitors`).
         let randr_version = xcb
-            .randr_query_version(1, 3)
-            .expect("failed to request XRandR version")
-            .reply()
-            .expect("failed to query XRandR version");
+            .extension_information(x11rb::protocol::randr::X11_EXTENSION_NAME)
+            .ok()
+            .flatten()
+            .and_then(|_| xcb.randr_query_version(1, 3).ok()?.reply().ok())
+            .map(|version| (version.major_version, version.minor_version));
+        if randr_version.is_none() {
+            tracing::warn!("the X server has no XRandR: its root window is the one monitor");
+        }
 
         let xsettings_screen = Self::new_xsettings_screen(&xcb, default_screen);
         if xsettings_screen.is_none() {
@@ -142,7 +148,7 @@ impl XConnection {
             monitor_handles: Mutex::new(None),
             database: RwLock::new(database),
             cursor_cache: Default::default(),
-            randr_version: (randr_version.major_version, randr_version.minor_version),
+            randr_version,
             xsettings_screen,
         })
     }
@@ -185,7 +191,7 @@ impl XConnection {
     }
 
     #[inline]
-    pub fn randr_version(&self) -> (u32, u32) {
+    pub fn randr_version(&self) -> Option<(u32, u32)> {
         self.randr_version
     }
 
