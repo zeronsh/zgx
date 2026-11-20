@@ -16,7 +16,9 @@ row a button there centres on at 100%). The window must say so too
 (`WindowInfo::controls`, unzoomed to the content's points) and its title
 bar strip (`titlebar_area`) must be as tall as centres them, or AppKit's
 40 points where they sit higher. All three buttons must stand in one row, evenly
-apart (the zoom button too: AppKit lays it out last). In full screen it reports no buttons.
+apart (the zoom button too: AppKit lays it out last), and stay so after every frame of a resize in
+steps and of AppKit's animated resize, after each of 30 frame changes back to back, and after each
+pass of a live resize's event-tracking run loop (`LIVE_RESIZE`, `ANIMATED`, `BURST`, `TRACKING`). In full screen it reports no buttons.
 
 It is launched as a direct child, from /tmp, with a clean environment; it
 sends no input. If a system dialog appears, stop and report it; never click
@@ -54,7 +56,8 @@ def main():
             out = subprocess.run([str(binary), '--at', f'{x},{y}'], cwd='/tmp', env=clean, capture_output=True,
                                  text=True, timeout=60).stdout
             print(f'== at {x},{y}')
-            print('\n'.join(line for line in out.splitlines() if line.startswith('CLOSE ')))
+            print('\n'.join(line for line in out.splitlines()
+                            if line.startswith(('CLOSE ', 'LIVE_RESIZE ', 'ANIMATED ', 'BURST ', 'TRACKING '))))
             reports = {when: dict(re.findall(r'(\w+)=(\S+)', rest))
                        for when, rest in re.findall(r'^CLOSE (\S+) (.*)$', out, re.M)}
             label = f'at {x},{y}'
@@ -78,6 +81,16 @@ def main():
                 strip = max(40, want_y * 2 + height) / zoom
                 checks[f'{label}: {when}, the strip as tall as centres them'] = (
                     report['area_h'] != 'none' and abs(float(report['area_h']) - strip) <= 0.5)
+            # Through a resize in steps, AppKit's animated one, frame changes back
+            # to back, and a live resize's tracking loop: every read, one row,
+            # evenly apart (the zoom button too, which AppKit lays out last).
+            for kind, what in (('LIVE_RESIZE', 'resizing in steps'), ('ANIMATED', 'an animated resize'),
+                               ('BURST', 'frame changes back to back'),
+                               ('TRACKING', "a live resize's tracking loop")):
+                line = re.search(rf'^{kind} (.*)$', out, re.M)
+                fields = dict(re.findall(r'(\w+)=(\S*)', line.group(1))) if line else {}
+                checks[f'{label}: {what}, the three buttons in one row every time'] = (
+                    bool(line) and fields.get('row_wrong') == '0')
     for name, ok in checks.items():
         print(('ok  ' if ok else 'FAIL') + ' ' + name)
     return 0 if checks and all(checks.values()) else 1
