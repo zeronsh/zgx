@@ -1,0 +1,15 @@
+[package]
+name = "zgx-module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Native modules for zgx apps: an app's own Rust, built apart from zgx as a library the runtime loads, and called from Luau."
+keywords = ["gui", "luau", "plugin", "abi"]
+categories = ["gui"]
+
+# Nothing but std: a module links this and its own code, so its build is
+# its own code's (docs/design/runtime.md).
+[dependencies]
