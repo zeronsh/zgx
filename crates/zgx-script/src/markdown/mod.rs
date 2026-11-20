@@ -536,18 +536,21 @@ struct Call {
     first: Option<usize>,
 }
 impl Call {
-    fn read(opts: &Option<mlua::Table>) -> mlua::Result<Self> {
-        let flag = |name: &str| -> mlua::Result<bool> {
-            Ok(match opts {
-                Some(t) => t.get::<Option<bool>>(name)?.unwrap_or(false),
-                None => false,
-            })
-        };
-        let options = Options {
-            breaks: flag("breaks")?,
-            paths: flag("paths")?,
-            html_marks: flag("html_marks")?,
-            code: None,
+    fn read(lua: &mlua::Lua, opts: &Option<mlua::Table>) -> mlua::Result<Self> {
+        let options = match opts {
+            Some(t) => {
+                let keys = keys(lua)?;
+                let flag = |key: &mlua::LuaString| -> mlua::Result<bool> {
+                    Ok(t.raw_get::<Option<bool>>(key)?.unwrap_or(false))
+                };
+                Options {
+                    breaks: flag(&keys.breaks)?,
+                    paths: flag(&keys.paths)?,
+                    html_marks: flag(&keys.html_marks)?,
+                    code: None,
+                }
+            }
+            None => Options::default(),
         };
         let key: Option<String> = match opts {
             Some(t) => t.get("key")?,
@@ -605,7 +608,7 @@ pub(crate) fn script(
     lua: &mlua::Lua,
     (text, opts): (mlua::Value, Option<mlua::Table>),
 ) -> mlua::Result<mlua::Value> {
-    let call = Call::read(&opts)?;
+    let call = Call::read(lua, &opts)?;
     if let Some(state) = crate::value::state_handle(&text) {
         let env = crate::node::env(lua)?;
         let weak = lua.weak();
@@ -831,6 +834,33 @@ const LAZY_TICK: std::time::Duration = std::time::Duration::from_millis(8);
 /// Give a new VM its parsed markdown.
 pub(crate) fn install(lua: &mlua::Lua) {
     lua.set_app_data(Parsed::default());
+    // Its option names, made now rather than inside a first call.
+    let _ = keys(lua);
+}
+
+/// The names of the options `ui.markdown` and `ui.markdown_view` read,
+/// made once a VM. Read raw by these, an option costs neither a string
+/// made nor a protected call each time (so a props table's metatable
+/// gives none of them).
+pub(crate) struct Keys {
+    pub breaks: mlua::LuaString,
+    pub paths: mlua::LuaString,
+    pub html_marks: mlua::LuaString,
+    pub copy: mlua::LuaString,
+}
+
+/// The VM's option names (`Keys`), made the first time they're asked for.
+pub(crate) fn keys(lua: &mlua::Lua) -> mlua::Result<mlua::AppDataRef<'_, Keys>> {
+    if let Some(keys) = lua.app_data_ref::<Keys>() {
+        return Ok(keys);
+    }
+    lua.set_app_data(Keys {
+        breaks: lua.create_string("breaks")?,
+        paths: lua.create_string("paths")?,
+        html_marks: lua.create_string("html_marks")?,
+        copy: lua.create_string("copy")?,
+    });
+    Ok(lua.app_data_ref::<Keys>().expect("set above"))
 }
 
 /// A VM at rest: its parsed texts and the streams not asked for lately go. What
@@ -2297,7 +2327,7 @@ mod tests {
         install(&lua);
         let text = "# Title\n\nSome *words* and a [link](https://example.com).";
         // (The blocks themselves: `script` makes a new table of them each time.)
-        let call = Call::read(&None).expect("no options");
+        let call = Call::read(&lua, &None).expect("no options");
         let ask = || answer(&lua, Source::Str(text), &call, false).expect("its blocks");
         let first = ask();
         let held = |lua: &mlua::Lua| {

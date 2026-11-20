@@ -490,6 +490,33 @@ return ui.column {
     assert_eq!(h.text("keyed"), h.text("on"));
 }
 
+/// Markdown's options are read from the table given, not through its
+/// metatable: they are read raw, by names made once.
+#[test]
+fn markdown_options_come_from_the_table_itself() {
+    let mut h = Harness::inline(
+        r#"local function show(blocks: any): string
+    local out = {}
+    for _, r in blocks[1].s do
+        table.insert(out, r.x .. (if r.b then "+b" else ""))
+    end
+    return table.concat(out, "|")
+end
+local text = "one\ntwo <b>b</b>"
+local inherited = setmetatable({}, { __index = { breaks = true, html_marks = true } })
+local view = setmetatable({ text }, { __index = { breaks = true, copy = false } })
+return ui.column {
+    ui.text { id = "own", show(ui.markdown(text, { breaks = true, html_marks = true })) },
+    ui.text { id = "inherited", show(ui.markdown(text, inherited)) },
+    ui.markdown_view(view),
+}
+"#,
+    );
+    h.settle();
+    assert_eq!(h.text("own"), "one\ntwo |b+b");
+    assert_eq!(h.text("inherited"), "one two b");
+}
+
 /// A Luau string of `text`, every byte escaped.
 fn lua_string(text: &str) -> String {
     let bytes: String = text.bytes().map(|b| format!("\\{b:03}")).collect();
