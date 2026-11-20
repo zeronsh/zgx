@@ -5,7 +5,8 @@
 
 Builds the traffic_lights_probe example and runs it twice, with the close
 button asked at 18,22 and at 12,6 (`WindowOptions::traffic_lights`, content
-points from the window's top left). Through a resize, a dark and a light
+points from the window's top left). Through a resize, the button moved off its place and read back at once (AppKit's
+layout moves it by the same frame change), a dark and a light
 appearance, the app hidden and shown (focus lost and back), a zoom to 125%
 and back, and into and out of full screen (as the green button does), AppKit
 must have the close button's top left there, read from the button's own
@@ -55,7 +56,7 @@ def main():
             reports = {when: dict(re.findall(r'(\w+)=(\S+)', rest))
                        for when, rest in re.findall(r'^CLOSE (\S+) (.*)$', out, re.M)}
             label = f'at {x},{y}'
-            checks[f'{label}: done'] = 'TRAFFIC_LIGHTS_DONE' in out and len(reports) == 9
+            checks[f'{label}: done'] = 'TRAFFIC_LIGHTS_DONE' in out and len(reports) == 10
             for when, report in reports.items():
                 if when == 'full':
                     checks[f'{label}: in full screen, no buttons reported'] = report['controls'] == 'none'
