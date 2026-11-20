@@ -40,7 +40,7 @@ zgx-script	352	3286	lower_list
 zgx-script	490	4164	lower_item_list
 zgx-script	352	3931	lower_rich::{closure#1}::{closure#0}
 zgx-script	181	2780	to_lua
-zgx-script	200	1289	value::<impl in crates/zgx-script/src/value.rs>::reconcile
+zgx-script	160	1081	value::<impl in crates/zgx-script/src/value.rs>::reconcile
 zgx-script	166	1211	<impl in crates/zgx-script/src/lib.rs>::set_state
 zgx-script	105	1230	element::<impl in crates/zgx-script/src/element.rs>::flush
 zgx-script	325	2141	anime::engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush
