@@ -156,6 +156,9 @@ fn tab_strip(
                             alone.with_untracked(|tabs| tabs.len() == 1)
                         })
                         .on_drag_end(move |drag: &TabDrag, accepted| {
+                            // For drag_windows_smoke: the drag is over, a
+                            // window it moved left where it goes.
+                            println!("TAB_END {} accepted={accepted}", drag.tab.title);
                             if accepted && !drag.kept.get() {
                                 remove(&removed, drag.tab.id);
                             }
