@@ -1449,6 +1449,10 @@ export type MarkdownOptions = {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files: runs with `f`.
 	paths: boolean?,
+	-- Inline HTML's marks style their text, as GitHub-sanitized HTML
+	-- shows them: `b`/`strong`, `i`/`em`, `s`/`del`/`strike`,
+	-- `code`/`kbd`/`samp`/`tt`, `a href`, and `br` a line break.
+	html_marks: boolean?,
 	-- With `key`: a text this long (true: 4 KB; or bytes) landing whole
 	-- comes back at once, its blocks not parsed yet `{ t = "pending" }`,
 	-- and is parsed over frames, the end first.
@@ -5979,6 +5983,9 @@ export type MarkdownViewProps = {
 	breaks: boolean?,
 	-- Repository paths (`src/main.rs:12`) are files.
 	paths: boolean?,
+	-- Inline HTML's marks style their text (`b`, `em`, `code`, `a href`,
+	-- `br`, …), as GitHub-sanitized HTML shows them.
+	html_marks: boolean?,
 	-- A Copy button on code blocks (true).
 	copy: boolean?,
 	-- Told of a link click (or its Open Link); true says it was handled, so the link isn't opened.
