@@ -181,20 +181,19 @@ unsafe extern "C" fn release(value: Raw) {
     // SAFETY: An owned value, given back once.
     drop(unsafe { take(value) });
 }
-unsafe extern "C" fn item(list: *const Raw, index: usize, out: *mut Raw) -> bool {
-    // SAFETY: A list alive for this call, and room for one value.
+unsafe extern "C" fn items(list: *const Raw, from: usize, out: *mut Raw, cap: usize) -> usize {
+    // SAFETY: A list alive for this call, and room for `cap` values.
     unsafe {
         let raw = *list;
         if raw.tag != abi::LIST {
-            return false;
+            return 0;
         }
-        match (&*list_ptr(&raw)).get(index) {
-            Some(value) => {
-                *out = lend(value);
-                true
-            }
-            None => false,
+        let items = (&*list_ptr(&raw)).get(from..).unwrap_or(&[]);
+        let n = items.len().min(cap);
+        for (i, value) in items[..n].iter().enumerate() {
+            out.add(i).write(lend(value));
         }
+        n
     }
 }
 unsafe extern "C" fn field(map: *const Raw, key: *const u8, len: usize, out: *mut Raw) -> bool {
@@ -215,28 +214,41 @@ unsafe extern "C" fn field(map: *const Raw, key: *const u8, len: usize, out: *mu
         }
     }
 }
-unsafe extern "C" fn entry(
+unsafe extern "C" fn entries(
     map: *const Raw,
-    index: usize,
-    key: *mut Bytes,
-    value: *mut Raw,
-) -> bool {
-    // SAFETY: A map alive for this call, room for a key and a value.
+    from: usize,
+    keys: *mut Bytes,
+    values: *mut Raw,
+    cap: usize,
+) -> usize {
+    // SAFETY: A map alive for this call, room for `cap` keys and values.
     unsafe {
         let raw = *map;
         if raw.tag != abi::MAP {
-            return false;
+            return 0;
         }
-        match (&*map_ptr(&raw)).get(index) {
-            Some((k, v)) => {
-                *key = Bytes {
-                    ptr: k.as_ptr(),
-                    len: k.len(),
-                };
-                *value = lend(v);
-                true
-            }
-            None => false,
+        let fields = (&*map_ptr(&raw)).get(from..).unwrap_or(&[]);
+        let n = fields.len().min(cap);
+        for (i, (key, value)) in fields[..n].iter().enumerate() {
+            keys.add(i).write(Bytes {
+                ptr: key.as_ptr(),
+                len: key.len(),
+            });
+            values.add(i).write(lend(value));
+        }
+        n
+    }
+}
+unsafe extern "C" fn slice(list: *const Raw, from: usize, to: usize) -> Raw {
+    // SAFETY: A list alive for this call.
+    unsafe {
+        let raw = *list;
+        if raw.tag != abi::LIST {
+            return NIL;
+        }
+        match (&*list_ptr(&raw)).get(from..to) {
+            Some(items) => give(Value::List(items.iter().cloned().collect())),
+            None => NIL,
         }
     }
 }
@@ -267,9 +279,10 @@ static API: Api = Api {
     map,
     clone,
     release,
-    item,
+    items,
     field,
-    entry,
+    entries,
+    slice,
     open,
 };
 
@@ -305,8 +318,8 @@ unsafe extern "C" fn register_function(
         // (All of `user`, not its pointer alone: it frees with the closure.)
         let user = &user;
         // SAFETY: The module's function and its own `user`; the argument is
-        // given, and what it returns is owned.
-        unsafe { take(call(user.ptr, give(arg))) }
+        // lent for the call, and what it returns is owned.
+        unsafe { take(call(user.ptr, &lend(&arg))) }
     });
 }
 unsafe extern "C" fn register_action(
@@ -322,8 +335,8 @@ unsafe extern "C" fn register_action(
     let user = User { ptr: user, free };
     host.action(name, move |arg| {
         let user = &user;
-        // SAFETY: The module's action and its own `user`.
-        unsafe { call(user.ptr, give(arg)) }
+        // SAFETY: The module's action and its own `user`, the argument lent.
+        unsafe { call(user.ptr, &lend(&arg)) }
     });
 }
 
