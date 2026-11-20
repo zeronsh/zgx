@@ -678,7 +678,7 @@ return ui.column { w_full = true, h_full = true,
 #[test]
 fn inspect_windows_lists_popups_with_their_owner_and_whether_they_show() {
     use zgx_script::inspect::{Reply, Session};
-    let mut h = Harness::inline(
+    let h = Harness::inline(
         r##"
 local open = ui.state("open", false)
 return ui.column { w_full = true, h_full = true,

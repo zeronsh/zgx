@@ -135,7 +135,7 @@ fn pane(name: &'static str, rows: usize, images: Vec<Arc<ImageData>>, ui: &Ui) -
                 .child(div().w(26.).h(26.).rounded(13.).bg(rgba(0xffffff1a))),
         )
         .child(
-            scroll(offset).grow().w_full().child(
+            fade_edges(scroll(offset).grow().w_full(), fade).child(
                 column()
                     .w_full()
                     .p(16.)
