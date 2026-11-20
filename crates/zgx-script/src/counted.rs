@@ -60,6 +60,7 @@ impl Str {
         this.text.as_ptr()
     }
     /// How many hold this text.
+    #[inline(always)]
     pub fn strong_count(this: &Str) -> usize {
         let rc = std::mem::ManuallyDrop::new(
             // SAFETY: As `rc`, and not dropped: `self` still holds it.
@@ -149,8 +150,22 @@ impl Clone for Str {
 impl Drop for Str {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: An `Rc<str>`'s `into_raw`, given back once.
-        drop(unsafe { Rc::from_raw(self.raw()) });
+        // One hold fewer, as dropping the `Rc<str>` is, said by which hold
+        // it is: the usual one (others still hold it) is then a count and
+        // nothing else. An `Rc` rebuilt and dropped whichever it was needs
+        // room on the stack for its last hold's sake, which every drop paid
+        // for.
+        let held = Str::strong_count(self);
+        // SAFETY: An `Rc<str>`'s `into_raw`, given back once: the last
+        // hold, which frees it, or one of several, which frees nothing.
+        unsafe {
+            if held == 1 {
+                drop(Rc::from_raw(self.raw()));
+            } else {
+                std::hint::assert_unchecked(held > 1);
+                Rc::decrement_strong_count(self.raw());
+            }
+        }
     }
 }
 impl Deref for Str {
