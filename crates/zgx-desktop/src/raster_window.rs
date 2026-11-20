@@ -4,7 +4,7 @@
 //! 0.5, at a third of the memory. 1x windows only: one at a higher scale,
 //! or that comes to one, draws on the GPU.
 use crate::{presentation::Presentation, raster::Raster};
-use std::{error::Error, num::NonZeroU32, sync::Arc};
+use std::{cell::RefCell, error::Error, num::NonZeroU32, rc::Rc, sync::Arc};
 use winit::window::Window;
 use zgx::scene::{Color, Rect, Scene};
 
@@ -70,6 +70,47 @@ pub(crate) struct RasterWindow {
     surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
     presentation: Presentation,
     size: (usize, usize),
+    /// What it showed, between frames (`Ui::snapshot`).
+    shown: Rc<RefCell<RasterShown>>,
+}
+
+/// What a raster window last showed, for pictures of it (`Ui::snapshot`):
+/// the raster's own pixels, moved here after each frame and back before
+/// the next draws, so keeping them copies nothing.
+#[derive(Default)]
+pub(crate) struct RasterShown {
+    /// 0RGB, as the raster draws (opaque).
+    pixels: Vec<u32>,
+    width: usize,
+}
+impl RasterShown {
+    /// The region `x, y, width, height` (pixels, from its top left, clipped
+    /// to it) as BGRA rows, opaque, with its size; `None` outside it or
+    /// before a frame.
+    pub(crate) fn read(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        let full_w = self.width;
+        let full_h = self.pixels.len().checked_div(full_w)?;
+        let (x, y) = (x as usize, y as usize);
+        let w = (width as usize).min(full_w.checked_sub(x)?);
+        let h = (height as usize).min(full_h.checked_sub(y)?);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(w * h * 4);
+        for row in self.pixels[y * full_w..].chunks(full_w).take(h) {
+            for pixel in &row[x..x + w] {
+                let [b, g, r, _] = pixel.to_le_bytes();
+                out.extend_from_slice(&[b, g, r, 255]);
+            }
+        }
+        Some((w as u32, h as u32, out))
+    }
 }
 impl RasterWindow {
     /// One for `window`, its text set up with `fonts` and `language`.
@@ -98,6 +139,7 @@ impl RasterWindow {
             surface,
             presentation: Presentation::default(),
             size: (0, 0),
+            shown: Rc::default(),
         };
         let size = window.inner_size();
         made.resize(size.width, size.height);
@@ -131,9 +173,21 @@ impl RasterWindow {
         self.raster
             .set_background(u32::from_be_bytes([0, color.0, color.1, color.2]));
     }
+    /// What it shows, for pictures of it, as it changes.
+    pub(crate) fn shown(&self) -> Rc<RefCell<RasterShown>> {
+        self.shown.clone()
+    }
+    /// The raster's pixels back from `shown`, to draw into.
+    fn reclaim(&mut self) {
+        let mut shown = self.shown.borrow_mut();
+        if self.raster.pixels.is_empty() {
+            std::mem::swap(&mut self.raster.pixels, &mut shown.pixels);
+        }
+    }
     /// The window's new size in pixels: its next frame draws whole. Whether
     /// it changed (a surface that can't take it keeps the old one, said).
     pub(crate) fn resize(&mut self, width: u32, height: u32) -> bool {
+        self.reclaim();
         let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
             return false;
         };
@@ -150,6 +204,15 @@ impl RasterWindow {
     }
     /// Draw `damage` of `scene` (and what scrolled), and show what changed.
     pub(crate) fn render(&mut self, scene: &Scene, damage: &[Rect]) -> Result<(), Box<dyn Error>> {
+        self.reclaim();
+        let shown = self.draw(scene, damage);
+        // What it shows, kept for pictures until the next frame takes it back.
+        let mut kept = self.shown.borrow_mut();
+        kept.pixels = std::mem::take(&mut self.raster.pixels);
+        kept.width = self.size.0;
+        shown
+    }
+    fn draw(&mut self, scene: &Scene, damage: &[Rect]) -> Result<(), Box<dyn Error>> {
         if self.size.0 == 0 || self.size.1 == 0 {
             return Ok(());
         }

@@ -17021,6 +17021,23 @@ impl GpuRenderer {
             over: self.over_frames(),
         })
     }
+    /// What the window last showed, to read a region of later
+    /// (`ShownFrame::read`): its retained target as this frame left it,
+    /// which holds what was presented until the next frame draws. Take a
+    /// new one after each frame. None drawn with Direct3D 11 directly.
+    #[cfg(not(target_os = "macos"))]
+    pub fn shown_frame(&self) -> Option<ShownFrame> {
+        #[cfg(d3d11)]
+        if self.d3d11.is_some() {
+            return None;
+        }
+        self.flush_pending();
+        Some(ShownFrame {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            texture: self.target.clone(),
+        })
+    }
     /// Diagnostics: split each frame drawn with Metal directly at its
     /// backdrop blur's passes (reduce, across, down), each committed on its
     /// own, for `debug_take_pass_times`. Off by default; it adds a command
@@ -18466,6 +18483,80 @@ impl ShownFrame {
         let (w, h, mut pixels) = read?;
         for over in &self.over {
             over.draw(&mut pixels, (x as i32, y as i32), (w as i32, h as i32));
+        }
+        Some((w, h, pixels))
+    }
+}
+/// A frame a window showed (`GpuRenderer::shown_frame`): its retained
+/// target, readable between its frames.
+#[cfg(not(target_os = "macos"))]
+pub struct ShownFrame {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    texture: wgpu::Texture,
+}
+#[cfg(not(target_os = "macos"))]
+impl ShownFrame {
+    /// The region `x, y, width, height` (pixels, from its top left, clipped
+    /// to it) as premultiplied BGRA rows, with its size; `None` for a region
+    /// outside it. Only that region is copied from the GPU, and waited for.
+    pub fn read(&self, x: u32, y: u32, width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let size = self.texture.size();
+        let w = width.min(size.width.checked_sub(x)?);
+        let h = height.min(size.height.checked_sub(y)?);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let stride = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shown frame read"),
+            size: u64::from(stride) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        rx.recv().ok()?.ok()?;
+        let mapped = buffer.get_mapped_range(..);
+        let row = w as usize * 4;
+        let mut pixels = Vec::with_capacity(row * h as usize);
+        for read in mapped.chunks(stride as usize) {
+            pixels.extend_from_slice(&read[..row]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        // Retained targets are BGRA (`FORMAT`); any other is RGBA, swapped.
+        if self.texture.format() != wgpu::TextureFormat::Bgra8Unorm {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                *pixel = bgra_to_rgba(u32::from_le_bytes(*pixel)).to_le_bytes();
+            }
         }
         Some((w, h, pixels))
     }

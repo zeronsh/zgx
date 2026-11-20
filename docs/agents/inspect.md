@@ -93,7 +93,7 @@ A binding is a node's (`@67`, its kind or the script line that made it); an effe
 
 A tree line is `@n #id role "name or text" ="value" x,y wxh` and flags (`focused`, `disabled`, `checked`), indented two spaces a level, in document order. Boxes with nothing to say (no id, role or text) are left out and their children shown in their place; a button's own label text is folded into the button. `--all` shows every node. Same tree, same text: compare runs with `diff`.
 
-`snapshot` is a PNG of a node's box as the window last drew it, at the window's pixels (`--width 600` halves it until it fits). Without `--out` it stays beside the socket, readable by its user alone, and the answer says where; the app keeps its last 16. As MCP, `zgx_snapshot` answers the picture itself. Pictures come from what a macOS window shows; elsewhere, and in `TestApp`, the answer says there is none.
+`snapshot` is a PNG of a node's box as the window last drew it, at the window's pixels (`--width 600` halves it until it fits). Without `--out` it stays beside the socket, readable by its user alone, and the answer says where; the app keeps its last 16. As MCP, `zgx_snapshot` answers the picture itself. Pictures come from what the window last showed: its GPU frame on macOS, Linux and Windows, or the software raster's pixels where it draws on the raster (a machine with no GPU, as CI's and headless ones are). A window drawn with Direct3D 11, and a `TestApp`, take none, and the answer says so.
 
 A module's states are named `module.luau::name`; give the name alone when only one module has it.
 
@@ -183,7 +183,7 @@ zgx inspect key Escape                    # closes the innermost
 
 A select's options are `menuitemradio`, as AppKit's pop-up button has them; a combobox's are `option`; a date picker's month is a `grid`.
 
-On macOS a popup is a window of its own and may lie past the main window's edge. Its boxes are in the main window's points all the same, so clicks and targets reach it. `snapshot` pictures it from its own surface, and `memory` counts its renderers as `gpu popup windows`. A popup opens in the scene first and gets its window at the next frame, so a reading taken between the two says `popup windows not yet drawn`.
+On macOS, and on X11 and Windows where a popup reaches past the window, a popup is a window of its own and may lie past the main window's edge. Its boxes are in the main window's points all the same, so clicks and targets reach it. `snapshot` pictures it from its own surface (Wayland's are the main window's picture), and `memory` counts its renderers as `gpu popup windows`. A popup opens in the scene first and gets its window at the next frame, so a reading taken between the two says `popup windows not yet drawn`.
 
 ## The app's other windows
 
