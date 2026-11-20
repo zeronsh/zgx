@@ -5603,6 +5603,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zgx-module"
+version = "0.1.10"
+
+[[package]]
+name = "zgx-module-fixture"
+version = "0.0.0"
+dependencies = [
+ "zgx-module",
+]
+
+[[package]]
 name = "zgx-run"
 version = "0.1.10"
 dependencies = [
@@ -5627,6 +5638,7 @@ dependencies = [
  "icu_locale_core",
  "icu_plurals",
  "libc",
+ "libloading",
  "memchr",
  "objc2-core-foundation",
  "objc2-core-video",
@@ -5647,6 +5659,8 @@ dependencies = [
  "zgx-fingerprint",
  "zgx-gpu",
  "zgx-mlua",
+ "zgx-module",
+ "zgx-module-fixture",
  "zgx-workload",
 ]
 

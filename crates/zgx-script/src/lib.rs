@@ -84,6 +84,8 @@ mod lower;
 pub mod markdown;
 mod meter;
 mod modifiers;
+#[cfg(feature = "modules")]
+mod modules;
 mod motion;
 mod node;
 mod opens;
