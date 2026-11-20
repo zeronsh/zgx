@@ -1096,7 +1096,8 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool, defs:
         deeper: 0,
         align: None,
         html: false,
-        marks: Vec::new(),
+        divert: false,
+        marks: None,
         named: Vec::new(),
         top: offset,
     };
@@ -1142,8 +1143,6 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool, defs:
                 Some(false) => Event::Text("~".into()),
                 _ => event,
             },
-            // A `<br>` breaks the line as a line's end of two spaces does.
-            Event::InlineHtml(html) if options.html_marks && is_break(&html) => Event::HardBreak,
             event => event,
         };
         let opens = matches!(event, Event::Start(_));
@@ -1459,7 +1458,7 @@ enum HtmlMark {
 }
 
 /// The tags whose marks show, as GitHub's sanitizing schema keeps them
-/// (`br` aside, a break: `is_break`). The rest (`sub`, `sup`, `span`,
+/// (`br` aside, a line break: `Builder::inline_html`). The rest (`sub`, `sup`, `span`,
 /// `u`, …) are dropped and their text kept.
 const HTML_MARKS: [(&str, HtmlMark); 12] = [
     ("b", HtmlMark::Bold),
@@ -1475,6 +1474,13 @@ const HTML_MARKS: [(&str, HtmlMark); 12] = [
     ("tt", HtmlMark::Code),
     ("a", HtmlMark::Link),
 ];
+
+/// The inline HTML marks open, innermost last, and where they opened
+/// (`Builder::place`).
+struct Marks {
+    list: Vec<Mark>,
+    place: Vec<usize>,
+}
 
 /// An open inline HTML mark: its tag's name (`HTML_MARKS`'), which its
 /// closer names, and what it does.
@@ -1570,11 +1576,6 @@ impl<'a> HtmlTag<'a> {
     }
 }
 
-/// Whether inline HTML is a line break: `<br>`, `<br/>`, `<br />`.
-fn is_break(html: &str) -> bool {
-    matches!(HtmlTag::read(html), Some(tag) if !tag.closing && tag.name.eq_ignore_ascii_case("br"))
-}
-
 /// An attribute's value with its common character references read.
 fn html_entities(value: &str) -> String {
     if !value.contains('&') {
@@ -1648,8 +1649,12 @@ struct Builder<'a> {
     align: Option<Box<[Alignment]>>,
     /// Inside raw HTML.
     html: bool,
-    /// The inline HTML marks open (`Options::html_marks`), innermost last.
-    marks: Vec<Mark>,
+    /// Text goes elsewhere than a plain run: an image's alt, or under
+    /// inline HTML marks (`push_diverted`). One flag, so plain text pays
+    /// one test for both.
+    divert: bool,
+    /// The inline HTML marks open (`Options::html_marks`); `None` for none.
+    marks: Option<Box<Marks>>,
     /// The references its text's definitions resolved: label, where.
     named: Vec<(Label, usize)>,
     /// Where the top-level element being read starts in the whole text.
@@ -1700,13 +1705,15 @@ impl Builder<'_> {
     }
 
     fn push_text(&mut self, text: &str, code: bool) {
-        if !self.marks.is_empty() {
-            return self.push_marked(text, code);
+        if self.divert {
+            return self.push_diverted(text, code);
         }
-        if let Some(image) = &mut self.image {
-            image.1.push_str(text);
-            return;
-        }
+        self.push_plain(text, code);
+    }
+
+    /// Text as a run of its own, or joining the last.
+    #[inline(always)]
+    fn push_plain(&mut self, text: &str, code: bool) {
         let paths = self.options.paths;
         match self.links.last().cloned() {
             Some(Link::Url(url)) => self.push_run(text, code, Some(url), None),
@@ -1805,13 +1812,24 @@ impl Builder<'_> {
         ) {
             return false;
         }
+        // So do inline HTML marks' (`Options::html_marks`), and a `<br>`
+        // ends its line as a hard break does.
+        let tag = match event {
+            Event::InlineHtml(html) if self.options.html_marks => HtmlTag::read(html),
+            _ => None,
+        };
+        if tag.as_ref().is_some_and(|t| t.closing) {
+            return false;
+        }
+        let br = tag.is_some_and(|t| t.name.eq_ignore_ascii_case("br"));
         let Some((src, alt, blank, link)) = self.picture.take() else {
             return false;
         };
-        let ends = matches!(
-            event,
-            Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph | TagEnd::Item)
-        );
+        let ends = br
+            || matches!(
+                event,
+                Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph | TagEnd::Item)
+            );
         let blocks = matches!(self.frames.last(), Some(Frame::Blocks(_)));
         if !(blank && ends && blocks && self.heading.is_none()) {
             self.runs.push(Run {
@@ -1850,7 +1868,7 @@ impl Builder<'_> {
         ]));
         self.took = true;
         self.line = (0, 0);
-        matches!(event, Event::SoftBreak | Event::HardBreak)
+        br || matches!(event, Event::SoftBreak | Event::HardBreak)
     }
 
     /// A reference this text's own definition resolves: no callback says so.
@@ -1861,9 +1879,6 @@ impl Builder<'_> {
         }
     }
     fn take_runs(&mut self) -> Value {
-        if !self.marks.is_empty() {
-            self.marks.clear();
-        }
         let mut runs = std::mem::take(&mut self.runs);
         // Its mark goes with them: read against the next block's words (a
         // tight list item starts no paragraph to set it), it would call them
@@ -1894,54 +1909,100 @@ impl Builder<'_> {
         }
     }
 
-    /// Text under inline HTML marks: theirs over the markdown's own.
+    /// Text that is an image's alt, or under inline HTML marks.
     #[cold]
     #[inline(never)]
-    fn push_marked(&mut self, text: &str, code: bool) {
-        let marks = std::mem::take(&mut self.marks);
+    fn push_diverted(&mut self, text: &str, code: bool) {
+        if let Some(image) = &mut self.image {
+            image.1.push_str(text);
+            return;
+        }
+        if !self.open_marks() {
+            return self.push_plain(text, code);
+        }
         let mut style = self.style();
         let mut code = code;
         let mut link = None;
-        for mark in &marks {
+        for mark in self.marks.iter().flat_map(|m| &m.list) {
             match &mark.kind {
                 MarkKind::Bold => style.bold = true,
                 MarkKind::Italic => style.italic = true,
                 MarkKind::Strike => style.strike = true,
                 MarkKind::Code => code = true,
-                MarkKind::Link(to) => link = to.as_ref(),
+                MarkKind::Link(to) => link = to.clone(),
             }
         }
         // A markdown link around or inside it goes where it says.
         let linked = link.is_some() && self.links.is_empty();
         if let (true, Some(link)) = (linked, link) {
-            self.links.push(link.clone());
+            self.links.push(link);
         }
         self.styles.push(style);
-        self.push_text(text, code);
+        self.push_plain(text, code);
         self.styles.pop();
         if linked {
             self.links.pop();
         }
-        self.marks = marks;
     }
 
-    /// An inline HTML tag (`Options::html_marks`): a mark opens or closes.
-    /// A closer ends its own mark alone; a stray one does nothing.
+    /// Where text is being read: the top-level element, and how much each
+    /// open container holds. A paragraph, heading, cell or item ending
+    /// adds to its container (or closes it), so marks opened under another
+    /// place are left over from one that ended.
+    fn place(&self) -> Vec<usize> {
+        let mut place = vec![self.top, self.deeper];
+        for frame in &self.frames {
+            match frame {
+                Frame::Blocks(blocks) => place.push(blocks.len()),
+                Frame::List { items, .. } => place.push(items.len()),
+                Frame::Table {
+                    head, rows, row, ..
+                } => place.extend([head.len(), rows.len(), row.len()]),
+            }
+        }
+        place
+    }
+
+    /// The marks open here, those of a paragraph, heading, cell or item
+    /// that has ended (left open) let go.
+    fn open_marks(&mut self) -> bool {
+        if self.marks.as_ref().is_some_and(|m| m.place != self.place()) {
+            self.marks = None;
+            self.divert = self.image.is_some();
+        }
+        self.marks.is_some()
+    }
+
+    /// An inline HTML tag (`Options::html_marks`): a mark opens or closes,
+    /// or (`br`) the line breaks as at a hard break. A closer ends its own
+    /// mark alone; a stray one does nothing.
     #[cold]
     #[inline(never)]
     fn inline_html(&mut self, html: &str) {
         let Some(tag) = HtmlTag::read(html) else {
             return;
         };
+        if !tag.closing && tag.name.eq_ignore_ascii_case("br") {
+            self.push_text("\n", false);
+            self.mark_line();
+            return;
+        }
         let Some(&(name, kind)) = HTML_MARKS
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(tag.name))
         else {
             return;
         };
+        self.open_marks();
         if tag.closing {
-            if let Some(at) = self.marks.iter().rposition(|m| m.name == name) {
-                self.marks.remove(at);
+            if let Some(marks) = &mut self.marks
+                && let Some(at) = marks.list.iter().rposition(|m| m.name == name)
+            {
+                marks.list.remove(at);
+                if marks.list.is_empty() {
+                    self.marks = None;
+                    self.divert = self.image.is_some();
+                }
             }
             return;
         }
@@ -1959,7 +2020,17 @@ impl Builder<'_> {
                     .map(|href| link_of(&href, self.options.paths)),
             ),
         };
-        self.marks.push(Mark { name, kind });
+        let place = self.place();
+        self.marks
+            .get_or_insert_with(|| {
+                Box::new(Marks {
+                    list: Vec::new(),
+                    place,
+                })
+            })
+            .list
+            .push(Mark { name, kind });
+        self.divert = true;
     }
 
     fn block(&mut self, block: Value) {
@@ -2066,7 +2137,8 @@ impl Builder<'_> {
                     ..
                 } => {
                     self.note_reference(link_type, &id);
-                    self.image = Some((dest_url.to_string(), String::new()))
+                    self.image = Some((dest_url.to_string(), String::new()));
+                    self.divert = true;
                 }
                 // Raw HTML isn't shown: the parser gives its indentation as
                 // text, which would join the next block's words.
@@ -2094,8 +2166,6 @@ impl Builder<'_> {
                     } else if !(self.took && self.runs.is_empty()) {
                         let runs = self.take_runs();
                         self.block(map(vec![("t", "p".into()), ("s", runs)]));
-                    } else if !self.marks.is_empty() {
-                        self.marks.clear();
                     }
                     self.took = false;
                 }
@@ -2135,9 +2205,6 @@ impl Builder<'_> {
                 TagEnd::Item => {
                     // A tight item's text never became a paragraph.
                     self.flush_tight();
-                    if !self.marks.is_empty() {
-                        self.marks.clear();
-                    }
                     if let Some(Frame::Blocks(blocks)) = self.frames.pop()
                         && let Some(Frame::List { items, .. }) = self.frames.last_mut()
                     {
@@ -2188,6 +2255,7 @@ impl Builder<'_> {
                 }
                 TagEnd::Image => {
                     // Placed by what follows it (`place_picture`).
+                    self.divert = self.marks.is_some();
                     if let Some((src, alt)) = self.image.take() {
                         let blank = self.blank_line();
                         let link = match self.links.last() {
@@ -2626,6 +2694,22 @@ mod tests {
             marked("# <i>head\n\nplain", &html_marks()),
             [vec!["head+i"], vec!["plain"]]
         );
+        // Nor past a quote, or an item's paragraph, into the next.
+        assert_eq!(
+            marked("> <b>a\n\n> b\n\nc", &html_marks()),
+            [vec![], vec![], vec!["c"]]
+        );
+        let quotes = parse("> <b>a\n\n> b", &html_marks());
+        let second = quotes[1].field("b").unwrap().list()[0]
+            .field("s")
+            .unwrap()
+            .list();
+        assert!(second[0].field("b").is_none(), "{:?}", second[0].to_json());
+        let loose = parse("- <i>a\n\n  b\n- c", &html_marks());
+        let items = loose[0].field("items").unwrap().list();
+        let first = items[0].list();
+        assert!(first[0].field("s").unwrap().list()[0].field("i").is_some());
+        assert!(first[1].field("s").unwrap().list()[0].field("i").is_none());
         let items = parse("- <b>one\n- two", &html_marks());
         let items = items[0].field("items").unwrap().list();
         let second = items[1].list()[0].field("s").unwrap().list();
@@ -2658,6 +2742,24 @@ mod tests {
             assert_eq!(marked(text, &html_marks()), hard, "{text:?}");
         }
         assert_eq!(hard, [vec!["one\ntwo"]]);
+        // A picture on a line of its own before one is a block, as before
+        // a hard break.
+        assert_eq!(
+            kinds(&parse("a\n![p](u.png)<br>b", &html_marks())),
+            kinds(&parse("a\n![p](u.png)  \nb", &plain()))
+        );
+        assert_eq!(
+            kinds(&parse("a\n![p](u.png)<br>b", &html_marks())),
+            ["p", "img", "p"]
+        );
+        // Inside an HTML link, a badge stays among the words.
+        assert_eq!(
+            kinds(&parse(
+                "<a href=\"https://a.b\">![p](u.png)</a> words",
+                &html_marks()
+            )),
+            ["p"]
+        );
     }
 
     #[test]
