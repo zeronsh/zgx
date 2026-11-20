@@ -26,7 +26,7 @@ zgx_module::module!(|host: &Host| {
     });
     // A map's fields as `{ key, value }` pairs, in its order, less `drop`.
     host.function("fixture.fields", |arg| {
-        let drop = arg.record().get("drop").and_then(|d| d.str()).unwrap_or("");
+        let drop = arg.field("drop").and_then(|d| d.str()).unwrap_or("");
         Value::list(
             arg.fields()
                 .filter(|(k, _)| *k != drop)
@@ -39,20 +39,53 @@ zgx_module::module!(|host: &Host| {
         Value::from(list.items().filter_map(|n| n.num()).sum::<f64>())
     });
     host.function("fixture.slice", |arg| {
-        let arg = arg.record();
-        let at = |key| arg.get(key).and_then(|n| n.num()).unwrap_or(0.) as usize;
-        arg.get("list")
-            .map_or(Value::NIL, |list| list.slice(at("from"), at("to")))
+        let [list, from, to, none] = arg.get(["list", "from", "to", "none"]);
+        assert!(none.is_none());
+        let at = |n: Option<zgx_module::Ref>| n.and_then(|n| n.num()).unwrap_or(0.) as usize;
+        list.map_or(Value::NIL, |list| list.slice(at(from), at(to)))
     });
-    // How many fields a map has, and its last key: a map wider than a
-    // record holds in place.
+    // How many fields a map has, its last key, and fields found and not
+    // found in it: a map wide enough to be searched by halves.
     host.function("fixture.wide", |map| {
-        let record = map.record();
-        let last = record.iter().last().map_or("", |(k, _)| k);
+        let last = map.fields().last().map_or("", |(k, _)| k);
+        let found = map.field("k57").and_then(|n| n.num()).unwrap_or(0.);
+        let none =
+            map.field("k570").is_none() && map.field("a").is_none() && map.field("z").is_none();
         Value::record([
-            ("n", Value::from(record.len() as f64)),
+            ("n", Value::from(map.len() as f64)),
             ("last", Value::from(last)),
+            ("k57", Value::from(found)),
+            ("none", Value::from(none)),
         ])
+    });
+    // A string's length: an argument read and a number made, so what
+    // entering a module costs and little else.
+    host.function("fixture.length", |text| {
+        Value::from(text.str().map_or(0, str::len) as f64)
+    });
+    // The same of a string of any length, one the runtime holds in pieces
+    // too; and whether `str` alone reads it.
+    host.function("fixture.long", |text| {
+        Value::record([
+            (
+                "len",
+                Value::from(text.text().map_or(0, |t| t.len()) as f64),
+            ),
+            ("str", Value::from(text.str().is_some())),
+        ])
+    });
+    // Rows read a field at a time, as an app's model code reads them: what
+    // `module_call_bench` compares with the same pass linked in.
+    host.function("fixture.rows", |rows| {
+        let mut sum = 0.;
+        for row in rows.items() {
+            let [id, text, n, done] = row.get(["id", "text", "n", "done"]);
+            sum += n.and_then(|n| n.num()).unwrap_or(0.);
+            sum += (id.and_then(|s| s.str()).map_or(0, str::len)
+                + text.and_then(|s| s.str()).map_or(0, str::len)) as f64;
+            sum += f64::from(u8::from(done.and_then(|d| d.bool()) == Some(true)));
+        }
+        Value::from(sum)
     });
     // A value kept by an action, read by a function: a module's own state.
     let kept: Rc<RefCell<Value>> = Rc::default();

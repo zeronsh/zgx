@@ -14,19 +14,25 @@
 //! ```
 //!
 //! A module links this crate and nothing of zgx: what crosses is [`abi`], C
-//! types and functions, so a module built once runs in any runtime that
-//! speaks its [`abi::ABI`], whatever compiler built either
-//! (docs/design/runtime.md). Values are the runtime's own, counted not
-//! copied: a list a module returns is the list the script reads.
+//! functions and a value's layout, so a module built once runs in any
+//! runtime that speaks its [`abi::ABI`] (docs/design/runtime.md). Values
+//! are the runtime's own, read where it holds them: a string's text, a
+//! list's items and a map's fields cost a module what they cost code linked
+//! into the app, and nothing is copied.
 //!
 //! A panic in a module ends the process, as one in a host's own function
 //! does today: nothing unwinds across the boundary.
 
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("zgx-module reads values by their 64-bit layout");
+
 pub mod abi;
 
 use std::{
+    cell::UnsafeCell,
     ffi::c_void,
     marker::PhantomData,
+    mem::MaybeUninit,
     sync::atomic::{AtomicPtr, Ordering},
 };
 
@@ -47,21 +53,58 @@ fn api() -> &'static Api {
     unsafe { &*api }
 }
 
-const NIL: Raw = Raw {
-    tag: abi::NIL,
-    a: 0,
-    b: 0,
-};
-
-/// Whether a value of this tag is counted by the runtime (so cloned and
-/// released through it), not held in the three words.
-#[inline]
-fn counted(tag: u32) -> bool {
-    tag >= abi::STR
+const fn raw_of(tag: u8) -> Raw {
+    let mut bytes = [MaybeUninit::new(0u8); abi::VALUE_SIZE];
+    bytes[0] = MaybeUninit::new(tag);
+    Raw(bytes)
 }
 
-/// A value a module owns: what a function is called with and returns. The
+/// The kind of the value at `at`.
+///
+/// # Safety
+/// `at` points at a value.
+#[inline(always)]
+unsafe fn tag(at: *const Raw) -> u8 {
+    // SAFETY: A value's first byte says which kind it is.
+    unsafe { at.cast::<u8>().read() }
+}
+/// The word `offset` bytes into what `at` points at.
+///
+/// # Safety
+/// A word of the runtime's is there.
+#[inline(always)]
+unsafe fn word<T>(at: *const T, offset: usize) -> usize {
+    // SAFETY: The caller's.
+    unsafe { at.cast::<u8>().add(offset).cast::<usize>().read() }
+}
+/// Where a string's, a list's or a map's contents begin.
+///
+/// # Safety
+/// `at` points at one of those.
+#[inline(always)]
+unsafe fn data(at: *const Raw) -> *const u8 {
+    // SAFETY: Such a value holds a counted pointer, its contents `DATA_AT`
+    // past it.
+    unsafe { (word(at, abi::HELD_AT) as *const u8).add(abi::DATA_AT) }
+}
+/// # Safety
+/// `ptr` and `len` are a string of the runtime's, alive for `'a`.
+#[inline(always)]
+unsafe fn text<'a>(ptr: *const u8, len: usize) -> &'a str {
+    // SAFETY: The runtime's strings are UTF-8.
+    unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }
+}
+
+/// Whether `tag` is a kind held by a counted pointer a module counts
+/// itself.
+#[inline(always)]
+fn counted(tag: u8) -> bool {
+    matches!(tag, abi::STR | abi::LIST | abi::MAP)
+}
+
+/// A value a module owns: what a function returns, and what it keeps. The
 /// runtime's own, so cloning one counts it and copies nothing.
+#[repr(transparent)]
 pub struct Value {
     raw: Raw,
     /// The runtime's values belong to the interface's thread.
@@ -71,64 +114,68 @@ pub struct Value {
 impl Value {
     /// `nil`.
     pub const NIL: Value = Value {
-        raw: NIL,
+        raw: raw_of(abi::NIL),
         _thread: PhantomData,
     };
 
     /// A list of `items`.
     pub fn list(items: impl IntoIterator<Item = Value>) -> Value {
-        let mut raws: Vec<Raw> = items.into_iter().map(Value::into_raw).collect();
-        // SAFETY: `raws` are owned values, given to the runtime.
-        Value::owned(unsafe { (api().list)(raws.as_mut_ptr(), raws.len()) })
+        // (`Value` is its three words and a marker: a `Vec` of them is the
+        // items the runtime takes.)
+        let mut items: Vec<Value> = items.into_iter().collect();
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: `items` are owned values, given to the runtime; it writes
+        // `out`.
+        unsafe {
+            (api().list)(items.as_mut_ptr().cast(), items.len(), out.as_mut_ptr());
+            items.set_len(0);
+            Value::owned(out.assume_init())
+        }
     }
     /// A map of `fields`, in any order (the last of a key given twice
     /// kept).
     pub fn record<K: AsRef<str>>(fields: impl IntoIterator<Item = (K, Value)>) -> Value {
-        let fields: Vec<(K, Value)> = fields.into_iter().collect();
-        let keys: Vec<Bytes> = fields
+        let (held, mut values): (Vec<K>, Vec<Value>) = fields.into_iter().unzip();
+        let keys: Vec<Bytes> = held
             .iter()
-            .map(|(k, _)| Bytes {
+            .map(|k| Bytes {
                 ptr: k.as_ref().as_ptr(),
                 len: k.as_ref().len(),
             })
             .collect();
-        // (The keys' text is still held by `held` while the runtime reads it.)
-        let (held, values): (Vec<K>, Vec<Value>) = fields.into_iter().unzip();
-        let mut raws: Vec<Raw> = values.into_iter().map(Value::into_raw).collect();
-        // SAFETY: As many keys as owned values, the keys' bytes alive in `held`.
-        let made = unsafe { (api().map)(keys.as_ptr(), raws.as_mut_ptr(), raws.len()) };
-        drop(held);
-        Value::owned(made)
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: As many keys as owned values, the keys' bytes alive in
+        // `held`; the runtime takes the values and writes `out`.
+        unsafe {
+            (api().map)(
+                keys.as_ptr(),
+                values.as_mut_ptr().cast(),
+                values.len(),
+                out.as_mut_ptr(),
+            );
+            values.set_len(0);
+            Value::owned(out.assume_init())
+        }
     }
     /// It, to read.
-    #[inline]
+    #[inline(always)]
     pub fn get(&self) -> Ref<'_> {
         Ref {
-            raw: self.raw,
+            at: &self.raw,
             _of: PhantomData,
         }
     }
-    #[inline]
+    #[inline(always)]
     fn owned(raw: Raw) -> Value {
         Value {
             raw,
             _thread: PhantomData,
         }
     }
-    /// Its three words, the caller now owning what they count.
-    #[inline]
-    pub fn into_raw(self) -> Raw {
-        let raw = self.raw;
-        std::mem::forget(self);
-        raw
-    }
-    /// # Safety
-    /// `raw` is an owned value of this runtime, owned by nothing else.
-    #[inline]
-    pub unsafe fn from_raw(raw: Raw) -> Value {
-        Value::owned(raw)
-    }
 }
+// A list the runtime takes is a `Vec<Value>`'s buffer.
+const _: () = assert!(size_of::<Value>() == abi::VALUE_SIZE && align_of::<Value>() == 8);
+
 impl Default for Value {
     fn default() -> Self {
         Value::NIL
@@ -137,9 +184,25 @@ impl Default for Value {
 impl Drop for Value {
     #[inline]
     fn drop(&mut self) {
-        if counted(self.raw.tag) {
-            // SAFETY: Owned, and released once.
-            unsafe { (api().release)(self.raw) }
+        let at: *mut Raw = &mut self.raw;
+        // SAFETY: An owned value. A string, a list or a map held elsewhere
+        // too is one hold fewer, as `Rc`'s drop is; the last hold, and any
+        // kind held another way, the runtime frees.
+        unsafe {
+            let tag = tag(at);
+            if tag <= abi::NUM {
+                return;
+            }
+            if counted(tag) {
+                let count = (word(at, abi::HELD_AT) as *mut u8)
+                    .add(abi::COUNT_AT)
+                    .cast::<usize>();
+                if *count > 1 {
+                    *count -= 1;
+                    return;
+                }
+            }
+            (api().release)(at);
         }
     }
 }
@@ -157,28 +220,36 @@ impl std::fmt::Debug for Value {
 impl From<bool> for Value {
     #[inline]
     fn from(b: bool) -> Self {
-        Value::owned(Raw {
-            tag: abi::BOOL,
-            a: u64::from(b),
-            b: 0,
-        })
+        let mut raw = raw_of(abi::BOOL);
+        raw.0[abi::BOOL_AT] = MaybeUninit::new(u8::from(b));
+        Value::owned(raw)
     }
 }
 impl From<f64> for Value {
     #[inline]
     fn from(n: f64) -> Self {
-        Value::owned(Raw {
-            tag: abi::NUM,
-            a: n.to_bits(),
-            b: 0,
-        })
+        let mut raw = raw_of(abi::NUM);
+        // SAFETY: A number's `f64` is at `HELD_AT`, inside the value.
+        unsafe {
+            std::ptr::from_mut(&mut raw)
+                .cast::<u8>()
+                .add(abi::HELD_AT)
+                .cast::<f64>()
+                .write(n)
+        };
+        Value::owned(raw)
     }
 }
 impl From<&str> for Value {
     #[inline]
     fn from(s: &str) -> Self {
-        // SAFETY: A string's bytes, read before this returns.
-        Value::owned(unsafe { (api().string)(s.as_ptr(), s.len()) })
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: A string's bytes, read before this returns; the runtime
+        // writes `out`.
+        unsafe {
+            (api().string)(s.as_ptr(), s.len(), out.as_mut_ptr());
+            Value::owned(out.assume_init())
+        }
     }
 }
 impl From<String> for Value {
@@ -192,75 +263,123 @@ impl<'a> From<Ref<'a>> for Value {
     }
 }
 
-/// A value lent: an owned one being read, a list's item or a map's field.
-/// Reading through it counts and copies nothing.
+/// A value lent: a function's argument, an owned one being read, a list's
+/// item or a map's field, where the runtime holds it. Reading through it
+/// counts and copies nothing, and calls nothing.
 #[derive(Clone, Copy)]
 pub struct Ref<'a> {
-    raw: Raw,
+    at: *const Raw,
     _of: PhantomData<&'a Value>,
 }
 
 impl<'a> Ref<'a> {
-    /// What a script would read of a value the runtime holds its own way
-    /// (a row kept folded as its map); else itself.
-    #[inline]
-    fn opened(self) -> Raw {
-        if self.raw.tag != abi::OTHER {
-            return self.raw;
+    /// What a script would read of a row kept folded (the map it opens
+    /// to); else itself.
+    #[inline(always)]
+    fn opened(self) -> *const Raw {
+        // SAFETY: `at` points at a value.
+        if unsafe { tag(self.at) } != abi::FOLDED {
+            return self.at;
         }
-        let mut out = NIL;
-        // SAFETY: A lent value, and room for one.
-        if unsafe { (api().open)(&self.raw, &mut out) } {
-            out
-        } else {
-            self.raw
-        }
+        self.unfolded()
+    }
+    #[cold]
+    #[inline(never)]
+    fn unfolded(self) -> *const Raw {
+        // SAFETY: A lent value.
+        let opened = unsafe { (api().open)(self.at) };
+        if opened.is_null() { self.at } else { opened }
+    }
+    #[inline(always)]
+    fn tag(self) -> u8 {
+        // SAFETY: `at` points at a value.
+        unsafe { tag(self.at) }
     }
     pub fn is_nil(self) -> bool {
-        self.raw.tag == abi::NIL
+        self.tag() == abi::NIL
     }
     /// Whether Luau counts it as true: anything but `nil` and `false`.
     pub fn truthy(self) -> bool {
-        !matches!((self.raw.tag, self.raw.a), (abi::NIL, _) | (abi::BOOL, 0))
+        self.tag() != abi::NIL && self.bool() != Some(false)
     }
+    #[inline]
     pub fn bool(self) -> Option<bool> {
-        (self.raw.tag == abi::BOOL).then_some(self.raw.a != 0)
+        // SAFETY: A boolean's byte is at `BOOL_AT`.
+        (self.tag() == abi::BOOL)
+            .then(|| unsafe { self.at.cast::<u8>().add(abi::BOOL_AT).read() != 0 })
     }
+    #[inline]
     pub fn num(self) -> Option<f64> {
-        (self.raw.tag == abi::NUM).then(|| f64::from_bits(self.raw.a))
+        // SAFETY: A number's `f64` is at `HELD_AT`.
+        (self.tag() == abi::NUM)
+            .then(|| unsafe { self.at.cast::<u8>().add(abi::HELD_AT).cast::<f64>().read() })
     }
     /// Its text if it is a string, read where the runtime holds it.
     #[inline]
     pub fn str(self) -> Option<&'a str> {
-        let raw = self.opened();
-        if raw.tag != abi::STR {
+        if self.tag() != abi::STR {
             return None;
         }
-        // SAFETY: A string's `a` and `b` are its UTF-8 and its length, alive
-        // as long as the value this was lent from.
-        Some(unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                raw.a as *const u8,
-                raw.b as usize,
-            ))
-        })
+        // SAFETY: A string holds its UTF-8 and its length, alive as long as
+        // the value this was lent from.
+        Some(unsafe { text(data(self.at), word(self.at, abi::HELD_AT + 8)) })
+    }
+    /// Its text if it is a string of any length. The runtime holds one past
+    /// 64 KiB in pieces, which [`Ref::str`] doesn't read: this reads it
+    /// too, as one string made for the reading.
+    #[inline]
+    pub fn text(self) -> Option<Text<'a>> {
+        match self.tag() {
+            abi::STR => self.str().map(Text::Lent),
+            abi::TEXT => {
+                let mut out = MaybeUninit::<Raw>::uninit();
+                // SAFETY: A lent value; the runtime writes `out`.
+                let flat = unsafe {
+                    (api().flat)(self.at, out.as_mut_ptr());
+                    Value::owned(out.assume_init())
+                };
+                flat.get().str().is_some().then_some(Text::Held(flat))
+            }
+            _ => None,
+        }
     }
     /// Whether it is a list.
+    #[inline]
     pub fn is_list(self) -> bool {
-        self.opened().tag == abi::LIST
+        // SAFETY: A value.
+        unsafe { tag(self.opened()) == abi::LIST }
     }
     /// Whether it is a map.
+    #[inline]
     pub fn is_map(self) -> bool {
-        self.opened().tag == abi::MAP
+        // SAFETY: A value.
+        unsafe { tag(self.opened()) == abi::MAP }
+    }
+    /// A list's items or a map's fields, where they are, and how many;
+    /// nowhere and none if it isn't a `kind`.
+    #[inline(always)]
+    fn contents(self, kind: u8) -> (*const u8, usize) {
+        let at = self.opened();
+        // SAFETY: A value; a list or a map holds its contents and a count.
+        unsafe {
+            if tag(at) == kind {
+                (data(at), word(at, abi::HELD_AT + 8))
+            } else {
+                (std::ptr::null(), 0)
+            }
+        }
     }
     /// How many items a list has, or fields a map; 0 for anything else.
     #[inline]
     pub fn len(self) -> usize {
-        let raw = self.opened();
-        if matches!(raw.tag, abi::LIST | abi::MAP) {
-            raw.b as usize
-        } else {
-            0
+        let at = self.opened();
+        // SAFETY: A value; a list or a map holds a count.
+        unsafe {
+            if matches!(tag(at), abi::LIST | abi::MAP) {
+                word(at, abi::HELD_AT + 8)
+            } else {
+                0
+            }
         }
     }
     pub fn is_empty(self) -> bool {
@@ -269,258 +388,208 @@ impl<'a> Ref<'a> {
     /// A list's item, from 0.
     #[inline]
     pub fn item(self, index: usize) -> Option<Ref<'a>> {
-        let raw = self.opened();
-        if raw.tag != abi::LIST || index >= raw.b as usize {
-            return None;
-        }
-        let mut out = NIL;
-        // SAFETY: A lent list, and room for one value.
-        (unsafe { (api().items)(&raw, index, &mut out, 1) } == 1).then_some(Ref {
-            raw: out,
+        let (items, len) = self.contents(abi::LIST);
+        // SAFETY: Within the list, whose items are values.
+        (index < len).then(|| Ref {
+            at: unsafe { items.cast::<Raw>().add(index) },
             _of: PhantomData,
         })
     }
-    /// A list's items, none if it isn't one: read from the runtime many at
-    /// a time, so a pass over a long list crosses to it a few times, not
-    /// once an item.
-    pub fn items(self) -> Items<'a> {
-        let raw = self.opened();
-        let len = if raw.tag == abi::LIST {
-            raw.b as usize
-        } else {
-            0
-        };
-        Items {
-            list: raw,
-            len,
-            next: 0,
-            held: [std::mem::MaybeUninit::uninit(); CHUNK],
-            from: 0,
-            count: 0,
+    /// A list's items, none if it isn't one.
+    #[inline]
+    pub fn items(self) -> impl ExactSizeIterator<Item = Ref<'a>> + DoubleEndedIterator + Clone {
+        let (items, len) = self.contents(abi::LIST);
+        // SAFETY: Within the list, whose items are values.
+        (0..len).map(move |i| Ref {
+            at: unsafe { items.cast::<Raw>().add(i) },
             _of: PhantomData,
-        }
+        })
     }
     /// A list of this list's items `from` to `to` (from 0, `to` excluded):
     /// the items counted, not copied. `nil` if they aren't in it.
     pub fn slice(self, from: usize, to: usize) -> Value {
-        let raw = self.opened();
-        // SAFETY: A lent value.
-        Value::owned(unsafe { (api().slice)(&raw, from, to) })
+        let mut out = MaybeUninit::<Raw>::uninit();
+        // SAFETY: A lent value; the runtime writes `out`.
+        unsafe {
+            (api().slice)(self.opened(), from, to, out.as_mut_ptr());
+            Value::owned(out.assume_init())
+        }
     }
-    /// A map's field. Reading several of one map's, [`Ref::get`] reads them
-    /// in one call.
+    /// The map's field at `index` (in key order): its key and its value.
+    ///
+    /// # Safety
+    /// `fields` is a map's, of more than `index` fields.
+    #[inline(always)]
+    unsafe fn entry(fields: *const u8, index: usize) -> (&'a str, Ref<'a>) {
+        // SAFETY: A field is a key (a counted pointer to its UTF-8, and its
+        // length) and a value, `FIELD_SIZE` apart.
+        unsafe {
+            let field = fields.add(index * abi::FIELD_SIZE);
+            let key = field.add(abi::FIELD_KEY_AT);
+            let key = text((word(key, 0) as *const u8).add(abi::DATA_AT), word(key, 8));
+            (
+                key,
+                Ref {
+                    at: field.add(abi::FIELD_VALUE_AT).cast(),
+                    _of: PhantomData,
+                },
+            )
+        }
+    }
+    /// A map's field: found as the runtime finds it, with no call.
     #[inline]
     pub fn field(self, key: &str) -> Option<Ref<'a>> {
-        let [field] = self.get([key]);
-        field
+        let (fields, len) = self.contents(abi::MAP);
+        // SAFETY: A map's fields, each index under `len`.
+        unsafe {
+            // (As the runtime's own lookup: a short map in order, a long one
+            // by halves; its fields are sorted by key.)
+            if len <= 8 {
+                for i in 0..len {
+                    let (k, value) = Self::entry(fields, i);
+                    if key_eq(k, key) {
+                        return Some(value);
+                    }
+                }
+                return None;
+            }
+            let (mut low, mut high) = (0, len);
+            while low < high {
+                let mid = low + (high - low) / 2;
+                let (k, value) = Self::entry(fields, mid);
+                match k.cmp(key) {
+                    std::cmp::Ordering::Equal => return Some(value),
+                    std::cmp::Ordering::Less => low = mid + 1,
+                    std::cmp::Ordering::Greater => high = mid,
+                }
+            }
+            None
+        }
     }
-    /// The fields of a map named by `keys`, each at its key's place, read
-    /// from the runtime in one call: `let [id, text] = row.get(["id",
-    /// "text"])`. None for a field it doesn't have, all none if it isn't a
-    /// map.
+    /// The fields of a map named by `keys`, each at its key's place: `let
+    /// [id, text] = row.get(["id", "text"])`. None for a field it doesn't
+    /// have, all none if it isn't a map.
     #[inline]
     pub fn get<const N: usize>(self, keys: [&str; N]) -> [Option<Ref<'a>>; N] {
-        let raw = self.opened();
-        if raw.tag != abi::MAP {
-            return [None; N];
-        }
-        let keys = keys.map(|key| Bytes {
-            ptr: key.as_ptr(),
-            len: key.len(),
-        });
-        let mut out = [std::mem::MaybeUninit::<Raw>::uninit(); N];
-        // SAFETY: A lent map, `N` keys and room for `N` values, each of
-        // which the runtime writes.
-        unsafe { (api().fields)(&raw, keys.as_ptr(), N, out.as_mut_ptr().cast()) };
-        out.map(|raw| {
-            // SAFETY: Written by the call above.
-            let raw = unsafe { raw.assume_init() };
-            (raw.tag != abi::ABSENT).then_some(Ref {
-                raw,
-                _of: PhantomData,
-            })
-        })
-    }
-    /// A map's fields, all read from the runtime at once: for code that
-    /// reads several of them. Empty if it isn't a map.
-    pub fn record(self) -> Record<'a> {
-        let raw = self.opened();
-        let len = if raw.tag == abi::MAP {
-            raw.b as usize
-        } else {
-            0
-        };
-        let mut record = Record {
-            len: 0,
-            keys: [std::mem::MaybeUninit::uninit(); INLINE],
-            values: [std::mem::MaybeUninit::uninit(); INLINE],
-            more: Vec::new(),
-            _of: PhantomData,
-        };
-        if len <= INLINE {
-            // SAFETY: A lent map, and room for `INLINE` keys and values.
-            record.len = unsafe {
-                (api().entries)(
-                    &raw,
-                    0,
-                    record.keys.as_mut_ptr().cast(),
-                    record.values.as_mut_ptr().cast(),
-                    INLINE,
-                )
-            };
-        } else {
-            let mut keys = vec![
-                Bytes {
-                    ptr: std::ptr::null(),
-                    len: 0
-                };
-                len
-            ];
-            let mut values = vec![NIL; len];
-            // SAFETY: A lent map, and room for all its keys and values.
-            let n =
-                unsafe { (api().entries)(&raw, 0, keys.as_mut_ptr(), values.as_mut_ptr(), len) };
-            record.more = keys.into_iter().zip(values).take(n).collect();
-        }
-        record
+        keys.map(|key| self.field(key))
     }
     /// A map's fields in key order, none if it isn't one.
-    pub fn fields(self) -> impl Iterator<Item = (&'a str, Ref<'a>)> {
-        let record = self.record();
-        (0..record.len()).map(move |i| record.at(i))
+    #[inline]
+    pub fn fields(self) -> impl ExactSizeIterator<Item = (&'a str, Ref<'a>)> + Clone {
+        let (fields, len) = self.contents(abi::MAP);
+        // SAFETY: A map's fields, each index under `len`.
+        (0..len).map(move |i| unsafe { Self::entry(fields, i) })
     }
     /// It, owned: counted, not copied.
     #[inline]
     pub fn to_owned(self) -> Value {
-        if counted(self.raw.tag) {
-            // SAFETY: A lent value; the runtime counts it once more.
-            Value::owned(unsafe { (api().clone)(&self.raw) })
-        } else {
-            Value::owned(self.raw)
+        // SAFETY: A lent value. A string, a list or a map is held once
+        // more, as `Rc`'s clone holds it; a number, a boolean and `nil`
+        // are their three words; any other kind the runtime clones.
+        unsafe {
+            let tag = tag(self.at);
+            if counted(tag) {
+                let count = (word(self.at, abi::HELD_AT) as *mut u8)
+                    .add(abi::COUNT_AT)
+                    .cast::<usize>();
+                if *count < usize::MAX / 2 {
+                    *count += 1;
+                    return Value::owned(self.at.read());
+                }
+            } else if tag <= abi::NUM {
+                return Value::owned(self.at.read());
+            }
+            let mut out = MaybeUninit::<Raw>::uninit();
+            (api().clone)(self.at, out.as_mut_ptr());
+            Value::owned(out.assume_init())
         }
     }
 }
 impl std::fmt::Debug for Ref<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let raw = self.opened();
-        match raw.tag {
-            abi::NIL => f.write_str("nil"),
-            abi::BOOL => write!(f, "{}", raw.a != 0),
-            abi::NUM => write!(f, "{}", f64::from_bits(raw.a)),
-            abi::STR => write!(f, "{:?}", self.str().unwrap_or("")),
-            abi::LIST => f.debug_list().entries(self.items()).finish(),
-            abi::MAP => f.debug_map().entries(self.fields()).finish(),
-            _ => f.write_str("<value>"),
-        }
-    }
-}
-
-/// How many of a list's items [`Items`] reads from the runtime at a time.
-const CHUNK: usize = 32;
-/// How many of a map's fields a [`Record`] holds without allocating.
-const INLINE: usize = 16;
-
-/// A list's items ([`Ref::items`]).
-pub struct Items<'a> {
-    list: Raw,
-    len: usize,
-    next: usize,
-    /// The items from `from`, the first `count` written.
-    held: [std::mem::MaybeUninit<Raw>; CHUNK],
-    from: usize,
-    count: usize,
-    _of: PhantomData<&'a Value>,
-}
-impl<'a> Iterator for Items<'a> {
-    type Item = Ref<'a>;
-    #[inline]
-    fn next(&mut self) -> Option<Ref<'a>> {
-        if self.next >= self.len {
-            return None;
-        }
-        if self.next >= self.from + self.count {
-            // SAFETY: A lent list, and room for `CHUNK` values.
-            self.count = unsafe {
-                (api().items)(&self.list, self.next, self.held.as_mut_ptr().cast(), CHUNK)
-            };
-            self.from = self.next;
-            if self.count == 0 {
-                self.len = self.next;
-                return None;
-            }
-        }
-        // SAFETY: Among the `count` the runtime wrote.
-        let raw = unsafe { self.held[self.next - self.from].assume_init() };
-        self.next += 1;
-        Some(Ref {
-            raw,
-            _of: PhantomData,
-        })
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.len - self.next;
-        (left, Some(left))
-    }
-}
-impl ExactSizeIterator for Items<'_> {}
-
-/// A map's fields, read from the runtime at once ([`Ref::record`]).
-pub struct Record<'a> {
-    /// How many of `keys` and `values` the runtime wrote.
-    len: usize,
-    keys: [std::mem::MaybeUninit<Bytes>; INLINE],
-    values: [std::mem::MaybeUninit<Raw>; INLINE],
-    /// A map of more than `INLINE` fields: all of them.
-    more: Vec<(Bytes, Raw)>,
-    _of: PhantomData<&'a Value>,
-}
-impl<'a> Record<'a> {
-    /// How many fields.
-    pub fn len(&self) -> usize {
-        if self.more.is_empty() {
-            self.len
+        if self.is_nil() {
+            f.write_str("nil")
+        } else if let Some(b) = self.bool() {
+            write!(f, "{b}")
+        } else if let Some(n) = self.num() {
+            write!(f, "{n}")
+        } else if let Some(s) = self.str() {
+            write!(f, "{s:?}")
+        } else if self.is_list() {
+            f.debug_list().entries(self.items()).finish()
+        } else if self.is_map() {
+            f.debug_map().entries(self.fields()).finish()
         } else {
-            self.more.len()
+            f.write_str("<value>")
         }
     }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+}
+
+/// A string's text ([`Ref::text`]): where the runtime holds it, or, of one
+/// it holds in pieces, a string made of them.
+pub enum Text<'a> {
+    Lent(&'a str),
+    Held(Value),
+}
+impl std::ops::Deref for Text<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            Text::Lent(text) => text,
+            Text::Held(value) => value.get().str().unwrap_or(""),
+        }
     }
+}
+
+/// Whether two keys are the same text: the runtime's own comparison
+/// (`zgx-script`'s `key_eq`), a few loads for keys up to 24 bytes and no
+/// call, so a field found here costs what one found there does.
+#[inline(always)]
+fn key_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    let word = |s: &[u8], at: usize| u64::from_ne_bytes(s[at..at + 8].try_into().unwrap());
+    let half = |s: &[u8], at: usize| u32::from_ne_bytes(s[at..at + 4].try_into().unwrap());
+    match n {
+        0 => true,
+        1..=3 => a[0] == b[0] && a[n / 2] == b[n / 2] && a[n - 1] == b[n - 1],
+        4..=7 => half(a, 0) == half(b, 0) && half(a, n - 4) == half(b, n - 4),
+        8..=16 => word(a, 0) == word(b, 0) && word(a, n - 8) == word(b, n - 8),
+        17..=24 => {
+            word(a, 0) == word(b, 0) && word(a, 8) == word(b, 8) && word(a, n - 8) == word(b, n - 8)
+        }
+        _ => a == b,
+    }
+}
+
+/// A module's own state, for the interface's thread: a `static` read with
+/// no lookup (`static HELD: Local<Held> = Local::new();`). A `thread_local!`
+/// in a library is a call each time it's read; this is a load.
+///
+/// Everything a module registers is called on the interface's thread, the
+/// one that loaded it, and that is the only thread that may use a `Local`:
+/// a module's own threads must not touch one.
+pub struct Local<T>(UnsafeCell<Option<T>>);
+// SAFETY: Used from the interface's thread alone (the type's contract).
+unsafe impl<T> Sync for Local<T> {}
+impl<T: Default> Local<T> {
+    pub const fn new() -> Self {
+        Local(UnsafeCell::new(None))
+    }
+    /// Runs `read` with the state, made on its first use. Not re-entrant:
+    /// `read` must not use this `Local` again.
     #[inline]
-    fn at(&self, index: usize) -> (&'a str, Ref<'a>) {
-        let (key, raw) = if self.more.is_empty() {
-            // SAFETY: `index` is under `len`, which the runtime wrote.
-            unsafe {
-                (
-                    self.keys[index].assume_init(),
-                    self.values[index].assume_init(),
-                )
-            }
-        } else {
-            self.more[index]
-        };
-        // SAFETY: A key is UTF-8, alive as long as the map it was lent from.
-        let key =
-            unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(key.ptr, key.len)) };
-        (
-            key,
-            Ref {
-                raw,
-                _of: PhantomData,
-            },
-        )
+    pub fn with<R>(&self, read: impl FnOnce(&mut T) -> R) -> R {
+        // SAFETY: One thread, and no `with` inside another's `read`.
+        read(unsafe { &mut *self.0.get() }.get_or_insert_with(T::default))
     }
-    /// The field `key`.
-    #[inline]
-    pub fn get(&self, key: &str) -> Option<Ref<'a>> {
-        (0..self.len())
-            .map(|i| self.at(i))
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v)
-    }
-    /// Its fields, in key order.
-    pub fn iter(&self) -> impl Iterator<Item = (&'a str, Ref<'a>)> + '_ {
-        (0..self.len()).map(|i| self.at(i))
+}
+impl<T: Default> Default for Local<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -539,15 +608,17 @@ impl Host<'_> {
         unsafe extern "C" fn call<F: Fn(Ref<'_>) -> Value>(
             user: *mut c_void,
             arg: *const Raw,
-        ) -> Raw {
+            out: *mut Raw,
+        ) {
             // SAFETY: `user` is the `F` boxed below, alive until `free`;
-            // `arg` is lent for this call.
+            // `arg` is lent for this call; `out` takes what it made.
             unsafe {
-                (*(user as *const F))(Ref {
-                    raw: *arg,
+                let made = (*(user as *const F))(Ref {
+                    at: arg,
                     _of: PhantomData,
-                })
-                .into_raw()
+                });
+                out.write(made.raw);
+                std::mem::forget(made);
             }
         }
         unsafe extern "C" fn free<F>(user: *mut c_void) {
@@ -577,7 +648,7 @@ impl Host<'_> {
             // SAFETY: As `function`'s.
             unsafe {
                 (*(user as *const F))(Ref {
-                    raw: *arg,
+                    at: arg,
                     _of: PhantomData,
                 })
             }
@@ -605,7 +676,8 @@ impl Host<'_> {
 }
 
 /// What [`module!`]'s entry does: checks the runtime speaks this module's
-/// interface, keeps its value functions, and runs `setup`.
+/// interface and lays values out as this crate reads them, keeps its value
+/// functions, and runs `setup`.
 ///
 /// # Safety
 /// `api` and `registrar` are the runtime's, as [`abi::Entry`] is called
@@ -624,6 +696,9 @@ pub unsafe fn enter(
         || (registrar.size as usize) < size_of::<abi::Registrar>()
     {
         return abi::REFUSED_ABI;
+    }
+    if api_ref.layout != abi::LAYOUT {
+        return abi::REFUSED_LAYOUT;
     }
     API.store(api.cast_mut(), Ordering::Relaxed);
     setup(&Host { registrar });
