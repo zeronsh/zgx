@@ -4401,7 +4401,8 @@ fn styled(
     if events.any_input() {
         view = with_events(view, node, vm, low, handle_for());
         if let Some(rare) = &events.rare {
-            view = with_rare(view, rare, vm, low, handle_for());
+            let follows = events.pointer_move.is_some();
+            view = with_rare(view, rare, follows, vm, low, handle_for());
         }
     }
     if events.any_drag() || events.drags().drag_preview.is_some() {
@@ -5978,17 +5979,18 @@ fn with_events(
 }
 
 /// The handlers few nodes have (`RareEvents`), one check in `styled` for
-/// them all.
+/// them all. `follows`: the node has `on_pointer_move`.
 #[inline(never)]
 fn with_rare(
     mut view: View,
     rare: &crate::node::RareEvents,
+    follows: bool,
     vm: &Rc<Vm>,
     low: &Rc<Lowering>,
     handle: Rc<OnceCell<NodeHandle>>,
 ) -> View {
-    if let Some(handler) = &rare.aux_click {
-        view = with_aux_click(view, handler.clone(), vm, low, handle.clone());
+    if rare.aux_click.is_some() || rare.aux_press.is_some() || rare.aux_release.is_some() {
+        view = with_aux(view, rare, follows, vm, low, handle.clone());
     }
     if let Some(handler) = &rare.navigate {
         view = with_navigate(view, handler.clone(), vm, low);
@@ -6068,77 +6070,148 @@ fn with_file_drop(
     })
 }
 
-/// `on_aux_click`: a listener of its own, so a node without one pays nothing
-/// for it. An aux click is a press and a release of one extra button on the
-/// node, as a click is of the primary. Over a child, the release takes the
-/// press going down (`armed`) and clicks coming back up, so a press a
-/// child's handler took (stopping it there) is spent and never clicks a
-/// later release that began elsewhere; the pointer leaving the node spends
-/// it too, so a release elsewhere never leaves one behind.
+/// `on_aux_click`, `on_aux_press` and `on_aux_release`: a listener of their
+/// own, so a node without them pays nothing for it.
+///
+/// A press of an extra button (the middle, or one past it) goes to the
+/// innermost node with `on_aux_press` or `on_aux_release`, as `on_press`'s
+/// does; one with `on_aux_release`, or with `on_pointer_move` (`follows`)
+/// too, keeps the pointer until that button comes up, wherever it goes, so
+/// a board pans by the middle button. Its release then goes to that node
+/// alone (`held`), and a cancel releases it as well, with `cancelled`.
+///
+/// An aux click is a press and a release of one extra button on the node,
+/// as a click is of the primary. Over a child, the release takes the press
+/// going down (`armed`) and clicks coming back up, so a press a child's
+/// handler took (stopping it there) is spent and never clicks a later
+/// release that began elsewhere; the pointer leaving the node spends it
+/// too, so a release elsewhere never leaves one behind, and a release the
+/// node hears because it kept the pointer clicks only over it.
 #[inline(never)]
-fn with_aux_click(
+fn with_aux(
     view: View,
-    handler: Handler,
+    rare: &crate::node::RareEvents,
+    follows: bool,
     vm: &Rc<Vm>,
     low: &Rc<Lowering>,
     handle: Rc<OnceCell<NodeHandle>>,
 ) -> View {
+    let (click, press, release) = (
+        rare.aux_click.clone(),
+        rare.aux_press.clone(),
+        rare.aux_release.clone(),
+    );
+    let takes = press.is_some() || release.is_some();
+    let captures = release.is_some() || (press.is_some() && follows);
     let (vm, actions) = (vm.clone(), low.actions.clone());
     let (mut pressed, mut armed) = (None::<PointerButton>, false);
-    view.on_event(move |event| match &event.event {
-        InputEvent::PointerDown {
-            button: button @ (PointerButton::Middle | PointerButton::Other(_)),
-            ..
-        } if event.phase != EventPhase::Capture => pressed = Some(*button),
-        InputEvent::PointerUp {
-            x,
-            y,
-            button: button @ (PointerButton::Middle | PointerButton::Other(_)),
-        } => {
-            let clicked = match event.phase {
-                EventPhase::Capture => {
-                    armed = pressed.take() == Some(*button);
-                    false
-                }
-                EventPhase::Target => {
-                    armed = false;
-                    pressed.take() == Some(*button)
-                }
-                _ => std::mem::take(&mut armed),
-            };
-            if !clicked {
-                return;
-            }
-            let lua = &vm.lua;
-            let local = handle
+    let mut held = None::<PointerButton>;
+    view.on_event(move |event| {
+        // `{ button, x, y, local_x, local_y, shift, ctrl, alt, meta, cmd }`,
+        // and whether that point is on the node.
+        let modifiers = event.pointer_modifiers();
+        let point = |x: f32, y: f32, button: PointerButton| {
+            let (local, inside) = handle
                 .get()
-                .and_then(|h| h.scene().map(|s| s.borrow().local_point(h.node(), *x, *y)))
-                .unwrap_or((*x, *y));
-            let held = event.pointer_modifiers();
-            let table = lua.create_table().and_then(|t| {
-                t.set("x", *x)?;
-                t.set("y", *y)?;
+                .and_then(|h| {
+                    let scene = h.scene()?;
+                    let scene = scene.borrow();
+                    let local = scene.local_point(h.node(), x, y);
+                    let b = scene.bounds(h.node());
+                    let inside =
+                        (0. ..=b.width).contains(&local.0) && (0. ..=b.height).contains(&local.1);
+                    Some((local, inside))
+                })
+                .unwrap_or(((x, y), true));
+            let table = vm.lua.create_table().and_then(|t| {
+                t.set("x", x)?;
+                t.set("y", y)?;
                 t.set("local_x", local.0)?;
                 t.set("local_y", local.1)?;
-                t.set("shift", held.shift)?;
-                t.set("ctrl", held.control)?;
-                t.set("alt", held.alt)?;
-                t.set("meta", held.meta)?;
-                t.set("cmd", held.primary_shortcut())?;
+                t.set("shift", modifiers.shift)?;
+                t.set("ctrl", modifiers.control)?;
+                t.set("alt", modifiers.alt)?;
+                t.set("meta", modifiers.meta)?;
+                t.set("cmd", modifiers.primary_shortcut())?;
                 match button {
-                    PointerButton::Other(n) => t.set("button", i64::from(*n))?,
+                    PointerButton::Other(n) => t.set("button", i64::from(n))?,
                     _ => t.set("button", "middle")?,
                 }
                 Ok(t)
             });
-            if let Ok(t) = table {
-                // The innermost node with one takes it, as `on_click`.
+            table.map(|t| (t, inside))
+        };
+        match &event.event {
+            InputEvent::PointerDown {
+                x,
+                y,
+                button: button @ (PointerButton::Middle | PointerButton::Other(_)),
+            } if event.phase != EventPhase::Capture => {
+                let (x, y, button) = (*x, *y, *button);
+                pressed = Some(button);
+                if !takes {
+                    return;
+                }
+                // The innermost node with one takes it, as `on_press`.
                 event.stop_propagation();
-                run(&handler, &vm, &actions, t);
+                held = Some(button);
+                if captures {
+                    event.capture_pointer();
+                }
+                if let (Some(h), Ok((t, _))) = (&press, point(x, y, button)) {
+                    run(h, &vm, &actions, t);
+                }
             }
+            InputEvent::PointerUp {
+                x,
+                y,
+                button: button @ (PointerButton::Middle | PointerButton::Other(_)),
+            } => {
+                if event.phase != EventPhase::Capture && held == Some(*button) {
+                    held = None;
+                    if let (Some(h), Ok((t, _))) = (&release, point(*x, *y, *button)) {
+                        run(h, &vm, &actions, t);
+                    }
+                }
+                let Some(click) = &click else { return };
+                let clicked = match event.phase {
+                    EventPhase::Capture => {
+                        armed = pressed.take() == Some(*button);
+                        false
+                    }
+                    EventPhase::Target => {
+                        armed = false;
+                        pressed.take() == Some(*button)
+                    }
+                    _ => std::mem::take(&mut armed),
+                };
+                if !clicked {
+                    return;
+                }
+                if let Ok((t, inside)) = point(*x, *y, *button)
+                    && inside
+                {
+                    // The innermost node with one takes it, as `on_click`.
+                    event.stop_propagation();
+                    run(click, &vm, &actions, t);
+                }
+            }
+            InputEvent::PointerCancel => {
+                (pressed, armed) = (None, false);
+                if let Some(button) = held.take()
+                    && let Some(h) = &release
+                {
+                    let (x, y) = handle.get().and_then(|h| h.pointer()).unwrap_or_default();
+                    if let Ok((t, _)) = point(x, y, button)
+                        && t.set("cancelled", true).is_ok()
+                    {
+                        run(h, &vm, &actions, t);
+                    }
+                }
+            }
+            InputEvent::PointerLeave => (pressed, armed) = (None, false),
+            _ => {}
         }
-        InputEvent::PointerLeave => (pressed, armed) = (None, false),
-        _ => {}
     })
 }
 
