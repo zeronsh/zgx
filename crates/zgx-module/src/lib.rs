@@ -6,8 +6,8 @@
 //! use zgx_module::{Host, Value};
 //!
 //! zgx_module::module!(|host: &Host| {
-//!     host.function("words.count", |text: Value| {
-//!         let n = text.get().str().map_or(0, |s| s.split_whitespace().count());
+//!     host.function("words.count", |text| {
+//!         let n = text.str().map_or(0, |s| s.split_whitespace().count());
 //!         Value::from(n as f64)
 //!     });
 //! });
@@ -275,31 +275,40 @@ impl<'a> Ref<'a> {
         }
         let mut out = NIL;
         // SAFETY: A lent list, and room for one value.
-        unsafe { (api().item)(&raw, index, &mut out) }.then_some(Ref {
+        (unsafe { (api().items)(&raw, index, &mut out, 1) } == 1).then_some(Ref {
             raw: out,
             _of: PhantomData,
         })
     }
-    /// A list's items, none if it isn't one.
-    pub fn items(self) -> impl ExactSizeIterator<Item = Ref<'a>> + DoubleEndedIterator {
+    /// A list's items, none if it isn't one: read from the runtime many at
+    /// a time, so a pass over a long list crosses to it a few times, not
+    /// once an item.
+    pub fn items(self) -> Items<'a> {
         let raw = self.opened();
         let len = if raw.tag == abi::LIST {
             raw.b as usize
         } else {
             0
         };
-        let list = Ref {
-            raw,
+        Items {
+            list: raw,
+            len,
+            next: 0,
+            held: [NIL; CHUNK],
+            from: 0,
+            count: 0,
             _of: PhantomData,
-        };
-        (0..len).map(move |i| {
-            list.item(i).unwrap_or(Ref {
-                raw: NIL,
-                _of: PhantomData,
-            })
-        })
+        }
     }
-    /// A map's field.
+    /// A list of this list's items `from` to `to` (from 0, `to` excluded):
+    /// the items counted, not copied. `nil` if they aren't in it.
+    pub fn slice(self, from: usize, to: usize) -> Value {
+        let raw = self.opened();
+        // SAFETY: A lent value.
+        Value::owned(unsafe { (api().slice)(&raw, from, to) })
+    }
+    /// A map's field. Reading several of one map's, [`Ref::record`] reads
+    /// them all at once.
     #[inline]
     pub fn field(self, key: &str) -> Option<Ref<'a>> {
         let raw = self.opened();
@@ -313,35 +322,56 @@ impl<'a> Ref<'a> {
             _of: PhantomData,
         })
     }
-    /// A map's fields in key order, none if it isn't one.
-    pub fn fields(self) -> impl ExactSizeIterator<Item = (&'a str, Ref<'a>)> {
+    /// A map's fields, all read from the runtime at once: for code that
+    /// reads several of them. Empty if it isn't a map.
+    pub fn record(self) -> Record<'a> {
         let raw = self.opened();
         let len = if raw.tag == abi::MAP {
             raw.b as usize
         } else {
             0
         };
-        (0..len).map(move |i| {
-            let mut key = Bytes {
-                ptr: std::ptr::NonNull::dangling().as_ptr(),
+        let mut record = Record {
+            len: 0,
+            keys: [Bytes {
+                ptr: std::ptr::null(),
                 len: 0,
-            };
-            let mut value = NIL;
-            // SAFETY: A lent map, and room for a key and a value. A key is
-            // UTF-8, alive as long as the map.
-            unsafe {
-                (api().entry)(&raw, i, &mut key, &mut value);
-                let key =
-                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(key.ptr, key.len));
-                (
-                    key,
-                    Ref {
-                        raw: value,
-                        _of: PhantomData,
-                    },
+            }; INLINE],
+            values: [NIL; INLINE],
+            more: Vec::new(),
+            _of: PhantomData,
+        };
+        if len <= INLINE {
+            // SAFETY: A lent map, and room for `INLINE` keys and values.
+            record.len = unsafe {
+                (api().entries)(
+                    &raw,
+                    0,
+                    record.keys.as_mut_ptr(),
+                    record.values.as_mut_ptr(),
+                    INLINE,
                 )
-            }
-        })
+            };
+        } else {
+            let mut keys = vec![
+                Bytes {
+                    ptr: std::ptr::null(),
+                    len: 0
+                };
+                len
+            ];
+            let mut values = vec![NIL; len];
+            // SAFETY: A lent map, and room for all its keys and values.
+            let n =
+                unsafe { (api().entries)(&raw, 0, keys.as_mut_ptr(), values.as_mut_ptr(), len) };
+            record.more = keys.into_iter().zip(values).take(n).collect();
+        }
+        record
+    }
+    /// A map's fields in key order, none if it isn't one.
+    pub fn fields(self) -> impl Iterator<Item = (&'a str, Ref<'a>)> {
+        let record = self.record();
+        (0..record.len()).map(move |i| record.at(i))
     }
     /// It, owned: counted, not copied.
     #[inline]
@@ -369,6 +399,106 @@ impl std::fmt::Debug for Ref<'_> {
     }
 }
 
+/// How many of a list's items [`Items`] reads from the runtime at a time.
+const CHUNK: usize = 32;
+/// How many of a map's fields a [`Record`] holds without allocating.
+const INLINE: usize = 16;
+
+/// A list's items ([`Ref::items`]).
+pub struct Items<'a> {
+    list: Raw,
+    len: usize,
+    next: usize,
+    held: [Raw; CHUNK],
+    /// `held` is the items from `from`, `count` of them.
+    from: usize,
+    count: usize,
+    _of: PhantomData<&'a Value>,
+}
+impl<'a> Iterator for Items<'a> {
+    type Item = Ref<'a>;
+    #[inline]
+    fn next(&mut self) -> Option<Ref<'a>> {
+        if self.next >= self.len {
+            return None;
+        }
+        if self.next >= self.from + self.count {
+            // SAFETY: A lent list, and room for `CHUNK` values.
+            self.count =
+                unsafe { (api().items)(&self.list, self.next, self.held.as_mut_ptr(), CHUNK) };
+            self.from = self.next;
+            if self.count == 0 {
+                self.len = self.next;
+                return None;
+            }
+        }
+        let raw = self.held[self.next - self.from];
+        self.next += 1;
+        Some(Ref {
+            raw,
+            _of: PhantomData,
+        })
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.len - self.next;
+        (left, Some(left))
+    }
+}
+impl ExactSizeIterator for Items<'_> {}
+
+/// A map's fields, read from the runtime at once ([`Ref::record`]).
+pub struct Record<'a> {
+    len: usize,
+    keys: [Bytes; INLINE],
+    values: [Raw; INLINE],
+    /// A map of more than `INLINE` fields: all of them.
+    more: Vec<(Bytes, Raw)>,
+    _of: PhantomData<&'a Value>,
+}
+impl<'a> Record<'a> {
+    /// How many fields.
+    pub fn len(&self) -> usize {
+        if self.more.is_empty() {
+            self.len
+        } else {
+            self.more.len()
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[inline]
+    fn at(&self, index: usize) -> (&'a str, Ref<'a>) {
+        let (key, raw) = if self.more.is_empty() {
+            (self.keys[index], self.values[index])
+        } else {
+            self.more[index]
+        };
+        // SAFETY: A key is UTF-8, alive as long as the map it was lent from.
+        let key =
+            unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(key.ptr, key.len)) };
+        (
+            key,
+            Ref {
+                raw,
+                _of: PhantomData,
+            },
+        )
+    }
+    /// The field `key`.
+    #[inline]
+    pub fn get(&self, key: &str) -> Option<Ref<'a>> {
+        (0..self.len())
+            .map(|i| self.at(i))
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v)
+    }
+    /// Its fields, in key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a str, Ref<'a>)> + '_ {
+        (0..self.len()).map(|i| self.at(i))
+    }
+}
+
 /// The host a module is loading into: where it registers what scripts
 /// call. Lent to the module's setup, not kept.
 pub struct Host<'a> {
@@ -378,18 +508,28 @@ pub struct Host<'a> {
 impl Host<'_> {
     /// Registers a function scripts call for its value now, with
     /// `ui.call_sync(name, arg)` (`ScriptHost::function`): on the
-    /// interface's thread, so quick, with no I/O.
-    pub fn function(&self, name: &str, function: impl Fn(Value) -> Value + 'static) {
-        unsafe extern "C" fn call<F: Fn(Value) -> Value>(user: *mut c_void, arg: Raw) -> Raw {
+    /// interface's thread, so quick, with no I/O. Its argument is lent for
+    /// the call (`to_owned` keeps it).
+    pub fn function(&self, name: &str, function: impl Fn(Ref<'_>) -> Value + 'static) {
+        unsafe extern "C" fn call<F: Fn(Ref<'_>) -> Value>(
+            user: *mut c_void,
+            arg: *const Raw,
+        ) -> Raw {
             // SAFETY: `user` is the `F` boxed below, alive until `free`;
-            // `arg` is owned by this call.
-            unsafe { (*(user as *const F))(Value::from_raw(arg)).into_raw() }
+            // `arg` is lent for this call.
+            unsafe {
+                (*(user as *const F))(Ref {
+                    raw: *arg,
+                    _of: PhantomData,
+                })
+                .into_raw()
+            }
         }
         unsafe extern "C" fn free<F>(user: *mut c_void) {
             // SAFETY: The box made below, freed once.
             drop(unsafe { Box::from_raw(user as *mut F) });
         }
-        fn register<F: Fn(Value) -> Value + 'static>(r: &abi::Registrar, name: &str, f: F) {
+        fn register<F: Fn(Ref<'_>) -> Value + 'static>(r: &abi::Registrar, name: &str, f: F) {
             let user = Box::into_raw(Box::new(f)) as *mut c_void;
             // SAFETY: The registrar's own host, inside the entry call.
             unsafe {
@@ -407,16 +547,21 @@ impl Host<'_> {
     }
     /// Registers an action scripts bind with `ui.action(name, arg)` or call
     /// with `ui.invoke` (`ScriptHost::action`).
-    pub fn action(&self, name: &str, action: impl Fn(Value) + 'static) {
-        unsafe extern "C" fn call<F: Fn(Value)>(user: *mut c_void, arg: Raw) {
+    pub fn action(&self, name: &str, action: impl Fn(Ref<'_>) + 'static) {
+        unsafe extern "C" fn call<F: Fn(Ref<'_>)>(user: *mut c_void, arg: *const Raw) {
             // SAFETY: As `function`'s.
-            unsafe { (*(user as *const F))(Value::from_raw(arg)) }
+            unsafe {
+                (*(user as *const F))(Ref {
+                    raw: *arg,
+                    _of: PhantomData,
+                })
+            }
         }
         unsafe extern "C" fn free<F>(user: *mut c_void) {
             // SAFETY: The box made below, freed once.
             drop(unsafe { Box::from_raw(user as *mut F) });
         }
-        fn register<F: Fn(Value) + 'static>(r: &abi::Registrar, name: &str, f: F) {
+        fn register<F: Fn(Ref<'_>) + 'static>(r: &abi::Registrar, name: &str, f: F) {
             let user = Box::into_raw(Box::new(f)) as *mut c_void;
             // SAFETY: The registrar's own host, inside the entry call.
             unsafe {

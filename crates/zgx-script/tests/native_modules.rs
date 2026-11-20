@@ -25,6 +25,14 @@ local before = ui.call_sync("fixture.kept")
 ui.invoke("fixture.keep", { held = "by the module" })
 local after = ui.call_sync("fixture.kept")
 local shared = ui.call_sync("fixture.echo", ui.shared("rows"):get())
+local hundred, wide = {}, {}
+for i = 1, 100 do
+    hundred[i] = i
+    wide[`k{i}`] = i
+end
+local sum = ui.call_sync("fixture.sum", hundred)
+local slice = ui.call_sync("fixture.slice", { list = hundred, from = 40, to = 43 })
+local past = ui.call_sync("fixture.slice", { list = hundred, from = 99, to = 101 })
 return ui.column {
     ui.text { id = "echo", show(echoed) },
     ui.text { id = "nil", show(ui.call_sync("fixture.echo")) },
@@ -32,6 +40,7 @@ return ui.column {
     ui.text { id = "fields", show(fields) },
     ui.text { id = "kept", `{show(before)} then {show(after)}` },
     ui.text { id = "shared", show(shared) },
+    ui.text { id = "long", `{sum} {show(slice)} {show(past)} {show(ui.call_sync("fixture.wide", wide))}` },
 }
 "#;
 
@@ -84,7 +93,7 @@ fn app(load: impl FnOnce(&ScriptHost) + 'static) -> TestApp {
 
 fn answers(app: &mut TestApp) -> Vec<String> {
     assert_eq!(app.error(), None);
-    ["echo", "nil", "words", "fields", "kept", "shared"]
+    ["echo", "nil", "words", "fields", "kept", "shared", "long"]
         .map(|id| app.text(id))
         .to_vec()
 }
@@ -104,6 +113,7 @@ fn a_loaded_module_answers_scripts() {
             "[1=[key=a,value=1],2=[key=c,value=see],3=[key=drop,value=b]]",
             "nil then [held=by the module]",
             "[1=[id=a,n=1],2=[id=b,n=2]]",
+            "5050 [1=41,2=42,3=43] nil [last=k99,n=100]",
         ]
     );
 }

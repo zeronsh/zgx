@@ -75,21 +75,30 @@ pub struct Api {
     pub clone: unsafe extern "C" fn(value: *const Raw) -> Raw,
     /// Gives an owned value back.
     pub release: unsafe extern "C" fn(value: Raw),
-    /// A list's item (from 0), lent for as long as the list is; false past
-    /// its end or if it isn't a list.
-    pub item: unsafe extern "C" fn(list: *const Raw, index: usize, out: *mut Raw) -> bool,
+    /// A list's items from `from` (from 0), up to `cap` of them, lent for
+    /// as long as the list is: how many it wrote, 0 past its end or if it
+    /// isn't a list. One call for many, as a pass over a list reads them.
+    pub items:
+        unsafe extern "C" fn(list: *const Raw, from: usize, out: *mut Raw, cap: usize) -> usize,
     /// A map's field, lent for as long as the map is; false if it has none
     /// of that name or isn't a map.
     pub field:
         unsafe extern "C" fn(map: *const Raw, key: *const u8, len: usize, out: *mut Raw) -> bool,
-    /// A map's field by its place (from 0, in key order), its key and value
-    /// lent for as long as the map is.
-    pub entry: unsafe extern "C" fn(
+    /// A map's fields from the `from`th (from 0, in key order), up to `cap`
+    /// of them, their keys and values lent for as long as the map is: how
+    /// many it wrote. One call for a whole row, as code reading several of
+    /// its fields reads them.
+    pub entries: unsafe extern "C" fn(
         map: *const Raw,
-        index: usize,
-        key: *mut Bytes,
-        value: *mut Raw,
-    ) -> bool,
+        from: usize,
+        keys: *mut Bytes,
+        values: *mut Raw,
+        cap: usize,
+    ) -> usize,
+    /// A list of a list's items `from` to `to` (from 0, `to` excluded),
+    /// owned: the items counted, not copied. `nil` if it isn't a list or
+    /// they aren't in it.
+    pub slice: unsafe extern "C" fn(list: *const Raw, from: usize, to: usize) -> Raw,
     /// An [`OTHER`] value as what a script would read of it, lent for as
     /// long as it is: a row kept folded as its map. False for what has no
     /// such reading here (an image, an element, a long text held in
@@ -98,10 +107,12 @@ pub struct Api {
 }
 
 /// A module's function, as `ui.call_sync(name, arg)` calls it: `arg` is
-/// owned by the function, and so is what it returns by the runtime.
-pub type Function = unsafe extern "C" fn(user: *mut c_void, arg: Raw) -> Raw;
-/// A module's action, as `ui.action(name, arg)` and `ui.invoke` call it.
-pub type Action = unsafe extern "C" fn(user: *mut c_void, arg: Raw);
+/// lent for the call (a function that keeps it clones it), and what it
+/// returns is owned, the runtime's from then.
+pub type Function = unsafe extern "C" fn(user: *mut c_void, arg: *const Raw) -> Raw;
+/// A module's action, as `ui.action(name, arg)` and `ui.invoke` call it:
+/// `arg` lent, as a function's.
+pub type Action = unsafe extern "C" fn(user: *mut c_void, arg: *const Raw);
 /// Frees a registration's `user` when the host that held it goes.
 pub type Free = unsafe extern "C" fn(user: *mut c_void);
 
