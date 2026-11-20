@@ -104,6 +104,13 @@ const BITS: &[&str] = &[
     "<a href=\"u\">",
     "</a>",
     "<code>",
+    "https://a.b/c",
+    "www.x.org",
+    "http",
+    "://",
+    "a@b.co",
+    "(",
+    ")",
     "&amp;",
     "&",
     "é",
@@ -436,13 +443,22 @@ fn a_reply_streamed_shows_what_it_shows_at_once() {
             html_marks: true,
             ..Options::default()
         },
+        Options {
+            autolinks: true,
+            ..Options::default()
+        },
+        Options {
+            html_marks: true,
+            autolinks: true,
+            ..Options::default()
+        },
     ];
     let mut found = Vec::new();
     for seed in start..start + seeds {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let text = text(&mut rng);
         let pieces = pieces(&text, &mut rng);
-        let options = &options[(seed % 3) as usize];
+        let options = &options[(seed % options.len() as u64) as usize];
         if disagreement(&pieces, options).is_some() {
             let small = smallest(pieces, options);
             found.push(format!(
@@ -515,6 +531,37 @@ return ui.column {
     h.settle();
     assert_eq!(h.text("own"), "one\ntwo |b+b");
     assert_eq!(h.text("inherited"), "one two b");
+}
+
+/// A script asks for autolink literals, and has none without asking.
+#[test]
+fn a_script_asks_for_autolinks() {
+    let mut h = Harness::inline(
+        r#"local function show(blocks: any): string
+    local out = {}
+    for _, r in blocks[1].s do
+        table.insert(out, r.x .. (if r.a then ">" .. r.a else ""))
+    end
+    return table.concat(out, "|")
+end
+local text = "see www.a.com and https://b.c/d."
+local reply = ui.state("reply", text)
+local streamed = ui.markdown(reply, { key = "reply", autolinks = true })
+return ui.column {
+    ui.text { id = "on", show(ui.markdown(text, { autolinks = true })) },
+    ui.text { id = "off", show(ui.markdown(text)) },
+    ui.text { id = "keyed", function() return show(streamed:get()) end },
+    ui.markdown_view { text, autolinks = true },
+}
+"#,
+    );
+    h.settle();
+    assert_eq!(
+        h.text("on"),
+        "see |www.a.com>http://www.a.com| and |https://b.c/d>https://b.c/d|."
+    );
+    assert_eq!(h.text("off"), "see www.a.com and https://b.c/d.");
+    assert_eq!(h.text("keyed"), h.text("on"));
 }
 
 /// A Luau string of `text`, every byte escaped.

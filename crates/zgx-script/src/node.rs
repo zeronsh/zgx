@@ -5845,6 +5845,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     breaks: flag(&keys.breaks, false)?,
                     paths: flag(&keys.paths, false)?,
                     html_marks: flag(&keys.html_marks, false)?,
+                    autolinks: flag(&keys.autolinks, false)?,
                     code: None,
                 },
                 copy: flag(&keys.copy, true)?,
