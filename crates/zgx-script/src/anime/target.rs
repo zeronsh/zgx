@@ -512,7 +512,7 @@ fn lit_to_value(lit: &Lit) -> Value {
     match lit {
         Lit::Num(n) => Value::Num(*n as f64),
         Lit::Bool(b) => Value::Bool(*b),
-        Lit::Str(s) => Value::Str(s.clone().into()),
+        Lit::Str(s) => Value::Str(s.clone()),
         Lit::Color(c) => Value::Str(format_color(color_to_array(*c)).into()),
         Lit::Pair(a, b) => Value::List(vec![Value::Num(*a as f64), Value::Num(*b as f64)].into()),
         Lit::Len(zgx::layout::Length::Px(n)) => Value::Num(*n as f64),

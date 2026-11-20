@@ -28,7 +28,7 @@ use zgx::reactive::Signal;
 #[derive(Clone, Debug)]
 enum Key {
     Num(f64),
-    Str(Rc<str>),
+    Str(crate::Str),
     Bool(bool),
     Nil,
 }
@@ -56,7 +56,7 @@ impl Key {
     fn of_value(value: &Value) -> Key {
         match value {
             Value::Num(n) => Key::Num(*n),
-            Value::Str(s) => Key::Str(s.rc()),
+            Value::Str(s) => Key::Str(s.clone()),
             Value::Text(t) => Key::Str(t.to_cow().into()),
             Value::Bool(b) => Key::Bool(*b),
             _ => Key::Nil,

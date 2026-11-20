@@ -5,10 +5,7 @@
 //!
 //! [`Slice`] is a counted slice of zgx's own, as `Rc<[T]>` is but with its
 //! counts and items at stated places: a list's ([`List`]) and a map's
-//! ([`Map`], of [`Field`]s). [`Str`] is a string std's own `Rc<str>` holds,
-//! kept as a pointer to its text and a length, made and let go of through
-//! `Rc`'s documented raw functions alone: turning one into an `Rc<str>` and
-//! back copies nothing.
+//! ([`Map`], of [`Field`]s). [`Str`] is one whose bytes are UTF-8.
 
 use std::{
     alloc::{self, Layout},
@@ -24,94 +21,63 @@ use std::{
 
 use crate::Value;
 
-/// A string a value holds: text shared, not copied, by each clone, as an
-/// `Rc<str>` is, and one's worth of memory: `Str::from(rc)` and
-/// `Rc::<str>::from(str)` change which type holds it and nothing else.
-// A pointer to the text and its length, in that order: what a module reads.
-#[repr(C)]
-pub struct Str {
-    text: NonNull<u8>,
-    len: usize,
-    _held: PhantomData<Rc<str>>,
-}
+/// A string a value holds: text shared, not copied, by each clone. A counted
+/// slice of zgx's own ([`Slice`]) whose bytes are UTF-8, so its counts and
+/// its text are at places zgx states, as a list's are, and holding one,
+/// letting go of one and freeing one cost what a list's do.
+///
+/// It is not an `Rc<str>`: turning one into the other copies the text
+/// ([`Str::rc`], `Str::from(rc)`). What keeps a value's string keeps a `Str`.
+// A pointer to its text (its counts before it) and its length in bytes, in
+// that order: what a module reads.
+#[repr(transparent)]
+#[derive(Clone, Default)]
+pub struct Str(Slice<u8>);
 
 impl Str {
-    #[inline(always)]
-    fn raw(&self) -> *const str {
-        std::ptr::slice_from_raw_parts(self.text.as_ptr().cast_const(), self.len) as *const str
+    /// `first` then `second`, as one string made in place.
+    pub(crate) fn joined(first: &str, second: &str) -> Str {
+        Str(Slice::written(first.len() + second.len(), |room| {
+            // SAFETY: Room for both, apart from either.
+            unsafe {
+                let at = room.as_mut_ptr().cast::<u8>();
+                std::ptr::copy_nonoverlapping(first.as_ptr(), at, first.len());
+                std::ptr::copy_nonoverlapping(second.as_ptr(), at.add(first.len()), second.len());
+            }
+            room.len()
+        }))
     }
-    /// The same text as an `Rc<str>`: held once more, not copied.
+    /// The same text as an `Rc<str>`: a copy of it.
     #[inline]
     pub fn rc(&self) -> Rc<str> {
-        // SAFETY: `raw` is an `Rc<str>`'s `into_raw`, held by `self`.
-        unsafe {
-            Rc::increment_strong_count(self.raw());
-            Rc::from_raw(self.raw())
-        }
+        Rc::from(&**self)
     }
     /// Whether both are the same text in memory.
-    #[inline]
+    #[inline(always)]
     pub fn ptr_eq(a: &Str, b: &Str) -> bool {
-        a.text == b.text
+        Slice::ptr_eq(&a.0, &b.0)
     }
     /// Where its text is.
-    #[inline]
+    #[inline(always)]
     pub fn as_ptr(this: &Str) -> *const u8 {
-        this.text.as_ptr()
+        Slice::as_ptr(&this.0)
     }
     /// How many hold this text.
     #[inline(always)]
     pub fn strong_count(this: &Str) -> usize {
-        let rc = std::mem::ManuallyDrop::new(
-            // SAFETY: As `rc`, and not dropped: `self` still holds it.
-            unsafe { Rc::from_raw(this.raw()) },
-        );
-        Rc::strong_count(&rc)
-    }
-}
-impl From<Rc<str>> for Str {
-    #[inline]
-    fn from(text: Rc<str>) -> Self {
-        let len = text.len();
-        // SAFETY: `into_raw` is never null.
-        let text = unsafe { NonNull::new_unchecked(Rc::into_raw(text) as *mut u8) };
-        Str {
-            text,
-            len,
-            _held: PhantomData,
-        }
-    }
-}
-impl From<&Rc<str>> for Str {
-    #[inline]
-    fn from(text: &Rc<str>) -> Self {
-        Str::from(text.clone())
-    }
-}
-impl From<Str> for Rc<str> {
-    #[inline]
-    fn from(text: Str) -> Self {
-        let text = std::mem::ManuallyDrop::new(text);
-        // SAFETY: An `Rc<str>`'s `into_raw`, handed back once.
-        unsafe { Rc::from_raw(text.raw()) }
-    }
-}
-impl From<&Str> for Rc<str> {
-    #[inline]
-    fn from(text: &Str) -> Self {
-        text.rc()
+        Slice::strong_count(&this.0)
     }
 }
 impl From<&str> for Str {
     #[inline]
     fn from(text: &str) -> Self {
-        Str::from(Rc::<str>::from(text))
+        Str(Slice::copied(text.as_bytes()))
     }
 }
 impl From<String> for Str {
     #[inline]
     fn from(text: String) -> Self {
-        Str::from(Rc::<str>::from(text))
+        Str::from(text.as_str())
     }
 }
 impl From<&String> for Str {
@@ -122,58 +88,44 @@ impl From<&String> for Str {
 }
 impl From<Box<str>> for Str {
     fn from(text: Box<str>) -> Self {
-        Str::from(Rc::<str>::from(text))
+        Str::from(&*text)
     }
 }
 impl From<std::borrow::Cow<'_, str>> for Str {
     fn from(text: std::borrow::Cow<'_, str>) -> Self {
-        Str::from(Rc::<str>::from(text))
+        Str::from(&*text)
     }
 }
-impl Default for Str {
-    fn default() -> Self {
-        Str::from("")
+impl From<Rc<str>> for Str {
+    /// (A copy of the text.)
+    fn from(text: Rc<str>) -> Self {
+        Str::from(&*text)
     }
 }
-impl Clone for Str {
-    #[inline]
-    fn clone(&self) -> Self {
-        // SAFETY: An `Rc<str>`'s `into_raw`, held by `self`.
-        unsafe { Rc::increment_strong_count(self.raw()) };
-        Str {
-            text: self.text,
-            len: self.len,
-            _held: PhantomData,
-        }
+impl From<&Rc<str>> for Str {
+    /// (A copy of the text.)
+    fn from(text: &Rc<str>) -> Self {
+        Str::from(&**text)
     }
 }
-impl Drop for Str {
-    #[inline]
-    fn drop(&mut self) {
-        // One hold fewer, as dropping the `Rc<str>` is, said by which hold
-        // it is: the usual one (others still hold it) is then a count and
-        // nothing else. An `Rc` rebuilt and dropped whichever it was needs
-        // room on the stack for its last hold's sake, which every drop paid
-        // for.
-        let held = Str::strong_count(self);
-        // SAFETY: An `Rc<str>`'s `into_raw`, given back once: the last
-        // hold, which frees it, or one of several, which frees nothing.
-        unsafe {
-            if held == 1 {
-                drop(Rc::from_raw(self.raw()));
-            } else {
-                std::hint::assert_unchecked(held > 1);
-                Rc::decrement_strong_count(self.raw());
-            }
-        }
+impl From<Str> for Rc<str> {
+    /// (A copy of the text.)
+    fn from(text: Str) -> Self {
+        text.rc()
+    }
+}
+impl From<&Str> for Rc<str> {
+    /// (A copy of the text.)
+    fn from(text: &Str) -> Self {
+        text.rc()
     }
 }
 impl Deref for Str {
     type Target = str;
     #[inline(always)]
     fn deref(&self) -> &str {
-        // SAFETY: The text an `Rc<str>` holds for as long as `self` lives.
-        unsafe { &*self.raw() }
+        // SAFETY: Made from a `str`'s bytes, and never changed.
+        unsafe { std::str::from_utf8_unchecked(&self.0) }
     }
 }
 impl AsRef<str> for Str {
@@ -199,9 +151,8 @@ impl fmt::Display for Str {
 impl PartialEq for Str {
     #[inline]
     fn eq(&self, other: &Str) -> bool {
-        // (The same text in memory is equal without being read, as an
-        // `Rc<str>`'s is.)
-        (self.text == other.text && self.len == other.len) || **self == **other
+        // (The same text in memory is equal without being read.)
+        Str::ptr_eq(self, other) || **self == **other
     }
 }
 impl Eq for Str {}
@@ -499,6 +450,16 @@ impl<T> Slice<T> {
             moved
         }
     }
+    /// A slice of `items`, copied as one: for items that are their bytes
+    /// (a string's).
+    #[inline]
+    pub(crate) fn copied(items: &[T]) -> Self
+    where
+        T: Copy,
+    {
+        // SAFETY: `items` are read, not taken: they are `Copy`.
+        unsafe { Self::moved(items.as_ptr(), items.len()) }
+    }
     /// Whether both are the same slice in memory.
     #[inline]
     pub fn ptr_eq(a: &Self, b: &Self) -> bool {
@@ -787,6 +748,8 @@ mod tests {
         // SAFETY: Two words, the first its text's address.
         let words: [usize; 2] = unsafe { std::mem::transmute_copy(&text) };
         assert_eq!(words, [text.as_ptr() as usize, 6]);
+        // SAFETY: Its count, `ITEMS_AT` before its text: held once.
+        assert_eq!(unsafe { *((words[0] - ITEMS_AT) as *const usize) }, 1);
         let list: Slice<u64> = Slice::from(vec![7, 8, 9]);
         // SAFETY: Two words: its items' address, and how many.
         let words: [usize; 2] = unsafe { std::mem::transmute_copy(&list) };
@@ -800,19 +763,19 @@ mod tests {
     }
 
     #[test]
-    fn a_string_and_an_rc_share_their_text() {
-        let rc: Rc<str> = Rc::from("shared");
-        let text = Str::from(rc.clone());
-        assert_eq!(text.as_ptr(), rc.as_ptr());
-        assert_eq!(Rc::strong_count(&rc), 2);
-        let back: Rc<str> = text.rc();
-        assert!(Rc::ptr_eq(&rc, &back));
-        assert_eq!(Rc::strong_count(&rc), 3);
-        let moved: Rc<str> = text.into();
-        assert_eq!(Rc::strong_count(&rc), 3);
-        drop((back, moved));
-        assert_eq!(Rc::strong_count(&rc), 1);
+    fn a_string_is_counted_as_a_slice_is() {
+        let text = Str::from("counted");
+        let again = text.clone();
+        assert!(Str::ptr_eq(&text, &again));
+        assert_eq!(Str::strong_count(&text), 2);
+        drop(again);
+        assert_eq!(Str::strong_count(&text), 1);
+        // An `Rc<str>` of it is a copy, and back.
+        let rc = text.rc();
+        assert_ne!(rc.as_ptr(), Str::as_ptr(&text));
+        assert_eq!(Str::from(rc), text);
         assert_eq!(Str::from("a"), "a");
+        assert_eq!(&*Str::default(), "");
     }
 
     #[test]
