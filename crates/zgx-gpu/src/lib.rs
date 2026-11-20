@@ -4422,13 +4422,17 @@ struct SharedDevice {
     /// `lost`.
     contexts: LostCells,
 }
-/// WARP's device while a context holds it (`GpuContext::prepare`): held
-/// weakly, so it goes with the last context on it.
-static WARP_DEVICE: std::sync::Mutex<std::sync::Weak<SharedDevice>> =
-    std::sync::Mutex::new(std::sync::Weak::new());
+/// WARP's device, once a context made it (`GpuContext::prepare`): kept for
+/// the process, not only while a context holds it. The last context to go
+/// let go of it before its renderer's buffers and textures, and its queue,
+/// which waits there for the frame still drawing: a context made then, on
+/// another thread, made a second device beside it, and two wgpu devices on
+/// WARP at once fault in `ExecuteCommandLists` (zgx-video's render tests
+/// on Windows, #2402). wgpu says nothing of when a device is gone.
+static WARP_DEVICE: std::sync::Mutex<Option<Arc<SharedDevice>>> = std::sync::Mutex::new(None);
 /// What a `GpuContext` holds that another thread can make (`GpuContext::prepare`).
 struct Prepared {
-    /// Keeps WARP's process-wide device for `WARP_DEVICE` to find.
+    /// The device it draws with: on WARP, the one `WARP_DEVICE` keeps.
     shared: Arc<SharedDevice>,
     lost: Arc<std::sync::Mutex<Option<String>>>,
     instance: wgpu::Instance,
@@ -4470,7 +4474,7 @@ pub struct GpuContext {
     inner: Rc<GpuContextInner>,
 }
 struct GpuContextInner {
-    /// Keeps WARP's process-wide device for `WARP_DEVICE` to find.
+    /// The device it draws with: on WARP, the one `WARP_DEVICE` keeps.
     shared: Arc<SharedDevice>,
     /// Why the device was lost (driver reset, removal, `debug_lose_device`):
     /// set from wgpu's callback, from any thread.
@@ -4740,7 +4744,7 @@ impl GpuContext {
         // (Not a lost one: a context made after a loss takes a new device.)
         let reusable = warp_slot
             .as_ref()
-            .and_then(|slot| slot.upgrade())
+            .and_then(|slot| (*slot).clone())
             .filter(|shared| shared.lost.lock().is_ok_and(|lost| lost.is_none()));
         let shared = match reusable {
             Some(shared) => shared,
@@ -4757,7 +4761,7 @@ impl GpuContext {
                     contexts,
                 });
                 if let Some(slot) = &mut warp_slot {
-                    **slot = Arc::downgrade(&shared);
+                    **slot = Some(shared.clone());
                 }
                 shared
             }
@@ -4896,8 +4900,8 @@ impl GpuContext {
             .clone()
     }
     /// Lose the device, as a driver reset would: for tests of recovery. On
-    /// WARP's process-wide device (`WARP_DEVICE`), while other contexts draw
-    /// on it, only this context fails from then on.
+    /// WARP's process-wide device (`WARP_DEVICE`), which other contexts may
+    /// draw on, only this context fails from then on.
     pub fn debug_lose_device(&self) {
         if Arc::strong_count(&self.inner.shared) == 1 {
             self.inner.device.destroy();
