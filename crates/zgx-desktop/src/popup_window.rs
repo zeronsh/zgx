@@ -2100,9 +2100,10 @@ mod x11 {
         /// A drag preview's: its box's offset from where the scene lays the
         /// preview out (its shadow's margin), to move it with the drag.
         preview: Option<(f32, f32)>,
-        /// With no compositor, its corners cut (`cut_corners`): its size in
-        /// pixels and their radius.
-        cut: Option<(u32, u32, u32)>,
+        /// With no compositor, the window cut to the panel it shows
+        /// (`cut_to_panel`): the panel's box in the window's pixels (x, y,
+        /// width, height) and its corners' radius.
+        cut: Option<(i32, i32, u32, u32, u32)>,
     }
     thread_local! {
         static HIDDEN: RefCell<Vec<Popup>> = const { RefCell::new(Vec::new()) };
@@ -2788,17 +2789,12 @@ mod x11 {
                         (rect.height * scale).round() as u32,
                     );
                     let _ = popup.window.request_inner_size(size);
-                    let radius = if composited {
-                        0
-                    } else {
-                        (corner_radius(scene, root) * scale).round() as u32
-                    };
-                    cut_corners(
-                        &popup.window,
-                        &mut popup.cut,
-                        (size.width, size.height),
-                        radius,
-                    );
+                    // With nothing compositing, what the panel leaves clear
+                    // (its corners, an inset round it) would show black.
+                    let panel = (!composited)
+                        .then(|| panel_shape(scene, root, rect, scale, (size.width, size.height)))
+                        .flatten();
+                    cut_to_panel(&popup.window, &mut popup.cut, panel);
                 }
                 // Popups are small: one that changed is drawn whole. One that
                 // only moved (a drag preview) is not drawn again.
@@ -2956,25 +2952,66 @@ mod x11 {
     }
     /// A popup's panel's corner radius, in points: its root's, or that of the
     /// box filling it that paints.
-    fn corner_radius(scene: &Scene, root: NodeId) -> f32 {
-        let bounds = scene.bounds(root);
-        let mut node = root;
-        for _ in 0..4 {
+    /// The panel popup `root` shows in its window at `window` (the scene's
+    /// points): the largest box in it, at any depth, that paints a fill (a
+    /// menu's panel, inset in a padded root, or nested in wrappers), and its
+    /// corners' radius (the largest of them). None if nothing paints. A walk
+    /// of what is open once as it opens or resizes: what can't be larger
+    /// than the box found isn't gone into.
+    fn shown_panel(scene: &Scene, root: NodeId, window: Rect) -> Option<(Rect, f32)> {
+        let area = |rect: Rect| rect.width * rect.height;
+        let mut best: Option<(Rect, f32)> = None;
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            let Some(inside) = scene.bounds(node).intersection(window) else {
+                continue;
+            };
+            if best.is_some_and(|(found, _)| area(inside) <= area(found)) {
+                continue;
+            }
             if let NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } = scene.kind(node)
-                && quad.radius > 0.
+                && (quad.fill.3 > 0
+                    || quad
+                        .decoration
+                        .as_ref()
+                        .is_some_and(|d| d.background.is_some()))
             {
-                return quad.radius;
+                let radius =
+                    (quad.decoration.as_ref())
+                        .and_then(|d| d.corners)
+                        .map_or(quad.radius, |c| {
+                            c.top_left
+                                .max(c.top_right)
+                                .max(c.bottom_right)
+                                .max(c.bottom_left)
+                        });
+                best = Some((inside, radius));
             }
-            let filling = scene.children(node).iter().copied().find(|child| {
-                let child = scene.bounds(*child);
-                (child.width - bounds.width).abs() < 1. && (child.height - bounds.height).abs() < 1.
-            });
-            match filling {
-                Some(child) => node = child,
-                None => break,
-            }
+            stack.extend(scene.children(node).iter().copied());
         }
-        0.
+        best
+    }
+    /// The shape the window of popup `root` at `window` (the scene's points,
+    /// `size` pixels at `scale`) is cut to: its panel's box in its pixels and
+    /// the panel's corners' radius. None where the panel fills the window
+    /// square: nothing to cut.
+    fn panel_shape(
+        scene: &Scene,
+        root: NodeId,
+        window: Rect,
+        scale: f32,
+        (width, height): (u32, u32),
+    ) -> Option<(i32, i32, u32, u32, u32)> {
+        let (panel, radius) = shown_panel(scene, root, window)?;
+        let px = |v: f32| (v * scale).round() as i32;
+        let x = px(panel.x - window.x).clamp(0, width as i32);
+        let y = px(panel.y - window.y).clamp(0, height as i32);
+        let right = px(panel.x + panel.width - window.x).clamp(x, width as i32);
+        let bottom = px(panel.y + panel.height - window.y).clamp(y, height as i32);
+        let (w, h) = ((right - x) as u32, (bottom - y) as u32);
+        let radius = (radius * scale).round() as u32;
+        let fills = (x, y, w, h) == (0, 0, width, height);
+        (!(fills && radius == 0) && w > 0 && h > 0).then_some((x, y, w, h, radius))
     }
     /// The rows of a box `width` by `height` with corners of `radius`, all in
     /// pixels: a row each across the corners, the rest in one.
@@ -3007,6 +3044,59 @@ mod x11 {
         });
         rows
     }
+    /// The panel a popup shows is found at any depth, inset or not: a
+    /// menu whose rounded panel sits in a padded root, or under wrappers,
+    /// was left unshaped with no compositor (only a root its panel's size,
+    /// four levels down at most, was looked in), its clear corners black.
+    #[cfg(test)]
+    #[test]
+    fn a_popups_panel_is_found_inset_and_nested() {
+        use zgx::{compose::prelude::*, widgets::Ui};
+        let panel = |view: View| {
+            let mut ui = Ui::new(400., 300.);
+            let handle = ui.mount(view);
+            ui.prepare_frame();
+            let scene = ui.scene.borrow();
+            let window = scene.bounds(handle.node());
+            let found = shown_panel(&scene, handle.node(), window);
+            // The window at 2x, its pixels.
+            let size = ((window.width * 2.) as u32, (window.height * 2.) as u32);
+            let shape = panel_shape(&scene, handle.node(), window, 2., size);
+            (window, found, shape)
+        };
+        let card = || div().w(180.).h(100.).rounded(10.).bg(rgb(0x2a2f3a));
+        // The root itself, rounded: its whole box, cut at its corners.
+        let (window, found, shape) = panel(card());
+        assert_eq!(found, Some((window, 10.)));
+        assert_eq!(shape, Some((0, 0, 360, 200, 20)), "at 2x");
+        // Inset in a padded root that paints nothing.
+        let (window, found, shape) = panel(div().p(10.).child(card()));
+        let (inside, radius) = found.expect("the inset panel");
+        assert_eq!(radius, 10.);
+        assert_eq!((inside.x - window.x, inside.y - window.y), (10., 10.));
+        assert_eq!((inside.width, inside.height), (180., 100.));
+        assert_eq!(
+            shape.map(|s| (s.0, s.1, s.4)),
+            Some((20, 20, 20)),
+            "offset and radius at 2x"
+        );
+        // Five wrappers down, past the old four levels, and inset too.
+        let mut nested = div().pt(4.).child(card());
+        for _ in 0..5 {
+            nested = div().child(nested);
+        }
+        let (_, found, _) = panel(nested);
+        assert_eq!(
+            found.map(|(r, radius)| (r.width, r.height, radius)),
+            Some((180., 100., 10.))
+        );
+        // A square panel filling the window: nothing to cut.
+        let (_, _, shape) = panel(div().w(200.).h(120.).bg(rgb(0x2a2f3a)));
+        assert_eq!(shape, None);
+        // Nothing painted: no panel.
+        let (_, found, _) = panel(div().w(200.).h(120.));
+        assert_eq!(found, None);
+    }
     #[cfg(test)]
     #[test]
     fn rounded_rows_cover_the_box_but_its_corners() {
@@ -3033,11 +3123,11 @@ mod x11 {
     /// Cut `popup`'s window to its panel's rounded box: with no compositor
     /// what its corners leave clear is black. A radius of 0 puts its whole
     /// window back.
-    fn cut_corners(
+    /// Cut `window` to `panel` (`panel_shape`), or back to its whole box.
+    fn cut_to_panel(
         window: &Window,
-        cut: &mut Option<(u32, u32, u32)>,
-        (width, height): (u32, u32),
-        radius: u32,
+        cut: &mut Option<(i32, i32, u32, u32, u32)>,
+        panel: Option<(i32, i32, u32, u32, u32)>,
     ) {
         use x11rb::{
             connection::Connection,
@@ -3046,7 +3136,7 @@ mod x11 {
                 xproto::ClipOrdering,
             },
         };
-        let wanted = (radius > 0).then_some((width, height, radius));
+        let wanted = panel;
         if *cut == wanted {
             return;
         }
@@ -3059,14 +3149,14 @@ mod x11 {
                 return;
             };
             let _ = match wanted {
-                Some(_) => shape::rectangles(
+                Some((x, y, width, height, radius)) => shape::rectangles(
                     connection,
                     SO::SET,
                     SK::BOUNDING,
                     ClipOrdering::UNSORTED,
                     id,
-                    0,
-                    0,
+                    x as i16,
+                    y as i16,
                     &rounded_rows(width, height, radius),
                 )
                 .map(|_| ()),
