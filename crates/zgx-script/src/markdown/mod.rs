@@ -849,12 +849,10 @@ const LAZY_TICK: std::time::Duration = std::time::Duration::from_millis(8);
 /// Give a new VM its parsed markdown.
 pub(crate) fn install(lua: &mlua::Lua) {
     lua.set_app_data(Parsed::default());
-    // Its option names, made now rather than inside a first call.
-    let _ = keys(lua);
 }
 
 /// The names of the options `ui.markdown` and `ui.markdown_view` read,
-/// made once a VM. Read raw by these, an option costs neither a string
+/// made once a VM, at its first markdown (a VM without any holds none). Read raw by these, an option costs neither a string
 /// made nor a protected call each time (so a props table's metatable
 /// gives none of them).
 pub(crate) struct Keys {
@@ -866,20 +864,43 @@ pub(crate) struct Keys {
     pub copy: mlua::LuaString,
 }
 
-/// The VM's option names (`Keys`), made the first time they're asked for.
-pub(crate) fn keys(lua: &mlua::Lua) -> mlua::Result<mlua::AppDataRef<'_, Keys>> {
-    if let Some(keys) = lua.app_data_ref::<Keys>() {
-        return Ok(keys);
+/// The VM's option names, held (`Keys` in its app data) or, made while its
+/// app data is borrowed elsewhere, this call's own.
+pub(crate) enum KeysRef<'a> {
+    Held(mlua::AppDataRef<'a, Keys>),
+    Own(Keys),
+}
+
+impl std::ops::Deref for KeysRef<'_> {
+    type Target = Keys;
+    fn deref(&self) -> &Keys {
+        match self {
+            KeysRef::Held(keys) => keys,
+            KeysRef::Own(keys) => keys,
+        }
     }
-    lua.set_app_data(Keys {
+}
+
+/// The VM's option names (`Keys`), made the first time they're asked for.
+/// A markdown made while the VM's app data is borrowed (inside another
+/// call's work) can't keep them there: it reads by names of its own, and a
+/// later call keeps them.
+pub(crate) fn keys(lua: &mlua::Lua) -> mlua::Result<KeysRef<'_>> {
+    if let Some(keys) = lua.app_data_ref::<Keys>() {
+        return Ok(KeysRef::Held(keys));
+    }
+    let keys = Keys {
         breaks: lua.create_string("breaks")?,
         paths: lua.create_string("paths")?,
         html_marks: lua.create_string("html_marks")?,
         autolinks: lua.create_string("autolinks")?,
         math: lua.create_string("math")?,
         copy: lua.create_string("copy")?,
-    });
-    Ok(lua.app_data_ref::<Keys>().expect("set above"))
+    };
+    Ok(match lua.try_set_app_data(keys) {
+        Ok(_) => KeysRef::Held(lua.app_data_ref::<Keys>().expect("set above")),
+        Err(keys) => KeysRef::Own(keys),
+    })
 }
 
 /// A VM at rest: its parsed texts and the streams not asked for lately go. What
@@ -2395,6 +2416,33 @@ mod tests {
     fn plain() -> Options {
         Options::default()
     }
+    #[test]
+    fn options_read_while_app_data_is_borrowed_and_names_are_kept_after() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        let opts = lua.create_table().expect("a table");
+        opts.raw_set("breaks", true).expect("set");
+        opts.raw_set("html_marks", true).expect("set");
+        let opts = Some(opts);
+        {
+            // Another call's work holds the VM's app data: the names can't
+            // be kept there, and the options read all the same.
+            let _held = lua.app_data_ref::<Parsed>().expect("installed");
+            assert!(matches!(keys(&lua).expect("names"), KeysRef::Own(_)));
+            let call = Call::read(&lua, &opts).expect("read");
+            assert!(call.options.breaks && call.options.html_marks && !call.options.paths);
+        }
+        assert!(
+            lua.app_data_ref::<Keys>().is_none(),
+            "none kept while borrowed"
+        );
+        // Free again: the next call keeps them, and the one after reads them.
+        let call = Call::read(&lua, &opts).expect("read");
+        assert!(call.options.breaks && call.options.html_marks);
+        assert!(lua.app_data_ref::<Keys>().is_some(), "kept");
+        assert!(matches!(keys(&lua).expect("names"), KeysRef::Held(_)));
+    }
+
     #[test]
     fn at_rest_parsed_text_goes_and_the_same_text_parses_the_same() {
         let lua = mlua::Lua::new();
