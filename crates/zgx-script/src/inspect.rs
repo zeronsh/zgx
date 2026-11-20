@@ -993,7 +993,7 @@ impl Session {
                 );
                 Ok((driver::tree_lines_text(&shown, hidden), data))
             })(),
-            "gc" => (|| {
+            "gc" => {
                 let top = number("top").map_or(10, |n| n.max(1.) as usize);
                 let flag = |key: &str| field(key).is_some_and(|v| v.truthy());
                 let query = crate::GcQuery {
@@ -1119,7 +1119,7 @@ impl Session {
                     lines.join("\n"),
                     Value::record([("vms", Value::List(vms.into()))]),
                 ))
-            })(),
+            }
             "node" => target(&ui).map(|node| {
                 let fields = driver::node(&ui, self.0.inspector.as_ref(), node);
                 let text = fields
