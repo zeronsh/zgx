@@ -1067,13 +1067,11 @@ impl CpuTextRaster {
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let p = glyph.physical((0., 0.), 1.);
-                if let Some(image) = glyph_image(&mut self.swash, &mut self.fonts, p.cache_key) {
-                    images.push((
-                        p.x,
-                        p.y + run.line_y as i32,
-                        rich.runs()[run_at(rich, starts[run.line_i] + glyph.start)].color,
-                        image,
-                    ));
+                let color = rich.runs()[run_at(rich, starts[run.line_i] + glyph.start)].color;
+                // Thickened for its run's colour, as the GPU renderer keys it.
+                let key = smoothed(p.cache_key, smoothing(color));
+                if let Some(image) = glyph_image(&mut self.swash, &mut self.fonts, key) {
+                    images.push((p.x, p.y + run.line_y as i32, color, image));
                 }
             }
         }

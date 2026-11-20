@@ -1319,7 +1319,11 @@ impl Raster {
         let (x0, y0, x1, y1) = self.region(clip);
         // Its origin on a whole pixel, as the GPU renderer snaps it.
         let (ox, oy) = (bounds.x.round() as i32, bounds.y.round() as i32);
+        // Thickened for its colour as the GPU renderer keys its glyphs
+        // (macOS's font smoothing; none elsewhere).
+        let smoothing = zgx_gpu::text::smoothing(color);
         for (key, x, y) in places {
+            let key = zgx_gpu::text::smoothed(key, smoothing);
             if !images.contains_key(&key) {
                 let image = zgx_gpu::glyph_image(swash, &mut fonts, key);
                 *image_bytes += image.as_ref().map_or(0, |i| i.data.capacity());

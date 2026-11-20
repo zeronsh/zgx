@@ -1658,11 +1658,17 @@ const SHARP_TEXT_BELOW: f32 = 2.;
 /// A glyph quad's `options.y` below `SHARP_TEXT_BELOW`: a mask whose coverage
 /// `draw.wgsl` firms by its colour (`firm`).
 const FIRM_GLYPH: f32 = 1.25;
-/// A glyph's `options.y`: straight alpha, firmed below `SHARP_TEXT_BELOW` if a
-/// mask (a colour glyph's own colours stay as they are).
+/// Whether a mask glyph's coverage is firmed at `scale` (`FIRM_GLYPH`):
+/// below `SHARP_TEXT_BELOW`, but not on macOS, whose font smoothing has
+/// thickened the glyph already (`text::smoothing`). The GPU's quads
+/// (`glyph_texture`) and the software raster (`glyph_coverage`) both ask.
+fn firms_glyphs(scale: f32) -> bool {
+    scale < SHARP_TEXT_BELOW && !cfg!(target_os = "macos")
+}
+/// A glyph's `options.y`: straight alpha, firmed where `firms_glyphs` says
+/// if a mask (a colour glyph's own colours stay as they are).
 fn glyph_texture(color: bool, scale: f32) -> f32 {
-    // On macOS Core Text has thickened it already, as macOS's own text.
-    if !color && scale < SHARP_TEXT_BELOW && !cfg!(target_os = "macos") {
+    if !color && firms_glyphs(scale) {
         FIRM_GLYPH
     } else {
         1.
@@ -21589,10 +21595,10 @@ pub fn glyph_image(
     text::glyph_image(swash, fonts, key)
 }
 /// A mask glyph's coverage `a` as `draw.wgsl` draws it in `color` at
-/// `scale`: firmed below `SHARP_TEXT_BELOW` (`firm`, `firmness`).
+/// `scale`: firmed where `firms_glyphs` says (`firm`, `firmness`).
 #[doc(hidden)]
 pub fn glyph_coverage(a: f32, color: Color, scale: f32) -> f32 {
-    if scale >= SHARP_TEXT_BELOW {
+    if !firms_glyphs(scale) {
         return a;
     }
     let luma = (0.2126 * color.0 as f32 + 0.7152 * color.1 as f32 + 0.0722 * color.2 as f32) / 255.;
