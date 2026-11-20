@@ -147,9 +147,14 @@ async fn animation_frames_tick_while_awaited_and_stop_at_rest() {
     sleep(200).await;
     let ticks = ticks.get();
     assert_eq!(ticks.len(), 3, "three refreshes came: {ticks:?}");
+    // Each a later refresh, at no earlier a time: a browser can give two
+    // refreshes one timestamp (a headless one often), so a frame may come
+    // with no time passed, never with time gone back.
     assert!(
-        ticks.windows(2).all(|w| w[1].0 > w[0].0 && w[1].1 > w[0].1),
-        "each later than the last: {ticks:?}"
+        ticks
+            .windows(2)
+            .all(|w| w[1].0 > w[0].0 && w[1].1 >= w[0].1),
+        "each a later refresh, at no earlier a time: {ticks:?}"
     );
     assert_eq!(host.text_content().unwrap_or_default(), "3 frames");
     assert!(

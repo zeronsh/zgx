@@ -35,6 +35,9 @@ struct Host {
     last_frame: Cell<Option<f64>>,
     /// The display's refresh interval, in ms, as frames have come.
     interval: Cell<f64>,
+    /// The time the last frame was given (`Frame::time`): the next is never
+    /// earlier.
+    last_time: Cell<Option<Instant>>,
     _run: Closure<dyn FnMut()>,
     _fire: Closure<dyn FnMut()>,
     _frame: Closure<dyn FnMut(f64)>,
@@ -77,6 +80,7 @@ pub(crate) fn services() -> (TaskRunner, FrameClock) {
                 refreshes: Cell::new(0),
                 last_frame: Cell::new(None),
                 interval: Cell::new(1e3 / 60.),
+                last_time: Cell::new(None),
                 _run: run,
                 _fire: fire,
                 _frame: frame,
@@ -152,6 +156,13 @@ fn frame(at: f64) {
             .map_or(0., |performance| (performance.now() - at).max(0.));
         let interval = std::time::Duration::from_secs_f64(interval / 1e3);
         let time = Instant::now() + interval - std::time::Duration::from_secs_f64(late / 1e3);
+        // Never before the last frame's: a browser can give two frames one
+        // timestamp (a headless one often), its clock is coarse, and the
+        // interval taken at once for a faster display would put a frame
+        // earlier than the one before. Animations go by time; it doesn't go
+        // back (the same time twice is a frame with no time passed).
+        let time = host.last_time.get().map_or(time, |last| time.max(last));
+        host.last_time.set(Some(time));
         host.frames.deliver(Frame {
             index,
             time,
