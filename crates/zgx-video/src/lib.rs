@@ -9,6 +9,9 @@ pub mod clip;
 pub mod compose;
 pub mod encode;
 pub mod film;
+#[cfg(target_os = "macos")]
+mod native;
+#[cfg(target_os = "macos")]
 pub mod player;
 pub mod render;
 pub mod script;

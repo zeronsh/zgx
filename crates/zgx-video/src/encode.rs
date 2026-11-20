@@ -86,8 +86,12 @@ pub struct EncodeOptions {
 }
 
 /// ffmpeg: on the PATH, or where a package manager puts it for an app the
-/// system started, whose PATH is short.
+/// system started, whose PATH is short. `ZGX_VIDEO_FFMPEG=none` renders as if
+/// there were none (to try that path).
 pub fn ffmpeg() -> Option<PathBuf> {
+    if std::env::var_os("ZGX_VIDEO_FFMPEG").is_some_and(|v| v == "none") {
+        return None;
+    }
     let name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
@@ -100,7 +104,85 @@ pub fn ffmpeg() -> Option<PathBuf> {
         .find(|file| file.is_file())
 }
 
+#[cfg(not(target_os = "macos"))]
 const NO_FFMPEG: &str = "zgx video needs ffmpeg for this format, and found none on the PATH. Install it (`brew install ffmpeg`, `apt install ffmpeg`, `winget install ffmpeg`), or render PNGs or a GIF, which need nothing";
+#[cfg(target_os = "macos")]
+const NO_FFMPEG: &str = "zgx video needs ffmpeg for this format, and found none on the PATH. Install it (`brew install ffmpeg`), or render H.264, HEVC or ProRes, which macOS writes, or PNGs or a GIF, which need nothing";
+/// Sound is muxed in by ffmpeg alone, for now, whoever wrote the frames.
+const NO_FFMPEG_SOUND: &str = "zgx video needs ffmpeg to add this video's sound, and found none on the PATH. Install it (`brew install ffmpeg`, `apt install ffmpeg`, `winget install ffmpeg`), or render it muted (`--mute`)";
+
+/// Who writes a format (`choice`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Writer {
+    /// zgx itself: PNGs and GIFs.
+    Own,
+    /// ffmpeg.
+    Ffmpeg,
+    /// macOS (AVFoundation, on VideoToolbox): only where ffmpeg can't write
+    /// it as well (see `docs/video.md`'s measurements).
+    Native,
+}
+
+/// The encoders this ffmpeg has (`ffmpeg -encoders`), read once.
+fn ffmpeg_encoders() -> Option<&'static str> {
+    static ENCODERS: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ENCODERS
+        .get_or_init(|| {
+            let out = Command::new(ffmpeg()?)
+                .args(["-hide_banner", "-encoders"])
+                .output()
+                .ok()?;
+            Some(String::from_utf8_lossy(&out.stdout).into_owned())
+        })
+        .as_deref()
+}
+
+/// Who writes `format`, and why, in a line for the command to say. ffmpeg's
+/// software encoders whenever it has them: macOS's hardware H.264 and HEVC
+/// need two to four times the bytes for libx264's and libx265's quality and
+/// top out below libx264's default, and Apple's ProRes measured below
+/// `prores_ks`. macOS writes them where ffmpeg can't (none installed, or
+/// one without the encoder): a file, rather than an error.
+/// `ZGX_VIDEO_NATIVE=1` has macOS write them anyway (to compare).
+#[doc(hidden)]
+pub fn choice(format: Format) -> (Writer, String) {
+    let (name, software) = match format {
+        Format::Png | Format::Gif => return (Writer::Own, String::new()),
+        Format::H264 => ("H.264", "libx264"),
+        Format::Hevc => ("HEVC", "libx265"),
+        Format::ProRes => ("ProRes 4444", "prores_ks"),
+        Format::WebM => ("VP9", "libvpx-vp9"),
+        Format::Av1 => ("AV1", "an AV1 encoder"),
+    };
+    let ffmpeg_has = |encoder: &str| {
+        ffmpeg_encoders().is_some_and(|all| all.split_whitespace().any(|word| word == encoder))
+    };
+    #[cfg(target_os = "macos")]
+    if crate::native::writes(format) {
+        if std::env::var_os("ZGX_VIDEO_NATIVE").is_some_and(|v| !v.is_empty() && v != "0") {
+            return (
+                Writer::Native,
+                format!("{name} by macOS (ZGX_VIDEO_NATIVE)"),
+            );
+        }
+        if !ffmpeg_has(software) {
+            let why = match ffmpeg() {
+                None => "no ffmpeg was found".to_owned(),
+                Some(_) => format!("this ffmpeg has no {software}"),
+            };
+            let note = match format {
+                Format::ProRes => String::new(),
+                _ => format!(
+                    "; macOS's hardware {name} tops out near 53.5 dB PSNR, below {software}'s default: install ffmpeg with {software} for that"
+                ),
+            };
+            return (Writer::Native, format!("{name} by macOS, as {why}{note}"));
+        }
+    }
+    let _ = &ffmpeg_has;
+    (Writer::Ffmpeg, format!("{name} by ffmpeg's {software}"))
+}
 
 /// rav1e's quantizer (0-255) for a `quality` on libx264's scale: the
 /// quantizer the AV1 encoders' CRF (0-63) is a quarter of.
@@ -183,6 +265,13 @@ impl Drop for Sink {
 }
 
 enum Encoder {
+    /// macOS writing it itself (`native`); `options`, to hand the file to
+    /// ffmpeg if its first frame is refused.
+    #[cfg(target_os = "macos")]
+    Native {
+        writer: crate::native::Writer,
+        options: Box<EncodeOptions>,
+    },
     Ffmpeg {
         child: Child,
         stderr: JoinHandle<String>,
@@ -249,9 +338,38 @@ impl Encoder {
                     fps: options.fps,
                 })
             }
+            #[cfg(target_os = "macos")]
+            format if choice(format).0 == Writer::Native => {
+                match crate::native::Writer::start(options) {
+                    Ok(writer) => Ok(Self::Native {
+                        writer,
+                        options: Box::new(options.clone()),
+                    }),
+                    Err(why) => Self::instead_of_native(options, &why),
+                }
+            }
             Format::H264 | Format::Hevc | Format::ProRes | Format::WebM | Format::Av1 => {
                 Self::ffmpeg(options)
             }
+        }
+    }
+    /// What macOS wouldn't write (`why`), written by ffmpeg instead: never
+    /// worse than ffmpeg alone would have made it. Without ffmpeg, an error
+    /// saying both.
+    #[cfg(target_os = "macos")]
+    fn instead_of_native(options: &EncodeOptions, why: &str) -> Result<Self, String> {
+        match Self::ffmpeg(options) {
+            Ok(encoder) => {
+                eprintln!(
+                    "zgx video: macOS didn't write {} ({why}); ffmpeg writes it",
+                    options.output.display()
+                );
+                Ok(encoder)
+            }
+            Err(error) => Err(format!(
+                "macOS couldn't write {} ({why}), and ffmpeg couldn't either: {error}",
+                options.output.display()
+            )),
         }
     }
     fn ffmpeg(options: &EncodeOptions) -> Result<Self, String> {
@@ -400,6 +518,22 @@ impl Encoder {
     }
     fn write(&mut self, frame: &[u8], index: usize) -> Result<(), String> {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::Native { writer, options } => match writer.write(frame, index) {
+                Ok(()) => Ok(()),
+                // Refused as it starts: ffmpeg writes the file instead.
+                Err(why) if index == 0 => {
+                    let options = options.clone();
+                    let Self::Native { writer, .. } =
+                        std::mem::replace(self, Self::instead_of_native(&options, &why)?)
+                    else {
+                        unreachable!("native");
+                    };
+                    writer.cancel();
+                    self.write(frame, index)
+                }
+                Err(why) => Err(why),
+            },
             Self::Ffmpeg { child, .. } => child
                 .stdin
                 .as_mut()
@@ -436,6 +570,8 @@ impl Encoder {
     }
     fn finish(self) -> Result<(), String> {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::Native { writer, .. } => writer.finish(),
             Self::Ffmpeg {
                 mut child,
                 stderr,
@@ -479,7 +615,11 @@ pub fn concat(
     format: Format,
     audio: Option<&Path>,
 ) -> Result<(), String> {
-    let ffmpeg = ffmpeg().ok_or(NO_FFMPEG)?;
+    let ffmpeg = ffmpeg().ok_or(if audio.is_some() {
+        NO_FFMPEG_SOUND
+    } else {
+        NO_FFMPEG
+    })?;
     let list = output.with_file_name(format!(
         ".{}.parts.txt",
         output
