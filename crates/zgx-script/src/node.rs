@@ -5838,6 +5838,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 parse: crate::markdown::Options {
                     breaks: flag("breaks", false)?,
                     paths: flag("paths", false)?,
+                    html_marks: flag("html_marks", false)?,
                     code: None,
                 },
                 copy: flag("copy", true)?,
