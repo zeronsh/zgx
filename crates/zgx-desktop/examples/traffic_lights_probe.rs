@@ -6,12 +6,15 @@
 //!
 //! It resizes the window, gives it a dark and then a light appearance,
 //! hides and shows the app (the window losing focus and getting it back),
+//! zooms it to fill the screen (`zoom:`, as a double click on the title
+//! bar does) and back,
 //! moves the close button off its place (as AppKit's layout does) and reads it
 //! back at once, zooms it to 125% and back, and goes into full screen and out (as the
 //! green button does), printing after each
-//! `CLOSE <when> x=<pt> y=<pt> h=<pt> hidden=<bool> zoom=<z>
+//! `CLOSE <when> x=<pt> y=<pt> h=<pt> hidden=<bool> zoom=<z> buttons=<x:y,x:y,x:y>
 //! controls=<x,y,w,h or none> area_h=<pt or none>`: the close button's top
-//! left in the window's points from its top left, as AppKit has it, and
+//! left in the window's points from its top left, as AppKit has it (and
+//! each of the three buttons'), and
 //! what the window says of its buttons and title bar strip
 //! (`WindowInfo::controls`, `titlebar_area`, in the content's points).
 //! `WINDOW <number>` first says which it is (its `CGWindowID`, for
@@ -139,6 +142,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state::hide(false);
                 pause(800).await;
                 report("refocused");
+                state::fill_screen();
+                pause(1200).await;
+                report("filled");
+                state::fill_screen();
+                pause(1200).await;
+                report("unfilled");
+                state::relayout_titlebar();
+                pause(600).await;
+                report("relaid");
                 if let Some(ui) = ui.upgrade() {
                     ui.set_zoom(1.25);
                 }
@@ -206,12 +218,29 @@ mod state {
         };
         let frame = close.convertRect_toView(close.bounds(), None);
         let top = window.frame().size.height - (frame.origin.y + frame.size.height);
+        let height = window.frame().size.height;
+        let buttons: Vec<String> = [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ]
+        .into_iter()
+        .filter_map(|kind| window.standardWindowButton(kind))
+        .map(|button| {
+            let frame = button.convertRect_toView(button.bounds(), None);
+            let top = height - (frame.origin.y + frame.size.height);
+            format!("{:.1}:{top:.1}", frame.origin.x)
+        })
+        .collect();
         format!(
-            "x={:.1} y={:.1} h={:.1} hidden={}",
+            "x={:.1} y={:.1} h={:.1} hidden={} buttons={} window={:.0}x{:.0}",
             frame.origin.x,
             top,
             frame.size.height,
-            close.isHidden()
+            close.isHidden(),
+            buttons.join(","),
+            window.frame().size.width,
+            height
         )
     }
 
@@ -335,6 +364,37 @@ mod state {
         }
     }
 
+    /// The window zoomed to fill the screen, or back: AppKit's `zoom:`, as
+    /// a double click on the title bar (or Option and the green button) does.
+    pub fn fill_screen() {
+        if let Some(window) = ours() {
+            window.zoom(None);
+        }
+    }
+
+    /// AppKit's title bar laid out again with the window's size unchanged, as
+    /// a new title has it: its constraints set every button's frame, the zoom
+    /// button's last, and no resize follows to place them again.
+    pub fn relayout_titlebar() {
+        let Some(window) = ours() else {
+            return;
+        };
+        let Some(close) = window.standardWindowButton(NSWindowButton::CloseButton) else {
+            return;
+        };
+        // SAFETY: a set superview back pointer is a live view (main thread).
+        let Some(container) =
+            (unsafe { close.superview() }).and_then(|bar| unsafe { bar.superview() })
+        else {
+            return;
+        };
+        // A new title, then the probe's own back (`ours` finds the window by it).
+        for title in ["Traffic lights, retitled", "Traffic lights"] {
+            window.setTitle(&objc2_foundation::NSString::from_str(title));
+            container.layoutSubtreeIfNeeded();
+        }
+    }
+
     /// What the green button does.
     pub fn toggle() {
         if let Some(window) = ours() {
@@ -354,6 +414,8 @@ mod state {
     pub fn nudge() {}
     pub fn hide(_: bool) {}
     pub fn toggle() {}
+    pub fn fill_screen() {}
+    pub fn relayout_titlebar() {}
     pub fn watch_frames(_: (f64, f64)) {}
     pub fn animate_resize(_: (f64, f64)) {}
     pub fn reset_counts() {}
