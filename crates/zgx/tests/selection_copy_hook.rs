@@ -12,9 +12,14 @@ use zgx::{
     widgets::{ClipboardContent, EditCommand, SelectionCopyRequest, Ui},
 };
 
-/// A clipboard in memory: what was written, text and HTML.
+/// A clipboard in memory: what was written, text and HTML; and apart, what
+/// was written with types (`set_clipboard_typed`), so a copy without types
+/// is seen to take the calls it always did.
 #[derive(Default)]
-struct Clipboard(RefCell<Vec<(String, Option<String>)>>);
+struct Clipboard(
+    RefCell<Vec<(String, Option<String>)>>,
+    RefCell<Vec<ClipboardContent>>,
+);
 impl Platform for Clipboard {
     fn clipboard_text(&self) -> Option<String> {
         self.last().map(|(text, _)| text)
@@ -25,6 +30,18 @@ impl Platform for Clipboard {
     }
     fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
         self.0.borrow_mut().push((text, Some(html)));
+        true
+    }
+    fn set_clipboard_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+    ) -> bool {
+        let types = types.to_vec();
+        self.1
+            .borrow_mut()
+            .push(ClipboardContent { text, html, types });
         true
     }
     fn open_files(&self, _: FilePicker) -> Pending<Result<Vec<std::path::PathBuf>, String>> {
@@ -103,10 +120,10 @@ fn upper(heard: &Heard) -> Hook {
             request.html.to_owned(),
             request.leaves.to_vec(),
         ));
-        Some(ClipboardContent {
-            text: request.text.to_uppercase(),
-            html: Some(format!("<cite>{}</cite>", request.text)),
-        })
+        Some(ClipboardContent::new(
+            request.text.to_uppercase(),
+            Some(format!("<cite>{}</cite>", request.text)),
+        ))
     })
 }
 
@@ -387,4 +404,73 @@ fn the_edit_menus_select_all_and_copy_take_the_region_last_pressed_in() {
     // Cut and paste with no field focused do nothing.
     assert!(!ui.edit_command(EditCommand::Cut, clipboard.as_ref()));
     assert!(!ui.edit_command(EditCommand::Paste, clipboard.as_ref()));
+}
+
+/// Types a region's hook gives go with its text and HTML in one write
+/// (`Platform::set_clipboard_typed`) by every route; a copy without types
+/// never takes that call (the tests above see their writes as ever).
+#[test]
+fn types_a_hook_gives_go_in_one_write_by_every_route() {
+    let clipboard = Rc::new(Clipboard::default());
+    let mut ui = Ui::new(400., 300.);
+    let hook: Hook = Rc::new(|request: &SelectionCopyRequest| {
+        let types = vec![("application/x-notes".into(), request.text.to_uppercase())];
+        Some(ClipboardContent {
+            text: request.text.to_owned(),
+            html: None,
+            types,
+        })
+    });
+    region(
+        &mut ui,
+        &clipboard,
+        vec![text("Copy these words")],
+        Some(hook),
+    );
+    drag(&mut ui, (0., 10.), (40., 10.));
+    let given = ClipboardContent {
+        text: "Copy th".into(),
+        html: None,
+        types: vec![("application/x-notes".into(), "COPY TH".into())],
+    };
+    let key = Key::Character("c".into());
+    assert!(ui.clipboard_shortcut(&key, primary(), clipboard.as_ref()));
+    assert!(ui.edit_command(EditCommand::Copy, clipboard.as_ref()));
+    assert!(ui.copy_selection(&PlatformService(clipboard.clone())));
+    assert_eq!(*clipboard.1.borrow(), [given.clone(), given.clone(), given]);
+    assert!(
+        clipboard.0.borrow().is_empty(),
+        "no write without its types"
+    );
+    assert_eq!(
+        typed_write_on_a_plain_platform(),
+        Some(("t".into(), Some("<b>t</b>".into())))
+    );
+}
+
+/// A platform without types of its own (`set_clipboard_typed`'s default)
+/// takes a typed write's text and HTML as a rich copy.
+fn typed_write_on_a_plain_platform() -> Option<(String, Option<String>)> {
+    struct Plain(Clipboard);
+    impl Platform for Plain {
+        fn clipboard_text(&self) -> Option<String> {
+            self.0.clipboard_text()
+        }
+        fn set_clipboard_text(&self, text: String) -> bool {
+            self.0.set_clipboard_text(text)
+        }
+        fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
+            self.0.set_clipboard_rich_text(text, html)
+        }
+        fn open_files(&self, p: FilePicker) -> Pending<Result<Vec<std::path::PathBuf>, String>> {
+            self.0.open_files(p)
+        }
+        fn save_file(&self, p: FilePicker) -> Pending<Result<Option<std::path::PathBuf>, String>> {
+            self.0.save_file(p)
+        }
+    }
+    let plain = Plain(Clipboard::default());
+    let types = [("application/x-notes".to_owned(), "n".to_owned())];
+    assert!(plain.set_clipboard_typed("t".into(), Some("<b>t</b>".into()), &types));
+    plain.0.last()
 }

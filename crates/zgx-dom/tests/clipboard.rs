@@ -129,3 +129,65 @@ fn a_paste_key_bound_by_a_keymap_reads_what_is_pasted() {
     mounted.unmount();
     host.remove();
 }
+
+/// What the clipboard held as read: its types, and the value of one.
+type TypeReads = Rc<RefCell<Vec<(Vec<String>, Option<String>)>>>;
+
+/// A paste's types beyond text and HTML (a page's copy that set its own)
+/// read back as it brings them; a write with types copies them where it
+/// can (a gesture's `execCommand("copy")`), and without one its text still
+/// goes, as a plain write's does.
+#[wasm_bindgen_test]
+fn a_pastes_types_read_back_and_a_typed_write_keeps_its_text() {
+    let runtime = Runtime::new();
+    let read: TypeReads = Rc::default();
+    let log = read.clone();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        component(move |cx| {
+            let platform = cx.service::<PlatformService>();
+            let (log, written) = (log.clone(), platform.clone());
+            column()
+                .child(button().id("read").child(text("Read")).on_click(move || {
+                    let types = platform.0.clipboard_types();
+                    let notes = platform.0.clipboard_typed("application/x-notes");
+                    log.borrow_mut().push((types, notes));
+                }))
+                .child(button().id("write").child(text("Write")).on_click(move || {
+                    let types = [("application/x-notes".to_owned(), "written".to_owned())];
+                    assert!(written.0.set_clipboard_typed("t".into(), None, &types));
+                    assert_eq!(written.0.clipboard_text().as_deref(), Some("t"));
+                    let typed = written.0.clipboard_typed("application/x-notes");
+                    // Copied, the types read back; refused, none are left.
+                    assert!(
+                        matches!(typed.as_deref(), None | Some("written")),
+                        "{typed:?}"
+                    );
+                }))
+        }),
+    );
+    let data = web_sys::DataTransfer::new().unwrap();
+    data.set_data("text/plain", "pasted").unwrap();
+    data.set_data("application/x-notes", "from a page 😀\n\n")
+        .unwrap();
+    let init = web_sys::ClipboardEventInit::new();
+    init.set_bubbles(true);
+    init.set_clipboard_data(Some(&data));
+    let paste = web_sys::ClipboardEvent::new_with_event_init_dict("paste", &init).unwrap();
+    find(&host, "[data-id=read]")
+        .dispatch_event(&paste)
+        .unwrap();
+    find(&host, "[data-id=read]").click();
+    assert_eq!(
+        *read.borrow(),
+        [(
+            vec!["application/x-notes".to_owned()],
+            Some("from a page 😀\n\n".to_owned())
+        )]
+    );
+    find(&host, "[data-id=write]").click();
+    mounted.unmount();
+    host.remove();
+}

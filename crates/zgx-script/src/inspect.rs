@@ -185,8 +185,8 @@ fn ok(text: String, data: Value) -> String {
     ])
     .to_json()
 }
-/// `clipboard`: what the window's clipboard holds (its text, HTML, image
-/// and files), or with `action` `set`, put `text` and `html` there (either
+/// `clipboard`: what the window's clipboard holds (its text, HTML, image,
+/// files and types of an app's own: `Platform::clipboard_types`), or with `action` `set`, put `text` and `html` there (either
 /// alone; both as a rich copy), the picture at `image` (a file) or `files`
 /// (paths, as a file manager copies them; an app's own clipboard only). An
 /// off-screen session's is its own (`ZGX_CLIPBOARD=memory`), so a QA script
@@ -260,6 +260,9 @@ async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String
     let files: Vec<String> = (platform.0.clipboard_files().iter())
         .map(|f| f.display().to_string())
         .collect();
+    let types: Vec<(String, String)> = (platform.0.clipboard_types().into_iter())
+        .filter_map(|kind| Some((kind.clone(), platform.0.clipboard_typed(&kind)?)))
+        .collect();
     let line = |name: &str, value: &Option<String>| match value {
         Some(value) => format!("{name}: {value:?}"),
         None => format!("{name}: none"),
@@ -273,6 +276,13 @@ async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String
                 true => "files: none".to_string(),
                 false => format!("files: {files:?}"),
             },
+            match types.is_empty() {
+                true => "types: none".to_string(),
+                false => (types.iter())
+                    .map(|(kind, value)| format!("type {kind}: {value:?}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            },
         ]
         .join("\n"),
         Value::record([
@@ -282,6 +292,19 @@ async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String
             (
                 "files",
                 Value::List(files.iter().map(|f| Value::from(f.as_str())).collect()),
+            ),
+            (
+                "types",
+                Value::List(
+                    (types.iter())
+                        .map(|(kind, value)| {
+                            Value::record([
+                                ("type", Value::from(kind.as_str())),
+                                ("value", Value::from(value.as_str())),
+                            ])
+                        })
+                        .collect(),
+                ),
             ),
         ]),
     )

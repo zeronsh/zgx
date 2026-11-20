@@ -9,7 +9,10 @@
 //! wrote. A key a keymap binds to paste (⌘V, Ctrl+V) runs its action when
 //! the paste event comes, so it reads what is pasted (`js/zgx-dom.js`).
 //! Writes go through `navigator.clipboard.write`, `text/plain` with
-//! `text/html` beside it.
+//! `text/html` beside it; a write with types of the app's own copies as a
+//! person's ⌘C does, setting them on the copy event's data, which a page
+//! reads back in its paste (Chromium keeps them as its web custom data). A
+//! paste's types beyond text and HTML read back as it brings them.
 
 use crate::js;
 use std::path::PathBuf;
@@ -29,6 +32,26 @@ impl Platform for Browser {
     }
     fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
         js::zgx_clipboard_write(&text, Some(html))
+    }
+    fn set_clipboard_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+    ) -> bool {
+        if types.is_empty() {
+            return js::zgx_clipboard_write(&text, html);
+        }
+        let types = (types.iter())
+            .flat_map(|(kind, value)| [kind.clone(), value.clone()])
+            .collect();
+        js::zgx_clipboard_write_typed(&text, html, types)
+    }
+    fn clipboard_types(&self) -> Vec<String> {
+        js::zgx_clipboard_types().into_iter().step_by(2).collect()
+    }
+    fn clipboard_typed(&self, mime: &str) -> Option<String> {
+        js::zgx_clipboard_typed(mime)
     }
     fn open_url(&self, url: &str) -> bool {
         js::zgx_open_url(url)

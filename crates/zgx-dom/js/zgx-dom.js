@@ -1802,8 +1802,11 @@ function onContextMenu(event) {
 // The clipboard (`src/platform.rs`). A page reads it only inside a paste
 // event: reads give that paste's, else what the page last copied, cut,
 // pasted or wrote.
-let clipboard = { text: null, html: null };
+let clipboard = { text: null, html: null, types: [] };
 let pastePending = null;
+// The types a copy event in progress puts on the clipboard
+// (`zgx_clipboard_write_typed`), and whether it took them.
+let typedCopy = null;
 
 export function zgx_clipboard_text() {
   return clipboard.text;
@@ -1813,8 +1816,40 @@ export function zgx_clipboard_html() {
   return clipboard.html;
 }
 
+// The types of a page's own the clipboard holds as this page last read or
+// wrote them: names and values in turn.
+export function zgx_clipboard_types() {
+  return clipboard.types.flat();
+}
+
+export function zgx_clipboard_typed(mime) {
+  const found = clipboard.types.find(([kind]) => kind === mime);
+  return found ? found[1] : null;
+}
+
+// `text`, `html` and `types` (names and values in turn) in one copy: the
+// async Clipboard API takes no type of a page's own, so the page copies as
+// a person's ⌘C does (`execCommand`, within a click or a key's gesture),
+// setting each on the event's data, which the browser keeps where other
+// pages' pastes read them (Chromium's web custom data). Refused (no
+// gesture), the text and HTML go as `zgx_clipboard_write` writes them.
+export function zgx_clipboard_write_typed(text, html, types) {
+  const pairs = [];
+  for (let i = 0; i + 1 < types.length; i += 2) pairs.push([types[i], types[i + 1]]);
+  typedCopy = { text, html: html === undefined ? null : html, types: pairs, taken: false };
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (_) {}
+  const taken = copied && typedCopy.taken;
+  typedCopy = null;
+  if (!taken) return zgx_clipboard_write(text, html);
+  clipboard = { text, html: html === undefined ? null : html, types: pairs };
+  return true;
+}
+
 export function zgx_clipboard_write(text, html) {
-  clipboard = { text, html: html === undefined ? null : html };
+  clipboard = { text, html: html === undefined ? null : html, types: [] };
   const c = navigator.clipboard;
   if (!c) return false;
   const done = html != null && typeof ClipboardItem !== "undefined"
@@ -2096,18 +2131,35 @@ export function zgx_open_url(url) {
   return window.open(url, "_blank", "noopener,noreferrer") !== null || true;
 }
 
-function onCopy() {
+function onCopy(event) {
+  // A copy `zgx_clipboard_write_typed` made: what it writes, nothing else.
+  if (typedCopy && event.clipboardData) {
+    const data = event.clipboardData;
+    data.setData("text/plain", typedCopy.text);
+    if (typedCopy.html !== null) data.setData("text/html", typedCopy.html);
+    for (const [kind, value] of typedCopy.types) data.setData(kind, value);
+    typedCopy.taken = true;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return;
+  }
   const selection = document.getSelection();
   const text = selection ? selection.toString() : "";
-  if (text) clipboard = { text, html: null };
+  if (text) clipboard = { text, html: null, types: [] };
 }
+
+// What a page's own types are among a paste's: those not the browser's.
+const standardTypes = new Set(["text/plain", "text/html", "text/uri-list", "Files"]);
 
 function onPaste(event) {
   const data = event.clipboardData;
   if (data) {
     const text = data.getData("text/plain");
     const html = data.getData("text/html");
-    clipboard = { text: text || null, html: html || null };
+    const types = Array.from(data.types)
+      .filter((kind) => !standardTypes.has(kind))
+      .map((kind) => [kind, data.getData(kind)]);
+    clipboard = { text: text || null, html: html || null, types };
   }
   // A paste a keymap waited for (`onKeymaps`): its actions run now.
   const pending = pastePending;
