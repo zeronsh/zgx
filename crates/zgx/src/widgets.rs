@@ -2078,6 +2078,7 @@ pub struct ClipboardContent {
 }
 impl ClipboardContent {
     /// `text`, with `html` beside it where given, and no types.
+    #[doc(hidden)]
     pub fn new(text: String, html: Option<String>) -> Self {
         Self {
             text,
@@ -2088,6 +2089,7 @@ impl ClipboardContent {
     /// Put it on `platform`'s clipboard: its types, where it has some, in
     /// one change with the text and HTML; else the text, and the HTML
     /// beside it, as ever. Whether the clipboard took it.
+    #[doc(hidden)]
     pub fn write(self, platform: &dyn crate::platform::Platform) -> bool {
         if !self.types.is_empty() {
             return platform.set_clipboard_typed(self.text, self.html, &self.types);
