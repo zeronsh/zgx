@@ -17,6 +17,8 @@ mod converted_with_collection;
 mod form_values;
 #[path = "../guard_doors.rs"]
 mod guard_doors;
+#[path = "../host_registration.rs"]
+mod host_registration;
 #[path = "../io.rs"]
 mod io;
 #[path = "../large_data.rs"]
