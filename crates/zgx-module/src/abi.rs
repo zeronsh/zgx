@@ -35,6 +35,9 @@ pub const MAP: u32 = 5;
 /// row kept folded): a module passes it on, and reads it through [`Api`].
 pub const OTHER: u32 = 6;
 
+/// Not a value: what [`Api::fields`] writes for a field a map doesn't have.
+pub const ABSENT: u32 = u32::MAX;
+
 /// A value. Owned (released once, with [`Api::release`], or handed back to
 /// the runtime) or lent (valid while what lent it is, never released):
 /// which one is by where it came from, said at each function.
@@ -80,10 +83,12 @@ pub struct Api {
     /// isn't a list. One call for many, as a pass over a list reads them.
     pub items:
         unsafe extern "C" fn(list: *const Raw, from: usize, out: *mut Raw, cap: usize) -> usize,
-    /// A map's field, lent for as long as the map is; false if it has none
-    /// of that name or isn't a map.
-    pub field:
-        unsafe extern "C" fn(map: *const Raw, key: *const u8, len: usize, out: *mut Raw) -> bool,
+    /// The `len` fields of a map named by `keys`, lent for as long as the
+    /// map is, each written to `out` at its key's place: [`ABSENT`] where
+    /// the map has none of that name, all of them if it isn't a map. One
+    /// call for the fields a function reads.
+    pub fields:
+        unsafe extern "C" fn(map: *const Raw, keys: *const Bytes, len: usize, out: *mut Raw),
     /// A map's fields from the `from`th (from 0, in key order), up to `cap`
     /// of them, their keys and values lent for as long as the map is: how
     /// many it wrote. One call for a whole row, as code reading several of

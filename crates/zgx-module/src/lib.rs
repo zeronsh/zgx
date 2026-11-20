@@ -294,7 +294,7 @@ impl<'a> Ref<'a> {
             list: raw,
             len,
             next: 0,
-            held: [NIL; CHUNK],
+            held: [std::mem::MaybeUninit::uninit(); CHUNK],
             from: 0,
             count: 0,
             _of: PhantomData,
@@ -307,19 +307,38 @@ impl<'a> Ref<'a> {
         // SAFETY: A lent value.
         Value::owned(unsafe { (api().slice)(&raw, from, to) })
     }
-    /// A map's field. Reading several of one map's, [`Ref::record`] reads
-    /// them all at once.
+    /// A map's field. Reading several of one map's, [`Ref::get`] reads them
+    /// in one call.
     #[inline]
     pub fn field(self, key: &str) -> Option<Ref<'a>> {
+        let [field] = self.get([key]);
+        field
+    }
+    /// The fields of a map named by `keys`, each at its key's place, read
+    /// from the runtime in one call: `let [id, text] = row.get(["id",
+    /// "text"])`. None for a field it doesn't have, all none if it isn't a
+    /// map.
+    #[inline]
+    pub fn get<const N: usize>(self, keys: [&str; N]) -> [Option<Ref<'a>>; N] {
         let raw = self.opened();
         if raw.tag != abi::MAP {
-            return None;
+            return [None; N];
         }
-        let mut out = NIL;
-        // SAFETY: A lent map, the key's bytes, and room for one value.
-        unsafe { (api().field)(&raw, key.as_ptr(), key.len(), &mut out) }.then_some(Ref {
-            raw: out,
-            _of: PhantomData,
+        let keys = keys.map(|key| Bytes {
+            ptr: key.as_ptr(),
+            len: key.len(),
+        });
+        let mut out = [std::mem::MaybeUninit::<Raw>::uninit(); N];
+        // SAFETY: A lent map, `N` keys and room for `N` values, each of
+        // which the runtime writes.
+        unsafe { (api().fields)(&raw, keys.as_ptr(), N, out.as_mut_ptr().cast()) };
+        out.map(|raw| {
+            // SAFETY: Written by the call above.
+            let raw = unsafe { raw.assume_init() };
+            (raw.tag != abi::ABSENT).then_some(Ref {
+                raw,
+                _of: PhantomData,
+            })
         })
     }
     /// A map's fields, all read from the runtime at once: for code that
@@ -333,11 +352,8 @@ impl<'a> Ref<'a> {
         };
         let mut record = Record {
             len: 0,
-            keys: [Bytes {
-                ptr: std::ptr::null(),
-                len: 0,
-            }; INLINE],
-            values: [NIL; INLINE],
+            keys: [std::mem::MaybeUninit::uninit(); INLINE],
+            values: [std::mem::MaybeUninit::uninit(); INLINE],
             more: Vec::new(),
             _of: PhantomData,
         };
@@ -347,8 +363,8 @@ impl<'a> Ref<'a> {
                 (api().entries)(
                     &raw,
                     0,
-                    record.keys.as_mut_ptr(),
-                    record.values.as_mut_ptr(),
+                    record.keys.as_mut_ptr().cast(),
+                    record.values.as_mut_ptr().cast(),
                     INLINE,
                 )
             };
@@ -409,8 +425,8 @@ pub struct Items<'a> {
     list: Raw,
     len: usize,
     next: usize,
-    held: [Raw; CHUNK],
-    /// `held` is the items from `from`, `count` of them.
+    /// The items from `from`, the first `count` written.
+    held: [std::mem::MaybeUninit<Raw>; CHUNK],
     from: usize,
     count: usize,
     _of: PhantomData<&'a Value>,
@@ -424,15 +440,17 @@ impl<'a> Iterator for Items<'a> {
         }
         if self.next >= self.from + self.count {
             // SAFETY: A lent list, and room for `CHUNK` values.
-            self.count =
-                unsafe { (api().items)(&self.list, self.next, self.held.as_mut_ptr(), CHUNK) };
+            self.count = unsafe {
+                (api().items)(&self.list, self.next, self.held.as_mut_ptr().cast(), CHUNK)
+            };
             self.from = self.next;
             if self.count == 0 {
                 self.len = self.next;
                 return None;
             }
         }
-        let raw = self.held[self.next - self.from];
+        // SAFETY: Among the `count` the runtime wrote.
+        let raw = unsafe { self.held[self.next - self.from].assume_init() };
         self.next += 1;
         Some(Ref {
             raw,
@@ -448,9 +466,10 @@ impl ExactSizeIterator for Items<'_> {}
 
 /// A map's fields, read from the runtime at once ([`Ref::record`]).
 pub struct Record<'a> {
+    /// How many of `keys` and `values` the runtime wrote.
     len: usize,
-    keys: [Bytes; INLINE],
-    values: [Raw; INLINE],
+    keys: [std::mem::MaybeUninit<Bytes>; INLINE],
+    values: [std::mem::MaybeUninit<Raw>; INLINE],
     /// A map of more than `INLINE` fields: all of them.
     more: Vec<(Bytes, Raw)>,
     _of: PhantomData<&'a Value>,
@@ -470,7 +489,13 @@ impl<'a> Record<'a> {
     #[inline]
     fn at(&self, index: usize) -> (&'a str, Ref<'a>) {
         let (key, raw) = if self.more.is_empty() {
-            (self.keys[index], self.values[index])
+            // SAFETY: `index` is under `len`, which the runtime wrote.
+            unsafe {
+                (
+                    self.keys[index].assume_init(),
+                    self.values[index].assume_init(),
+                )
+            }
         } else {
             self.more[index]
         };
