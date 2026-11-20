@@ -3600,6 +3600,7 @@ impl ScriptHost {
     /// let go of too), and what each held before and after, with what is left
     /// by object type, userdata type and the chunk each function's code came
     /// from: to tell garbage a collection frees from what scripts keep.
+    #[doc(hidden)]
     pub fn gc_report(&self, query: &GcQuery) -> Vec<GcVm> {
         let loaded = self.0.current.borrow().clone();
         let vms: Vec<Rc<Vm>> = loaded.iter().flat_map(|l| l._vms.iter().cloned()).collect();
@@ -5666,6 +5667,7 @@ mod budget_tests {
 
 /// What one script VM held around a full collection (`ScriptHost::gc_report`).
 #[derive(Debug, Clone, Default)]
+#[doc(hidden)]
 pub struct GcVm {
     /// The VM's name (the app's, or a plugin's).
     pub name: String,
