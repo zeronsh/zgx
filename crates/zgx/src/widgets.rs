@@ -3396,12 +3396,14 @@ impl Ui {
     /// over the callback stays small enough to inline where it is built.
     #[cfg_attr(feature = "trace", track_caller)]
     fn add_binding(&mut self, owner: NodeId, mount_pure: bool, callback: Rc<RefCell<dyn FnMut()>>) {
+        // Read here: a closure below is no `track_caller` function.
+        #[cfg(feature = "trace")]
+        let at = std::panic::Location::caller();
         self.runtime.clone().batch(|| {
             let effect = self.runtime.effect_callback(mount_pure, callback);
             #[cfg(feature = "trace")]
             if crate::trace::enabled() {
                 // Where in zgx the binding was made says which prop or feature it is.
-                let at = std::panic::Location::caller();
                 crate::trace::name(
                     effect.number(),
                     format!(
