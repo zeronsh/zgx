@@ -476,7 +476,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   text-drop <target|x,y> --text T [--html H] [--hover-only]
                        text dragged in from another app, let go there
   prefers reduced-motion on|off|system   what zgx reads as the system's (never its setting)
-  scroll <target> <dy> [dx] command <id>
+  scroll <target|x,y> <dy> [dx]  command <id>
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
