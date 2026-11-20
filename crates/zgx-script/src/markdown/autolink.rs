@@ -14,14 +14,19 @@ use std::cell::RefCell;
 
 thread_local! {
     /// The markdown being read with autolinks, and where it starts in the
-    /// whole text (`read_from`): kept apart from the parse's own state, so
-    /// a parse without them reads as it did.
+    /// whole text (`read_from`), for the length of that parse (`release`):
+    /// kept apart from the parse's own state, so a parse without them reads
+    /// as it did.
     static SOURCE: RefCell<(String, usize)> = const { RefCell::new((String::new(), 0)) };
 }
 
+/// What `release` keeps of the copy's capacity: a short reply's, so its
+/// next chunk doesn't allocate again; a long one's goes with the parse.
+const KEPT_CAPACITY: usize = 4096;
+
 /// The markdown a parse with autolinks is about to read, from `offset` in
 /// the whole text: what its links read of what was written
-/// (`entity_in_source`).
+/// (`entity_in_source`), until the parse ends (`release`).
 #[cold]
 #[inline(never)]
 pub(super) fn read_from(text: &str, offset: usize) {
@@ -29,6 +34,21 @@ pub(super) fn read_from(text: &str, offset: usize) {
         source.clear();
         source.push_str(text);
         *at = offset;
+    });
+}
+
+/// The parse that `read_from` began has ended: its copy goes, so a long
+/// text isn't held at rest (a small one's capacity stays, `KEPT_CAPACITY`).
+#[cold]
+#[inline(never)]
+pub(super) fn release() {
+    SOURCE.with_borrow_mut(|(source, at)| {
+        if source.capacity() > KEPT_CAPACITY {
+            *source = String::new();
+        } else {
+            source.clear();
+        }
+        *at = 0;
     });
 }
 
@@ -393,6 +413,28 @@ mod tests {
             "Anonymous FTP is available at ftp://foo.bar.baz.",
         );
         links("HTTPS://A.B/c", "[HTTPS://A.B/c](HTTPS://A.B/c)");
+    }
+
+    #[test]
+    fn a_parses_copy_of_its_markdown_goes_with_the_parse() {
+        let options = super::super::Options {
+            autolinks: true,
+            ..Default::default()
+        };
+        let long = "See https://a.b/c&amp; now.\n\n".repeat(4_000);
+        let blocks = super::super::parse(&long, &options);
+        assert_eq!(blocks.len(), 4_000);
+        // Nothing of a long text is held at rest; a short one's capacity
+        // stays for the next parse.
+        SOURCE.with_borrow(|(source, at)| {
+            assert!(source.is_empty() && *at == 0);
+            assert!(source.capacity() <= KEPT_CAPACITY, "{}", source.capacity());
+        });
+        super::super::parse("www.a.com", &options);
+        SOURCE.with_borrow(|(source, _)| {
+            assert!(source.is_empty());
+            assert!(source.capacity() > 0 && source.capacity() <= KEPT_CAPACITY);
+        });
     }
 
     #[test]
