@@ -1562,17 +1562,29 @@ impl<'a> HtmlTag<'a> {
     }
 }
 
-/// What inline HTML after a picture says of its place: `None` for a
-/// closer (the picture's place is left to what follows), else whether it
-/// is a `<br>`, ending the picture's line. (Out of line, with the text
-/// read here: the hot event loop stays as it was.)
+/// What follows a picture, as its place reads it (`Builder::place_picture`).
+#[derive(Clone, Copy, PartialEq)]
+enum After {
+    /// An inline tag closing (a link around a badge): the place is left
+    /// to what follows it.
+    Closer,
+    /// A line break, taken by the picture's place if it ends its line.
+    Break,
+    /// Its paragraph's or item's end.
+    End,
+    Other,
+}
+
+/// What inline HTML after a picture is to its place: a closer, a `<br>`
+/// (a line break) or neither. (Out of line, given the text by value: the
+/// hot event loop takes no event's address.)
 #[cold]
 #[inline(never)]
-fn picture_tag(html: &pulldown_cmark::CowStr) -> Option<bool> {
-    match HtmlTag::read(html) {
-        Some(tag) if tag.closing => None,
-        Some(tag) => Some(tag.name.eq_ignore_ascii_case("br")),
-        None => Some(false),
+fn picture_tag(html: pulldown_cmark::CowStr) -> After {
+    match HtmlTag::read(&html) {
+        Some(tag) if tag.closing => After::Closer,
+        Some(tag) if tag.name.eq_ignore_ascii_case("br") => After::Break,
+        _ => After::Other,
     }
 }
 
@@ -1782,40 +1794,24 @@ impl Builder<'_> {
         })
     }
 
-    /// The picture read (`picture`), placed by `event`, what follows it:
+    /// The picture read (`picture`), placed by what follows it (`after`):
     /// alone on its line, the words before it are a paragraph and it a
     /// block (the words after it the next paragraph); else a run among the
-    /// words. Whether the event was the line's end it took. (Out of line:
-    /// a picture is rare, and `event`'s hot arms stay as small as they
-    /// were.)
+    /// words. Whether the event was the line's end it took. (Out of line,
+    /// given a summary of the event: a picture is rare, and the hot event
+    /// loop neither grows nor takes an event's address.)
     #[cold]
     #[inline(never)]
-    fn place_picture(&mut self, event: &Event) -> bool {
+    fn place_picture(&mut self, after: After) -> bool {
         // Inline tags closing after it (a link around a badge) leave its
         // place to what follows them.
-        if matches!(
-            event,
-            Event::End(TagEnd::Link | TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough)
-        ) {
+        if after == After::Closer {
             return false;
         }
-        // So do inline HTML marks' (`Options::html_marks`), and a `<br>`
-        // ends its line as a hard break does.
-        let br = match event {
-            Event::InlineHtml(html) if self.options.html_marks => match picture_tag(html) {
-                None => return false,
-                Some(br) => br,
-            },
-            _ => false,
-        };
         let Some((src, alt, blank, link)) = self.picture.take() else {
             return false;
         };
-        let ends = br
-            || matches!(
-                event,
-                Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph | TagEnd::Item)
-            );
+        let ends = matches!(after, After::Break | After::End);
         let blocks = matches!(self.frames.last(), Some(Frame::Blocks(_)));
         if !(blank && ends && blocks && self.heading.is_none()) {
             self.runs.push(Run {
@@ -1853,7 +1849,7 @@ impl Builder<'_> {
         ]));
         self.took = true;
         self.line = (0, 0);
-        br || matches!(event, Event::SoftBreak | Event::HardBreak)
+        after == After::Break
     }
 
     /// A reference this text's own definition resolves: no callback says so.
@@ -2028,8 +2024,21 @@ impl Builder<'_> {
 
     fn event(&mut self, event: Event) {
         // A picture's place, by what follows it (its line's end, taken).
-        if self.picture.is_some() && self.place_picture(&event) {
-            return;
+        // Inline HTML marks' closers leave it as markdown's do, and a
+        // `<br>` ends its line as a hard break does.
+        if self.picture.is_some() {
+            let after = match &event {
+                Event::End(
+                    TagEnd::Link | TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough,
+                ) => After::Closer,
+                Event::SoftBreak | Event::HardBreak => After::Break,
+                Event::End(TagEnd::Paragraph | TagEnd::Item) => After::End,
+                Event::InlineHtml(html) if self.options.html_marks => picture_tag(html.clone()),
+                _ => After::Other,
+            };
+            if self.place_picture(after) {
+                return;
+            }
         }
         if let Event::Start(Tag::List(_) | Tag::CodeBlock(_) | Tag::BlockQuote(_) | Tag::Table(_))
         | Event::Rule = &event
