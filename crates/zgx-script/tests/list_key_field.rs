@@ -3,7 +3,7 @@
 //! rows being built reach the script.
 mod common;
 use common::Harness;
-use std::rc::Rc;
+use zgx_script::Slice;
 use zgx_script::Value;
 
 const APP: &str = r#"
@@ -31,11 +31,11 @@ fn rows(ids: impl IntoIterator<Item = usize>) -> Value {
                 .collect();
             Value::record([
                 ("id", Value::from(format!("row-{i}").as_str())),
-                ("parts", Value::List(Rc::from(parts))),
+                ("parts", Value::List(Slice::from(parts))),
             ])
         })
         .collect();
-    Value::List(Rc::from(rows))
+    Value::List(Slice::from(rows))
 }
 
 #[test]
@@ -90,7 +90,10 @@ fn a_field_key_keeps_a_rows_state_as_the_list_moves() {
 fn a_row_without_the_field_keys_by_its_place() {
     let h = Harness::inline(APP);
     h.frames(2);
-    let plain = Value::List(Rc::from(vec![Value::record([("other", Value::Num(1.))])]));
+    let plain = Value::List(Slice::from(vec![Value::record([(
+        "other",
+        Value::Num(1.),
+    )])]));
     h.host.shared("rows", Value::Nil).set(plain);
     h.frames(3);
     assert_eq!(h.error(), None, "as with a function giving nil");

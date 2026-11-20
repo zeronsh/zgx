@@ -2,8 +2,8 @@
 //! script's: it costs a call none of its budget.
 mod common;
 use common::Harness;
-use std::rc::Rc;
 use std::time::Duration;
+use zgx_script::Slice;
 use zgx_script::{Limits, ScriptHost, Value};
 
 /// A computed that does almost nothing but read the list, and then reaches
@@ -42,11 +42,11 @@ fn long_rows() -> Value {
             ])
         })
         .collect();
-    let parts = Value::List(Rc::from(parts));
+    let parts = Value::List(Slice::from(parts));
     let rows: Vec<Value> = (0..300)
         .map(|i| {
             // (Each its own: a table shared between rows converts once.)
-            let parts = Value::List(Rc::from(
+            let parts = Value::List(zgx_script::Slice::from(
                 parts
                     .list()
                     .iter()
@@ -65,7 +65,7 @@ fn long_rows() -> Value {
             ])
         })
         .collect();
-    Value::List(Rc::from(rows))
+    Value::List(Slice::from(rows))
 }
 
 /// Far below what 300,000 records take to convert in any build, and far above

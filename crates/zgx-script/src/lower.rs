@@ -3,6 +3,8 @@
 //! reactive style per node; text templates interpolate state in Rust.
 //! Targetable nodes (`id`, `class`, `ref`, `on_mount`) also carry an element:
 //! what animations write, resolved over the node's own styles.
+use crate::Field;
+use crate::Slice;
 use crate::{
     Actions, Vm, anim,
     anime::{Key as Property, target::Target, value::V},
@@ -1140,7 +1142,7 @@ fn computed_fn(app: &Vm, value: impl Fn() -> Value + 'static) -> Option<mlua::Fu
 /// `source`'s value now, as a script reads it: a string or a boolean.
 fn value_now(source: &Owned, ty: Ty, app: &Vm) -> Value {
     match resolve(source, ty, None, app) {
-        Some(Lit::Str(text)) => Value::Str(text),
+        Some(Lit::Str(text)) => Value::Str(text.into()),
         Some(Lit::Bool(b)) => Value::Bool(b),
         _ => Value::Nil,
     }
@@ -1318,14 +1320,14 @@ fn filtered(
         .iter()
         .enumerate()
         .map(|(at, child)| match &child.id {
-            Some(id) => Value::Str(id.clone()),
+            Some(id) => Value::Str(id.clone().into()),
             None => Value::Num((at + 1) as f64),
         })
         .collect();
     let low = low.clone();
     switch(
         move || {
-            let mut value = Value::List(Rc::from(ids.as_slice()));
+            let mut value = Value::List(Slice::from(ids.as_slice()));
             for (plugin, f) in &order {
                 value = passed(plugin, f, value);
             }
@@ -2199,10 +2201,10 @@ fn quick(item: &Value) -> Quick {
         Value::Nil => Quick::Nil,
         Value::Bool(b) => Quick::Bool(*b),
         Value::Num(n) => Quick::Num(if *n == 0. { 0 } else { n.to_bits() }),
-        Value::Str(s) => Quick::Str(s.clone()),
+        Value::Str(s) => Quick::Str(s.rc()),
         Value::Text(t) => Quick::Str(t.to_cow().into()),
-        Value::List(l) => Quick::At(Rc::as_ptr(l).cast::<()>() as usize),
-        Value::Map(m) => Quick::At(Rc::as_ptr(m).cast::<()>() as usize),
+        Value::List(l) => Quick::At(Slice::as_ptr(l).cast::<()>() as usize),
+        Value::Map(m) => Quick::At(Slice::as_ptr(m).cast::<()>() as usize),
         Value::Element(e) => Quick::At(e.address()),
         Value::Image(image) => Quick::At(std::sync::Arc::as_ptr(image).cast::<()>() as usize),
         Value::Folded(folded) => Quick::At(Rc::as_ptr(folded).cast::<()>() as usize),
@@ -2255,7 +2257,7 @@ fn content_hash(item: &Value, hasher: &mut impl std::hash::Hasher) {
         }
         Value::Map(entries) => {
             entries.len().hash(hasher);
-            for (key, value) in entries.iter() {
+            for Field(key, value) in entries.iter() {
                 key.hash(hasher);
                 content_hash(value, hasher);
             }
@@ -7327,7 +7329,7 @@ fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Opt
 }
 fn resolve_value(source: &Owned, vm: &Vm) -> Value {
     match source {
-        Owned::Lit(Lit::Str(s)) => Value::Str(s.clone()),
+        Owned::Lit(Lit::Str(s)) => Value::Str(s.clone().into()),
         Owned::Lit(Lit::Num(n)) => Value::Num(*n as f64),
         Owned::Lit(Lit::Bool(b)) => Value::Bool(*b),
         Owned::State(s) => s.get(),
@@ -7506,7 +7508,7 @@ enum Picture {
 fn picture_of(src: &Owned, vm: &Vm) -> Option<Picture> {
     let of = |value: &Value| match value {
         Value::Image(image) => Some(Picture::Image(image.clone())),
-        Value::Str(path) => Some(Picture::Path(path.clone())),
+        Value::Str(path) => Some(Picture::Path(path.rc())),
         _ => None,
     };
     match src {
@@ -7880,7 +7882,7 @@ impl ListKey {
     fn of(value: &Value) -> Option<ListKey> {
         Some(match value {
             Value::Num(n) => ListKey::Num(if *n == 0. { 0 } else { n.to_bits() }),
-            Value::Str(s) => ListKey::Str(s.clone()),
+            Value::Str(s) => ListKey::Str(s.rc()),
             Value::Bool(b) => ListKey::Bool(*b),
             _ => return None,
         })
@@ -7889,7 +7891,7 @@ impl ListKey {
         match self {
             ListKey::Index(i) => Value::Num((i + 1) as f64),
             ListKey::Num(bits) => Value::Num(f64::from_bits(*bits)),
-            ListKey::Str(s) => Value::Str(s.clone()),
+            ListKey::Str(s) => Value::Str(s.clone().into()),
             ListKey::Bool(b) => Value::Bool(*b),
         }
     }
@@ -10502,7 +10504,7 @@ fn geometry_of<S: Styled>(s: S, name: &str) -> S {
 fn a_list_keeping_its_first_items_passes_over_the_rest_as_the_full_pass_does() {
     let runtime = zgx::reactive::Runtime::new();
     // A table item: `n` its contents, a new allocation each call.
-    let table = |n: u64| Value::Map(Rc::from(vec![(Rc::from("n"), Value::Num(n as f64))]));
+    let table = |n: u64| Value::record([("n", Value::Num(n as f64))]);
     for live in [false, true] {
         for seed in 1..=40_u64 {
             let mut random = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -10529,7 +10531,7 @@ fn a_list_keeping_its_first_items_passes_over_the_rest_as_the_full_pass_does() {
                         // Equal contents, a new table.
                         let i = at(list.len(), next());
                         if let Value::Map(m) = &list[i] {
-                            list[i] = Value::Map(Rc::from(m.to_vec()));
+                            list[i] = Value::Map(Slice::from(m.to_vec()));
                         }
                     }
                     6 => {

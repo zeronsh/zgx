@@ -5,6 +5,8 @@ use zgx_module::{Host, Value};
 zgx_module::module!(|host: &Host| {
     // What it was given, back: every kind of value there and back.
     host.function("fixture.echo", |arg| arg.to_owned());
+    // The same, handed its argument: nothing counted.
+    host.function_taking("fixture.echo_taking", |arg| arg);
     // `{ words, longest, kinds }` of a list of strings.
     host.function("fixture.words", |texts| {
         let words: usize = texts

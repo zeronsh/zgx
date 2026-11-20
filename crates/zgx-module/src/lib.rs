@@ -77,15 +77,14 @@ unsafe fn word<T>(at: *const T, offset: usize) -> usize {
     // SAFETY: The caller's.
     unsafe { at.cast::<u8>().add(offset).cast::<usize>().read() }
 }
-/// Where a string's, a list's or a map's contents begin.
+/// Where a list's items or a map's fields begin.
 ///
 /// # Safety
-/// `at` points at one of those.
+/// `at` points at a list or a map.
 #[inline(always)]
 unsafe fn data(at: *const Raw) -> *const u8 {
-    // SAFETY: Such a value holds a counted pointer, its contents `DATA_AT`
-    // past it.
-    unsafe { (word(at, abi::HELD_AT) as *const u8).add(abi::DATA_AT) }
+    // SAFETY: Such a value holds a pointer to its contents.
+    unsafe { word(at, abi::HELD_AT) as *const u8 }
 }
 /// # Safety
 /// `ptr` and `len` are a string of the runtime's, alive for `'a`.
@@ -95,11 +94,11 @@ unsafe fn text<'a>(ptr: *const u8, len: usize) -> &'a str {
     unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }
 }
 
-/// Whether `tag` is a kind held by a counted pointer a module counts
-/// itself.
+/// Whether `tag` is a kind a module counts itself: a list or a map, whose
+/// count is at a stated place. (A string's is std's `Rc`'s own.)
 #[inline(always)]
 fn counted(tag: u8) -> bool {
-    matches!(tag, abi::STR | abi::LIST | abi::MAP)
+    matches!(tag, abi::LIST | abi::MAP)
 }
 
 /// A value a module owns: what a function returns, and what it keeps. The
@@ -185,8 +184,8 @@ impl Drop for Value {
     #[inline]
     fn drop(&mut self) {
         let at: *mut Raw = &mut self.raw;
-        // SAFETY: An owned value. A string, a list or a map held elsewhere
-        // too is one hold fewer, as `Rc`'s drop is; the last hold, and any
+        // SAFETY: An owned value. A list or a map held elsewhere too is one
+        // hold fewer, as its own drop is; the last hold, a string, and any
         // kind held another way, the runtime frees.
         unsafe {
             let tag = tag(at);
@@ -195,7 +194,7 @@ impl Drop for Value {
             }
             if counted(tag) {
                 let count = (word(at, abi::HELD_AT) as *mut u8)
-                    .add(abi::COUNT_AT)
+                    .sub(abi::COUNT_BEFORE)
                     .cast::<usize>();
                 if *count > 1 {
                     *count -= 1;
@@ -320,9 +319,14 @@ impl<'a> Ref<'a> {
         if self.tag() != abi::STR {
             return None;
         }
-        // SAFETY: A string holds its UTF-8 and its length, alive as long as
-        // the value this was lent from.
-        Some(unsafe { text(data(self.at), word(self.at, abi::HELD_AT + 8)) })
+        // SAFETY: A string holds a pointer to its UTF-8 and its length,
+        // alive as long as the value this was lent from.
+        Some(unsafe {
+            text(
+                word(self.at, abi::HELD_AT) as *const u8,
+                word(self.at, abi::HELD_AT + 8),
+            )
+        })
     }
     /// Its text if it is a string of any length. The runtime holds one past
     /// 64 KiB in pieces, which [`Ref::str`] doesn't read: this reads it
@@ -421,12 +425,12 @@ impl<'a> Ref<'a> {
     /// `fields` is a map's, of more than `index` fields.
     #[inline(always)]
     unsafe fn entry(fields: *const u8, index: usize) -> (&'a str, Ref<'a>) {
-        // SAFETY: A field is a key (a counted pointer to its UTF-8, and its
-        // length) and a value, `FIELD_SIZE` apart.
+        // SAFETY: A field is a key (a pointer to its UTF-8, and its length)
+        // and a value, `FIELD_SIZE` apart.
         unsafe {
             let field = fields.add(index * abi::FIELD_SIZE);
             let key = field.add(abi::FIELD_KEY_AT);
-            let key = text((word(key, 0) as *const u8).add(abi::DATA_AT), word(key, 8));
+            let key = text(word(key, 0) as *const u8, word(key, 8));
             (
                 key,
                 Ref {
@@ -483,14 +487,14 @@ impl<'a> Ref<'a> {
     /// It, owned: counted, not copied.
     #[inline]
     pub fn to_owned(self) -> Value {
-        // SAFETY: A lent value. A string, a list or a map is held once
-        // more, as `Rc`'s clone holds it; a number, a boolean and `nil`
-        // are their three words; any other kind the runtime clones.
+        // SAFETY: A lent value. A list or a map is held once more, as its
+        // own clone holds it; a number, a boolean and `nil` are their
+        // three words; a string and any other kind the runtime clones.
         unsafe {
             let tag = tag(self.at);
             if counted(tag) {
                 let count = (word(self.at, abi::HELD_AT) as *mut u8)
-                    .add(abi::COUNT_AT)
+                    .sub(abi::COUNT_BEFORE)
                     .cast::<usize>();
                 if *count < usize::MAX / 2 {
                     *count += 1;
@@ -668,6 +672,44 @@ impl Host<'_> {
         }
         register(self.registrar, name, function);
     }
+    /// Registers a function handed its argument (`ui.call_sync(name,
+    /// arg)`), for one that keeps or returns what it is given: no count of
+    /// it is made. Any other is cheaper as a [`Host::function`], whose
+    /// argument the runtime frees where it is.
+    pub fn function_taking(&self, name: &str, function: impl Fn(Value) -> Value + 'static) {
+        unsafe extern "C" fn call<F: Fn(Value) -> Value>(
+            user: *mut c_void,
+            arg: *mut Raw,
+            out: *mut Raw,
+        ) {
+            // SAFETY: `user` is the `F` boxed below, alive until `free`;
+            // `arg` is owned by this call; `out` takes what it made.
+            unsafe {
+                let made = (*(user as *const F))(Value::owned(arg.read()));
+                out.write(made.raw);
+                std::mem::forget(made);
+            }
+        }
+        unsafe extern "C" fn free<F>(user: *mut c_void) {
+            // SAFETY: The box made below, freed once.
+            drop(unsafe { Box::from_raw(user as *mut F) });
+        }
+        fn register<F: Fn(Value) -> Value + 'static>(r: &abi::Registrar, name: &str, f: F) {
+            let user = Box::into_raw(Box::new(f)) as *mut c_void;
+            // SAFETY: The registrar's own host, inside the entry call.
+            unsafe {
+                (r.function_taking)(
+                    r.host,
+                    name.as_ptr(),
+                    name.len(),
+                    call::<F>,
+                    user,
+                    free::<F>,
+                )
+            }
+        }
+        register(self.registrar, name, function);
+    }
     /// Registers an action scripts bind with `ui.action(name, arg)` or call
     /// with `ui.invoke` (`ScriptHost::action`).
     pub fn action(&self, name: &str, action: impl Fn(Ref<'_>) + 'static) {
@@ -703,8 +745,7 @@ impl Host<'_> {
 }
 
 /// What [`module!`]'s entry does: checks the runtime speaks this module's
-/// interface and lays values out as this crate reads them, keeps its value
-/// functions, and runs `setup`.
+/// interface, keeps its value functions, and runs `setup`.
 ///
 /// # Safety
 /// `api` and `registrar` are the runtime's, as [`abi::Entry`] is called
@@ -723,9 +764,6 @@ pub unsafe fn enter(
         || (registrar.size as usize) < size_of::<abi::Registrar>()
     {
         return abi::REFUSED_ABI;
-    }
-    if api_ref.layout != abi::LAYOUT {
-        return abi::REFUSED_LAYOUT;
     }
     API.store(api.cast_mut(), Ordering::Relaxed);
     setup(&Host { registrar });
