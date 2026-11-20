@@ -256,13 +256,44 @@ impl Hash for Str {
     }
 }
 
+/// A count came back round to none: the program stops, as `Rc`'s does, at
+/// an instruction and not a call. A call here gives every function a clone
+/// is inlined into a frame to make it from, and made `Value`'s clone too
+/// much to inline where an iterator clones each item (2 instructions a
+/// clone, and a call an item).
+#[cold]
+#[inline(always)]
+fn overflowed() -> ! {
+    // SAFETY: An instruction that stops the program; it reads and writes
+    // nothing.
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    unsafe {
+        std::arch::asm!("ud2", options(noreturn, nomem, nostack))
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!("brk #1", options(noreturn, nomem, nostack))
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")))]
+    std::process::abort()
+}
+
+/// A slice asked for is longer than memory.
+#[cold]
+#[inline(never)]
+fn too_long() -> ! {
+    panic!("a slice's size")
+}
+
 /// A counted slice's counts: how many hold it, and how many more would if
 /// it were still there (its [`WeakSlice`]s, and one for all who hold it).
 /// Its items follow, [`ITEMS_AT`] bytes from its start: a slice points at
 /// its items, its counts that far before them, as an `Rc<str>`'s text has
 /// its own, so holding and letting go of a string, a list and a map are the
 /// same few instructions.
-#[repr(C)]
+// (Aligned as a value is wherever a pointer is narrower, the browser's
+// build among them, so items start a whole number of them past the counts.)
+#[repr(C, align(8))]
 struct Counts {
     strong: Cell<usize>,
     weak: Cell<usize>,
@@ -311,8 +342,21 @@ impl<T> Slice<T> {
             .pad_to_align()
     }
     /// Room for `len` items, held once, its items unwritten: where they go.
+    #[inline]
     fn room(len: usize) -> NonNull<T> {
-        let layout = Self::layout(len);
+        let () = Self::ALIGNED;
+        let align = align_of::<Counts>();
+        // Its counts, its items, and up to a whole alignment: `layout`'s
+        // own sum, with one check for a length no memory could hold.
+        let size = len
+            .checked_mul(size_of::<T>())
+            .and_then(|items| items.checked_add(ITEMS_AT + align - 1))
+            .map(|size| size & !(align - 1))
+            .filter(|size| *size <= isize::MAX as usize - align);
+        let Some(size) = size else { too_long() };
+        // SAFETY: A size checked above and a power of two's alignment.
+        let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+        debug_assert!(layout == Self::layout(len));
         // SAFETY: The layout is never empty: it has its counts.
         let Some(counts) = NonNull::new(unsafe { alloc::alloc(layout) }.cast::<Counts>()) else {
             alloc::handle_alloc_error(layout)
@@ -521,7 +565,7 @@ impl<T> Clone for Slice<T> {
         let held = strong.get().wrapping_add(1);
         strong.set(held);
         if held == 0 {
-            std::process::abort();
+            overflowed();
         }
         Self::held(self.at, self.len)
     }
@@ -571,13 +615,19 @@ impl<T: PartialEq> PartialEq for Slice<T> {
     }
 }
 impl<T> From<Vec<T>> for Slice<T> {
-    #[inline]
-    fn from(mut items: Vec<T>) -> Self {
-        // SAFETY: The vector's items move, and it then holds none: it frees
-        // its memory alone.
+    #[inline(always)]
+    fn from(items: Vec<T>) -> Self {
+        let mut items = std::mem::ManuallyDrop::new(items);
+        // SAFETY: The vector's items move, and its memory is then freed as
+        // a vector of nothing written: no item is dropped, or looked at.
         unsafe {
             let moved = Self::moved(items.as_ptr(), items.len());
-            items.set_len(0);
+            let (at, room) = (items.as_mut_ptr(), items.capacity());
+            drop(Vec::from_raw_parts(
+                at.cast::<std::mem::MaybeUninit<T>>(),
+                0,
+                room,
+            ));
             moved
         }
     }
@@ -637,7 +687,14 @@ impl From<Vec<(Str, Value)>> for Slice<Field> {
 impl<const N: usize> From<[(Str, Value); N]> for Slice<Field> {
     #[inline]
     fn from(fields: [(Str, Value); N]) -> Self {
-        Slice::from(fields.map(|(key, value)| Field(key, value)))
+        let at = Self::room(N);
+        // (Each pair written where it stays as a field: one move each, and
+        // nothing between them that can fail.)
+        for (i, (key, value)) in fields.into_iter().enumerate() {
+            // SAFETY: Under `N`, so inside the allocation, and unwritten.
+            unsafe { at.as_ptr().add(i).write(Field(key, value)) };
+        }
+        Self::held(at, N)
     }
 }
 impl<'a, T> IntoIterator for &'a Slice<T> {
@@ -713,6 +770,7 @@ mod tests {
     /// A value's string, list and map are a pointer and a length each, the
     /// field a key then a value: the layout native modules read.
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn the_layout_is_the_one_stated() {
         assert_eq!(size_of::<Str>(), 16);
         assert_eq!(size_of::<List>(), 16);
