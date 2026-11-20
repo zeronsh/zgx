@@ -1448,6 +1448,9 @@ export type MarkdownOptions = {
 	-- shows them: `b`/`strong`, `i`/`em`, `s`/`del`/`strike`,
 	-- `code`/`kbd`/`samp`/`tt`, `a href`, and `br` a line break.
 	html_marks: boolean?,
+	-- GFM's autolink literals are links: `https://…` as written, `www.…`
+	-- to `http://…`, an email to `mailto:` (no `ftp://`, as remark-gfm).
+	autolinks: boolean?,
 	-- With `key`: a text this long (true: 4 KB; or bytes) landing whole
 	-- comes back at once, its blocks not parsed yet `{ t = "pending" }`,
 	-- and is parsed over frames, the end first.
@@ -5981,6 +5984,8 @@ export type MarkdownViewProps = {
 	-- Inline HTML's marks style their text (`b`, `em`, `code`, `a href`,
 	-- `br`, …), as GitHub-sanitized HTML shows them.
 	html_marks: boolean?,
+	-- GFM's autolink literals (`https://…`, `www.…`, emails) are links.
+	autolinks: boolean?,
 	-- A Copy button on code blocks (true).
 	copy: boolean?,
 	-- Told of a link click (or its Open Link); true says it was handled, so the link isn't opened.

@@ -5941,6 +5941,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     breaks: flag("breaks", false)?,
                     paths: flag("paths", false)?,
                     html_marks: flag("html_marks", false)?,
+                    autolinks: flag("autolinks", false)?,
                     code: None,
                     math: on_math.is_some(),
                 },

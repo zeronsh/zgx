@@ -17,13 +17,15 @@
 //! f? (a repository file, with [`Options::paths`]) }`. A link whose address
 //! is still streaming has `a` = [`PENDING_LINK_URL`]: style it as a link,
 //! but it goes nowhere yet. Raw HTML is dropped, but for the inline marks
-//! [`Options::html_marks`] reads.
+//! [`Options::html_marks`] reads. With [`Options::autolinks`], GFM's
+//! autolink literals are links.
 //!
 //! Streaming text parses incrementally ([`Incremental`]): an append parses
 //! again only from the last top-level blocks, and the blocks before them
 //! are the same values as before, so what reads them (a script's
 //! `ui.each` over them, a reconciling [`crate::Shared`]) skips them at a
 //! pointer's glance.
+mod autolink;
 mod mend;
 pub(crate) mod view;
 
@@ -50,6 +52,11 @@ pub struct Options {
     /// kept; block HTML is dropped either way.
     #[doc(hidden)]
     pub html_marks: bool,
+    /// GFM's autolink literals are links: `https://…` as written, `www.…`
+    /// to `http://…`, and an email to `mailto:` (not `ftp://`, as
+    /// remark-gfm, which a web chat renders with, links none).
+    #[doc(hidden)]
+    pub autolinks: bool,
     /// More fields for a code block, from its language and text (coloured
     /// lines, say): `(name, value)` pairs.
     pub code: Option<CodeFields>,
@@ -552,6 +559,7 @@ impl Call {
             breaks: flag("breaks")?,
             paths: flag("paths")?,
             html_marks: flag("html_marks")?,
+            autolinks: flag("autolinks")?,
             code: None,
             math: flag("math")?,
         };
@@ -663,6 +671,7 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
         call.options.breaks,
         call.options.paths,
         call.options.html_marks,
+        call.options.autolinks,
     );
     Ok(match &call.key {
         Some(key) => {
@@ -869,8 +878,9 @@ const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
 
-/// `breaks`, `paths` and `html_marks`, as a script asked for them.
-type Flags = (bool, bool, bool);
+/// `breaks`, `paths`, `html_marks` and `autolinks`, as a script asked for
+/// them.
+type Flags = (bool, bool, bool, bool);
 type Texts = std::collections::HashMap<(String, Flags), Value>;
 /// Each keyed stream: its flags, its parse, and its last answer (whose
 /// table the next one's is derived from), with that table once a script
@@ -1618,6 +1628,15 @@ fn safe_href(href: &str) -> bool {
         .any(|s| s.eq_ignore_ascii_case(scheme))
 }
 
+/// A block's runs with their autolink literals linked
+/// (`Options::autolinks`). Out of line: a block read without them pays one
+/// test.
+#[cold]
+#[inline(never)]
+fn link_runs(runs: &mut Vec<Run>) {
+    autolink::link_runs(runs);
+}
+
 /// What is being built at each level of nesting.
 enum Frame {
     /// Blocks of a container (the document, a list item, a quote).
@@ -1906,6 +1925,9 @@ impl Builder<'_> {
             while last.text.ends_with('\n') {
                 last.text.pop();
             }
+        }
+        if self.options.autolinks {
+            link_runs(&mut runs);
         }
         runs_value(&runs)
     }
@@ -2819,6 +2841,139 @@ mod tests {
         let runs = blocks[0].field("s").unwrap().list();
         assert!(runs[2].field("b").is_none());
         assert_eq!(runs[2].field("x"), Some(&Value::from(" and")));
+    }
+
+    fn autolinks() -> Options {
+        Options {
+            autolinks: true,
+            ..plain()
+        }
+    }
+
+    #[track_caller]
+    fn links(text: &str, want: &[&str]) {
+        assert_eq!(marked(text, &autolinks()), [want], "{text:?}");
+    }
+
+    #[test]
+    fn autolink_literals_are_links_with_autolinks() {
+        // Anara's chat suite's `autolink` case, as its web chat shows it.
+        links(
+            "Plain https://example.com/path and www.example.com links.",
+            &[
+                "Plain ",
+                "https://example.com/path>https://example.com/path",
+                " and ",
+                "www.example.com>http://www.example.com",
+                " links.",
+            ],
+        );
+        links(
+            "Mail me@example.com, or (see www.a.com/x_(y)).",
+            &[
+                "Mail ",
+                "me@example.com>mailto:me@example.com",
+                ", or (see ",
+                "www.a.com/x_(y)>http://www.a.com/x_(y)",
+                ").",
+            ],
+        );
+        // Headings and cells too.
+        assert_eq!(
+            marked("# www.a.com", &autolinks()),
+            [vec!["www.a.com>http://www.a.com"]]
+        );
+    }
+
+    #[test]
+    fn an_autolink_keeps_its_marks() {
+        links("**https://a.b/c**", &["https://a.b/c+b>https://a.b/c"]);
+        links(
+            "see *www.a.com* now",
+            &["see ", "www.a.com+i>http://www.a.com", " now"],
+        );
+        // Across runs of other marks, each keeps its own.
+        links(
+            "https://a.b/**x**y",
+            &[
+                "https://a.b/>https://a.b/xy",
+                "x+b>https://a.b/xy",
+                "y>https://a.b/xy",
+            ],
+        );
+        // Text the parser gives in pieces (an entity) reads whole.
+        links(
+            "www.a.com/?a=1&amp;b=2 x",
+            &["www.a.com/?a=1&b=2>http://www.a.com/?a=1&b=2", " x"],
+        );
+    }
+
+    #[test]
+    fn code_links_and_files_hold_no_autolinks() {
+        links("`www.a.com` x", &["www.a.com+c", " x"]);
+        links(
+            "[www.a.com](https://z.y) x",
+            &["www.a.com>https://z.y", " x"],
+        );
+        links("<https://a.b> x", &["https://a.b>https://a.b", " x"]);
+        let text = "```\nhttps://a.b\n```";
+        assert_eq!(parse(text, &autolinks()), parse(text, &plain()));
+    }
+
+    #[test]
+    fn without_autolinks_text_has_none() {
+        let text = "Plain https://example.com/path and www.example.com, a@b.co.";
+        assert_eq!(
+            marked(text, &plain()),
+            [vec![
+                "Plain https://example.com/path and www.example.com, a@b.co."
+            ]]
+        );
+        let text = "a **b** *c* `d` [e](https://f.g)\n\n- one\n- two\n\n| a |\n|---|\n| b |";
+        assert_eq!(parse(text, &plain()), parse(text, &autolinks()));
+    }
+
+    #[test]
+    fn a_streaming_url_links_as_it_grows_and_ends_as_a_whole_parse() {
+        let text = "See https://example.com/a/b. Then www.x.org!";
+        let mut parser = Incremental::new(autolinks());
+        for end in 1..=text.len() {
+            parser.set_text(&text[..end]);
+            let _ = parser.blocks();
+        }
+        assert_eq!(parser.blocks(), parse(text, &autolinks()));
+        parser.set_text("See https://example.com/a/b. Then www.x.org!");
+        let runs = parser.blocks()[0].field("s").unwrap().list().to_vec();
+        assert_eq!(
+            runs[1].field("a"),
+            Some(&Value::from("https://example.com/a/b"))
+        );
+    }
+
+    #[test]
+    fn autolinks_and_html_marks_read_together() {
+        let both = Options {
+            autolinks: true,
+            html_marks: true,
+            ..plain()
+        };
+        // An HTML link's text holds no autolink; a tag's marks stay on one.
+        assert_eq!(
+            marked(
+                "<a href=\"https://z.y\">www.a.com</a> <b>www.b.com</b>",
+                &both
+            ),
+            [vec![
+                "www.a.com>https://z.y",
+                " ",
+                "www.b.com+b>http://www.b.com"
+            ]]
+        );
+        // A `<br>` ends a URL as a hard break does.
+        assert_eq!(
+            marked("https://a.b/c<br>d", &both),
+            [vec!["https://a.b/c>https://a.b/c", "\nd"]]
+        );
     }
 
     #[test]
