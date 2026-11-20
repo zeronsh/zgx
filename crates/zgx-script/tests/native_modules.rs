@@ -113,7 +113,7 @@ fn a_loaded_module_answers_scripts() {
             "[1=[key=a,value=1],2=[key=c,value=see],3=[key=drop,value=b]]",
             "nil then [held=by the module]",
             "[1=[id=a,n=1],2=[id=b,n=2]]",
-            "5050 [1=41,2=42,3=43] nil [last=k99,n=100]",
+            "5050 [1=41,2=42,3=43] nil [k57=57,last=k99,n=100,none=true]",
         ]
     );
 }
@@ -203,4 +203,94 @@ fn rust_calls_what_a_module_registered() {
         host
     });
     assert_eq!(app.error(), None);
+}
+
+/// A row kept folded: a module reads its fields as a script would, opened
+/// for it, and hands it on as it is.
+#[test]
+fn a_module_reads_a_folded_row_and_passes_it_on() {
+    struct Row;
+    impl zgx_script::Unfold for Row {
+        fn unfold(&self) -> Value {
+            Value::record([
+                ("id", Value::from("f1")),
+                ("n", Value::Num(7.)),
+                ("text", Value::from("folded")),
+            ])
+        }
+    }
+    let app = TestApp::new(|runtime| {
+        let host = ScriptHost::inline(runtime, "app", "return ui.column {}");
+        // SAFETY: This workspace's own fixture.
+        unsafe { host.load_module(library()) }.unwrap();
+        let folded = Value::folded(Rc::from("f1"), Row);
+        let fields = host.registered_function("fixture.fields").unwrap();
+        let listed = fields(folded.clone());
+        let keys: Vec<&Value> = listed
+            .list()
+            .iter()
+            .filter_map(|f| f.field("key"))
+            .collect();
+        assert_eq!(
+            keys,
+            [&Value::from("id"), &Value::from("n"), &Value::from("text")]
+        );
+        let echo = host.registered_function("fixture.echo").unwrap();
+        assert!(matches!(echo(folded), Value::Folded(_)));
+        host
+    });
+    assert_eq!(app.error(), None);
+}
+
+/// A string past 64 KiB, which the runtime holds in pieces: `text` reads it
+/// whole, `str` (which reads in place) doesn't, and it passes through.
+#[test]
+fn a_module_reads_a_long_string() {
+    let mut app = TestApp::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"
+            local long = ui.state("long", string.rep("x", 70000) .. "end")
+            local read = ui.call_sync("fixture.long", long:get())
+            local short = ui.call_sync("fixture.long", "short")
+            local back = ui.call_sync("fixture.echo", long:get())
+            return ui.text { id = "out", `{read.len} {read.str} {short.len} {short.str} {#back} {string.sub(back, -3)}` }
+            "#,
+        );
+        // SAFETY: This workspace's own fixture.
+        unsafe { host.load_module(library()) }.unwrap();
+        host
+    });
+    assert_eq!(app.error(), None);
+    assert_eq!(app.text("out"), "70003 false 5 true 70003 end");
+}
+
+/// The last hold on a value a module kept is given back to the runtime as
+/// the module lets go of it.
+#[test]
+fn a_module_frees_what_it_held_last() {
+    let list: Rc<[Value]> = Rc::from(vec![Value::from("held")]);
+    let given = list.clone();
+    let app = TestApp::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", "return ui.column {}");
+        // SAFETY: This workspace's own fixture.
+        unsafe { host.load_module(library()) }.unwrap();
+        let keep = host.registered_action("fixture.keep").unwrap();
+        let weak = Rc::downgrade(&given);
+        keep(Value::List(given));
+        assert_eq!(weak.strong_count(), 2, "held here and by the module");
+        // (The item, held by the list alone: freed with it, by the runtime.)
+        let item = match &weak.upgrade().unwrap()[0] {
+            Value::Str(text) => Rc::downgrade(text),
+            _ => unreachable!(),
+        };
+        keep(Value::Nil);
+        assert_eq!(weak.strong_count(), 1);
+        assert_eq!(item.strong_count(), 1);
+        host
+    });
+    assert_eq!(app.error(), None);
+    drop(app);
+    assert_eq!(Rc::strong_count(&list), 1);
 }

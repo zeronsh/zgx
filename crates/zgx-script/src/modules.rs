@@ -2,296 +2,244 @@
 //! apart from zgx as a library and loaded here, its functions registered as
 //! a host's own are (`ScriptHost::function`, `ScriptHost::action`).
 //!
-//! What crosses is `zgx_module::abi`: C types and functions. A [`Value`]
-//! crosses as three words, its strings, lists and maps the very `Rc`s
-//! state holds, counted not copied, so a call through a module costs the
-//! call a linked-in function costs plus a jump (docs/design/runtime.md has
-//! the measurements).
+//! What crosses is `zgx_module::abi`: C functions, and a [`Value`]'s own
+//! layout. A module is lent a value where it is and reads its text, its
+//! items and its fields there, with no call, as code linked into the app
+//! does; it calls here to make a value and to free the last hold on one
+//! (docs/design/runtime.md has the measurements).
 //!
 //! Only an app loads modules, by a path it names in Rust: nothing a script
 //! or a plugin can say loads one.
 
-use std::{ffi::c_void, path::Path, rc::Rc};
+use std::{ffi::c_void, mem::MaybeUninit, path::Path, rc::Rc, sync::OnceLock};
 
-use zgx_module::abi::{self, Api, Bytes, Raw, Registrar};
+use zgx_module::abi::{self, Api, Bytes, Layout, Raw, Registrar};
 
 use crate::{ScriptHost, Value};
 
-const NIL: Raw = Raw {
-    tag: abi::NIL,
-    a: 0,
-    b: 0,
-};
-
-/// `value` as a module owns it: what it counted, the module now does.
-#[inline]
-fn give(value: Value) -> Raw {
-    match value {
-        Value::Nil => NIL,
-        Value::Bool(b) => Raw {
-            tag: abi::BOOL,
-            a: u64::from(b),
-            b: 0,
-        },
-        Value::Num(n) => Raw {
-            tag: abi::NUM,
-            a: n.to_bits(),
-            b: 0,
-        },
-        Value::Str(s) => {
-            let len = s.len();
-            Raw {
-                tag: abi::STR,
-                a: Rc::into_raw(s) as *const u8 as u64,
-                b: len as u64,
-            }
+/// How this build lays a value out, measured: `Value` (`repr(u8)`: its
+/// kind's byte, then what it holds), an `Rc` of a string or a slice (a
+/// pointer to its counts and contents, then a length), and a map's field.
+/// A module reads values by `abi::LAYOUT`; this must be that, or none
+/// loads.
+fn measured() -> Result<Layout, String> {
+    /// The word at `offset` in `value`.
+    fn word<T>(value: &T, offset: usize) -> usize {
+        // SAFETY: Callers read inside `value`, where a pointer or a length is.
+        unsafe {
+            std::ptr::from_ref(value)
+                .cast::<u8>()
+                .add(offset)
+                .cast::<usize>()
+                .read()
         }
-        Value::List(items) => {
-            let len = items.len();
-            Raw {
-                tag: abi::LIST,
-                a: Rc::into_raw(items) as *const Value as u64,
-                b: len as u64,
-            }
-        }
-        Value::Map(fields) => {
-            let len = fields.len();
-            Raw {
-                tag: abi::MAP,
-                a: Rc::into_raw(fields) as *const (Rc<str>, Value) as u64,
-                b: len as u64,
-            }
-        }
-        other => Raw {
-            tag: abi::OTHER,
-            a: Box::into_raw(Box::new(other)) as u64,
-            b: 0,
-        },
     }
-}
-
-/// `value` as a module reads it for as long as `value` lives: nothing
-/// counted.
-#[inline]
-fn lend(value: &Value) -> Raw {
-    match value {
-        Value::Nil => NIL,
-        Value::Bool(b) => Raw {
-            tag: abi::BOOL,
-            a: u64::from(*b),
-            b: 0,
-        },
-        Value::Num(n) => Raw {
-            tag: abi::NUM,
-            a: n.to_bits(),
-            b: 0,
-        },
-        Value::Str(s) => Raw {
-            tag: abi::STR,
-            a: Rc::as_ptr(s) as *const u8 as u64,
-            b: s.len() as u64,
-        },
-        Value::List(items) => Raw {
-            tag: abi::LIST,
-            a: Rc::as_ptr(items) as *const Value as u64,
-            b: items.len() as u64,
-        },
-        Value::Map(fields) => Raw {
-            tag: abi::MAP,
-            a: Rc::as_ptr(fields) as *const (Rc<str>, Value) as u64,
-            b: fields.len() as u64,
-        },
-        other => Raw {
-            tag: abi::OTHER,
-            a: std::ptr::from_ref(other) as u64,
-            b: 0,
-        },
+    fn byte<T>(value: &T, offset: usize) -> u8 {
+        // SAFETY: Callers read an initialized byte inside `value`.
+        unsafe { std::ptr::from_ref(value).cast::<u8>().add(offset).read() }
     }
+    let unlike = |what: &str| {
+        Err(format!(
+            "this build lays {what} out another way than modules read it"
+        ))
+    };
+    if size_of::<Value>() != abi::VALUE_SIZE
+        || align_of::<Value>() != 8
+        || size_of::<Raw>() != abi::VALUE_SIZE
+    {
+        return unlike("a value");
+    }
+    // Kinds by their numbers, a boolean's byte and a number's place.
+    let (yes, number) = (Value::Bool(true), Value::Num(6.5));
+    if byte(&Value::Nil, 0) != abi::NIL
+        || (byte(&yes, 0), byte(&yes, abi::BOOL_AT)) != (abi::BOOL, 1)
+        || byte(&number, 0) != abi::NUM
+        || word(&number, abi::HELD_AT) as u64 != 6.5f64.to_bits()
+    {
+        return unlike("a boolean or a number");
+    }
+    // A string: its counted pointer, then its length; from that pointer,
+    // where its count is and where its bytes are.
+    let text: Rc<str> = Rc::from("layout");
+    let string = Value::Str(text.clone());
+    let pointer = word(&string, abi::HELD_AT);
+    let data_at = (Rc::as_ptr(&text) as *const u8 as usize).wrapping_sub(pointer);
+    // SAFETY: Read only if the pointer is `DATA_AT` before the text, so
+    // inside the `Rc`'s allocation, where its counts are.
+    let counts =
+        |held: usize| unsafe { ((pointer + abi::COUNT_AT) as *const usize).read() == held };
+    if byte(&string, 0) != abi::STR
+        || word(&string, abi::HELD_AT + 8) != text.len()
+        || data_at != abi::DATA_AT
+        || !counts(2)
+    {
+        return unlike("a string");
+    }
+    drop(text);
+    if !counts(1) {
+        return unlike("a string's count");
+    }
+    // A list and a map: the same shape, their contents a value or a field
+    // apart.
+    let items: Rc<[Value]> = Rc::from(vec![Value::Num(1.), Value::Num(2.)]);
+    let list = Value::List(items.clone());
+    if byte(&list, 0) != abi::LIST
+        || word(&list, abi::HELD_AT) + abi::DATA_AT != Rc::as_ptr(&items) as *const Value as usize
+        || word(&list, abi::HELD_AT + 8) != 2
+    {
+        return unlike("a list");
+    }
+    let fields: Rc<[(Rc<str>, Value)]> = Rc::from(vec![(Rc::from("key"), Value::Num(1.))]);
+    let map = Value::Map(fields.clone());
+    let field = &fields[0];
+    let key_at = std::ptr::from_ref(&field.0) as usize - std::ptr::from_ref(field) as usize;
+    let value_at = std::ptr::from_ref(&field.1) as usize - std::ptr::from_ref(field) as usize;
+    if byte(&map, 0) != abi::MAP
+        || word(&map, abi::HELD_AT) + abi::DATA_AT
+            != Rc::as_ptr(&fields) as *const (Rc<str>, Value) as usize
+        || word(&map, abi::HELD_AT + 8) != 1
+        || word(&field.0, 0) + abi::DATA_AT != Rc::as_ptr(&field.0) as *const u8 as usize
+        || word(&field.0, 8) != 3
+    {
+        return unlike("a map");
+    }
+    Ok(Layout {
+        value_size: size_of::<Value>() as u16,
+        bool_at: abi::BOOL_AT as u16,
+        held_at: abi::HELD_AT as u16,
+        count_at: abi::COUNT_AT as u16,
+        data_at: data_at as u16,
+        field_size: size_of::<(Rc<str>, Value)>() as u16,
+        field_key_at: key_at as u16,
+        field_value_at: value_at as u16,
+    })
 }
 
-fn str_ptr(raw: &Raw) -> *const str {
-    std::ptr::slice_from_raw_parts(raw.a as *const u8, raw.b as usize) as *const str
-}
-fn list_ptr(raw: &Raw) -> *const [Value] {
-    std::ptr::slice_from_raw_parts(raw.a as *const Value, raw.b as usize)
-}
-fn map_ptr(raw: &Raw) -> *const [(Rc<str>, Value)] {
-    std::ptr::slice_from_raw_parts(raw.a as *const (Rc<str>, Value), raw.b as usize)
-}
-
-/// An owned value a module hands back, as the [`Value`] it was.
+/// `value` written to `out`, a module's from then.
 ///
 /// # Safety
-/// `raw` is what [`give`] or one of [`API`]'s makers returned, or a clone
-/// of a lent value ([`clone`]), owned by nothing else.
-#[inline]
-unsafe fn take(raw: Raw) -> Value {
-    // SAFETY: Each pointer is the `Rc::into_raw` (or `Box::into_raw`) of
-    // its kind, with the length it had.
-    unsafe {
-        match raw.tag {
-            abi::BOOL => Value::Bool(raw.a != 0),
-            abi::NUM => Value::Num(f64::from_bits(raw.a)),
-            abi::STR => Value::Str(Rc::from_raw(str_ptr(&raw))),
-            abi::LIST => Value::List(Rc::from_raw(list_ptr(&raw))),
-            abi::MAP => Value::Map(Rc::from_raw(map_ptr(&raw))),
-            abi::OTHER => *Box::from_raw(raw.a as *mut Value),
-            _ => Value::Nil,
-        }
-    }
+/// `out` has room for a value, and holds none.
+#[inline(always)]
+unsafe fn give(value: Value, out: *mut Raw) {
+    // SAFETY: A `Raw` is a value's size and alignment (`measured`).
+    unsafe { out.cast::<Value>().write(value) }
+}
+/// The value a module lent, read where it is.
+///
+/// # Safety
+/// `raw` points at a value alive for `'a`.
+#[inline(always)]
+unsafe fn lent<'a>(raw: *const Raw) -> &'a Value {
+    // SAFETY: The caller's.
+    unsafe { &*raw.cast::<Value>() }
+}
+/// An owned value a module hands over, taken.
+///
+/// # Safety
+/// `raw` points at an owned value, not used again.
+#[inline(always)]
+unsafe fn take(raw: *mut Raw) -> Value {
+    // SAFETY: The caller's.
+    unsafe { raw.cast::<Value>().read() }
 }
 
-unsafe extern "C" fn string(ptr: *const u8, len: usize) -> Raw {
+unsafe extern "C" fn string(ptr: *const u8, len: usize, out: *mut Raw) {
     // SAFETY: The module's string, UTF-8 (a `&str` of its own).
-    let text = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) };
-    give(Value::Str(Rc::from(text)))
+    unsafe {
+        let text = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
+        give(Value::Str(Rc::from(text)), out);
+    }
 }
-unsafe extern "C" fn list(items: *mut Raw, len: usize) -> Raw {
+unsafe extern "C" fn list(items: *mut Raw, len: usize, out: *mut Raw) {
     // SAFETY: `len` owned values, taken once each.
-    let items: Rc<[Value]> = (0..len).map(|i| unsafe { take(*items.add(i)) }).collect();
-    give(Value::List(items))
+    unsafe {
+        let items: Rc<[Value]> = (0..len).map(|i| take(items.add(i))).collect();
+        give(Value::List(items), out);
+    }
 }
-unsafe extern "C" fn map(keys: *const Bytes, values: *mut Raw, len: usize) -> Raw {
+unsafe extern "C" fn map(keys: *const Bytes, values: *mut Raw, len: usize, out: *mut Raw) {
     let field = |i: usize| {
         // SAFETY: `len` keys (UTF-8) and as many owned values, taken once.
         unsafe {
             let key = *keys.add(i);
             let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key.ptr, key.len));
-            (key, take(*values.add(i)))
+            (key, take(values.add(i)))
         }
     };
-    give(Value::record((0..len).map(field)))
+    // SAFETY: Room for a value.
+    unsafe { give(Value::record((0..len).map(field)), out) }
 }
-unsafe extern "C" fn clone(value: *const Raw) -> Raw {
-    // SAFETY: A value lent or owned, alive for this call: its `Rc` is
-    // counted once more, or (another kind) the value cloned into a box.
+unsafe extern "C" fn slice(list: *const Raw, from: usize, to: usize, out: *mut Raw) {
+    // SAFETY: A value alive for this call, and room for one.
     unsafe {
-        let raw = *value;
-        match raw.tag {
-            abi::STR => Rc::increment_strong_count(str_ptr(&raw)),
-            abi::LIST => Rc::increment_strong_count(list_ptr(&raw)),
-            abi::MAP => Rc::increment_strong_count(map_ptr(&raw)),
-            abi::OTHER => return give((*(raw.a as *const Value)).clone()),
-            _ => {}
-        }
-        raw
+        let part = match lent(list) {
+            Value::List(items) => items.get(from..to),
+            _ => None,
+        };
+        give(
+            part.map_or(Value::Nil, |items| {
+                Value::List(items.iter().cloned().collect())
+            }),
+            out,
+        );
     }
 }
-unsafe extern "C" fn release(value: Raw) {
+unsafe extern "C" fn clone(value: *const Raw, out: *mut Raw) {
+    // SAFETY: A value alive for this call, and room for one.
+    unsafe { give(lent(value).clone(), out) }
+}
+unsafe extern "C" fn release(value: *mut Raw) {
     // SAFETY: An owned value, given back once.
     drop(unsafe { take(value) });
 }
-unsafe extern "C" fn items(list: *const Raw, from: usize, out: *mut Raw, cap: usize) -> usize {
-    // SAFETY: A list alive for this call, and room for `cap` values.
-    unsafe {
-        let raw = *list;
-        if raw.tag != abi::LIST {
-            return 0;
-        }
-        let items = (&*list_ptr(&raw)).get(from..).unwrap_or(&[]);
-        let n = items.len().min(cap);
-        for (i, value) in items[..n].iter().enumerate() {
-            out.add(i).write(lend(value));
-        }
-        n
-    }
-}
-unsafe extern "C" fn fields(map: *const Raw, keys: *const Bytes, len: usize, out: *mut Raw) {
-    const ABSENT: Raw = Raw {
-        tag: abi::ABSENT,
-        a: 0,
-        b: 0,
-    };
-    // SAFETY: A map alive for this call, `len` keys (UTF-8) and room for as
-    // many values.
-    unsafe {
-        let raw = *map;
-        let fields: &[(Rc<str>, Value)] = if raw.tag == abi::MAP {
-            &*map_ptr(&raw)
-        } else {
-            &[]
-        };
-        for i in 0..len {
-            let key = *keys.add(i);
-            let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key.ptr, key.len));
-            out.add(i).write(match crate::value::find_key(fields, key) {
-                Ok(at) => lend(&fields[at].1),
-                Err(_) => ABSENT,
-            });
-        }
-    }
-}
-unsafe extern "C" fn entries(
-    map: *const Raw,
-    from: usize,
-    keys: *mut Bytes,
-    values: *mut Raw,
-    cap: usize,
-) -> usize {
-    // SAFETY: A map alive for this call, room for `cap` keys and values.
-    unsafe {
-        let raw = *map;
-        if raw.tag != abi::MAP {
-            return 0;
-        }
-        let fields = (&*map_ptr(&raw)).get(from..).unwrap_or(&[]);
-        let n = fields.len().min(cap);
-        for (i, (key, value)) in fields[..n].iter().enumerate() {
-            keys.add(i).write(Bytes {
-                ptr: key.as_ptr(),
-                len: key.len(),
-            });
-            values.add(i).write(lend(value));
-        }
-        n
-    }
-}
-unsafe extern "C" fn slice(list: *const Raw, from: usize, to: usize) -> Raw {
-    // SAFETY: A list alive for this call.
-    unsafe {
-        let raw = *list;
-        if raw.tag != abi::LIST {
-            return NIL;
-        }
-        match (&*list_ptr(&raw)).get(from..to) {
-            Some(items) => give(Value::List(items.iter().cloned().collect())),
-            None => NIL,
-        }
-    }
-}
-unsafe extern "C" fn open(value: *const Raw, out: *mut Raw) -> bool {
-    // SAFETY: A value alive for this call, room for one.
-    unsafe {
-        let raw = *value;
-        if raw.tag != abi::OTHER {
-            return false;
-        }
-        let held = &*(raw.a as *const Value);
-        match held.read_through() {
-            Some(read) => {
-                *out = lend(read);
-                true
-            }
-            None => false,
-        }
+unsafe extern "C" fn open(value: *const Raw) -> *const Raw {
+    // SAFETY: A value alive for this call.
+    match unsafe { lent(value) }.read_through() {
+        Some(opened) => std::ptr::from_ref(opened).cast(),
+        None => std::ptr::null(),
     }
 }
 
-/// The value functions every module is given.
-static API: Api = Api {
-    abi: abi::ABI,
-    size: size_of::<Api>() as u32,
-    string,
-    list,
-    map,
-    clone,
-    release,
-    items,
-    fields,
-    entries,
-    slice,
-    open,
-};
+unsafe extern "C" fn flat(value: *const Raw, out: *mut Raw) {
+    // SAFETY: A value alive for this call, and room for one.
+    unsafe {
+        let whole = match lent(value) {
+            Value::Text(text) => Value::Str(Rc::from(text.to_string())),
+            _ => Value::Nil,
+        };
+        give(whole, out);
+    }
+}
+
+/// The value functions every module is given, once this build's layout is
+/// known to be the one modules read.
+fn api() -> Result<&'static Api, String> {
+    static API: OnceLock<Result<Api, String>> = OnceLock::new();
+    API.get_or_init(|| {
+        let layout = measured()?;
+        if layout != abi::LAYOUT {
+            return Err(format!(
+                "this build lays values out as {layout:?}, and modules read them as {:?}",
+                abi::LAYOUT
+            ));
+        }
+        Ok(Api {
+            abi: abi::ABI,
+            size: size_of::<Api>() as u32,
+            layout,
+            string,
+            list,
+            map,
+            slice,
+            clone,
+            release,
+            open,
+            flat,
+        })
+    })
+    .as_ref()
+    .map_err(Clone::clone)
+}
 
 /// A registration's `user`, freed with the host's hold on it.
 struct User {
@@ -324,9 +272,13 @@ unsafe extern "C" fn register_function(
     host.function(name, move |arg| {
         // (All of `user`, not its pointer alone: it frees with the closure.)
         let user = &user;
+        let mut out = MaybeUninit::<Raw>::uninit();
         // SAFETY: The module's function and its own `user`; the argument is
-        // lent for the call, and what it returns is owned.
-        unsafe { take(call(user.ptr, &lend(&arg))) }
+        // lent for the call, where it is, and what it writes is owned.
+        unsafe {
+            call(user.ptr, std::ptr::from_ref(&arg).cast(), out.as_mut_ptr());
+            take(out.as_mut_ptr())
+        }
     });
 }
 unsafe extern "C" fn register_action(
@@ -343,7 +295,7 @@ unsafe extern "C" fn register_action(
     host.action(name, move |arg| {
         let user = &user;
         // SAFETY: The module's action and its own `user`, the argument lent.
-        unsafe { call(user.ptr, &lend(&arg)) }
+        unsafe { call(user.ptr, std::ptr::from_ref(&arg).cast()) }
     });
 }
 
@@ -389,12 +341,15 @@ impl ScriptHost {
         };
         // SAFETY: The tables an entry is called with, `registrar` alive
         // through the call.
-        match unsafe { entry(&API, &registrar) } {
+        match unsafe { entry(api()?, &registrar) } {
             0 => Ok(()),
             abi::REFUSED_ABI => Err(format!(
                 "built for another module interface than this runtime's ({})",
                 abi::ABI
             )),
+            abi::REFUSED_LAYOUT => {
+                Err("built to read values another way than this runtime lays them out".into())
+            }
             code => Err(format!("the module refused to load ({code})")),
         }
     }
@@ -409,5 +364,16 @@ impl ScriptHost {
     /// host's own Rust to call.
     pub fn registered_action(&self, name: &str) -> Option<Rc<dyn Fn(Value)>> {
         self.0.actions.borrow().get(name).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Modules read values by `abi::LAYOUT`: this build's own, measured, is
+    /// that. A compiler that laid an `Rc` or a field out another way would
+    /// fail here, and at run time load no module rather than misread one.
+    #[test]
+    fn this_build_lays_values_out_as_modules_read_them() {
+        assert_eq!(super::measured(), Ok(zgx_module::abi::LAYOUT));
     }
 }
