@@ -196,21 +196,28 @@ unsafe extern "C" fn items(list: *const Raw, from: usize, out: *mut Raw, cap: us
         n
     }
 }
-unsafe extern "C" fn field(map: *const Raw, key: *const u8, len: usize, out: *mut Raw) -> bool {
-    // SAFETY: A map alive for this call, a key's UTF-8, room for a value.
+unsafe extern "C" fn fields(map: *const Raw, keys: *const Bytes, len: usize, out: *mut Raw) {
+    const ABSENT: Raw = Raw {
+        tag: abi::ABSENT,
+        a: 0,
+        b: 0,
+    };
+    // SAFETY: A map alive for this call, `len` keys (UTF-8) and room for as
+    // many values.
     unsafe {
         let raw = *map;
-        if raw.tag != abi::MAP {
-            return false;
-        }
-        let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key, len));
-        let fields = &*map_ptr(&raw);
-        match crate::value::find_key(fields, key) {
-            Ok(at) => {
-                *out = lend(&fields[at].1);
-                true
-            }
-            Err(_) => false,
+        let fields: &[(Rc<str>, Value)] = if raw.tag == abi::MAP {
+            &*map_ptr(&raw)
+        } else {
+            &[]
+        };
+        for i in 0..len {
+            let key = *keys.add(i);
+            let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key.ptr, key.len));
+            out.add(i).write(match crate::value::find_key(fields, key) {
+                Ok(at) => lend(&fields[at].1),
+                Err(_) => ABSENT,
+            });
         }
     }
 }
@@ -280,7 +287,7 @@ static API: Api = Api {
     clone,
     release,
     items,
-    field,
+    fields,
     entries,
     slice,
     open,
