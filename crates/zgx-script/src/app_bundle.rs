@@ -50,12 +50,11 @@ fn platform_of(triple: &str) -> String {
     format!("{arch}-{os}")
 }
 
-/// Whether `dir` is a bundle: it has a manifest saying so.
+/// Whether `dir` is a bundle: it has a manifest naming the bundle format
+/// (not parsed here: [`open`] reads it, and refuses one that isn't).
 pub fn is_bundle(dir: &Path) -> bool {
-    std::fs::read_to_string(dir.join("manifest.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .is_some_and(|manifest| manifest.get("zgx_bundle").is_some())
+    std::fs::read(dir.join("manifest.json"))
+        .is_ok_and(|text| text.windows(12).any(|at| at == b"\"zgx_bundle\""))
 }
 
 /// What `zgx build` is asked for.
