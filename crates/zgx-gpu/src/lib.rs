@@ -6977,34 +6977,36 @@ impl GpuRenderer {
         let mut freed = false;
         self.atlas_spent = false;
         loop {
-            // Matched where it lies, returned as made (each arm taking it
-            // by value cost a frame's stats a copy or two).
-            let result = self.render_once(scene, damage);
-            let out_of_atlas = matches!(
-                &result,
-                Err(error) if error.0 == "glyph atlas capacity exceeded in one frame"
-            );
-            if out_of_atlas && !std::mem::replace(&mut freed, true) && self.free_glyphs() {
-                continue;
+            match self.render_once(scene, damage) {
+                Err(error) if error.0 == "glyph atlas capacity exceeded in one frame" => {
+                    let gave_back = !std::mem::replace(&mut freed, true) && self.free_glyphs();
+                    if gave_back {
+                        continue;
+                    }
+                    if self.atlas_size < MAX_ATLAS {
+                        // Back to the size it had reached, not a doubling
+                        // at a time, each of which rasterizes the frame's
+                        // glyphs.
+                        let size = (self.atlas_size * 2).max(self.atlas_grew_to);
+                        self.reset_atlas(size.min(MAX_ATLAS));
+                    } else if !self.atlas_spent {
+                        self.atlas_spent = true;
+                        self.recycle_atlas();
+                        self.atlas_recycled_at = self.frame;
+                    } else {
+                        return Err(error);
+                    }
+                }
+                // (One arm takes a frame's stats as main's did: each arm
+                // more copied them once more a frame.)
+                result => {
+                    #[cfg(target_os = "macos")]
+                    if result.is_ok() {
+                        self.sync_loops(scene);
+                    }
+                    return result;
+                }
             }
-            if out_of_atlas && self.atlas_size < MAX_ATLAS {
-                // Back to the size it had reached, not a doubling at a time,
-                // each of which rasterizes the frame's glyphs.
-                let size = (self.atlas_size * 2).max(self.atlas_grew_to);
-                self.reset_atlas(size.min(MAX_ATLAS));
-                continue;
-            }
-            if out_of_atlas && !self.atlas_spent {
-                self.atlas_spent = true;
-                self.recycle_atlas();
-                self.atlas_recycled_at = self.frame;
-                continue;
-            }
-            #[cfg(target_os = "macos")]
-            if result.is_ok() {
-                self.sync_loops(scene);
-            }
-            return result;
         }
     }
     fn render_once(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
