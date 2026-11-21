@@ -71,21 +71,20 @@ impl Checked {
         {
             return;
         }
-        let mut scripts: Vec<&String> = self
-            .sums
-            .keys()
-            .filter(|rel| rel.ends_with(".luau"))
-            .collect();
-        scripts.sort();
-        let scripts: Vec<String> = scripts.into_iter().cloned().collect();
-        let scripts = Arc::new(scripts);
         for worker in 0..WORKERS {
-            let (me, scripts) = (self.clone(), scripts.clone());
+            let me = self.clone();
             self.ahead.workers.fetch_add(1, Ordering::AcqRel);
             let spawned = std::thread::Builder::new()
                 .name("zgx-read-ahead".into())
                 .spawn(move || {
-                    for rel in scripts.iter().skip(worker).step_by(WORKERS) {
+                    // (Listed here, not on the thread that asked.)
+                    let mut scripts: Vec<&String> = me
+                        .sums
+                        .keys()
+                        .filter(|rel| rel.ends_with(".luau"))
+                        .collect();
+                    scripts.sort();
+                    for rel in scripts.into_iter().skip(worker).step_by(WORKERS) {
                         if me.ahead.state.load(Ordering::Acquire) != READING {
                             break;
                         }
