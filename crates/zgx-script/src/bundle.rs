@@ -320,9 +320,20 @@ pub mod build {
     /// came from: `dir`'s own, and each package its `zgx.json` lists, under
     /// [`PACKAGES`]; the `.luaurc` aliases into a package name its copy.
     pub(crate) fn sources(dir: &Path) -> io::Result<Vec<(String, PathBuf, Vec<u8>)>> {
+        sources_skipping(dir, &[], true)
+    }
+
+    /// As `sources`, leaving out the folders in `skip` (an app's native
+    /// modules' crates, whose `target/` holds files of the kinds kept),
+    /// and telling cargo what to watch only for a build script (`cargo`).
+    pub(crate) fn sources_skipping(
+        dir: &Path,
+        skip: &[PathBuf],
+        cargo: bool,
+    ) -> io::Result<Vec<(String, PathBuf, Vec<u8>)>> {
         let read = |rel: String, path: PathBuf| Ok((rel, std::fs::read(&path)?, path));
         let mut rels = Vec::new();
-        collect(dir, dir, &mut rels)?;
+        collect(dir, dir, skip, &mut rels)?;
         let mut files = rels
             .into_iter()
             .map(|rel| {
@@ -330,11 +341,13 @@ pub mod build {
                 read(rel, path)
             })
             .collect::<io::Result<Vec<_>>>()?;
-        let packages = packages(dir)?;
+        let packages = packages(dir, cargo)?;
         for (name, folder) in &packages {
-            println!("cargo:rerun-if-changed={}", folder.display());
+            if cargo {
+                println!("cargo:rerun-if-changed={}", folder.display());
+            }
             let mut rels = Vec::new();
-            collect(folder, folder, &mut rels)?;
+            collect(folder, folder, skip, &mut rels)?;
             for rel in rels {
                 let path = folder.join(&rel);
                 files.push(read(format!("{PACKAGES}/{name}/{rel}"), path)?);
@@ -351,12 +364,14 @@ pub mod build {
     }
 
     /// The packages `dir`'s `zgx.json` lists, by name, as canonical folders.
-    fn packages(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
+    fn packages(dir: &Path, cargo: bool) -> io::Result<Vec<(String, PathBuf)>> {
         let config = dir.join("zgx.json");
         let Ok(text) = std::fs::read_to_string(&config) else {
             return Ok(Vec::new());
         };
-        println!("cargo:rerun-if-changed={}", config.display());
+        if cargo {
+            println!("cargo:rerun-if-changed={}", config.display());
+        }
         let fail = |why: String| io::Error::other(format!("{}: {why}", config.display()));
         let json: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| fail(e.to_string()))?;
@@ -412,15 +427,18 @@ pub mod build {
         serde_json::to_vec_pretty(&config).map_err(io::Error::other)
     }
 
-    fn collect(root: &Path, dir: &Path, out: &mut Vec<String>) -> io::Result<()> {
+    fn collect(root: &Path, dir: &Path, skip: &[PathBuf], out: &mut Vec<String>) -> io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
+            if skip.contains(&path) {
+                continue;
+            }
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             if name.starts_with('.') && name != ".luaurc" {
                 continue;
             }
             if path.is_dir() {
-                collect(root, &path, out)?;
+                collect(root, &path, skip, out)?;
                 continue;
             }
             let wanted = matches!(

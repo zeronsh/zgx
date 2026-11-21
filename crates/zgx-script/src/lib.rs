@@ -113,6 +113,8 @@ mod modules {
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
+pub mod app_bundle;
+#[doc(hidden)]
 pub mod module_build;
 #[doc(hidden)]
 pub mod module_types;
@@ -1319,6 +1321,9 @@ pub(crate) enum Files {
     Bundle(&'static Bundle, Code),
     /// Files held in memory (`ScriptHost::from_files`).
     Memory(std::sync::Arc<MemoryFiles>, Code),
+    /// A bundle's folder on the disk (`zgx build`'s `ui/`), read as the
+    /// disk is, file by file as asked, and loaded as its `Code` allows.
+    Folder(std::sync::Arc<std::path::Path>, Code),
 }
 /// Why a reload in place (`ScriptHost::retarget`) or a trial load
 /// (`ScriptHost::validate`) failed.
@@ -1356,12 +1361,17 @@ pub enum ScriptFiles {
     Bundle(&'static Bundle),
     /// Files held in memory: an update downloaded, say.
     Memory(std::sync::Arc<MemoryFiles>),
+    /// A bundle's folder on the disk, `zgx build`'s (`app_bundle`), read as
+    /// its files are asked for: only one whose hashes were checked
+    /// (`app_bundle::open`) may load as `Code::VerifiedBytecode`.
+    Folder(PathBuf),
 }
 impl ScriptFiles {
     fn with(self, code: Code) -> Files {
         match self {
             ScriptFiles::Bundle(bundle) => Files::Bundle(bundle, code),
             ScriptFiles::Memory(memory) => Files::Memory(memory, code),
+            ScriptFiles::Folder(dir) => Files::Folder(dir.into(), code),
         }
     }
 }
@@ -1389,17 +1399,18 @@ impl Files {
     /// source, it just fails to parse.
     fn chunk<'a>(&self, chunk: mlua::chunk::Chunk<'a>) -> mlua::chunk::Chunk<'a> {
         match self {
-            Files::Bundle(_, Code::VerifiedBytecode) | Files::Memory(_, Code::VerifiedBytecode) => {
-                chunk
-            }
-            Files::Bundle(_, Code::Source) | Files::Memory(_, Code::Source) | Files::Disk => {
-                chunk.set_mode(mlua::chunk::ChunkMode::Text)
-            }
+            Files::Bundle(_, Code::VerifiedBytecode)
+            | Files::Memory(_, Code::VerifiedBytecode)
+            | Files::Folder(_, Code::VerifiedBytecode) => chunk,
+            Files::Bundle(_, Code::Source)
+            | Files::Memory(_, Code::Source)
+            | Files::Folder(_, Code::Source)
+            | Files::Disk => chunk.set_mode(mlua::chunk::ChunkMode::Text),
         }
     }
     pub(crate) fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         match self {
-            Files::Disk => std::fs::read(path),
+            Files::Disk | Files::Folder(..) => std::fs::read(path),
             Files::Memory(files, _) => files.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's files")
             }),
@@ -1414,6 +1425,7 @@ impl Files {
             Files::Disk => None,
             Files::Bundle(bundle, _) => Some(PathBuf::from(bundle.root)),
             Files::Memory(memory, _) => Some(PathBuf::from(memory.root_path())),
+            Files::Folder(dir, _) => Some(dir.to_path_buf()),
         }
     }
     /// The packages it holds (none on the disk: `ScriptHost::package`).
@@ -1422,6 +1434,18 @@ impl Files {
             Files::Disk => Vec::new(),
             Files::Bundle(bundle, _) => bundle.packages(),
             Files::Memory(memory, _) => memory.packages(),
+            // As `build::bundle` stores them: `.packages/<name>/`.
+            Files::Folder(dir, _) => {
+                let mut names: Vec<String> = std::fs::read_dir(dir.join(bundle::build::PACKAGES))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|entry| entry.path().is_dir())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            }
         }
     }
     fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String> {
@@ -1429,7 +1453,7 @@ impl Files {
     }
     fn is_dir(&self, path: &std::path::Path) -> bool {
         match self {
-            Files::Disk => path.is_dir(),
+            Files::Disk | Files::Folder(..) => path.is_dir(),
             Files::Bundle(bundle, _) => bundle.is_dir(path),
             Files::Memory(files, _) => files.is_dir(path),
         }
@@ -1437,7 +1461,7 @@ impl Files {
     /// The files in directory `dir`.
     fn list(&self, dir: &std::path::Path) -> Vec<PathBuf> {
         match self {
-            Files::Disk => std::fs::read_dir(dir)
+            Files::Disk | Files::Folder(..) => std::fs::read_dir(dir)
                 .into_iter()
                 .flatten()
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
@@ -1658,6 +1682,15 @@ fn require_module<const LENDING: bool>(
     } else {
         files
     };
+    // A module of the app's own checked bundle (a package it lends, its
+    // design system, say) is the bundle's bytecode whichever VM requires
+    // it: a plugin's reads it as the app's does, and can't change it.
+    let files = match host.upgrade().map(|h| h.files.borrow().clone()) {
+        Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(dir, _) if within(dir, &path)) => {
+            app
+        }
+        _ => files,
+    };
     // While the host watches its files: who requires what (`reloads`).
     let tracker = if LENDING || !reloads::recording() {
         None
@@ -1742,7 +1775,7 @@ fn require_module<const LENDING: bool>(
             .and_then(|h| h.sources.compiled(&path, &code))
             // Compiled ahead while the app's window was made (`compile_ahead`).
             .or_else(|| sources::prefetched(&code)),
-        Files::Bundle(..) | Files::Memory(..) => None,
+        Files::Bundle(..) | Files::Memory(..) | Files::Folder(..) => None,
     };
     let bytecode = match package.as_deref() {
         Some(package) => package.bytecode(),
@@ -2427,7 +2460,7 @@ impl ScriptHost {
     /// for the disk's (always read as source).
     fn code_mode(&self) -> Code {
         match &*self.0.files.borrow() {
-            Files::Bundle(_, code) | Files::Memory(_, code) => *code,
+            Files::Bundle(_, code) | Files::Memory(_, code) | Files::Folder(_, code) => *code,
             Files::Disk => Code::Source,
         }
     }
@@ -2460,6 +2493,7 @@ impl ScriptHost {
             match files {
                 Files::Bundle(bundle, _) => *files = Files::Bundle(bundle, code),
                 Files::Memory(memory, _) => *files = Files::Memory(memory.clone(), code),
+                Files::Folder(dir, _) => *files = Files::Folder(dir.clone(), code),
                 Files::Disk => {}
             }
         })
@@ -3984,7 +4018,7 @@ impl ScriptHost {
         if !cfg!(debug_assertions)
             || matches!(
                 *self.0.files.borrow(),
-                Files::Bundle(..) | Files::Memory(..)
+                Files::Bundle(..) | Files::Memory(..) | Files::Folder(..)
             )
             || zgx::env::var_os("ZGX_LINT").is_some_and(|v| v == "0")
         {
@@ -4405,7 +4439,7 @@ impl ScriptHost {
             }
             if matches!(
                 *host.0.files.borrow(),
-                Files::Bundle(..) | Files::Memory(..)
+                Files::Bundle(..) | Files::Memory(..) | Files::Folder(..)
             ) && host.0.managed.borrow().is_empty()
             {
                 return;
@@ -5072,6 +5106,11 @@ impl ScriptHost {
             }
             (Files::Memory(memory, _), Script::File(path) | Script::Plugin { path, .. })
                 if plugin && !path.starts_with(memory.root_path()) =>
+            {
+                Files::Disk
+            }
+            (Files::Folder(dir, _), Script::File(path) | Script::Plugin { path, .. })
+                if plugin && !path.starts_with(&*dir) =>
             {
                 Files::Disk
             }
