@@ -224,7 +224,7 @@ impl Incremental {
             // What it is, if it makes a block (raw HTML doesn't).
             if let Some(Value::Str(hint)) = self.tops[at].blocks.first().cloned() {
                 let (from, to) = self.top_range(at);
-                self.tops[at].blocks = vec![pending_block(text, from, to, hint.into())];
+                self.tops[at].blocks = vec![pending_block(text, from, to, hint)];
             }
         }
         self.pending_below = u32::try_from(self.tops.len()).unwrap_or(u32::MAX);
@@ -903,12 +903,12 @@ fn scan_tops(text: &str) -> Vec<Top> {
 }
 
 /// The stand-in for a top-level element not parsed yet.
-fn pending_block(text: &str, from: usize, to: usize, hint: Rc<str>) -> Value {
+fn pending_block(text: &str, from: usize, to: usize, hint: Str) -> Value {
     let own = text[from..to].trim_end();
     let num = |n: usize| Value::Num(n as f64);
     map(vec![
         ("t", Value::Str(Str::from(PENDING))),
-        ("hint", Value::Str(hint.into())),
+        ("hint", Value::Str(hint)),
         ("lines", num(own.lines().count().max(1))),
         ("from", num(from + 1)),
         ("to", num(from + own.len())),
@@ -1344,10 +1344,7 @@ fn link_of(href: &str, paths: bool) -> Link {
 }
 
 fn map(fields: Vec<(&str, Value)>) -> Value {
-    let mut fields: Vec<Field> = fields
-        .into_iter()
-        .map(|(k, v)| Field(Str::from(key(k)), v))
-        .collect();
+    let mut fields: Vec<Field> = fields.into_iter().map(|(k, v)| Field(key(k), v)).collect();
     fields.sort_by(|a, b| a.0.cmp(&b.0));
     Value::Map(fields.into())
 }
@@ -1356,16 +1353,16 @@ thread_local! {
     /// The field names blocks and runs are made with (`map`), each made
     /// once: a document's every block and run named its fields anew, an
     /// allocation each. At most `KEYS` (a code block's own fields add some).
-    static NAMES: std::cell::RefCell<Vec<Rc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static NAMES: std::cell::RefCell<Vec<Str>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 const KEYS: usize = 64;
 /// `name` as the field name blocks share (`NAMES`).
-fn key(name: &str) -> Rc<str> {
+fn key(name: &str) -> Str {
     NAMES.with_borrow_mut(|names| {
         if let Some(kept) = names.iter().find(|kept| &***kept == name) {
             return kept.clone();
         }
-        let made: Rc<str> = Rc::from(name);
+        let made = Str::from(name);
         if names.len() < KEYS {
             names.push(made.clone());
         }

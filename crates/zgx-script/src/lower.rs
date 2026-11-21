@@ -1142,7 +1142,7 @@ fn computed_fn(app: &Vm, value: impl Fn() -> Value + 'static) -> Option<mlua::Fu
 /// `source`'s value now, as a script reads it: a string or a boolean.
 fn value_now(source: &Owned, ty: Ty, app: &Vm) -> Value {
     match resolve(source, ty, None, app) {
-        Some(Lit::Str(text)) => Value::Str(text.into()),
+        Some(Lit::Str(text)) => Value::Str(text),
         Some(Lit::Bool(b)) => Value::Bool(b),
         _ => Value::Nil,
     }
@@ -1249,7 +1249,10 @@ fn filtered(
                 }
             },
             Filtered::Label => {
-                let written = copy.label.take().map(|label| Source::Lit(Lit::Str(label)));
+                let written = copy
+                    .label
+                    .take()
+                    .map(|label| Source::Lit(Lit::Str(label.into())));
                 let a11y = copy.a11y.get_or_insert_default();
                 let source = a11y.label.take().or(written);
                 a11y.label = filtered_source(source.as_ref(), Value::Nil, Ty::Str, plugin, f, &app);
@@ -2193,7 +2196,7 @@ enum Quick {
     Nil,
     Bool(bool),
     Num(u64),
-    Str(Rc<str>),
+    Str(crate::Str),
     At(usize),
 }
 fn quick(item: &Value) -> Quick {
@@ -2201,7 +2204,7 @@ fn quick(item: &Value) -> Quick {
         Value::Nil => Quick::Nil,
         Value::Bool(b) => Quick::Bool(*b),
         Value::Num(n) => Quick::Num(if *n == 0. { 0 } else { n.to_bits() }),
-        Value::Str(s) => Quick::Str(s.rc()),
+        Value::Str(s) => Quick::Str(s.clone()),
         Value::Text(t) => Quick::Str(t.to_cow().into()),
         Value::List(l) => Quick::At(Slice::as_ptr(l).cast::<()>() as usize),
         Value::Map(m) => Quick::At(Slice::as_ptr(m).cast::<()>() as usize),
@@ -7329,7 +7332,7 @@ fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Opt
 }
 fn resolve_value(source: &Owned, vm: &Vm) -> Value {
     match source {
-        Owned::Lit(Lit::Str(s)) => Value::Str(s.clone().into()),
+        Owned::Lit(Lit::Str(s)) => Value::Str(s.clone()),
         Owned::Lit(Lit::Num(n)) => Value::Num(*n as f64),
         Owned::Lit(Lit::Bool(b)) => Value::Bool(*b),
         Owned::State(s) => s.get(),
@@ -7502,13 +7505,13 @@ fn lower_text(text: &Text, vm: &Rc<Vm>) -> View {
 /// What an image's `src` shows now: a picture to load by its path, or a
 /// bitmap itself (`ui.bitmap`, a pasted image, one kept in state).
 enum Picture {
-    Path(Rc<str>),
+    Path(crate::Str),
     Image(Arc<ImageData>),
 }
 fn picture_of(src: &Owned, vm: &Vm) -> Option<Picture> {
     let of = |value: &Value| match value {
         Value::Image(image) => Some(Picture::Image(image.clone())),
-        Value::Str(path) => Some(Picture::Path(path.rc())),
+        Value::Str(path) => Some(Picture::Path(path.clone())),
         _ => None,
     };
     match src {
@@ -7595,7 +7598,7 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
             image_signal(label.clone(), move || {
                 let image = match picture_of(&src, &vm2) {
                     Some(Picture::Image(image)) => {
-                        told.loaded(&vm2, Rc::from("bitmap"), &image);
+                        told.loaded(&vm2, crate::Str::from("bitmap"), &image);
                         image
                     }
                     Some(Picture::Path(path)) => match try_load_image(&vm2, &low2, &path) {
@@ -7786,7 +7789,7 @@ struct ToldInner {
     events: Option<Rc<crate::node::ImageEvents>>,
     timers: Option<Rc<crate::timers::Timers>>,
     /// The `src` last told of, and whether it loaded.
-    last: std::cell::RefCell<Option<(Rc<str>, bool)>>,
+    last: std::cell::RefCell<Option<(crate::Str, bool)>>,
 }
 impl Told {
     fn new(events: Option<Rc<crate::node::ImageEvents>>, low: &Lowering) -> Self {
@@ -7798,7 +7801,7 @@ impl Told {
         }))
     }
     /// Whether `src` is new to tell of (its outcome `loaded`).
-    fn first(&self, src: &Rc<str>, loaded: bool) -> bool {
+    fn first(&self, src: &crate::Str, loaded: bool) -> bool {
         let mut last = self.0.last.borrow_mut();
         if last
             .as_ref()
@@ -7809,7 +7812,7 @@ impl Told {
         *last = Some((src.clone(), loaded));
         true
     }
-    fn loaded(&self, vm: &Rc<Vm>, src: Rc<str>, image: &ImageData) {
+    fn loaded(&self, vm: &Rc<Vm>, src: crate::Str, image: &ImageData) {
         let Some(on_load) = self.0.events.as_ref().and_then(|e| e.on_load.clone()) else {
             return;
         };
@@ -7825,7 +7828,7 @@ impl Told {
         });
     }
     #[cold]
-    fn failed(&self, vm: &Rc<Vm>, src: Rc<str>, why: String) {
+    fn failed(&self, vm: &Rc<Vm>, src: crate::Str, why: String) {
         if !self.first(&src, false) {
             return;
         }
@@ -7875,14 +7878,14 @@ fn swept(view: View, low: &Lowering) -> View {
 enum ListKey {
     Index(usize),
     Num(u64),
-    Str(Rc<str>),
+    Str(crate::Str),
     Bool(bool),
 }
 impl ListKey {
     fn of(value: &Value) -> Option<ListKey> {
         Some(match value {
             Value::Num(n) => ListKey::Num(if *n == 0. { 0 } else { n.to_bits() }),
-            Value::Str(s) => ListKey::Str(s.rc()),
+            Value::Str(s) => ListKey::Str(s.clone()),
             Value::Bool(b) => ListKey::Bool(*b),
             _ => return None,
         })
@@ -7891,7 +7894,7 @@ impl ListKey {
         match self {
             ListKey::Index(i) => Value::Num((i + 1) as f64),
             ListKey::Num(bits) => Value::Num(f64::from_bits(*bits)),
-            ListKey::Str(s) => Value::Str(s.clone().into()),
+            ListKey::Str(s) => Value::Str(s.clone()),
             ListKey::Bool(b) => Value::Bool(*b),
         }
     }
@@ -7937,7 +7940,7 @@ fn list_keys(vm: &Vm, key: &mlua::Function, count: usize, last: &mut Vec<ListKey
                 Ok(mlua::Value::Integer(n)) => Some(ListKey::of(&Value::Num(n as f64))),
                 Ok(mlua::Value::Boolean(b)) => Some(Some(ListKey::Bool(b))),
                 Ok(mlua::Value::String(s)) => {
-                    Some(Some(ListKey::Str(Rc::from(&*s.to_string_lossy()))))
+                    Some(Some(ListKey::Str(crate::Str::from(&*s.to_string_lossy()))))
                 }
                 _ => None,
             };
@@ -8547,7 +8550,7 @@ fn item_keys(vm: &Vm, key: &mlua::Function, items: &Value, kept: &mut KeptKeys) 
                         Ok(mlua::Value::Integer(v)) => ListKey::of(&Value::Num(v as f64)),
                         Ok(mlua::Value::Boolean(b)) => Some(ListKey::Bool(b)),
                         Ok(mlua::Value::String(s)) => {
-                            Some(ListKey::Str(Rc::from(&*s.to_string_lossy())))
+                            Some(ListKey::Str(crate::Str::from(&*s.to_string_lossy())))
                         }
                         _ => None,
                     };
@@ -8980,8 +8983,8 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     struct OwnedSpan {
         text: Text,
         style: SpanStyle,
-        font: Option<Rc<str>>,
-        lang: Option<Rc<str>>,
+        font: Option<crate::Str>,
+        lang: Option<crate::Str>,
         followed: Vec<(&'static str, Ty, Owned)>,
         click: Option<Handler>,
         href: Option<Arc<str>>,

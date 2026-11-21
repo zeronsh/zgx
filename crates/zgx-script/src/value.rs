@@ -586,22 +586,21 @@ impl Value {
                 let mut unchanged = new.len() == was.len();
                 // Straight into the shared slice: one allocation, not a
                 // vector's and then a copy of it.
-                let items: List = new
-                    .iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        let prior = match &ids {
-                            Some(ids) => id_of(item).and_then(|id| ids.get(&id).copied()),
-                            None => was.get(i),
-                        };
-                        let item = match prior {
-                            Some(prior) => item.clone().reconcile(prior),
-                            None => item.clone(),
-                        };
-                        unchanged = unchanged && was.get(i).is_some_and(|w| same(&item, w));
-                        item
-                    })
-                    .collect();
+                // (Each written in its place as it is made, with nothing
+                // checked between them: a long list's every item.)
+                let items: List = List::filled(new.len(), |i| {
+                    let item = &new[i];
+                    let prior = match &ids {
+                        Some(ids) => id_of(item).and_then(|id| ids.get(&id).copied()),
+                        None => was.get(i),
+                    };
+                    let item = match prior {
+                        Some(prior) => item.clone().reconcile(prior),
+                        None => item.clone(),
+                    };
+                    unchanged = unchanged && was.get(i).is_some_and(|w| same(&item, w));
+                    item
+                });
                 if unchanged {
                     old.clone()
                 } else {
@@ -617,26 +616,24 @@ impl Value {
                 // Both sorted by key: walk them together.
                 let mut unchanged = new.len() == was.len();
                 let mut at = 0;
-                let fields: Map = new
-                    .iter()
-                    .map(|Field(key, value)| {
-                        // Most often the same keys: equal is told first.
-                        while at < was.len() && !key_eq(&was[at].0, key) && *was[at].0 < **key {
-                            at += 1;
+                let fields: Map = Map::filled(new.len(), |i| {
+                    let Field(key, value) = &new[i];
+                    // Most often the same keys: equal is told first.
+                    while at < was.len() && !key_eq(&was[at].0, key) && *was[at].0 < **key {
+                        at += 1;
+                    }
+                    match was.get(at) {
+                        Some(Field(k, v)) if key_eq(k, key) => {
+                            let value = value.clone().reconcile(v);
+                            unchanged = unchanged && same(&value, v);
+                            Field(k.clone(), value)
                         }
-                        match was.get(at) {
-                            Some(Field(k, v)) if key_eq(k, key) => {
-                                let value = value.clone().reconcile(v);
-                                unchanged = unchanged && same(&value, v);
-                                (k.clone(), value)
-                            }
-                            _ => {
-                                unchanged = false;
-                                (key.clone(), value.clone())
-                            }
+                        _ => {
+                            unchanged = false;
+                            Field(key.clone(), value.clone())
                         }
-                    })
-                    .collect();
+                    }
+                });
                 if unchanged {
                     old.clone()
                 } else {
@@ -665,7 +662,7 @@ impl Value {
     /// A table kept as `source` until it's read: to scripts, what `source`
     /// opens to, its table going when no script holds it. `id` is its `id`
     /// field, read without opening it (a list's key). Equal only to itself.
-    pub fn folded(id: Rc<str>, source: impl Unfold + 'static) -> Value {
+    pub fn folded(id: impl Into<Str>, source: impl Unfold + 'static) -> Value {
         Folded::value(Value::Str(id.into()), source)
     }
     /// It to read through, a folded value opened for this reading only: for
@@ -1027,7 +1024,7 @@ fn convert_in(value: mlua::Value, old: Option<&Value>, depth: u32) -> mlua::Resu
             Some(Value::Str(o)) if *s.as_bytes() == *o.as_bytes() => Value::Str(o.clone()),
             Some(Value::Text(o)) if same_text(o, &s.as_bytes()) => Value::Text(o.clone()),
             _ if s.as_bytes().len() > zgx::text::LONG => long_string(&s.as_bytes()),
-            _ => Value::Str(str_of(&s.as_bytes()).into()),
+            _ => Value::Str(str_of(&s.as_bytes())),
         },
         mlua::Value::Table(t) => match t
             .weak_lua()
@@ -1100,7 +1097,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
     struct Cx<'a> {
         held: Option<std::cell::Ref<'a, FxHashMap<usize, (Value, usize)>>>,
         /// By the Luau string's address (no script chooses it, so Fx).
-        strings: FxHashMap<usize, Rc<str>>,
+        strings: FxHashMap<usize, Str>,
         /// The items and fields of the tables being read, on one stack each:
         /// a table, once read, is its own moved off into one allocation,
         /// where a vector of its own would grow, then be copied (as
@@ -1144,7 +1141,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
                         Some(Value::Str(o)) if o.as_bytes() == bytes => Value::Str(o.clone()),
                         Some(Value::Text(o)) if same_text(o, bytes) => Value::Text(o.clone()),
                         _ if bytes.len() > zgx::text::LONG => long_string(bytes),
-                        _ => Value::Str(string(cx, data as usize, bytes).into()),
+                        _ => Value::Str(string(cx, data as usize, bytes)),
                     }
                 }
                 ffi::LUA_TLIGHTUSERDATA
@@ -1157,7 +1154,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
             })
         }
     }
-    fn string(cx: &mut Cx, at: usize, bytes: &[u8]) -> Rc<str> {
+    fn string(cx: &mut Cx, at: usize, bytes: &[u8]) -> Str {
         cx.strings
             .entry(at)
             .or_insert_with(|| str_of(bytes))
@@ -1232,7 +1229,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
                             .map(|i| &was_fields[i]);
                         let key = match prior {
                             Some(Field(k, _)) => k.clone(),
-                            None => string(cx, data as usize, bytes).into(),
+                            None => string(cx, data as usize, bytes),
                         };
                         read(state, top, prior.map(|Field(_, v)| v), depth + 1, cx)
                             .map(|v| cx.keyed.push(Field(key, v)))
@@ -1690,9 +1687,9 @@ thread_local! {
 /// A Luau string's text, invalid UTF-8 replaced (as `to_string_lossy`), in
 /// one allocation: valid text (nearly every string) is copied once, not
 /// scanned for invalid sequences into a `String` and copied again.
-fn str_of(bytes: &[u8]) -> Rc<str> {
+fn str_of(bytes: &[u8]) -> Str {
     match std::str::from_utf8(bytes) {
-        Ok(text) => Rc::from(text),
+        Ok(text) => Str::from(text),
         Err(_) => String::from_utf8_lossy(bytes).into(),
     }
 }
@@ -1727,20 +1724,8 @@ pub(crate) fn forget_streamed_edits() {
 /// `was` then `text`, made where it is kept: one copy of each, where a
 /// `String` turned into an `Rc<str>` copies the whole again (an append
 /// never costs more than setting the joined text would).
-fn joined(was: &str, text: &str) -> Rc<str> {
-    let mut bytes = Rc::<[u8]>::new_uninit_slice(was.len() + text.len());
-    let slot = Rc::get_mut(&mut bytes).expect("just made");
-    // SAFETY: `slot` has room for both, which don't overlap it, and every
-    // byte of it is written before it is read.
-    let bytes = unsafe {
-        let at = slot.as_mut_ptr().cast::<u8>();
-        std::ptr::copy_nonoverlapping(was.as_ptr(), at, was.len());
-        std::ptr::copy_nonoverlapping(text.as_ptr(), at.add(was.len()), text.len());
-        bytes.assume_init()
-    };
-    // SAFETY: two strings one after the other are UTF-8, and `str` has
-    // `[u8]`'s layout.
-    unsafe { Rc::from_raw(Rc::into_raw(bytes) as *const str) }
+fn joined(was: &str, text: &str) -> Str {
+    Str::joined(was, text)
 }
 /// `text` added to `was` (`state:append`): a long string takes it where it
 /// ends, its chunks shared and the edit kept, so an editor bound to it
@@ -1756,7 +1741,7 @@ fn appended(was: Option<&Value>, text: &str) -> mlua::Result<Value> {
         Some(Value::Str(was)) if was.len() + text.len() > zgx::text::LONG => {
             Value::Text(zgx::text::Text::new(&format!("{was}{text}")))
         }
-        Some(Value::Str(was)) => Value::Str(joined(was, text).into()),
+        Some(Value::Str(was)) => Value::Str(joined(was, text)),
         None | Some(Value::Nil) => Value::Str(text.into()),
         Some(_) => {
             return Err(mlua::Error::runtime(
@@ -3662,7 +3647,7 @@ mod tests {
                 Value::record([("id", Value::from("r1")), ("text", Value::from("hello"))])
             }
         }
-        let value = Value::folded(Str::from("r1").into(), Row);
+        let value = Value::folded("r1", Row);
         let Value::Folded(folded) = &value else {
             panic!("folded")
         };

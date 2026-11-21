@@ -3,10 +3,10 @@
 //! (10,000 messages' `id` share one).
 
 use crate::Field;
+use crate::Str;
 use crate::value::Value;
 use rustc_hash::FxHashMap;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
-use std::rc::Rc;
 
 /// `text`, which must be JSON whole, as a value: objects as maps (their keys
 /// sorted, the last of a key given twice kept, as serde_json's map keeps
@@ -30,16 +30,16 @@ pub(crate) fn parse_bytes(text: &[u8]) -> serde_json::Result<Value> {
 /// then be copied.
 #[derive(Default)]
 struct Keys {
-    known: FxHashMap<Box<str>, Rc<str>>,
+    known: FxHashMap<Box<str>, Str>,
     items: Vec<Value>,
     fields: Vec<Field>,
 }
 impl Keys {
-    fn get(&mut self, key: &str) -> Rc<str> {
+    fn get(&mut self, key: &str) -> Str {
         if let Some(known) = self.known.get(key) {
             return known.clone();
         }
-        let made: Rc<str> = key.into();
+        let made: Str = key.into();
         self.known.insert(key.into(), made.clone());
         made
     }
@@ -86,7 +86,7 @@ impl<'de> Visitor<'de> for Json<'_> {
         let from = self.0.fields.len();
         while let Some(key) = entries.next_key_seed(Key(&mut *self.0))? {
             let value = entries.next_value_seed(Json(&mut *self.0))?;
-            self.0.fields.push(Field(key.into(), value));
+            self.0.fields.push(Field(key, value));
         }
         let fields = &mut self.0.fields[from..];
         // Sorted, as maps are (often they come so); a key given twice keeps
@@ -111,17 +111,17 @@ impl<'de> Visitor<'de> for Json<'_> {
 
 struct Key<'a>(&'a mut Keys);
 impl<'de> DeserializeSeed<'de> for Key<'_> {
-    type Value = Rc<str>;
-    fn deserialize<D: Deserializer<'de>>(self, reader: D) -> Result<Rc<str>, D::Error> {
+    type Value = Str;
+    fn deserialize<D: Deserializer<'de>>(self, reader: D) -> Result<Str, D::Error> {
         reader.deserialize_str(self)
     }
 }
 impl<'de> Visitor<'de> for Key<'_> {
-    type Value = Rc<str>;
+    type Value = Str;
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str("a key")
     }
-    fn visit_str<E>(self, key: &str) -> Result<Rc<str>, E> {
+    fn visit_str<E>(self, key: &str) -> Result<Str, E> {
         Ok(self.0.get(key))
     }
 }
