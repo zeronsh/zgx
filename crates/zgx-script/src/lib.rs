@@ -1326,6 +1326,10 @@ pub(crate) enum Files {
     /// loaded as its `Code` allows.
     Folder(checked_files::Checked, Code),
 }
+// Every host holds one, and each `require` clones it: a pointer and a word,
+// whatever its kind (a larger one moved the heap's layout under every
+// scene of the perf gate).
+const _: () = assert!(std::mem::size_of::<Files>() <= 16);
 /// Why a reload in place (`ScriptHost::retarget`) or a trial load
 /// (`ScriptHost::validate`) failed.
 #[doc(hidden)]
@@ -1427,7 +1431,7 @@ impl Files {
             Files::Disk => None,
             Files::Bundle(bundle, _) => Some(PathBuf::from(bundle.root)),
             Files::Memory(memory, _) => Some(PathBuf::from(memory.root_path())),
-            Files::Folder(checked, _) => Some(checked.dir.to_path_buf()),
+            Files::Folder(checked, _) => Some(checked.dir().to_path_buf()),
         }
     }
     /// The packages it holds (none on the disk: `ScriptHost::package`).
@@ -1439,7 +1443,7 @@ impl Files {
             // As `build::bundle` stores them: `.packages/<name>/`.
             Files::Folder(checked, _) => {
                 let mut names: Vec<String> =
-                    std::fs::read_dir(checked.dir.join(bundle::build::PACKAGES))
+                    std::fs::read_dir(checked.dir().join(bundle::build::PACKAGES))
                         .into_iter()
                         .flatten()
                         .flatten()
@@ -1693,7 +1697,7 @@ fn require_module<const LENDING: bool>(
     let files = match files {
         Files::Folder(..) => files,
         files => match host.upgrade().map(|h| h.files.borrow().clone()) {
-            Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(&checked.dir, &path)) => {
+            Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(checked.dir(), &path)) => {
                 app
             }
             _ => files,
@@ -5121,7 +5125,7 @@ impl ScriptHost {
                 Files::Disk
             }
             (Files::Folder(checked, _), Script::File(path) | Script::Plugin { path, .. })
-                if plugin && !path.starts_with(&*checked.dir) =>
+                if plugin && !path.starts_with(checked.dir()) =>
             {
                 Files::Disk
             }
