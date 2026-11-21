@@ -474,6 +474,8 @@ pub fn run_hosting(
     // as the build compiled them, its modules' libraries for this platform.
     let bundle = if zgx_script::app_bundle::is_bundle(path) {
         let opened = zgx_script::app_bundle::open(path)?;
+        // Its scripts read and checked while the window is made.
+        opened.read_ahead();
         if zgx::env::var_os("ZGX_BUNDLE_TIMING").is_some() {
             eprintln!(
                 "zgx-run: bundle checked in {:.2} ms",

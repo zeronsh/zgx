@@ -4769,8 +4769,13 @@ impl ScriptHost {
         loaded
     }
     fn load_anew(&self) -> Result<Loaded, String> {
-        // What `compile_ahead` compiled goes as this load ends.
+        // What `compile_ahead` compiled goes as this load ends, and what a
+        // bundle's files read ahead.
         let _ahead = sources::ReleaseAhead;
+        let _read = checked_files::ReleaseRead(match &*self.0.files.borrow() {
+            Files::Folder(checked, _) => Some(checked.clone()),
+            _ => None,
+        });
         if let Some(tracker) = tracking(&self.0) {
             tracker.begin(self.app_key());
         }
