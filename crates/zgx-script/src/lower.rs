@@ -6683,7 +6683,8 @@ fn code_editor(
     };
     let ranges = Rc::new(ranges);
     // A highlighter's `{ { from, to, color?, weight =, italic =, strike =,
-    // bg = } }`: positional as `ranges`, its styles by name.
+    // bg =, size =, line_height =, underline =, font = "mono" } }`:
+    // positional as `ranges`, its styles by name.
     let spans = {
         let color_of = color_of.clone();
         move |list: &mlua::Table| {
@@ -6731,6 +6732,30 @@ fn code_editor(
                         Some(b"bg") => {
                             style.background = value.as_str().and_then(&*color_of);
                             styled |= style.background.is_some();
+                        }
+                        // Rare (a note's headings, its inline code): kept
+                        // apart, so a span without them stays as small.
+                        Some(b"size") => {
+                            if let Some(size) = number(&value) {
+                                style = style.size(size.clamp(1., 512.) as f32);
+                                styled = true;
+                            }
+                        }
+                        Some(b"line_height") => {
+                            if let Some(pitch) = number(&value) {
+                                style = style.line_height(pitch.clamp(1., 1024.) as f32);
+                                styled = true;
+                            }
+                        }
+                        Some(b"underline") => {
+                            style.underline = yes(&value);
+                            styled |= style.underline;
+                        }
+                        Some(b"font") => {
+                            if value.as_str().is_some_and(|font| font == "mono") {
+                                style = style.mono();
+                                styled = true;
+                            }
                         }
                         Some(_) => {}
                     }
