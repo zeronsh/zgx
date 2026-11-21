@@ -1,12 +1,12 @@
 //! An editor's copies and cuts through the app (`View::on_copy`): the app says what goes on the clipboard,
 //! text with HTML beside it, or nothing for the selection's plain text. Its context menu and
-//! `EditorHandle::copy_to_clipboard` / `cut_to_clipboard` ask it (⌘C, ⌘X and the Edit menu, in zgx-desktop,
-//! go through the same `Ui::copy_from`). A password field never asks it, nor does an empty selection.
+//! `EditorHandle::copy_to_clipboard` / `cut_to_clipboard` ask it, as do the keys `zgx inspect` sends
+//! (`Ui::clipboard_shortcut`); ⌘C, ⌘X and the Edit menu, in zgx-desktop, go through the same `Ui::copy_from`. A password field never asks it, nor does an empty selection.
 //! The clipboard is this test's, in memory: never the machine's.
 use std::{cell::RefCell, rc::Rc};
 use zgx::{
     compose::{ViewHandle, prelude::*},
-    input::{InputEvent, PointerButton},
+    input::{InputEvent, Key, Modifiers, PointerButton},
     platform::PlatformService,
     widgets::{ClipboardContent, CopyRequest, EditorHandle, Ui},
 };
@@ -217,4 +217,66 @@ fn a_cut_in_a_read_only_editor_is_a_copy() {
     assert!(f.editor.cut_to_clipboard(&f.ui, &f.platform));
     assert_eq!(*f.heard.borrow(), vec![(false, 6..11, "world".into())]);
     assert_eq!(f.value.get(), "Hello world");
+}
+
+#[test]
+fn copy_and_cut_keys_sent_to_the_view_ask_the_app() {
+    let f = field(false);
+    // As `zgx inspect key cmd+c` sends them: the window's shortcut, not the view's.
+    let primary = Modifiers {
+        meta: cfg!(target_os = "macos"),
+        control: !cfg!(target_os = "macos"),
+        ..Modifiers::default()
+    };
+    f.ui.input.focus(&f.ui.scene, Some(f.editor.node));
+    f.editor.set_selection(6, 11);
+    assert!(f.ui.clipboard_shortcut(&Key::Character("c".into()), primary, &*f.clipboard));
+    assert_eq!(
+        held(&f),
+        Some(("WORLD".into(), Some("<b>world</b>".into())))
+    );
+    assert!(f.ui.clipboard_shortcut(&Key::Character("x".into()), primary, &*f.clipboard));
+    assert_eq!(f.value.get(), "Hello ");
+    assert_eq!(
+        *f.heard.borrow(),
+        vec![
+            (false, 6..11, "world".into()),
+            (true, 6..11, "world".into())
+        ]
+    );
+}
+
+/// End to end, as `zgx inspect key cmd+c` takes it: the key to the view
+/// first, which an editor leaves alone, then to the window's shortcut; the
+/// app's HTML reaches the clipboard beside its text.
+#[test]
+fn a_copy_key_through_the_view_reaches_the_clipboard_with_the_apps_html() {
+    let mut f = field(false);
+    let primary = Modifiers {
+        meta: cfg!(target_os = "macos"),
+        control: !cfg!(target_os = "macos"),
+        ..Modifiers::default()
+    };
+    f.ui.input.focus(&f.ui.scene, Some(f.editor.node));
+    f.editor.set_selection(0, 5);
+    let key = Key::Character("c".into());
+    let taken = f.ui.dispatch(InputEvent::KeyDown {
+        key: key.clone(),
+        modifiers: primary,
+        repeat: false,
+    });
+    assert!(
+        !taken.default_prevented,
+        "the editor leaves the copy key alone"
+    );
+    assert!(f.ui.clipboard_shortcut(&key, primary, &*f.clipboard));
+    f.ui.dispatch(InputEvent::KeyUp {
+        key,
+        modifiers: primary,
+    });
+    assert_eq!(
+        held(&f),
+        Some(("HELLO".into(), Some("<b>Hello</b>".into())))
+    );
+    assert_eq!(*f.heard.borrow(), vec![(false, 0..5, "Hello".into())]);
 }

@@ -550,6 +550,8 @@ type AtomsFollow = Box<dyn FnMut(&mut crate::text_edit::TextEditor) -> Vec<crate
 #[derive(Default)]
 pub(crate) struct CodeOptions {
     highlighter: Option<crate::widgets::SpanHighlighter>,
+    /// `line_insets`: each line's room (`EditorHandle::set_line_insets`).
+    line_insets: Option<crate::widgets::LineInsets>,
     decorations: Option<Box<dyn FnMut() -> Decorations>>,
     underlines: Option<Box<dyn FnMut() -> Underlines>>,
     current_line: Option<Box<dyn FnMut() -> Option<crate::scene::Color>>>,
@@ -2027,6 +2029,18 @@ impl View {
         highlighter: impl Fn(&str, u32) -> (crate::widgets::LineSpans, u32) + 'static,
     ) -> Self {
         self.code_mut().highlighter = Some(std::rc::Rc::new(highlighter));
+        self
+    }
+    /// Room around each line of a text area (a list item's indent, a
+    /// heading's space above; `EditorHandle::set_line_insets`), given the
+    /// line's index, its text and what the line before left its
+    /// highlighter. It must depend on nothing but its arguments.
+    #[doc(hidden)]
+    pub fn line_insets(
+        mut self,
+        insets: impl Fn(usize, &str, u32) -> crate::widgets::LineInset + 'static,
+    ) -> Self {
+        self.code_mut().line_insets = Some(std::rc::Rc::new(insets));
         self
     }
     /// Ranges of a text area's text (UTF-8 byte ranges) marked with a colour
@@ -7671,6 +7685,7 @@ fn open_element(
         if let Some(code) = rare.as_deref_mut().and_then(|r| r.code.take()) {
             let CodeOptions {
                 highlighter,
+                line_insets,
                 decorations,
                 underlines,
                 current_line,
@@ -7683,6 +7698,9 @@ fn open_element(
                 atom_pointer,
                 atom_style,
             } = *code;
+            if line_insets.is_some() {
+                editor.set_line_insets(line_insets);
+            }
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
                 // Colours may be theme tokens: a new theme colours the lines
@@ -7759,15 +7777,26 @@ fn open_element(
         }
         let typography = environment.typography.clone();
         let theme = environment.theme.clone();
+        // Bound after its options, so their first runs come before its own:
+        // the editor draws once as it mounts, not once each. That draw's
+        // reads (a custom shaper's) are this binding's too: run again with
+        // its style unchanged, one of them changed, and it draws again (no
+        // binding of its own for it: a mount pays for none).
+        let first = Cell::new(true);
         ui.bind_input(root, move || {
             let style = typography.get();
             let theme = Some(&*theme);
-            editor.set_text_style(
+            let changed = editor.set_text_style(
                 style.color_in(theme),
                 style.size_in(theme),
                 style.font_in(theme),
                 style.wrap,
             );
+            if first.replace(false) {
+                editor.finish_mount();
+            } else if !changed {
+                editor.refresh();
+            }
         });
     }
     if let Some(id) = view.id {

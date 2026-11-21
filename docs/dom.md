@@ -112,6 +112,7 @@ Shown as a labelled placeholder box, or left out:
 - **Lists**: the `_watched` variants' watchers aren't called.
 - **Windows**: `ui.window.popups` stays empty (the browser's top layer holds popups); `zgx inspect` and `zgx test`'s heap tools (`gc`, `app:retained_states`) are desktop devtools.
 - **Canvas**: a canvas view's pan and zoom (`canvas_view`) isn't applied.
+- **Text areas' line styles (desktop first)**: a highlighter span's `size`, `line_height`, `font = "mono"` and chip (`SpanStyle::size`, `line_height`, `mono`, `chip`), and lines' room and hiding (`EditorHandle::set_line_insets`, `LineInset`, a textarea's `line_insets`) shape and place a desktop text area's lines; a `<textarea>` has one style, so the browser shows the text plainly. To map with the contenteditable atom editor (`docs/dom.md`, atoms), pending Wing's OK on landing them desktop first.
 - **Also not yet mapped**: SVG, and a `NodeHandle`'s layout, editor and scene methods.
 - **Sizes worked out** (`w_calc` and the like) aren't written as CSS yet.
 

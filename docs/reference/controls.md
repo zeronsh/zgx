@@ -101,8 +101,12 @@ A `highlight` span is `{ from, to, color }` (`color` may be left out), with thes
 | `italic` | `boolean` | italic |
 | `strike` | `boolean` | a line through it, in its colour |
 | `bg` | `Color` | a wash behind it (inline code) |
+| `size` | `number` | its font size in points (a note's heading) |
+| `line_height` | `number` | its line pitch in points: the line takes its runs' tallest |
+| `underline` | `boolean` | a line under it (a link) |
+| `font` | `"mono"` | the monospaced font (inline code) |
 
-Where spans overlap, each of `color`, `weight` and `bg` is the first's (by `from`) that gives it, and `italic` and `strike` hold if any gives them: a code span inside bold text keeps the bold weight and shows its own colour, and delimiters greyed inside a bold span stay bold. A line whose spans give a `weight` or `italic` is shaped with them, so its width, wrapping, carets, clicks and selection follow what shows; other lines (colours, strikes and washes only) are shaped as plain text, as before.
+Where spans overlap, each of `color`, `weight`, `bg`, `size` and `line_height` is the first's (by `from`) that gives it, and `italic`, `strike`, `underline` and `font = "mono"` hold if any gives them: a code span inside bold text keeps the bold weight and shows its own colour, and delimiters greyed inside a bold span stay bold. A line whose spans give a `weight`, `italic`, `size`, `line_height` or `font` is shaped with them, so its width, wrapping, carets, clicks and selection follow what shows; other lines (colours, strikes and washes only) are shaped as plain text, as before.
 
 ```lua
 local draft = ui.state("draft", "Some **bold** and `code`")
@@ -136,6 +140,25 @@ return ui.textarea {
 ```
 
 A long text (more than 64 KiB, or 2,000 lines), or one with `highlight`, is laid out by its lines: the lines in view are shaped and drawn, a line keeps its shape until it changes, and where each line starts is a few bytes a line, so a file of 100,000 lines opens in about 20 ms and a keystroke costs about a millisecond ([the code editor example](../../crates/zgx-script/examples/code_editor), `code_editor_bench`). A string over 64 KiB in state is held in chunks of a few kilobytes: the state, the textarea bound to it, its layout and its accessibility value share one copy, and a keystroke's new value shares every chunk but the one it changed (a script reading the state still reads a string). Assistive technology reads such a text a page at a time, as browsers' code editors give it: the lines in view and a page each side (or around the caret, scrolled away), a text run a line, so a keystroke sends the runs of the line it changed.
+
+### Line room
+
+`line_insets = function(line, state) return { left, above, below, hidden } end` gives a textarea's line room of its own, in points: `left` before its text (the line wraps in what it leaves, its carets, clicks and selection moving with it), `above` and `below` it, and `hidden = true` takes the line and its room away (a closed toggle's lines; keep the caret out of them). `state` is what `highlight` was given for the line (what the line before left it; 0 without a highlighter), so a fenced code block's lines know they're inside it. It's asked once for each line text and state, and must depend on nothing but its arguments. A textarea without it lays out and scrolls as before. In the browser, lines take no room of their own yet ([zgx-dom](../dom.md#what-doesnt-map)).
+
+```lua
+return ui.textarea {
+	value = ui.state("note", "# Title\n- one\n- two"),
+	wrap = true,
+	line_insets = function(line, state)
+		if string.sub(line, 1, 2) == "# " then
+			return { above = 16, below = 6 }
+		elseif string.sub(line, 1, 2) == "- " then
+			return { left = 20 }
+		end
+		return nil
+	end,
+}
+```
 
 ## checkbox
 

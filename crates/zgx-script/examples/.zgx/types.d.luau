@@ -616,6 +616,23 @@ export type HighlightSpan = {
 	strike: boolean?,
 	-- A wash behind it (inline code).
 	bg: Color?,
+	-- Its font size in points (a heading in a note): shapes its line.
+	size: number?,
+	-- Its line pitch in points: the line takes its runs' tallest.
+	line_height: number?,
+	-- A line under it (a link).
+	underline: boolean?,
+	-- `"mono"`: in the monospaced font (inline code); shapes its line.
+	font: "mono"?,
+}
+-- A textarea line's room (`line_insets`), in points: before its text (it
+-- wraps in what this leaves), above and below it; `hidden` takes the line
+-- and its room away (a closed toggle's lines).
+export type LineInset = {
+	left: number?,
+	above: number?,
+	below: number?,
+	hidden: boolean?,
 }
 -- A number, or a number token: a standard one (`"$radius.md"`, see
 -- `NumberToken`) or an app's (`"$terminal.inset"`), hence any string.
@@ -9400,12 +9417,20 @@ export type InputProps = {
 	-- before left (0 before the first), it returns spans `{ from, to,
 	-- color }` (bytes counted from 1, as `string.find` gives them; `color`
 	-- a colour or `"$token"`, or left out) with `weight`, `italic`,
-	-- `strike` and `bg` by name (`HighlightSpan`), and what the line leaves
+	-- `strike`, `bg`, `size`, `line_height`, `underline` and `font` by
+	-- name (`HighlightSpan`), and what the line leaves
 	-- the next (a block comment or string running on: any value, a
 	-- number, a string, a table; the same string or number is the same
 	-- state, a table the same one only as itself). It must depend on
 	-- nothing but its arguments.
 	highlight: ((line: string, state: any) -> ({ HighlightSpan }?, any))?,
+	-- Several lines only: a line's room (`LineInset`): a list item's
+	-- indent, a heading's or a quote's space above and below. Given the
+	-- line and the state `highlight` was given for it (0 without one), so
+	-- a fenced block's lines know they're inside it. Asked once for each
+	-- line text and state, it must depend on nothing but its arguments.
+	-- An editor without it lays out as before.
+	line_insets: ((line: string, state: any) -> LineInset?)?,
 	-- Several lines only: ranges of the whole text marked behind it (a
 	-- search's matches), `{ { from, to, color? }, … }` in bytes counted
 	-- from 1; only those in view are drawn.

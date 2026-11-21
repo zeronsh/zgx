@@ -257,3 +257,39 @@ fn a_textarea_can_leave_its_caret_where_it_is_as_text_is_dragged_over_it() {
     assert!(!shows(&mut h, "kept"));
     assert!(shows(&mut h, "moved"));
 }
+
+/// A code view mounted with its text, highlighter, line numbers and a
+/// read-only function highlights each line once, not once per option set.
+#[test]
+fn a_code_view_mounted_whole_highlights_each_line_once() {
+    let mut h = Harness::inline(
+        r##"
+        calls = 0
+        local lines = {}
+        for i = 1, 40 do lines[i] = "local x" .. i .. " = " .. i end
+        local text = ui.state("text", table.concat(lines, "\n"))
+        local editable = ui.state("editable", false)
+        local seen = ui.state("seen", "")
+        return ui.column { w = 400, h = 300,
+            ui.button { id = "read", w = 10, h = 10, on_click = function() seen:set(tostring(calls)) end },
+            ui.text { id = "seen", seen },
+            ui.textarea {
+                id = "code", value = text, line_numbers = true, font = "mono", text_size = 13,
+                grow = 1, w_full = true, h = 0,
+                read_only = function() return not editable:get() end,
+                current_line = "#ff000020",
+                highlight = function(line, state)
+                    calls += 1
+                    return { { 1, 5, "#ff0000" } }, state
+                end,
+            },
+        }
+        "##,
+    );
+    h.settle();
+    h.click("read");
+    h.settle();
+    let calls: usize = h.text("seen").parse().unwrap();
+    assert!(calls > 0, "the highlighter ran");
+    assert!(calls <= 40, "{calls} highlighter calls for 40 lines");
+}

@@ -146,3 +146,83 @@ fn a_highlighter_may_edit_its_editor_while_it_is_measured() {
     assert_eq!(h.error(), None);
     assert!(metric(&h).field("wrapped_height").is_some());
 }
+
+/// A highlighter's span with a line pitch of its own makes its line that
+/// tall, and the lines below it move down; `size`, `underline` and
+/// `font = "mono"` are read too, with no error.
+#[test]
+fn a_highlight_spans_pitch_and_size_shape_its_line() {
+    let h = Harness::inline(
+        r#"
+        local ref = ui.ref()
+        local metrics = ui.state("metrics", nil)
+        ui.effect(function()
+            local el = ref:get()
+            metrics:set(if el then el:text_metrics(300) else nil)
+        end)
+        return ui.textarea { ref = ref, value = ui.state("text", "Title\nbody\n"),
+            w = 300, h = 100, text_size = 10, line_height = 20,
+            highlight = function(line, state)
+                if line == "Title" then
+                    return { { 1, 5, size = 16, line_height = 44, underline = true } }, state
+                end
+                return { { 1, 2, font = "mono" } }, state
+            end }
+    "#,
+    );
+    h.frames(4);
+    assert_eq!(h.error(), None);
+    let height = metric(&h)
+        .field("wrapped_height")
+        .and_then(Value::as_f64)
+        .unwrap();
+    assert!(
+        height >= 44. + 20. + 20.,
+        "the title's pitch pushes the rest: {height}"
+    );
+}
+
+/// `line_insets` gives a line room of its own from its text and the state
+/// `highlight` was given for it: a fenced block's lines, inside it by their
+/// state, each take room above; a hidden line takes none.
+#[test]
+fn line_insets_give_lines_room_by_their_text_and_state() {
+    let h = Harness::inline(
+        r#"
+        local ref = ui.ref()
+        local metrics = ui.state("metrics", nil)
+        ui.effect(function()
+            local el = ref:get()
+            metrics:set(if el then el:text_metrics(300) else nil)
+        end)
+        return ui.textarea { ref = ref, value = ui.state("text", "a\n```\nb\n```\nc\nhidden"),
+            w = 300, h = 200, text_size = 10, line_height = 20,
+            highlight = function(line, state)
+                if line == "```" then
+                    return {}, if state == "code" then 0 else "code"
+                end
+                return {}, state
+            end,
+            line_insets = function(line, state)
+                if line == "hidden" then
+                    return { hidden = true }
+                end
+                if state == "code" then
+                    return { above = 10 }
+                end
+                return nil
+            end }
+    "#,
+    );
+    h.frames(4);
+    assert_eq!(h.error(), None);
+    let height = |h: &Harness| {
+        metric(h)
+            .field("wrapped_height")
+            .and_then(Value::as_f64)
+            .unwrap()
+    };
+    // Five lines of 20 (the sixth hidden), and 10 above "b" and the
+    // closing fence.
+    assert_eq!(height(&h), 120.);
+}

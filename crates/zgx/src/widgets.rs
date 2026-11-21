@@ -18,7 +18,9 @@ use std::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-pub use crate::editor_lines::{Highlighter, LineColors, LineSpans, SpanHighlighter, SpanStyle};
+pub use crate::editor_lines::{
+    Highlighter, LineColors, LineInset, LineInsets, LineSpans, SpanHighlighter, SpanStyle, SpanText,
+};
 
 /// What had keyboard focus, and a text field's selection there, when it
 /// was taken (`Ui::focus_snapshot`), to put back (`Ui::restore_focus`).
@@ -375,7 +377,7 @@ pub struct EditorHandle {
     line_numbers: Rc<Cell<bool>>,
     preferred_x: Rc<Cell<Option<f32>>>,
     text: NodeId,
-    scene: Rc<RefCell<Scene>>,
+    pub(crate) scene: Rc<RefCell<Scene>>,
     /// What the last refresh laid the text out for: the box's size, its
     /// style, the shaper revision and its content insets (which a border
     /// in its kind changes too).
@@ -414,6 +416,9 @@ struct EditorHint {
     /// Misspelled words (`View::spellcheck`), as byte ranges: marked with a
     /// dotted line. Usually none.
     misspelled: RefCell<Vec<std::ops::Range<usize>>>,
+    /// Checks the text again from scratch (`EditorHandle::recheck_spelling`): set
+    /// while it is spellchecked.
+    respell: RefCell<Option<Rc<dyn Fn()>>>,
     /// The clause an input method is converting (its composition's cursor
     /// range), in the composition layer's points, and that layer: where its
     /// candidates show.
@@ -427,6 +432,9 @@ struct EditorHint {
     /// (`Ui::restore_focus`). Drawn focused otherwise, the caret is
     /// scrolled into view.
     hold: Cell<bool>,
+    /// Mounting, its draws wait for its options (`EditorHandle::finish_mount`):
+    /// 0 drawn as asked, 1 held, 2 held with a draw owed.
+    mount_held: Cell<u8>,
     /// Another editor was just refreshed for its new size, in the same step
     /// of a frame (`refresh_if_resized`): the next draw takes its size from
     /// the layout that one made, not laying out what that one's draw dirtied.
@@ -741,10 +749,12 @@ impl EditorHint {
             secure: Cell::default(),
             input_mode: Cell::default(),
             misspelled: RefCell::default(),
+            respell: RefCell::default(),
             clause: Cell::default(),
             composition_layer: Cell::default(),
             reveal: Cell::default(),
             hold: Cell::default(),
+            mount_held: Cell::default(),
             laid_out: Cell::default(),
             reveal_at: Cell::default(),
             point: std::cell::OnceCell::new(),
@@ -1437,6 +1447,20 @@ impl EditorHandle {
             })
             .cloned()
     }
+    /// Checks the spelling of the whole text again, forgetting what was
+    /// checked before: after the system's checker learns or ignores a word
+    /// (`Platform::learn_spelling`, `ignore_spelling`) the underline under it
+    /// goes, as it does from zgx's own context menu. Nothing happens while the
+    /// editor isn't spellchecked (`View::spellcheck`).
+    pub fn recheck_spelling(&self) {
+        let recheck = self.hint.respell.borrow().clone();
+        if let Some(recheck) = recheck {
+            recheck();
+        }
+    }
+    pub(crate) fn set_spell_recheck(&self, recheck: Rc<dyn Fn()>) {
+        *self.hint.respell.borrow_mut() = Some(recheck);
+    }
     pub(crate) fn misspellings(&self) -> Vec<std::ops::Range<usize>> {
         self.hint.misspelled.borrow().clone()
     }
@@ -1577,6 +1601,21 @@ impl EditorHandle {
         self.hint.line_cache().set_highlighter(highlighter.clone());
         self.natural.wrapped.set_highlighter(highlighter.clone());
         self.natural.unwrapped.set_highlighter(highlighter);
+        self.natural.invalidate_spans();
+        self.refresh();
+    }
+    /// Room around each line of a multiline editor (a note's list item's
+    /// indent, a heading's space above), by line index: each line wraps in
+    /// what its indent leaves, and its carets, hits, selection and the lines
+    /// below follow. `None`: none. Only an editor given some keeps them.
+    #[doc(hidden)]
+    pub fn set_line_insets(&self, insets: Option<LineInsets>) {
+        if !self.multiline {
+            return;
+        }
+        self.hint.line_cache().set_insets(insets.clone());
+        self.natural.wrapped.set_insets(insets.clone());
+        self.natural.unwrapped.set_insets(insets);
         self.natural.invalidate_spans();
         self.refresh();
     }
@@ -1787,14 +1826,21 @@ impl EditorHandle {
     pub fn set_typography(&self, color: Color, size: f32, font: FontStyle) {
         self.set_text_style(color, size, font, self.wrap.get());
     }
-    pub(crate) fn set_text_style(&self, color: Color, size: f32, mut font: FontStyle, wrap: bool) {
+    /// Whether it changed anything (false: the style it had).
+    pub(crate) fn set_text_style(
+        &self,
+        color: Color,
+        size: f32,
+        mut font: FontStyle,
+        wrap: bool,
+    ) -> bool {
         let wrap = wrap && self.multiline;
         let wrap_changed = self.wrap.replace(wrap) != wrap;
         font.weight = font.weight.clamp(1, 1000);
         let next = (color, size.max(1.), font);
         let previous = self.typography.borrow().clone();
         if previous == next && !wrap_changed {
-            return;
+            return false;
         }
         let metrics_changed = wrap_changed || previous.1 != next.1 || previous.2 != next.2;
         *self.typography.borrow_mut() = next;
@@ -1808,7 +1854,7 @@ impl EditorHandle {
         } else {
             let mut scene = self.scene.borrow_mut();
             if !scene.contains(self.text) {
-                return;
+                return true;
             }
             if let NodeKind::Text {
                 text, font_size, ..
@@ -1825,6 +1871,7 @@ impl EditorHandle {
             }
             scene.set_kind(self.caret, NodeKind::Rect(color));
         }
+        true
     }
     /// Refresh it if its size changed; whether it did. `laid_out`: another
     /// was refreshed in this step of the frame, which laid out all but what
@@ -1857,6 +1904,13 @@ impl EditorHandle {
     /// Lay out and repaint the editor from its model again.
     pub fn refresh(&self) {
         (self.refresh)();
+    }
+    /// A mount set its options: the draw they held (`text_input_styled`)
+    /// happens now, once, unless the mount draws it later.
+    pub(crate) fn finish_mount(&self) {
+        if self.hint.mount_held.replace(0) == 2 && !input_draw_pending(self.node, &self.scene) {
+            self.refresh();
+        }
     }
     /// The selected text, for the clipboard; empty in a password field.
     pub fn copy(&self) -> String {
@@ -4432,6 +4486,12 @@ impl Ui {
     pub fn set_app_active(&self, active: bool) {
         self.scene.borrow_mut().set_popups_held(!active);
     }
+    /// Whether the window is the active one now, its keys going to it
+    /// (`Ui::set_window_active`).
+    #[doc(hidden)]
+    pub fn window_is_active(&self) -> bool {
+        !self.storage.selection.borrow().inactive
+    }
     /// Whether the window is the active one, its keys going to it
     /// (`Ui::set_window_active`), as it changes.
     pub fn observe_window_active(&self) -> Signal<bool> {
@@ -4875,7 +4935,8 @@ impl Ui {
         }
     }
     /// The person copied (or, with `cut`, cut) out of `editor` (a key, the
-    /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`): its
+    /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`,
+    /// `clipboard_shortcut`): its
     /// `View::on_copy` says what goes on the clipboard, else its selection's
     /// text, and `write` puts it there (text, HTML and types beside it). A
     /// password field gives nothing and asks no hook; nor does an empty
@@ -6886,6 +6947,7 @@ impl Ui {
         let focus = focused.clone();
         let draw_caret_width = self.storage.caret_width.clone();
         let draw_blink = self.storage.caret_blink.clone();
+        let draw_window = Rc::downgrade(&self.storage);
         let scroll_for_draw = scroll.clone();
         let scroll_limit = Rc::new(Cell::new((0f32, 0f32)));
         let draw_scroll_limit = scroll_limit.clone();
@@ -6919,6 +6981,10 @@ impl Ui {
                 limit: scroll_limit.clone(),
             },
         ));
+        // A view's editor draws once its mount has set its options.
+        if styled {
+            hint.mount_held.set(1);
+        }
         let wheel_hint = hint.clone();
         hint.composition_layer.set(Some(preedit_layer));
         let draw_hint = hint.clone();
@@ -7372,85 +7438,100 @@ impl Ui {
                     {
                         s.damage_shown(layer);
                     }
-                    for i in shown_lines.clone() {
-                        if pool.iter().any(|(line, _)| *line == i) {
-                            continue;
-                        }
-                        let id = free.pop().unwrap_or_else(|| {
-                            s.append(
-                                layer,
-                                NodeKind::Text {
-                                    text: std::sync::Arc::from(""),
-                                    color,
-                                    font_size: size,
-                                },
-                                Style::default(),
-                            )
-                        });
-                        pool.push((i, id));
-                    }
-                    for (i, id) in pool.iter() {
-                        let line = lines.line_text(*i);
-                        let cache = draw_hint.line_cache();
-                        let colored = cache.spans(lines, *i).and_then(|spans| {
-                            // Looks are read only where it has any.
-                            let style = |looks: &[crate::editor_lines::SpanLook]| {
-                                crate::editor_lines::styled_line(
-                                    &line, &spans, color, size, &font, looks,
-                                )
-                            };
-                            if cache.has_rare() {
-                                style(&cache.looks())
-                            } else {
-                                style(&[])
-                            }
-                        });
-                        match colored {
-                            Some(rich) => {
-                                if !matches!(s.kind(*id), NodeKind::RichText { text } if **text == rich)
-                                {
-                                    s.set_kind(*id, NodeKind::RichText { text: rich.into() });
-                                }
-                            }
-                            None => {
-                                let unchanged = matches!(
-                                    s.kind(*id),
-                                    NodeKind::Text { text, color: c, font_size }
-                                        if **text == *line && *c == color && *font_size == size
-                                );
-                                if !unchanged {
-                                    s.set_kind(
-                                        *id,
-                                        NodeKind::Text {
-                                            text: line.to_arc(),
-                                            color,
-                                            font_size: size,
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                        s.set_font(*id, font.clone());
-                        let shaped = lines.line(*i).size();
-                        let width = wrap_width.unwrap_or(shaped.0 + 2.);
-                        let mut style = fixed(width, lines.height(*i));
-                        style.text_wrap = draw_wrap.get();
-                        s.set_style(*id, style);
-                        // The size its line was shaped to here: showing it,
-                        // or moving it, shapes it no more. A node just made is
-                        // asked for its ink in the empty box it had (where it
-                        // painted nothing; a line's box is never empty).
-                        s.know_text_size(*id, wrap_width, shaped);
-                        if s.bounds(*id).width == 0. {
-                            s.know_text_size(*id, Some(0.), shaped);
-                        }
-                        s.set_transform(
-                            *id,
-                            Transform {
-                                x: 0.,
-                                y: lines.top(*i),
-                            },
+                    // Lines with room of their own (`set_line_insets`), out
+                    // of line: a text area without places its lines as ever.
+                    if lines.has_insets() {
+                        place_lines_in_room(
+                            &mut s,
+                            lines,
+                            (&mut *pool, &mut free),
+                            layer,
+                            shown_lines.clone(),
+                            &draw_hint.line_cache(),
+                            (color, size, &font),
+                            (wrap_width, draw_wrap.get()),
                         );
+                    } else {
+                        for i in shown_lines.clone() {
+                            if pool.iter().any(|(line, _)| *line == i) {
+                                continue;
+                            }
+                            let id = free.pop().unwrap_or_else(|| {
+                                s.append(
+                                    layer,
+                                    NodeKind::Text {
+                                        text: std::sync::Arc::from(""),
+                                        color,
+                                        font_size: size,
+                                    },
+                                    Style::default(),
+                                )
+                            });
+                            pool.push((i, id));
+                        }
+                        for (i, id) in pool.iter() {
+                            let line = lines.line_text(*i);
+                            let cache = draw_hint.line_cache();
+                            let colored = cache.spans(lines, *i).and_then(|spans| {
+                                // Looks are read only where it has any.
+                                let style = |looks: &[crate::editor_lines::SpanLook]| {
+                                    crate::editor_lines::styled_line(
+                                        &line, &spans, color, size, &font, looks,
+                                    )
+                                };
+                                if cache.has_rare() {
+                                    style(&cache.looks())
+                                } else {
+                                    style(&[])
+                                }
+                            });
+                            match colored {
+                                Some(rich) => {
+                                    if !matches!(s.kind(*id), NodeKind::RichText { text } if **text == rich)
+                                    {
+                                        s.set_kind(*id, NodeKind::RichText { text: rich.into() });
+                                    }
+                                }
+                                None => {
+                                    let unchanged = matches!(
+                                        s.kind(*id),
+                                        NodeKind::Text { text, color: c, font_size }
+                                            if **text == *line && *c == color && *font_size == size
+                                    );
+                                    if !unchanged {
+                                        s.set_kind(
+                                            *id,
+                                            NodeKind::Text {
+                                                text: line.to_arc(),
+                                                color,
+                                                font_size: size,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            s.set_font(*id, font.clone());
+                            let shaped = lines.line(*i).size();
+                            let width = wrap_width.unwrap_or(shaped.0 + 2.);
+                            let mut style = fixed(width, lines.height(*i));
+                            style.text_wrap = draw_wrap.get();
+                            s.set_style(*id, style);
+                            // The size its line was shaped to here: showing it,
+                            // or moving it, shapes it no more. A node just made is
+                            // asked for its ink in the empty box it had (where it
+                            // painted nothing; a line's box is never empty).
+                            s.know_text_size(*id, wrap_width, shaped);
+                            if s.bounds(*id).width == 0. {
+                                s.know_text_size(*id, Some(0.), shaped);
+                            }
+                            s.set_transform(
+                                *id,
+                                Transform {
+                                    x: 0.,
+                                    y: lines.top(*i),
+                                },
+                            );
+                        }
                     }
                     s.set_transform(
                         layer,
@@ -7478,7 +7559,12 @@ impl Ui {
             );
             let mut effects = s.effects(caret);
             // Read-only text shows a selection but no caret.
+            // Untracked: a window's activity changing shows or hides the
+            // caret itself (`caret_blink::window_active_changed`), no draw.
             let caret_shown = *focus.borrow()
+                && draw_window
+                    .upgrade()
+                    .is_none_or(|storage| !storage.selection.borrow().inactive)
                 && !draw_read_only.get()
                 && e.preedit().is_none_or(|preedit| preedit.cursor.is_some());
             // Shown, it paints unless the host draws it (`Ui::native_caret`).
@@ -8138,6 +8224,12 @@ impl Ui {
             let metric_typography = typography.clone();
             let storage = Rc::downgrade(&self.storage);
             Rc::new(move || {
+                if told.mount_held.get() != 0 {
+                    told.mount_held.set(2);
+                    return;
+                }
+                #[cfg(debug_assertions)]
+                EDITOR_DRAWS.set(EDITOR_DRAWS.get() + 1);
                 let held = told.hold.get();
                 refresh();
                 // Spans that shape their lines found as it drew (the first
@@ -8933,12 +9025,7 @@ impl Ui {
                             if let Some(was) = gesture.drop_restore.take() {
                                 edit.set_selection(was.anchor, was.focus);
                             }
-                            let modifiers = cx.pointer_modifiers();
-                            let copy = if cfg!(target_os = "macos") {
-                                modifiers.alt
-                            } else {
-                                modifiers.control
-                            };
+                            let copy = cx.pointer_modifiers().drag_copies();
                             // From this very editor (this window's), its text
                             // still there: moved within it.
                             let here = text
@@ -9786,6 +9873,114 @@ impl Ui {
     }
 }
 
+thread_local! {
+    static EDITOR_DRAWS: Cell<u64> = const { Cell::new(0) };
+}
+/// How many times editors on this thread were drawn from their model: for
+/// tests that an editor's options don't each draw it. Counted in debug
+/// builds only (0 in release ones).
+#[doc(hidden)]
+pub fn debug_editor_draws() -> u64 {
+    EDITOR_DRAWS.get()
+}
+/// A text area's line nodes for the lines in view, each placed past its
+/// room (`set_line_insets`) in what its indent leaves; a hidden line
+/// (`LineInset::hidden`) has none. The draw's own loop, for an area with
+/// insets: one without places its lines as before.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn place_lines_in_room(
+    s: &mut Scene,
+    lines: &crate::editor_lines::LinesLayout,
+    (pool, free): (&mut Vec<(usize, NodeId)>, &mut Vec<NodeId>),
+    layer: NodeId,
+    shown: std::ops::Range<usize>,
+    cache: &crate::editor_lines::LineCache,
+    (color, size, font): (Color, f32, &FontStyle),
+    (wrap_width, text_wrap): (Option<f32>, bool),
+) {
+    pool.retain(|(line, id)| {
+        let hidden = lines.inset(*line).hidden;
+        if hidden {
+            free.push(*id);
+        }
+        !hidden
+    });
+    for i in shown {
+        if lines.inset(i).hidden || pool.iter().any(|(line, _)| *line == i) {
+            continue;
+        }
+        let id = free.pop().unwrap_or_else(|| {
+            s.append(
+                layer,
+                NodeKind::Text {
+                    text: std::sync::Arc::from(""),
+                    color,
+                    font_size: size,
+                },
+                Style::default(),
+            )
+        });
+        pool.push((i, id));
+    }
+    for (i, id) in pool.iter() {
+        let line = lines.line_text(*i);
+        let colored = cache.spans(lines, *i).and_then(|spans| {
+            let style = |looks: &[crate::editor_lines::SpanLook]| {
+                crate::editor_lines::styled_line(&line, &spans, color, size, font, looks)
+            };
+            if cache.has_rare() {
+                style(&cache.looks())
+            } else {
+                style(&[])
+            }
+        });
+        match colored {
+            Some(rich) => {
+                if !matches!(s.kind(*id), NodeKind::RichText { text } if **text == rich) {
+                    s.set_kind(*id, NodeKind::RichText { text: rich.into() });
+                }
+            }
+            None => {
+                let unchanged = matches!(
+                    s.kind(*id),
+                    NodeKind::Text { text, color: c, font_size }
+                        if **text == *line && *c == color && *font_size == size
+                );
+                if !unchanged {
+                    s.set_kind(
+                        *id,
+                        NodeKind::Text {
+                            text: line.to_arc(),
+                            color,
+                            font_size: size,
+                        },
+                    );
+                }
+            }
+        }
+        s.set_font(*id, font.clone());
+        let shaped = lines.line(*i).size();
+        let inset = lines.inset(*i);
+        let wrap_width = lines.draw_width(*i, wrap_width);
+        let width = wrap_width.unwrap_or(shaped.0 + 2.);
+        let mut style = fixed(width, lines.height(*i) - inset.above - inset.below);
+        style.text_wrap = text_wrap;
+        s.set_style(*id, style);
+        s.know_text_size(*id, wrap_width, shaped);
+        if s.bounds(*id).width == 0. {
+            s.know_text_size(*id, Some(0.), shaped);
+        }
+        s.set_transform(
+            *id,
+            Transform {
+                x: inset.left,
+                y: lines.top(*i) + inset.above,
+            },
+        );
+    }
+}
 /// An input waiting to be drawn, with the model effect whose reads its
 /// draw's are.
 type InputDraw = (NodeId, u64, Rc<dyn Fn()>);
