@@ -161,7 +161,7 @@ A module can be linked into the app instead (one crate built as an `rlib` too), 
 { "modules": { "words": "modules/words" } }
 ```
 
-`zgx types` and `zgx check` read them from there. Loading them is still the app's Rust's: `zgx-run` doesn't load modules from `zgx.json` yet.
+`zgx-run` loads them from there before the app's scripts run (`zgx-run --module words=<library>` hands it another library for one). A module `zgx.json` names that has no built library stops `zgx-run` before its window opens, naming it; one that won't load (built for another interface, or not what its manifest says) is shown in the error banner, the scripts' `ui.module` saying why. `zgx types` and `zgx check` read the same key.
 
 ## Calling one from Luau
 

@@ -14,8 +14,11 @@ description = "Run a zgx Luau script as a desktop app, with hot reload: `zgx-run
 # mimalloc as the runner's allocator (zgx-desktop's `mimalloc`): 6-10%
 # less CPU for script, text and layout work, for about 2 MB more memory.
 # `--no-default-features` keeps the system's.
-default = ["mimalloc", "inspect", "fetch", "socket", "scene3d", "i18n", "gltf", "webkitgtk", "terminal"]
+default = ["mimalloc", "inspect", "fetch", "socket", "scene3d", "i18n", "gltf", "webkitgtk", "terminal", "modules"]
 mimalloc = ["zgx-desktop/mimalloc"]
+# Native modules (zgx-script's `modules`): the app's own Rust libraries
+# zgx.json's `modules` names, loaded before its scripts (docs/modules.md).
+modules = ["zgx-script/modules"]
 # Sound: the `audio` global and `sound =` on controls (zgx-script's
 # `audio`), played on the system's default output (zgx-desktop's `audio`),
 # opened at the first sound: WAV, voices and buses, the core a UI app's

@@ -76,6 +76,39 @@ fn library_of(name: &str, path: &Path) -> Result<(PathBuf, String), String> {
     })
 }
 
+/// The names of the native modules `dir`'s `zgx.json` lists (none without
+/// one), in its order of names; what is wrong with its `modules` if it
+/// isn't an object of names and paths.
+pub fn named_in(dir: &Path) -> Result<Vec<String>, String> {
+    let path = dir.join("zgx.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+    let json: Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    match json.get("modules") {
+        None => Ok(Vec::new()),
+        Some(Value::Object(modules)) => modules
+            .iter()
+            .map(|(name, at)| match at.as_str() {
+                Some(_) if abi::is_name(name) => Ok(name.clone()),
+                Some(_) => Err(format!(
+                    "{}: module `{name}`: a module's name is letters, digits and `_`",
+                    path.display()
+                )),
+                None => Err(format!(
+                    "{}: module `{name}`: its path is not a string",
+                    path.display()
+                )),
+            })
+            .collect(),
+        Some(_) => Err(format!(
+            "{}: `modules` is not an object of names and paths",
+            path.display()
+        )),
+    }
+}
+
 /// The native modules `dir`'s `zgx.json` names, each with its library and
 /// its manifest, and what is wrong with those that have none to read (not
 /// built yet, say): their types are left out.
