@@ -6526,6 +6526,60 @@ enum StateKey {
     Number(u64),
     At(usize),
 }
+/// A textarea's `line_insets` as its lines' room: asked once for each line
+/// text and state (the state `highlight` was given for it), and kept.
+fn line_insets_of(
+    insets: mlua::Function,
+    vm: Rc<Vm>,
+    states: Rc<std::cell::RefCell<LineStates>>,
+) -> impl Fn(usize, &str, u32) -> zgx::widgets::LineInset + 'static {
+    /// Line texts and states kept, at most: about a long note's lines.
+    const KEPT_INSETS: usize = 4096;
+    // By state, then text: found without copying the line.
+    type Known = HashMap<u32, HashMap<Box<str>, zgx::widgets::LineInset>>;
+    let known: std::cell::RefCell<(Known, usize)> = std::cell::RefCell::default();
+    move |_, line, state| {
+        if let Some(inset) = known.borrow().0.get(&state).and_then(|by| by.get(line)) {
+            return *inset;
+        }
+        let called = if state & KEPT == 0 {
+            vm.call::<Option<mlua::Table>>(&insets, (line, state))
+        } else {
+            let before = states.borrow().value(state);
+            vm.call::<Option<mlua::Table>>(&insets, (line, before))
+        };
+        let inset = match called {
+            Ok(Some(table)) => {
+                let number = |key: &str| {
+                    table
+                        .raw_get::<Option<f64>>(key)
+                        .ok()
+                        .flatten()
+                        .filter(|v| v.is_finite())
+                        .map_or(0., |v| v.max(0.) as f32)
+                };
+                let mut inset =
+                    zgx::widgets::LineInset::new(number("left"), number("above"), number("below"));
+                if table.raw_get::<Option<bool>>("hidden").ok().flatten() == Some(true) {
+                    inset = zgx::widgets::LineInset::hidden();
+                }
+                inset
+            }
+            Ok(None) => zgx::widgets::LineInset::default(),
+            Err(error) => {
+                vm.report(error);
+                zgx::widgets::LineInset::default()
+            }
+        };
+        let mut known = known.borrow_mut();
+        if known.1 >= KEPT_INSETS {
+            *known = Default::default();
+        }
+        known.1 += 1;
+        known.0.entry(state).or_default().insert(line.into(), inset);
+        inset
+    }
+}
 /// What a `highlight` leaves the next line, read where it lies: a whole
 /// number (most highlighters' states) as itself, with no `Value` made.
 enum Next {
@@ -6762,9 +6816,18 @@ fn code_editor(
             out
         }
     };
+    // What lines leave the next, beyond whole numbers: shared by
+    // `highlight`, which makes them, and `line_insets`, which reads them.
+    let states = Rc::new(std::cell::RefCell::new(LineStates::default()));
+    if let Some(line_insets) = &code.line_insets {
+        view = view.line_insets(line_insets_of(
+            line_insets.clone(),
+            vm.clone(),
+            states.clone(),
+        ));
+    }
     if let Some(highlight) = &code.highlight {
-        let (highlight, vm) = (highlight.clone(), vm.clone());
-        let states = std::cell::RefCell::new(LineStates::default());
+        let (highlight, vm, states) = (highlight.clone(), vm.clone(), states.clone());
         view = view.span_highlighter(move |line, state| {
             // A whole number is passed as itself (most highlighters' states,
             // no table touched); anything else from the side table.

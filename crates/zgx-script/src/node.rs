@@ -1841,6 +1841,10 @@ pub(crate) struct CodeProps {
     /// line's colours, `{ { from, to, color }, … }` (bytes, as
     /// `string.find` gives them), and what it leaves the next line.
     pub highlight: Option<Function>,
+    /// `line_insets = function(line, state) return { left, above, below,
+    /// hidden } end`: a line's room, given what `highlight` was given for
+    /// it (0 without one).
+    pub line_insets: Option<Function>,
     /// `decorations`: a state or function of `{ { from, to, color }, … }`,
     /// bytes of the whole text marked behind it (a search's matches).
     pub decorations: Option<Readable>,
@@ -4019,6 +4023,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "spellcheck",
     "line_numbers",
     "highlight",
+    "line_insets",
     "decorations",
     "underlines",
     "find",
@@ -6137,6 +6142,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     line_numbers: table.get::<Option<bool>>("line_numbers")?.unwrap_or(false),
                     code: {
                         let highlight = table.raw_get::<Option<Function>>("highlight")?;
+                        let line_insets = table.raw_get::<Option<Function>>("line_insets")?;
                         let decorations = match table.raw_get::<mlua::Value>("decorations")? {
                             mlua::Value::Nil => None,
                             mlua::Value::Function(f) => Some(Readable::Function(f)),
@@ -6183,6 +6189,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             }
                         };
                         (highlight.is_some()
+                            || line_insets.is_some()
                             || decorations.is_some()
                             || underlines.is_some()
                             || current_line.is_some()
@@ -6193,6 +6200,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         .then(|| {
                             Rc::new(CodeProps {
                                 highlight,
+                                line_insets,
                                 decorations,
                                 underlines,
                                 current_line,
