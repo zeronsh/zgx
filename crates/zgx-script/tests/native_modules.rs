@@ -987,8 +987,9 @@ fn a_module_written_in_c_answers_scripts() {
 }
 
 /// `zgx types` writes an app's modules into its definitions from their
-/// manifests, read from the libraries `zgx.json` names: an editor completes
-/// a module's functions, and a wrong argument is a type error.
+/// manifests, read from the libraries `zgx.json` names: each module's table
+/// is typed, so an editor completes its functions and a wrong argument is a
+/// type error. A call by name stays untyped.
 #[test]
 fn an_apps_modules_are_typed_for_its_scripts() {
     use zgx_script::{app_types, check, module_types};
@@ -998,10 +999,18 @@ fn an_apps_modules_are_typed_for_its_scripts() {
     // (A copy: its types are written beside it.)
     let library = dir.join("lib").join(typed_library().file_name().unwrap());
     std::fs::copy(typed_library(), &library).unwrap();
+    // A second module: all a tool reads of a library is its manifest, so a
+    // file of one stands for it here.
+    let few = r#"{"zgx_module":1,"abi":1,"name":"few_more","functions":{"few.now":{"args":[],"returns":{"optional":"number"}}},"actions":{}}"#;
+    std::fs::write(
+        dir.join("lib/few.bin"),
+        zgx_module::abi::manifest_bytes(few),
+    )
+    .unwrap();
     std::fs::write(
         dir.join("zgx.json"),
         format!(
-            r#"{{ "modules": {{ "typed": {:?}, "few": "lib/few.bin", "absent": "modules/absent" }} }}"#,
+            r#"{{ "modules": {{ "typed": {:?}, "few_more": "lib/few.bin", "absent": "modules/absent" }} }}"#,
             format!("lib/{}", library.file_name().unwrap().to_string_lossy())
         ),
     )
@@ -1013,23 +1022,15 @@ local joined: string = typed.join("a", "b")
 local found = typed.find({ id = "x", limit = 1 })
 local id: string? = if found then found.id else nil
 local tags: { string } = if found then found.tags else {}
-local by_name: number = ui.call_sync("typed.count_words", "x")
-local other: any = ui.call_sync("some.host_function", { 1 })
+local now: number? = ui.module("few_more").now()
+local by_name: any = ui.call_sync("typed.count_words", "x")
 ui.invoke("typed.keep", { any = "value" })
 return ui.column {
-	ui.text { `{words} {joined} {id} {#tags} {by_name} {other}` },
+	ui.text { `{words} {joined} {id} {#tags} {now} {by_name}` },
 	ui.button { "Keep", on_click = ui.action("typed.keep", 1) },
 }
 "#;
     std::fs::write(dir.join("app.luau"), good).unwrap();
-    // A second module, of few functions: all a tool reads of a library is
-    // its manifest, so a file of one stands for it here.
-    let few = r#"{"zgx_module":1,"abi":1,"name":"few","functions":{"few.count":{"args":[["text","string"]],"returns":"number"},"few.join":{"args":[["a","string"],["b","string"]],"returns":"string"},"few.now":{"args":[],"returns":{"optional":"number"}}},"actions":{}}"#;
-    std::fs::write(
-        dir.join("lib/few.bin"),
-        zgx_module::abi::manifest_bytes(few),
-    )
-    .unwrap();
 
     let (modules, untyped) = module_types::of_app(&dir);
     assert_eq!(modules.len(), 2);
@@ -1050,12 +1051,13 @@ return ui.column {
         "\tnothing: () -> (),",
         "\tdoubled: (n: number) -> number,",
         "\tany: (value: any) -> any,",
-        "\tmodule: ((name: \"few\") -> FewModule) & ((name: \"typed\") -> TypedModule) & ((name: string) -> any),",
-        // (More functions than luau-lsp takes by name: `ui.call_sync` is as
-        // it was, and the tables type them.)
+        "export type FewMoreModule = {\n\tnow: () -> number?,\n}",
+        // (Modules in `zgx.json`'s order of names.)
+        "\tmodule: ((name: \"few_more\") -> FewMoreModule) & ((name: \"typed\") -> TypedModule) & ((name: string) -> any),",
+        // By name, untyped as ever.
         "\tcall_sync: (name: string, arg: unknown?) -> any,",
-        "\taction: ((name: \"typed.keep\", value: any) -> Action) & ((name: \"typed.must\", text: string) -> Action) & ((name: string, arg: unknown?) -> Action),",
-        "\tinvoke: ((name: \"typed.keep\", value: any) -> ()) & ((name: \"typed.must\", text: string) -> ()) & ((name: string, arg: unknown?) -> ()),",
+        "\taction: (name: string, arg: unknown?) -> Action,",
+        "\tinvoke: (name: string, arg: unknown?) -> (),",
     ] {
         assert!(written.contains(line), "no {line:?} in the app's types");
     }
@@ -1063,12 +1065,7 @@ return ui.column {
         .iter()
         .map(|(_, manifest)| manifest.clone())
         .collect();
-    assert_eq!(
-        module_types::notes(&manifests),
-        [
-            "ui.call_sync is not typed by name: the app's modules have 14 to name, and luau-lsp takes 8 (each module's table types them)"
-        ]
-    );
+    assert_eq!(module_types::notes(&manifests), Vec::<String>::new());
     // Unchanged, it isn't written again; and the module's own types are
     // beside its library.
     assert!(!app_types::write_types(&dir).unwrap());
@@ -1100,46 +1097,12 @@ local b = typed.nope("x")
 local c = typed.join("a")
 local d: string = typed.count_words("x")
 local e = typed.find({ id = 7 })
-local f: number = ui.module("few").join("a", "b")
+local f: string = ui.module("few_more").now()
 return ui.text { `{a} {b} {c} {d} {e} {f}` }
 "#;
         assert_eq!(checked(bad), [3, 4, 5, 6, 7, 8]);
     } else {
         eprintln!("skipped the check: luau-lsp is not installed");
-    }
-
-    // An app whose modules' functions are few has them by name too: those
-    // of one argument or none, which is what `ui.call_sync` passes.
-    std::fs::write(
-        dir.join("zgx.json"),
-        r#"{ "modules": { "few": "lib/few.bin" } }"#,
-    )
-    .unwrap();
-    assert!(app_types::write_types(&dir).unwrap());
-    let written = std::fs::read_to_string(app_types::types_file(&dir)).unwrap();
-    assert!(written.contains(
-        "\tcall_sync: ((name: \"few.count\", text: string) -> number) & ((name: \"few.now\") -> number?) & ((name: string, arg: unknown?) -> any),"
-    ));
-    assert!(written.contains("\taction: (name: string, arg: unknown?) -> Action,"));
-    if check::find_luau_lsp().is_some() {
-        // By name, what a call gives is typed. What it is passed isn't: a
-        // wrong argument matches the signature any name has.
-        let by_name = r#"--!strict
-local count: number = ui.call_sync("few.count", "x")
-local wrong: string = ui.call_sync("few.count", "x")
-local passed: number = ui.call_sync("few.count", 5)
-local now: number? = ui.call_sync("few.now")
-return ui.text { `{count} {wrong} {passed} {now}` }
-"#;
-        std::fs::write(dir.join("app.luau"), by_name).unwrap();
-        let report = check::check(std::slice::from_ref(&dir), &check::Options::default()).unwrap();
-        let errors: Vec<u32> = report
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == check::Severity::Error)
-            .map(|d| d.line)
-            .collect();
-        assert_eq!(errors, [3], "{:?}", report.diagnostics);
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
