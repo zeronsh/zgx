@@ -209,3 +209,23 @@ fn a_blinking_caret_never_moves_a_box_or_damages_past_itself() {
         }
     }
 }
+
+#[test]
+fn a_window_that_is_not_key_shows_no_caret_and_wakes_for_nothing() {
+    let mut ui = Ui::new(400., 200.);
+    let editor = focused_editor(&mut ui);
+    ui.set_caret_blink(Some(BLINK));
+    assert!(ui.next_interaction_deadline().is_some());
+    ui.set_window_active(false);
+    ui.prepare_frame();
+    assert_eq!(ui.next_interaction_deadline(), None);
+    let opacity = ui.scene.borrow().effects(editor.caret).opacity;
+    assert_eq!(
+        opacity, 0.,
+        "AppKit draws no caret in a window that is not key"
+    );
+    ui.set_window_active(true);
+    ui.prepare_frame();
+    assert!(ui.next_interaction_deadline().is_some());
+    assert_eq!(ui.scene.borrow().effects(editor.caret).opacity, 1.);
+}
