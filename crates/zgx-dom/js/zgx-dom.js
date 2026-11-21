@@ -2113,6 +2113,18 @@ export function zgx_focus_snapshot() {
   return el.selectionDirection === "backward" ? [id, tag, end, start] : [id, tag, start, end];
 }
 
+// A text area over a model's selection in the page, as UTF-8 bytes of its
+// text (anchor, focus in order), for an edit a script makes there at the
+// caret; undefined where the selection is elsewhere.
+export function zgx_edit_selection(id) {
+  const el = nodes[id];
+  const selection = document.getSelection();
+  if (!el || !selection || selection.rangeCount === 0 || !el.contains(selection.anchorNode)) return undefined;
+  const text = el.textContent;
+  const [start, end] = editSelection(el);
+  return [utf8(text, start), utf8(text, end)];
+}
+
 // `NodeHandle::restore_focus`: focus back on the snapshot's node, its
 // selection set, nothing scrolled (no container around it, the page or the
 // field's own text). False, and nothing changed, if the node is gone or its

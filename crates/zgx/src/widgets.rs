@@ -2281,6 +2281,60 @@ pub(crate) fn write_clipboard(
 ) -> bool {
     content.write(&*platform.0)
 }
+/// A text area's text, atoms and undo, as scripts edit it on every target
+/// (`NodeHandle::text_edits`): the desktop's `EditorHandle`, or a DOM text
+/// area with atoms over its own model. (Pin line.)
+#[doc(hidden)]
+pub trait TextEdits {
+    /// Its committed text.
+    fn text(&self) -> String;
+    /// Its atoms, by start.
+    fn atoms(&self) -> Vec<crate::text_edit::Atom>;
+    /// `EditorHandle::insert_atom`: `label` an atom over the selection or
+    /// `range` (bytes), one undo step; its id, or none.
+    fn insert_atom(
+        &self,
+        label: &str,
+        range: Option<std::ops::Range<usize>>,
+        wash: Option<Color>,
+        payload: Option<std::sync::Arc<dyn crate::text_edit::AtomPayload>>,
+    ) -> Option<u64>;
+    /// Undo its last step; whether there was one.
+    fn undo(&self) -> bool;
+    /// Redo the last step undone; whether there was one.
+    fn redo(&self) -> bool;
+    fn can_undo(&self) -> bool;
+    fn can_redo(&self) -> bool;
+}
+impl TextEdits for EditorHandle {
+    fn text(&self) -> String {
+        self.editor.borrow().text().into_owned()
+    }
+    fn atoms(&self) -> Vec<crate::text_edit::Atom> {
+        EditorHandle::atoms(self)
+    }
+    fn insert_atom(
+        &self,
+        label: &str,
+        range: Option<std::ops::Range<usize>>,
+        wash: Option<Color>,
+        payload: Option<std::sync::Arc<dyn crate::text_edit::AtomPayload>>,
+    ) -> Option<u64> {
+        EditorHandle::insert_atom(self, label, range, wash, payload)
+    }
+    fn undo(&self) -> bool {
+        EditorHandle::undo(self)
+    }
+    fn redo(&self) -> bool {
+        EditorHandle::redo(self)
+    }
+    fn can_undo(&self) -> bool {
+        self.editor.borrow().can_undo()
+    }
+    fn can_redo(&self) -> bool {
+        self.editor.borrow().can_redo()
+    }
+}
 /// The layout and notification passes a frame takes to settle.
 const LAYOUT_PASSES: usize = 64;
 /// How much of a point a size or a position may differ by and be the same

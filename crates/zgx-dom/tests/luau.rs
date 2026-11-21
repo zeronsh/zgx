@@ -416,3 +416,68 @@ async fn a_cleared_list_of_rows_rests_near_where_it_began() {
     );
     mounted.unmount();
 }
+
+/// `ui.editor` in the browser, as on the desktop: `insert_atom` replaces
+/// the typed "@que" with a chip, `atoms` reads it, and one undo puts the
+/// typed text back (one redo the chip).
+#[wasm_bindgen_test]
+fn ui_editor_inserts_atoms_and_undoes_in_the_browser() {
+    let runtime = Runtime::new();
+    let script = ScriptHost::inline(
+        &runtime,
+        "atoms.luau",
+        r#"
+        local draft = ui.state("draft", "ask @que")
+        local atoms = ui.state("atoms", {})
+        local made = ui.state("made", "none")
+        local box = ui.ref()
+        local function read()
+            local list = ui.editor.atoms(box:get()) or {}
+            local a = list[1]
+            made:set(`{#list}:{a and a.id or "-"}:{a and a.from or "-"}-{a and a.to or "-"}:{tostring(ui.editor.can_undo(box:get()))}`)
+        end
+        return ui.column {
+            ui.textarea { ref = box, value = draft, atoms = atoms, w = 300, h = 80 },
+            ui.button { on_click = function()
+                ui.editor.insert_atom(box:get(), "@quarterly.pdf", {
+                    id = "q-1", data = { path = "q.pdf" }, replace = { from = 4, to = 8 },
+                })
+                read()
+            end, "Add" },
+            ui.button { on_click = function() ui.editor.undo(box:get()); read() end, "Undo" },
+            ui.button { on_click = function() ui.editor.redo(box:get()); read() end, "Redo" },
+            ui.text { function() return `{made:get()}|{draft:get()}|{#atoms:get()}` end },
+        }
+        "#,
+    );
+    script.reload().expect("the script loads");
+    let host = host();
+    let _mounted = zgx_dom::mount(&runtime, &host, script.view());
+    zgx_dom::flush();
+    let press = |index: u32| {
+        let buttons = host.query_selector_all("button").unwrap();
+        let button: web_sys::HtmlElement = buttons.item(index).unwrap().dyn_into().unwrap();
+        button.click();
+        zgx_dom::flush();
+    };
+    let out = || host.text_content().unwrap_or_default();
+    let chips = || host.query_selector_all("[data-atom]").unwrap().length();
+    press(0);
+    assert!(
+        out().contains("1:q-1:4-18:true|ask @quarterly.pdf|1"),
+        "{}",
+        out()
+    );
+    assert_eq!(chips(), 1, "a chip");
+    press(1);
+    assert!(out().contains("0:-:---:"), "{}", out());
+    assert!(out().contains("|ask @que|0"), "{}", out());
+    assert_eq!(chips(), 0);
+    press(2);
+    assert!(
+        out().contains("1:q-1:4-18:true|ask @quarterly.pdf|1"),
+        "{}",
+        out()
+    );
+    assert_eq!(chips(), 1);
+}
