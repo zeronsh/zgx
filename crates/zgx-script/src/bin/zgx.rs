@@ -108,6 +108,24 @@ fn types(args: Vec<String>) -> ExitCode {
                     if changed { "wrote" } else { "unchanged:" },
                     file.display()
                 );
+                // A native module `zgx.json` names that has no library to
+                // read (not built yet) is left untyped: say which.
+                let (modules, untyped) = zgx_script::module_types::of_app(&dir);
+                for (library, manifest) in &modules {
+                    if let Some(name) = zgx_script::module_types::name_of(manifest) {
+                        println!("  module `{name}`: {}", library.display());
+                    }
+                }
+                let manifests: Vec<String> = modules
+                    .iter()
+                    .map(|(_, manifest)| manifest.clone())
+                    .collect();
+                for why in untyped
+                    .into_iter()
+                    .chain(zgx_script::module_types::notes(&manifests))
+                {
+                    eprintln!("zgx types: {why}");
+                }
             }
             Err(error) => {
                 eprintln!("zgx types: {error}");

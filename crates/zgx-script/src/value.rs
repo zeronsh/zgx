@@ -228,6 +228,13 @@ impl Folded {
         let opened = self.opened.get_or_init(Box::default);
         opened.kept.get_or_init(|| self.opened()).field(key)
     }
+    /// What it opens to, opened for good: a reader given a reference (a
+    /// native module's).
+    #[cfg(feature = "modules")]
+    pub(crate) fn kept(&self) -> &Value {
+        let opened = self.opened.get_or_init(Box::default);
+        opened.kept.get_or_init(|| self.opened())
+    }
     /// The value it opens to, opened again only if nothing holds the last.
     fn opened(&self) -> Value {
         if let Some(value) = self.held() {
@@ -666,6 +673,15 @@ impl Value {
         match self {
             Value::Folded(folded) => std::borrow::Cow::Owned(folded.read()),
             _ => std::borrow::Cow::Borrowed(self),
+        }
+    }
+    /// A folded value as the table it opens to, kept open; none for any
+    /// other value.
+    #[cfg(feature = "modules")]
+    pub(crate) fn read_through(&self) -> Option<&Value> {
+        match self {
+            Value::Folded(folded) => Some(folded.kept()),
+            _ => None,
         }
     }
     /// Whether Luau counts it as true: anything but `nil` and `false`.
