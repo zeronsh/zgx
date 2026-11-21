@@ -18,6 +18,11 @@ default = ["components", "svg", "png", "jpeg", "gif", "webp", "cjk-thai-words"]
 # Test-only hooks in `zgx test` (none in a default build): a delay an
 # environment variable names, to land a signal in a window on purpose.
 test-hooks = []
+# Native modules (`ScriptHost::load_module`): an app's own Rust, built apart
+# as libraries with the `zgx-module` crate and loaded as the app starts
+# (docs/design/runtime.md). Off by default: a host that loads none links no
+# loader.
+modules = ["dep:libloading"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # The component library's `ui.*` (zgx-components): the data grid, tree,
@@ -79,6 +84,8 @@ zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
 mlua = { package = "zgx-mlua", version = "0.12.10", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
+# The system's loader for native modules (`modules`).
+libloading = { version = "0.8", optional = true }
 # `ui.zip`: entries' checksums.
 crc32fast = "1"
 # A font's or a picture's bytes a script hands over as base64 (`b64.rs`),
@@ -109,6 +116,9 @@ web-time = "1.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
+# Native modules' interface: their manifests are read for `zgx types` in
+# every build but the browser's, which loads no library (nothing but std).
+zgx-module = { path = "../zgx-module", version = "0.1.10", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -142,6 +152,11 @@ path = "examples/web_view.rs"
 name = "scene3d"
 required-features = ["scene3d"]
 
+[[example]]
+# What a call into a native module costs, against the same function linked in.
+name = "module_call_bench"
+required-features = ["modules"]
+
 [dev-dependencies]
 # The perf gate's output check, called by the gate benches each frame.
 zgx-fingerprint = { path = "../../scripts/perf/fingerprint" }
@@ -150,11 +165,21 @@ zgx-desktop = { path = "../zgx-desktop" }
 png = "0.18"
 # The benchmark workload of the vlist_luau example.
 zgx-workload = { path = "../../comparisons/workload" }
+# A native module, loaded as a library and linked in (tests/native_modules.rs).
+zgx-module-fixture = { path = "../zgx-module/fixture" }
+zgx-module-fixture-typed = { path = "../zgx-module/fixture-typed" }
 
 # CoreVideo frames for `ScriptHost::surface` (tests/host_surfaces.rs).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-core-foundation = "0.3.2"
 objc2-core-video = "0.3.2"
+
+[[test]]
+# Its own binary: it needs the `modules` feature, and the fixture built as
+# a library beside it.
+name = "native_modules"
+path = "tests/native_modules.rs"
+required-features = ["modules"]
 
 [[test]]
 name = "luau_pages"

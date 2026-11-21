@@ -220,6 +220,7 @@ fn check_with(
         .ok_or(CheckError::NotInstalled)?;
     let mut files = Vec::new();
     let mut sources = Vec::new();
+    let mut manifests = Vec::new();
     for path in paths {
         let found = scripts(path);
         if found.is_empty() {
@@ -235,6 +236,9 @@ fn check_with(
         // An app's directory: its tokens' types, for its editor too.
         if path.is_dir() {
             crate::app_types::write_types_of(path, &own)?;
+            // Its native modules' types, checked against too.
+            let (modules, _) = crate::module_types::of_app(path);
+            manifests.extend(modules.into_iter().map(|(_, manifest)| manifest));
         }
         sources.extend(own);
         files.extend(found);
@@ -251,8 +255,11 @@ fn check_with(
     let _cleanup = Cleanup(dir.clone());
     let definitions = dir.join("zgx.d.luau");
     // zgx's, with the apps' own tokens in them (`app_types`).
-    std::fs::write(&definitions, crate::app_types::definitions(&sources))
-        .map_err(CheckError::Io)?;
+    std::fs::write(
+        &definitions,
+        crate::app_types::definitions_with(&sources, &manifests),
+    )
+    .map_err(CheckError::Io)?;
     // An app whose scripts require `@app/…` (its own modules, which a
     // plugin may replace) or `@app-original/…` (a replacement's original)
     // is checked with both aliases naming its directory: the nearest

@@ -7009,7 +7009,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             match action {
                 Some(action) => {
                     action(arg.unwrap_or(Value::Nil));
-                    Ok(())
+                    crate::modules::failure().map_or(Ok(()), Err)
                 }
                 None => Err(mlua::Error::runtime(format!(
                     "no host action named `{name}`"
@@ -7028,7 +7028,14 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             };
             crate::rules::guard(lua, crate::GuardKind::Function, &name)?;
             match function {
-                Some(function) => Ok(function(arg.unwrap_or(Value::Nil))),
+                Some(function) => {
+                    let value = function(arg.unwrap_or(Value::Nil));
+                    // (A module's function says so when it can't answer.)
+                    match crate::modules::failure() {
+                        None => Ok(value),
+                        Some(error) => Err(error),
+                    }
+                }
                 None => Err(mlua::Error::runtime(format!(
                     "no host function named `{name}`"
                 ))),

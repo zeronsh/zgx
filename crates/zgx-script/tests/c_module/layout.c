@@ -1,0 +1,48 @@
+/* Prints the sizes and offsets of zgx_module.h, one "name value" a line,
+ * for tests/native_modules.rs to hold against Rust's. */
+#include <stdio.h>
+#include "zgx_module.h"
+
+#define SIZE(type) printf("sizeof(" #type ") %zu\n", sizeof(type))
+#define AT(type, field) printf(#type "." #field " %zu\n", offsetof(type, field))
+
+int main(void) {
+    printf("ZGX_MODULE_ABI %u\n", ZGX_MODULE_ABI);
+    printf("ZGX_COUNT_BEFORE %d\n", ZGX_COUNT_BEFORE);
+    printf("ZGX_MANIFEST_HEAD %d\n", ZGX_MANIFEST_HEAD);
+    printf("kinds %d %d %d %d %d %d %d %d\n", ZGX_NIL, ZGX_BOOL, ZGX_NUM, ZGX_STR, ZGX_TEXT,
+           ZGX_LIST, ZGX_MAP, ZGX_FOLDED);
+    printf("statuses %u %u %u\n", ZGX_DONE, ZGX_FAILED, ZGX_REFUSED_ABI);
+    printf("sum %u\n", zgx_manifest_sum((const uint8_t *)"{\"name\":\"c\"}", 12));
+    SIZE(zgx_value);
+    AT(zgx_value, kind);
+    AT(zgx_value, boolean);
+    AT(zgx_value, held);
+    AT(zgx_value, len);
+    SIZE(zgx_field);
+    AT(zgx_field, key);
+    AT(zgx_field, key_len);
+    AT(zgx_field, value);
+    SIZE(zgx_bytes);
+    AT(zgx_bytes, ptr);
+    AT(zgx_bytes, len);
+    SIZE(zgx_api);
+    AT(zgx_api, abi);
+    AT(zgx_api, size);
+    AT(zgx_api, string);
+    AT(zgx_api, list);
+    AT(zgx_api, map);
+    AT(zgx_api, slice);
+    AT(zgx_api, clone);
+    AT(zgx_api, release);
+    AT(zgx_api, open);
+    AT(zgx_api, flat);
+    SIZE(zgx_registrar);
+    AT(zgx_registrar, size);
+    AT(zgx_registrar, host);
+    AT(zgx_registrar, function);
+    AT(zgx_registrar, function_taking);
+    AT(zgx_registrar, action);
+    AT(zgx_registrar, state);
+    return 0;
+}
