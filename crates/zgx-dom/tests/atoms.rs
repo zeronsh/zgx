@@ -518,3 +518,35 @@ fn a_paste_of_a_copy_makes_its_atoms_chips_and_a_cut_takes_them() {
     assert_eq!(to_value.get(), "hi ");
     assert_eq!(chips(&to), ["hi"], "one undo takes the paste and its chip");
 }
+
+#[wasm_bindgen_test]
+fn a_chip_is_read_as_one_unit_by_its_text_or_its_name() {
+    let runtime = Runtime::new();
+    let value = runtime.signal(String::from("ask Ada and Bo"));
+    let host = host();
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        text_area("Message", value).atoms_when(|editor| {
+            let mut named = Atom::new(editor.new_atom_id(), 12..14);
+            named.name = Some(std::sync::Arc::from("Bo Jensen"));
+            vec![Atom::new(editor.new_atom_id(), 4..7), named]
+        }),
+    );
+    zgx_dom::flush();
+    let list = host.query_selector_all("[data-atom]").unwrap();
+    let chip = |i| {
+        list.item(i)
+            .unwrap()
+            .dyn_into::<web_sys::Element>()
+            .unwrap()
+    };
+    for i in 0..2 {
+        assert_eq!(chip(i).get_attribute("role").as_deref(), Some("img"));
+    }
+    assert_eq!(chip(0).get_attribute("aria-label").as_deref(), Some("Ada"));
+    assert_eq!(
+        chip(1).get_attribute("aria-label").as_deref(),
+        Some("Bo Jensen")
+    );
+}

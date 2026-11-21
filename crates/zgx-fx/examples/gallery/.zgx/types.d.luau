@@ -9461,6 +9461,9 @@ export type AtomItem = {
 	to: number,
 	data: any?,
 	style: AtomLook?,
+	-- What assistive technology reads for it instead of its text (a
+	-- mention's full name); either way it is read as one unit.
+	name: string?,
 	-- Only on a removed atom: the text it had.
 	label: string?,
 }
@@ -9474,6 +9477,8 @@ export type InsertAtomOptions = {
 	id: string?,
 	data: any?,
 	style: { bg: string? }?,
+	-- What assistive technology reads for it instead of its text.
+	name: string?,
 	-- The characters it takes the place of (the `@que` typed to ask for it).
 	replace: { from: number, to: number }?,
 }

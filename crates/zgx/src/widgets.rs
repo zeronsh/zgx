@@ -700,6 +700,8 @@ struct CodeAtoms {
     /// How its atoms go on the clipboard beyond the app and come back
     /// (`EditorHandle::set_atom_codec`).
     codec: RefCell<Option<crate::editor_atom_clipboard::Codec>>,
+    /// The atoms' and text's revisions its semantics' atoms are of.
+    semantic_units: Cell<Option<(u64, u64)>>,
 }
 struct ShownAtomIcon {
     node: NodeId,
@@ -1694,6 +1696,16 @@ impl EditorHandle {
         self.refresh();
         Some(id)
     }
+    /// What assistive technology reads for atom `id` instead of its text
+    /// (`Atom::name`). Whether it has that atom.
+    #[doc(hidden)]
+    pub fn set_atom_name(&self, id: u64, name: Option<std::sync::Arc<str>>) -> bool {
+        let found = self.editor.borrow_mut().set_atom_name(id, name);
+        if found {
+            self.refresh();
+        }
+        found
+    }
     /// Set its atoms (a draft's): see `TextEditor::set_atoms`.
     pub fn set_atoms(&self, atoms: Vec<crate::text_edit::Atom>) {
         self.hint.code_made();
@@ -2245,6 +2257,8 @@ pub trait TextEdits {
         wash: Option<Color>,
         payload: Option<std::sync::Arc<dyn crate::text_edit::AtomPayload>>,
     ) -> Option<u64>;
+    /// What a reader reads for atom `id` (`Atom::name`); whether it has it.
+    fn set_atom_name(&self, id: u64, name: Option<std::sync::Arc<str>>) -> bool;
     /// Undo its last step; whether there was one.
     fn undo(&self) -> bool;
     /// Redo the last step undone; whether there was one.
@@ -2267,6 +2281,9 @@ impl TextEdits for EditorHandle {
         payload: Option<std::sync::Arc<dyn crate::text_edit::AtomPayload>>,
     ) -> Option<u64> {
         EditorHandle::insert_atom(self, label, range, wash, payload)
+    }
+    fn set_atom_name(&self, id: u64, name: Option<std::sync::Arc<str>>) -> bool {
+        EditorHandle::set_atom_name(self, id, name)
     }
     fn undo(&self) -> bool {
         EditorHandle::undo(self)
@@ -8376,6 +8393,22 @@ impl Ui {
                     ),
                 }
                 draw_semantic_revision.set(Some(e.revision()));
+            }
+            // Its atoms, each one unit to a reader (a text area with atoms
+            // alone: most never have one).
+            if e.has_atoms() || draw_hint.code().and_then(CodeHint::atoms).is_some() {
+                let atoms = draw_hint.code_made().atoms_made();
+                let told = (e.atoms_revision(), e.revision());
+                if atoms.semantic_units.get() != Some(told) {
+                    let units = (e.atoms().iter())
+                        .map(|atom| crate::semantics::TextUnit {
+                            range: atom.range.clone(),
+                            label: atom.name.as_deref().map(str::to_owned),
+                        })
+                        .collect();
+                    semantics.update_text_units(root, units);
+                    atoms.semantic_units.set(Some(told));
+                }
             }
             // What assistive technology reads of a long text: the lines in
             // view and a page each side, or a page around the caret when it

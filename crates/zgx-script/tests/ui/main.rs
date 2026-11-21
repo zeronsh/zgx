@@ -5,6 +5,8 @@
 #![allow(clippy::duplicate_mod)]
 #[path = "../atom_clipboard.rs"]
 mod atom_clipboard;
+#[path = "../atom_names.rs"]
+mod atom_names;
 #[path = "../atom_pointer.rs"]
 mod atom_pointer;
 #[path = "../atom_style.rs"]

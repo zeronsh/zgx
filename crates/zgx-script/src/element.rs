@@ -1335,10 +1335,11 @@ pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<
                 let Some(editor) = edits_of(&e) else {
                     return Ok(None);
                 };
-                let (mut key, mut data, mut bg, mut range) =
-                    (None, crate::value::Value::Nil, None, None);
+                let (mut key, mut data, mut bg, mut range, mut name) =
+                    (None, crate::value::Value::Nil, None, None, None);
                 if let Some(options) = &options {
                     key = options.get::<Option<String>>("id")?;
+                    name = options.get::<Option<String>>("name")?;
                     data = options
                         .get::<Option<crate::value::Value>>("data")?
                         .unwrap_or_default();
@@ -1363,7 +1364,12 @@ pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<
                 let wash = bg.as_deref().and_then(crate::node::parse_color);
                 let payload = crate::atoms::payload(key.clone(), &data, bg);
                 let made = off_clock(lua, |_| {
-                    editor.insert_atom(&label, range, wash, Some(payload))
+                    let id = editor.insert_atom(&label, range, wash, Some(payload))?;
+                    // What a reader reads for it instead of its text.
+                    if let Some(name) = name.filter(|name| !name.is_empty()) {
+                        editor.set_atom_name(id, Some(std::sync::Arc::from(name)));
+                    }
+                    Some(id)
                 })
                 .flatten();
                 settle(lua);
