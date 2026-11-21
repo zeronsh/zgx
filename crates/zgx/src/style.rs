@@ -1452,17 +1452,17 @@ pub(crate) fn merge_insets(target: &mut Insets, source: Insets, mask: u8) {
         target.left = source.left;
     }
 }
-/// Take a setter's value; a theme token stands for a placeholder value the
-/// setter writes as any other, and the property is bound to the token (its
-/// value is written when the node is styled). A later value replaces the
-/// binding. One path through the setter keeps chained setters moving the
-/// style in place.
 /// An outline's colour while only its width is set: a patch carrying it keeps
 /// the colour (or theme token) it lands on, and alone it draws black.
 pub(crate) const OUTLINE_COLOR_UNSET: Color = Color(1, 2, 3, 0);
 /// An outline's width while only its colour is set: a patch carrying it keeps
 /// the width it lands on (0 included), and alone it draws 1 point.
 pub(crate) const OUTLINE_WIDTH_UNSET: f32 = f32::NAN;
+/// Take a setter's value; a theme token stands for a placeholder value the
+/// setter writes as any other, and the property is bound to the token (its
+/// value is written when the node is styled). A later value replaces the
+/// binding. One path through the setter keeps chained setters moving the
+/// style in place.
 macro_rules! value_or_token {
     ($self:ident, $value:ident, $field:expr) => {
         let ($value, token) = crate::theme::split($value.into());

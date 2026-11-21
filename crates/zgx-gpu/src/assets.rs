@@ -58,6 +58,7 @@ fn webp_is_animated(bytes: &[u8]) -> bool {
 /// An animated WebP's frames, composited, and how long each shows; it loops
 /// for ever (the container's loop count isn't read).
 #[cfg(feature = "webp")]
+#[doc(hidden)]
 pub fn decode_webp_animation(bytes: &[u8]) -> Result<Arc<zgx::animation::Animation>, GpuError> {
     use image::AnimationDecoder;
     use zgx::animation::{Animation, Frame, LoopCount};
