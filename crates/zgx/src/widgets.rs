@@ -4076,6 +4076,10 @@ impl Ui {
             signal
         })
     }
+    /// Out of line: only an app that reads `ui.window.popups` observes them,
+    /// and every layout of the others passes by.
+    #[cold]
+    #[inline(never)]
     fn publish_popups(&self) {
         let Some(signal) = self.storage.popups_observed.borrow().clone() else {
             return;
@@ -4087,7 +4091,9 @@ impl Ui {
     }
     /// Whether any after-layout work ran.
     fn run_after_layout(&self) -> bool {
-        self.publish_popups();
+        if self.storage.popups_observed.borrow().is_some() {
+            self.publish_popups();
+        }
         let pending = std::mem::take(&mut *self.storage.after_layout.borrow_mut());
         if pending.is_empty() {
             return false;
