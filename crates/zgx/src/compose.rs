@@ -7759,15 +7759,31 @@ fn open_element(
         }
         let typography = environment.typography.clone();
         let theme = environment.theme.clone();
+        // Bound after its options, so their first runs come before its own:
+        // the editor draws once as it mounts, not once each. That draw's
+        // reads (a custom shaper's) are this binding's too: run again with
+        // its style unchanged, one of them changed, and it draws again (no
+        // binding of its own for it: a mount pays for none).
+        let last = RefCell::new(None);
         ui.bind_input(root, move || {
             let style = typography.get();
             let theme = Some(&*theme);
-            editor.set_text_style(
+            let now = (
                 style.color_in(theme),
                 style.size_in(theme),
                 style.font_in(theme),
                 style.wrap,
             );
+            let first = last.borrow().is_none();
+            if !first && last.borrow().as_ref() == Some(&now) {
+                editor.refresh();
+                return;
+            }
+            editor.set_text_style(now.0, now.1, now.2.clone(), now.3);
+            *last.borrow_mut() = Some(now);
+            if first {
+                editor.finish_mount();
+            }
         });
     }
     if let Some(id) = view.id {
