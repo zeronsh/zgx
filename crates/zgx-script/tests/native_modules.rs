@@ -1296,3 +1296,70 @@ fn a_bundle_runs_its_bytecode_and_is_checked_once() {
     assert!(open(&out).unwrap().hashed);
     std::fs::remove_dir_all(base).unwrap();
 }
+
+/// A package a bundled app lends its plugins (a design system in its own
+/// folder) is the bundle's bytecode: a plugin, whose own files are source
+/// on the disk, requires its modules as the app does.
+#[test]
+fn a_bundles_lent_package_is_its_bytecode_for_plugins_too() {
+    use zgx_script::app_bundle::{Options, open_with, write};
+    use zgx_script::{Capability, Plugin};
+    let base = std::env::temp_dir().join(format!("zgx-bundle-lent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let write_file = |path: &std::path::Path, text: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let app = base.join("app");
+    write_file(
+        &app.join("app.luau"),
+        "local badge = require(\"@ds/badge\")\nreturn ui.column { id = \"app\", ui.text { id = \"mine\", badge(\"app\") } }\n",
+    );
+    write_file(
+        &app.join("ds/badge.luau"),
+        "return function(label) return label .. \" calm\" end\n",
+    );
+    let out = base.join("dist");
+    write(
+        &app,
+        &Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let opened = open_with(&out, &base.join("cache")).unwrap();
+    assert_ne!(
+        std::fs::read(opened.ui.join("ds/badge.luau")).unwrap()[0],
+        b'r',
+        "bytecode"
+    );
+    let plugins = base.join("plugins");
+    write_file(
+        &plugins.join("p.luau"),
+        "local badge = require(\"@ds/badge\")\nui.contribute { target = \"#mine\", after = ui.text { id = \"theirs\", badge(\"plugin\") } }\n",
+    );
+    let ui = opened.ui.clone();
+    let mut run = TestApp::new(move |runtime| {
+        let host = ScriptHost::from_files(
+            runtime,
+            zgx_script::ScriptFiles::Folder(ui.clone()),
+            "app.luau",
+            zgx_script::Code::VerifiedBytecode,
+        )
+        .package("ds", ui.join("ds"))
+        .grant_all_plugins(Capability::Package("ds".into()));
+        host.set_plugins(vec![Plugin {
+            name: "p".into(),
+            entry: plugins.join("p.luau"),
+            grants: Vec::new(),
+        }]);
+        host
+    });
+    run.frames(1);
+    assert_eq!(run.error(), None);
+    assert_eq!(run.text("mine"), "app calm");
+    assert_eq!(run.text("theirs"), "plugin calm");
+    drop(run);
+    std::fs::remove_dir_all(base).unwrap();
+}
