@@ -413,8 +413,9 @@ impl PartialEq for Value {
 /// One step of a path into a value: a map's key or a list's 1-based index.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PathKey {
-    /// A map's key.
-    Key(Rc<str>),
+    /// A map's key: the runtime's own string, so a map given a new key by
+    /// it holds the same string, counted, not copied.
+    Key(Str),
     /// A list's index, from 1.
     Index(usize),
 }
@@ -782,7 +783,7 @@ impl Value {
                     (Err(i), child) => {
                         let mut out = Vec::with_capacity(fields.len() + 1);
                         out.extend_from_slice(&fields[..i]);
-                        out.push(Field(key.clone().into(), child));
+                        out.push(Field(key.clone(), child));
                         out.extend_from_slice(&fields[i..]);
                         Value::Map(out.into())
                     }
