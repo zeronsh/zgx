@@ -8983,8 +8983,8 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     struct OwnedSpan {
         text: Text,
         style: SpanStyle,
-        font: Option<Rc<str>>,
-        lang: Option<Rc<str>>,
+        font: Option<crate::Str>,
+        lang: Option<crate::Str>,
         followed: Vec<(&'static str, Ty, Owned)>,
         click: Option<Handler>,
         href: Option<Arc<str>>,
@@ -9109,7 +9109,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         "strike" => style.strike = on,
                         _ => {
                             if let Some(Lit::Str(name)) = lit {
-                                *font = Some(name.rc());
+                                *font = Some(name);
                             }
                         }
                     }

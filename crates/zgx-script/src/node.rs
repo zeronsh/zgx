@@ -1572,9 +1572,9 @@ pub(crate) struct Span {
     pub underline: Option<bool>,
     pub strike: bool,
     /// `font`: as `ui.text`'s, `"mono"` or a family's name.
-    pub font: Option<Rc<str>>,
+    pub font: Option<crate::Str>,
     /// `lang`: the language its text is in, over its paragraph's.
-    pub lang: Option<Rc<str>>,
+    pub lang: Option<crate::Str>,
     /// Those of its options given a state or a function, and what it was
     /// given: read as the paragraph is built, so a change builds it again.
     /// Empty for most spans.
@@ -5472,12 +5472,12 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"strike" => span.strike = lua.unpack::<Value>(given)?.truthy(),
                 b"font" => {
                     if let Value::Str(font) = lua.unpack(given)? {
-                        span.font = Some(font.into());
+                        span.font = Some(font);
                     }
                 }
                 b"lang" => {
                     if let Value::Str(lang) = lua.unpack(given)? {
-                        span.lang = Some(lang.into());
+                        span.lang = Some(lang);
                     }
                 }
                 // `padding = 4` (across) or `{ 4, 0.5 }` (across, down).

@@ -124,8 +124,11 @@ impl Deref for Str {
     type Target = str;
     #[inline(always)]
     fn deref(&self) -> &str {
-        // SAFETY: Made from a `str`'s bytes, and never changed.
-        unsafe { std::str::from_utf8_unchecked(&self.0) }
+        // SAFETY: Made from a `str`'s bytes, and never changed; `len` of
+        // them, alive as long as `self`. (A cast, not a call into `str`'s
+        // and the slice's own makers: a string read in a hot function is
+        // then one step for the compiler to inline, as an `Rc<str>`'s is.)
+        unsafe { &*(std::ptr::slice_from_raw_parts(self.0.at.as_ptr(), self.0.len) as *const str) }
     }
 }
 impl AsRef<str> for Str {
@@ -547,7 +550,7 @@ impl<T> Deref for Slice<T> {
     #[inline(always)]
     fn deref(&self) -> &[T] {
         // SAFETY: `len` items, alive as long as `self`.
-        unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.len) }
+        unsafe { &*std::ptr::slice_from_raw_parts(self.at.as_ptr(), self.len) }
     }
 }
 impl<T> AsRef<[T]> for Slice<T> {
