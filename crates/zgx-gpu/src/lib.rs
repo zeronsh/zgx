@@ -10061,30 +10061,7 @@ impl GpuRenderer {
         // (A kept frame's glyphs stay where they are: patching it gave way
         // before the atlas filled, `render_kept`.)
         if MODE != PATCH && !made && self.atlas_filling() {
-            // Filling again soon after the last time with what its text
-            // holds means the visible working set does not fit: grow rather
-            // than give back or re-rasterize glyphs each time it fills. Not
-            // where what its text holds takes under 3/8 of it (a colour
-            // animating through font smoothing's levels leaves each level's
-            // glyphs behind, beside a page of text that stays): given back,
-            // the rest leaves room, and nothing grows to stay grown.
-            // Else the cells no text holds are given back where they lie,
-            // and only where that leaves it filling does it start over.
-            let thrashing = self.frame.wrapping_sub(self.atlas_recycled_at) < ATLAS_THRASH_FRAMES;
-            if thrashing
-                && self.atlas_size < MAX_ATLAS
-                && self.entries.len() < 8192
-                && (self.shelves.area() - self.unheld_area()) * 8
-                    > u64::from(self.atlas_size).pow(2) * 3
-            {
-                let size = (self.atlas_size * 2).min(MAX_ATLAS);
-                if !self.grow_atlas(size) {
-                    self.reset_atlas(size);
-                }
-            } else if !self.evict_glyphs() {
-                self.recycle_atlas();
-            }
-            self.atlas_recycled_at = self.frame;
+            self.atlas_filled();
         }
         let mut quads = std::mem::take(&mut self.frame_quads);
         if !made {
@@ -15776,6 +15753,37 @@ impl GpuRenderer {
     fn evict_glyphs(&mut self) -> bool {
         self.free_glyphs();
         !self.atlas_filling()
+    }
+    /// The atlas filling as a frame starts: grown, given back or started
+    /// over. Cold and out of line: a frame's own body stays as it was
+    /// (inlined, this branch's growth cost every frame's render instructions).
+    #[cold]
+    #[inline(never)]
+    fn atlas_filled(&mut self) {
+        // Filling again soon after the last time with what its text
+        // holds means the visible working set does not fit: grow rather
+        // than give back or re-rasterize glyphs each time it fills. Not
+        // where what its text holds takes under 3/8 of it (a colour
+        // animating through font smoothing's levels leaves each level's
+        // glyphs behind, beside a page of text that stays): given back,
+        // the rest leaves room, and nothing grows to stay grown.
+        // Else the cells no text holds are given back where they lie,
+        // and only where that leaves it filling does it start over.
+        let thrashing = self.frame.wrapping_sub(self.atlas_recycled_at) < ATLAS_THRASH_FRAMES;
+        if thrashing
+            && self.atlas_size < MAX_ATLAS
+            && self.entries.len() < 8192
+            && (self.shelves.area() - self.unheld_area()) * 8
+                > u64::from(self.atlas_size).pow(2) * 3
+        {
+            let size = (self.atlas_size * 2).min(MAX_ATLAS);
+            if !self.grow_atlas(size) {
+                self.reset_atlas(size);
+            }
+        } else if !self.evict_glyphs() {
+            self.recycle_atlas();
+        }
+        self.atlas_recycled_at = self.frame;
     }
     /// The texels of the atlas's glyph cells no text the renderer holds.
     fn unheld_area(&self) -> u64 {
