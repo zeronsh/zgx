@@ -1291,9 +1291,10 @@ pub(crate) enum Files {
     Bundle(&'static Bundle, Code),
     /// Files held in memory (`ScriptHost::from_files`).
     Memory(std::sync::Arc<MemoryFiles>, Code),
-    /// A bundle's folder on the disk (`zgx build`'s `ui/`), read as the
-    /// disk is, file by file as asked, and loaded as its `Code` allows.
-    Folder(std::sync::Arc<std::path::Path>, Code),
+    /// A bundle's folder on the disk (`zgx build`'s `ui/`), read file by
+    /// file as asked, each checked against its manifest as it is read, and
+    /// loaded as its `Code` allows.
+    Folder(app_bundle::Checked, Code),
 }
 /// Why a reload in place (`ScriptHost::retarget`) or a trial load
 /// (`ScriptHost::validate`) failed.
@@ -1331,17 +1332,17 @@ pub enum ScriptFiles {
     Bundle(&'static Bundle),
     /// Files held in memory: an update downloaded, say.
     Memory(std::sync::Arc<MemoryFiles>),
-    /// A bundle's folder on the disk, `zgx build`'s (`app_bundle`), read as
-    /// its files are asked for: only one whose hashes were checked
-    /// (`app_bundle::open`) may load as `Code::VerifiedBytecode`.
-    Folder(PathBuf),
+    /// A bundle's folder on the disk, `zgx build`'s, as `app_bundle::open`
+    /// found it (`Opened::files`): read as its files are asked for, each
+    /// checked against the bundle's manifest as it is read.
+    Folder(app_bundle::Checked),
 }
 impl ScriptFiles {
     fn with(self, code: Code) -> Files {
         match self {
             ScriptFiles::Bundle(bundle) => Files::Bundle(bundle, code),
             ScriptFiles::Memory(memory) => Files::Memory(memory, code),
-            ScriptFiles::Folder(dir) => Files::Folder(dir.into(), code),
+            ScriptFiles::Folder(checked) => Files::Folder(checked, code),
         }
     }
 }
@@ -1380,7 +1381,8 @@ impl Files {
     }
     pub(crate) fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         match self {
-            Files::Disk | Files::Folder(..) => std::fs::read(path),
+            Files::Disk => std::fs::read(path),
+            Files::Folder(checked, _) => checked.read(path),
             Files::Memory(files, _) => files.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's files")
             }),
@@ -1395,7 +1397,7 @@ impl Files {
             Files::Disk => None,
             Files::Bundle(bundle, _) => Some(PathBuf::from(bundle.root)),
             Files::Memory(memory, _) => Some(PathBuf::from(memory.root_path())),
-            Files::Folder(dir, _) => Some(dir.to_path_buf()),
+            Files::Folder(checked, _) => Some(checked.dir.to_path_buf()),
         }
     }
     /// The packages it holds (none on the disk: `ScriptHost::package`).
@@ -1405,14 +1407,15 @@ impl Files {
             Files::Bundle(bundle, _) => bundle.packages(),
             Files::Memory(memory, _) => memory.packages(),
             // As `build::bundle` stores them: `.packages/<name>/`.
-            Files::Folder(dir, _) => {
-                let mut names: Vec<String> = std::fs::read_dir(dir.join(bundle::build::PACKAGES))
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .filter(|entry| entry.path().is_dir())
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .collect();
+            Files::Folder(checked, _) => {
+                let mut names: Vec<String> =
+                    std::fs::read_dir(checked.dir.join(bundle::build::PACKAGES))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter(|entry| entry.path().is_dir())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect();
                 names.sort();
                 names
             }
@@ -1656,7 +1659,7 @@ fn require_module<const LENDING: bool>(
     // design system, say) is the bundle's bytecode whichever VM requires
     // it: a plugin's reads it as the app's does, and can't change it.
     let files = match host.upgrade().map(|h| h.files.borrow().clone()) {
-        Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(dir, _) if within(dir, &path)) => {
+        Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(&checked.dir, &path)) => {
             app
         }
         _ => files,
@@ -2463,7 +2466,7 @@ impl ScriptHost {
             match files {
                 Files::Bundle(bundle, _) => *files = Files::Bundle(bundle, code),
                 Files::Memory(memory, _) => *files = Files::Memory(memory.clone(), code),
-                Files::Folder(dir, _) => *files = Files::Folder(dir.clone(), code),
+                Files::Folder(checked, _) => *files = Files::Folder(checked.clone(), code),
                 Files::Disk => {}
             }
         })
@@ -5077,8 +5080,8 @@ impl ScriptHost {
             {
                 Files::Disk
             }
-            (Files::Folder(dir, _), Script::File(path) | Script::Plugin { path, .. })
-                if plugin && !path.starts_with(&*dir) =>
+            (Files::Folder(checked, _), Script::File(path) | Script::Plugin { path, .. })
+                if plugin && !path.starts_with(&*checked.dir) =>
             {
                 Files::Disk
             }

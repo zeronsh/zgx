@@ -10,8 +10,9 @@ for another interface is shown in the banner, its scripts not run. Last,
 `zgx run` with a module's crate: built into the cache and loaded, taken
 from the cache the next time, and as its source changes, built again and
 the app restarted with a notice. And `zgx build`'s bundle of that app run
-by zgx-run: its bytecode and its module's library, checked; one whose
-library was changed is refused before a window opens."""
+by zgx-run: its bytecode and its module's library, checked; a script
+changed since the build refused as it is read, with the reason; and one
+whose library was changed refused before a window opens."""
 import argparse
 import json
 import os
@@ -214,13 +215,21 @@ def bundle_phase(zgx, zgx_run, work, env):
     finally:
         stop(process)
     said = process.stderr.read()
-    assert "bundle checked in" in said and "(hashed)" in said, said
-    # Again: known by its stamps, not hashed.
+    assert "bundle checked in" in said, said
+    # A script changed: refused as it is read, with the reason.
+    entry = out / "ui/app.luau"
+    original = entry.read_bytes()
+    entry.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
     process, path = launch(zgx_run, out, env)
-    assert path, f"zgx-run stopped: {process.stderr.read()}"
-    stop(process)
-    said = process.stderr.read()
-    assert "(known)" in said, said
+    try:
+        assert path, f"zgx-run stopped: {process.stderr.read()}"
+        deadline = time.monotonic() + 30
+        while "isn't the file its bundle's manifest names" not in (said := errors(path)):
+            assert time.monotonic() < deadline, said
+            time.sleep(0.1)
+    finally:
+        stop(process)
+    entry.write_bytes(original)
     # Its module's library changed: refused, before any window.
     library = next((out / "modules").glob("*/*"))
     library.write_bytes(library.read_bytes() + b"\0")
@@ -308,7 +317,8 @@ def main():
               "hands over, shows --notice, stops naming one that isn't built, and shows one it refuses; "
               "zgx run builds a module's crate, takes it from the cache when unchanged, and builds it "
               "again and restarts the app with a notice as its source changes; and zgx-run runs zgx build's "
-              "bundle of it, hashing it once, and refuses it once its library changes")
+              "bundle of it, refuses a script changed since the build as it is read, and refuses the "
+              "bundle before a window once its library changes")
     finally:
         xvfb.terminate()
 

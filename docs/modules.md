@@ -184,7 +184,7 @@ dist/my-app/
 
 Each module is built for release for each `--target` (the host's by default) where its key is new, and taken from the cache otherwise, so a release in which only Luau changed compiles no Rust. `zgx-run dist/my-app` runs it: the scripts are read from `ui/` as they are asked for, as the build compiled them. `--version` sets the bundle's version over `zgx.json`'s `version`.
 
-Luau checks no bytecode it loads, so a bundle is trusted as native code is: zgx-run runs one a person or the app's install names, and nothing a script or a plugin names. Opening one checks it against its manifest: each module's library by its SHA-256 every launch, and the scripts by one SHA-256 over the whole `ui/` tree the first time, after which each file's size and time of change are enough (kept in the cache) until one of them changes. A bundle whose scripts or libraries aren't those its manifest names is refused before a window opens.
+Luau checks no bytecode it loads, so a bundle is trusted as native code is: zgx-run runs one a person or the app's install names, and nothing a script or a plugin names. It is checked against its manifest, which holds each file's SHA-256: each module's library as the bundle is opened, every launch (it is native code, loaded then), and each file of `ui/` as it is read, so the bytes checked are the bytes run and a launch hashes only what it loads. A library that isn't the one its manifest names stops zgx-run before a window opens; a script that isn't (changed since the build), or one the manifest doesn't name, fails to load as a missing or broken script does, with the reason, and nothing of it runs.
 
 ## Calling one from Luau
 

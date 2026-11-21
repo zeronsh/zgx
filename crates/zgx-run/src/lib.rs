@@ -476,9 +476,8 @@ pub fn run_hosting(
         let opened = zgx_script::app_bundle::open(path)?;
         if zgx::env::var_os("ZGX_BUNDLE_TIMING").is_some() {
             eprintln!(
-                "zgx-run: bundle checked in {:.2} ms ({})",
-                opened.checked_in.as_secs_f64() * 1e3,
-                if opened.hashed { "hashed" } else { "known" }
+                "zgx-run: bundle checked in {:.2} ms",
+                opened.checked_in.as_secs_f64() * 1e3
             );
         }
         Some(opened)
@@ -506,7 +505,7 @@ pub fn run_hosting(
         Some(bundle) => bundle.modules.clone(),
         None => modules_of(script.parent().unwrap_or(Path::new(".")))?,
     };
-    let bundle = bundle.map(|bundle| (bundle.ui, bundle.entry));
+    let bundle = bundle.map(|bundle| (bundle.files(), bundle.entry));
     let notice = LAUNCH.lock().unwrap().notice.take();
     let WindowConfig {
         frame_autosave,
@@ -565,9 +564,9 @@ pub fn run_hosting(
     app.run(move |cx| {
         // Its packages, what it exposes to plugins, and its plugins.
         let host = match &bundle {
-            Some((ui, entry)) => ScriptHost::from_files(
+            Some((files, entry)) => ScriptHost::from_files(
                 &cx.ui.runtime,
-                zgx_script::ScriptFiles::Folder(ui.clone()),
+                files.clone(),
                 entry,
                 zgx_script::Code::VerifiedBytecode,
             ),
