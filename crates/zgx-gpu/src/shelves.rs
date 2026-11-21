@@ -119,15 +119,40 @@ impl Shelves {
             return None;
         }
         let class = class(height).min(self.size);
-        // A shelf of its class or a little taller, then a new one, then an
-        // empty one of any height that holds it, the shortest.
-        let near = |s: &Shelf| s.height >= class && s.height <= class + class / 4 + 2;
+        // The shortest shelf in use that holds it, then the last shelf,
+        // taller if it must be (as a running row grows to its tallest cell:
+        // an atlas nothing has been given back to packs as tightly as one
+        // filled a row at a time), then an emptied one of any height that
+        // holds it, the shortest, then a new one.
         let mut found = self
             .shelves
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.cells > 0 && near(s))
-            .find_map(|(i, s)| s.fit(width, self.size).map(|x| (i, x)));
+            .filter(|(_, s)| s.cells > 0 && s.height >= class)
+            .filter_map(|(i, s)| s.fit(width, self.size).map(|x| (i, x, s.height)))
+            .min_by_key(|(_, _, height)| *height)
+            .map(|(i, x, _)| (i, x));
+        let count = self.shelves.len();
+        if found.is_none()
+            && let Some(last) = self.shelves.last_mut()
+            && last.cells > 0
+            && last.end + width <= self.size
+            && self.top + class.saturating_sub(last.height) <= self.size
+        {
+            let taller = class.saturating_sub(last.height);
+            last.height += taller;
+            self.top += taller;
+            found = Some((count - 1, last.end));
+        }
+        if found.is_none() {
+            found = self
+                .shelves
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.cells == 0 && s.height >= class)
+                .min_by_key(|(_, s)| s.height)
+                .map(|(i, _)| (i, 0));
+        }
         if found.is_none() && self.top + class <= self.size {
             self.shelves.push(Shelf {
                 y: self.top,
@@ -138,15 +163,6 @@ impl Shelves {
             });
             self.top += class;
             found = Some((self.shelves.len() - 1, 0));
-        }
-        if found.is_none() {
-            found = self
-                .shelves
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| s.cells == 0 && s.height >= class)
-                .min_by_key(|(_, s)| s.height)
-                .map(|(i, _)| (i, 0));
         }
         let (i, x) = found?;
         // An emptied shelf taller than the class: the rest of it a shelf
@@ -260,6 +276,35 @@ mod tests {
         }
         assert_eq!(shelves.alloc(64, 24), Some((0, 38)));
         assert_eq!(shelves.area(), 64 * 8 * 2 + 64 * 16 + 32 * 6 + 64 * 24);
+    }
+
+    #[test]
+    fn cells_of_any_height_share_the_last_shelf_as_a_running_row() {
+        let mut shelves = Shelves::new(64);
+        // Heights of other classes, each beside the last: one row, as tall
+        // as its tallest, as a running row packs them.
+        assert_eq!(shelves.alloc(10, 8), Some((0, 0)));
+        assert_eq!(shelves.alloc(10, 20), Some((10, 0)));
+        assert_eq!(shelves.alloc(10, 12), Some((20, 0)));
+        assert_eq!(shelves.rows(), 20);
+        // Past its width, the next row starts below its tallest cell.
+        assert_eq!(shelves.alloc(40, 8), Some((0, 20)));
+    }
+
+    #[test]
+    fn a_shelf_grown_taller_is_taken_again_whole_once_freed() {
+        let mut shelves = Shelves::new(64);
+        let small = shelves.alloc(20, 8).unwrap();
+        // Grown to a taller cell's class, beside the small one.
+        let tall = shelves.alloc(20, 24).unwrap();
+        assert_eq!(tall, (20, 0));
+        let below = shelves.alloc(64, 8).unwrap();
+        assert_eq!(below, (0, 24));
+        // Both freed: the shelf, 24 rows tall, holds a cell that tall again.
+        shelves.free(small, 20, 8);
+        shelves.free(tall, 20, 24);
+        assert_eq!(shelves.alloc(64, 24), Some((0, 0)));
+        assert_eq!(shelves.area(), 64 * 8 + 64 * 24);
     }
 
     #[test]
