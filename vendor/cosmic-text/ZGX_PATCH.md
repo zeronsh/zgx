@@ -555,3 +555,8 @@ boxed).
 zgx-gpu's `cjk_cascade` checks each glyph class at 12 to 28 px and three
 weights against Core Text's own advance.
 
+
+A record separator (U+001E) ends a line as a line feed does (`LineEnding::Rs`,
+`LineIter`): an editor's own break inside one of its lines (a note's soft
+break, a table cell's line), so the text's lines stay the editor's and a
+line can show several rows.
