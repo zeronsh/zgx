@@ -2031,9 +2031,17 @@ function onBeforeInput(event) {
   const text = el.textContent;
   const [start, end] = editRange(el, event);
   let data = event.data;
-  // A paste or a drop: its plain text alone.
-  if (data == null && event.dataTransfer) data = event.dataTransfer.getData("text/plain");
-  sendEdit(el, event.inputType, data || "", utf8(text, start), utf8(text, end));
+  let kind = event.inputType;
+  // A paste or a drop: its plain text, and a copy's atoms beside it.
+  if (data == null && event.dataTransfer) {
+    data = event.dataTransfer.getData("text/plain");
+    const atoms = kind === "insertFromPaste" ? event.dataTransfer.getData(ATOMS_TYPE) : "";
+    if (atoms) {
+      kind = "insertFromPasteAtoms";
+      data = (data || "") + "\0" + atoms;
+    }
+  }
+  sendEdit(el, kind, data || "", utf8(text, start), utf8(text, end));
 }
 
 function onCompositionStart(event) {
@@ -2174,6 +2182,46 @@ export function zgx_open_url(url) {
   return window.open(url, "_blank", "noopener,noreferrer") !== null || true;
 }
 
+// A text area's atoms on the clipboard beside its text (`ATOMS_TYPE` in
+// zgx): what its model hands a copy (`zgx_copy_atoms`).
+const ATOMS_TYPE = "application/x-zgx-atoms";
+let atomsCopy = null;
+
+export function zgx_copy_atoms(text, atoms) {
+  atomsCopy = { text, atoms: atoms === undefined ? null : atoms };
+}
+
+// A copy or a cut out of a text area over a model (one with atoms): its
+// model's text and atoms, the cut taken out of the model as an edit.
+function copyFromModel(event) {
+  const selection = document.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
+  const el = editHost(selection.anchorNode);
+  if (!el || !el.contains(selection.focusNode) || !event.clipboardData) return false;
+  const text = el.textContent;
+  const [start, end] = editSelection(el);
+  atomsCopy = null;
+  sendEdit(el, "copy", "", utf8(text, start), utf8(text, end));
+  const copy = atomsCopy;
+  atomsCopy = null;
+  if (!copy) return false;
+  const data = event.clipboardData;
+  data.setData("text/plain", copy.text);
+  const types = [];
+  if (copy.atoms !== null) {
+    data.setData(ATOMS_TYPE, copy.atoms);
+    types.push([ATOMS_TYPE, copy.atoms]);
+  }
+  clipboard = { text: copy.text, html: null, types };
+  event.preventDefault();
+  if (event.type === "cut") {
+    const now = el.textContent;
+    const [from, to] = editSelection(el);
+    sendEdit(el, "deleteByCut", "", utf8(now, from), utf8(now, to));
+  }
+  return true;
+}
+
 function onCopy(event) {
   // A copy `zgx_clipboard_write_typed` made: what it writes, nothing else.
   if (typedCopy && event.clipboardData) {
@@ -2186,6 +2234,7 @@ function onCopy(event) {
     event.stopImmediatePropagation();
     return;
   }
+  if (copyFromModel(event)) return;
   const selection = document.getSelection();
   const text = selection ? selection.toString() : "";
   if (text) clipboard = { text, html: null, types: [] };

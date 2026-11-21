@@ -21,6 +21,11 @@ pub(crate) fn context_menu(
             .as_ref()
             .and_then(|platform| platform.0.clipboard_text())
             .filter(|text| !text.is_empty());
+        // A copy's atoms, for a text area that takes them.
+        let atoms = platform
+            .as_ref()
+            .filter(|_| editor.takes_atoms())
+            .and_then(|platform| platform.0.clipboard_typed(crate::widgets::ATOMS_TYPE));
         // An editor hearing pastes may want one with no text in it (an image).
         let takes = ui.upgrade().is_some_and(|ui| ui.takes_paste(editor.node));
         let (cut, copy, paste, all) = (
@@ -75,7 +80,7 @@ pub(crate) fn context_menu(
                 .on_click(move || {
                     let (editor, ui) = &paste;
                     if let Some(ui) = ui.upgrade() {
-                        ui.paste_into(editor, clipboard.as_deref());
+                        ui.paste_into_with(editor, clipboard.as_deref(), atoms.as_deref());
                     }
                 }),
             menu_item("Select All")

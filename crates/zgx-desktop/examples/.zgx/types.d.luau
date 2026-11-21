@@ -9595,7 +9595,9 @@ export type InputProps = {
 	-- from, to, data?, style? }` each, `from` and `to` in characters from 0
 	-- (half-open), by `from`. Two-way, as `value` is: the editor writes it as
 	-- they are made, lost or moved, and setting it restores them (a draft's;
-	-- set the text first). The label stays in the text.
+	-- set the text first). The label stays in the text. A copy or a cut
+	-- puts them on the clipboard beside it, and a paste into a textarea with
+	-- `atoms` makes them again (a new `id` where its name is taken there).
 	atoms: State<{ AtomItem }>?,
 	-- Told after atoms are made, lost or moved (an edit, an undo): what was
 	-- added and removed (a removed one with its `label` and the range it had),

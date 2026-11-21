@@ -7028,9 +7028,18 @@ fn code_editor(
             crate::node::atom_look_of(style)
                 .map(|look| Arc::new(atom_style_of(&look, &vm, &low, &theme)))
         };
+        let look_of = Rc::new(look_of);
+        let follow = (color_of.clone(), look_of.clone());
         view = view.atoms_when(move |editor| {
             let list = state.with(Clone::clone);
-            crate::atoms::from_list(&list, editor, &*color_of, &look_of)
+            crate::atoms::from_list(&list, editor, &*follow.0, &*follow.1)
+        });
+        // Its atoms on the clipboard beyond the app: names, data and looks.
+        view = view.atom_codec(zgx::widgets::AtomCodec {
+            encode: Box::new(crate::atoms::clipboard_json),
+            decode: Box::new(move |json, existing| {
+                crate::atoms::from_clipboard(json, existing, &*color_of, &*look_of)
+            }),
         });
     }
     if code.atoms.is_some() || code.on_atoms.is_some() {

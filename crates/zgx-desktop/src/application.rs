@@ -4027,12 +4027,26 @@ impl Host {
             return false;
         }
         if k.eq_ignore_ascii_case("v") {
-            let text = match self.clipboard.borrow_mut().as_mut() {
-                Some(clipboard) => clipboard.get_text().ok(),
+            let (text, atoms) = match self.clipboard.borrow_mut().as_mut() {
+                Some(clipboard) => {
+                    // A copy's atoms, read only for a text area that takes them.
+                    let atoms = editor
+                        .takes_atoms()
+                        .then(|| clipboard.get_types().ok())
+                        .flatten()
+                        .and_then(|types| {
+                            types.into_iter().find_map(|(kind, value)| {
+                                (kind == zgx::widgets::ATOMS_TYPE).then_some(value)
+                            })
+                        });
+                    (clipboard.get_text().ok(), atoms)
+                }
                 None => return true,
             };
             // With the clipboard let go: what hears the paste may read it.
-            self.context.ui.paste_into(&editor, text.as_deref());
+            self.context
+                .ui
+                .paste_into_with(&editor, text.as_deref(), atoms.as_deref());
             return true;
         }
         if self.clipboard.borrow().is_none() {

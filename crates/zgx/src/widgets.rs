@@ -582,8 +582,12 @@ fn show_decorations(
     s.set_style(id, style);
     s.set_text_mark_shapes(id, shaped, ends, radius);
 }
-pub use crate::editor_atom_pointer::{AtomHover, AtomPress};
 #[doc(hidden)]
+pub use crate::editor_atom_clipboard::{
+    ATOMS_TYPE, AtomCodec, PlacedAtoms, copied as copied_atoms, forget_copied_atoms,
+    pasted as pasted_atoms,
+};
+pub use crate::editor_atom_pointer::{AtomHover, AtomPress};
 pub use crate::editor_atom_style::{AtomIcon, AtomStyle, AtomSvg, AtomUnderline};
 /// What is told of an editor's atoms: what happened to them, then all of
 /// them as they are.
@@ -701,6 +705,9 @@ struct CodeAtoms {
     atom_spans_of: Cell<Option<(u64, u64)>>,
     /// Its atoms' icons, shown: each node (Svg or Panel well wrapping Svg) and what it shows.
     atom_icons: RefCell<Vec<ShownAtomIcon>>,
+    /// How its atoms go on the clipboard beyond the app and come back
+    /// (`EditorHandle::set_atom_codec`).
+    codec: RefCell<Option<crate::editor_atom_clipboard::Codec>>,
 }
 struct ShownAtomIcon {
     node: NodeId,
@@ -1818,6 +1825,58 @@ impl EditorHandle {
         let code = self.hint.code_made().atoms_made();
         *code.on_atoms.borrow_mut() = Some(Box::new(told));
         code.atoms_told.set(self.editor.borrow().atoms_revision());
+        self.refresh();
+    }
+    /// How its atoms go on the clipboard beyond the app, and come back from
+    /// it (`AtomCodec`): a script's names, data and looks. Within the app a
+    /// copy's atoms come back as they were without one.
+    #[doc(hidden)]
+    pub fn set_atom_codec(&self, codec: AtomCodec) {
+        *self.hint.code_made().atoms_made().codec.borrow_mut() = Some(Rc::new(codec));
+    }
+    /// Whether a paste makes atoms in it (`ATOMS_TYPE`): a text area that
+    /// has atoms, or listens to them, or shows them. A plain one takes the
+    /// text alone, and its host need not read the type.
+    #[doc(hidden)]
+    pub fn takes_atoms(&self) -> bool {
+        self.hint.code().and_then(CodeHint::atoms).is_some() || self.editor.borrow().has_atoms()
+    }
+    /// Its atom codec, if it has one.
+    fn atom_codec(&self) -> Option<crate::editor_atom_clipboard::Codec> {
+        let atoms = self.hint.code()?.atoms()?;
+        atoms.codec.borrow().clone()
+    }
+    /// What goes on the clipboard beside its selection's text (`text`, from
+    /// byte `start`) for its atoms: `ATOMS_TYPE`'s JSON, or none.
+    fn copied_atoms(&self, text: &str, start: usize) -> Option<String> {
+        let e = self.editor.borrow();
+        if !e.has_atoms() {
+            return None;
+        }
+        let codec = self.atom_codec();
+        crate::editor_atom_clipboard::copied(text, start, e.atoms(), codec.as_deref())
+    }
+    /// `paste`, with the atoms the clipboard's `ATOMS_TYPE` (`atoms`) holds
+    /// made over the pasted text where it is that text: one undo step.
+    #[doc(hidden)]
+    pub fn paste_with_atoms(&self, text: &str, atoms: Option<&str>) {
+        let Some(json) = atoms.filter(|_| {
+            self.takes_atoms() && self.hint.gap().is_none_or(|gap| gap.at.get().is_none())
+        }) else {
+            return self.paste(text);
+        };
+        if self.is_read_only() {
+            return;
+        }
+        let text = normalize_text(text, self.multiline);
+        let codec = self.atom_codec();
+        let made = {
+            let e = self.editor.borrow();
+            crate::editor_atom_clipboard::pasted(&text, json, e.atoms(), codec.as_deref())
+        };
+        self.preferred_x.set(None);
+        self.editor.borrow_mut().insert_pasted_atoms(&text, made);
+        self.hint.value.write(&self.editor);
         self.refresh();
     }
     /// Call `told` with the first line in view, from 1, whenever it changes
@@ -4937,6 +4996,14 @@ impl Ui {
     /// no text where the clipboard holds something else (an image), and
     /// nothing borrowed that the hook may use: it may read the clipboard.
     pub fn paste_into(&self, editor: &EditorHandle, text: Option<&str>) {
+        self.paste_into_with(editor, text, None);
+    }
+    /// `paste_into`, with what the clipboard holds of `ATOMS_TYPE` (`atoms`):
+    /// a copy's atoms made again over the pasted text, where the editor
+    /// takes atoms (`EditorHandle::takes_atoms`; hosts read the type only
+    /// for one that does).
+    #[doc(hidden)]
+    pub fn paste_into_with(&self, editor: &EditorHandle, text: Option<&str>, atoms: Option<&str>) {
         if editor.is_read_only() {
             return;
         }
@@ -4945,7 +5012,7 @@ impl Ui {
             return;
         }
         if let Some(text) = text {
-            editor.paste(text);
+            editor.paste_with_atoms(text, atoms);
         }
     }
     #[cold]
@@ -4996,9 +5063,16 @@ impl Ui {
             range,
             text: &text,
         };
-        let content = hook
-            .and_then(|hook| hook(&request))
-            .unwrap_or_else(|| ClipboardContent::new(text, None));
+        let start = request.range.start;
+        let content = hook.and_then(|hook| hook(&request)).unwrap_or_else(|| {
+            // Its atoms beside the text, where it has some in the selection.
+            let atoms = editor.copied_atoms(&text, start);
+            let mut content = ClipboardContent::new(text, None);
+            if let Some(atoms) = atoms {
+                content.types.push((ATOMS_TYPE.to_owned(), atoms));
+            }
+            content
+        });
         if !write(content) {
             return false;
         }
@@ -5059,7 +5133,11 @@ impl Ui {
         match command {
             EditCommand::Paste => {
                 let text = platform.clipboard_text();
-                self.paste_into(&editor, text.as_deref());
+                let atoms = editor
+                    .takes_atoms()
+                    .then(|| platform.clipboard_typed(ATOMS_TYPE))
+                    .flatten();
+                self.paste_into_with(&editor, text.as_deref(), atoms.as_deref());
             }
             EditCommand::Copy | EditCommand::Cut => {
                 self.copy_from(&editor, command == EditCommand::Cut, write);

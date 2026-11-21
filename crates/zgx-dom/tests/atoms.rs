@@ -458,3 +458,63 @@ async fn a_selection_shown_into_a_chip_takes_it_whole_and_a_caret_its_nearer_edg
         "a drag or a double click selects it whole"
     );
 }
+
+/// The clipboard type a text area's atoms go on as.
+const ATOMS_TYPE: &str = "application/x-zgx-atoms";
+
+/// A `copy` (or `cut`) of `el`'s whole text, as the browser sends a
+/// person's ⌘C: its data, as the page wrote it.
+fn copy_all(el: &web_sys::HtmlElement, kind: &str) -> web_sys::DataTransfer {
+    el.focus().unwrap();
+    let range = document().create_range().unwrap();
+    range.select_node_contents(el).unwrap();
+    let selection = document().get_selection().unwrap().unwrap();
+    selection.remove_all_ranges().unwrap();
+    selection.add_range(&range).unwrap();
+    let data = web_sys::DataTransfer::new().unwrap();
+    let init = web_sys::ClipboardEventInit::new();
+    init.set_bubbles(true);
+    init.set_cancelable(true);
+    init.set_clipboard_data(Some(&data));
+    let event = web_sys::ClipboardEvent::new_with_event_init_dict(kind, &init).unwrap();
+    el.dispatch_event(&event).unwrap();
+    zgx_dom::flush();
+    data
+}
+
+/// A paste of `data` at the end of `el`.
+fn paste(el: &web_sys::HtmlElement, data: &web_sys::DataTransfer) {
+    caret_at_end(el);
+    let init = web_sys::InputEventInit::new();
+    init.set_bubbles(true);
+    init.set_cancelable(true);
+    init.set_input_type("insertFromPaste");
+    init.set_data_transfer(Some(data));
+    let event = web_sys::InputEvent::new_with_event_init_dict("beforeinput", &init).unwrap();
+    el.dispatch_event(&event).unwrap();
+    zgx_dom::flush();
+}
+
+#[wasm_bindgen_test]
+fn a_copy_puts_its_atoms_beside_the_text() {
+    let (_mounted, el, _) = note("ask Ada now", Some((4, 7)));
+    let data = copy_all(&el, "copy");
+    assert_eq!(data.get_data("text/plain").unwrap(), "ask Ada now");
+    let json = data.get_data(ATOMS_TYPE).unwrap();
+    assert!(json.contains(r#""from":4,"to":7"#), "{json}");
+}
+
+#[wasm_bindgen_test]
+fn a_paste_of_a_copy_makes_its_atoms_chips_and_a_cut_takes_them() {
+    let (_mounted, from, from_value) = note("ask Ada now", Some((4, 7)));
+    let (_other, to, to_value) = note("hi ", Some((0, 2)));
+    let data = copy_all(&from, "cut");
+    assert_eq!(from_value.get(), "", "the cut took it, chip and all");
+    assert!(chips(&from).is_empty());
+    paste(&to, &data);
+    assert_eq!(to_value.get(), "hi ask Ada now");
+    assert_eq!(chips(&to), ["hi", "Ada"], "the pasted atom a chip");
+    before_input(&to, "historyUndo", None);
+    assert_eq!(to_value.get(), "hi ");
+    assert_eq!(chips(&to), ["hi"], "one undo takes the paste and its chip");
+}
