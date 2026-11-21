@@ -7782,25 +7782,20 @@ fn open_element(
         // reads (a custom shaper's) are this binding's too: run again with
         // its style unchanged, one of them changed, and it draws again (no
         // binding of its own for it: a mount pays for none).
-        let last = RefCell::new(None);
+        let first = Cell::new(true);
         ui.bind_input(root, move || {
             let style = typography.get();
             let theme = Some(&*theme);
-            let now = (
+            let changed = editor.set_text_style(
                 style.color_in(theme),
                 style.size_in(theme),
                 style.font_in(theme),
                 style.wrap,
             );
-            let first = last.borrow().is_none();
-            if !first && last.borrow().as_ref() == Some(&now) {
-                editor.refresh();
-                return;
-            }
-            editor.set_text_style(now.0, now.1, now.2.clone(), now.3);
-            *last.borrow_mut() = Some(now);
-            if first {
+            if first.replace(false) {
                 editor.finish_mount();
+            } else if !changed {
+                editor.refresh();
             }
         });
     }

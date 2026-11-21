@@ -1826,14 +1826,21 @@ impl EditorHandle {
     pub fn set_typography(&self, color: Color, size: f32, font: FontStyle) {
         self.set_text_style(color, size, font, self.wrap.get());
     }
-    pub(crate) fn set_text_style(&self, color: Color, size: f32, mut font: FontStyle, wrap: bool) {
+    /// Whether it changed anything (false: the style it had).
+    pub(crate) fn set_text_style(
+        &self,
+        color: Color,
+        size: f32,
+        mut font: FontStyle,
+        wrap: bool,
+    ) -> bool {
         let wrap = wrap && self.multiline;
         let wrap_changed = self.wrap.replace(wrap) != wrap;
         font.weight = font.weight.clamp(1, 1000);
         let next = (color, size.max(1.), font);
         let previous = self.typography.borrow().clone();
         if previous == next && !wrap_changed {
-            return;
+            return false;
         }
         let metrics_changed = wrap_changed || previous.1 != next.1 || previous.2 != next.2;
         *self.typography.borrow_mut() = next;
@@ -1847,7 +1854,7 @@ impl EditorHandle {
         } else {
             let mut scene = self.scene.borrow_mut();
             if !scene.contains(self.text) {
-                return;
+                return true;
             }
             if let NodeKind::Text {
                 text, font_size, ..
@@ -1864,6 +1871,7 @@ impl EditorHandle {
             }
             scene.set_kind(self.caret, NodeKind::Rect(color));
         }
+        true
     }
     /// Refresh it if its size changed; whether it did. `laid_out`: another
     /// was refreshed in this step of the frame, which laid out all but what
@@ -6853,7 +6861,7 @@ impl Ui {
         let focus = focused.clone();
         let draw_caret_width = self.storage.caret_width.clone();
         let draw_blink = self.storage.caret_blink.clone();
-        let draw_window_active = self.observe_window_active();
+        let draw_window = Rc::downgrade(&self.storage);
         let scroll_for_draw = scroll.clone();
         let scroll_limit = Rc::new(Cell::new((0f32, 0f32)));
         let draw_scroll_limit = scroll_limit.clone();
@@ -7465,7 +7473,9 @@ impl Ui {
             // Untracked: a window's activity changing shows or hides the
             // caret itself (`caret_blink::window_active_changed`), no draw.
             let caret_shown = *focus.borrow()
-                && draw_window_active.with_untracked(|active| *active)
+                && draw_window
+                    .upgrade()
+                    .is_none_or(|storage| !storage.selection.borrow().inactive)
                 && !draw_read_only.get()
                 && e.preedit().is_none_or(|preedit| preedit.cursor.is_some());
             // Shown, it paints unless the host draws it (`Ui::native_caret`).
