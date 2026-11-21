@@ -246,7 +246,7 @@ fn read_clipboard_with(term: &Terminal, handlers: &Rc<RefCell<Handlers>>, reads:
         let result = vm
             .runtime
             .clone()
-            .batch(|| vm.call::<()>(&handler, request));
+            .batch(|| vm.call_as::<()>("the terminal's clipboard handler", &handler, request));
         if let Err(error) = result {
             vm.report(error);
         }
@@ -280,7 +280,10 @@ fn dispatch(handlers: &Handlers, event: &TerminalEvent) {
     };
     let call = |f: &Option<Function>, args: mlua::MultiValue| {
         if let Some(f) = f {
-            let result = vm.runtime.clone().batch(|| vm.call::<()>(f, args));
+            let result = vm
+                .runtime
+                .clone()
+                .batch(|| vm.call_as::<()>("a terminal handler", f, args));
             if let Err(error) = result {
                 vm.report(error);
             }

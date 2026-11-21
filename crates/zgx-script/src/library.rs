@@ -686,7 +686,9 @@ pub(crate) fn view(
                     {
                         asked.insert(id.clone());
                         quiet.untracked(|| {
-                            if let Err(error) = vm.call::<()>(&on_open, id) {
+                            if let Err(error) =
+                                vm.call_as::<()>("the tree's on_open handler", &on_open, id)
+                            {
                                 vm.report(error);
                             }
                         });
@@ -697,7 +699,7 @@ pub(crate) fn view(
             let (on_activate, vm) = (on_activate.clone(), vm.clone());
             tree(label.clone(), children, open_signal, selected, move |id| {
                 if let Some(f) = &on_activate
-                    && let Err(error) = vm.call::<()>(f, id)
+                    && let Err(error) = vm.call_as::<()>("the tree's on_activate handler", f, id)
                 {
                     vm.report(error);
                 }
@@ -865,7 +867,11 @@ pub(crate) fn view(
                     let record = cells.with(|v| v.item(i).cloned()).unwrap_or(Value::Nil);
                     let value = record.field(column).cloned().unwrap_or(Value::Nil);
                     format_vm
-                        .call::<String>(format, (value.clone(), column.to_owned(), record))
+                        .call_as::<String>(
+                            "the table's format function",
+                            format,
+                            (value.clone(), column.to_owned(), record),
+                        )
                         .unwrap_or_else(|error| {
                             format_vm.report(error);
                             value.to_string()
@@ -880,7 +886,11 @@ pub(crate) fn view(
                 source = source.on_edit(move |r, column, text| {
                     let i = at(r);
                     if let Some(f) = &on_edit {
-                        if let Err(error) = vm.call::<()>(f, (i + 1, column.to_owned(), text)) {
+                        if let Err(error) = vm.call_as::<()>(
+                            "the table's on_edit handler",
+                            f,
+                            (i + 1, column.to_owned(), text),
+                        ) {
                             vm.report(error);
                         }
                         return;
@@ -909,7 +919,9 @@ pub(crate) fn view(
             if let Some(f) = on_activate.clone() {
                 let (vm, at) = (vm.clone(), original.clone());
                 source = source.on_activate(move |r| {
-                    if let Err(error) = vm.call::<()>(&f, at(r) + 1) {
+                    if let Err(error) =
+                        vm.call_as::<()>("the table's on_activate handler", &f, at(r) + 1)
+                    {
                         vm.report(error);
                     }
                 });
@@ -1063,17 +1075,21 @@ pub(crate) fn view(
             if let Some(f) = unavailable.clone() {
                 let vm = vm.clone();
                 options.disabled = Some(Rc::new(move |d: CalendarDate| {
-                    vm.call::<bool>(&f, (d.to_string(), d.weekday()))
-                        .unwrap_or_else(|error| {
-                            vm.report(error);
-                            false
-                        })
+                    vm.call_as::<bool>(
+                        "the calendar's disabled function",
+                        &f,
+                        (d.to_string(), d.weekday()),
+                    )
+                    .unwrap_or_else(|error| {
+                        vm.report(error);
+                        false
+                    })
                 }));
             }
             if let Some(f) = format.clone() {
                 let vm = vm.clone();
                 options.format = Some(Rc::new(move |d: CalendarDate| {
-                    vm.call::<String>(&f, d.to_string())
+                    vm.call_as::<String>("the calendar's format function", &f, d.to_string())
                         .unwrap_or_else(|error| {
                             vm.report(error);
                             d.to_string()
@@ -1194,7 +1210,9 @@ pub(crate) fn view(
             let (on_run, vm, registry) = (on_run.clone(), vm.clone(), low.commands.clone());
             command_palette(open, list, move |id| match &on_run {
                 Some(f) => {
-                    if let Err(error) = vm.call::<()>(f, id) {
+                    if let Err(error) =
+                        vm.call_as::<()>("the command palette's on_run handler", f, id)
+                    {
                         vm.report(error);
                     }
                 }
@@ -1262,7 +1280,7 @@ pub(crate) fn view(
                 let vm = vm.clone();
                 let ask: CloseTab = Rc::new(move |id: &str| {
                     !matches!(
-                        vm.call::<mlua::Value>(&f, id),
+                        vm.call_as::<mlua::Value>("the tabs' on_close handler", &f, id),
                         Ok(mlua::Value::Boolean(false))
                     )
                 });
@@ -1278,7 +1296,8 @@ pub(crate) fn view(
             more.on_move = on_move.clone().map(|f| {
                 let vm = vm.clone();
                 let told: MoveTab = Rc::new(move |id: &str, to: &str| {
-                    if let Err(error) = vm.call::<()>(&f, (id, to)) {
+                    if let Err(error) = vm.call_as::<()>("the tabs' on_move handler", &f, (id, to))
+                    {
                         vm.report(error);
                     }
                 });
@@ -1296,7 +1315,9 @@ pub(crate) fn view(
                         Ok(at)
                     });
                     // `false` keeps the tab: anything else tears it off.
-                    match at.and_then(|at| vm.call::<mlua::Value>(&f, (id, at))) {
+                    match at.and_then(|at| {
+                        vm.call_as::<mlua::Value>("the tabs' on_tear_off handler", &f, (id, at))
+                    }) {
                         Ok(said) => !matches!(said, mlua::Value::Boolean(false)),
                         Err(error) => {
                             vm.report(error);
@@ -1313,7 +1334,8 @@ pub(crate) fn view(
                 selected,
                 options,
                 more,
-                move |id, _| match vm.call::<mlua::Value>(&panel, id) {
+                move |id, _| match vm.call_as::<mlua::Value>("the tabs' panel function", &panel, id)
+                {
                     Ok(mlua::Value::UserData(ud)) if ud.is::<crate::node::NodeUd>() => {
                         match ud.borrow::<crate::node::NodeUd>() {
                             Ok(node) => lower(&node.0, &low),
@@ -1530,7 +1552,7 @@ fn toast(lua: &Lua, table: Table) -> mlua::Result<u64> {
         let run: mlua::Function = action.get("run")?;
         toast = toast.action(label, move || {
             if let Some(vm) = vm.upgrade()
-                && let Err(error) = vm.call::<()>(&run, ())
+                && let Err(error) = vm.call_as::<()>("the toast's action", &run, ())
             {
                 vm.report(error);
             }

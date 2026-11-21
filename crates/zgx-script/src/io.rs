@@ -132,7 +132,9 @@ fn listen(
                 continue;
             };
             vm.runtime.clone().batch(|| {
-                if let Err(e) = vm.call::<()>(&on_click, ()) {
+                if let Err(e) =
+                    vm.call_as::<()>("the notification's on_click handler", &on_click, ())
+                {
                     vm.report(e);
                 }
             });
@@ -818,13 +820,23 @@ fn download_status(
     Ok(move |status: DownloadStatus| {
         let Some(vm) = vm.upgrade() else { return };
         let result = match status {
-            DownloadStatus::Progress { received, total } => progress
+            DownloadStatus::Progress { received, total } => progress.as_ref().map(|f| {
+                vm.call_as::<()>(
+                    "the download's on_progress handler",
+                    f,
+                    (received as f64, total.map(|t| t as f64)),
+                )
+            }),
+            DownloadStatus::Finished => finish.as_ref().map(|f| {
+                vm.call_as::<()>(
+                    "the download's on_done handler",
+                    f,
+                    (true, mlua::Value::Nil),
+                )
+            }),
+            DownloadStatus::Failed(why) => finish
                 .as_ref()
-                .map(|f| vm.call::<()>(f, (received as f64, total.map(|t| t as f64)))),
-            DownloadStatus::Finished => finish
-                .as_ref()
-                .map(|f| vm.call::<()>(f, (true, mlua::Value::Nil))),
-            DownloadStatus::Failed(why) => finish.as_ref().map(|f| vm.call::<()>(f, (false, why))),
+                .map(|f| vm.call_as::<()>("the download's on_done handler", f, (false, why))),
             _ => None,
         };
         if let Some(Err(e)) = result {

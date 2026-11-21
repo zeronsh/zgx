@@ -493,6 +493,7 @@ pub(crate) fn each(
                 &vm,
                 cx,
                 &low,
+                crate::lower::EACH_ROW,
                 &builder,
                 (item.unwrap_or_default(), index + 1),
             );
