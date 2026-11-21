@@ -4400,6 +4400,12 @@ impl Ui {
     pub fn set_app_active(&self, active: bool) {
         self.scene.borrow_mut().set_popups_held(!active);
     }
+    /// Whether the window is the active one now, its keys going to it
+    /// (`Ui::set_window_active`).
+    #[doc(hidden)]
+    pub fn window_is_active(&self) -> bool {
+        !self.storage.selection.borrow().inactive
+    }
     /// Whether the window is the active one, its keys going to it
     /// (`Ui::set_window_active`), as it changes.
     pub fn observe_window_active(&self) -> Signal<bool> {
@@ -6847,6 +6853,7 @@ impl Ui {
         let focus = focused.clone();
         let draw_caret_width = self.storage.caret_width.clone();
         let draw_blink = self.storage.caret_blink.clone();
+        let draw_window_active = self.observe_window_active();
         let scroll_for_draw = scroll.clone();
         let scroll_limit = Rc::new(Cell::new((0f32, 0f32)));
         let draw_scroll_limit = scroll_limit.clone();
@@ -7461,7 +7468,10 @@ impl Ui {
             );
             let mut effects = s.effects(caret);
             // Read-only text shows a selection but no caret.
+            // Untracked: a window's activity changing shows or hides the
+            // caret itself (`caret_blink::window_active_changed`), no draw.
             let caret_shown = *focus.borrow()
+                && draw_window_active.with_untracked(|active| *active)
                 && !draw_read_only.get()
                 && e.preedit().is_none_or(|preedit| preedit.cursor.is_some());
             // Shown, it paints unless the host draws it (`Ui::native_caret`).

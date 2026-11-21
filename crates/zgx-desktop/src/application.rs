@@ -4783,6 +4783,7 @@ impl Host {
                 let _ = proxy.send_event(Event::Zoom(token));
             });
         }
+        self.context.ui.set_window_active(window.has_focus());
         self.window = Some(window);
         #[cfg(target_os = "macos")]
         {
