@@ -22,6 +22,12 @@ pub struct Checked {
 /// the bytes that were checked until a host reads it.
 #[derive(Debug, Default)]
 struct Ahead {
+    /// What reads cost the threads that asked (`ZGX_BUNDLE_TIMING`): files
+    /// taken ready, files read and hashed there, their bytes, and the time.
+    taken: std::sync::atomic::AtomicU64,
+    read_here: std::sync::atomic::AtomicU64,
+    bytes_here: std::sync::atomic::AtomicU64,
+    nanos_here: std::sync::atomic::AtomicU64,
     /// Not started, reading, or let go (`NOT_YET`, `READING`, `DONE`).
     state: AtomicU8,
     /// Workers still reading.
@@ -105,6 +111,21 @@ impl Checked {
 
     /// Lets go of what was read ahead and no load took, and stops reading.
     pub(crate) fn release_ahead(&self) {
+        if zgx::env::var_os("ZGX_BUNDLE_TIMING").is_some() {
+            let count = |n: &std::sync::atomic::AtomicU64| n.swap(0, Ordering::Relaxed);
+            eprintln!(
+                "zgx: bundle files as a load ended: {} taken ready, {} read and checked by the loading thread ({:.2} MB, {:.2} ms), {} ready untaken",
+                count(&self.ahead.taken),
+                count(&self.ahead.read_here),
+                count(&self.ahead.bytes_here) as f64 / 1e6,
+                count(&self.ahead.nanos_here) as f64 / 1e6,
+                self.ahead
+                    .ready
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .len(),
+            );
+        }
         if self.ahead.state.swap(DONE, Ordering::AcqRel) == READING {
             self.ahead
                 .ready
@@ -157,11 +178,21 @@ impl Checked {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&key);
             if let Some(bytes) = taken {
+                self.ahead.taken.fetch_add(1, Ordering::Relaxed);
                 return Ok(bytes);
             }
         }
+        let started = std::time::Instant::now();
         let bytes = std::fs::read(path)?;
-        if Sha256::digest(&bytes)[..] != sum[..] {
+        let matches = Sha256::digest(&bytes)[..] == sum[..];
+        self.ahead.read_here.fetch_add(1, Ordering::Relaxed);
+        self.ahead
+            .bytes_here
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        self.ahead
+            .nanos_here
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if !matches {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "isn't the file its bundle's manifest names (changed since it was built)",
