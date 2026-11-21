@@ -322,6 +322,77 @@ pub fn script_path(path: &Path) -> PathBuf {
     }
 }
 
+/// What `zgx run` hands the runtime: each module's library by name, built
+/// and cached for this run (`--module words=<library>`), in place of where
+/// zgx.json's `modules` would find it; and a line to show as the app
+/// starts (`--notice`: "module `words` changed: restarted").
+#[derive(Default)]
+struct Launch {
+    modules: Vec<(String, PathBuf)>,
+    notice: Option<String>,
+}
+static LAUNCH: std::sync::Mutex<Launch> = std::sync::Mutex::new(Launch {
+    modules: Vec::new(),
+    notice: None,
+});
+
+/// The library to load for the module `name` instead of the one zgx.json's
+/// `modules` names (as `zgx run` builds it): set before [`run`].
+pub fn set_module(name: impl Into<String>, library: impl Into<PathBuf>) {
+    let mut launch = LAUNCH.lock().unwrap();
+    let name = name.into();
+    launch.modules.retain(|(n, _)| *n != name);
+    launch.modules.push((name, library.into()));
+}
+
+/// A line the app shows in its banner once its scripts have loaded, and on
+/// stderr: what `zgx run` says of why it started it again.
+pub fn set_notice(notice: impl Into<String>) {
+    LAUNCH.lock().unwrap().notice = Some(notice.into());
+}
+
+/// The native modules the app at `dir` loads, by name: each library `zgx
+/// run` handed over, else the one zgx.json's `modules` names (a library's
+/// path, or a crate whose newest build is taken). A module zgx.json names
+/// with no library to load is an error: its scripts would call it.
+#[cfg(feature = "modules")]
+fn modules_of(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let given = std::mem::take(&mut LAUNCH.lock().unwrap().modules);
+    let named = zgx_script::module_types::named_in(dir)?;
+    let (found, missing) = zgx_script::module_types::of_app(dir);
+    let mut modules = Vec::new();
+    for name in named {
+        if let Some((_, library)) = given.iter().find(|(n, _)| *n == name) {
+            modules.push((name, library.clone()));
+            continue;
+        }
+        let library = found
+            .iter()
+            .find(|(_, manifest)| {
+                zgx_script::module_types::name_of(manifest).as_deref() == Some(name.as_str())
+            })
+            .map(|(library, _)| library.clone());
+        match library {
+            Some(library) => modules.push((name, library)),
+            None => {
+                let why = missing
+                    .iter()
+                    .find(|why| why.starts_with(&format!("module `{name}`")))
+                    .cloned()
+                    .unwrap_or_else(|| format!("module `{name}`: no library to load"));
+                return Err(why);
+            }
+        }
+    }
+    // One `zgx run` built that zgx.json doesn't name is loaded too.
+    for (name, library) in given {
+        if !modules.iter().any(|(n, _)| *n == name) {
+            modules.push((name, library));
+        }
+    }
+    Ok(modules)
+}
+
 /// Run the script at `path` (a file, or a directory with `app.luau`) as an
 /// app, until its window closes: a window from its `zgx.json`, its
 /// commands as the menu bar, hot reload as its files change, and
@@ -380,6 +451,11 @@ pub fn run_hosting(
     // are set up, not one by one on the main thread at each `require`.
     zgx_script::compile_ahead(&script, &[]);
     let (config, app_host, window_config) = AppConfig::read(&script)?;
+    // The app's native modules, found before its window opens: one it names
+    // that isn't built is said now, not as a script calls it.
+    #[cfg(feature = "modules")]
+    let modules = modules_of(script.parent().unwrap_or(Path::new(".")))?;
+    let notice = LAUNCH.lock().unwrap().notice.take();
     let WindowConfig {
         frame_autosave,
         visible,
@@ -482,9 +558,35 @@ pub fn run_hosting(
         socket::install(&host);
         #[cfg(feature = "audio")]
         play_through(&host, cx);
+        // Its modules, before the scripts that call them. One that won't
+        // load (another interface, a library that isn't what its manifest
+        // says) is shown, and the scripts don't run.
+        #[cfg(feature = "modules")]
+        let loaded = modules.iter().try_for_each(|(name, library)| {
+            // SAFETY: The app's own module: zgx.json, the app's own file,
+            // names it, or `zgx run` built it from what zgx.json names.
+            unsafe { host.load_module(library) }.map_err(|why| format!("module `{name}`: {why}"))
+        });
+        #[cfg(not(feature = "modules"))]
+        let loaded: Result<(), String> = Ok(());
         configure(&host);
-        let _ = host.reload();
-        cx.tasks.spawn(host.watch(Duration::from_millis(250)));
+        // What `zgx run` says of why it started the app (before its view,
+        // which shows it).
+        if let Some(notice) = &notice
+            && loaded.is_ok()
+        {
+            host.notice(notice.clone());
+        }
+        match loaded {
+            Ok(()) => {
+                let _ = host.reload();
+                cx.tasks.spawn(host.watch(Duration::from_millis(250)));
+            }
+            Err(why) => {
+                eprintln!("zgx-run: {why}");
+                host.error().set(Some(why));
+            }
+        }
         let menus_follow = serve_commands(&host, cx);
         // The script's windows (`ui.window`): each open while its state is.
         let windows_follow = follow_windows(&host, cx);
@@ -498,6 +600,7 @@ pub fn run_hosting(
         let devtools = devtools_asked
             .then(|| inspect(&host, cx, handle, &script))
             .flatten();
+
         let keep = std::cell::RefCell::new(Some((menus_follow, windows_follow, devtools)));
         cx.on_closed(move || {
             saving.save();

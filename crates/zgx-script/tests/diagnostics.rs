@@ -122,6 +122,45 @@ fn a_failed_reload_shows_where_and_a_good_one_clears_it() {
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
+/// A notice from what runs the app (`zgx run`'s "module changed:
+/// restarted") shows in the banner while no error does, outlives a reload,
+/// and dismisses as an error does.
+#[test]
+fn a_notice_shows_until_dismissed_and_a_load_keeps_it() {
+    let mut h = Harness::new(|runtime| {
+        let host = zgx_script::ScriptHost::inline(runtime, "app", APP);
+        host.notice("module `words` changed: restarted");
+        host
+    });
+    let banner = texts(&mut h, "script-error-banner");
+    assert!(
+        banner
+            .iter()
+            .any(|t| t.contains("module `words` changed: restarted")),
+        "{banner:?}"
+    );
+    // An error is shown over it; once dismissed, the notice is back.
+    h.click("bump");
+    assert!(
+        texts(&mut h, "script-error-banner")
+            .iter()
+            .any(|t| t.contains("bump failed"))
+    );
+    h.click("script-error-dismiss");
+    assert!(h.find("script-error-banner").is_some(), "the notice, again");
+    // A reload keeps it.
+    h.host.reload().unwrap();
+    h.frame();
+    assert_eq!(
+        h.host.notice_shown().as_deref(),
+        Some("module `words` changed: restarted")
+    );
+    assert!(h.find("script-error-banner").is_some());
+    h.click("script-error-dismiss");
+    assert!(h.find("script-error-banner").is_none());
+    assert_eq!(h.host.notice_shown(), None);
+}
+
 #[test]
 fn handler_errors_show_and_the_banner_dismisses() {
     let mut h = Harness::inline(APP);
