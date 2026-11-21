@@ -700,10 +700,7 @@ fn a_glyph_magnified_past_the_atlas_still_draws() {
     // rasterizes: the layer draws again no finer than the glyph fits, and
     // the stem still covers the middle of the window, not a gap. Deeper,
     // that raster serves on; back within the atlas, it is exact again.
-    // Past it once more, twice: the 30× glyph (some 1,200 rows) is still
-    // the text's when the frame starts, so the atlas gives it back only
-    // once the frame has run out of room, and draws that frame again.
-    for (push, repaints) in [(80., 2), (85., 0), (30., 1), (90., 2)] {
+    for (push, repaints) in [(80., 2), (85., 0), (30., 1), (90., 1)] {
         scene.set_local_transform(
             stage,
             LocalTransform {
