@@ -113,6 +113,8 @@ mod modules {
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
+pub mod module_build;
+#[doc(hidden)]
 pub mod module_types;
 /// In the browser, which loads no library: no module, and none typed.
 #[cfg(target_arch = "wasm32")]

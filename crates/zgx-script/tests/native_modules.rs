@@ -1147,3 +1147,44 @@ fn a_refused_module_is_named_with_why() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A module's key covers its crate's files, and only those: a change to one
+/// makes another key, saving it as it was makes the first again, and its
+/// build output (`target/`) and hidden files make none.
+#[test]
+fn a_modules_key_follows_its_sources() {
+    use zgx_script::module_build::{Profile, key, sources};
+    let dir = std::env::temp_dir().join(format!("zgx-module-key-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"k\"\n").unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let target = "x86_64-unknown-linux-gnu";
+    let first = key(&dir, Profile::Dev, target).unwrap();
+    assert_eq!(first.len(), 32);
+    assert_eq!(key(&dir, Profile::Dev, target).unwrap(), first);
+    // Another profile, another target: other keys.
+    assert_ne!(key(&dir, Profile::Release, target).unwrap(), first);
+    assert_ne!(
+        key(&dir, Profile::Dev, "aarch64-apple-darwin").unwrap(),
+        first
+    );
+    // What isn't a source makes none.
+    std::fs::write(dir.join("target/debug/libk.so"), "built").unwrap();
+    std::fs::write(dir.join(".editor-swap"), "x").unwrap();
+    assert_eq!(key(&dir, Profile::Dev, target).unwrap(), first);
+    assert_eq!(
+        sources(&dir),
+        [dir.join("Cargo.toml"), dir.join("src/lib.rs")]
+    );
+    // A source's change does, and undoing it is the first key again.
+    std::fs::write(dir.join("src/lib.rs"), "fn b() {}\n").unwrap();
+    assert_ne!(key(&dir, Profile::Dev, target).unwrap(), first);
+    std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    assert_eq!(key(&dir, Profile::Dev, target).unwrap(), first);
+    // So does a new file, moved or not.
+    std::fs::write(dir.join("src/more.rs"), "").unwrap();
+    assert_ne!(key(&dir, Profile::Dev, target).unwrap(), first);
+    std::fs::remove_dir_all(dir).unwrap();
+}
