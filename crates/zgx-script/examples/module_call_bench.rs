@@ -6,11 +6,14 @@
 //! `CASE=length`: a string in, its length out, so the call alone.
 //! `CASE=echo`: a string in, the same string out: a module is lent its
 //! argument, so it counts the string where linked-in code is handed it.
+//! `CASE=taking`: the same echo by a function handed its argument
+//! (`Host::function_taking`), which counts nothing.
 //! `CASE=rows`: 200 rows read a field at a time, so a module's reads.
 //!
 //! It prints nothing to compare by itself: run each arm under a counter and
 //! subtract (`perf stat -e instructions:u`), the script's work the same in
-//! both.
+//! both. Under cachegrind, set `ZGX_GATE` too: a round's script runs some
+//! fifty times slower there, and its time budget is lengthened to match.
 //!
 //!   cargo build --release -p zgx-script --features modules --example module_call_bench
 //!   cargo build --release -p zgx-module-fixture
@@ -18,6 +21,9 @@
 //!   ARM=module MODULE=target/release/libzgx_module_fixture.so CASE=echo perf stat …
 
 use zgx_script::{ScriptHost, Value, testing::TestApp};
+
+#[path = "support/bench_limits.rs"]
+mod bench_limits;
 
 fn number(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -59,6 +65,9 @@ fn main() {
         ui.command {{ id = "echo", title = "e", run = function()
             for _ = 1, {calls} do ui.call_sync("fixture.echo", "a string") end
         end }}
+        ui.command {{ id = "taking", title = "t", run = function()
+            for _ = 1, {calls} do ui.call_sync("fixture.echo_taking", "a string") end
+        end }}
         ui.command {{ id = "length", title = "l", run = function()
             for _ = 1, {calls} do ui.call_sync("fixture.length", "a string") end
         end }}
@@ -69,7 +78,7 @@ fn main() {
         "#
     );
     let app = TestApp::new(move |runtime| {
-        let host = ScriptHost::inline(runtime, "bench", script);
+        let host = ScriptHost::inline(runtime, "bench", script).limits(bench_limits::limits());
         let row = |i: usize| {
             Value::record([
                 ("id", Value::from(format!("row-{i}").as_str())),
@@ -87,6 +96,7 @@ fn main() {
             unsafe { host.load_module(path) }.expect("the fixture module");
         } else {
             host.function("fixture.echo", |arg| arg);
+            host.function("fixture.echo_taking", |arg| arg);
             host.function("fixture.length", |arg| match arg {
                 Value::Str(s) => Value::Num(s.len() as f64),
                 _ => Value::Num(0.),
