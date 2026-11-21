@@ -1,6 +1,11 @@
 //! Native input-method probe; the application never synthesizes IME events.
 //! `--password`: the first editor is a password field, which no input
 //! method composes into (`scripts/native_ime_smoke.py --password`).
+//!
+//! `--atom`: the first editor holds "see @file.pdf", the mention an atom,
+//! and prints its atoms and selection each report (`ATOMS first …`), as an
+//! input method composes right after and right before it
+//! (`scripts/native_ime_smoke.py --atom`).
 //! `--replace-while-composing`: the app sets the first editor's text to
 //! "REPLACED" while an input method composes in it, which ends the
 //! composition (`scripts/windows_ime_smoke.py --replace-while-composing`).
@@ -140,6 +145,7 @@ fn open_input_method_tsf() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let observe = std::env::args().any(|arg| arg == "--native-observe");
     let password = std::env::args().any(|arg| arg == "--password");
+    let atom = std::env::args().any(|arg| arg == "--atom");
     let replace = std::env::args().any(|arg| arg == "--replace-while-composing");
     let modes = std::env::args().any(|arg| arg == "--input-modes");
     let mode = |mode| {
@@ -161,7 +167,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         })
         .run(move |cx| {
-            let first = cx.ui.signal(String::new());
+            let first = cx.ui.signal(if atom {
+                String::from("see @file.pdf")
+            } else {
+                String::new()
+            });
             let second = cx.ui.signal(String::new());
             let editor = |label: &'static str, model| {
                 text_input(label, model)
@@ -196,11 +206,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .gap(12.)
                     .text_color(Color(231, 236, 246, 255))
                     .child(text("Native input-method composition").h(24.))
-                    .child(
-                        editor("first", first.clone())
+                    .child({
+                        let first = editor("first", first.clone())
                             .secure(password)
-                            .input_mode(mode(zgx::text_edit::InputMode::Email)),
-                    )
+                            .input_mode(mode(zgx::text_edit::InputMode::Email));
+                        if atom {
+                            first.atoms_when(|editor| {
+                                vec![zgx::text_edit::Atom::new(editor.new_atom_id(), 4..13)]
+                            })
+                        } else {
+                            first
+                        }
+                    })
                     .child(text("Second editor").h(24.))
                     .child(
                         editor("second", second.clone())
@@ -273,6 +290,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         second.get(),
                         input.focused()
                     );
+                    if atom && let Some(editor) = &first_editor {
+                        let ranges: Vec<_> =
+                            editor.atoms().iter().map(|a| a.range.clone()).collect();
+                        println!("ATOMS first {ranges:?} selection={:?}", editor.selection());
+                    }
                     let scene = scene.borrow();
                     for (label, node) in [("first", first_node), ("second", second_node)] {
                         let mut nodes = vec![node];

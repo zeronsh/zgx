@@ -5,6 +5,11 @@
 types its letters (no preedit, nothing composed), as a browser's password
 field takes no input method.
 
+`--atom`: the first editor holds "see @file.pdf", the mention an atom.
+Pinyin composed right after it and right before it commits beside it: no
+letter lost, the atom whole (one unit, moved by what went before it), and
+the caret after what was committed.
+
 `--server-gone`: the input method's server (ibus-x11) goes while a focus
 for the app is queued behind it (the app stopped meanwhile), as when IBus
 went as a window closed (#564); the app takes the focus without waiting on
@@ -48,6 +53,47 @@ def password(env, app, window, xdo, key, type_text, output):
     wait_for_exit(app, env, output, 10)
     (output/'result.json').write_text(json.dumps({'result': 'pass'}, indent=2)+'\n')
     print('PASS: pinyin typed into a password field typed its letters; no input method composed there')
+
+
+def atom(env, app, window, xdo, key, type_text, output):
+    """Pinyin right after an atom and right before it."""
+    def settled(text, atoms, selection, what):
+        deadline = time.monotonic() + 10
+        # ibus-x11 can hold a preedit or commit until its next XIM event
+        # (the main flow's note): one key libpinyin ignores lets it go.
+        nudge_at = time.monotonic() + 1.5
+        while True:
+            if nudge_at is not None and time.monotonic() > nudge_at:
+                nudge_at = None
+                xdo('key', 'F24')
+            log = (output/'application.log').read_text()
+            models = re.findall(r'MODEL \d+ first=(".*?") second=', log)
+            found = re.findall(r'ATOMS first (\[.*?\]) selection=(\(\d+, \d+\))', log)
+            now = (json.loads(models[-1]) if models else None, found[-1] if found else None)
+            if now == (text, (atoms, selection)):
+                return now
+            if time.monotonic() > deadline:
+                raise AssertionError(f'{what}: the first field shows {now}, not {(text, (atoms, selection))}')
+            time.sleep(.1)
+    checks = {'start': settled('see @file.pdf', '[4..13]', '(13, 13)', 'at the end')}
+    # Right after it (the field's end).
+    type_text('nihao'); key('space')
+    checks['after'] = settled('see @file.pdf你好', '[4..13]', '(19, 19)', 'composed after the atom')
+    # Right before it: four characters on from the start.
+    key('Home')
+    for _ in range(4):
+        key('Right')
+    checks['caret before it'] = settled('see @file.pdf你好', '[4..13]', '(4, 4)', 'the caret before the atom')
+    type_text('nihao'); key('space')
+    checks['before'] = settled('see 你好@file.pdf你好', '[10..19]', '(10, 10)', 'composed before the atom')
+    composed = [line for line in (output/'application.log').read_text().splitlines() if line.startswith('COMMIT first')]
+    checks['commits'] = composed
+    if composed != ['COMMIT first "你好"', 'COMMIT first "你好"']:
+        raise AssertionError(f'commits: {composed}')
+    xdo('windowactivate', window); time.sleep(.3); xdo('key', 'alt+F4')
+    wait_for_exit(app, env, output, 10)
+    (output/'result.json').write_text(json.dumps({'result': 'pass', 'checks': checks}, indent=2, ensure_ascii=False)+'\n')
+    print('PASS: pinyin committed right after an atom and right before it, the atom whole and moved, the caret after each commit')
 
 
 def server_gone(env, app, window, xdo, key, type_text, output):
@@ -128,6 +174,7 @@ def main():
     parser.add_argument('--output', type=pathlib.Path, required=True)
     parser.add_argument('--server-gone', action='store_true', help="ibus-x11 goes with a focus queued (#564)")
     parser.add_argument('--password', action='store_true', help="a password field takes no input method")
+    parser.add_argument('--atom', action='store_true', help="composing right after and right before an atom")
     parser.add_argument('--server-stopped', action='store_true', help="ibus-x11 answers nothing as the window closes (#564)")
     args = parser.parse_args()
     for executable in ('Xvfb', 'openbox', 'dbus-daemon', 'gsettings', 'ibus-daemon', 'ibus', 'xdotool', 'xwininfo'):
@@ -192,7 +239,7 @@ def main():
                 # as it would quitting: no key and no window manager grab in
                 # flight to the stopped input method.
                 app_env = dict(env, ZGX_SECONDS='12') if args.server_stopped else env
-                app = subprocess.Popen([str(args.binary.resolve())] + (['--password'] if args.password else []),
+                app = subprocess.Popen([str(args.binary.resolve())] + (['--password'] if args.password else []) + (['--atom'] if args.atom else []),
                                        env=app_env, stdout=output, stderr=output)
                 deadline=time.monotonic()+20
                 while True:
@@ -306,6 +353,10 @@ def main():
                     return
                 if args.password:
                     password(env, app, window, xdo, key, type_text, args.output)
+                    return
+                if args.atom:
+                    key('End')
+                    atom(env, app, window, xdo, key, type_text, args.output)
                     return
                 if args.server_stopped:
                     server_stopped(env, app, window, xdo, key, type_text, args.output)
