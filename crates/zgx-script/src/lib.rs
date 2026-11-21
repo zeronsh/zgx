@@ -110,6 +110,7 @@ mod modules {
         )
     }
 }
+pub mod module_build;
 pub mod module_types;
 mod motion;
 mod node;

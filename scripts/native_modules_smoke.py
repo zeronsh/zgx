@@ -6,7 +6,10 @@ Xvfb, calls the typed fixture module (crates/zgx-module/fixture-typed) as
 socket. Then: a library handed over with `--module` is the one loaded, and
 `--notice` shows in the banner; a module zgx.json names that isn't built
 stops zgx-run before a window opens, naming it; and one whose manifest is
-for another interface is shown in the banner, its scripts not run."""
+for another interface is shown in the banner, its scripts not run. Last,
+`zgx run` with a module's crate: built into the cache and loaded, taken
+from the cache the next time, and as its source changes, built again and
+the app restarted with a notice."""
 import argparse
 import json
 import os
@@ -95,11 +98,109 @@ def errors(path):
     return answer["text"]
 
 
+MODULE = """
+#[zgx_module::module(name = "greet")]
+mod greet {
+    #[zgx_module::export]
+    fn hello(name: &str) -> String {
+        format!("GREETING, {name}")
+    }
+}
+"""
+
+GREET_APP = """
+ui.state("said", ui.module("greet").hello("you"))
+return ui.text { id = "main", "main" }
+"""
+
+
+def zgx_run_app(zgx, app, env):
+    """`zgx run <app>`: its process, and stderr as it goes into a file."""
+    log = open(app / "run.log", "w")
+    process = subprocess.Popen([str(zgx), "run", str(app)], env=env, stdout=subprocess.DEVNULL,
+                               stderr=log, text=True)
+    return process, log
+
+
+def socket_of(env, exclude=()):
+    """The devtools socket of a zgx-run that serves one (not those in `exclude`)."""
+    folder = pathlib.Path(env["TMPDIR"]) / f"zgx-inspect-{os.getuid()}"
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        found = [p for p in folder.glob("*.sock") if p not in exclude] if folder.exists() else []
+        for path in found:
+            try:
+                if ask(path, {"cmd": "state", "name": "said"})["ok"]:
+                    return path
+            except OSError:
+                pass
+        time.sleep(0.2)
+    raise AssertionError("no zgx-run serving devtools")
+
+
+def zgx_run_phase(zgx, work, env):
+    app = work / "greet-app"
+    crate = app / "modules/greet"
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text(f"""[workspace]
+[package]
+name = "greet"
+version = "0.1.0"
+edition = "2024"
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+zgx-module = {{ path = "{ROOT / 'crates/zgx-module'}" }}
+""")
+    (crate / "src/lib.rs").write_text(MODULE)
+    (app / "app.luau").write_text(GREET_APP)
+    (app / "zgx.json").write_text(json.dumps({"title": "Greet", "modules": {"greet": "modules/greet"}}))
+    env = dict(env, ZGX_CACHE=str(work / "cache"))
+    # Built, loaded, answering.
+    process, log = zgx_run_app(zgx, app, env)
+    try:
+        path = socket_of(env)
+        assert state(path, "said") == '"GREETING, you"', state(path, "said")
+        built = (app / "run.log").read_text()
+        assert "module `greet` built in" in built, built
+        # Its source changes: built again, the app started again with a
+        # notice.
+        (crate / "src/lib.rs").write_text(MODULE.replace("GREETING", "HELLO"))
+        path = socket_of(env, exclude={path})
+        deadline = time.monotonic() + 120
+        while state(path, "said") != '"HELLO, you"':
+            assert time.monotonic() < deadline, state(path, "said")
+            time.sleep(0.2)
+        said = (app / "run.log").read_text()
+        assert "zgx run: module `greet` changed, restarting" in said, said
+        assert "module `greet` changed: restarted" in errors(path), errors(path)
+    finally:
+        process.kill()
+        process.wait()
+        log.close()
+        # (zgx run's zgx-run: killed with it, by the process group below.)
+        subprocess.run(["pkill", "-KILL", "-P", str(process.pid)], check=False)
+    # Started again unchanged: the cache's, nothing built.
+    (app / "run.log").unlink()
+    process, log = zgx_run_app(zgx, app, env)
+    try:
+        path = socket_of(env, exclude=set())
+        assert state(path, "said") == '"HELLO, you"', state(path, "said")
+        assert "built in" not in (app / "run.log").read_text(), (app / "run.log").read_text()
+    finally:
+        process.kill()
+        process.wait()
+        log.close()
+        subprocess.run(["pkill", "-KILL", "-P", str(process.pid)], check=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zgx_run", type=pathlib.Path, help="zgx-run, built with its `modules` feature")
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--zgx", type=pathlib.Path, help="the zgx tool (default: beside zgx-run)")
     args = parser.parse_args()
+    zgx = args.zgx or args.zgx_run.with_name("zgx")
     args.output.mkdir(parents=True, exist_ok=True)
     work = pathlib.Path(tempfile.mkdtemp(dir=args.output)).resolve()
     library = fixture()
@@ -160,8 +261,14 @@ def main():
             assert not answer["ok"] or "nil" in answer.get("text", ""), answer
         finally:
             stop(process)
+        # (The earlier zgx-runs' sockets are gone with them.)
+        for old in (work / f"zgx-inspect-{os.getuid()}").glob("*.sock"):
+            old.unlink()
+        zgx_run_phase(zgx, work, env)
         print("PASS: zgx-run loads zgx.json's module before the scripts that call it, takes one --module "
-              "hands over, shows --notice, stops naming one that isn't built, and shows one it refuses")
+              "hands over, shows --notice, stops naming one that isn't built, and shows one it refuses; "
+              "zgx run builds a module's crate, takes it from the cache when unchanged, and builds it "
+              "again and restarts the app with a notice as its source changes")
     finally:
         xvfb.terminate()
 

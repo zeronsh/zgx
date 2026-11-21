@@ -163,6 +163,14 @@ A module can be linked into the app instead (one crate built as an `rlib` too), 
 
 `zgx-run` loads them from there before the app's scripts run (`zgx-run --module words=<library>` hands it another library for one). A module `zgx.json` names that has no built library stops `zgx-run` before its window opens, naming it; one that won't load (built for another interface, or not what its manifest says) is shown in the error banner, the scripts' `ui.module` saying why. `zgx types` and `zgx check` read the same key.
 
+### `zgx run`
+
+`zgx run my-app` builds each module whose sources changed, then starts the app with them. A module's **key** is a SHA-256 over every file in its crate's folder (but `target/` and hidden ones), the compiler, the target, the profile and the interface's number; a library built for a key is kept in the cache (`~/.cache/zgx/modules/<name>/<key>/`, or `ZGX_CACHE`) and taken from there whenever that key comes up again, so an unchanged module is never built twice, for any app or checkout. A miss runs cargo with a target directory of the module's own in the cache, so a rebuild compiles only what changed. `--release` builds them for release.
+
+While the app runs, Luau files reload as always. When a module's sources change, `zgx run` builds it again and, since a loaded library can't be replaced, starts the app again: "module `words` changed, restarting" on the terminal, and in the restarted app's banner. A change that doesn't build leaves the app running as it was, cargo's errors on the terminal.
+
+The key can't see a path dependency outside the module's folder: keep those inside it, or depend by version or git, which `Cargo.lock` pins.
+
 ## Calling one from Luau
 
 `ui.module(name)` gives a loaded module's functions as a table, each called with its own arguments:

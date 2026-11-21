@@ -97,6 +97,9 @@ base64 = "0.22"
 # `.luaurc` aliases for `require("@alias/...")`.
 serde = "1"
 serde_json = "1"
+# Native modules' keys and a bundle's hashes (`module_build`, `zgx build`,
+# zgx-run's check of a bundle's libraries): SHA-256.
+sha2 = "0.10"
 # Markdown for `ui.markdown` and `zgx_script::markdown`.
 pulldown-cmark = { version = "0.13", default-features = false }
 unicase = "2"
