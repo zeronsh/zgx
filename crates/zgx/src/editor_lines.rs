@@ -67,6 +67,10 @@ pub struct SpanStyle {
     /// equation's): its place in its editor's looks (`SpanLook`), from 1.
     /// Four bytes, so a plain span pays for no more.
     pub(crate) look: Option<std::num::NonZeroU32>,
+    /// Its size, line pitch and font beyond the editor's, which few spans
+    /// have (a note's heading, its inline code): their name among the
+    /// thread's (`SpanText`), from 1. Two bytes, in room the span had.
+    pub(crate) text: Option<std::num::NonZeroU16>,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -107,6 +111,34 @@ impl SpanStyle {
         self.underline = true;
         self
     }
+    /// Its text `size` points large (a heading in a note): shaped so.
+    #[doc(hidden)]
+    pub fn size(self, size: f32) -> Self {
+        self.with_text(|text| text.size = Some(size))
+    }
+    /// Its line `line_height` points high (a heading's): the line takes
+    /// the tallest of its runs'.
+    #[doc(hidden)]
+    pub fn line_height(self, line_height: f32) -> Self {
+        self.with_text(|text| text.line_height = Some(line_height))
+    }
+    /// Its text in the monospaced font (inline code): shaped so.
+    #[doc(hidden)]
+    pub fn mono(self) -> Self {
+        self.with_text(|text| text.mono = true)
+    }
+    /// Its size, line pitch and font beyond the editor's (`SpanStyle::size`,
+    /// `line_height`, `mono`).
+    #[doc(hidden)]
+    pub fn text(&self) -> SpanText {
+        self.text.map(SpanText::named).unwrap_or_default()
+    }
+    fn with_text(mut self, change: impl FnOnce(&mut SpanText)) -> Self {
+        let mut text = self.text();
+        change(&mut text);
+        self.text = text.name();
+        self
+    }
     /// Its text shown as picture `id` (`EditorHandle::inline_svg`): each
     /// U+FFFC character in it that picture's box, or other text one box.
     #[doc(hidden)]
@@ -122,6 +154,16 @@ impl SpanStyle {
         self.background = self.background.or(style.background);
         self.underline |= style.underline;
         self.look = self.look.or(style.look);
+        self.text = match (self.text, style.text) {
+            (Some(a), Some(b)) if a != b => {
+                let (mut a, b) = (SpanText::named(a), SpanText::named(b));
+                a.size = a.size.or(b.size);
+                a.line_height = a.line_height.or(b.line_height);
+                a.mono |= b.mono;
+                a.name()
+            }
+            (a, b) => a.or(b),
+        };
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
@@ -131,11 +173,66 @@ impl SpanStyle {
             && self.background.is_none()
             && !self.underline
             && self.look.is_none()
+            && self.text.is_none()
     }
     /// Whether it changes how its text is shaped (and so its width): a
     /// look may (its lead, its picture).
     fn shapes(&self) -> bool {
-        self.weight.is_some() || self.italic || self.look.is_some()
+        self.weight.is_some() || self.italic || self.look.is_some() || self.text.is_some()
+    }
+}
+/// A span's size, line pitch and font beyond its editor's
+/// (`SpanStyle::size`, `line_height`, `mono`). Few spans have one, and few
+/// differ: each is kept once on its thread, and a span names it in two
+/// bytes (`SpanStyle::text`), so plain spans stay as small as they were.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct SpanText {
+    /// Its font size in points.
+    pub size: Option<f32>,
+    /// Its line pitch in points.
+    pub line_height: Option<f32>,
+    /// In the monospaced font.
+    pub mono: bool,
+}
+thread_local! {
+    /// The thread's span texts, a span's `SpanStyle::text` naming one by
+    /// its place here, from 1. Only added to, so a name stays its text.
+    static SPAN_TEXTS: RefCell<Vec<SpanText>> = const { RefCell::new(Vec::new()) };
+}
+impl SpanText {
+    /// The text `name` names (`SpanStyle::text`).
+    fn named(name: std::num::NonZeroU16) -> Self {
+        SPAN_TEXTS.with_borrow(|texts| {
+            texts
+                .get(name.get() as usize - 1)
+                .copied()
+                .unwrap_or_default()
+        })
+    }
+    /// Its name, the same for the same text (`None` for the editor's own,
+    /// or past the 65,535 different texts a thread names).
+    fn name(self) -> Option<std::num::NonZeroU16> {
+        if self == Self::default() {
+            return None;
+        }
+        let same = |a: Option<f32>, b: Option<f32>| a.map(f32::to_bits) == b.map(f32::to_bits);
+        SPAN_TEXTS.with_borrow_mut(|texts| {
+            let at = match texts.iter().position(|known| {
+                same(known.size, self.size)
+                    && same(known.line_height, self.line_height)
+                    && known.mono == self.mono
+            }) {
+                Some(at) => at,
+                None if texts.len() < u16::MAX as usize => {
+                    texts.push(self);
+                    texts.len() - 1
+                }
+                None => return None,
+            };
+            std::num::NonZeroU16::new(at as u16 + 1)
+        })
     }
 }
 /// A span's look beyond its `SpanStyle`, which few spans have: kept once in
@@ -337,6 +434,13 @@ pub(crate) fn styled_line(
                 font.weight = weight.clamp(1, 1000);
             }
             font.italic |= style.italic;
+            let text = style.text();
+            if text.mono {
+                font.family = crate::text_layout::FontFamily::Monospace;
+            }
+            if let Some(line_height) = text.line_height {
+                font.line_height = crate::text_layout::LineHeight::px(line_height);
+            }
             let look = style.look.and_then(|id| look(looks, id));
             // Edge padding is room before and/or after the atom's text:
             // `padding[1] < 0` encodes `before = 2 * padding[0]`,
@@ -351,7 +455,7 @@ pub(crate) fn styled_line(
             crate::rich_text::TextRun {
                 range,
                 font,
-                font_size: size,
+                font_size: text.size.unwrap_or(size),
                 color: style.color.unwrap_or(color),
                 background: style.background,
                 padding,
@@ -476,6 +580,7 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                     s.weight.unwrap_or(0),
                     s.italic,
                     s.look.map_or(0, std::num::NonZeroU32::get),
+                    s.text.map_or(0, std::num::NonZeroU16::get),
                 )
             })
             .collect(),
@@ -569,7 +674,7 @@ struct Tail {
 /// A shaped line, and when it was last used.
 type Shaped = (Rc<dyn TextLayout>, u64);
 /// What shapes a styled line's runs: each one's range, weight and slant.
-type ShapeKey = Box<[(u32, u32, u16, bool, u32)]>;
+type ShapeKey = Box<[(u32, u32, u16, bool, u32, u16)]>;
 /// A styled line's text and what shapes its runs (`shape_key`).
 type StyledKey = (Box<str>, ShapeKey);
 /// A highlighted line: its colours, what it leaves the next, when used.
@@ -1392,6 +1497,76 @@ mod tests {
         assert_eq!(std::mem::size_of::<Option<std::num::NonZeroU32>>(), 4);
         assert_eq!(std::mem::size_of::<SpanStyle>(), 24);
         assert_eq!(std::mem::size_of::<(Range<usize>, SpanStyle)>(), 40);
+    }
+
+    /// A note's heading and inline code: size, line pitch, underline and
+    /// the monospaced font reach the runs; a span with none of them names
+    /// no text, and the same text is the same name.
+    #[test]
+    fn note_spans_set_size_pitch_underline_and_font() {
+        use crate::scene::Color;
+        let ink = Color(0, 0, 0, 255);
+        let spans: LineSpans = vec![
+            (
+                0..5,
+                SpanStyle::default().size(24.).line_height(32.).weight(600),
+            ),
+            (6..10, SpanStyle::default().mono()),
+            (11..15, SpanStyle::default().underline()),
+        ];
+        let font = crate::text_layout::FontStyle::default();
+        let rich = styled_line("Title code link", &spans, ink, 16., &font, &[]).unwrap();
+        let runs = rich.runs();
+        let title = runs.iter().find(|r| r.range == (0..5)).unwrap();
+        assert_eq!(title.font_size, 24.);
+        assert_eq!(title.font.line_height.pixels(), Some(32.));
+        assert_eq!(title.font.weight, 600);
+        let code = runs.iter().find(|r| r.range == (6..10)).unwrap();
+        assert_eq!(code.font.family, crate::text_layout::FontFamily::Monospace);
+        assert_eq!(code.font_size, 16.);
+        assert!(
+            runs.iter()
+                .find(|r| r.range == (11..15))
+                .unwrap()
+                .underline
+                .is_some()
+        );
+        assert!(
+            shape_key(&spans).is_some(),
+            "size and font reshape the line"
+        );
+        assert!(shape_key(&vec![(11..15, SpanStyle::default().underline())]).is_none());
+        assert_eq!(SpanStyle::default().text, None);
+        assert_eq!(
+            SpanStyle::default().size(24.).text,
+            SpanStyle::default().size(24.).text
+        );
+        assert_ne!(
+            SpanStyle::default().size(24.).text,
+            SpanStyle::default().size(20.).text
+        );
+    }
+
+    /// Overlapping spans merge their texts as their other styles: the
+    /// first's size, and the monospaced font if either has it (code in a
+    /// heading).
+    #[test]
+    fn overlapping_span_texts_merge() {
+        use crate::scene::Color;
+        let spans: LineSpans = vec![
+            (0..10, SpanStyle::default().size(24.)),
+            (6..10, SpanStyle::default().mono()),
+        ];
+        let font = crate::text_layout::FontStyle::default();
+        let rich = styled_line("Title code", &spans, Color(0, 0, 0, 255), 16., &font, &[]).unwrap();
+        let code = rich
+            .runs()
+            .iter()
+            .find(|r| r.range == (6..10))
+            .unwrap()
+            .clone();
+        assert_eq!(code.font_size, 24.);
+        assert_eq!(code.font.family, crate::text_layout::FontFamily::Monospace);
     }
 
     /// Spans that only colour give their runs as before styles: in order,

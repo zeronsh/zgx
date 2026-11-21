@@ -101,8 +101,12 @@ A `highlight` span is `{ from, to, color }` (`color` may be left out), with thes
 | `italic` | `boolean` | italic |
 | `strike` | `boolean` | a line through it, in its colour |
 | `bg` | `Color` | a wash behind it (inline code) |
+| `size` | `number` | its font size in points (a note's heading) |
+| `line_height` | `number` | its line pitch in points: the line takes its runs' tallest |
+| `underline` | `boolean` | a line under it (a link) |
+| `font` | `"mono"` | the monospaced font (inline code) |
 
-Where spans overlap, each of `color`, `weight` and `bg` is the first's (by `from`) that gives it, and `italic` and `strike` hold if any gives them: a code span inside bold text keeps the bold weight and shows its own colour, and delimiters greyed inside a bold span stay bold. A line whose spans give a `weight` or `italic` is shaped with them, so its width, wrapping, carets, clicks and selection follow what shows; other lines (colours, strikes and washes only) are shaped as plain text, as before.
+Where spans overlap, each of `color`, `weight`, `bg`, `size` and `line_height` is the first's (by `from`) that gives it, and `italic`, `strike`, `underline` and `font = "mono"` hold if any gives them: a code span inside bold text keeps the bold weight and shows its own colour, and delimiters greyed inside a bold span stay bold. A line whose spans give a `weight`, `italic`, `size`, `line_height` or `font` is shaped with them, so its width, wrapping, carets, clicks and selection follow what shows; other lines (colours, strikes and washes only) are shaped as plain text, as before.
 
 ```lua
 local draft = ui.state("draft", "Some **bold** and `code`")

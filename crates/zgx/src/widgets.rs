@@ -18,7 +18,9 @@ use std::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-pub use crate::editor_lines::{Highlighter, LineColors, LineSpans, SpanHighlighter, SpanStyle};
+pub use crate::editor_lines::{
+    Highlighter, LineColors, LineSpans, SpanHighlighter, SpanStyle, SpanText,
+};
 
 /// What had keyboard focus, and a text field's selection there, when it
 /// was taken (`Ui::focus_snapshot`), to put back (`Ui::restore_focus`).

@@ -602,6 +602,14 @@ export type HighlightSpan = {
 	strike: boolean?,
 	-- A wash behind it (inline code).
 	bg: Color?,
+	-- Its font size in points (a heading in a note): shapes its line.
+	size: number?,
+	-- Its line pitch in points: the line takes its runs' tallest.
+	line_height: number?,
+	-- A line under it (a link).
+	underline: boolean?,
+	-- `"mono"`: in the monospaced font (inline code); shapes its line.
+	font: "mono"?,
 }
 -- A number, or a number token: a standard one (`"$radius.md"`, see
 -- `NumberToken`) or an app's (`"$terminal.inset"`), hence any string.
@@ -9386,7 +9394,8 @@ export type InputProps = {
 	-- before left (0 before the first), it returns spans `{ from, to,
 	-- color }` (bytes counted from 1, as `string.find` gives them; `color`
 	-- a colour or `"$token"`, or left out) with `weight`, `italic`,
-	-- `strike` and `bg` by name (`HighlightSpan`), and what the line leaves
+	-- `strike`, `bg`, `size`, `line_height`, `underline` and `font` by
+	-- name (`HighlightSpan`), and what the line leaves
 	-- the next (a block comment or string running on: any value, a
 	-- number, a string, a table; the same string or number is the same
 	-- state, a table the same one only as itself). It must depend on
