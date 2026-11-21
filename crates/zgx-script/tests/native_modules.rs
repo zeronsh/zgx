@@ -1188,3 +1188,111 @@ fn a_modules_key_follows_its_sources() {
     assert_ne!(key(&dir, Profile::Dev, target).unwrap(), first);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// `zgx build`'s bundle: its scripts as bytecode, run from its folder as
+/// they are asked for; checked against its manifest when opened, by a hash
+/// the first time and by its files' stamps after, and refused once a
+/// script changes.
+#[test]
+fn a_bundle_runs_its_bytecode_and_is_checked_once() {
+    use zgx_script::app_bundle::{Options, open_with, write};
+    let base = std::env::temp_dir().join(format!("zgx-bundle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    std::fs::create_dir_all(app.join("parts")).unwrap();
+    std::fs::write(
+        app.join("app.luau"),
+        "local part = require(\"./parts/part\")\nreturn ui.text { id = \"out\", part.say() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("parts/part.luau"),
+        "return { say = function() return \"from bytecode\" end }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("zgx.json"),
+        r#"{ "app_id": "bundled", "version": "1.2.3" }"#,
+    )
+    .unwrap();
+    // (A cache of its own: what a check remembers.)
+    let cache = base.join("cache");
+    let open = |dir: &std::path::Path| open_with(dir, &cache);
+    let out = base.join("dist");
+    let written = write(
+        &app,
+        &Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((written.files, written.scripts), (3, 2));
+    // Its scripts are bytecode: Luau's first byte is its version, never `l`.
+    let compiled = std::fs::read(out.join("ui/app.luau")).unwrap();
+    assert_ne!(compiled[0], b'l');
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["app_id"], "bundled");
+    assert_eq!(manifest["version"], "1.2.3");
+    assert_eq!(manifest["ui"]["files"], 3);
+
+    let first = open(&out).unwrap();
+    assert!(first.hashed, "the first open hashes it");
+    let again = open(&out).unwrap();
+    assert!(!again.hashed, "after, its stamps say it is the one checked");
+    assert_eq!(again.app_id, "bundled");
+
+    // It runs from its folder, as bytecode.
+    let ui = again.ui.clone();
+    let mut run = TestApp::new(move |runtime| {
+        ScriptHost::from_files(
+            runtime,
+            zgx_script::ScriptFiles::Folder(ui),
+            "app.luau",
+            zgx_script::Code::VerifiedBytecode,
+        )
+    });
+    assert_eq!(run.error(), None);
+    assert_eq!(run.text("out"), "from bytecode");
+    drop(run);
+
+    // A script changed is refused; written again, the bundle is checked anew.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut tampered = std::fs::read(out.join("ui/parts/part.luau")).unwrap();
+    tampered.push(0);
+    std::fs::write(out.join("ui/parts/part.luau"), tampered).unwrap();
+    let refused = open(&out).unwrap_err();
+    assert!(
+        refused.ends_with(
+            "its scripts aren't those its manifest names (ui/ changed since it was built)"
+        ),
+        "{refused}"
+    );
+    // A folder that is no bundle isn't replaced by one.
+    std::fs::create_dir_all(base.join("other")).unwrap();
+    std::fs::write(base.join("other/keep.txt"), "mine").unwrap();
+    let kept = write(
+        &app,
+        &Options {
+            out: Some(base.join("other")),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        kept.ends_with("not a bundle, and not empty: name another place (--out)"),
+        "{kept}"
+    );
+    assert!(base.join("other/keep.txt").is_file());
+    write(
+        &app,
+        &Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(open(&out).unwrap().hashed);
+    std::fs::remove_dir_all(base).unwrap();
+}

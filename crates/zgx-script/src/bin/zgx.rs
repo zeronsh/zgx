@@ -9,6 +9,10 @@
 //! (`zgx_script::module_build`), and building one again and restarting the
 //! app as its sources change.
 //!
+//! `zgx build [--out <dir>] [--target <triple>]… [--version <v>] <app>`
+//! writes the app as a bundle (`zgx_script::app_bundle`), which `zgx-run
+//! <bundle>` runs.
+//!
 //! `zgx check [--nonstrict] <file-or-dir>...` type checks Luau scripts
 //! with luau-lsp and the bundled `ui`/`anime` definitions, printing
 //! `file:line:col` findings; it exits 1 when there are errors.
@@ -35,6 +39,7 @@ use zgx_script::check::{CheckError, Options, Report, check};
 
 const USAGE: &str = "usage: zgx new <name> [--template basic|router|list|form|plugins] [--i18n]
        zgx run [--inspect] [--release] <app.luau-or-dir> [args...]
+       zgx build [--out <dir>] [--target <triple>]... [--version <v>] <app-dir>
        zgx check [--nonstrict] <file-or-dir>...
        zgx lint [--format text|json] <file-or-dir>...
        zgx lint --rules
@@ -54,6 +59,12 @@ run: opens the app in a window and reloads it as its files change
 The native modules zgx.json names are built first if their sources changed
 (cached by a hash of them; --release builds them for release), and as their
 sources change while it runs, built again and the app restarted.
+
+build: the app as a bundle (dist/<app_id>, or --out): its scripts compiled
+to bytecode, its other files as they are, each native module's library for
+each --target (the host's by default; built for release if its sources
+changed, else from the cache) and a manifest of hashes. `zgx-run <bundle>`
+runs it.
 --inspect serves devtools (`zgx inspect help`).
 
 check: type checks zgx Luau scripts with luau-lsp, the bundled ui/anime
@@ -474,6 +485,59 @@ fn supervise(
     }
 }
 
+/// `zgx build [--out <dir>] [--target <triple>]… [--version <v>] <app-dir>`.
+fn build(args: Vec<String>) -> ExitCode {
+    let mut options = zgx_script::app_bundle::Options::default();
+    let mut app = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => options.out = args.next().map(PathBuf::from),
+            "--target" => options.targets.extend(args.next()),
+            "--version" => options.version = args.next(),
+            _ if app.is_none() && !arg.starts_with("--") => app = Some(PathBuf::from(arg)),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(app) = app else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let started = std::time::Instant::now();
+    match zgx_script::app_bundle::write(&app, &options) {
+        Ok(written) => {
+            for module in &written.modules {
+                println!(
+                    "module `{}`: {} ({})",
+                    module.name,
+                    if module.built {
+                        format!("built in {:.2} s", module.built_in.as_secs_f64())
+                    } else {
+                        "unchanged, from the cache".into()
+                    },
+                    module.library.display()
+                );
+            }
+            println!(
+                "wrote {} in {:.2} s: {} files, {} scripts compiled in {:.2} s",
+                written.dir.display(),
+                started.elapsed().as_secs_f64(),
+                written.files,
+                written.scripts,
+                written.ui_in.as_secs_f64()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("zgx build: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// `zgx video …`: handed to zgx-video (beside this binary, or on PATH), which
 /// links the renderer this tool doesn't.
 fn video(args: Vec<String>) -> ExitCode {
@@ -507,6 +571,7 @@ fn main() -> ExitCode {
         Some("inspect") => return inspect(args.collect()),
         Some("audit") => return audit(args.collect()),
         Some("run") => return run(args.collect()),
+        Some("build") => return build(args.collect()),
         Some("video") => return video(args.collect()),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
