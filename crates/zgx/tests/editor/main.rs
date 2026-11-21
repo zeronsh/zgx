@@ -18,6 +18,8 @@ mod editor_atom_pointer;
 mod editor_atom_style;
 #[path = "../editor_atom_svg.rs"]
 mod editor_atom_svg;
+#[path = "../editor_atom_units.rs"]
+mod editor_atom_units;
 #[path = "../editor_atoms.rs"]
 mod editor_atoms;
 #[path = "../editor_autocorrect.rs"]

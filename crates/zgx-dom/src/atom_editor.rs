@@ -119,7 +119,9 @@ impl AtomEditor {
     /// How atom `atom` shows: its wash, and its look beyond it (its own over
     /// the text area's).
     fn chip_css(&self, atom: &Atom) -> String {
-        let mut css = String::from("border-radius:4px;");
+        // Selected whole, as the model selects it (a drag into it, a
+        // double click on a word of it).
+        let mut css = String::from("border-radius:4px;user-select:all;-webkit-user-select:all;");
         if let Some(wash) = atom.wash.or(self.wash) {
             css.push_str(&format!("background:{};", css_color(wash)));
         }

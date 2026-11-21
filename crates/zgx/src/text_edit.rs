@@ -795,11 +795,17 @@ impl TextEditor {
             }
             None => self.over_atoms(self.selection.range()),
         };
+        let before = self.selection;
         self.selection = Selection {
             anchor: range.start,
             focus: range.end,
         };
         let changed = self.replace(label, None);
+        // Undone, the caret goes back where typing left it (after the `@que`
+        // it replaced), not over the text it took.
+        if changed && let Some(step) = self.undo.back_mut() {
+            step.before = before;
+        }
         let start = range.start;
         let id = self.new_atom_id();
         let atom = Atom {
@@ -989,6 +995,10 @@ impl TextEditor {
         }
     }
     fn boundary(&self, offset: usize) -> usize {
+        self.out_of_atoms(self.grapheme_floor(offset))
+    }
+    /// `offset` moved back to a grapheme boundary.
+    fn grapheme_floor(&self, offset: usize) -> usize {
         let mut offset = offset.min(self.text.len());
         while !self.text.is_char_boundary(offset) {
             offset -= 1;
@@ -996,22 +1006,45 @@ impl TextEditor {
         let (base, text) = self.text.around(offset);
         let local = offset - base;
         let mut cursor = unicode_segmentation::GraphemeCursor::new(local, text.len(), true);
-        let at = if cursor.is_boundary(&text, 0).unwrap_or(false) {
+        if cursor.is_boundary(&text, 0).unwrap_or(false) {
             offset
         } else {
             base + cursor.prev_boundary(&text, 0).ok().flatten().unwrap_or(0)
-        };
-        self.out_of_atoms(at)
+        }
+    }
+    /// `anchor` to `focus` on grapheme boundaries, out of atoms: a caret at
+    /// the nearer edge of one it is inside, a selection widened to take
+    /// whole each atom it goes into (a double click on a word of a chip
+    /// selects the chip).
+    fn selection_between(&self, anchor: usize, focus: usize) -> Selection {
+        let (anchor, focus) = (self.grapheme_floor(anchor), self.grapheme_floor(focus));
+        if anchor == focus || !self.has_atoms() {
+            let at = self.out_of_atoms(anchor);
+            let to = self.out_of_atoms(focus);
+            return Selection {
+                anchor: at,
+                focus: to,
+            };
+        }
+        if anchor < focus {
+            Selection {
+                anchor: self.atom_start_of(anchor),
+                focus: self.atom_end_of(focus),
+            }
+        } else {
+            Selection {
+                anchor: self.atom_end_of(anchor),
+                focus: self.atom_start_of(focus),
+            }
+        }
     }
     /// Select from `anchor` to `focus`, each moved back to a grapheme
-    /// boundary. Ends a typing run and cancels any preedit.
+    /// boundary, a selection taking whole any atom it goes into. Ends a
+    /// typing run and cancels any preedit.
     pub fn set_selection(&mut self, anchor: usize, focus: usize) {
         self.run = None;
         self.cancel_preedit();
-        self.selection = Selection {
-            anchor: self.boundary(anchor),
-            focus: self.boundary(focus),
-        };
+        self.selection = self.selection_between(anchor, focus);
     }
     /// Select all the text.
     pub fn select_all(&mut self) {
@@ -1531,8 +1564,10 @@ impl TextEditor {
     fn move_to(&mut self, offset: usize, extend: bool) {
         self.run = None;
         self.cancel_preedit();
-        self.selection.focus = self.boundary(offset);
-        if !extend {
+        if extend {
+            self.selection = self.selection_between(self.selection.anchor, offset);
+        } else {
+            self.selection.focus = self.boundary(offset);
             self.selection.anchor = self.selection.focus;
         }
     }
@@ -3189,7 +3224,7 @@ mod atom_tests {
             e.selection(),
             Selection {
                 anchor: 2,
-                focus: 8
+                focus: 17
             }
         );
         e.set_selection(2, 17);
