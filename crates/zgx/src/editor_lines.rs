@@ -127,6 +127,15 @@ impl SpanStyle {
     pub fn mono(self) -> Self {
         self.with_text(|text| text.mono = true)
     }
+    /// Its background as a chip: `padding` points across and down round
+    /// its text (across, taking room in the line), corners of `radius`.
+    #[doc(hidden)]
+    pub fn chip(self, padding: [f32; 2], radius: f32) -> Self {
+        self.with_text(|text| {
+            text.padding = Some(padding);
+            text.radius = Some(radius);
+        })
+    }
     /// Its size, line pitch and font beyond the editor's (`SpanStyle::size`,
     /// `line_height`, `mono`).
     #[doc(hidden)]
@@ -160,6 +169,8 @@ impl SpanStyle {
                 a.size = a.size.or(b.size);
                 a.line_height = a.line_height.or(b.line_height);
                 a.mono |= b.mono;
+                a.padding = a.padding.or(b.padding);
+                a.radius = a.radius.or(b.radius);
                 a.name()
             }
             (a, b) => a.or(b),
@@ -181,8 +192,9 @@ impl SpanStyle {
         self.weight.is_some() || self.italic || self.look.is_some() || self.text.is_some()
     }
 }
-/// A span's size, line pitch and font beyond its editor's
-/// (`SpanStyle::size`, `line_height`, `mono`). Few spans have one, and few
+/// A span's size, line pitch and font beyond its editor's, and its
+/// background's shape (`SpanStyle::size`, `line_height`, `mono`, `chip`).
+/// Few spans have one, and few
 /// differ: each is kept once on its thread, and a span names it in two
 /// bytes (`SpanStyle::text`), so plain spans stay as small as they were.
 #[doc(hidden)]
@@ -195,6 +207,11 @@ pub struct SpanText {
     pub line_height: Option<f32>,
     /// In the monospaced font.
     pub mono: bool,
+    /// Room round its text inside its background, across and down, in
+    /// points (a chip): across, it takes room in the line.
+    pub padding: Option<[f32; 2]>,
+    /// Its background's corner radius, in points.
+    pub radius: Option<f32>,
 }
 thread_local! {
     /// The thread's span texts, a span's `SpanStyle::text` naming one by
@@ -218,11 +235,14 @@ impl SpanText {
             return None;
         }
         let same = |a: Option<f32>, b: Option<f32>| a.map(f32::to_bits) == b.map(f32::to_bits);
+        let pad = |p: Option<[f32; 2]>| p.map(|[x, y]| [x.to_bits(), y.to_bits()]);
         SPAN_TEXTS.with_borrow_mut(|texts| {
             let at = match texts.iter().position(|known| {
                 same(known.size, self.size)
                     && same(known.line_height, self.line_height)
                     && known.mono == self.mono
+                    && pad(known.padding) == pad(self.padding)
+                    && same(known.radius, self.radius)
             }) {
                 Some(at) => at,
                 None if texts.len() < u16::MAX as usize => {
@@ -468,13 +488,14 @@ pub(crate) fn styled_line(
             let look = style.look.and_then(|id| look(looks, id));
             // Edge padding is room before and/or after the atom's text:
             // `padding[1] < 0` encodes `before = 2 * padding[0]`,
-            // `after = -(padding[1] + 1)` (`TextRun::across_padding`).
+            // `after = -(padding[1] + 1)` (`TextRun::across_padding`). A
+            // chip span's room is round its text (`SpanStyle::chip`).
             let lead = look.and_then(|l| l.lead).filter(|v| *v > 0.).unwrap_or(0.);
             let trail = look.and_then(|l| l.trail).filter(|v| *v > 0.).unwrap_or(0.);
             let padding = if lead > 0. || trail > 0. {
                 [lead / 2., -1. - trail]
             } else {
-                [0.; 2]
+                text.padding.unwrap_or_default()
             };
             crate::rich_text::TextRun {
                 range,
@@ -483,9 +504,9 @@ pub(crate) fn styled_line(
                 color: style.color.unwrap_or(color),
                 background: style.background,
                 padding,
+                radius: text.radius.unwrap_or_default(),
                 underline: style.underline.then(|| underline(look)),
                 strikethrough: style.strike.then(|| crate::rich_text::Decoration::new(1.)),
-                ..Default::default()
             }
         })
         .collect();
@@ -1669,6 +1690,41 @@ mod tests {
         assert_ne!(
             SpanStyle::default().size(24.).text,
             SpanStyle::default().size(20.).text
+        );
+    }
+
+    /// A chip span's background takes room across round its text and has
+    /// round corners; it shapes its line, so carets follow the room.
+    #[test]
+    fn a_chip_span_pads_and_rounds_its_background() {
+        use crate::scene::Color;
+        let wash = Color(200, 200, 255, 255);
+        let spans: LineSpans = vec![(
+            4..8,
+            SpanStyle::default().background(wash).chip([4., 2.], 6.),
+        )];
+        let font = crate::text_layout::FontStyle::default();
+        let rich = styled_line(
+            "see chip here",
+            &spans,
+            Color(0, 0, 0, 255),
+            14.,
+            &font,
+            &[],
+        )
+        .unwrap();
+        let chip = rich
+            .runs()
+            .iter()
+            .find(|r| r.range == (4..8))
+            .unwrap()
+            .clone();
+        assert_eq!(chip.padding, [4., 2.]);
+        assert_eq!(chip.radius, 6.);
+        assert_eq!(chip.background, Some(wash));
+        assert!(
+            shape_key(&spans).is_some(),
+            "its room across reshapes the line"
         );
     }
 
