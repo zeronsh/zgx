@@ -900,6 +900,10 @@ impl LineCache {
             self.rare_set.set(true);
         }
         drop(rare);
+        // Its lines are asked for in `styled`, where their room goes in.
+        if self.has_insets() {
+            self.shapes.set(true);
+        }
         self.shaped.borrow_mut().clear();
         self.styled.borrow_mut().clear();
         self.heights.borrow_mut().clear();
@@ -966,7 +970,8 @@ impl LineCache {
     /// Style lines with `highlighter` (none: the editor's style).
     pub(crate) fn set_highlighter(&self, highlighter: Option<SpanHighlighter>) {
         *self.highlighter.borrow_mut() = highlighter;
-        self.shapes.set(false);
+        // Lines with room are asked for in `styled` whatever their spans.
+        self.shapes.set(self.has_insets());
         self.tall.set(false);
         self.states.borrow_mut().clear();
         *self.tail.borrow_mut() = None;
@@ -1171,7 +1176,44 @@ impl LineCache {
     /// Line `i` shaped with the runs its spans give it, if they shape it
     /// (a weight, italics): `None` for a line shaped as its plain text.
     fn styled(&self, layout: &LinesLayout, i: usize, text: &str) -> Option<Rc<dyn TextLayout>> {
+        if !self.shapes.get() {
+            return None;
+        }
+        // Lines with room of their own (`set_insets`, which makes lines be
+        // asked here): shaped in it, out of line.
+        if layout.room {
+            return self.styled_in_room(layout, i, text);
+        }
         self.styled_at(layout, i, text, (layout.wrap, text))
+    }
+    /// `styled` for an editor whose lines have room of their own: line `i`
+    /// shaped in what its indent leaves (kept apart from the same text
+    /// unindented), its room carried by its layout (`InsetLayout`).
+    #[cold]
+    #[inline(never)]
+    fn styled_in_room(
+        &self,
+        layout: &LinesLayout,
+        i: usize,
+        text: &str,
+    ) -> Option<Rc<dyn TextLayout>> {
+        let inset = layout.inset(i);
+        if inset == LineInset::default() {
+            return self.styled_at(layout, i, text, (layout.wrap, text));
+        }
+        let indented;
+        let (wrap, key) = match layout.wrap {
+            Some(_) if inset.left > 0. => {
+                indented = format!("{}\u{0}{}", inset.left.to_bits(), text);
+                (layout.draw_width(i, layout.wrap), &*indented)
+            }
+            wrap => (wrap, text),
+        };
+        let inner = match self.styled_at(layout, i, text, (wrap, key)) {
+            Some(inner) => inner,
+            None => self.line_at(text, &layout.shape, (wrap, key)),
+        };
+        Some(Rc::new(InsetLayout { inner, inset }))
     }
     /// `styled`, shaped at `wrap` and kept by `key` (its text, or its text
     /// and indent: `LinesLayout::line_in_room`).
@@ -1327,6 +1369,89 @@ pub(crate) struct LinesLayout {
     /// Lines across chunks, joined once (a long line's every draw would
     /// copy it): a few, by number.
     joined: RefCell<HashMap<usize, Arc<str>>>,
+}
+/// A line shaped with its room (`LineInset`) in it: its carets, hits,
+/// selection and size moved past its indent and the room above, its height
+/// the room above and below too.
+struct InsetLayout {
+    inner: Rc<dyn TextLayout>,
+    inset: LineInset,
+}
+impl InsetLayout {
+    fn out(&self, r: Rect) -> Rect {
+        Rect::new(
+            r.x + self.inset.left,
+            r.y + self.inset.above,
+            r.width,
+            r.height,
+        )
+    }
+}
+impl TextLayout for InsetLayout {
+    fn cache_weight(&self) -> Option<usize> {
+        self.inner.cache_weight()
+    }
+    fn size(&self) -> (f32, f32) {
+        let (w, h) = self.inner.size();
+        (w + self.inset.left, h + self.inset.above + self.inset.below)
+    }
+    fn hit_test(&self, x: f32, y: f32) -> usize {
+        self.hit_position(x, y).byte_offset
+    }
+    fn hit_position(&self, x: f32, y: f32) -> TextPosition {
+        self.inner
+            .hit_position(x - self.inset.left, y - self.inset.above)
+    }
+    fn caret(&self, byte_offset: usize) -> Rect {
+        self.out(self.inner.caret(byte_offset))
+    }
+    fn caret_position(&self, position: TextPosition) -> Rect {
+        self.out(self.inner.caret_position(position))
+    }
+    fn selection(&self, range: Range<usize>) -> Vec<Rect> {
+        self.inner
+            .selection(range)
+            .into_iter()
+            .map(|r| self.out(r))
+            .collect()
+    }
+    fn selection_within(&self, range: Range<usize>, top: f32, bottom: f32) -> Vec<Rect> {
+        let above = self.inset.above;
+        (self
+            .inner
+            .selection_within(range, top - above, bottom - above)
+            .into_iter())
+        .map(|r| self.out(r))
+        .collect()
+    }
+    fn line_carets(&self, text: &str) -> Option<Vec<crate::text_layout::LineCarets>> {
+        let mut lines = self.inner.line_carets(text)?;
+        for line in &mut lines {
+            line.top += self.inset.above;
+            for x in &mut line.carets {
+                *x += self.inset.left;
+            }
+        }
+        Some(lines)
+    }
+    fn carets_x(&self, offsets: &[usize]) -> Vec<f32> {
+        let mut xs = self.inner.carets_x(offsets);
+        for x in &mut xs {
+            *x += self.inset.left;
+        }
+        xs
+    }
+    fn visual_line_range(&self, position: TextPosition) -> (TextPosition, TextPosition) {
+        self.inner.visual_line_range(position)
+    }
+    fn visual_line_edge(&self, position: TextPosition, end: bool) -> TextPosition {
+        self.inner.visual_line_edge(position, end)
+    }
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        (self.inner.inline_boxes().into_iter())
+            .map(|(at, x, y)| (at, x + self.inset.left, y + self.inset.above))
+            .collect()
+    }
 }
 /// A line's text: in its chunk, or joined across chunks and kept.
 pub(crate) enum LineText<'a> {
@@ -1543,13 +1668,10 @@ impl LinesLayout {
         }
         self.cache.inset(self, i)
     }
-    /// Line `i`, shaped.
+    /// Line `i`, shaped. A line with room of its own (`set_line_insets`)
+    /// is shaped with its room in it (`InsetLayout`, from `LineCache::styled`):
+    /// its carets, hits and size carry it, so nothing here asks for it.
     pub(crate) fn line(&self, i: usize) -> Rc<dyn TextLayout> {
-        // Lines with room of their own (`set_line_insets`), out of line: a
-        // text area without pays one check.
-        if self.room {
-            return self.line_in_room(i);
-        }
         let text = self.line_text(i);
         let layout = match self.cache.styled(self, i, &text) {
             Some(layout) => layout,
@@ -1560,52 +1682,34 @@ impl LinesLayout {
             self.widest.set(width);
         }
         if let Some(heights) = &self.heights {
-            let height = height.max(self.row);
+            let height = if self.room {
+                self.height_in_room(i, height)
+            } else {
+                height.max(self.row)
+            };
             if heights.borrow().each[i] != height {
                 heights.borrow_mut().set(i, height);
-                self.cache
-                    .heights
-                    .borrow_mut()
-                    .insert((*text).into(), height);
+                // A line's room isn't its text's: kept only without.
+                if !self.room {
+                    self.cache
+                        .heights
+                        .borrow_mut()
+                        .insert((*text).into(), height);
+                }
             }
         }
         layout
     }
-    /// `line` of an editor whose lines may have room of their own.
+    /// Line `i`'s height from its layout's (its room in it): none hidden.
     #[cold]
     #[inline(never)]
-    fn line_in_room(&self, i: usize) -> Rc<dyn TextLayout> {
-        let text = self.line_text(i);
+    fn height_in_room(&self, i: usize, height: f32) -> f32 {
         let inset = self.inset(i);
-        // An indented line wraps in what its indent leaves: kept apart from
-        // the same text unindented.
-        let indented;
-        let (wrap, key) = match self.wrap {
-            Some(_) if inset.left > 0. => {
-                indented = format!("{}\u{0}{}", inset.left.to_bits(), &*text);
-                (self.draw_width(i, self.wrap), &*indented)
-            }
-            wrap => (wrap, &*text),
-        };
-        let layout = match self.cache.styled_at(self, i, &text, (wrap, key)) {
-            Some(layout) => layout,
-            None => self.cache.line_at(&text, &self.shape, (wrap, key)),
-        };
-        let (width, height) = layout.size();
-        let width = width + inset.left;
-        if width > self.widest.get() {
-            self.widest.set(width);
+        if inset.hidden {
+            0.
+        } else {
+            height.max(self.row + inset.above + inset.below)
         }
-        if let Some(heights) = &self.heights {
-            // Kept without its room: the same text elsewhere has its own.
-            let bare = height.max(self.row);
-            let height = inset.height(bare);
-            if heights.borrow().each[i] != height {
-                heights.borrow_mut().set(i, height);
-                self.cache.heights.borrow_mut().insert((*text).into(), bare);
-            }
-        }
-        layout
     }
     /// Line `i`'s local position for text position `position`.
     fn local(&self, i: usize, position: TextPosition) -> TextPosition {
@@ -1616,16 +1720,7 @@ impl LinesLayout {
         }
     }
     fn shift(&self, i: usize, rect: Rect) -> Rect {
-        if !self.room {
-            return Rect::new(rect.x, rect.y + self.top(i), rect.width, rect.height);
-        }
-        let inset = self.inset(i);
-        Rect::new(
-            rect.x + inset.left,
-            rect.y + self.top(i) + inset.above,
-            rect.width,
-            rect.height,
-        )
+        Rect::new(rect.x, rect.y + self.top(i), rect.width, rect.height)
     }
     /// The selection of `range`, only on the lines between `top` and
     /// `bottom`: what an editor draws of a selection of the whole file.
@@ -1689,8 +1784,7 @@ impl TextLayout for LinesLayout {
     fn hit_position(&self, x: f32, y: f32) -> TextPosition {
         let i = self.line_at(y);
         let layout = self.line(i);
-        let inset = self.inset(i);
-        let local = layout.hit_position(x - inset.left, y.max(0.) - self.top(i) - inset.above);
+        let local = layout.hit_position(x, y.max(0.) - self.top(i));
         let range = self.line_range(i);
         TextPosition {
             byte_offset: range.start + local.byte_offset.min(range.len()),
@@ -2125,8 +2219,8 @@ mod tests {
         assert_eq!(layout.draw_width(1, Some(200.)), Some(164.));
         assert_eq!(layout.draw_width(0, Some(200.)), Some(200.));
         assert!(
-            layout.line(1).size().0 <= 164.,
-            "its rows fit the width it is drawn in"
+            layout.line(1).size().0 <= 164. + 36.,
+            "its rows fit the width it is drawn in, past its indent"
         );
         assert_eq!(layout.draw_width(1, None), None);
     }

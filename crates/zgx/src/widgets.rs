@@ -7352,97 +7352,100 @@ impl Ui {
                     {
                         s.damage_shown(layer);
                     }
-                    // A hidden line (`LineInset::hidden`) has no node.
-                    let insets = lines.has_insets();
-                    if insets {
-                        free_hidden_lines(lines, &mut pool, &mut free);
-                    }
-                    for i in shown_lines.clone() {
-                        if (insets && lines.inset(i).hidden)
-                            || pool.iter().any(|(line, _)| *line == i)
-                        {
-                            continue;
-                        }
-                        let id = free.pop().unwrap_or_else(|| {
-                            s.append(
-                                layer,
-                                NodeKind::Text {
-                                    text: std::sync::Arc::from(""),
-                                    color,
-                                    font_size: size,
-                                },
-                                Style::default(),
-                            )
-                        });
-                        pool.push((i, id));
-                    }
-                    for (i, id) in pool.iter() {
-                        let line = lines.line_text(*i);
-                        let cache = draw_hint.line_cache();
-                        let colored = cache.spans(lines, *i).and_then(|spans| {
-                            // Looks are read only where it has any.
-                            let style = |looks: &[crate::editor_lines::SpanLook]| {
-                                crate::editor_lines::styled_line(
-                                    &line, &spans, color, size, &font, looks,
+                    // Lines with room of their own (`set_line_insets`), out
+                    // of line: a text area without places its lines as ever.
+                    if lines.has_insets() {
+                        place_lines_in_room(
+                            &mut s,
+                            lines,
+                            (&mut *pool, &mut free),
+                            layer,
+                            shown_lines.clone(),
+                            &draw_hint.line_cache(),
+                            (color, size, &font),
+                            (wrap_width, draw_wrap.get()),
+                        );
+                    } else {
+                        for i in shown_lines.clone() {
+                            if pool.iter().any(|(line, _)| *line == i) {
+                                continue;
+                            }
+                            let id = free.pop().unwrap_or_else(|| {
+                                s.append(
+                                    layer,
+                                    NodeKind::Text {
+                                        text: std::sync::Arc::from(""),
+                                        color,
+                                        font_size: size,
+                                    },
+                                    Style::default(),
                                 )
-                            };
-                            if cache.has_rare() {
-                                style(&cache.looks())
-                            } else {
-                                style(&[])
-                            }
-                        });
-                        match colored {
-                            Some(rich) => {
-                                if !matches!(s.kind(*id), NodeKind::RichText { text } if **text == rich)
-                                {
-                                    s.set_kind(*id, NodeKind::RichText { text: rich.into() });
+                            });
+                            pool.push((i, id));
+                        }
+                        for (i, id) in pool.iter() {
+                            let line = lines.line_text(*i);
+                            let cache = draw_hint.line_cache();
+                            let colored = cache.spans(lines, *i).and_then(|spans| {
+                                // Looks are read only where it has any.
+                                let style = |looks: &[crate::editor_lines::SpanLook]| {
+                                    crate::editor_lines::styled_line(
+                                        &line, &spans, color, size, &font, looks,
+                                    )
+                                };
+                                if cache.has_rare() {
+                                    style(&cache.looks())
+                                } else {
+                                    style(&[])
                                 }
-                            }
-                            None => {
-                                let unchanged = matches!(
-                                    s.kind(*id),
-                                    NodeKind::Text { text, color: c, font_size }
-                                        if **text == *line && *c == color && *font_size == size
-                                );
-                                if !unchanged {
-                                    s.set_kind(
-                                        *id,
-                                        NodeKind::Text {
-                                            text: line.to_arc(),
-                                            color,
-                                            font_size: size,
-                                        },
+                            });
+                            match colored {
+                                Some(rich) => {
+                                    if !matches!(s.kind(*id), NodeKind::RichText { text } if **text == rich)
+                                    {
+                                        s.set_kind(*id, NodeKind::RichText { text: rich.into() });
+                                    }
+                                }
+                                None => {
+                                    let unchanged = matches!(
+                                        s.kind(*id),
+                                        NodeKind::Text { text, color: c, font_size }
+                                            if **text == *line && *c == color && *font_size == size
                                     );
+                                    if !unchanged {
+                                        s.set_kind(
+                                            *id,
+                                            NodeKind::Text {
+                                                text: line.to_arc(),
+                                                color,
+                                                font_size: size,
+                                            },
+                                        );
+                                    }
                                 }
                             }
+                            s.set_font(*id, font.clone());
+                            let shaped = lines.line(*i).size();
+                            let width = wrap_width.unwrap_or(shaped.0 + 2.);
+                            let mut style = fixed(width, lines.height(*i));
+                            style.text_wrap = draw_wrap.get();
+                            s.set_style(*id, style);
+                            // The size its line was shaped to here: showing it,
+                            // or moving it, shapes it no more. A node just made is
+                            // asked for its ink in the empty box it had (where it
+                            // painted nothing; a line's box is never empty).
+                            s.know_text_size(*id, wrap_width, shaped);
+                            if s.bounds(*id).width == 0. {
+                                s.know_text_size(*id, Some(0.), shaped);
+                            }
+                            s.set_transform(
+                                *id,
+                                Transform {
+                                    x: 0.,
+                                    y: lines.top(*i),
+                                },
+                            );
                         }
-                        s.set_font(*id, font.clone());
-                        let shaped = lines.line(*i).size();
-                        // Its room (`set_line_insets`): placed past it, in
-                        // what the indent leaves. None without insets.
-                        let (at, wrap_width, width, height) = if insets {
-                            line_in_room(lines, *i, wrap_width, shaped)
-                        } else {
-                            (
-                                (0., lines.top(*i)),
-                                wrap_width,
-                                wrap_width.unwrap_or(shaped.0 + 2.),
-                                lines.height(*i),
-                            )
-                        };
-                        let mut style = fixed(width, height);
-                        style.text_wrap = draw_wrap.get();
-                        s.set_style(*id, style);
-                        // The size its line was shaped to here: showing it,
-                        // or moving it, shapes it no more. A node just made is
-                        // asked for its ink in the empty box it had (where it
-                        // painted nothing; a line's box is never empty).
-                        s.know_text_size(*id, wrap_width, shaped);
-                        if s.bounds(*id).width == 0. {
-                            s.know_text_size(*id, Some(0.), shaped);
-                        }
-                        s.set_transform(*id, Transform { x: at.0, y: at.1 });
                     }
                     s.set_transform(
                         layer,
@@ -9794,14 +9797,22 @@ thread_local! {
 pub fn debug_editor_draws() -> u64 {
     EDITOR_DRAWS.get()
 }
-/// `pool`'s line nodes whose lines are hidden (`LineInset::hidden`) moved
-/// to `free`: a hidden line has no node.
+/// A text area's line nodes for the lines in view, each placed past its
+/// room (`set_line_insets`) in what its indent leaves; a hidden line
+/// (`LineInset::hidden`) has none. The draw's own loop, for an area with
+/// insets: one without places its lines as before.
 #[cold]
 #[inline(never)]
-fn free_hidden_lines(
+#[allow(clippy::too_many_arguments)]
+fn place_lines_in_room(
+    s: &mut Scene,
     lines: &crate::editor_lines::LinesLayout,
-    pool: &mut Vec<(usize, NodeId)>,
-    free: &mut Vec<NodeId>,
+    (pool, free): (&mut Vec<(usize, NodeId)>, &mut Vec<NodeId>),
+    layer: NodeId,
+    shown: std::ops::Range<usize>,
+    cache: &crate::editor_lines::LineCache,
+    (color, size, font): (Color, f32, &FontStyle),
+    (wrap_width, text_wrap): (Option<f32>, bool),
 ) {
     pool.retain(|(line, id)| {
         let hidden = lines.inset(*line).hidden;
@@ -9810,26 +9821,79 @@ fn free_hidden_lines(
         }
         !hidden
     });
-}
-/// Where line `i`'s node goes with its room (`set_line_insets`), the width
-/// it wraps in, and its box's width and height: past its indent and the
-/// room above, in what the indent leaves.
-#[cold]
-#[inline(never)]
-fn line_in_room(
-    lines: &crate::editor_lines::LinesLayout,
-    i: usize,
-    wrap_width: Option<f32>,
-    shaped: (f32, f32),
-) -> ((f32, f32), Option<f32>, f32, f32) {
-    let inset = lines.inset(i);
-    let wrap_width = lines.draw_width(i, wrap_width);
-    (
-        (inset.left, lines.top(i) + inset.above),
-        wrap_width,
-        wrap_width.unwrap_or(shaped.0 + 2.),
-        lines.height(i) - inset.above - inset.below,
-    )
+    for i in shown {
+        if lines.inset(i).hidden || pool.iter().any(|(line, _)| *line == i) {
+            continue;
+        }
+        let id = free.pop().unwrap_or_else(|| {
+            s.append(
+                layer,
+                NodeKind::Text {
+                    text: std::sync::Arc::from(""),
+                    color,
+                    font_size: size,
+                },
+                Style::default(),
+            )
+        });
+        pool.push((i, id));
+    }
+    for (i, id) in pool.iter() {
+        let line = lines.line_text(*i);
+        let colored = cache.spans(lines, *i).and_then(|spans| {
+            let style = |looks: &[crate::editor_lines::SpanLook]| {
+                crate::editor_lines::styled_line(&line, &spans, color, size, font, looks)
+            };
+            if cache.has_rare() {
+                style(&cache.looks())
+            } else {
+                style(&[])
+            }
+        });
+        match colored {
+            Some(rich) => {
+                if !matches!(s.kind(*id), NodeKind::RichText { text } if **text == rich) {
+                    s.set_kind(*id, NodeKind::RichText { text: rich.into() });
+                }
+            }
+            None => {
+                let unchanged = matches!(
+                    s.kind(*id),
+                    NodeKind::Text { text, color: c, font_size }
+                        if **text == *line && *c == color && *font_size == size
+                );
+                if !unchanged {
+                    s.set_kind(
+                        *id,
+                        NodeKind::Text {
+                            text: line.to_arc(),
+                            color,
+                            font_size: size,
+                        },
+                    );
+                }
+            }
+        }
+        s.set_font(*id, font.clone());
+        let shaped = lines.line(*i).size();
+        let inset = lines.inset(*i);
+        let wrap_width = lines.draw_width(*i, wrap_width);
+        let width = wrap_width.unwrap_or(shaped.0 + 2.);
+        let mut style = fixed(width, lines.height(*i) - inset.above - inset.below);
+        style.text_wrap = text_wrap;
+        s.set_style(*id, style);
+        s.know_text_size(*id, wrap_width, shaped);
+        if s.bounds(*id).width == 0. {
+            s.know_text_size(*id, Some(0.), shaped);
+        }
+        s.set_transform(
+            *id,
+            Transform {
+                x: inset.left,
+                y: lines.top(*i) + inset.above,
+            },
+        );
+    }
 }
 /// An input waiting to be drawn, with the model effect whose reads its
 /// draw's are.
