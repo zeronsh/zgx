@@ -23570,6 +23570,11 @@ declare ui: {
 	-- A host function's value, now (`ScriptHost::function`): a read of data the
 	-- host keeps, so large data is never copied into the script whole.
 	call_sync: (name: string, arg: unknown?) -> any,
+	-- A native module the app loaded (`ScriptHost::load_module`), as a table
+	-- of its functions, each called with its own arguments:
+	-- `ui.module("words").count(text)`. `zgx types` gives each module the
+	-- app's `zgx.json` names its own type here. The app's own scripts only.
+	module: (name: string) -> any,
 	-- Call a host action for its result (`ScriptHost::async_action`; a
 	-- plain action settles at once with nil): a promise of what it returns.
 	call: (name: string, arg: unknown?) -> Promise,

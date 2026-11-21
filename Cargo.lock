@@ -5603,12 +5603,31 @@ dependencies = [
 [[package]]
 name = "zgx-module"
 version = "0.1.10"
+dependencies = [
+ "zgx-module-macros",
+]
 
 [[package]]
 name = "zgx-module-fixture"
 version = "0.0.0"
 dependencies = [
  "zgx-module",
+]
+
+[[package]]
+name = "zgx-module-fixture-typed"
+version = "0.0.0"
+dependencies = [
+ "zgx-module",
+]
+
+[[package]]
+name = "zgx-module-macros"
+version = "0.1.10"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -5659,6 +5678,7 @@ dependencies = [
  "zgx-mlua",
  "zgx-module",
  "zgx-module-fixture",
+ "zgx-module-fixture-typed",
  "zgx-workload",
 ]
 

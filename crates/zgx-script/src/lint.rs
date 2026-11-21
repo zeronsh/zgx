@@ -345,6 +345,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "now",
     "object",
     "call_sync",
+    "module",
     "task",
     "router",
     "async",

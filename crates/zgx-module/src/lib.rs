@@ -5,7 +5,7 @@
 //! ```ignore
 //! use zgx_module::{Host, Value};
 //!
-//! zgx_module::module!(|host: &Host| {
+//! zgx_module::register!(|host: &Host| {
 //!     host.function("words.count", |text| {
 //!         let n = text.str().map_or(0, |s| s.split_whitespace().count());
 //!         Value::from(n as f64)
@@ -20,6 +20,20 @@
 //! list's items and a map's fields cost a module what they cost code linked
 //! into the app, and nothing is copied.
 //!
+//! Written with [`module`] and [`export`], a module's functions are plain
+//! Rust functions of typed arguments, and scripts and editors know their
+//! types (docs/modules.md):
+//!
+//! ```ignore
+//! #[zgx_module::module(name = "words")]
+//! mod words {
+//!     #[zgx_module::export]
+//!     fn count(text: &str) -> f64 {
+//!         text.split_whitespace().count() as f64
+//!     }
+//! }
+//! ```
+//!
 //! A panic in a module ends the process, as one in a host's own function
 //! does today: nothing unwinds across the boundary.
 
@@ -27,6 +41,11 @@
 compile_error!("zgx-module reads values by their 64-bit layout");
 
 pub mod abi;
+mod typed;
+
+pub use typed::{FromValue, IntoValue, List, Map};
+#[cfg(feature = "macros")]
+pub use zgx_module_macros::{Record, export, module};
 
 use std::{
     cell::RefCell,
@@ -109,6 +128,9 @@ pub struct Value {
     /// The runtime's values belong to the interface's thread.
     _thread: PhantomData<*const ()>,
 }
+
+/// A `nil` to lend where there is no value.
+static NIL: Raw = raw_of(abi::NIL);
 
 impl Value {
     /// `nil`.
@@ -272,6 +294,25 @@ pub struct Ref<'a> {
 }
 
 impl<'a> Ref<'a> {
+    /// A `nil`: what a map's missing field or an argument not passed reads
+    /// as.
+    pub const NIL: Ref<'static> = Ref {
+        at: &raw const NIL,
+        _of: PhantomData,
+    };
+    /// What kind of value it is, as an error says it: "a string".
+    pub fn kind(self) -> &'static str {
+        // SAFETY: A value.
+        match unsafe { tag(self.opened()) } {
+            abi::NIL => "nil",
+            abi::BOOL => "a boolean",
+            abi::NUM => "a number",
+            abi::STR | abi::TEXT => "a string",
+            abi::LIST => "a list",
+            abi::MAP => "a map",
+            _ => "a value only the runtime reads",
+        }
+    }
     /// What a script would read of a row kept folded (the map it opens
     /// to); else itself.
     #[inline(always)]
@@ -346,6 +387,11 @@ impl<'a> Ref<'a> {
             }
             _ => None,
         }
+    }
+    /// Whether it is a string, of any length ([`Ref::text`] reads it).
+    #[inline]
+    pub fn is_string(self) -> bool {
+        matches!(self.tag(), abi::STR | abi::TEXT)
     }
     /// Whether it is a list.
     #[inline]
@@ -635,116 +681,290 @@ impl Host<'_> {
     /// `ui.call_sync(name, arg)` (`ScriptHost::function`): on the
     /// interface's thread, so quick, with no I/O. Its argument is lent for
     /// the call (`to_owned` keeps it).
-    pub fn function(&self, name: &str, function: impl Fn(Ref<'_>) -> Value + 'static) {
-        unsafe extern "C" fn call<F: Fn(Ref<'_>) -> Value>(
+    pub fn function<F: Fn(Ref<'_>) -> Value + 'static>(&self, name: &str, function: F) {
+        unsafe extern "C" fn call<G: Fn(Ref<'_>) -> Value>(
             user: *mut c_void,
-            arg: *const Raw,
+            args: *const Raw,
+            _len: usize,
             out: *mut Raw,
-        ) {
+        ) -> u32 {
             // SAFETY: `user` is the `F` boxed below, alive until `free`;
-            // `arg` is lent for this call; `out` takes what it made.
+            // the first of `args` is lent for this call (there is always
+            // one); `out` takes what it made.
             unsafe {
-                let made = (*(user as *const F))(Ref {
-                    at: arg,
+                let made = (*(user as *const G))(Ref {
+                    at: args,
                     _of: PhantomData,
                 });
-                out.write(made.raw);
-                std::mem::forget(made);
+                __private::give(out, made)
             }
         }
-        unsafe extern "C" fn free<F>(user: *mut c_void) {
-            // SAFETY: The box made below, freed once.
-            drop(unsafe { Box::from_raw(user as *mut F) });
-        }
-        fn register<F: Fn(Ref<'_>) -> Value + 'static>(r: &abi::Registrar, name: &str, f: F) {
-            let user = Box::into_raw(Box::new(f)) as *mut c_void;
-            // SAFETY: The registrar's own host, inside the entry call.
+        let user = Box::into_raw(Box::new(function));
+        // SAFETY: `call` reads `user` as the box it is, and `free` frees it.
+        unsafe { self.raw_function(name, call::<F>, user.cast(), free_box_of(user)) }
+    }
+    /// [`Host::function`], of a function that may fail: what it returns as
+    /// `Err` is raised in the script that called, as an error naming this
+    /// function and its module.
+    pub fn try_function<F: Fn(Ref<'_>) -> Result<Value, Failed> + 'static>(
+        &self,
+        name: &str,
+        function: F,
+    ) {
+        unsafe extern "C" fn call<G: Fn(Ref<'_>) -> Result<Value, Failed>>(
+            user: *mut c_void,
+            args: *const Raw,
+            _len: usize,
+            out: *mut Raw,
+        ) -> u32 {
+            // SAFETY: As `function`'s.
             unsafe {
-                (r.function)(
-                    r.host,
-                    name.as_ptr(),
-                    name.len(),
-                    call::<F>,
-                    user,
-                    free::<F>,
-                )
+                match (*(user as *const G))(Ref {
+                    at: args,
+                    _of: PhantomData,
+                }) {
+                    Ok(made) => __private::give(out, made),
+                    Err(failed) => __private::fail(out, failed),
+                }
             }
         }
-        register(self.registrar, name, function);
+        let user = Box::into_raw(Box::new(function));
+        // SAFETY: As `function`'s.
+        unsafe { self.raw_function(name, call::<F>, user.cast(), free_box_of(user)) }
     }
     /// Registers a function handed its argument (`ui.call_sync(name,
     /// arg)`), for one that keeps or returns what it is given: no count of
     /// it is made. Any other is cheaper as a [`Host::function`], whose
     /// argument the runtime frees where it is.
-    pub fn function_taking(&self, name: &str, function: impl Fn(Value) -> Value + 'static) {
-        unsafe extern "C" fn call<F: Fn(Value) -> Value>(
+    pub fn function_taking<F: Fn(Value) -> Value + 'static>(&self, name: &str, function: F) {
+        unsafe extern "C" fn call<G: Fn(Value) -> Value>(
             user: *mut c_void,
             arg: *mut Raw,
             out: *mut Raw,
-        ) {
+        ) -> u32 {
             // SAFETY: `user` is the `F` boxed below, alive until `free`;
             // `arg` is owned by this call; `out` takes what it made.
             unsafe {
-                let made = (*(user as *const F))(Value::owned(arg.read()));
-                out.write(made.raw);
-                std::mem::forget(made);
+                let made = (*(user as *const G))(Value::owned(arg.read()));
+                __private::give(out, made)
             }
         }
-        unsafe extern "C" fn free<F>(user: *mut c_void) {
-            // SAFETY: The box made below, freed once.
-            drop(unsafe { Box::from_raw(user as *mut F) });
+        let user = Box::into_raw(Box::new(function));
+        let r = self.registrar;
+        // SAFETY: The registrar's own host, inside the entry call; `call`
+        // reads `user` as the box it is, and `free` frees it.
+        unsafe {
+            (r.function_taking)(
+                r.host,
+                name.as_ptr(),
+                name.len(),
+                call::<F>,
+                user.cast(),
+                free_box_of(user),
+            )
         }
-        fn register<F: Fn(Value) -> Value + 'static>(r: &abi::Registrar, name: &str, f: F) {
-            let user = Box::into_raw(Box::new(f)) as *mut c_void;
-            // SAFETY: The registrar's own host, inside the entry call.
-            unsafe {
-                (r.function_taking)(
-                    r.host,
-                    name.as_ptr(),
-                    name.len(),
-                    call::<F>,
-                    user,
-                    free::<F>,
-                )
-            }
-        }
-        register(self.registrar, name, function);
     }
     /// Registers an action scripts bind with `ui.action(name, arg)` or call
     /// with `ui.invoke` (`ScriptHost::action`).
-    pub fn action(&self, name: &str, action: impl Fn(Ref<'_>) + 'static) {
-        unsafe extern "C" fn call<F: Fn(Ref<'_>)>(user: *mut c_void, arg: *const Raw) {
+    pub fn action<F: Fn(Ref<'_>) + 'static>(&self, name: &str, action: F) {
+        unsafe extern "C" fn call<G: Fn(Ref<'_>)>(
+            user: *mut c_void,
+            arg: *const Raw,
+            _out: *mut Raw,
+        ) -> u32 {
             // SAFETY: As `function`'s.
             unsafe {
-                (*(user as *const F))(Ref {
+                (*(user as *const G))(Ref {
                     at: arg,
                     _of: PhantomData,
                 })
             }
+            abi::DONE
         }
-        unsafe extern "C" fn free<F>(user: *mut c_void) {
-            // SAFETY: The box made below, freed once.
-            drop(unsafe { Box::from_raw(user as *mut F) });
-        }
-        fn register<F: Fn(Ref<'_>) + 'static>(r: &abi::Registrar, name: &str, f: F) {
-            let user = Box::into_raw(Box::new(f)) as *mut c_void;
-            // SAFETY: The registrar's own host, inside the entry call.
+        let user = Box::into_raw(Box::new(action));
+        // SAFETY: As `function`'s.
+        unsafe { self.raw_action(name, call::<F>, user.cast(), free_box_of(user)) }
+    }
+    /// [`Host::action`], of an action that may fail: what it returns as
+    /// `Err` is reported as a script's error is, naming this action and its
+    /// module.
+    pub fn try_action<F: Fn(Ref<'_>) -> Result<(), Failed> + 'static>(
+        &self,
+        name: &str,
+        action: F,
+    ) {
+        unsafe extern "C" fn call<G: Fn(Ref<'_>) -> Result<(), Failed>>(
+            user: *mut c_void,
+            arg: *const Raw,
+            out: *mut Raw,
+        ) -> u32 {
+            // SAFETY: As `function`'s; `out` is written only failing.
             unsafe {
-                (r.action)(
-                    r.host,
-                    name.as_ptr(),
-                    name.len(),
-                    call::<F>,
-                    user,
-                    free::<F>,
-                )
+                match (*(user as *const G))(Ref {
+                    at: arg,
+                    _of: PhantomData,
+                }) {
+                    Ok(()) => abi::DONE,
+                    Err(failed) => __private::fail(out, failed),
+                }
             }
         }
-        register(self.registrar, name, action);
+        let user = Box::into_raw(Box::new(action));
+        // SAFETY: As `function`'s.
+        unsafe { self.raw_action(name, call::<F>, user.cast(), free_box_of(user)) }
+    }
+    /// Registers `call` itself, with what it is handed as `user` and what
+    /// frees that: what [`Host::function`] does with a closure's, and what
+    /// [`export`] does with a function it wrote.
+    ///
+    /// # Safety
+    /// `call` is sound called as [`abi::Function`] says with this `user`,
+    /// on this thread, until `free` is called with it, once.
+    #[doc(hidden)]
+    pub unsafe fn raw_function(
+        &self,
+        name: &str,
+        call: abi::Function,
+        user: *mut c_void,
+        free: abi::Free,
+    ) {
+        let r = self.registrar;
+        // SAFETY: The registrar's own host, inside the entry call.
+        unsafe { (r.function)(r.host, name.as_ptr(), name.len(), call, user, free) }
+    }
+    /// [`Host::raw_function`], of an action.
+    ///
+    /// # Safety
+    /// As `raw_function`'s, by [`abi::Action`].
+    #[doc(hidden)]
+    pub unsafe fn raw_action(
+        &self,
+        name: &str,
+        call: abi::Action,
+        user: *mut c_void,
+        free: abi::Free,
+    ) {
+        let r = self.registrar;
+        // SAFETY: The registrar's own host, inside the entry call.
+        unsafe { (r.action)(r.host, name.as_ptr(), name.len(), call, user, free) }
     }
 }
 
-/// What [`module!`]'s entry does: checks the runtime speaks this module's
+/// What frees a registration's `user` that is a `Box<F>`.
+fn free_box_of<F>(_: *mut F) -> abi::Free {
+    unsafe extern "C" fn free<F>(user: *mut c_void) {
+        // SAFETY: The box a registration made, freed once.
+        drop(unsafe { Box::from_raw(user as *mut F) });
+    }
+    free::<F>
+}
+
+/// Why a call failed: what a function or an action returns as `Err`, raised
+/// in the script that called with the function's and the module's names
+/// before it. Say what was wrong with what the script passed, as the end of
+/// a sentence: `"has no row 12"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failed(pub String);
+impl From<String> for Failed {
+    fn from(why: String) -> Self {
+        Failed(why)
+    }
+}
+impl From<&str> for Failed {
+    fn from(why: &str) -> Self {
+        Failed(why.to_owned())
+    }
+}
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// What [`export`] and [`module`] write their code with. Not for a module's
+/// own use: it changes with them.
+#[doc(hidden)]
+pub mod __private {
+    use super::{Failed, FromValue, Raw, Ref, State, Value, abi};
+    pub use std::ffi::c_void;
+
+    /// The argument at `index` of the `len` a function was lent: a `nil` if
+    /// it wasn't passed.
+    ///
+    /// # Safety
+    /// `args` are a call's (`abi::Function`): `len` values, and at least
+    /// one to read.
+    #[inline(always)]
+    pub unsafe fn arg<'a>(args: *const Raw, len: usize, index: usize) -> Ref<'a> {
+        if index == 0 || index < len {
+            Ref {
+                // SAFETY: Among the values lent.
+                at: unsafe { args.add(index) },
+                _of: std::marker::PhantomData,
+            }
+        } else {
+            Ref::NIL
+        }
+    }
+    /// A call's result, written where the runtime takes it.
+    ///
+    /// # Safety
+    /// `out` has room for a value and holds none.
+    #[inline(always)]
+    pub unsafe fn give(out: *mut Raw, made: Value) -> u32 {
+        // SAFETY: The caller's; the value is the runtime's from here.
+        unsafe { out.write(made.raw) };
+        std::mem::forget(made);
+        abi::DONE
+    }
+    /// Why a call failed, written where its result would have gone.
+    ///
+    /// # Safety
+    /// As `give`'s.
+    #[cold]
+    #[inline(never)]
+    pub unsafe fn fail(out: *mut Raw, failed: Failed) -> u32 {
+        // SAFETY: The caller's.
+        unsafe { give(out, Value::from(failed.0)) };
+        abi::FAILED
+    }
+    /// A call failing over the argument at `index` (from 0), named `name`,
+    /// which isn't a `T`.
+    ///
+    /// # Safety
+    /// As `give`'s.
+    #[cold]
+    #[inline(never)]
+    pub unsafe fn wrong<'a, T: FromValue<'a>>(
+        out: *mut Raw,
+        index: usize,
+        name: &str,
+        value: Ref<'a>,
+    ) -> u32 {
+        let why = format!("argument {} ({name}) {}", index + 1, T::wrong(value));
+        // SAFETY: The caller's.
+        unsafe { fail(out, Failed(why)) }
+    }
+    /// A registration's `user` that is a module's state, as the function
+    /// registered with it reads it.
+    ///
+    /// # Safety
+    /// `user` is `state_user::<T>`'s, on the thread it was made on.
+    #[inline(always)]
+    pub unsafe fn state<'a, T: 'static>(user: *mut c_void) -> &'a std::cell::RefCell<T> {
+        // SAFETY: The caller's: the runtime keeps a module's state for as
+        // long as the thread runs.
+        unsafe { &*(user as *const std::cell::RefCell<T>) }
+    }
+    /// A module's state as a registration's `user`.
+    pub fn state_user<T: 'static>(state: State<T>) -> *mut c_void {
+        state.at as *mut c_void
+    }
+    /// What frees a `user` that needs no freeing.
+    pub unsafe extern "C" fn keep(_user: *mut c_void) {}
+}
+
+/// What a module's entry does ([`register!`], [`module`]): checks the runtime speaks this module's
 /// interface, keeps its value functions, and runs `setup`.
 ///
 /// # Safety
@@ -770,14 +990,26 @@ pub unsafe fn enter(
     0
 }
 
-/// A module's entry: `setup` is called with the [`Host`] each time the
-/// module is loaded into one, to register its functions.
+/// A module's entry, written by hand: `setup` is called with the [`Host`]
+/// each time the module is loaded into one, to register its functions
+/// (`Host::function`, `Host::action`), and `name` is what the module is
+/// called. What [`module`] writes for a `mod` of exported functions; a
+/// module made this way says nothing of its functions in its manifest, so
+/// nothing knows their types.
+///
+/// ```ignore
+/// zgx_module::register!("words", |host: &zgx_module::Host| { … });
+/// ```
 #[macro_export]
-macro_rules! module {
-    ($setup:expr) => {
+macro_rules! register {
+    ($name:literal, $setup:expr) => {
+        const _: () = assert!(
+            $crate::abi::is_name($name),
+            "a module's name is letters, digits and `_`"
+        );
         /// # Safety
         /// Called by the zgx runtime alone (`zgx_module::abi::Entry`).
-        #[unsafe(no_mangle)]
+        #[unsafe(export_name = concat!("zgx_module_v1_", $name))]
         pub unsafe extern "C" fn zgx_module_v1(
             api: *const $crate::abi::Api,
             registrar: *const $crate::abi::Registrar,
@@ -785,5 +1017,18 @@ macro_rules! module {
             // SAFETY: As the runtime calls it.
             unsafe { $crate::enter(api, registrar, $setup) }
         }
+        /// The module's manifest (`zgx_module::abi::MANIFEST`): its name.
+        #[used]
+        #[unsafe(export_name = concat!("zgx_module_manifest_", $name))]
+        pub static zgx_module_manifest: [u8; ZGX_MODULE_JSON.len() + 48] =
+            $crate::abi::manifest(ZGX_MODULE_JSON);
+        #[doc(hidden)]
+        const ZGX_MODULE_JSON: &str = concat!(
+            "{\"zgx_module\":1,\"abi\":1,\"name\":\"",
+            $name,
+            "\",\"version\":\"",
+            env!("CARGO_PKG_VERSION"),
+            "\"}"
+        );
     };
 }

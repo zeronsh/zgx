@@ -22,7 +22,7 @@ test-hooks = []
 # as libraries with the `zgx-module` crate and loaded as the app starts
 # (docs/design/runtime.md). Off by default: a host that loads none links no
 # loader.
-modules = ["dep:zgx-module", "dep:libloading"]
+modules = ["dep:libloading"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # The component library's `ui.*` (zgx-components): the data grid, tree,
@@ -84,8 +84,10 @@ zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
 mlua = { package = "zgx-mlua", version = "0.12.10", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
-# Native modules' interface, and the system's loader for them (`modules`).
-zgx-module = { path = "../zgx-module", version = "0.1.10", optional = true }
+# Native modules' interface (their manifests are read for `zgx types` in
+# every build: nothing but std), and the system's loader for them
+# (`modules`).
+zgx-module = { path = "../zgx-module", version = "0.1.10", default-features = false }
 libloading = { version = "0.8", optional = true }
 # `ui.zip`: entries' checksums.
 crc32fast = "1"
@@ -165,6 +167,7 @@ png = "0.18"
 zgx-workload = { path = "../../comparisons/workload" }
 # A native module, loaded as a library and linked in (tests/native_modules.rs).
 zgx-module-fixture = { path = "../zgx-module/fixture" }
+zgx-module-fixture-typed = { path = "../zgx-module/fixture-typed" }
 
 # CoreVideo frames for `ScriptHost::surface` (tests/host_surfaces.rs).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
