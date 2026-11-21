@@ -179,6 +179,24 @@ fn remove_stale_storage() {
                 libc::kill(pid as i32, 0) != 0
                     && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
             },
+            // No process has the id: OpenProcess refuses it as a bad
+            // parameter (one that exists but isn't ours answers access denied).
+            #[cfg(windows)]
+            Some(pid) => {
+                use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
+                use windows::Win32::System::Threading::{
+                    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+                };
+                // SAFETY: a handle opened only to ask, and closed at once.
+                match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+                    Ok(handle) => {
+                        // SAFETY: the handle just opened.
+                        let _ = unsafe { CloseHandle(handle) };
+                        false
+                    }
+                    Err(e) => e.code() == ERROR_INVALID_PARAMETER.to_hresult(),
+                }
+            }
             _ => false,
         };
         let old = entry
