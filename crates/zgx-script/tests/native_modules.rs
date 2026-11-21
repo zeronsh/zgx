@@ -1106,3 +1106,44 @@ return ui.text { `{a} {b} {c} {d} {e} {f}` }
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A module that won't load is refused whole, and `ui.module` says why,
+/// where it would otherwise only say there is none.
+#[test]
+fn a_refused_module_is_named_with_why() {
+    let dir = std::env::temp_dir().join(format!("zgx-module-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let library = dir.join("libwords.so");
+    // A manifest for another interface, in a file that is no library.
+    let mut file = vec![0u8; 64];
+    file.extend(zgx_module::abi::manifest_bytes(
+        r#"{"zgx_module":1,"abi":2,"name":"words"}"#,
+    ));
+    std::fs::write(&library, file).unwrap();
+    let mut why = String::new();
+    let mut app = TestApp::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.text { id = "out", (string.gsub(tostring(select(2, pcall(ui.module, "words"))), "[{}]", "")) }"#,
+        );
+        // SAFETY: Not a library: refused before anything is loaded.
+        why = unsafe { host.load_module(&library) }.unwrap_err();
+        host
+    });
+    assert!(
+        why.ends_with("its manifest is for another module interface than this runtime's (1)"),
+        "{why}"
+    );
+    // (Its first line: the traceback follows.)
+    let out = app.text("out");
+    let first = out.lines().next().unwrap_or("");
+    assert!(
+        first.ends_with(&format!(
+            "module `words` didn't load: {}: its manifest is for another module interface than this runtime's (1)",
+            library.display()
+        )),
+        "{out}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

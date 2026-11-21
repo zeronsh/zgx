@@ -843,6 +843,9 @@ pub(crate) struct Warnings {
 pub(crate) struct Diagnostics {
     calls: Cell<u64>,
     warnings: RefCell<Warnings>,
+    /// What the app's runner said as it started it (`ScriptHost::notice`),
+    /// made by the first notice: a host given none has none.
+    notice: RefCell<Option<Signal<Option<String>>>>,
 }
 impl Diagnostics {
     pub(crate) fn borrow(&self) -> std::cell::Ref<'_, Warnings> {
@@ -3863,6 +3866,26 @@ impl ScriptHost {
             _ => None,
         }
     }
+    /// A line for the person running the app, from what runs it rather
+    /// than its scripts (`zgx run`'s "module `words` changed: restarted"):
+    /// on stderr, and in the banner while no error is shown, until it is
+    /// dismissed or another notice replaces it. Loads don't clear it. Give
+    /// it before `view`: a view built before a host's first notice shows
+    /// none.
+    #[doc(hidden)]
+    pub fn notice(&self, message: impl Into<String>) {
+        let message = message.into();
+        eprintln!("{message}");
+        let mut notice = self.0.warnings.notice.borrow_mut();
+        let signal = notice.get_or_insert_with(|| self.0.runtime.signal(None));
+        signal.set(Some(message));
+    }
+    /// The notice shown (`notice`), if any.
+    #[doc(hidden)]
+    pub fn notice_shown(&self) -> Option<String> {
+        let notice = self.0.warnings.notice.borrow();
+        notice.as_ref().and_then(|n| n.with_untracked(Clone::clone))
+    }
     /// The latest load or script error, shown over the interface until fixed.
     pub fn error(&self) -> Signal<Option<String>> {
         self.0.error.clone()
@@ -4465,6 +4488,8 @@ impl ScriptHost {
             },
         );
         let (error, type_errors) = (self.0.error.clone(), self.0.type_errors.clone());
+        let notice = self.0.warnings.notice.borrow().clone();
+        let dismiss_notice = notice.clone();
         let lint = self.0.lint.clone();
         let (dismiss_error, dismiss_types, dismiss_lint) =
             (error.clone(), type_errors.clone(), lint.clone());
@@ -4554,14 +4579,31 @@ impl ScriptHost {
             root.child_when(
                 move || {
                     show_errors
-                        .then(|| error.get().or_else(|| type_errors.get()))
+                        .then(|| {
+                            error
+                                .get()
+                                .or_else(|| type_errors.get())
+                                .or_else(|| notice.as_ref().and_then(|n| n.get()))
+                        })
                         .flatten()
                 },
                 move |message, cx| {
                     let (error, types) = (dismiss_error.clone(), dismiss_types.clone());
+                    let notice = dismiss_notice.clone();
                     let banner = banner(&message, move || {
-                        error.set(None);
-                        types.set(None);
+                        // What it shows: an error first, the notice when
+                        // there is none.
+                        let shown = error.with_untracked(Option::is_some)
+                            || types.with_untracked(Option::is_some);
+                        match &notice {
+                            Some(notice) if !shown => {
+                                notice.set(None);
+                            }
+                            _ => {
+                                error.set(None);
+                                types.set(None);
+                            }
+                        }
                     });
                     error_layer(banner, cx)
                 },
