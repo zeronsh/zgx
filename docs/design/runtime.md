@@ -338,6 +338,7 @@ Zeron's host goes past functions and state in six places. The target is a generi
 - **Signing.** macOS's hardened runtime loads only libraries signed by the app's team (section 6, step 5). Windows and Linux ask nothing.
 - **A panic is an abort** (section 2).
 - **The runtime's features are fixed at its build.** An app that needs a feature the published runtime lacks (an audio codec, say) needs another published flavour, or the interim build of section 8.
+- **Open: templates in a bundle.** An app whose people lay their own templates over its interface (Zeron's) runs that interface from a copy with the template applied. A bundle's interface is bytecode, loaded only from the bundle itself, so the copy can't be made from it, and the bundle doesn't carry the sources a template would be laid over. Until it does (sources beside the bytecode, or templates applied at load), a bundled Zeron runs its own interface and says on stderr that a template is on and not applied.
 - **Not covered:** iOS and Android, which load no libraries at run time. A mobile app links its modules statically (`ScriptHost::enter_module` registers one by its entry, with no loading).
 
 ## 10. Order of work

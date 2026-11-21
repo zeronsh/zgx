@@ -12,19 +12,22 @@
 //!
 //! Luau checks no bytecode it loads, so a bundle is trusted as native code
 //! is: only one a person or an app's install names is run, never one a
-//! script, a plugin or a download names. Opening one checks it against its
-//! manifest: each module's library by its SHA-256 every time (it is native
-//! code), and the scripts by one SHA-256 over the whole `ui/` tree once,
-//! after which the size and time of each file are enough, kept in the cache
-//! (`<cache>/bundles/`), until one of them changes.
-use crate::module_build::{self, Profile, Source, cache_dir, file_hash};
+//! script, a plugin or a download names. It is checked against its
+//! manifest: each module's library by its SHA-256 as it is opened (it is
+//! native code, loaded then), and each file of `ui/` by its own SHA-256 as
+//! it is read, the bytes checked being the bytes run. So a launch hashes
+//! what it loads, when it loads it, and nothing else: no walk of `ui/` up
+//! front, and nothing a file changed after its check could slip past.
+use crate::module_build::{self, Profile, Source, file_hash};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use zgx_module::abi;
 
 /// The bundle format's number (`"zgx_bundle"` in its manifest).
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The platform a library is for, as a bundle's manifest names it: this
 /// build's (`x86_64-linux`, `aarch64-macos`).
@@ -81,42 +84,24 @@ pub struct Written {
     pub ui_in: Duration,
 }
 
-/// One SHA-256 over a tree of files: each file's path, length and bytes,
-/// in order of path.
-fn tree_hash(files: &[(String, Vec<u8>)]) -> String {
-    let mut hasher = Sha256::new();
-    for (rel, bytes) in files {
-        hasher.update(rel.as_bytes());
-        hasher.update([0]);
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
-    }
-    hasher
-        .finalize()
+/// `bytes`' SHA-256, in hex.
+fn hash_of(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
 }
 
-/// The files under `dir`, by `/`-separated path from it, sorted.
-fn files_under(dir: &Path) -> Vec<(String, PathBuf)> {
-    let mut found = Vec::new();
-    let mut dirs = vec![dir.to_path_buf()];
-    while let Some(at) = dirs.pop() {
-        for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => dirs.push(path),
-                Ok(kind) if kind.is_file() => {
-                    let rel = path.strip_prefix(dir).unwrap_or(&path);
-                    found.push((rel.to_string_lossy().replace('\\', "/"), path));
-                }
-                _ => {}
-            }
-        }
+/// A SHA-256 written in hex, as its 32 bytes.
+fn sum_of(hex: &str) -> Option<[u8; 32]> {
+    let mut sum = [0; 32];
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
     }
-    found.sort();
-    found
+    for (at, byte) in sum.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[at * 2..at * 2 + 2], 16).ok()?;
+    }
+    Some(sum)
 }
 
 /// `zgx build`: the app in `app` (a folder with its `app.luau`) as a
@@ -232,7 +217,7 @@ pub fn write(app: &Path, options: &Options) -> Result<Written, String> {
     skip.push(partial.clone());
     let sources =
         crate::bundle::build::sources_skipping(&app, &skip, false).map_err(|e| e.to_string())?;
-    let mut files = Vec::with_capacity(sources.len());
+    let mut sums = serde_json::Map::new();
     let mut scripts = 0;
     for (rel, _, bytes) in sources {
         let bytes = if rel.ends_with(".luau") {
@@ -251,7 +236,7 @@ pub fn write(app: &Path, options: &Options) -> Result<Written, String> {
             made(parent)?;
         }
         std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        files.push((rel, bytes));
+        sums.insert(rel, hash_of(&bytes).into());
     }
     let ui_in = started.elapsed();
     let manifest = serde_json::json!({
@@ -261,7 +246,7 @@ pub fn write(app: &Path, options: &Options) -> Result<Written, String> {
         "runtime": env!("CARGO_PKG_VERSION"),
         "abi": abi::ABI,
         "entry": "app.luau",
-        "ui": { "sha256": tree_hash(&files), "files": files.len() },
+        "ui": { "files": sums.len(), "sha256": sums },
         "modules": listed,
     });
     std::fs::write(
@@ -279,7 +264,7 @@ pub fn write(app: &Path, options: &Options) -> Result<Written, String> {
     std::fs::rename(&partial, &out).map_err(|e| format!("{}: {e}", out.display()))?;
     Ok(Written {
         dir: out,
-        files: files.len(),
+        files: sums.len(),
         scripts,
         modules: built,
         ui_in,
@@ -293,44 +278,31 @@ pub struct Opened {
     pub ui: PathBuf,
     /// Its first script, in `ui/`.
     pub entry: String,
-    /// Its app's id and version.
+    /// Its app's id.
     pub app_id: String,
     /// Its version, as `zgx build` was told.
     pub version: String,
     /// Its modules' libraries for this platform, by name, each checked.
     pub modules: Vec<(String, PathBuf)>,
-    /// Whether its scripts were hashed now (the first time this bundle was
-    /// opened, or a file of it changed since), not taken from the cache.
-    pub hashed: bool,
-    /// How long checking it took.
+    /// How long checking it took (its manifest and its modules' libraries:
+    /// its files are checked as they are read).
     pub checked_in: Duration,
+    files: Checked,
 }
 
-/// Each file's path, length and time of change: what says a checked tree
-/// is still the one checked.
-fn stamps(files: &[(String, PathBuf)]) -> String {
-    let mut out = String::new();
-    for (rel, path) in files {
-        let meta = std::fs::metadata(path).ok();
-        let len = meta.as_ref().map_or(0, |m| m.len());
-        let at = meta
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |t| t.as_nanos());
-        out.push_str(&format!("{len} {at} {rel}\n"));
+impl Opened {
+    /// Its `ui/` as a host reads it (`ScriptHost::from_files`): each file
+    /// checked against its manifest as it is read.
+    pub fn files(&self) -> crate::ScriptFiles {
+        crate::ScriptFiles::Folder(self.files.clone())
     }
-    out
 }
+
+pub use crate::checked_files::Checked;
 
 /// `zgx-run <bundle>`: the bundle in `dir`, checked against its manifest
 /// (see the module's docs), with its modules for this platform.
 pub fn open(dir: &Path) -> Result<Opened, String> {
-    open_with(dir, &cache_dir())
-}
-
-/// As [`open`], remembering what it checked in `cache` (`cache_dir()`'s).
-#[doc(hidden)]
-pub fn open_with(dir: &Path, cache: &Path) -> Result<Opened, String> {
     let started = Instant::now();
     let fail = |why: String| format!("{}: {why}", dir.display());
     let text = std::fs::read(dir.join("manifest.json"))
@@ -353,7 +325,7 @@ pub fn open_with(dir: &Path, cache: &Path) -> Result<Opened, String> {
         .canonicalize()
         .map_err(|e| fail(format!("ui: {e}")))?;
     let string = |key: &str| manifest[key].as_str().unwrap_or_default().to_owned();
-    // Each module's library, every time: native code.
+    // Each module's library, now: native code, loaded as it is checked.
     let here = platform();
     let mut modules = Vec::new();
     for (name, by_platform) in manifest["modules"].as_object().into_iter().flatten() {
@@ -370,47 +342,22 @@ pub fn open_with(dir: &Path, cache: &Path) -> Result<Opened, String> {
         }
         modules.push((name.clone(), path));
     }
-    // Its scripts: hashed once, then known by their stamps.
-    let files = files_under(&ui);
-    let now = stamps(&files);
-    let mut key = Sha256::new();
-    key.update(ui.to_string_lossy().as_bytes());
-    key.update([0]);
-    key.update(&text);
-    let key: String = key.finalize()[..16]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let record = cache.join("bundles").join(key);
-    let hashed = std::fs::read_to_string(&record).ok().as_deref() != Some(&*now);
-    if hashed {
-        let read = files
-            .iter()
-            .map(|(rel, path)| {
-                std::fs::read(path)
-                    .map(|bytes| (rel.clone(), bytes))
-                    .map_err(|e| fail(format!("ui/{rel}: {e}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if manifest["ui"]["sha256"].as_str() != Some(&*tree_hash(&read)) {
-            return Err(fail(
-                "its scripts aren't those its manifest names (ui/ changed since it was built)"
-                    .into(),
-            ));
-        }
-        // (A cache that can't be written only costs the next launch a hash.)
-        if let Some(parent) = record.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&record, &now);
+    // Its files' sums, each checked as its file is read.
+    let mut sums = HashMap::new();
+    for (rel, hex) in manifest["ui"]["sha256"].as_object().into_iter().flatten() {
+        let sum = hex
+            .as_str()
+            .and_then(sum_of)
+            .ok_or_else(|| fail(format!("manifest.json: ui/{rel}'s sha256")))?;
+        sums.insert(rel.clone(), sum);
     }
     Ok(Opened {
+        files: Checked::new(ui.as_path().into(), Arc::new(sums)),
         ui,
         entry: manifest["entry"].as_str().unwrap_or("app.luau").to_owned(),
         app_id: string("app_id"),
         version: string("version"),
         modules,
-        hashed,
         checked_in: started.elapsed(),
     })
 }
