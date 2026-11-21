@@ -14,6 +14,9 @@ pub(crate) struct Shelves {
     top: u32,
     /// Texels of the cells taken.
     area: u64,
+    /// The rows of the shelves holding cells (`rows`), kept as they change:
+    /// asked every frame (`GpuRenderer::atlas_filling`).
+    rows: u32,
 }
 
 struct Shelf {
@@ -99,6 +102,7 @@ impl Shelves {
             shelves: Vec::new(),
             top: 0,
             area: 0,
+            rows: 0,
         }
     }
     /// Texels of the cells taken.
@@ -107,11 +111,7 @@ impl Shelves {
     }
     /// The rows its shelves holding cells take (an emptied shelf's not).
     pub(crate) fn rows(&self) -> u32 {
-        self.shelves
-            .iter()
-            .filter(|s| s.cells > 0)
-            .map(|s| s.height)
-            .sum()
+        self.rows
     }
     /// A cell `width` × `height`: its origin, or `None` where none fits.
     pub(crate) fn alloc(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
@@ -142,6 +142,7 @@ impl Shelves {
             let taller = class.saturating_sub(last.height);
             last.height += taller;
             self.top += taller;
+            self.rows += taller;
             found = Some((count - 1, last.end));
         }
         if found.is_none() {
@@ -180,6 +181,9 @@ impl Shelves {
             self.shelves.insert(i + 1, rest);
         }
         let shelf = &mut self.shelves[i];
+        if shelf.cells == 0 {
+            self.rows += shelf.height;
+        }
         shelf.take(x, width);
         self.area += u64::from(width) * u64::from(height);
         Some((x, shelf.y))
@@ -193,6 +197,7 @@ impl Shelves {
         self.area -= u64::from(width) * u64::from(height);
         // Emptied, it joins the emptied shelves either side: one taller.
         if self.shelves[at].cells == 0 {
+            self.rows -= self.shelves[at].height;
             let mut at = at;
             if at > 0 && self.shelves[at - 1].cells == 0 {
                 at -= 1;
