@@ -1063,6 +1063,38 @@ impl TextEditor {
     pub fn insert_pasted(&mut self, value: &str) -> bool {
         self.replace(value, None)
     }
+    /// `insert_pasted`, with `atoms` made over the pasted text (their
+    /// ranges in bytes of `value`), new ids each: one undo step makes and
+    /// takes them with it (a copy's chips pasted).
+    pub fn insert_pasted_atoms(&mut self, value: &str, atoms: Vec<(Range<usize>, Atom)>) -> bool {
+        if atoms.is_empty() {
+            return self.insert_pasted(value);
+        }
+        let start = self.over_atoms(self.selection.range()).start;
+        if !self.replace(value, None) {
+            return false;
+        }
+        let state = self.atom_state.get_or_insert_default();
+        let mut made = Vec::with_capacity(atoms.len());
+        for (range, atom) in atoms {
+            let id = state.next;
+            state.next += 1;
+            let atom = Atom {
+                id,
+                range: start + range.start..start + range.end,
+                ..atom
+            };
+            state.atoms.push(atom.clone());
+            state.changes.push(AtomChange::Added(atom.clone()));
+            made.push(atom);
+        }
+        state.atoms.sort_by_key(|atom| atom.range.start);
+        state.revision = state.revision.wrapping_add(1);
+        if let Some(step) = self.last_step_atoms() {
+            step.created.extend(made);
+        }
+        true
+    }
     /// `insert`, as an edit of `run`'s kind (`None`: a step of its own).
     fn replace(&mut self, value: &str, run: Option<Run>) -> bool {
         // A range through an atom takes the whole atom.
