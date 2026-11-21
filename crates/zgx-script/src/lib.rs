@@ -1690,12 +1690,17 @@ fn require_module<const LENDING: bool>(
     };
     // A module of the app's own checked bundle (a package it lends, its
     // design system, say) is the bundle's bytecode whichever VM requires
-    // it: a plugin's reads it as the app's does, and can't change it.
-    let files = match host.upgrade().map(|h| h.files.borrow().clone()) {
-        Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(&checked.dir, &path)) => {
-            app
-        }
-        _ => files,
+    // it: a plugin's reads it as the app's does, and can't change it. (A
+    // VM reading the bundle already, the app's, asks nothing more: `within`
+    // costs each require a walk of its path.)
+    let files = match files {
+        Files::Folder(..) => files,
+        files => match host.upgrade().map(|h| h.files.borrow().clone()) {
+            Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(&checked.dir, &path)) => {
+                app
+            }
+            _ => files,
+        },
     };
     // While the host watches its files: who requires what (`reloads`).
     let tracker = if LENDING || !reloads::recording() {
