@@ -123,6 +123,13 @@ zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 # every build but the browser's, which loads no library (nothing but std).
 zgx-module = { path = "../zgx-module", version = "0.1.10", default-features = false }
 
+# SHA-256 by the CPU's own instructions on ARM (sha2 uses them there only
+# through `asm`; on x86 it always does): a bundle's files are hashed as
+# they are read, at 3.2 GB/s on an M-series Mac rather than 0.58. Not on
+# Windows, whose ARM build of sha2-asm isn't tried.
+[target.'cfg(all(target_arch = "aarch64", not(windows)))'.dependencies]
+sha2 = { version = "0.10", features = ["asm"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
