@@ -7399,7 +7399,7 @@ impl Ui {
                         // Its room (`set_line_insets`): placed past it, in
                         // what the indent leaves.
                         let inset = lines.inset(*i);
-                        let wrap_width = wrap_width.map(|w| (w - inset.left).max(1.));
+                        let wrap_width = lines.draw_width(*i, wrap_width);
                         let width = wrap_width.unwrap_or(shaped.0 + 2.);
                         let height = lines.height(*i) - inset.above - inset.below;
                         let mut style = fixed(width, height);

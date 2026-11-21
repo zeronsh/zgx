@@ -1439,6 +1439,12 @@ impl LinesLayout {
         }
         first..end.max(first + 1).min(self.line_count())
     }
+    /// The width line `i` is drawn in when the text wraps at `wrap`: what
+    /// its indent leaves, as it was wrapped.
+    pub(crate) fn draw_width(&self, i: usize, wrap: Option<f32>) -> Option<f32> {
+        let left = self.inset(i).left;
+        wrap.map(|w| if left > 0. { (w - left).max(1.) } else { w })
+    }
     /// Line `i`'s room (`EditorHandle::set_line_insets`).
     #[inline]
     pub(crate) fn inset(&self, i: usize) -> LineInset {
@@ -1452,9 +1458,9 @@ impl LinesLayout {
         // the same text unindented.
         let indented;
         let (wrap, key) = match self.wrap {
-            Some(wrap) if inset.left > 0. => {
+            Some(_) if inset.left > 0. => {
                 indented = format!("{}\u{0}{}", inset.left.to_bits(), &*text);
-                (Some((wrap - inset.left).max(1.)), &*indented)
+                (self.draw_width(i, self.wrap), &*indented)
             }
             wrap => (wrap, &*text),
         };
@@ -1902,6 +1908,37 @@ mod tests {
         cache.spans(&first, 0);
         cache.forget_last();
         assert!(lay().heights.is_none());
+    }
+
+    /// An indented line is drawn in the width it was wrapped to, not the
+    /// whole text's: its rows end at the same edge.
+    #[test]
+    fn an_indented_line_draws_in_the_width_it_wraps_to() {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| {
+            if i == 1 {
+                LineInset::new(36., 0., 0.)
+            } else {
+                LineInset::default()
+            }
+        })));
+        let text = "first\nsecond line that is long enough to wrap in a narrow box";
+        let layout = cache.layout(
+            || Text::new(text),
+            None,
+            14.,
+            Some(200.),
+            &FontStyle::default(),
+            0,
+            shaper,
+        );
+        assert_eq!(layout.draw_width(1, Some(200.)), Some(164.));
+        assert_eq!(layout.draw_width(0, Some(200.)), Some(200.));
+        assert!(
+            layout.line(1).size().0 <= 164.,
+            "its rows fit the width it is drawn in"
+        );
+        assert_eq!(layout.draw_width(1, None), None);
     }
 
     /// Laid out by its lines, a text has the carets, hits and selections it
