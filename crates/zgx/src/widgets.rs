@@ -4937,7 +4937,8 @@ impl Ui {
         }
     }
     /// The person copied (or, with `cut`, cut) out of `editor` (a key, the
-    /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`): its
+    /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`,
+    /// `clipboard_shortcut`): its
     /// `View::on_copy` says what goes on the clipboard, else its selection's
     /// text, and `write` puts it there (text, HTML and types beside it). A
     /// password field gives nothing and asks no hook; nor does an empty
