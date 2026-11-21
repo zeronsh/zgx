@@ -4,7 +4,7 @@
 mod common;
 
 use common::Harness;
-use std::rc::Rc;
+use zgx_script::Slice;
 use zgx_script::Value;
 
 const TEXT: usize = 20_000;
@@ -49,7 +49,7 @@ return ui.column {{
 
 fn shown(key: &str) -> (Harness, usize) {
     let h = Harness::inline(&app(key));
-    let shared = h.host.shared("rows", Value::List(Rc::from([])));
+    let shared = h.host.shared("rows", Value::List(Slice::from([])));
     h.settle();
     h.host.collect_garbage();
     let before = h.host.script_heap();
@@ -89,7 +89,7 @@ fn a_key_reading_more_than_the_short_fields_is_given_the_item() {
 #[test]
 fn a_keyed_row_follows_its_item_as_the_list_is_reversed() {
     let mut h = Harness::inline(&app("m.id"));
-    let shared = h.host.shared("rows", Value::List(Rc::from([])));
+    let shared = h.host.shared("rows", Value::List(Slice::from([])));
     h.settle();
     shared.set(rows(40));
     h.settle();

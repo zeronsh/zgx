@@ -103,10 +103,17 @@ impl Recipe {
     }
     fn option(&self, axis: usize, value: &Value) -> Result<u16, String> {
         let axis = &self.axes[axis];
-        let name: Rc<str> = match value {
+        // (Read where it is: a chosen option's name is looked up, not kept.)
+        let name: &str = match value {
             Value::Nil => return Ok(axis.default),
-            Value::Str(s) => s.clone(),
-            Value::Bool(b) => if *b { "true" } else { "false" }.into(),
+            Value::Str(s) => s,
+            Value::Bool(b) => {
+                if *b {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
             other => {
                 return Err(format!(
                     "variant `{}` is chosen by name, not {other:?}",
@@ -114,7 +121,11 @@ impl Recipe {
                 ));
             }
         };
-        match axis.options.iter().position(|(option, _)| *option == name) {
+        match axis
+            .options
+            .iter()
+            .position(|(option, _)| **option == *name)
+        {
             Some(i) => Ok(i as u16),
             None => Err(format!(
                 "variant `{}` has no option `{name}` (it has {})",

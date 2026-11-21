@@ -17,6 +17,7 @@
 //! takes, so no pixels and no base64 pass through the script. The archive
 //! is built beside the file and renamed over it on `close`, so a zip left
 //! unclosed (or failing) leaves the file as it was.
+use crate::Str;
 use crate::{
     calls::{PromiseUd, pending, settle_with},
     value::Value,
@@ -29,7 +30,6 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
-    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -280,9 +280,9 @@ impl ZipUd {
                 Some(Ok(None)) => Ok(Value::Nil),
                 Some(Ok(Some((bytes, width, height)))) => Ok(Value::Map(
                     vec![
-                        (Rc::from("bytes"), Value::Num(bytes as f64)),
-                        (Rc::from("width"), Value::Num(f64::from(width))),
-                        (Rc::from("height"), Value::Num(f64::from(height))),
+                        (Str::from("bytes"), Value::Num(bytes as f64)),
+                        (Str::from("width"), Value::Num(f64::from(width))),
+                        (Str::from("height"), Value::Num(f64::from(height))),
                     ]
                     .into(),
                 )),
