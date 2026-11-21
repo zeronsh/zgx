@@ -4382,7 +4382,8 @@ fn request_device(
                     message
                 });
             }
-            // Every context on the device (WARP's, each with a cell of its own).
+            // Every context on the device (Direct3D 12's, each with a cell of
+            // its own).
             let contexts = contexts.lock().unwrap_or_else(|p| p.into_inner());
             for context in contexts.iter().filter_map(std::sync::Weak::upgrade) {
                 let mut lost = context.lock().unwrap_or_else(|p| p.into_inner());
@@ -4406,10 +4407,11 @@ fn request_device(
 }
 /// Why a device was lost, once it is (set from any thread).
 type LostCell = Arc<std::sync::Mutex<Option<String>>>;
-/// The cells of the contexts sharing WARP's device, for its loss to reach.
+/// The cells of the contexts sharing a device, for its loss to reach.
 type LostCells = Arc<std::sync::Mutex<Vec<std::sync::Weak<std::sync::Mutex<Option<String>>>>>>;
-/// What contexts on one device share: on WARP, every context in the process
-/// (`WARP_DEVICE`), and elsewhere the one context made with it.
+/// What contexts on one device share: on Direct3D 12, every context in the
+/// process (`WARP_DEVICE`, `D3D12_DEVICE`), and elsewhere the one context
+/// made with it.
 struct SharedDevice {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -4417,9 +4419,9 @@ struct SharedDevice {
     queue: wgpu::Queue,
     /// The device's loss.
     lost: LostCell,
-    /// On WARP, each context's own cell, so a test can lose one context
-    /// alone (`GpuContext::debug_lose_device`); elsewhere the context reads
-    /// `lost`.
+    /// On Direct3D 12, each context's own cell, so a test can lose one
+    /// context alone (`GpuContext::debug_lose_device`); elsewhere the context
+    /// reads `lost`.
     contexts: LostCells,
 }
 /// WARP's device, once a context made it (`GpuContext::prepare`): kept for
@@ -4430,9 +4432,28 @@ struct SharedDevice {
 /// WARP at once fault in `ExecuteCommandLists` (zgx-video's render tests
 /// on Windows, #2402). wgpu says nothing of when a device is gone.
 static WARP_DEVICE: std::sync::Mutex<Option<Arc<SharedDevice>>> = std::sync::Mutex::new(None);
+/// A Direct3D 12 GPU's device while a context holds it (`GpuContext::prepare`):
+/// held weakly, so it goes with the last context and nothing of it stays at
+/// rest. A device per context, made and released on many threads at once (as
+/// zgx-video's chunks and tests do), hung NVIDIA's driver in the kernel
+/// (docs/validation.md, "NVIDIA on Windows"). Vulkan and Metal, untested so,
+/// keep a device per context.
+static D3D12_DEVICE: std::sync::Mutex<std::sync::Weak<SharedDevice>> =
+    std::sync::Mutex::new(std::sync::Weak::new());
+/// Whether a Direct3D 12 GPU's shared device is held (`D3D12_DEVICE`): none
+/// once the last context on it is gone.
+#[doc(hidden)]
+pub fn d3d12_device_held() -> bool {
+    D3D12_DEVICE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .strong_count()
+        > 0
+}
 /// What a `GpuContext` holds that another thread can make (`GpuContext::prepare`).
 struct Prepared {
-    /// The device it draws with: on WARP, the one `WARP_DEVICE` keeps.
+    /// The device it draws with: on Direct3D 12, the one `WARP_DEVICE` or
+    /// `D3D12_DEVICE` hands every context.
     shared: Arc<SharedDevice>,
     lost: Arc<std::sync::Mutex<Option<String>>>,
     instance: wgpu::Instance,
@@ -4474,7 +4495,8 @@ pub struct GpuContext {
     inner: Rc<GpuContextInner>,
 }
 struct GpuContextInner {
-    /// The device it draws with: on WARP, the one `WARP_DEVICE` keeps.
+    /// The device it draws with: on Direct3D 12, the one `WARP_DEVICE` or
+    /// `D3D12_DEVICE` hands every context.
     shared: Arc<SharedDevice>,
     /// Why the device was lost (driver reset, removal, `debug_lose_device`):
     /// set from wgpu's callback, from any thread.
@@ -4741,10 +4763,16 @@ impl GpuContext {
             && info.backend == wgpu::Backend::Dx12
             && info.device_type == wgpu::DeviceType::Cpu;
         let mut warp_slot = warp.then(|| WARP_DEVICE.lock().unwrap_or_else(|p| p.into_inner()));
+        // A Direct3D 12 GPU's device is shared too, while a context holds it
+        // (`D3D12_DEVICE`): one on the adapter this context chose.
+        let d3d12 = !noop && !warp && info.backend == wgpu::Backend::Dx12;
+        let mut d3d12_slot = d3d12.then(|| D3D12_DEVICE.lock().unwrap_or_else(|p| p.into_inner()));
         // (Not a lost one: a context made after a loss takes a new device.)
         let reusable = warp_slot
             .as_ref()
             .and_then(|slot| (*slot).clone())
+            .or_else(|| d3d12_slot.as_ref().and_then(|slot| slot.upgrade()))
+            .filter(|shared| shared.adapter.get_info() == info)
             .filter(|shared| shared.lost.lock().is_ok_and(|lost| lost.is_none()));
         let shared = match reusable {
             Some(shared) => shared,
@@ -4763,10 +4791,14 @@ impl GpuContext {
                 if let Some(slot) = &mut warp_slot {
                     **slot = Some(shared.clone());
                 }
+                if let Some(slot) = &mut d3d12_slot {
+                    **slot = Arc::downgrade(&shared);
+                }
                 shared
             }
         };
         drop(warp_slot);
+        drop(d3d12_slot);
         let SharedDevice {
             instance,
             adapter,
@@ -4775,7 +4807,7 @@ impl GpuContext {
             lost,
             contexts,
         } = &*shared;
-        let lost = match warp {
+        let lost = match warp || d3d12 {
             false => lost.clone(),
             true => {
                 let own = LostCell::default();
@@ -4900,8 +4932,9 @@ impl GpuContext {
             .clone()
     }
     /// Lose the device, as a driver reset would: for tests of recovery. On
-    /// WARP's process-wide device (`WARP_DEVICE`), which other contexts may
-    /// draw on, only this context fails from then on.
+    /// Direct3D 12's shared device (`WARP_DEVICE`, `D3D12_DEVICE`), which
+    /// other contexts may draw on, only this context fails from then on
+    /// (`debug_lose_shared_device` loses it for all of them).
     pub fn debug_lose_device(&self) {
         if Arc::strong_count(&self.inner.shared) == 1 {
             self.inner.device.destroy();
@@ -4913,6 +4946,39 @@ impl GpuContext {
     /// Whether `other` is this context (a clone of it), on the same device.
     pub fn shares_device(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.inner, &other.inner)
+    }
+    /// Whether `other`, this context or another, draws with the same wgpu
+    /// device: on Direct3D 12, every context does.
+    #[doc(hidden)]
+    pub fn same_device_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner.shared, &other.inner.shared)
+    }
+    /// Lose the device this context draws with, as a driver reset would, for
+    /// every context on it: for tests of recovery.
+    #[doc(hidden)]
+    pub fn debug_lose_shared_device(&self) {
+        self.inner.device.destroy();
+        let _ = self.inner.device.poll(wgpu::PollType::Poll);
+        let shared = &self.inner.shared;
+        let reason = || "destroyed for a test".to_owned();
+        shared
+            .lost
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_or_insert_with(reason);
+        let contexts = shared.contexts.lock().unwrap_or_else(|p| p.into_inner());
+        for context in contexts.iter().filter_map(std::sync::Weak::upgrade) {
+            context
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(reason);
+        }
+        drop(contexts);
+        self.inner
+            .lost
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_or_insert_with(reason);
     }
     /// The font system its renderers shape and draw text with.
     pub fn text_system(&self) -> Rc<RefCell<FontSystem>> {
