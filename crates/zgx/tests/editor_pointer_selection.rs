@@ -307,3 +307,41 @@ fn a_double_click_selects_a_chinese_japanese_or_thai_word() {
         assert_eq!(editor.copy(), if on { word } else { fallback }, "{text}");
     }
 }
+
+/// "see @file.pdf now" with an atom on "@file.pdf" (4..13): at size 10
+/// each grapheme is 6 wide, from x 10.
+fn chip_fixture() -> (Ui, EditorHandle) {
+    let (ui, editor) = fixture("see  now", 200., false);
+    editor.set_selection(4, 4);
+    editor.insert_atom("@file.pdf", None, None, None).unwrap();
+    editor.set_selection(0, 0);
+    ui.prepare_frame();
+    (ui, editor)
+}
+
+#[test]
+fn a_double_click_on_a_word_of_a_chip_selects_the_chip() {
+    let (mut ui, editor) = chip_fixture();
+    // On "pdf" (from 10).
+    click(&mut ui, 73., 20., false);
+    click(&mut ui, 73., 20., false);
+    assert_eq!(editor.copy(), "@file.pdf");
+}
+
+#[test]
+fn a_drag_into_a_chip_takes_it_whole_and_a_click_in_it_the_nearer_edge() {
+    let (mut ui, editor) = chip_fixture();
+    // From "se|e" into "@fi|le.pdf": past the chip's start, not its middle.
+    down(&mut ui, 22., 20., false);
+    move_to(&mut ui, 46., 20.);
+    up(&mut ui, 46., 20.);
+    assert_eq!(editor.copy(), "e @file.pdf");
+    // Back from after it into it.
+    down(&mut ui, 94., 20., false);
+    move_to(&mut ui, 70., 20.);
+    up(&mut ui, 70., 20.);
+    assert_eq!(editor.selection(), (14, 4));
+    // A click alone puts the caret at the nearer edge.
+    click(&mut ui, 46., 20., false);
+    assert_eq!(editor.selection(), (4, 4));
+}

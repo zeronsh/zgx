@@ -9460,7 +9460,8 @@ export type InputProps = {
 	-- The first line in view, from 1, whenever it changes: an outline following
 	-- the text.
 	on_top_line: ((line: number) -> ())?,
-	-- Its atoms (chips): ranges of the text that edit as one unit, `{ id,
+	-- Its atoms (chips): ranges of the text that edit as one unit (a caret
+	-- goes to one's nearer edge, a selection into one takes it whole), `{ id,
 	-- from, to, data?, style? }` each, `from` and `to` in characters from 0
 	-- (half-open), by `from`. Two-way, as `value` is: the editor writes it as
 	-- they are made, lost or moved, and setting it restores them (a draft's;

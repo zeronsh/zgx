@@ -910,6 +910,18 @@ fn hit_out_of_atoms(
         affinity: TextAffinity::After,
     }
 }
+/// Where a selection made by the pointer from `anchor` ends: `hit` (out of
+/// atoms, `hit_out_of_atoms`) while it is the anchor (a press, a pointer that
+/// stays by the edge it pressed at), else the place under the pointer
+/// itself (`raw`), so a selection into an atom takes it whole
+/// (`TextEditor::set_selection`).
+fn pointer_focus(anchor: usize, raw: TextPosition, hit: TextPosition) -> usize {
+    if hit.byte_offset == anchor {
+        hit.byte_offset
+    } else {
+        raw.byte_offset
+    }
+}
 /// `plain` decorations with `e`'s atoms' washes among them, by start (the
 /// text area's `wash` for those with none of their own), plus each atom's
 /// vertical chip padding (`padding[2]`) if set.
@@ -8601,24 +8613,35 @@ impl Ui {
                 // Hit the visible edge, not an arbitrarily distant text row.
                 let x = (px - bounds.x).clamp(0., bounds.width.max(0.)) + offset.0;
                 let y = (py - bounds.y).clamp(0., (bounds.height - 0.01).max(0.)) + offset.1;
-                let hit = hit_out_of_atoms(&edit, &*layout, layout.hit_position(x, y), x);
-                let (anchor, focus) = match mode {
-                    EditorPointerSelection::Character(anchor) => (anchor, hit),
+                let raw = layout.hit_position(x, y);
+                let hit = hit_out_of_atoms(&edit, &*layout, raw, x);
+                let (anchor, focus, to) = match mode {
+                    EditorPointerSelection::Character(anchor) => {
+                        (anchor, hit, pointer_focus(anchor, raw, hit))
+                    }
                     EditorPointerSelection::Unit { edges, line } => {
                         let current = editor_pointer_unit(
-                            edit.around(hit.byte_offset),
+                            edit.around(raw.byte_offset),
                             layout.as_ref(),
-                            hit,
+                            raw,
                             x,
                             y,
                             line,
                             multiline,
                         );
-                        extend_by_units(edges, current)
+                        let (anchor, focus) = extend_by_units(edges, current);
+                        (anchor, focus, focus.byte_offset)
                     }
                 };
-                edit.set_selection(anchor, focus.byte_offset);
-                position.set(focus);
+                edit.set_selection(anchor, to);
+                // Where the selection ends, out of any atom it took whole.
+                position.set(match edit.selection().focus {
+                    at if at == focus.byte_offset => focus,
+                    byte_offset => TextPosition {
+                        byte_offset,
+                        affinity: TextAffinity::After,
+                    },
+                });
                 if let EditorPointerSelection::Unit { .. } = mode {
                     gesture.units.set(Some((
                         mode,
@@ -8944,7 +8967,8 @@ impl Ui {
                     let (x, y) = in_viewport(&s, viewport, x, y);
                     let x = x - bounds.x + scroll.0;
                     let y = y - bounds.y + scroll.1;
-                    let hit = hit_out_of_atoms(&edit, &*layout, layout.hit_position(x, y), x);
+                    let raw = layout.hit_position(x, y);
+                    let hit = hit_out_of_atoms(&edit, &*layout, raw, x);
                     // A press on the selection may drag it (as AppKit's text
                     // views and browsers do): it stays until the pointer
                     // moves or lets go.
@@ -8971,27 +8995,37 @@ impl Ui {
                         units.unwrap_or(EditorPointerSelection::Character(edit.selection().anchor))
                     } else {
                         match cx.click_count() {
+                            // A word of a chip: the words under the pointer,
+                            // the chip whole (`set_selection`).
                             2 => {
-                                let edges = editor_pointer_unit(edit.around(hit.byte_offset), layout.as_ref(), hit, x, y, false, multiline);
+                                let edges = editor_pointer_unit(edit.around(raw.byte_offset), layout.as_ref(), raw, x, y, false, multiline);
                                 EditorPointerSelection::Unit { edges, line: false }
                             }
                             3.. => {
-                                let edges = editor_pointer_unit(edit.around(hit.byte_offset), layout.as_ref(), hit, x, y, true, multiline);
+                                let edges = editor_pointer_unit(edit.around(raw.byte_offset), layout.as_ref(), raw, x, y, true, multiline);
                                 EditorPointerSelection::Unit { edges, line: true }
                             }
                             _ => EditorPointerSelection::Character(hit.byte_offset),
                         }
                     };
-                    let (anchor, focus) = match mode {
-                        EditorPointerSelection::Character(anchor) => (anchor, hit),
+                    let (anchor, focus, to) = match mode {
+                        EditorPointerSelection::Character(anchor) => (anchor, hit, pointer_focus(anchor, raw, hit)),
                         EditorPointerSelection::Unit { edges, line } if cx.pointer_modifiers().shift => {
-                            let current = editor_pointer_unit(edit.around(hit.byte_offset), layout.as_ref(), hit, x, y, line, multiline);
-                            extend_by_units(edges, current)
+                            let current = editor_pointer_unit(edit.around(raw.byte_offset), layout.as_ref(), raw, x, y, line, multiline);
+                            let (anchor, focus) = extend_by_units(edges, current);
+                            (anchor, focus, focus.byte_offset)
                         }
-                        EditorPointerSelection::Unit { edges, .. } => (edges.0.byte_offset, edges.1),
+                        EditorPointerSelection::Unit { edges, .. } => (edges.0.byte_offset, edges.1, edges.1.byte_offset),
                     };
-                    edit.set_selection(anchor, focus.byte_offset);
-                    position.set(focus);
+                    edit.set_selection(anchor, to);
+                    // Where the selection ends, out of any atom it took whole.
+                    position.set(match edit.selection().focus {
+                        at if at == focus.byte_offset => focus,
+                        byte_offset => TextPosition {
+                            byte_offset,
+                            affinity: TextAffinity::After,
+                        },
+                    });
                     gesture.cancel();
                     gesture.mode.set(Some(mode));
                     let made = (edit.selection().anchor, edit.selection().focus);
