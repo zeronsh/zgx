@@ -29,6 +29,8 @@ mod autolink;
 mod mend;
 pub(crate) mod view;
 
+use crate::Field;
+use crate::Str;
 pub use mend::PENDING_LINK_URL;
 
 use crate::Value;
@@ -478,21 +480,23 @@ impl Incremental {
     }
     /// [`blocks`](Self::blocks) as one shared list, made in place: a long
     /// reply's answer is one allocation, not a vector and its copy.
-    pub fn blocks_shared(&mut self) -> std::rc::Rc<[Value]> {
+    pub fn blocks_shared(&mut self) -> crate::List {
         let stable = self.tops.len().saturating_sub(1);
         let (head, tail) = self.head_and_tail();
         let len = head.iter().map(|t| t.blocks.len()).sum::<usize>() + tail.len();
-        let mut list = std::rc::Rc::<[Value]>::new_uninit_slice(len);
-        let slots = std::rc::Rc::get_mut(&mut list).expect("made here, held nowhere else");
         let blocks = head.iter().flat_map(|top| &top.blocks).chain(tail);
-        for (slot, block) in slots.iter_mut().zip(blocks) {
-            slot.write(block.clone());
-        }
+        // (`len` is what `head` and `tail` hold.)
+        let list = crate::List::written(len, |slots| {
+            let mut wrote = 0;
+            for (slot, block) in slots.iter_mut().zip(blocks) {
+                slot.write(block.clone());
+                wrote += 1;
+            }
+            wrote
+        });
         (self.settled, self.appended) = (stable, None);
         self.counts.clear();
-        // SAFETY: `len` is what `head` and `tail` hold, so every slot was
-        // written above.
-        unsafe { list.assume_init() }
+        list
     }
     /// [`blocks`](Self::blocks) as a list grown from the last answer: the
     /// chunks of it wholly within the elements nothing changed since are
@@ -975,11 +979,11 @@ fn scan_tops(text: &str) -> Vec<Top> {
 }
 
 /// The stand-in for a top-level element not parsed yet.
-fn pending_block(text: &str, from: usize, to: usize, hint: Rc<str>) -> Value {
+fn pending_block(text: &str, from: usize, to: usize, hint: Str) -> Value {
     let own = text[from..to].trim_end();
     let num = |n: usize| Value::Num(n as f64);
     map(vec![
-        ("t", Value::Str(Rc::from(PENDING))),
+        ("t", Value::Str(Str::from(PENDING))),
         ("hint", Value::Str(hint)),
         ("lines", num(own.lines().count().max(1))),
         ("from", num(from + 1)),
@@ -1233,7 +1237,7 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool, defs:
                 // What it is stands in until `set_text_lazy` makes its block.
                 tops.push(Top {
                     start: offset + start,
-                    blocks: hint.map(|h| Value::Str(Rc::from(h))).into_iter().collect(),
+                    blocks: hint.map(|h| Value::Str(Str::from(h))).into_iter().collect(),
                 });
             }
         }
@@ -1433,7 +1437,7 @@ fn link_of(href: &str, paths: bool) -> Link {
 }
 
 fn map(fields: Vec<(&str, Value)>) -> Value {
-    let mut fields: Vec<(Rc<str>, Value)> = fields.into_iter().map(|(k, v)| (key(k), v)).collect();
+    let mut fields: Vec<Field> = fields.into_iter().map(|(k, v)| Field(key(k), v)).collect();
     fields.sort_by(|a, b| a.0.cmp(&b.0));
     Value::Map(fields.into())
 }
@@ -1442,16 +1446,16 @@ thread_local! {
     /// The field names blocks and runs are made with (`map`), each made
     /// once: a document's every block and run named its fields anew, an
     /// allocation each. At most `KEYS` (a code block's own fields add some).
-    static NAMES: std::cell::RefCell<Vec<Rc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static NAMES: std::cell::RefCell<Vec<Str>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 const KEYS: usize = 64;
 /// `name` as the field name blocks share (`NAMES`).
-fn key(name: &str) -> Rc<str> {
+fn key(name: &str) -> Str {
     NAMES.with_borrow_mut(|names| {
         if let Some(kept) = names.iter().find(|kept| &***kept == name) {
             return kept.clone();
         }
-        let made: Rc<str> = Rc::from(name);
+        let made = Str::from(name);
         if names.len() < KEYS {
             names.push(made.clone());
         }
@@ -2478,7 +2482,7 @@ mod tests {
     }
     fn same(a: &Value, b: &Value) -> bool {
         match (a, b) {
-            (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
+            (Value::Map(a), Value::Map(b)) => crate::Slice::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -2600,7 +2604,7 @@ mod tests {
                     .unwrap_or(depth),
                 Value::Map(fields) => fields
                     .iter()
-                    .map(|(k, v)| {
+                    .map(|crate::Field(k, v)| {
                         if &**k == "x"
                             && let Value::Str(s) = v
                         {

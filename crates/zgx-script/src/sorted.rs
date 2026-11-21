@@ -12,6 +12,9 @@
 //! the views reading a list (`WriteLog`), so a view finds them without
 //! comparing every row, and its slots are written where the order moved
 //! (`write_back`).
+use crate::Field;
+use crate::List;
+use crate::Slice;
 use crate::{
     Vm,
     value::{State, Value},
@@ -25,7 +28,7 @@ use zgx::reactive::Signal;
 #[derive(Clone, Debug)]
 enum Key {
     Num(f64),
-    Str(Rc<str>),
+    Str(crate::Str),
     Bool(bool),
     Nil,
 }
@@ -391,8 +394,8 @@ fn written_since(list: &Signal<Value>, seen: u64) -> Option<Vec<u32>> {
 /// share it), or an equal plain value.
 fn same_item(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
-        (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
+        (Value::Map(a), Value::Map(b)) => Slice::ptr_eq(a, b),
+        (Value::List(a), Value::List(b)) => Slice::ptr_eq(a, b),
         (a, b) => a == b,
     }
 }
@@ -494,7 +497,7 @@ impl Kept {
         &mut self,
         vm: &Vm,
         spec: &Spec,
-        items: &Rc<[Value]>,
+        items: &List,
         version: u64,
         written_since: &dyn Fn(u64) -> Option<Vec<u32>>,
     ) -> mlua::Result<()> {
@@ -518,7 +521,7 @@ impl Kept {
         &mut self,
         vm: &Vm,
         spec: &Spec,
-        items: &Rc<[Value]>,
+        items: &List,
         version: u64,
         written_since: &dyn Fn(u64) -> Option<Vec<u32>>,
     ) -> mlua::Result<()> {
@@ -570,7 +573,7 @@ impl Kept {
         &mut self,
         vm: &Vm,
         spec: &Spec,
-        items: &Rc<[Value]>,
+        items: &List,
         name: &str,
         version: u64,
         written_since: &dyn Fn(u64) -> Option<Vec<u32>>,
@@ -605,13 +608,15 @@ impl Kept {
         let Value::Map(fields) = item else {
             return None;
         };
-        if let Some((key, value)) = fields.get(hint.at)
+        if let Some(Field(key, value)) = fields.get(hint.at)
             && (key.as_ptr() as usize == hint.key || **key == *name)
         {
             hint.key = key.as_ptr() as usize;
             return Some(value);
         }
-        let at = fields.binary_search_by(|(key, _)| (**key).cmp(name)).ok()?;
+        let at = fields
+            .binary_search_by(|Field(key, _)| (**key).cmp(name))
+            .ok()?;
         *hint = Hint {
             at,
             key: fields[at].0.as_ptr() as usize,
@@ -694,7 +699,7 @@ impl Kept {
 
     /// Every item judged by script in one call (`JUDGE_ALL`), what it
     /// returns read through Luau's C API; field keys read in Rust.
-    fn judge_all(&mut self, vm: &Vm, spec: &Spec, items: &Rc<[Value]>) -> mlua::Result<()> {
+    fn judge_all(&mut self, vm: &Vm, spec: &Spec, items: &List) -> mlua::Result<()> {
         let judge = match &self.judge_all {
             Some(f) => f.clone(),
             None => {
@@ -785,13 +790,7 @@ impl Kept {
     // Kept out of the view's effect: inlined there it changes how the
     // whole sort (the same effect's other path) is compiled.
     #[inline(never)]
-    fn update(
-        &mut self,
-        vm: &Vm,
-        spec: &Spec,
-        items: &Rc<[Value]>,
-        changed: &[u32],
-    ) -> mlua::Result<()> {
+    fn update(&mut self, vm: &Vm, spec: &Spec, items: &List, changed: &[u32]) -> mlua::Result<()> {
         let mut moved = vec![false; items.len()];
         for &i in changed {
             moved[i as usize] = true;
@@ -1039,8 +1038,8 @@ fn permute(
     };
     // A re-sort alone: a filter's change, leaving most of the view out or
     // letting most in, costs less made anew.
-    let Some(slots) =
-        Rc::get_mut(list).filter(|slots| slots.len() == shown.len() && shown.len() == order.len())
+    let Some(slots) = Slice::get_mut(list)
+        .filter(|slots| slots.len() == shown.len() && shown.len() == order.len())
     else {
         return false;
     };
@@ -1089,7 +1088,7 @@ pub(crate) fn sorted(lua: &Lua, (list, spec): (mlua::Value, mlua::Value)) -> mlu
         }
     };
     let env = crate::node::env(lua)?;
-    let out = env.runtime.signal(Value::List(Rc::from([])));
+    let out = env.runtime.signal(Value::List(Slice::from([])));
     // A spec function runs in an effect of its own: only when what it
     // reads changes (a new spec sorts it all again), not on every write.
     let current: Rc<std::cell::RefCell<Option<Spec>>> = Rc::default();
@@ -1133,7 +1132,7 @@ pub(crate) fn sorted(lua: &Lua, (list, spec): (mlua::Value, mlua::Value)) -> mlu
         let Some(spec) = current.borrow().clone() else {
             return;
         };
-        let items: Rc<[Value]> = match source.with(Clone::clone) {
+        let items: List = match source.with(Clone::clone) {
             Value::List(items) => items,
             grown @ Value::Folded(_) if crate::value::grown_list(&grown).is_some() => {
                 crate::value::grown_list(&grown)
@@ -1141,7 +1140,7 @@ pub(crate) fn sorted(lua: &Lua, (list, spec): (mlua::Value, mlua::Value)) -> mlu
                     .flat()
                     .clone()
             }
-            Value::Nil => Rc::from([]),
+            Value::Nil => Slice::from([]),
             other => {
                 return vm.report(mlua::Error::runtime(format!(
                     "ui.sorted sorts a list, not {}",
@@ -1216,7 +1215,7 @@ pub(crate) fn sorted(lua: &Lua, (list, spec): (mlua::Value, mlua::Value)) -> mlu
                         && shown.len() == order.len()
                         && let Value::List(list) = view
                         && list.len() == order.len()
-                        && let Some(slots) = Rc::get_mut(list)
+                        && let Some(slots) = Slice::get_mut(list)
                     {
                         let mut written = vec![0u64; items.len().div_ceil(64)];
                         for &i in changed.iter().flatten() {

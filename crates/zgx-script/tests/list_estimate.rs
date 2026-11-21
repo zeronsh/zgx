@@ -35,7 +35,7 @@ fn rows(n: usize, mut seed: u64) -> Value {
             Value::record(fields)
         })
         .collect();
-    Value::List(std::rc::Rc::from(rows))
+    Value::List(zgx_script::Slice::from(rows))
 }
 /// Rows: 12 of padding each way, a wrapped body, a note if there is one.
 fn script(estimate: &str) -> String {
@@ -156,7 +156,7 @@ fn a_row_measured_keeps_its_height_when_others_come() {
     more.push(added);
     app.host
         .shared("list.rows", Value::Nil)
-        .set(Value::List(std::rc::Rc::from(more)));
+        .set(Value::List(zgx_script::Slice::from(more)));
     app.frames(3);
     let after = length(&mut app);
     assert!((after - truth - 42.).abs() < 25., "{truth} then {after}");
@@ -186,7 +186,7 @@ fn folded_rows_are_estimated_and_let_go() {
             BODIES.with_borrow_mut(|b| b.push(Rc::downgrade(&body)));
             Value::record([
                 ("id", Value::from(format!("r{}", self.0).as_str())),
-                ("body", Value::Str(body)),
+                ("body", Value::Str(body.into())),
             ])
         }
     }
@@ -254,7 +254,7 @@ fn on_real_documents() {
         }
     }
     let count = rows.len();
-    let data = Value::List(std::rc::Rc::from(rows));
+    let data = Value::List(zgx_script::Slice::from(rows));
     for width in [800., 500.] {
         let t = std::time::Instant::now();
         let (mut app, _services) = mounted(&script(&prose()), data.clone(), width);

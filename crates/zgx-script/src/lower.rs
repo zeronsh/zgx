@@ -3,6 +3,8 @@
 //! reactive style per node; text templates interpolate state in Rust.
 //! Targetable nodes (`id`, `class`, `ref`, `on_mount`) also carry an element:
 //! what animations write, resolved over the node's own styles.
+use crate::Field;
+use crate::Slice;
 use crate::{
     Actions, Vm, anim,
     anime::{Key as Property, target::Target, value::V},
@@ -1247,7 +1249,10 @@ fn filtered(
                 }
             },
             Filtered::Label => {
-                let written = copy.label.take().map(|label| Source::Lit(Lit::Str(label)));
+                let written = copy
+                    .label
+                    .take()
+                    .map(|label| Source::Lit(Lit::Str(label.into())));
                 let a11y = copy.a11y.get_or_insert_default();
                 let source = a11y.label.take().or(written);
                 a11y.label = filtered_source(source.as_ref(), Value::Nil, Ty::Str, plugin, f, &app);
@@ -1318,14 +1323,14 @@ fn filtered(
         .iter()
         .enumerate()
         .map(|(at, child)| match &child.id {
-            Some(id) => Value::Str(id.clone()),
+            Some(id) => Value::Str(id.clone().into()),
             None => Value::Num((at + 1) as f64),
         })
         .collect();
     let low = low.clone();
     switch(
         move || {
-            let mut value = Value::List(Rc::from(ids.as_slice()));
+            let mut value = Value::List(Slice::from(ids.as_slice()));
             for (plugin, f) in &order {
                 value = passed(plugin, f, value);
             }
@@ -2191,7 +2196,7 @@ enum Quick {
     Nil,
     Bool(bool),
     Num(u64),
-    Str(Rc<str>),
+    Str(crate::Str),
     At(usize),
 }
 fn quick(item: &Value) -> Quick {
@@ -2201,8 +2206,8 @@ fn quick(item: &Value) -> Quick {
         Value::Num(n) => Quick::Num(if *n == 0. { 0 } else { n.to_bits() }),
         Value::Str(s) => Quick::Str(s.clone()),
         Value::Text(t) => Quick::Str(t.to_cow().into()),
-        Value::List(l) => Quick::At(Rc::as_ptr(l).cast::<()>() as usize),
-        Value::Map(m) => Quick::At(Rc::as_ptr(m).cast::<()>() as usize),
+        Value::List(l) => Quick::At(Slice::as_ptr(l).cast::<()>() as usize),
+        Value::Map(m) => Quick::At(Slice::as_ptr(m).cast::<()>() as usize),
         Value::Element(e) => Quick::At(e.address()),
         Value::Image(image) => Quick::At(std::sync::Arc::as_ptr(image).cast::<()>() as usize),
         Value::Folded(folded) => Quick::At(Rc::as_ptr(folded).cast::<()>() as usize),
@@ -2255,7 +2260,7 @@ fn content_hash(item: &Value, hasher: &mut impl std::hash::Hasher) {
         }
         Value::Map(entries) => {
             entries.len().hash(hasher);
-            for (key, value) in entries.iter() {
+            for Field(key, value) in entries.iter() {
                 key.hash(hasher);
                 content_hash(value, hasher);
             }
@@ -7492,7 +7497,7 @@ fn lower_text(text: &Text, vm: &Rc<Vm>) -> View {
 /// What an image's `src` shows now: a picture to load by its path, or a
 /// bitmap itself (`ui.bitmap`, a pasted image, one kept in state).
 enum Picture {
-    Path(Rc<str>),
+    Path(crate::Str),
     Image(Arc<ImageData>),
 }
 fn picture_of(src: &Owned, vm: &Vm) -> Option<Picture> {
@@ -7585,7 +7590,7 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
             image_signal(label.clone(), move || {
                 let image = match picture_of(&src, &vm2) {
                     Some(Picture::Image(image)) => {
-                        told.loaded(&vm2, Rc::from("bitmap"), &image);
+                        told.loaded(&vm2, crate::Str::from("bitmap"), &image);
                         image
                     }
                     Some(Picture::Path(path)) => match try_load_image(&vm2, &low2, &path) {
@@ -7776,7 +7781,7 @@ struct ToldInner {
     events: Option<Rc<crate::node::ImageEvents>>,
     timers: Option<Rc<crate::timers::Timers>>,
     /// The `src` last told of, and whether it loaded.
-    last: std::cell::RefCell<Option<(Rc<str>, bool)>>,
+    last: std::cell::RefCell<Option<(crate::Str, bool)>>,
 }
 impl Told {
     fn new(events: Option<Rc<crate::node::ImageEvents>>, low: &Lowering) -> Self {
@@ -7788,7 +7793,7 @@ impl Told {
         }))
     }
     /// Whether `src` is new to tell of (its outcome `loaded`).
-    fn first(&self, src: &Rc<str>, loaded: bool) -> bool {
+    fn first(&self, src: &crate::Str, loaded: bool) -> bool {
         let mut last = self.0.last.borrow_mut();
         if last
             .as_ref()
@@ -7799,7 +7804,7 @@ impl Told {
         *last = Some((src.clone(), loaded));
         true
     }
-    fn loaded(&self, vm: &Rc<Vm>, src: Rc<str>, image: &ImageData) {
+    fn loaded(&self, vm: &Rc<Vm>, src: crate::Str, image: &ImageData) {
         let Some(on_load) = self.0.events.as_ref().and_then(|e| e.on_load.clone()) else {
             return;
         };
@@ -7815,7 +7820,7 @@ impl Told {
         });
     }
     #[cold]
-    fn failed(&self, vm: &Rc<Vm>, src: Rc<str>, why: String) {
+    fn failed(&self, vm: &Rc<Vm>, src: crate::Str, why: String) {
         if !self.first(&src, false) {
             return;
         }
@@ -7865,7 +7870,7 @@ fn swept(view: View, low: &Lowering) -> View {
 enum ListKey {
     Index(usize),
     Num(u64),
-    Str(Rc<str>),
+    Str(crate::Str),
     Bool(bool),
 }
 impl ListKey {
@@ -7927,7 +7932,7 @@ fn list_keys(vm: &Vm, key: &mlua::Function, count: usize, last: &mut Vec<ListKey
                 Ok(mlua::Value::Integer(n)) => Some(ListKey::of(&Value::Num(n as f64))),
                 Ok(mlua::Value::Boolean(b)) => Some(Some(ListKey::Bool(b))),
                 Ok(mlua::Value::String(s)) => {
-                    Some(Some(ListKey::Str(Rc::from(&*s.to_string_lossy()))))
+                    Some(Some(ListKey::Str(crate::Str::from(&*s.to_string_lossy()))))
                 }
                 _ => None,
             };
@@ -8537,7 +8542,7 @@ fn item_keys(vm: &Vm, key: &mlua::Function, items: &Value, kept: &mut KeptKeys) 
                         Ok(mlua::Value::Integer(v)) => ListKey::of(&Value::Num(v as f64)),
                         Ok(mlua::Value::Boolean(b)) => Some(ListKey::Bool(b)),
                         Ok(mlua::Value::String(s)) => {
-                            Some(ListKey::Str(Rc::from(&*s.to_string_lossy())))
+                            Some(ListKey::Str(crate::Str::from(&*s.to_string_lossy())))
                         }
                         _ => None,
                     };
@@ -8970,8 +8975,8 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     struct OwnedSpan {
         text: Text,
         style: SpanStyle,
-        font: Option<Rc<str>>,
-        lang: Option<Rc<str>>,
+        font: Option<crate::Str>,
+        lang: Option<crate::Str>,
         followed: Vec<(&'static str, Ty, Owned)>,
         click: Option<Handler>,
         href: Option<Arc<str>>,
@@ -9069,11 +9074,14 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
             .iter()
             .map(|span| {
                 // Copied only for the few that follow: a span's own is read
-                // where it lies.
+                // where it lies, and its font is never copied (only one a
+                // followed option names is held).
                 let mut own = None;
+                let mut own_font = None;
                 // Tracked: a change builds the paragraph again.
                 for (name, ty, source) in &span.followed {
-                    let (style, font) = own.get_or_insert_with(|| (span.style, span.font.clone()));
+                    let style = own.get_or_insert(span.style);
+                    let font = &mut own_font;
                     let lit = resolve(source, *ty, None, &vm);
                     let themed = match &lit {
                         Some(Lit::Color(color)) => Some(zgx::theme::Themed::Value(*color)),
@@ -9101,10 +9109,8 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         }
                     }
                 }
-                let (style, font) = match &own {
-                    Some((style, font)) => (style, font),
-                    None => (&span.style, &span.font),
-                };
+                let style = own.as_ref().unwrap_or(&span.style);
+                let font = own_font.as_ref().or(span.font.as_ref());
                 let SpanStyle {
                     color,
                     background,
@@ -10502,7 +10508,7 @@ fn geometry_of<S: Styled>(s: S, name: &str) -> S {
 fn a_list_keeping_its_first_items_passes_over_the_rest_as_the_full_pass_does() {
     let runtime = zgx::reactive::Runtime::new();
     // A table item: `n` its contents, a new allocation each call.
-    let table = |n: u64| Value::Map(Rc::from(vec![(Rc::from("n"), Value::Num(n as f64))]));
+    let table = |n: u64| Value::record([("n", Value::Num(n as f64))]);
     for live in [false, true] {
         for seed in 1..=40_u64 {
             let mut random = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -10529,7 +10535,7 @@ fn a_list_keeping_its_first_items_passes_over_the_rest_as_the_full_pass_does() {
                         // Equal contents, a new table.
                         let i = at(list.len(), next());
                         if let Value::Map(m) = &list[i] {
-                            list[i] = Value::Map(Rc::from(m.to_vec()));
+                            list[i] = Value::Map(Slice::from(m.to_vec()));
                         }
                     }
                     6 => {
