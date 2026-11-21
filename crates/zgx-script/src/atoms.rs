@@ -153,6 +153,9 @@ pub(crate) fn item(atom: &Atom, chars: (usize, usize)) -> Value {
         }
         None => fields.push(("id", Value::Str(format!("atom-{}", atom.id).into()))),
     }
+    if let Some(name) = &atom.name {
+        fields.push(("name", Value::Str(name.as_ref().into())));
+    }
     Value::record(fields)
 }
 
@@ -219,10 +222,16 @@ pub(crate) fn from_list(
             .and_then(|style| Some((style, look_of(style)?)));
         let style_json = look.as_ref().and_then(|(style, _)| value_json(style));
         let json = value_json(&data);
+        // What a reader reads for it instead of its text.
+        let name: Option<Arc<str>> = match item.field("name") {
+            Some(Value::Str(name)) if !name.is_empty() => Some(Arc::from(&**name)),
+            _ => None,
+        };
         let same = current.iter().find(|atom| {
-            script_atom(atom).is_some_and(|s| {
-                s.key == key && s.data == json && s.bg == bg && s.style == style_json
-            })
+            atom.name == name
+                && script_atom(atom).is_some_and(|s| {
+                    s.key == key && s.data == json && s.bg == bg && s.style == style_json
+                })
         });
         let atom = match same {
             Some(old) => Atom {
@@ -240,6 +249,7 @@ pub(crate) fn from_list(
                     wash: bg.as_deref().and_then(color_of),
                     payload: Some(styled_payload(key, &data, bg, style_json)),
                     style: look.map(|(_, style)| style),
+                    name,
                 }
             }
         };
@@ -254,6 +264,10 @@ pub(crate) fn clipboard_json(atom: &Atom) -> Option<String> {
     let script = script_atom(atom)?;
     let mut out = String::from("{\"id\":");
     out.push_str(&serde_json::to_string(&script.key).ok()?);
+    if let Some(name) = &atom.name {
+        out.push_str(",\"name\":");
+        out.push_str(&serde_json::to_string(&**name).ok()?);
+    }
     if let Some(data) = &script.data {
         out.push_str(",\"data\":");
         out.push_str(data);
@@ -324,6 +338,10 @@ pub(crate) fn from_clipboard(
                 wash: bg.as_deref().and_then(color_of),
                 payload: Some(styled_payload(key, &data, bg, style_json)),
                 style: look.map(|(_, style)| style),
+                name: match own.field("name") {
+                    Some(Value::Str(name)) if !name.is_empty() => Some(Arc::from(&**name)),
+                    _ => None,
+                },
             },
         ));
     }

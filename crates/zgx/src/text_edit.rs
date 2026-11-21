@@ -187,6 +187,10 @@ pub struct Atom {
     /// How it shows, over its text area's atom style (a mention's icon).
     #[doc(hidden)]
     pub style: Option<std::sync::Arc<crate::editor_atom_style::AtomStyle>>,
+    /// What assistive technology reads for it instead of its text (a
+    /// mention's full name), as one unit either way.
+    #[doc(hidden)]
+    pub name: Option<std::sync::Arc<str>>,
 }
 impl Atom {
     /// An atom named `id` over `range`, with no wash or payload.
@@ -197,6 +201,7 @@ impl Atom {
             wash: None,
             payload: None,
             style: None,
+            name: None,
         }
     }
 }
@@ -211,6 +216,7 @@ impl PartialEq for Atom {
                 _ => false,
             }
             && self.style == other.style
+            && self.name == other.name
     }
 }
 impl Eq for Atom {}
@@ -814,6 +820,7 @@ impl TextEditor {
             wash,
             payload,
             style: None,
+            name: None,
         };
         // (The text was already there: no step holds it, and any atom on it
         // goes as an edit would have taken it.)
@@ -830,6 +837,30 @@ impl TextEditor {
             step.created.push(atom);
         }
         Some(id)
+    }
+    /// What assistive technology reads for atom `id` instead of its text
+    /// (`Atom::name`). Whether it has that atom.
+    #[doc(hidden)]
+    pub fn set_atom_name(&mut self, id: u64, name: Option<std::sync::Arc<str>>) -> bool {
+        let Some(state) = self.atom_state.as_deref_mut() else {
+            return false;
+        };
+        let Some(atom) = state.atoms.iter_mut().find(|atom| atom.id == id) else {
+            return false;
+        };
+        if atom.name != name {
+            atom.name = name.clone();
+            state.revision = state.revision.wrapping_add(1);
+        }
+        // Its copies undo and redo bring back are named too.
+        for step in state.steps.values_mut() {
+            for kept in step.created.iter_mut().chain(&mut step.destroyed) {
+                if kept.id == id {
+                    kept.name = name.clone();
+                }
+            }
+        }
+        true
     }
     /// Set its atoms (a draft's): by start, within the text, on grapheme
     /// boundaries, none empty or overlapping; any that is not goes. Not an
