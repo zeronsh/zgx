@@ -762,3 +762,32 @@ fn recheck_spelling_forgets_what_the_checker_now_knows() {
         .unwrap()
         .recheck_spelling();
 }
+
+/// A spellchecked editor lets go of what it holds as it unmounts: its
+/// recheck held the editor, which held the recheck, so it and everything
+/// its handlers captured were never freed.
+#[test]
+fn a_spellchecked_editor_lets_go_of_its_handlers_as_it_unmounts() {
+    let mut ui = Ui::new(400., 200.);
+    let speller = Rc::new(Speller::default());
+    let value = ui.signal("fix teh bug".to_owned());
+    let held = Rc::new(());
+    let in_handler = held.clone();
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(speller.clone()),
+        column().size(400., 200.).child(
+            text_area("Notes", value.clone())
+                .id("field")
+                .spellcheck(true)
+                .on_caret(move |_| {
+                    let _ = &in_handler;
+                })
+                .size(300., 100.),
+        ),
+    ));
+    ui.prepare_frame();
+    assert!(Rc::strong_count(&held) > 1, "the handler holds it");
+    view.unmount();
+    ui.prepare_frame();
+    assert_eq!(Rc::strong_count(&held), 1, "unmounted, nothing holds it");
+}
