@@ -4,18 +4,22 @@
 //! every target, the browser too, where no bundle opens.
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// A bundle's `ui/` and its files' sums. Made by `app_bundle::open` alone,
 /// so a host reading a folder as a bundle's (`ScriptFiles::Folder`) reads
-/// only files that check out.
+/// only files that check out. One pointer: every host's `Files` holds one,
+/// and is no larger for it.
 #[derive(Clone, Debug)]
-pub struct Checked {
-    pub(crate) dir: Arc<Path>,
-    sums: Arc<HashMap<String, [u8; 32]>>,
-    ahead: Arc<Ahead>,
+pub struct Checked(Arc<Folder>);
+
+#[derive(Debug)]
+struct Folder {
+    dir: PathBuf,
+    sums: HashMap<String, [u8; 32]>,
+    ahead: Ahead,
 }
 
 /// Scripts read and checked ahead ([`Checked::read_ahead`]), each kept as
@@ -45,12 +49,17 @@ const WORKERS: usize = 2;
 
 impl Checked {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn new(dir: Arc<Path>, sums: Arc<HashMap<String, [u8; 32]>>) -> Self {
-        Self {
+    pub(crate) fn new(dir: PathBuf, sums: HashMap<String, [u8; 32]>) -> Self {
+        Self(Arc::new(Folder {
             dir,
             sums,
-            ahead: Arc::default(),
-        }
+            ahead: Ahead::default(),
+        }))
+    }
+
+    /// Its `ui/` (canonical).
+    pub(crate) fn dir(&self) -> &Path {
+        &self.0.dir
     }
 
     /// Reads and checks its scripts on worker threads, as the app does
@@ -64,6 +73,7 @@ impl Checked {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn read_ahead(&self) {
         if self
+            .0
             .ahead
             .state
             .compare_exchange(NOT_YET, READING, Ordering::AcqRel, Ordering::Relaxed)
@@ -73,37 +83,37 @@ impl Checked {
         }
         for worker in 0..WORKERS {
             let me = self.clone();
-            self.ahead.workers.fetch_add(1, Ordering::AcqRel);
+            self.0.ahead.workers.fetch_add(1, Ordering::AcqRel);
             let spawned = std::thread::Builder::new()
                 .name("zgx-read-ahead".into())
                 .spawn(move || {
                     // (Listed here, not on the thread that asked.)
-                    let mut scripts: Vec<&String> = me
-                        .sums
-                        .keys()
-                        .filter(|rel| rel.ends_with(".luau"))
-                        .collect();
+                    let mut scripts: Vec<&String> =
+                        me.0.sums
+                            .keys()
+                            .filter(|rel| rel.ends_with(".luau"))
+                            .collect();
                     scripts.sort();
                     for rel in scripts.into_iter().skip(worker).step_by(WORKERS) {
-                        if me.ahead.state.load(Ordering::Acquire) != READING {
+                        if me.0.ahead.state.load(Ordering::Acquire) != READING {
                             break;
                         }
-                        let Ok(bytes) = std::fs::read(me.dir.join(rel)) else {
+                        let Ok(bytes) = std::fs::read(me.0.dir.join(rel)) else {
                             continue;
                         };
-                        if Sha256::digest(&bytes)[..] != me.sums[rel][..] {
+                        if Sha256::digest(&bytes)[..] != me.0.sums[rel][..] {
                             continue;
                         }
-                        let mut ready = me.ahead.ready.lock().unwrap_or_else(|e| e.into_inner());
-                        if me.ahead.state.load(Ordering::Acquire) != READING {
+                        let mut ready = me.0.ahead.ready.lock().unwrap_or_else(|e| e.into_inner());
+                        if me.0.ahead.state.load(Ordering::Acquire) != READING {
                             break;
                         }
                         ready.insert(rel.clone(), bytes);
                     }
-                    me.ahead.workers.fetch_sub(1, Ordering::AcqRel);
+                    me.0.ahead.workers.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {
-                self.ahead.workers.fetch_sub(1, Ordering::AcqRel);
+                self.0.ahead.workers.fetch_sub(1, Ordering::AcqRel);
             }
         }
     }
@@ -114,19 +124,21 @@ impl Checked {
             let count = |n: &std::sync::atomic::AtomicU64| n.swap(0, Ordering::Relaxed);
             eprintln!(
                 "zgx: bundle files as a load ended: {} taken ready, {} read and checked by the loading thread ({:.2} MB, {:.2} ms), {} ready untaken",
-                count(&self.ahead.taken),
-                count(&self.ahead.read_here),
-                count(&self.ahead.bytes_here) as f64 / 1e6,
-                count(&self.ahead.nanos_here) as f64 / 1e6,
-                self.ahead
+                count(&self.0.ahead.taken),
+                count(&self.0.ahead.read_here),
+                count(&self.0.ahead.bytes_here) as f64 / 1e6,
+                count(&self.0.ahead.nanos_here) as f64 / 1e6,
+                self.0
+                    .ahead
                     .ready
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .len(),
             );
         }
-        if self.ahead.state.swap(DONE, Ordering::AcqRel) == READING {
-            self.ahead
+        if self.0.ahead.state.swap(DONE, Ordering::AcqRel) == READING {
+            self.0
+                .ahead
                 .ready
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -139,12 +151,13 @@ impl Checked {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn ahead_counts(&self) -> (usize, bool) {
         let ready = self
+            .0
             .ahead
             .ready
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len();
-        (ready, self.ahead.workers.load(Ordering::Acquire) == 0)
+        (ready, self.0.ahead.workers.load(Ordering::Acquire) == 0)
     }
 
     /// The file at `path`, under its `ui/`, if it is the one its manifest
@@ -154,7 +167,7 @@ impl Checked {
     pub(crate) fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         use std::io::{Error, ErrorKind};
         let absent = || Error::new(ErrorKind::NotFound, "not in the app's bundle");
-        let rel = path.strip_prefix(&*self.dir).map_err(|_| absent())?;
+        let rel = path.strip_prefix(&self.0.dir).map_err(|_| absent())?;
         let mut key = String::new();
         for part in rel.components() {
             match part {
@@ -168,27 +181,30 @@ impl Checked {
                 _ => return Err(absent()),
             }
         }
-        let sum = self.sums.get(&key).ok_or_else(absent)?;
-        if self.ahead.state.load(Ordering::Acquire) == READING {
+        let sum = self.0.sums.get(&key).ok_or_else(absent)?;
+        if self.0.ahead.state.load(Ordering::Acquire) == READING {
             let taken = self
+                .0
                 .ahead
                 .ready
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&key);
             if let Some(bytes) = taken {
-                self.ahead.taken.fetch_add(1, Ordering::Relaxed);
+                self.0.ahead.taken.fetch_add(1, Ordering::Relaxed);
                 return Ok(bytes);
             }
         }
         let started = std::time::Instant::now();
         let bytes = std::fs::read(path)?;
         let matches = Sha256::digest(&bytes)[..] == sum[..];
-        self.ahead.read_here.fetch_add(1, Ordering::Relaxed);
-        self.ahead
+        self.0.ahead.read_here.fetch_add(1, Ordering::Relaxed);
+        self.0
+            .ahead
             .bytes_here
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        self.ahead
+        self.0
+            .ahead
             .nanos_here
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if !matches {

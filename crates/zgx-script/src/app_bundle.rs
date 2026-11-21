@@ -22,7 +22,6 @@ use crate::module_build::{self, Profile, Source, file_hash};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zgx_module::abi;
 
@@ -368,7 +367,7 @@ pub fn open(dir: &Path) -> Result<Opened, String> {
         sums.insert(rel.clone(), sum);
     }
     Ok(Opened {
-        files: Checked::new(ui.as_path().into(), Arc::new(sums)),
+        files: Checked::new(ui.clone(), sums),
         ui,
         entry: manifest["entry"].as_str().unwrap_or("app.luau").to_owned(),
         app_id: string("app_id"),
