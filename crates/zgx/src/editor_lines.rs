@@ -665,6 +665,10 @@ pub(crate) struct LineCache {
     /// became so (`take_restyled`).
     shapes: Cell<bool>,
     restyled: Cell<bool>,
+    /// The highlighter has given a span with a size, pitch or font of its
+    /// own (`SpanStyle::text`: a note's heading): its lines' heights
+    /// differ, so each is kept, unwrapped too.
+    tall: Cell<bool>,
     /// What each line leaves the next, from the first; as far as known.
     states: RefCell<Vec<u32>>,
     /// What the lines below the last edit left before it: once the lines
@@ -863,7 +867,7 @@ impl LineCache {
     /// Whether its lines' heights differ beyond wrapping: kept for each
     /// line unwrapped too.
     pub(crate) fn keeps_heights(&self) -> bool {
-        self.has_insets()
+        self.tall.get() || self.has_insets()
     }
     /// Whether its lines have room of their own (`set_insets`).
     pub(crate) fn has_insets(&self) -> bool {
@@ -888,6 +892,7 @@ impl LineCache {
     pub(crate) fn set_highlighter(&self, highlighter: Option<SpanHighlighter>) {
         *self.highlighter.borrow_mut() = highlighter;
         self.shapes.set(false);
+        self.tall.set(false);
         self.states.borrow_mut().clear();
         *self.tail.borrow_mut() = None;
         self.colored.borrow_mut().clear();
@@ -1075,6 +1080,10 @@ impl LineCache {
         colors.sort_by_key(|(range, _)| range.start);
         if !self.shapes.get() && colors.iter().any(|(_, style)| style.shapes()) {
             self.shapes.set(true);
+            self.restyled.set(true);
+        }
+        if !self.tall.get() && colors.iter().any(|(_, style)| style.text.is_some()) {
+            self.tall.set(true);
             self.restyled.set(true);
         }
         let colors = Rc::new(colors);
@@ -1797,6 +1806,110 @@ mod tests {
             plain.heights.is_none(),
             "plain unwrapped lines keep no heights"
         );
+    }
+
+    /// A note's heading, then a paragraph and a list item: each line starts
+    /// where the one above ends (its taller pitch and its room included),
+    /// wrapped or not, and a heading's line is as tall as its pitch.
+    #[test]
+    fn a_heading_pushes_the_lines_below_it() {
+        for wrap in [None, Some(400.)] {
+            let cache = Rc::new(LineCache::default());
+            cache.set_highlighter(Some(Rc::new(|line: &str, state: u32| {
+                let spans: LineSpans = if state == 1 {
+                    vec![(
+                        0..line.len(),
+                        SpanStyle::default().size(24.).line_height(32.).weight(600),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                (spans, state + 1)
+            })));
+            cache.set_insets(Some(Rc::new(|i| match i {
+                1 => LineInset::new(0., 24., 0.),
+                2 => LineInset::new(0., 12., 0.),
+                3 => LineInset::new(32., 8., 0.),
+                _ => LineInset::default(),
+            })));
+            let text = "Title\nA heading\nbody text\nList item";
+            let lay = || {
+                cache.layout(
+                    || Text::new(text),
+                    None,
+                    14.,
+                    wrap,
+                    &FontStyle::default(),
+                    0,
+                    shaper,
+                )
+            };
+            // As the editor does: painting asks for the spans, and a span
+            // that shapes lays the text out again.
+            let first = lay();
+            for i in 0..4 {
+                cache.spans(&first, i);
+            }
+            assert!(cache.take_restyled());
+            cache.forget_last();
+            let layout = lay();
+            layout.lines_between(0., 1000.);
+            assert!(
+                layout.height(1) >= 32. + 24.,
+                "{wrap:?}: the heading's pitch and room: {}",
+                layout.height(1)
+            );
+            for i in 1..4 {
+                assert_eq!(
+                    layout.top(i),
+                    layout.top(i - 1) + layout.height(i - 1),
+                    "{wrap:?}: line {i} starts below line {}",
+                    i - 1
+                );
+            }
+            let heading = layout.caret(text.find("A heading").unwrap());
+            let body = layout.caret(text.find("body").unwrap());
+            let item = layout.caret(text.find("List item").unwrap());
+            assert_eq!(heading.y, layout.top(1) + 24.);
+            assert!(
+                body.y >= heading.y + 32. + 12.,
+                "{wrap:?}: the paragraph sits below the heading: {} vs {}",
+                body.y,
+                heading.y
+            );
+            assert!(
+                item.y >= body.y + 8. && item.x >= 32.,
+                "{wrap:?}: the list item, indented, below the paragraph"
+            );
+        }
+    }
+
+    /// Unwrapped, a highlighter that only colours, weighs or slants keeps
+    /// no heights: every line a row high, as before.
+    #[test]
+    fn plain_spans_keep_no_heights_unwrapped() {
+        let cache = Rc::new(LineCache::default());
+        cache.set_highlighter(Some(Rc::new(|line: &str, state: u32| {
+            (
+                vec![(0..line.len(), SpanStyle::default().weight(600))],
+                state,
+            )
+        })));
+        let lay = || {
+            cache.layout(
+                || Text::new("a\nb"),
+                None,
+                14.,
+                None,
+                &FontStyle::default(),
+                0,
+                shaper,
+            )
+        };
+        let first = lay();
+        cache.spans(&first, 0);
+        cache.forget_last();
+        assert!(lay().heights.is_none());
     }
 
     /// Laid out by its lines, a text has the carets, hits and selections it
