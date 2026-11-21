@@ -19,7 +19,7 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use crate::editor_lines::{
-    Highlighter, LineColors, LineSpans, SpanHighlighter, SpanStyle, SpanText,
+    Highlighter, LineColors, LineInset, LineInsets, LineSpans, SpanHighlighter, SpanStyle, SpanText,
 };
 
 /// What had keyboard focus, and a text field's selection there, when it
@@ -1601,6 +1601,21 @@ impl EditorHandle {
         self.hint.line_cache().set_highlighter(highlighter.clone());
         self.natural.wrapped.set_highlighter(highlighter.clone());
         self.natural.unwrapped.set_highlighter(highlighter);
+        self.natural.invalidate_spans();
+        self.refresh();
+    }
+    /// Room around each line of a multiline editor (a note's list item's
+    /// indent, a heading's space above), by line index: each line wraps in
+    /// what its indent leaves, and its carets, hits, selection and the lines
+    /// below follow. `None`: none. Only an editor given some keeps them.
+    #[doc(hidden)]
+    pub fn set_line_insets(&self, insets: Option<LineInsets>) {
+        if !self.multiline {
+            return;
+        }
+        self.hint.line_cache().set_insets(insets.clone());
+        self.natural.wrapped.set_insets(insets.clone());
+        self.natural.unwrapped.set_insets(insets);
         self.natural.invalidate_spans();
         self.refresh();
     }
@@ -7381,8 +7396,13 @@ impl Ui {
                         }
                         s.set_font(*id, font.clone());
                         let shaped = lines.line(*i).size();
+                        // Its room (`set_line_insets`): placed past it, in
+                        // what the indent leaves.
+                        let inset = lines.inset(*i);
+                        let wrap_width = wrap_width.map(|w| (w - inset.left).max(1.));
                         let width = wrap_width.unwrap_or(shaped.0 + 2.);
-                        let mut style = fixed(width, lines.height(*i));
+                        let height = lines.height(*i) - inset.above - inset.below;
+                        let mut style = fixed(width, height);
                         style.text_wrap = draw_wrap.get();
                         s.set_style(*id, style);
                         // The size its line was shaped to here: showing it,
@@ -7396,8 +7416,8 @@ impl Ui {
                         s.set_transform(
                             *id,
                             Transform {
-                                x: 0.,
-                                y: lines.top(*i),
+                                x: inset.left,
+                                y: lines.top(*i) + inset.above,
                             },
                         );
                     }
