@@ -1269,12 +1269,15 @@ fn off_clock<R>(lua: &mlua::Lua, work: impl FnOnce(&zgx::reactive::Runtime) -> R
 pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
     type El<'a> = mlua::UserDataRef<ElementUd>;
     let editor_of = |e: &El| e.0.handle.get().and_then(NodeHandle::editor);
+    // Its text, atoms and undo on every target (the DOM's text area with
+    // atoms keeps a model of its own).
+    let edits_of = |e: &El| e.0.handle.get().and_then(NodeHandle::text_edits);
     let table = lua.create_table()?;
     table.set(
         "undo",
         lua.create_function(move |lua, e: El| {
             settle(lua);
-            let Some(editor) = editor_of(&e) else {
+            let Some(editor) = edits_of(&e) else {
                 return Ok(false);
             };
             let mut done = false;
@@ -1287,7 +1290,7 @@ pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<
         "redo",
         lua.create_function(move |lua, e: El| {
             settle(lua);
-            let Some(editor) = editor_of(&e) else {
+            let Some(editor) = edits_of(&e) else {
                 return Ok(false);
             };
             let mut done = false;
@@ -1300,14 +1303,14 @@ pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<
         "can_undo",
         lua.create_function(move |lua, e: El| {
             settle(lua);
-            Ok(editor_of(&e).is_some_and(|editor| editor.editor.borrow().can_undo()))
+            Ok(edits_of(&e).is_some_and(|editor| editor.can_undo()))
         })?,
     )?;
     table.set(
         "can_redo",
         lua.create_function(move |lua, e: El| {
             settle(lua);
-            Ok(editor_of(&e).is_some_and(|editor| editor.editor.borrow().can_redo()))
+            Ok(edits_of(&e).is_some_and(|editor| editor.can_redo()))
         })?,
     )?;
     table.set(
@@ -1329,7 +1332,7 @@ pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<
         lua.create_function(
             move |lua, (e, label, options): (El, String, Option<mlua::Table>)| {
                 settle(lua);
-                let Some(editor) = editor_of(&e) else {
+                let Some(editor) = edits_of(&e) else {
                     return Ok(None);
                 };
                 let (mut key, mut data, mut bg, mut range) =
@@ -1343,7 +1346,7 @@ pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<
                         bg = style.get::<Option<String>>("bg")?;
                     }
                     if let Some(replace) = options.get::<Option<mlua::Table>>("replace")? {
-                        let text = editor.editor.borrow().text().into_owned();
+                        let text = editor.text();
                         let from = replace.get::<Option<usize>>("from")?;
                         let to = replace.get::<Option<usize>>("to")?;
                         range = match (from, to) {
@@ -1373,10 +1376,10 @@ pub(crate) fn install_editor(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<
     table.set(
         "atoms",
         lua.create_function(move |lua, e: El| {
-            let Some(editor) = editor_of(&e) else {
+            let Some(editor) = edits_of(&e) else {
                 return Ok(None);
             };
-            let text = editor.editor.borrow().text().into_owned();
+            let text = editor.text();
             let list = crate::atoms::list(&editor.atoms(), |byte| {
                 crate::atoms::char_of_byte(&text, byte)
             });

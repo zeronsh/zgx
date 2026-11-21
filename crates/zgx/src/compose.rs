@@ -10106,6 +10106,19 @@ impl NodeHandle {
         let ui = self.ui.upgrade()?;
         ui.editor(self.node)
     }
+    /// Its text, atoms and undo, on every target: the editor it is, or on
+    /// the DOM a text area with atoms (its model's). (Pin line.)
+    #[doc(hidden)]
+    pub fn text_edits(&self) -> Option<Rc<dyn crate::widgets::TextEdits>> {
+        if let Some(editor) = self.editor() {
+            return Some(Rc::new(editor));
+        }
+        #[cfg(feature = "dom")]
+        if let Some(hooks) = &self.dom {
+            return hooks.editor();
+        }
+        None
+    }
     /// An editor's selection, `(anchor, focus)` in UTF-8 byte offsets
     /// (see `EditorHandle::selection`); `None` for other nodes.
     pub fn selection(&self) -> Option<(usize, usize)> {

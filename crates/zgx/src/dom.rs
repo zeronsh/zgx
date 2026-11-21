@@ -107,6 +107,10 @@ pub trait Hooks {
         let _ = (node, tag, selection);
         false
     }
+    /// `NodeHandle::text_edits`: a text area with atoms over its own model.
+    fn editor(&self) -> Option<Rc<dyn crate::widgets::TextEdits>> {
+        None
+    }
 }
 
 /// A handle to a DOM node, for `on_mount`: its measurements from `hooks`,

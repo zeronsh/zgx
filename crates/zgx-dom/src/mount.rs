@@ -927,6 +927,12 @@ impl __dom::Hooks for NodeHooks {
         let (anchor, focus) = selection.map_or((-1., -1.), |(a, f)| (a as f64, f as f64));
         js::zgx_restore_focus(node, tag, anchor, focus)
     }
+    fn editor(&self) -> Option<Rc<dyn zgx::widgets::TextEdits>> {
+        if !self.state.borrow().alive {
+            return None;
+        }
+        crate::atom_editor::text_edits(self.node)
+    }
     fn scroll_into_view(&self, how: &zgx::compose::ScrollIntoView) -> bool {
         use zgx::compose::RowAlign;
         if !self.state.borrow().alive {
