@@ -4280,6 +4280,9 @@ impl UiPage {
     fn local(&self, x: f32, y: f32) -> Option<(f64, f64)> {
         let (node, scene) = (self.node.get()?, self.scene.borrow().upgrade()?);
         let scene = scene.try_borrow().ok()?;
+        if !scene.contains(node) {
+            return None;
+        }
         let bounds = scene.bounds(node);
         let shown = scene.window_rect(node, bounds);
         let scale = self.scale.get() as f64;
@@ -5164,6 +5167,9 @@ pub(crate) fn ime_area(ui: &Ui) -> Option<Rect> {
     let (x, y, w, h) = page.caret.get()?;
     let node = page.node.get()?;
     let scene = ui.scene.borrow();
+    if !scene.contains(node) {
+        return None;
+    }
     let bounds = scene.bounds(node);
     let scale = page.scale.get().max(0.01);
     let rect = Rect::new(

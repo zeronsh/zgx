@@ -1709,10 +1709,13 @@ fn field_lines(
 ) -> Option<Vec<zgx::scene::TextLine>> {
     let mut lines = Vec::new();
     for (start, node) in apart {
+        if !scene.contains(*node) {
+            return None;
+        }
         let zgx::scene::NodeKind::Text { text, .. } = scene.kind(*node) else {
             return None;
         };
-        if !scene.contains(*node) || value.get(*start..start + text.len())? != &**text {
+        if value.get(*start..start + text.len())? != &**text {
             return None;
         }
         for mut line in scene.text_lines(*node)? {
@@ -4800,5 +4803,22 @@ mod language_tests {
         language.set("zh-HK".into());
         ui.prepare_frame();
         assert_eq!(sent(&mut adapter, &ui), [some("zh-HK"), None, None]);
+    }
+
+    #[test]
+    fn field_lines_returns_none_for_a_removed_line_node() {
+        let mut scene = Scene::new(200., 100.);
+        let line = scene.append(
+            scene.root(),
+            zgx::scene::NodeKind::Text {
+                text: std::sync::Arc::from("hello"),
+                color: zgx::scene::Color(255, 255, 255, 255),
+                font_size: 14.,
+            },
+            zgx::scene::Style::default(),
+        );
+        scene.flush();
+        scene.remove(line);
+        assert!(field_lines(&scene, &[(0, line)], "hello").is_none());
     }
 }
