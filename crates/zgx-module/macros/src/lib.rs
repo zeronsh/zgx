@@ -37,7 +37,9 @@ const ABI: u32 = 1;
 /// #[zgx_module::module(name = "words")]
 /// mod words {
 ///     #[zgx_module::export]
-///     fn count(text: &str) -> f64 { … }
+///     fn count(text: &str) -> f64 {
+///         text.split_whitespace().count() as f64
+///     }
 /// }
 /// ```
 ///

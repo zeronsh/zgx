@@ -1003,7 +1003,12 @@ pub unsafe fn enter(
 /// nothing knows their types.
 ///
 /// ```ignore
-/// zgx_module::register!("words", |host: &zgx_module::Host| { … });
+/// zgx_module::register!("words", |host: &zgx_module::Host| {
+///     host.function("count", |text| {
+///         let words = text.str().map_or(0, |t| t.split_whitespace().count());
+///         zgx_module::Value::from(words as f64)
+///     });
+/// });
 /// ```
 #[macro_export]
 macro_rules! register {
