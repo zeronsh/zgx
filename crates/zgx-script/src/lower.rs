@@ -9082,11 +9082,14 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
             .iter()
             .map(|span| {
                 // Copied only for the few that follow: a span's own is read
-                // where it lies.
+                // where it lies, and its font is never copied (only one a
+                // followed option names is held).
                 let mut own = None;
+                let mut own_font = None;
                 // Tracked: a change builds the paragraph again.
                 for (name, ty, source) in &span.followed {
-                    let (style, font) = own.get_or_insert_with(|| (span.style, span.font.clone()));
+                    let style = own.get_or_insert(span.style);
+                    let font = &mut own_font;
                     let lit = resolve(source, *ty, None, &vm);
                     let themed = match &lit {
                         Some(Lit::Color(color)) => Some(zgx::theme::Themed::Value(*color)),
@@ -9114,10 +9117,8 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         }
                     }
                 }
-                let (style, font) = match &own {
-                    Some((style, font)) => (style, font),
-                    None => (&span.style, &span.font),
-                };
+                let style = own.as_ref().unwrap_or(&span.style);
+                let font = own_font.as_ref().or(span.font.as_ref());
                 let SpanStyle {
                     color,
                     background,
