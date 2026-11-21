@@ -1170,7 +1170,13 @@ impl LineCache {
     }
     /// Line `i` shaped with the runs its spans give it, if they shape it
     /// (a weight, italics): `None` for a line shaped as its plain text.
-    fn styled(
+    fn styled(&self, layout: &LinesLayout, i: usize, text: &str) -> Option<Rc<dyn TextLayout>> {
+        self.styled_at(layout, i, text, (layout.wrap, text))
+    }
+    /// `styled`, shaped at `wrap` and kept by `key` (its text, or its text
+    /// and indent: `LinesLayout::line_in_room`).
+    #[inline(always)]
+    fn styled_at(
         &self,
         layout: &LinesLayout,
         i: usize,
@@ -1207,9 +1213,13 @@ impl LineCache {
         styled.insert(key, (shaped.clone(), tick));
         Some(shaped)
     }
-    /// Line `text`, shaped at `wrap` (from the cache if it is there, by
-    /// `key`: its text, or its text and indent).
-    fn line(
+    /// Line `text`, shaped (from the cache if it is there).
+    fn line(&self, text: &str, shape: &LineShaper, wrap: Option<f32>) -> Rc<dyn TextLayout> {
+        self.line_at(text, shape, (wrap, text))
+    }
+    /// `line`, kept by `key` (its text, or its text and indent).
+    #[inline(always)]
+    fn line_at(
         &self,
         text: &str,
         shape: &LineShaper,
@@ -1311,6 +1321,9 @@ pub(crate) struct LinesLayout {
     shape: LineShaper,
     rich: RichLineShaper,
     cache: Rc<LineCache>,
+    /// Its lines have room of their own (`set_line_insets`), as when it was
+    /// made: a text area's insets set lay it out anew.
+    room: bool,
     /// Lines across chunks, joined once (a long line's every draw would
     /// copy it): a few, by number.
     joined: RefCell<HashMap<usize, Arc<str>>>,
@@ -1362,6 +1375,7 @@ impl LinesLayout {
             heights: None,
             shape,
             rich,
+            room: cache.has_insets(),
             cache,
             joined: RefCell::default(),
         };
@@ -1407,6 +1421,7 @@ impl LinesLayout {
             shape: old.shape.clone(),
             rich: old.rich.clone(),
             cache: old.cache.clone(),
+            room: old.cache.has_insets(),
             joined: RefCell::default(),
         };
         // The edited lines' lengths count for the longest.
@@ -1518,15 +1533,48 @@ impl LinesLayout {
     }
     /// Whether its lines have room of their own (`set_line_insets`).
     pub(crate) fn has_insets(&self) -> bool {
-        self.cache.has_insets()
+        self.room
     }
     /// Line `i`'s room (`EditorHandle::set_line_insets`).
     #[inline]
     pub(crate) fn inset(&self, i: usize) -> LineInset {
+        if !self.room {
+            return LineInset::default();
+        }
         self.cache.inset(self, i)
     }
     /// Line `i`, shaped.
     pub(crate) fn line(&self, i: usize) -> Rc<dyn TextLayout> {
+        // Lines with room of their own (`set_line_insets`), out of line: a
+        // text area without pays one check.
+        if self.room {
+            return self.line_in_room(i);
+        }
+        let text = self.line_text(i);
+        let layout = match self.cache.styled(self, i, &text) {
+            Some(layout) => layout,
+            None => self.cache.line(&text, &self.shape, self.wrap),
+        };
+        let (width, height) = layout.size();
+        if width > self.widest.get() {
+            self.widest.set(width);
+        }
+        if let Some(heights) = &self.heights {
+            let height = height.max(self.row);
+            if heights.borrow().each[i] != height {
+                heights.borrow_mut().set(i, height);
+                self.cache
+                    .heights
+                    .borrow_mut()
+                    .insert((*text).into(), height);
+            }
+        }
+        layout
+    }
+    /// `line` of an editor whose lines may have room of their own.
+    #[cold]
+    #[inline(never)]
+    fn line_in_room(&self, i: usize) -> Rc<dyn TextLayout> {
         let text = self.line_text(i);
         let inset = self.inset(i);
         // An indented line wraps in what its indent leaves: kept apart from
@@ -1539,9 +1587,9 @@ impl LinesLayout {
             }
             wrap => (wrap, &*text),
         };
-        let layout = match self.cache.styled(self, i, &text, (wrap, key)) {
+        let layout = match self.cache.styled_at(self, i, &text, (wrap, key)) {
             Some(layout) => layout,
-            None => self.cache.line(&text, &self.shape, (wrap, key)),
+            None => self.cache.line_at(&text, &self.shape, (wrap, key)),
         };
         let (width, height) = layout.size();
         let width = width + inset.left;
@@ -1568,6 +1616,9 @@ impl LinesLayout {
         }
     }
     fn shift(&self, i: usize, rect: Rect) -> Rect {
+        if !self.room {
+            return Rect::new(rect.x, rect.y + self.top(i), rect.width, rect.height);
+        }
         let inset = self.inset(i);
         Rect::new(
             rect.x + inset.left,

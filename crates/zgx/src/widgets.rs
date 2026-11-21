@@ -7347,13 +7347,7 @@ impl Ui {
                     // A hidden line (`LineInset::hidden`) has no node.
                     let insets = lines.has_insets();
                     if insets {
-                        pool.retain(|(line, id)| {
-                            let hidden = lines.inset(*line).hidden;
-                            if hidden {
-                                free.push(*id);
-                            }
-                            !hidden
-                        });
+                        free_hidden_lines(lines, &mut pool, &mut free);
                     }
                     for i in shown_lines.clone() {
                         if (insets && lines.inset(i).hidden)
@@ -7418,11 +7412,17 @@ impl Ui {
                         s.set_font(*id, font.clone());
                         let shaped = lines.line(*i).size();
                         // Its room (`set_line_insets`): placed past it, in
-                        // what the indent leaves.
-                        let inset = lines.inset(*i);
-                        let wrap_width = lines.draw_width(*i, wrap_width);
-                        let width = wrap_width.unwrap_or(shaped.0 + 2.);
-                        let height = lines.height(*i) - inset.above - inset.below;
+                        // what the indent leaves. None without insets.
+                        let (at, wrap_width, width, height) = if insets {
+                            line_in_room(lines, *i, wrap_width, shaped)
+                        } else {
+                            (
+                                (0., lines.top(*i)),
+                                wrap_width,
+                                wrap_width.unwrap_or(shaped.0 + 2.),
+                                lines.height(*i),
+                            )
+                        };
                         let mut style = fixed(width, height);
                         style.text_wrap = draw_wrap.get();
                         s.set_style(*id, style);
@@ -7434,13 +7434,7 @@ impl Ui {
                         if s.bounds(*id).width == 0. {
                             s.know_text_size(*id, Some(0.), shaped);
                         }
-                        s.set_transform(
-                            *id,
-                            Transform {
-                                x: inset.left,
-                                y: lines.top(*i) + inset.above,
-                            },
-                        );
+                        s.set_transform(*id, Transform { x: at.0, y: at.1 });
                     }
                     s.set_transform(
                         layer,
@@ -9789,6 +9783,43 @@ thread_local! {
 #[doc(hidden)]
 pub fn debug_editor_draws() -> u64 {
     EDITOR_DRAWS.get()
+}
+/// `pool`'s line nodes whose lines are hidden (`LineInset::hidden`) moved
+/// to `free`: a hidden line has no node.
+#[cold]
+#[inline(never)]
+fn free_hidden_lines(
+    lines: &crate::editor_lines::LinesLayout,
+    pool: &mut Vec<(usize, NodeId)>,
+    free: &mut Vec<NodeId>,
+) {
+    pool.retain(|(line, id)| {
+        let hidden = lines.inset(*line).hidden;
+        if hidden {
+            free.push(*id);
+        }
+        !hidden
+    });
+}
+/// Where line `i`'s node goes with its room (`set_line_insets`), the width
+/// it wraps in, and its box's width and height: past its indent and the
+/// room above, in what the indent leaves.
+#[cold]
+#[inline(never)]
+fn line_in_room(
+    lines: &crate::editor_lines::LinesLayout,
+    i: usize,
+    wrap_width: Option<f32>,
+    shaped: (f32, f32),
+) -> ((f32, f32), Option<f32>, f32, f32) {
+    let inset = lines.inset(i);
+    let wrap_width = lines.draw_width(i, wrap_width);
+    (
+        (inset.left, lines.top(i) + inset.above),
+        wrap_width,
+        wrap_width.unwrap_or(shaped.0 + 2.),
+        lines.height(i) - inset.above - inset.below,
+    )
 }
 /// An input waiting to be drawn, with the model effect whose reads its
 /// draw's are.
