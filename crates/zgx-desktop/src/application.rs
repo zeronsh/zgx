@@ -137,6 +137,16 @@ pub struct WindowOptions {
     /// software one): the GPU's, or the raster always.
     #[doc(hidden)]
     pub renderer: Option<crate::RendererChoice>,
+    /// Where `Titlebar::Inset`'s traffic lights go on macOS: the close
+    /// button's top left, in the content's points from the window's top
+    /// left (Electron's `trafficLightPosition`), so they line up with a
+    /// title bar of the app's own height. They stay there as the window
+    /// resizes, changes focus or appearance and comes back from full
+    /// screen, and move with the window's zoom as the content does. `None`
+    /// (the default) is AppKit's place, centred in a 40-point strip. Other
+    /// platforms and title bars place their own.
+    #[doc(hidden)]
+    pub traffic_lights: Option<(f64, f64)>,
 }
 /// A window's smallest and largest sizes are the same.
 #[cfg(any(windows, test))]
@@ -176,6 +186,7 @@ impl Default for WindowOptions {
             visible: true,
             caption_height: None,
             renderer: None,
+            traffic_lights: None,
         }
     }
 }
@@ -1106,6 +1117,12 @@ impl Application {
     /// return once the application quits.
     pub fn run(self, build: impl FnOnce(&mut WindowContext)) -> Result<(), Box<dyn Error>> {
         zgx::profile::mark("run");
+        // `ZGX_FREEZE_TIME=1`: every animation, timer, caret and frame stands
+        // at one time until `zgx inspect clock advance` moves it, so a
+        // screenshot run is the same each time.
+        if zgx::env::var_os("ZGX_FREEZE_TIME").is_some_and(|v| !v.is_empty() && v != "0") {
+            zgx::clock::freeze();
+        }
         // Who the app is to the system's notifications and badge.
         crate::notify::set_identity(crate::notify::Identity {
             application_id: self.application_id.clone(),
@@ -2834,6 +2851,17 @@ impl Host {
         if phase.settles()
             && let Some(window) = &self.window
         {
+            // Out of full screen AppKit lays the traffic lights out in its
+            // own places again, as the inset toolbar shows.
+            let (zoom, traffic_lights) = (self.context.ui.zoom(), self.options.traffic_lights);
+            if zoom != 1. || traffic_lights.is_some() {
+                crate::window_chrome::place_buttons(
+                    window,
+                    self.options.titlebar,
+                    zoom,
+                    traffic_lights,
+                );
+            }
             info.refresh(window, self.options.titlebar);
             // Covered after all, once the transition is over: an occlusion
             // it went on drawing through is counted now.
@@ -3990,14 +4018,8 @@ impl Host {
             // Through the region's `View::on_selection_copy`, the clipboard
             // taken only to write.
             let clipboard = self.clipboard.clone();
-            self.context.ui.copy_selection_from(|text, html| {
-                clipboard
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|clipboard| match html {
-                        Some(html) => clipboard.set_rich_text(text, html).is_ok(),
-                        None => clipboard.set_text(text).is_ok(),
-                    })
+            self.context.ui.copy_selection_from(|content| {
+                (clipboard.borrow_mut().as_mut()).is_some_and(|clipboard| clipboard.write(content))
             });
             return true;
         };
@@ -4023,14 +4045,8 @@ impl Host {
             &self.context.ui,
             &editor,
             k.eq_ignore_ascii_case("x"),
-            |text, html| {
-                clipboard
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|clipboard| match html {
-                        Some(html) => clipboard.set_rich_text(text, html).is_ok(),
-                        None => clipboard.set_text(text).is_ok(),
-                    })
+            |content| {
+                (clipboard.borrow_mut().as_mut()).is_some_and(|clipboard| clipboard.write(content))
             },
         );
         true
@@ -4444,10 +4460,16 @@ impl Host {
             self.options.glass,
             self.options.caption_height,
         );
-        // Opened zoomed: its buttons where the zoomed title bar has them.
+        // Opened zoomed or with its buttons placed: where its title bar has them.
         let zoom = self.context.ui.zoom();
-        if zoom != 1. {
-            crate::window_chrome::zoom_buttons(&window, self.options.titlebar, zoom);
+        let traffic_lights = self.options.traffic_lights;
+        if zoom != 1. || traffic_lights.is_some() {
+            crate::window_chrome::place_buttons(
+                &window,
+                self.options.titlebar,
+                zoom,
+                traffic_lights,
+            );
         }
         // A saved frame keeps its size.
         if self.options.titlebar != crate::Titlebar::Standard && !placed.restored {
@@ -5395,22 +5417,28 @@ impl Host {
                 {
                     self.reported_size = Some(size);
                 }
-                // AppKit lays the window's buttons out again: zoomed, they go
-                // back where the title bar has them, now and once its layout
-                // for the new size is done.
+                // AppKit lays the window's buttons out again: zoomed or placed,
+                // they go back where the title bar has them, now and once its
+                // layout for the new size is done.
                 let zoom = self.context.ui.zoom();
-                if zoom != 1.
+                let traffic_lights = self.options.traffic_lights;
+                if (zoom != 1. || traffic_lights.is_some())
                     && let Some(window) = &self.window
                 {
                     let titlebar = self.options.titlebar;
-                    crate::window_chrome::zoom_buttons(window, titlebar, zoom);
+                    crate::window_chrome::place_buttons(window, titlebar, zoom, traffic_lights);
                     self.context.window_info.refresh(window, titlebar);
                     #[cfg(target_os = "macos")]
                     {
                         let window = window.clone();
                         dispatch2::DispatchQueue::main().exec_async(move || {
                             let zoom = crate::popup_window::zoom_of(window.id());
-                            crate::window_chrome::zoom_buttons(&window, titlebar, zoom);
+                            crate::window_chrome::place_buttons(
+                                &window,
+                                titlebar,
+                                zoom,
+                                traffic_lights,
+                            );
                         });
                     }
                 }
@@ -6331,10 +6359,11 @@ impl Host {
                 scale,
             );
             // The platform's buttons where the zoomed title bar has them.
-            crate::window_chrome::zoom_buttons(
+            crate::window_chrome::place_buttons(
                 &window,
                 self.options.titlebar,
                 self.context.ui.zoom(),
+                self.options.traffic_lights,
             );
             // And where scripts read them (`ui.window.controls`).
             self.context
@@ -9794,7 +9823,7 @@ fn copy_or_cut_editor(
     ui: &zgx::widgets::Ui,
     editor: &zgx::widgets::EditorHandle,
     cut: bool,
-    write: impl FnOnce(String, Option<String>) -> bool,
+    write: impl FnOnce(zgx::widgets::ClipboardContent) -> bool,
 ) -> bool {
     ui.copy_from(editor, cut, write)
 }
@@ -9850,10 +9879,10 @@ mod tests {
                 .w(200.)
                 .h(30.)
                 .on_copy(|request| {
-                    Some(ClipboardContent {
-                        text: request.text.to_uppercase(),
-                        html: Some(format!("<i>{}</i>", request.text)),
-                    })
+                    Some(ClipboardContent::new(
+                        request.text.to_uppercase(),
+                        Some(format!("<i>{}</i>", request.text)),
+                    ))
                 }),
         );
         ui.prepare_frame();
@@ -9864,8 +9893,8 @@ mod tests {
             &ui,
             &editor,
             false,
-            |text, html| {
-                written = Some((text, html));
+            |content: ClipboardContent| {
+                written = Some((content.text, content.html));
                 true
             }
         ));
@@ -9879,8 +9908,8 @@ mod tests {
             &ui,
             &editor,
             true,
-            |text, html| {
-                written = Some((text, html));
+            |content: ClipboardContent| {
+                written = Some((content.text, content.html));
                 true
             }
         ));
@@ -9891,7 +9920,7 @@ mod tests {
         assert_eq!(value.get(), " world", "\u{2318}X deletes the selection");
         editor.set_secure(true);
         editor.set_selection(0, 6);
-        assert!(!super::copy_or_cut_editor(&ui, &editor, false, |_, _| {
+        assert!(!super::copy_or_cut_editor(&ui, &editor, false, |_| {
             panic!("a password field writes nothing")
         }));
     }

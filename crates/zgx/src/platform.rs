@@ -234,6 +234,41 @@ pub trait Platform {
         let _ = html;
         self.set_clipboard_text(text)
     }
+    /// Put `text` on the clipboard, with `html` (its rich form) where given
+    /// and `types` beside them, in one change of the clipboard: each type a
+    /// MIME type of the app's own (`application/x-anara-citations`) and its
+    /// text, written where a browser's page reads its own (Chromium's web
+    /// custom data), so a page's paste `getData`s them as another page's
+    /// copy put them. Whether it took them. None takes the text and HTML
+    /// alone; no types is a copy of text and HTML as ever.
+    #[doc(hidden)]
+    fn set_clipboard_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+    ) -> bool {
+        let _ = types;
+        match html {
+            Some(html) => self.set_clipboard_rich_text(text, html),
+            None => self.set_clipboard_text(text),
+        }
+    }
+    /// The MIME types of the app's own the clipboard holds (what
+    /// `set_clipboard_typed` wrote, or a web page's copy did), in the order
+    /// they were written; none where it holds none. The text and HTML are
+    /// `clipboard_text`'s and `clipboard_html`'s, not listed here.
+    #[doc(hidden)]
+    fn clipboard_types(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// The text of the clipboard's MIME type `mime` of those
+    /// `clipboard_types` lists, if it holds it. None reads none.
+    #[doc(hidden)]
+    fn clipboard_typed(&self, mime: &str) -> Option<String> {
+        let _ = mime;
+        None
+    }
     /// The clipboard's image, if it holds one: a screenshot, an image
     /// editor's copy, a browser's Copy Image. Later, as decoding a large one
     /// takes a frame or more: a desktop host reads it off the UI thread.
@@ -359,6 +394,9 @@ pub fn unforwarded(wrap: impl FnOnce(PlatformService) -> PlatformService) -> Vec
     let _ = w.set_clipboard_files(Vec::new());
     let _ = w.clipboard_html();
     let _ = w.set_clipboard_rich_text(String::new(), String::new());
+    let _ = w.set_clipboard_typed(String::new(), None, &[]);
+    let _ = w.clipboard_types();
+    let _ = w.clipboard_typed("");
     drop(w.clipboard_image());
     drop(w.set_clipboard_image(Arc::new(image)));
     drop(w.open_files(picker()));
@@ -385,7 +423,7 @@ struct Probe {
 }
 impl Probe {
     /// Every `Platform` method, in the trait's order.
-    const METHODS: [&'static str; 31] = [
+    const METHODS: [&'static str; 34] = [
         "clipboard_text",
         "set_clipboard_text",
         "primary_text",
@@ -406,6 +444,9 @@ impl Probe {
         "set_clipboard_files",
         "clipboard_html",
         "set_clipboard_rich_text",
+        "set_clipboard_typed",
+        "clipboard_types",
+        "clipboard_typed",
         "clipboard_image",
         "set_clipboard_image",
         "open_files",
@@ -499,6 +540,18 @@ impl Platform for Probe {
     fn set_clipboard_rich_text(&self, _: String, _: String) -> bool {
         self.heard("set_clipboard_rich_text");
         true
+    }
+    fn set_clipboard_typed(&self, _: String, _: Option<String>, _: &[(String, String)]) -> bool {
+        self.heard("set_clipboard_typed");
+        true
+    }
+    fn clipboard_types(&self) -> Vec<String> {
+        self.heard("clipboard_types");
+        Vec::new()
+    }
+    fn clipboard_typed(&self, _: &str) -> Option<String> {
+        self.heard("clipboard_typed");
+        None
     }
     fn clipboard_image(&self) -> Pending<Option<crate::image::ImageData>> {
         self.heard("clipboard_image");

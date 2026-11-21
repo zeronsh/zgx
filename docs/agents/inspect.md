@@ -141,6 +141,7 @@ zgx inspect type --no-click ' and a test'              # where focus is: no clic
 zgx inspect key Enter                                  # Escape, Tab, cmd+k, alt+ArrowDown, shift+Tab, F5…
 zgx inspect key alt                                    # modifiers alone (ctrl+shift): held, then let go, as a window reports a tap
 zgx inspect scroll '#transcript' 400                   # points; down is positive
+zgx inspect scroll 300,200 0 -120                      # at a point, sideways (dx), as a trackpad's motion
 zgx inspect command new                                # a ui.command, as its menu item or shortcut runs it
 zgx inspect set current '"c1"'                         # a named state, the value as JSON
 zgx inspect wait '"Copy"' --timeout 8000               # until it shows
@@ -156,7 +157,7 @@ zgx inspect sleep 500                                  # let the app run
 ## Clipboard
 
 ```sh
-zgx inspect clipboard                                  # its text, HTML, image's size and files
+zgx inspect clipboard                                  # its text, HTML, image's size, files and types (a copy's `types`)
 zgx inspect clipboard set --text "hello"               # or --html "<p>hi</p>" (with --text: a rich copy)
 zgx inspect clipboard set --image shot.png
 zgx inspect clipboard set --files notes.pdf shot.png   # as a file manager copies them: a paste hears them as files
@@ -187,7 +188,7 @@ On macOS a popup is a window of its own and may lie past the main window's edge.
 
 ## The app's other windows
 
-`windows` lists the main window and the windows the app declares (`ui.window`, an item of `ui.windows`), each with its id, size, title and popups open. Any command takes `window` (`--window` on the CLI, `window` on every MCP tool) and answers for that window: an id from `windows`, or an item's key, which names its window as `zgx test`'s `app:window` does. Without it, the main window answers. A window answers while it is open; one that closes is gone from `windows`. Popups answer for the window they open from, as above.
+`windows` lists the main window and the windows the app declares (`ui.window`, an item of `ui.windows`), each with its id, size, title and popups open. Each popup it wants open follows its window's line, with its role, its owner window and whether it shows or is held back while the app is at the back (`popup @412  menu  shown  owner main`); the JSON lists them as `panels`. Any command takes `window` (`--window` on the CLI, `window` on every MCP tool) and answers for that window: an id from `windows`, or an item's key, which names its window as `zgx test`'s `app:window` does. Without it, the main window answers. A window answers while it is open; one that closes is gone from `windows`. Popups answer for the window they open from, as above.
 
 ```sh
 zgx inspect windows                       # main  1100x720
@@ -196,6 +197,30 @@ zgx inspect --window img01.png tree       # the detail window's interface
 zgx inspect --window img01.png click '#favorite'
 zgx inspect --window windows1:shots state # states are the app's, from any window
 ```
+
+## A frozen clock
+
+`ZGX_FREEZE_TIME=1` at launch, or `clock freeze` in a running app, holds every animation, tween, timer (`ui.after`, `ui.every`), caret blink, tooltip delay and frame at one time, so a screenshot shows the same spinner, caret and transition each run. `clock advance <ms>` moves it on by hand, waking the timers due by then in order; `clock thaw` lets it run again.
+
+```sh
+zgx inspect clock freeze
+zgx inspect clock advance 250                         # a quarter second on: the tooltip's delay passes
+zgx inspect snapshot '#panel' --out panel.png
+zgx inspect clock thaw
+```
+
+## The Luau heap: garbage or a leak
+
+`gc` runs a full collection in each script VM and prints the heap before and after (what was garbage) and what is left by object type, userdata type and code chunk. Run it again after the same actions: what grows each time is kept, not garbage. `--retained KIND` prints the commonest chains of holders from a root to those objects (a userdata type such as `State`, `table`, `function`, or part of a function's name or chunk), and says how many a Luau holder alone reaches; the rest are held through the handles Rust keeps (`--lua-only` shows the Luau chains instead). `--mark`, then `--since-mark` after more actions, lists what survived that wasn't there before.
+
+```sh
+zgx inspect gc --top 5
+zgx inspect gc --mark
+zgx inspect click '#close-tab'
+zgx inspect gc --since-mark --retained State          # what the closed tab left, and who holds it
+```
+
+`zgx test`'s `app:states()` lists the named states, and `app:retained_states()` counts the States kept after a full collection, for a test that a closed view left none behind.
 
 ## Gestures: record once, replay
 
@@ -308,7 +333,7 @@ zgx inspect switch scroll_copy on
 
 ## As MCP tools
 
-`zgx inspect mcp` serves the same commands as MCP tools on stdio (`zgx_windows`, `zgx_tree`, `zgx_node`, `zgx_find`, `zgx_state`, `zgx_set_state`, `zgx_click`, `zgx_type`, `zgx_key`, `zgx_scroll`, `zgx_command`, `zgx_errors`, `zgx_lint`, `zgx_frames`, `zgx_mark`, `zgx_reloads`, `zgx_switch`, `zgx_search`, `zgx_snapshot`, `zgx_record`, `zgx_replay`, `zgx_wait`, `zgx_sleep`, `zgx_apps`), each answering the text the CLI prints, with `isError` when it failed. Every tool takes an optional `app` (a pid) for when several apps run, and an optional `window` (an id from `zgx_windows`, or an item's key) for another of the app's windows.
+`zgx inspect mcp` serves the same commands as MCP tools on stdio (`zgx_windows`, `zgx_tree`, `zgx_node`, `zgx_find`, `zgx_state`, `zgx_set_state`, `zgx_click`, `zgx_type`, `zgx_key`, `zgx_scroll`, `zgx_command`, `zgx_errors`, `zgx_lint`, `zgx_frames`, `zgx_mark`, `zgx_reloads`, `zgx_switch`, `zgx_clock`, `zgx_gc`, `zgx_search`, `zgx_snapshot`, `zgx_record`, `zgx_replay`, `zgx_wait`, `zgx_sleep`, `zgx_apps`), each answering the text the CLI prints, with `isError` when it failed. Every tool takes an optional `app` (a pid) for when several apps run, and an optional `window` (an id from `zgx_windows`, or an item's key) for another of the app's windows.
 
 ```sh
 claude mcp add zgx -- zgx inspect mcp      # Claude Code; any MCP client runs the same command

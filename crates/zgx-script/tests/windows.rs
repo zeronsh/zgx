@@ -643,3 +643,72 @@ fn a_windows_content_fills_it() {
     let b = window.scene.borrow().bounds(detail);
     assert_eq!((b.width, b.height), (420., 360.), "{b:?}");
 }
+
+/// `ui.window.popups` lists the menus and popovers open, as they open and close.
+#[test]
+fn window_popups_lists_the_open_menus_and_popovers() {
+    let mut h = Harness::inline(
+        r##"
+local open = ui.state("open", false)
+local seen = ui.state("seen", 0)
+return ui.column { w_full = true, h_full = true,
+    ui.text { id = "n", function() return tostring(#ui.window.popups:get()) end },
+    ui.popover { open = open, anchor = ui.button { id = "a", "Anchor" }, ui.text { id = "body", "inside" } },
+}"##,
+    );
+    h.host.window_state(&h.ui);
+    h.frames(3);
+    assert_eq!(h.text("n"), "0");
+    h.host
+        .set_state("open", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frames(4);
+    assert_eq!(h.text("n"), "1");
+    h.host
+        .set_state("open", zgx_script::Value::Bool(false))
+        .unwrap();
+    h.frames(4);
+    assert_eq!(h.text("n"), "0");
+}
+
+/// `zgx inspect windows` lists the popups a window wants open, each with its
+/// role, its owner window and whether it shows or is held back (the app at
+/// the back).
+#[cfg(feature = "inspect")]
+#[test]
+fn inspect_windows_lists_popups_with_their_owner_and_whether_they_show() {
+    use zgx_script::inspect::{Reply, Session};
+    let h = Harness::inline(
+        r##"
+local open = ui.state("open", false)
+return ui.column { w_full = true, h_full = true,
+    ui.menu { open = open, anchor = ui.button { id = "opener", "Open" },
+        ui.menu_item { "One" }, ui.menu_item { "Two" } },
+}"##,
+    );
+    h.ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 800.)]);
+    h.frames(3);
+    h.host
+        .set_state("open", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frames(3);
+    let session = Session::new(&h.ui, h.handle.clone(), &h.host, None);
+    let windows = |session: &Session| match session.answer(r#"{"cmd":"windows"}"#) {
+        Reply::Now(json) => json,
+        Reply::Later(_) => panic!("windows answers at once"),
+    };
+    let shown = windows(&session);
+    assert!(shown.contains("popup") && shown.contains("menu"), "{shown}");
+    assert!(
+        shown.contains("shown") && shown.contains("owner main"),
+        "{shown}"
+    );
+    assert!(shown.contains("\"shown\":true"), "{shown}");
+    h.ui.set_app_active(false);
+    h.frames(2);
+    let held = windows(&session);
+    assert!(
+        held.contains("held") && held.contains("\"held\":true"),
+        "{held}"
+    );
+}

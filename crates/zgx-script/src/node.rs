@@ -5828,20 +5828,29 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "markdown_view",
         lua.create_function(|lua, table: Table| {
-            // Its own options, read before the styles are.
-            let flag = |name: &str, default: bool| -> mlua::Result<bool> {
-                let value = table.get::<Option<bool>>(name)?.unwrap_or(default);
-                table.raw_set(name, mlua::Value::Nil)?;
-                Ok(value)
+            // Its own options, read (raw, by the VM's names for them) and
+            // taken out before the styles are.
+            let keys = crate::markdown::keys(lua)?;
+            let flag = |key: &mlua::LuaString, default: bool| -> mlua::Result<bool> {
+                Ok(match table.raw_get::<Option<bool>>(key)? {
+                    Some(value) => {
+                        table.raw_set(key, mlua::Value::Nil)?;
+                        value
+                    }
+                    None => default,
+                })
             };
             let options = crate::markdown::view::ViewOptions {
                 parse: crate::markdown::Options {
-                    breaks: flag("breaks", false)?,
-                    paths: flag("paths", false)?,
+                    breaks: flag(&keys.breaks, false)?,
+                    paths: flag(&keys.paths, false)?,
+                    html_marks: flag(&keys.html_marks, false)?,
+                    autolinks: flag(&keys.autolinks, false)?,
                     code: None,
                 },
-                copy: flag("copy", true)?,
+                copy: flag(&keys.copy, true)?,
             };
+            drop(keys);
             let mut args = TextArgs::default();
             let empty = Kind::Text(Text::Literal(String::new()));
             let (owner, lint) = owner_and_lint(lua)?;

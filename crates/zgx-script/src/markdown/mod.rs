@@ -16,13 +16,16 @@
 //! A run is `{ x = text, b?, i?, c? (code), s? (strike), a? (link),
 //! f? (a repository file, with [`Options::paths`]) }`. A link whose address
 //! is still streaming has `a` = [`PENDING_LINK_URL`]: style it as a link,
-//! but it goes nowhere yet. Raw HTML is dropped.
+//! but it goes nowhere yet. Raw HTML is dropped, but for the inline marks
+//! [`Options::html_marks`] reads. With [`Options::autolinks`], GFM's
+//! autolink literals are links.
 //!
 //! Streaming text parses incrementally ([`Incremental`]): an append parses
 //! again only from the last top-level blocks, and the blocks before them
 //! are the same values as before, so what reads them (a script's
 //! `ui.each` over them, a reconciling [`crate::Shared`]) skips them at a
 //! pointer's glance.
+mod autolink;
 mod mend;
 pub(crate) mod view;
 
@@ -44,6 +47,18 @@ pub struct Options {
     /// Repository paths in text (`src/main.rs:12`), in code spans that are a
     /// path whole, and relative links that read as one, are files (`f`).
     pub paths: bool,
+    /// Inline HTML's few marks style their text, as a web chat showing
+    /// GitHub-sanitized HTML does: `b`/`strong` bold, `i`/`em` italic,
+    /// `s`/`del`/`strike` struck, `code`/`kbd`/`samp`/`tt` code, `a href`
+    /// a link, and `br` a line break. Other tags are dropped and their text
+    /// kept; block HTML is dropped either way.
+    #[doc(hidden)]
+    pub html_marks: bool,
+    /// GFM's autolink literals are links: `https://…` as written, `www.…`
+    /// to `http://…`, and an email to `mailto:` (not `ftp://`, as
+    /// remark-gfm, which a web chat renders with, links none).
+    #[doc(hidden)]
+    pub autolinks: bool,
     /// More fields for a code block, from its language and text (coloured
     /// lines, say): `(name, value)` pairs.
     pub code: Option<CodeFields>,
@@ -532,17 +547,22 @@ struct Call {
     first: Option<usize>,
 }
 impl Call {
-    fn read(opts: &Option<mlua::Table>) -> mlua::Result<Self> {
-        let flag = |name: &str| -> mlua::Result<bool> {
-            Ok(match opts {
-                Some(t) => t.get::<Option<bool>>(name)?.unwrap_or(false),
-                None => false,
-            })
-        };
-        let options = Options {
-            breaks: flag("breaks")?,
-            paths: flag("paths")?,
-            code: None,
+    fn read(lua: &mlua::Lua, opts: &Option<mlua::Table>) -> mlua::Result<Self> {
+        let options = match opts {
+            Some(t) => {
+                let keys = keys(lua)?;
+                let flag = |key: &mlua::LuaString| -> mlua::Result<bool> {
+                    Ok(t.raw_get::<Option<bool>>(key)?.unwrap_or(false))
+                };
+                Options {
+                    breaks: flag(&keys.breaks)?,
+                    paths: flag(&keys.paths)?,
+                    html_marks: flag(&keys.html_marks)?,
+                    autolinks: flag(&keys.autolinks)?,
+                    code: None,
+                }
+            }
+            None => Options::default(),
         };
         let key: Option<String> = match opts {
             Some(t) => t.get("key")?,
@@ -600,7 +620,7 @@ pub(crate) fn script(
     lua: &mlua::Lua,
     (text, opts): (mlua::Value, Option<mlua::Table>),
 ) -> mlua::Result<mlua::Value> {
-    let call = Call::read(&opts)?;
+    let call = Call::read(lua, &opts)?;
     if let Some(state) = crate::value::state_handle(&text) {
         let env = crate::node::env(lua)?;
         let weak = lua.weak();
@@ -648,7 +668,12 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
         return Ok(Value::List(parse(&whole(), &call.options).into()));
     };
-    let flags = (call.options.breaks, call.options.paths);
+    let flags = (
+        call.options.breaks,
+        call.options.paths,
+        call.options.html_marks,
+        call.options.autolinks,
+    );
     Ok(match &call.key {
         Some(key) => {
             let mut streams = parsed.streams.borrow_mut();
@@ -824,6 +849,56 @@ pub(crate) fn install(lua: &mlua::Lua) {
     lua.set_app_data(Parsed::default());
 }
 
+/// The names of the options `ui.markdown` and `ui.markdown_view` read,
+/// made once a VM, at its first markdown (a VM without any holds none). Read raw by these, an option costs neither a string
+/// made nor a protected call each time (so a props table's metatable
+/// gives none of them).
+pub(crate) struct Keys {
+    pub breaks: mlua::LuaString,
+    pub paths: mlua::LuaString,
+    pub html_marks: mlua::LuaString,
+    pub autolinks: mlua::LuaString,
+    pub copy: mlua::LuaString,
+}
+
+/// The VM's option names, held (`Keys` in its app data) or, made while its
+/// app data is borrowed elsewhere, this call's own.
+pub(crate) enum KeysRef<'a> {
+    Held(mlua::AppDataRef<'a, Keys>),
+    Own(Keys),
+}
+
+impl std::ops::Deref for KeysRef<'_> {
+    type Target = Keys;
+    fn deref(&self) -> &Keys {
+        match self {
+            KeysRef::Held(keys) => keys,
+            KeysRef::Own(keys) => keys,
+        }
+    }
+}
+
+/// The VM's option names (`Keys`), made the first time they're asked for.
+/// A markdown made while the VM's app data is borrowed (inside another
+/// call's work) can't keep them there: it reads by names of its own, and a
+/// later call keeps them.
+pub(crate) fn keys(lua: &mlua::Lua) -> mlua::Result<KeysRef<'_>> {
+    if let Some(keys) = lua.app_data_ref::<Keys>() {
+        return Ok(KeysRef::Held(keys));
+    }
+    let keys = Keys {
+        breaks: lua.create_string("breaks")?,
+        paths: lua.create_string("paths")?,
+        html_marks: lua.create_string("html_marks")?,
+        autolinks: lua.create_string("autolinks")?,
+        copy: lua.create_string("copy")?,
+    };
+    Ok(match lua.try_set_app_data(keys) {
+        Ok(_) => KeysRef::Held(lua.app_data_ref::<Keys>().expect("set above")),
+        Err(keys) => KeysRef::Own(keys),
+    })
+}
+
 /// A VM at rest: its parsed texts and the streams not asked for lately go. What
 /// is on show keeps its blocks; only something built again parses again.
 pub(crate) fn rest(lua: &mlua::Lua) {
@@ -854,8 +929,9 @@ const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
 
-/// `breaks` and `paths`, as a script asked for them.
-type Flags = (bool, bool);
+/// `breaks`, `paths`, `html_marks` and `autolinks`, as a script asked for
+/// them.
+type Flags = (bool, bool, bool, bool);
 type Texts = std::collections::HashMap<(String, Flags), Value>;
 /// Each keyed stream: its flags, its parse, and its last answer (whose
 /// table the next one's is derived from), with that table once a script
@@ -1056,7 +1132,22 @@ struct Made {
 /// `text` (which starts at `offset` in the whole) parsed into its top-level
 /// elements, a reference to a definition ahead of it in `defs` following it.
 fn parse_at(text: &str, offset: usize, options: &Options, defs: &Defs) -> Made {
+    if options.autolinks {
+        return parse_with_source(text, offset, options, defs);
+    }
     parse_or_scan(text, offset, options, false, defs)
+}
+
+/// `parse_at` with autolinks: the markdown kept for their link pass while
+/// it parses, and let go after (`autolink::read_from`, `release`). Out of
+/// line, so a parse without them is a flag's test away from what it was.
+#[cold]
+#[inline(never)]
+fn parse_with_source(text: &str, offset: usize, options: &Options, defs: &Defs) -> Made {
+    autolink::read_from(text, offset);
+    let made = parse_or_scan(text, offset, options, false, defs);
+    autolink::release();
+    made
 }
 /// `parse_at`, or with `scan` its top-level elements alone (`scan_tops`):
 /// one loop over the parser's events, so the parser's iterator has the one
@@ -1078,6 +1169,8 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool, defs:
         deeper: 0,
         align: None,
         html: false,
+        divert: false,
+        marks: None,
         named: Vec::new(),
         top: offset,
     };
@@ -1422,6 +1515,198 @@ fn table_align(align: &[Alignment]) -> Value {
     )
 }
 
+/// What an inline HTML tag marks (`Options::html_marks`).
+#[derive(Clone, Copy)]
+enum HtmlMark {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    Link,
+}
+
+/// The tags whose marks show, as GitHub's sanitizing schema keeps them
+/// (`br` aside, a line break: `Builder::inline_html`). The rest (`sub`, `sup`, `span`,
+/// `u`, …) are dropped and their text kept.
+const HTML_MARKS: [(&str, HtmlMark); 12] = [
+    ("b", HtmlMark::Bold),
+    ("strong", HtmlMark::Bold),
+    ("i", HtmlMark::Italic),
+    ("em", HtmlMark::Italic),
+    ("s", HtmlMark::Strike),
+    ("del", HtmlMark::Strike),
+    ("strike", HtmlMark::Strike),
+    ("code", HtmlMark::Code),
+    ("kbd", HtmlMark::Code),
+    ("samp", HtmlMark::Code),
+    ("tt", HtmlMark::Code),
+    ("a", HtmlMark::Link),
+];
+
+/// The inline HTML marks open, innermost last, and where they opened
+/// (`Builder::place`).
+struct Marks {
+    list: Vec<Mark>,
+    place: Vec<usize>,
+}
+
+/// An open inline HTML mark: its tag's name (`HTML_MARKS`'), which its
+/// closer names, and what it does.
+struct Mark {
+    name: &'static str,
+    kind: MarkKind,
+}
+
+enum MarkKind {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    /// An `a`: where its `href` goes, if it has one.
+    Link(Option<Link>),
+}
+
+/// An inline HTML tag, read: `<name attrs…>`, `</name>` or `<name …/>`.
+struct HtmlTag<'a> {
+    name: &'a str,
+    closing: bool,
+    /// Closed where it opens (`<b/>`).
+    empty: bool,
+    attrs: &'a str,
+}
+
+impl<'a> HtmlTag<'a> {
+    /// The tag `html` is, or `None` for a comment, a declaration or a
+    /// processing instruction.
+    fn read(html: &'a str) -> Option<Self> {
+        let inner = html.trim_end().strip_prefix('<')?.strip_suffix('>')?;
+        let (closing, inner) = match inner.strip_prefix('/') {
+            Some(rest) => (true, rest),
+            None => (false, inner),
+        };
+        let end = inner
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .unwrap_or(inner.len());
+        let name = &inner[..end];
+        if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        let attrs = inner[end..].trim_end();
+        let (empty, attrs) = match attrs.strip_suffix('/') {
+            Some(rest) => (true, rest),
+            None => (false, attrs),
+        };
+        Some(Self {
+            name,
+            closing,
+            empty,
+            attrs,
+        })
+    }
+
+    /// The value of its attribute `want` (any case), entities read.
+    fn attr(&self, want: &str) -> Option<String> {
+        let mut rest = self.attrs;
+        loop {
+            rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '/');
+            if rest.is_empty() {
+                return None;
+            }
+            let end = rest
+                .find(|c: char| c.is_ascii_whitespace() || c == '=' || c == '/')
+                .unwrap_or(rest.len())
+                .max(1);
+            let name = &rest[..end];
+            rest = rest[end..].trim_start();
+            let mut value = None;
+            if let Some(after) = rest.strip_prefix('=') {
+                let after = after.trim_start();
+                let (v, next) = match after.chars().next() {
+                    Some(q @ ('"' | '\'')) => {
+                        let body = &after[1..];
+                        let close = body.find(q).unwrap_or(body.len());
+                        (&body[..close], body.get(close + 1..).unwrap_or(""))
+                    }
+                    _ => {
+                        let close = after
+                            .find(|c: char| c.is_ascii_whitespace())
+                            .unwrap_or(after.len());
+                        (&after[..close], &after[close..])
+                    }
+                };
+                value = Some(v);
+                rest = next;
+            }
+            if name.eq_ignore_ascii_case(want) {
+                return value.map(html_entities);
+            }
+        }
+    }
+}
+
+/// What follows a picture, as its place reads it (`Builder::place_picture`).
+#[derive(Clone, Copy, PartialEq)]
+enum After {
+    /// An inline tag closing (a link around a badge): the place is left
+    /// to what follows it.
+    Closer,
+    /// A line break, taken by the picture's place if it ends its line.
+    Break,
+    /// Its paragraph's or item's end.
+    End,
+    Other,
+}
+
+/// What inline HTML after a picture is to its place: a closer, a `<br>`
+/// (a line break) or neither. (Out of line, given the text by value: the
+/// hot event loop takes no event's address.)
+#[cold]
+#[inline(never)]
+fn picture_tag(html: pulldown_cmark::CowStr) -> After {
+    match HtmlTag::read(&html) {
+        Some(tag) if tag.closing => After::Closer,
+        Some(tag) if tag.name.eq_ignore_ascii_case("br") => After::Break,
+        _ => After::Other,
+    }
+}
+
+/// An attribute's value with its common character references read.
+fn html_entities(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    value
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// Whether an `href` is one GitHub's schema keeps: relative, or `http`,
+/// `https`, `mailto`, `xmpp`, `irc` or `ircs` (never `javascript:`).
+fn safe_href(href: &str) -> bool {
+    let Some(colon) = href.find(':') else {
+        return true;
+    };
+    if href[..colon].contains(['/', '?', '#']) {
+        return true;
+    }
+    let scheme = href[..colon].trim();
+    ["http", "https", "mailto", "xmpp", "irc", "ircs"]
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(scheme))
+}
+
+/// A block's runs with their autolink literals linked
+/// (`Options::autolinks`). Out of line: a block read without them pays one
+/// test.
+#[cold]
+#[inline(never)]
+fn link_runs(runs: &mut Vec<Run>, top: usize) {
+    autolink::link_runs(runs, top);
+}
+
 /// What is being built at each level of nesting.
 enum Frame {
     /// Blocks of a container (the document, a list item, a quote).
@@ -1467,6 +1752,12 @@ struct Builder<'a> {
     align: Option<Box<[Alignment]>>,
     /// Inside raw HTML.
     html: bool,
+    /// Text goes elsewhere than a plain run: an image's alt, or under
+    /// inline HTML marks (`push_diverted`). One flag, so plain text pays
+    /// one test for both.
+    divert: bool,
+    /// The inline HTML marks open (`Options::html_marks`); `None` for none.
+    marks: Option<Box<Marks>>,
     /// The references its text's definitions resolved: label, where.
     named: Vec<(Label, usize)>,
     /// Where the top-level element being read starts in the whole text.
@@ -1517,10 +1808,15 @@ impl Builder<'_> {
     }
 
     fn push_text(&mut self, text: &str, code: bool) {
-        if let Some(image) = &mut self.image {
-            image.1.push_str(text);
-            return;
+        if self.divert {
+            return self.push_diverted(text, code);
         }
+        self.push_plain(text, code);
+    }
+
+    /// Text as a run of its own, or joining the last.
+    #[inline(always)]
+    fn push_plain(&mut self, text: &str, code: bool) {
         let paths = self.options.paths;
         match self.links.last().cloned() {
             Some(Link::Url(url)) => self.push_run(text, code, Some(url), None),
@@ -1589,26 +1885,24 @@ impl Builder<'_> {
         })
     }
 
-    /// The picture read (`picture`), placed by `event`, what follows it:
+    /// The picture read (`picture`), placed by what follows it (`after`):
     /// alone on its line, the words before it are a paragraph and it a
     /// block (the words after it the next paragraph); else a run among the
-    /// words. Whether the event was the line's end it took.
-    fn place_picture(&mut self, event: &Event) -> bool {
+    /// words. Whether the event was the line's end it took. (Out of line,
+    /// given a summary of the event: a picture is rare, and the hot event
+    /// loop neither grows nor takes an event's address.)
+    #[cold]
+    #[inline(never)]
+    fn place_picture(&mut self, after: After) -> bool {
         // Inline tags closing after it (a link around a badge) leave its
         // place to what follows them.
-        if matches!(
-            event,
-            Event::End(TagEnd::Link | TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough)
-        ) {
+        if after == After::Closer {
             return false;
         }
         let Some((src, alt, blank, link)) = self.picture.take() else {
             return false;
         };
-        let ends = matches!(
-            event,
-            Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph | TagEnd::Item)
-        );
+        let ends = matches!(after, After::Break | After::End);
         let blocks = matches!(self.frames.last(), Some(Frame::Blocks(_)));
         if !(blank && ends && blocks && self.heading.is_none()) {
             self.runs.push(Run {
@@ -1646,7 +1940,7 @@ impl Builder<'_> {
         ]));
         self.took = true;
         self.line = (0, 0);
-        matches!(event, Event::SoftBreak | Event::HardBreak)
+        after == After::Break
     }
 
     /// A reference this text's own definition resolves: no callback says so.
@@ -1668,6 +1962,9 @@ impl Builder<'_> {
                 last.text.pop();
             }
         }
+        if self.options.autolinks {
+            link_runs(&mut runs, self.top);
+        }
         runs_value(&runs)
     }
 
@@ -1687,6 +1984,130 @@ impl Builder<'_> {
         }
     }
 
+    /// Text that is an image's alt, or under inline HTML marks.
+    #[cold]
+    #[inline(never)]
+    fn push_diverted(&mut self, text: &str, code: bool) {
+        if let Some(image) = &mut self.image {
+            image.1.push_str(text);
+            return;
+        }
+        if !self.open_marks() {
+            return self.push_plain(text, code);
+        }
+        let mut style = self.style();
+        let mut code = code;
+        let mut link = None;
+        for mark in self.marks.iter().flat_map(|m| &m.list) {
+            match &mark.kind {
+                MarkKind::Bold => style.bold = true,
+                MarkKind::Italic => style.italic = true,
+                MarkKind::Strike => style.strike = true,
+                MarkKind::Code => code = true,
+                MarkKind::Link(to) => link = to.clone(),
+            }
+        }
+        // A markdown link around or inside it goes where it says.
+        let linked = link.is_some() && self.links.is_empty();
+        if let (true, Some(link)) = (linked, link) {
+            self.links.push(link);
+        }
+        self.styles.push(style);
+        self.push_plain(text, code);
+        self.styles.pop();
+        if linked {
+            self.links.pop();
+        }
+    }
+
+    /// Where text is being read: the top-level element, and how much each
+    /// open container holds. A paragraph, heading, cell or item ending
+    /// adds to its container (or closes it), so marks opened under another
+    /// place are left over from one that ended.
+    fn place(&self) -> Vec<usize> {
+        let mut place = vec![self.top, self.deeper];
+        for frame in &self.frames {
+            match frame {
+                Frame::Blocks(blocks) => place.push(blocks.len()),
+                Frame::List { items, .. } => place.push(items.len()),
+                Frame::Table {
+                    head, rows, row, ..
+                } => place.extend([head.len(), rows.len(), row.len()]),
+            }
+        }
+        place
+    }
+
+    /// The marks open here, those of a paragraph, heading, cell or item
+    /// that has ended (left open) let go.
+    fn open_marks(&mut self) -> bool {
+        if self.marks.as_ref().is_some_and(|m| m.place != self.place()) {
+            self.marks = None;
+            self.divert = self.image.is_some();
+        }
+        self.marks.is_some()
+    }
+
+    /// An inline HTML tag (`Options::html_marks`): a mark opens or closes,
+    /// or (`br`) the line breaks as at a hard break. A closer ends its own
+    /// mark alone; a stray one does nothing.
+    #[cold]
+    #[inline(never)]
+    fn inline_html(&mut self, html: pulldown_cmark::CowStr) {
+        let Some(tag) = HtmlTag::read(&html) else {
+            return;
+        };
+        if !tag.closing && tag.name.eq_ignore_ascii_case("br") {
+            self.push_text("\n", false);
+            self.mark_line();
+            return;
+        }
+        let Some(&(name, kind)) = HTML_MARKS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(tag.name))
+        else {
+            return;
+        };
+        self.open_marks();
+        if tag.closing {
+            if let Some(marks) = &mut self.marks
+                && let Some(at) = marks.list.iter().rposition(|m| m.name == name)
+            {
+                marks.list.remove(at);
+                if marks.list.is_empty() {
+                    self.marks = None;
+                    self.divert = self.image.is_some();
+                }
+            }
+            return;
+        }
+        if tag.empty {
+            return;
+        }
+        let kind = match kind {
+            HtmlMark::Bold => MarkKind::Bold,
+            HtmlMark::Italic => MarkKind::Italic,
+            HtmlMark::Strike => MarkKind::Strike,
+            HtmlMark::Code => MarkKind::Code,
+            HtmlMark::Link => MarkKind::Link(
+                tag.attr("href")
+                    .filter(|href| safe_href(href))
+                    .map(|href| link_of(&href, self.options.paths)),
+            ),
+        };
+        let place = self.place();
+        self.marks
+            .get_or_insert_with(|| {
+                Box::new(Marks {
+                    list: Vec::new(),
+                    place,
+                })
+            })
+            .list
+            .push(Mark { name, kind });
+        self.divert = true;
+    }
+
     fn block(&mut self, block: Value) {
         // Loose content directly in a list (tight lists have no
         // paragraphs) belongs to the item being read: dropped here.
@@ -1697,8 +2118,21 @@ impl Builder<'_> {
 
     fn event(&mut self, event: Event) {
         // A picture's place, by what follows it (its line's end, taken).
-        if self.picture.is_some() && self.place_picture(&event) {
-            return;
+        // Inline HTML marks' closers leave it as markdown's do, and a
+        // `<br>` ends its line as a hard break does.
+        if self.picture.is_some() {
+            let after = match &event {
+                Event::End(
+                    TagEnd::Link | TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough,
+                ) => After::Closer,
+                Event::SoftBreak | Event::HardBreak => After::Break,
+                Event::End(TagEnd::Paragraph | TagEnd::Item) => After::End,
+                Event::InlineHtml(html) if self.options.html_marks => picture_tag(html.clone()),
+                _ => After::Other,
+            };
+            if self.place_picture(after) {
+                return;
+            }
         }
         if let Event::Start(Tag::List(_) | Tag::CodeBlock(_) | Tag::BlockQuote(_) | Tag::Table(_))
         | Event::Rule = &event
@@ -1791,7 +2225,8 @@ impl Builder<'_> {
                     ..
                 } => {
                     self.note_reference(link_type, &id);
-                    self.image = Some((dest_url.to_string(), String::new()))
+                    self.image = Some((dest_url.to_string(), String::new()));
+                    self.divert = true;
                 }
                 // Raw HTML isn't shown: the parser gives its indentation as
                 // text, which would join the next block's words.
@@ -1897,6 +2332,7 @@ impl Builder<'_> {
                 }
                 TagEnd::Image => {
                     // Placed by what follows it (`place_picture`).
+                    self.divert = self.marks.is_some();
                     if let Some((src, alt)) = self.image.take() {
                         let blank = self.blank_line();
                         let link = match self.links.last() {
@@ -1925,6 +2361,7 @@ impl Builder<'_> {
                 self.mark_line();
             }
             Event::Rule => self.block(map(vec![("t", "hr".into())])),
+            Event::InlineHtml(html) if self.options.html_marks => self.inline_html(html),
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::TaskListMarker(done) => self.push_text(if done { "☑ " } else { "☐ " }, false),
             Event::FootnoteReference(name) => self.push_text(&format!("[{name}]"), false),
@@ -1949,12 +2386,39 @@ mod tests {
         Options::default()
     }
     #[test]
+    fn options_read_while_app_data_is_borrowed_and_names_are_kept_after() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        let opts = lua.create_table().expect("a table");
+        opts.raw_set("breaks", true).expect("set");
+        opts.raw_set("html_marks", true).expect("set");
+        let opts = Some(opts);
+        {
+            // Another call's work holds the VM's app data: the names can't
+            // be kept there, and the options read all the same.
+            let _held = lua.app_data_ref::<Parsed>().expect("installed");
+            assert!(matches!(keys(&lua).expect("names"), KeysRef::Own(_)));
+            let call = Call::read(&lua, &opts).expect("read");
+            assert!(call.options.breaks && call.options.html_marks && !call.options.paths);
+        }
+        assert!(
+            lua.app_data_ref::<Keys>().is_none(),
+            "none kept while borrowed"
+        );
+        // Free again: the next call keeps them, and the one after reads them.
+        let call = Call::read(&lua, &opts).expect("read");
+        assert!(call.options.breaks && call.options.html_marks);
+        assert!(lua.app_data_ref::<Keys>().is_some(), "kept");
+        assert!(matches!(keys(&lua).expect("names"), KeysRef::Held(_)));
+    }
+
+    #[test]
     fn at_rest_parsed_text_goes_and_the_same_text_parses_the_same() {
         let lua = mlua::Lua::new();
         install(&lua);
         let text = "# Title\n\nSome *words* and a [link](https://example.com).";
         // (The blocks themselves: `script` makes a new table of them each time.)
-        let call = Call::read(&None).expect("no options");
+        let call = Call::read(&lua, &None).expect("no options");
         let ask = || answer(&lua, Source::Str(text), &call, false).expect("its blocks");
         let first = ask();
         let held = |lua: &mlua::Lua| {
@@ -2242,6 +2706,394 @@ mod tests {
         assert_eq!(
             parse(" <div\n\n- item", &plain),
             parse("<div\n\n- item", &plain)
+        );
+    }
+
+    fn html_marks() -> Options {
+        Options {
+            html_marks: true,
+            ..plain()
+        }
+    }
+
+    /// Each block's runs, as `text` and its marks: `+b`, `+i`, `+s`, `+c`,
+    /// `>where` for a link.
+    fn marked(text: &str, options: &Options) -> Vec<Vec<String>> {
+        parse(text, options)
+            .iter()
+            .map(|block| {
+                let runs = block.field("s").map(|s| s.list().to_vec());
+                runs.unwrap_or_default()
+                    .iter()
+                    .map(|r| {
+                        let mut s = match r.field("x") {
+                            Some(Value::Str(x)) => x.to_string(),
+                            _ => String::new(),
+                        };
+                        for flag in ["b", "i", "s", "c"] {
+                            if r.field(flag).is_some() {
+                                s.push('+');
+                                s.push_str(flag);
+                            }
+                        }
+                        if let Some(Value::Str(a)) = r.field("a") {
+                            s.push('>');
+                            s.push_str(a);
+                        }
+                        s
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[track_caller]
+    fn marks(text: &str, want: &[&str]) {
+        assert_eq!(marked(text, &html_marks()), [want], "{text:?}");
+    }
+
+    #[test]
+    fn inline_html_marks_style_their_text() {
+        marks("a <b>b</b> <strong>s</strong>", &["a ", "b+b", " ", "s+b"]);
+        marks("<i>i</i> <EM>e</EM>", &["i+i", " ", "e+i"]);
+        marks(
+            "<s>s</s> <del>d</del> <strike>k</strike>",
+            &["s+s", " ", "d+s", " ", "k+s"],
+        );
+        marks(
+            "<code>c</code> <kbd>k</kbd> <samp>s</samp> <tt>t</tt>",
+            &["c+c", " ", "k+c", " ", "s+c", " ", "t+c"],
+        );
+        // Case is no matter, in names and attributes.
+        marks("<B>x</b>", &["x+b"]);
+        marks(
+            "<A HREF='https://a.b/?q=1&amp;r=2'>go</A>",
+            &["go>https://a.b/?q=1&r=2"],
+        );
+    }
+
+    #[test]
+    fn inline_html_marks_nest_and_close_their_own() {
+        marks("<b>a <i>b</i> c</b>", &["a +b", "b+b+i", " c+b"]);
+        // A closer ends its own mark, not the innermost.
+        marks("<b>a<i>b</b>c</i>d", &["a+b", "b+b+i", "c+i", "d"]);
+        // With markdown's own: theirs and the tag's together.
+        marks(
+            "**a <i>b</i>** <b>*c*</b>",
+            &["a +b", "b+b+i", " ", "c+b+i"],
+        );
+        // A stray closer does nothing.
+        marks("a</b> b </i>c", &["a b c"]);
+    }
+
+    #[test]
+    fn an_unclosed_inline_html_mark_ends_with_its_paragraph() {
+        assert_eq!(
+            marked("<b>bold\n\nplain", &html_marks()),
+            [vec!["bold+b"], vec!["plain"]]
+        );
+        assert_eq!(
+            marked("# <i>head\n\nplain", &html_marks()),
+            [vec!["head+i"], vec!["plain"]]
+        );
+        // Nor past a quote, or an item's paragraph, into the next.
+        assert_eq!(
+            marked("> <b>a\n\n> b\n\nc", &html_marks()),
+            [vec![], vec![], vec!["c"]]
+        );
+        let quotes = parse("> <b>a\n\n> b", &html_marks());
+        let second = quotes[1].field("b").unwrap().list()[0]
+            .field("s")
+            .unwrap()
+            .list();
+        assert!(second[0].field("b").is_none(), "{:?}", second[0].to_json());
+        let loose = parse("- <i>a\n\n  b\n- c", &html_marks());
+        let items = loose[0].field("items").unwrap().list();
+        let first = items[0].list();
+        assert!(first[0].field("s").unwrap().list()[0].field("i").is_some());
+        assert!(first[1].field("s").unwrap().list()[0].field("i").is_none());
+        let items = parse("- <b>one\n- two", &html_marks());
+        let items = items[0].field("items").unwrap().list();
+        let second = items[1].list()[0].field("s").unwrap().list();
+        assert!(second[0].field("b").is_none(), "{:?}", second[0].to_json());
+    }
+
+    #[test]
+    fn an_html_link_goes_where_its_href_does() {
+        marks(
+            "see <a href=\"https://a.b/c\">this</a> now",
+            &["see ", "this>https://a.b/c", " now"],
+        );
+        marks("<a title=\"t\" href=/docs/x>rel</a>", &["rel>/docs/x"]);
+        // No href, no link.
+        marks("see <a name=\"x\">this</a> now", &["see this now"]);
+        // Only the protocols GitHub's schema keeps.
+        marks("<a href=\"javascript:alert(1)\">x</a>", &["x"]);
+        marks("<a href=\"mailto:a@b.c\">m</a>", &["m>mailto:a@b.c"]);
+        // Inside markdown's own link, that one's.
+        marks(
+            "[<a href=\"https://x.y\">t</a>](https://a.b)",
+            &["t>https://a.b"],
+        );
+    }
+
+    #[test]
+    fn an_html_break_breaks_the_line_as_a_hard_break_does() {
+        let hard = marked("one  \ntwo", &plain());
+        for text in ["one<br>two", "one<br/>two", "one<br />two", "one<BR>two"] {
+            assert_eq!(marked(text, &html_marks()), hard, "{text:?}");
+        }
+        assert_eq!(hard, [vec!["one\ntwo"]]);
+        // A picture on a line of its own before one is a block, as before
+        // a hard break.
+        assert_eq!(
+            kinds(&parse("a\n![p](u.png)<br>b", &html_marks())),
+            kinds(&parse("a\n![p](u.png)  \nb", &plain()))
+        );
+        assert_eq!(
+            kinds(&parse("a\n![p](u.png)<br>b", &html_marks())),
+            ["p", "img", "p"]
+        );
+        // Inside an HTML link, a badge stays among the words.
+        assert_eq!(
+            kinds(&parse(
+                "<a href=\"https://a.b\">![p](u.png)</a> words",
+                &html_marks()
+            )),
+            ["p"]
+        );
+    }
+
+    #[test]
+    fn other_inline_html_is_dropped_and_its_text_kept() {
+        marks("x<sup>2</sup> and H<sub>2</sub>O", &["x2 and H2O"]);
+        marks("<u>u</u> <span class=\"k\">s</span>", &["u s"]);
+        marks("a <!-- note --> b", &["a  b"]);
+        // Block HTML stays dropped.
+        assert_eq!(
+            marked("<div>\n<b>hidden</b>\n</div>\n\nlast", &html_marks()),
+            [vec!["last"]]
+        );
+    }
+
+    #[test]
+    fn without_html_marks_inline_html_is_dropped_as_ever() {
+        let text =
+            "Some <b>bold</b>, <a href=\"https://a.b\">a</a>, <code>c</code> and a <br> break.";
+        assert_eq!(
+            marked(text, &plain()),
+            [vec!["Some bold, a, c and a  break."]]
+        );
+        let on = marked(text, &html_marks());
+        assert_ne!(marked(text, &plain()), on);
+        // Text with no inline HTML parses the same either way.
+        let text = "a **b** *c* `d` [e](https://f.g)\n\n- one\n- two\n\n| a |\n|---|\n| b |";
+        assert_eq!(parse(text, &plain()), parse(text, &html_marks()));
+    }
+
+    #[test]
+    fn a_streaming_open_tag_marks_what_has_come() {
+        let mut parser = Incremental::new(html_marks());
+        parser.set_text("Some <b>bol");
+        let blocks = parser.blocks();
+        let runs = blocks[0].field("s").unwrap().list();
+        assert_eq!(runs.len(), 2);
+        assert!(runs[1].field("b").is_some());
+        parser.set_text("Some <b>bold</b> and");
+        let blocks = parser.blocks();
+        let runs = blocks[0].field("s").unwrap().list();
+        assert!(runs[2].field("b").is_none());
+        assert_eq!(runs[2].field("x"), Some(&Value::from(" and")));
+    }
+
+    fn autolinks() -> Options {
+        Options {
+            autolinks: true,
+            ..plain()
+        }
+    }
+
+    #[track_caller]
+    fn links(text: &str, want: &[&str]) {
+        assert_eq!(marked(text, &autolinks()), [want], "{text:?}");
+    }
+
+    #[test]
+    fn autolink_literals_are_links_with_autolinks() {
+        // Anara's chat suite's `autolink` case, as its web chat shows it.
+        links(
+            "Plain https://example.com/path and www.example.com links.",
+            &[
+                "Plain ",
+                "https://example.com/path>https://example.com/path",
+                " and ",
+                "www.example.com>http://www.example.com",
+                " links.",
+            ],
+        );
+        links(
+            "Mail me@example.com, or (see www.a.com/x_(y)).",
+            &[
+                "Mail ",
+                "me@example.com>mailto:me@example.com",
+                ", or (see ",
+                "www.a.com/x_(y)>http://www.a.com/x_(y)",
+                ").",
+            ],
+        );
+        // Headings and cells too.
+        assert_eq!(
+            marked("# www.a.com", &autolinks()),
+            [vec!["www.a.com>http://www.a.com"]]
+        );
+    }
+
+    #[test]
+    fn an_autolinks_trailing_entity_stays_out_as_written() {
+        // Anara's case: the source's `&amp;` is an entity GFM leaves out,
+        // though the text reads `&`.
+        links(
+            "Ends https://example.com/a&amp; here.",
+            &[
+                "Ends ",
+                "https://example.com/a>https://example.com/a",
+                "& here.",
+            ],
+        );
+        links(
+            "See www.a.com/x.&#38; now",
+            &["See ", "www.a.com/x>http://www.a.com/x", ".& now"],
+        );
+        // A `&` written as itself is no entity: it stays in.
+        links(
+            "Ends https://example.com/a& here.",
+            &[
+                "Ends ",
+                "https://example.com/a&>https://example.com/a&",
+                " here.",
+            ],
+        );
+        // In a later paragraph, the source read is that paragraph's own.
+        assert_eq!(
+            marked(
+                "x https://e.com/a\n\ny https://e.com/a&amp; z",
+                &autolinks()
+            ),
+            [
+                vec!["x ", "https://e.com/a>https://e.com/a"],
+                vec!["y ", "https://e.com/a>https://e.com/a", "& z"],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_schemes_domain_needs_no_period() {
+        // Anara's case, as micromark (remark-gfm) links it: its domains
+        // need no period, `www.`'s neither.
+        links(
+            "Open https://localhost:3000/x now",
+            &[
+                "Open ",
+                "https://localhost:3000/x>https://localhost:3000/x",
+                " now",
+            ],
+        );
+        links(
+            "www.localhost now",
+            &["www.localhost>http://www.localhost", " now"],
+        );
+        links("www. now", &["www. now"]);
+        links("http://x now", &["http://x>http://x", " now"]);
+    }
+
+    #[test]
+    fn an_autolink_keeps_its_marks() {
+        links("**https://a.b/c**", &["https://a.b/c+b>https://a.b/c"]);
+        links(
+            "see *www.a.com* now",
+            &["see ", "www.a.com+i>http://www.a.com", " now"],
+        );
+        // Across runs of other marks, each keeps its own.
+        links(
+            "https://a.b/**x**y",
+            &[
+                "https://a.b/>https://a.b/xy",
+                "x+b>https://a.b/xy",
+                "y>https://a.b/xy",
+            ],
+        );
+        // Text the parser gives in pieces (an entity) reads whole.
+        links(
+            "www.a.com/?a=1&amp;b=2 x",
+            &["www.a.com/?a=1&b=2>http://www.a.com/?a=1&b=2", " x"],
+        );
+    }
+
+    #[test]
+    fn code_links_and_files_hold_no_autolinks() {
+        links("`www.a.com` x", &["www.a.com+c", " x"]);
+        links(
+            "[www.a.com](https://z.y) x",
+            &["www.a.com>https://z.y", " x"],
+        );
+        links("<https://a.b> x", &["https://a.b>https://a.b", " x"]);
+        let text = "```\nhttps://a.b\n```";
+        assert_eq!(parse(text, &autolinks()), parse(text, &plain()));
+    }
+
+    #[test]
+    fn without_autolinks_text_has_none() {
+        let text = "Plain https://example.com/path and www.example.com, a@b.co.";
+        assert_eq!(
+            marked(text, &plain()),
+            [vec![
+                "Plain https://example.com/path and www.example.com, a@b.co."
+            ]]
+        );
+        let text = "a **b** *c* `d` [e](https://f.g)\n\n- one\n- two\n\n| a |\n|---|\n| b |";
+        assert_eq!(parse(text, &plain()), parse(text, &autolinks()));
+    }
+
+    #[test]
+    fn a_streaming_url_links_as_it_grows_and_ends_as_a_whole_parse() {
+        let text = "See https://example.com/a/b. Then www.x.org!";
+        let mut parser = Incremental::new(autolinks());
+        for end in 1..=text.len() {
+            parser.set_text(&text[..end]);
+            let _ = parser.blocks();
+        }
+        assert_eq!(parser.blocks(), parse(text, &autolinks()));
+        parser.set_text("See https://example.com/a/b. Then www.x.org!");
+        let runs = parser.blocks()[0].field("s").unwrap().list().to_vec();
+        assert_eq!(
+            runs[1].field("a"),
+            Some(&Value::from("https://example.com/a/b"))
+        );
+    }
+
+    #[test]
+    fn autolinks_and_html_marks_read_together() {
+        let both = Options {
+            autolinks: true,
+            html_marks: true,
+            ..plain()
+        };
+        // An HTML link's text holds no autolink; a tag's marks stay on one.
+        assert_eq!(
+            marked(
+                "<a href=\"https://z.y\">www.a.com</a> <b>www.b.com</b>",
+                &both
+            ),
+            [vec![
+                "www.a.com>https://z.y",
+                " ",
+                "www.b.com+b>http://www.b.com"
+            ]]
+        );
+        // A `<br>` ends a URL as a hard break does.
+        assert_eq!(
+            marked("https://a.b/c<br>d", &both),
+            [vec!["https://a.b/c>https://a.b/c", "\nd"]]
         );
     }
 

@@ -139,6 +139,10 @@ name = "script_layout_bench"
 path = "examples/layout_bench.rs"
 
 [[example]]
+name = "stream_bench"
+path = "examples/stream_bench.rs"
+
+[[example]]
 name = "script_web_view"
 path = "examples/web_view.rs"
 
@@ -197,6 +201,11 @@ path = "tests/md_chunk_flat.rs"
 # Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
 name = "md_chunk_flat_render"
 path = "tests/md_chunk_flat_render.rs"
+
+[[test]]
+# Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
+name = "stream_update"
+path = "tests/stream_update.rs"
 
 [[test]]
 # Its own process: what `compile_ahead` compiled is the process's.

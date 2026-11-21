@@ -1885,17 +1885,13 @@ impl EditorHandle {
     /// Whether the clipboard took it. (Pin line.)
     #[doc(hidden)]
     pub fn copy_to_clipboard(&self, ui: &Ui, platform: &crate::platform::PlatformService) -> bool {
-        ui.copy_from(self, false, |text, html| {
-            write_clipboard(platform, text, html)
-        })
+        ui.copy_from(self, false, |content| write_clipboard(platform, content))
     }
     /// Cut the selection to `platform`'s clipboard as the person would
     /// (`Ui::copy_from`). Whether the clipboard took it. (Pin line.)
     #[doc(hidden)]
     pub fn cut_to_clipboard(&self, ui: &Ui, platform: &crate::platform::PlatformService) -> bool {
-        ui.copy_from(self, true, |text, html| {
-            write_clipboard(platform, text, html)
-        })
+        ui.copy_from(self, true, |content| write_clipboard(platform, content))
     }
     /// Replace the selection with `text`, as typed: what a text service
     /// (Windows' emoji panel, dictation, touch keyboard) inserts. A
@@ -2068,13 +2064,41 @@ pub enum EditCommand {
     /// Select all the text there is to select.
     SelectAll,
 }
-/// What goes on the clipboard: text, and HTML beside it where given.
-/// (Pin line.)
+/// What goes on the clipboard: text, and HTML beside it where given, and
+/// types of the app's own beside them. (Pin line.)
 #[doc(hidden)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClipboardContent {
     pub text: String,
     pub html: Option<String>,
+    /// MIME types of the app's own and their text
+    /// (`Platform::set_clipboard_typed`), in one change with the text and
+    /// HTML; none writes them as ever.
+    pub types: Vec<(String, String)>,
+}
+impl ClipboardContent {
+    /// `text`, with `html` beside it where given, and no types.
+    #[doc(hidden)]
+    pub fn new(text: String, html: Option<String>) -> Self {
+        Self {
+            text,
+            html,
+            types: Vec::new(),
+        }
+    }
+    /// Put it on `platform`'s clipboard: its types, where it has some, in
+    /// one change with the text and HTML; else the text, and the HTML
+    /// beside it, as ever. Whether the clipboard took it.
+    #[doc(hidden)]
+    pub fn write(self, platform: &dyn crate::platform::Platform) -> bool {
+        if !self.types.is_empty() {
+            return platform.set_clipboard_typed(self.text, self.html, &self.types);
+        }
+        match self.html {
+            Some(html) => platform.set_clipboard_rich_text(self.text, html),
+            None => platform.set_clipboard_text(self.text),
+        }
+    }
 }
 /// What `View::on_copy` gives an editor: what goes on the clipboard for a
 /// copy or a cut, or none for the selection's plain text.
@@ -2109,16 +2133,12 @@ pub struct SelectedRows {
 /// What `View::on_selection_copy` gives a region: what goes on the
 /// clipboard, or none for the selection's own text and HTML.
 pub(crate) type SelectionCopyHook = Rc<dyn Fn(&SelectionCopyRequest) -> Option<ClipboardContent>>;
-/// `text` on `platform`'s clipboard, with `html` beside it where given.
+/// `content` on `platform`'s clipboard (`ClipboardContent::write`).
 pub(crate) fn write_clipboard(
     platform: &crate::platform::PlatformService,
-    text: String,
-    html: Option<String>,
+    content: ClipboardContent,
 ) -> bool {
-    match html {
-        Some(html) => platform.0.set_clipboard_rich_text(text, html),
-        None => platform.0.set_clipboard_text(text),
-    }
+    content.write(&*platform.0)
 }
 /// The layout and notification passes a frame takes to settle.
 const LAYOUT_PASSES: usize = 64;
@@ -2153,6 +2173,16 @@ impl Drop for FramePreparationGuard<'_> {
     fn drop(&mut self) {
         self.0.set(false);
     }
+}
+
+/// An open popup: where its window is, in window coordinates, and what it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[doc(hidden)]
+pub struct PopupInfo {
+    /// Its window's rectangle.
+    pub rect: Rect,
+    /// A menu, a popover or a tooltip, if it says.
+    pub role: Option<crate::scene::PopupRole>,
 }
 
 /// One retained document. Application code keeps returned node IDs as stable widget handles.
@@ -2638,6 +2668,8 @@ pub(crate) struct UiStorage {
     /// Open signals of anchored popups, by their popup roots
     /// (`Ui::dismiss_popups`).
     popups: RefCell<Vec<(NodeId, Signal<bool>)>>,
+    /// What each of those is (`register_popup`).
+    popup_kinds: RefCell<Vec<(NodeId, crate::scene::PopupRole)>>,
     /// Portals' owners and overlays, in the order they mounted (`Ui::portals`).
     portals: RefCell<Vec<(NodeId, NodeId)>>,
     /// The context menu opened last: the node it took the focus from, and
@@ -2728,6 +2760,9 @@ pub(crate) struct UiStorage {
     scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
     /// Run once after the next frame preparation's layout.
     after_layout: RefCell<Vec<Box<dyn FnOnce()>>>,
+    /// The open popups' windows, once something observes them
+    /// (`Ui::observe_popups`).
+    popups_observed: RefCell<Option<Signal<Vec<PopupInfo>>>>,
     /// Run after every layout pass that changes the layout, by owning node.
     layout_listeners: RefCell<crate::scene::NodeMap<Vec<LayoutListener>>>,
     /// Boxes views' container queries read (`View::container`).
@@ -3070,6 +3105,7 @@ impl Ui {
             popup_limits: runtime.signal(Vec::new()),
             popup_flips: runtime.signal(Vec::new()),
             popups: RefCell::new(Vec::new()),
+            popup_kinds: RefCell::new(Vec::new()),
             portals: RefCell::new(Vec::new()),
             context_menu: RefCell::new(None),
             popup_soon: RefCell::new(None),
@@ -3113,6 +3149,7 @@ impl Ui {
             margins_checked: Cell::new(0),
             scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
+            popups_observed: RefCell::default(),
             layout_listeners: RefCell::default(),
             containers: RefCell::default(),
             mount_initialization: RefCell::new(None),
@@ -3319,6 +3356,7 @@ impl Ui {
     }
     /// Run `f` now and whenever what it reads changes, for as long as `owner`
     /// is mounted.
+    #[track_caller]
     pub fn bind(&mut self, owner: NodeId, f: impl FnMut() + 'static) {
         self.bind_marked(owner, false, f);
     }
@@ -3326,6 +3364,8 @@ impl Ui {
     /// deferred input draws need not be made before it runs
     /// (`watch_geometry`).
     #[inline]
+    // Traced builds name a binding by where in zgx it was made.
+    #[cfg_attr(feature = "trace", track_caller)]
     pub(crate) fn bind_marked(
         &mut self,
         owner: NodeId,
@@ -3371,12 +3411,25 @@ impl Ui {
     }
     /// `bind_marked`'s effect, kept by `owner`: apart, so what is generic
     /// over the callback stays small enough to inline where it is built.
+    #[cfg_attr(feature = "trace", track_caller)]
     fn add_binding(&mut self, owner: NodeId, mount_pure: bool, callback: Rc<RefCell<dyn FnMut()>>) {
+        // Read here: a closure below is no `track_caller` function.
+        #[cfg(feature = "trace")]
+        let at = std::panic::Location::caller();
         self.runtime.clone().batch(|| {
             let effect = self.runtime.effect_callback(mount_pure, callback);
             #[cfg(feature = "trace")]
             if crate::trace::enabled() {
-                crate::trace::name(effect.number(), format!("@{} binding", owner.number()));
+                // Where in zgx the binding was made says which prop or feature it is.
+                crate::trace::name(
+                    effect.number(),
+                    format!(
+                        "@{} binding {}:{}",
+                        owner.number(),
+                        at.file().rsplit('/').next().unwrap_or(at.file()),
+                        at.line()
+                    ),
+                );
             }
             self.storage
                 .owned
@@ -3389,6 +3442,7 @@ impl Ui {
     }
     /// [`Ui::bind`] for a text input's model or typography: `mount_pure`,
     /// as it reads no geometry before its draw lays out (`watch_geometry`).
+    #[cfg_attr(feature = "trace", track_caller)]
     pub(crate) fn bind_input(&mut self, owner: NodeId, f: impl FnMut() + 'static) {
         self.bind_marked(owner, true, f);
         INPUT_DRAWS.with_borrow_mut(|draws| {
@@ -3994,8 +4048,52 @@ impl Ui {
             .or_default()
             .push(Rc::new(RefCell::new(f)));
     }
+    fn popup_infos(&self) -> Vec<PopupInfo> {
+        let scene = self.scene.borrow();
+        let kinds = self.storage.popup_kinds.borrow();
+        self.storage
+            .popups
+            .borrow()
+            .iter()
+            .filter(|(root, open)| scene.contains(*root) && open.with_untracked(|open| *open))
+            .map(|(root, _)| PopupInfo {
+                rect: scene.transformed_bounds(*root),
+                role: kinds
+                    .iter()
+                    .find(|(node, _)| node == root)
+                    .map(|(_, role)| *role),
+            })
+            .collect()
+    }
+    /// The open popups' windows, menus, popovers and tooltips, in window
+    /// coordinates, as of the last layout.
+    #[doc(hidden)]
+    pub fn observe_popups(&self) -> Signal<Vec<PopupInfo>> {
+        let existing = self.storage.popups_observed.borrow().clone();
+        existing.unwrap_or_else(|| {
+            let signal = self.signal(self.popup_infos());
+            *self.storage.popups_observed.borrow_mut() = Some(signal.clone());
+            signal
+        })
+    }
+    /// Out of line: only an app that reads `ui.window.popups` observes them,
+    /// and every layout of the others passes by.
+    #[cold]
+    #[inline(never)]
+    fn publish_popups(&self) {
+        let Some(signal) = self.storage.popups_observed.borrow().clone() else {
+            return;
+        };
+        let now = self.popup_infos();
+        if signal.with_untracked(|was| *was != now) {
+            signal.set(now);
+        }
+    }
     /// Whether any after-layout work ran.
     fn run_after_layout(&self) -> bool {
+        if self.storage.popups_observed.borrow().is_some() {
+            self.publish_popups();
+        }
         let pending = std::mem::take(&mut *self.storage.after_layout.borrow_mut());
         if pending.is_empty() {
             return false;
@@ -4608,11 +4706,19 @@ impl Ui {
         });
         self.retain(node, binding);
     }
-    pub(crate) fn register_popup(&self, root: NodeId, open: Signal<bool>) {
+    pub(crate) fn register_popup(
+        &self,
+        root: NodeId,
+        open: Signal<bool>,
+        role: crate::scene::PopupRole,
+    ) {
         let scene = self.scene.borrow();
         let mut popups = self.storage.popups.borrow_mut();
         popups.retain(|(node, _)| scene.contains(*node));
         popups.push((root, open));
+        let mut kinds = self.storage.popup_kinds.borrow_mut();
+        kinds.retain(|(node, _)| scene.contains(*node));
+        kinds.push((root, role));
     }
     /// A context menu opening, showing while `shown` is
     /// (`compose_context_menu`): it takes the focus from what has it.
@@ -4771,7 +4877,7 @@ impl Ui {
     /// The person copied (or, with `cut`, cut) out of `editor` (a key, the
     /// Edit menu, its context menu, `EditorHandle::copy_to_clipboard`): its
     /// `View::on_copy` says what goes on the clipboard, else its selection's
-    /// text, and `write` puts it there (text, and HTML beside it). A
+    /// text, and `write` puts it there (text, HTML and types beside it). A
     /// password field gives nothing and asks no hook; nor does an empty
     /// selection. A cut the clipboard took deletes the selection, one undo
     /// step, unless the editor is read-only (a cut there is a copy).
@@ -4781,7 +4887,7 @@ impl Ui {
         &self,
         editor: &EditorHandle,
         cut: bool,
-        write: impl FnOnce(String, Option<String>) -> bool,
+        write: impl FnOnce(ClipboardContent) -> bool,
     ) -> bool {
         if editor.is_secure() {
             return false;
@@ -4801,12 +4907,10 @@ impl Ui {
             range,
             text: &text,
         };
-        let content = hook.and_then(|hook| hook(&request));
-        let (text, html) = match content {
-            Some(content) => (content.text, content.html),
-            None => (text, None),
-        };
-        if !write(text, html) {
+        let content = hook
+            .and_then(|hook| hook(&request))
+            .unwrap_or_else(|| ClipboardContent::new(text, None));
+        if !write(content) {
             return false;
         }
         if cut {
@@ -4852,10 +4956,7 @@ impl Ui {
         command: EditCommand,
         platform: &dyn crate::platform::Platform,
     ) -> bool {
-        let write = |text: String, html: Option<String>| match html {
-            Some(html) => platform.set_clipboard_rich_text(text, html),
-            None => platform.set_clipboard_text(text),
-        };
+        let write = |content: ClipboardContent| content.write(platform);
         if command == EditCommand::SelectAll {
             return self.select_all();
         }

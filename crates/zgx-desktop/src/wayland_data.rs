@@ -91,6 +91,9 @@ enum Command {
         text: String,
         /// The same as HTML (the clipboard only), offered as `text/html`.
         html: Option<String>,
+        /// Chromium's web custom data (the clipboard only), offered as
+        /// `chromium/x-web-custom-data` (`clipboard::web_custom`).
+        custom: Option<Arc<[u8]>>,
         reply: mpsc::Sender<Result<(), String>>,
     },
     Load {
@@ -112,6 +115,10 @@ enum Command {
     },
     /// The clipboard's `text/html`: a browser's or word processor's copy.
     LoadHtml {
+        reply: mpsc::Sender<Result<Loaded, String>>,
+    },
+    /// The clipboard's `chromium/x-web-custom-data`: a web page's types.
+    LoadCustom {
         reply: mpsc::Sender<Result<Loaded, String>>,
     },
     /// Raise `window` with an activation token; held here until done, so
@@ -182,20 +189,37 @@ impl WaylandClipboard {
     /// Publish `text`; fails before the seat has delivered any input, as a
     /// selection needs an input serial.
     pub fn store(&self, primary: bool, text: String) -> Result<(), String> {
-        self.publish(primary, text, None)
+        self.publish(primary, text, None, None)
     }
     /// Publish the clipboard as plain text and as HTML: rich editors and
     /// browsers paste the HTML, everything else the text.
     pub fn store_rich(&self, text: String, html: String) -> Result<(), String> {
-        self.publish(false, text, Some(html))
+        self.publish(false, text, Some(html), None)
     }
-    fn publish(&self, primary: bool, text: String, html: Option<String>) -> Result<(), String> {
+    /// Publish the clipboard as plain text, as HTML where given, and with
+    /// Chromium's web custom data `custom` (a page's types) beside them.
+    pub fn store_custom(
+        &self,
+        text: String,
+        html: Option<String>,
+        custom: Vec<u8>,
+    ) -> Result<(), String> {
+        self.publish(false, text, html, Some(custom.into()))
+    }
+    fn publish(
+        &self,
+        primary: bool,
+        text: String,
+        html: Option<String>,
+        custom: Option<Arc<[u8]>>,
+    ) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
         self.0
             .send(Command::Store {
                 primary,
                 text,
                 html,
+                custom,
                 reply,
             })
             .map_err(|_| "Wayland data worker stopped".to_string())?;
@@ -246,6 +270,15 @@ impl WaylandClipboard {
             .send(Command::LoadHtml { reply })
             .map_err(|_| "Wayland data worker stopped".to_string())?;
         Ok(String::from_utf8_lossy(&read_loaded(answer)?.0).into_owned())
+    }
+    /// The clipboard's Chromium web custom data
+    /// (`chromium/x-web-custom-data`), as offered.
+    pub fn load_custom(&self) -> Result<Vec<u8>, String> {
+        let (reply, answer) = mpsc::channel();
+        self.0
+            .send(Command::LoadCustom { reply })
+            .map_err(|_| "Wayland data worker stopped".to_string())?;
+        Ok(read_loaded(answer)?.0)
     }
     pub fn load_files(&self) -> Result<Vec<std::path::PathBuf>, String> {
         let (reply, answer) = mpsc::channel();
@@ -367,9 +400,10 @@ impl NativeData {
                                 primary,
                                 text,
                                 html,
+                                custom,
                                 reply,
                             } => {
-                                let _ = reply.send(state.store(primary, text, html));
+                                let _ = reply.send(state.store(primary, text, html, custom));
                             }
                             Command::Load { primary, reply } => {
                                 let _ = reply.send(state.load(primary));
@@ -385,6 +419,9 @@ impl NativeData {
                             }
                             Command::LoadHtml { reply } => {
                                 let _ = reply.send(state.load_html());
+                            }
+                            Command::LoadCustom { reply } => {
+                                let _ = reply.send(state.load_custom());
                             }
                             Command::Activate { token, window } => state.activate(&token, &window),
                             Command::Drag {
@@ -483,6 +520,8 @@ struct Offer {
     png: bool,
     /// Whether it offers `text/html`.
     html: bool,
+    /// Whether it offers Chromium's web custom data.
+    custom: bool,
     /// The compositor's action for it, as last said. Hyprland says it once,
     /// as it makes the offer: before the enter that names it.
     action: Option<DndAction>,
@@ -607,8 +646,8 @@ struct Completion {
 }
 /// What this process published as the clipboard.
 enum Published {
-    /// Text, and the same as HTML.
-    Text(Arc<str>, Option<Arc<str>>),
+    /// Text, the same as HTML, and Chromium's web custom data.
+    Text(Arc<str>, Option<Arc<str>>, Option<Arc<[u8]>>),
     /// An image, as PNG.
     Png(Arc<[u8]>),
 }
@@ -857,7 +896,13 @@ impl State {
         };
         outgoing.end(how);
     }
-    fn store(&mut self, primary: bool, text: String, html: Option<String>) -> Result<(), String> {
+    fn store(
+        &mut self,
+        primary: bool,
+        text: String,
+        html: Option<String>,
+        custom: Option<Arc<[u8]>>,
+    ) -> Result<(), String> {
         let (seat, serial) = self.serial.ok_or("no input has reached this client yet")?;
         let seat = self
             .seats
@@ -882,11 +927,17 @@ impl State {
                 return Err("the compositor has no data device".into());
             };
             let source = manager.create_data_source(&self.qh, ());
-            for kind in TEXT_TYPES.iter().chain(html.as_ref().map(|_| &"text/html")) {
+            let custom_kind = custom
+                .as_ref()
+                .map(|_| &crate::clipboard::web_custom::FORMAT);
+            for kind in (TEXT_TYPES.iter())
+                .chain(html.as_ref().map(|_| &"text/html"))
+                .chain(custom_kind)
+            {
                 source.offer((*kind).into());
             }
             device.set_selection(Some(&source), serial);
-            let published = Published::Text(text, html.map(Into::into));
+            let published = Published::Text(text, html.map(Into::into), custom);
             if let Some((previous, _)) = self.source.replace((source, published)) {
                 previous.destroy();
             }
@@ -938,6 +989,18 @@ impl State {
             return Err("the clipboard holds no HTML".into());
         }
         offer.proxy.receive("text/html".into(), write.as_fd());
+        drop(write);
+        Ok(Loaded(read, false))
+    }
+    fn load_custom(&mut self) -> Result<Loaded, String> {
+        let (read, write) = UnixStream::pair().map_err(|e| e.to_string())?;
+        let offer = self.selection.as_ref().ok_or("the clipboard is empty")?;
+        if !offer.custom {
+            return Err("the clipboard holds no web custom data".into());
+        }
+        offer
+            .proxy
+            .receive(crate::clipboard::web_custom::FORMAT.into(), write.as_fd());
         drop(write);
         Ok(Loaded(read, false))
     }
@@ -1409,7 +1472,12 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
                     && current == source
                 {
                     match published {
-                        Published::Text(text, html) => {
+                        Published::Text(_, _, Some(custom))
+                            if mime_type == crate::clipboard::web_custom::FORMAT =>
+                        {
+                            write_bytes(fd, custom.clone());
+                        }
+                        Published::Text(text, html, _) => {
                             let html = html.as_ref().filter(|_| mime_type == "text/html");
                             write_selection(fd, html.unwrap_or(text).clone());
                         }
@@ -1580,6 +1648,7 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
                     saved.uris |= mime_type == "text/uri-list";
                     saved.png |= mime_type == "image/png";
                     saved.html |= mime_type == "text/html";
+                    saved.custom |= mime_type == crate::clipboard::web_custom::FORMAT;
                     saved.text = preferred(saved.text, &mime_type);
                 }
             }
@@ -1623,6 +1692,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                         text: None,
                         png: false,
                         html: false,
+                        custom: false,
                         action: None,
                     },
                 );

@@ -490,3 +490,138 @@ return ui.column { w = 400, h = 200,
     h.frames(3);
     assert_eq!(editor.atoms().len(), 2);
 }
+
+/// `zgx inspect gc`: a full collection per VM with the heap before and after,
+/// and what is left by type and code chunk.
+#[test]
+fn gc_report_separates_garbage_from_what_scripts_keep() {
+    let code = r#"
+local kept = {}
+for i = 1, 3000 do kept[i] = { i, tostring(i) } end
+for i = 1, 30000 do local garbage = { i, i + 1, i + 2 } end
+return ui.button { id = "b", on_click = function() local _ = #kept end, "keeps a table" }
+"#;
+    let h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    let report = h.host.gc_report(&Default::default());
+    assert!(!report.is_empty());
+    let vm = &report[0];
+    assert!(
+        vm.before > vm.after,
+        "{} before, {} after",
+        vm.before,
+        vm.after
+    );
+    let tables = vm
+        .by_type
+        .iter()
+        .find(|(name, ..)| name == "table")
+        .expect("tables");
+    assert!(tables.1 >= 3000, "{tables:?}");
+    assert!(
+        vm.chunks.iter().any(|(name, ..)| name.contains("app")),
+        "{:?}",
+        vm.chunks
+    );
+    // A second collection frees nothing more: what is left is kept.
+    let again = &h.host.gc_report(&Default::default())[0];
+    assert!(
+        again.before <= vm.after + 4096,
+        "{} vs {}",
+        again.before,
+        vm.after
+    );
+}
+
+/// `zgx inspect gc --mark`, `--since-mark` and `--retained`: what a click
+/// leaves behind after the mark is named, with the chain of holders from a
+/// root, its closures by chunk and line.
+#[test]
+fn gc_names_what_survives_after_a_mark_and_who_holds_it() {
+    use zgx_script::GcQuery;
+    let code = r#"
+local kept = {}
+local function remember(i) kept[#kept + 1] = { label = "row" .. i, run = function() return i end } end
+return ui.button { id = "b", on_click = function() remember(#kept) end, "keeps" }
+"#;
+    let mut h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    let mark = GcQuery {
+        top: 10,
+        mark: true,
+        ..Default::default()
+    };
+    assert!(h.host.gc_report(&mark)[0].found.marked.unwrap() > 0);
+    let b = h.find("b").unwrap();
+    let rect = h.ui.scene.borrow().bounds(b);
+    let (x, y) = (rect.x + rect.width / 2., rect.y + rect.height / 2.);
+    for _ in 0..7 {
+        let button = zgx::input::PointerButton::Primary;
+        h.ui.dispatch(zgx::input::InputEvent::PointerDown { x, y, button });
+        h.ui.dispatch(zgx::input::InputEvent::PointerUp { x, y, button });
+        h.settle();
+    }
+    let query = GcQuery {
+        top: 10,
+        retained: Some("run".into()),
+        sample: 3,
+        since_mark: true,
+        ..Default::default()
+    };
+    let found = &h.host.gc_report(&query)[0].found;
+    assert!(!found.no_mark);
+    assert!(
+        found
+            .since
+            .iter()
+            .any(|(name, count, _)| name.starts_with("function run @") && *count == 7),
+        "{:?}",
+        found.since
+    );
+    assert_eq!(found.matched, 7, "{found:?}");
+    let holder = &found.holders[0];
+    assert_eq!(holder.count, 7);
+    let path = holder.path.join(" | ");
+    assert!(
+        path.starts_with("registry") || path.contains("mainthread"),
+        "{path}"
+    );
+    assert!(path.contains("upvalue") && path.contains(".run"), "{path}");
+    assert!(path.contains("@") && path.contains(":"), "{path}");
+}
+
+/// `gc --retained` says how many matches a Luau holder alone reaches: a
+/// mounted node's state, held only by the handle Rust keeps to its handler's
+/// closure, is not one.
+#[test]
+fn gc_tells_luau_holders_from_rust_handles() {
+    let code = r##"
+local on = ui.state("on", false)
+local Probe = ui.component(function()
+    local s = ui.use_state(0)
+    return ui.div { id = "p", w = 10, h = 10, on_hover = function() s:set(1) end }
+end)
+return ui.column { ui.show(function() return on:get() end, Probe {}) }"##;
+    let h = Harness::new(|runtime| ScriptHost::inline(runtime, "app", code));
+    h.settle();
+    h.host
+        .set_state("on", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.settle();
+    h.frames(2);
+    let found = &h.host.gc_report(&zgx_script::GcQuery {
+        retained: Some("State".into()),
+        sample: 3,
+        ..Default::default()
+    })[0]
+        .found;
+    assert!(found.matched >= 1, "{found:?}");
+    assert_eq!(found.lua_reachable, 0, "held from Rust only: {found:?}");
+    assert!(
+        found
+            .holders
+            .iter()
+            .any(|h| h.path.iter().any(|step| step.contains("on_hover"))),
+        "{found:?}"
+    );
+}

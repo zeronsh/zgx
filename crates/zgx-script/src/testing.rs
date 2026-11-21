@@ -54,6 +54,9 @@ use zgx::{
 pub struct FakeDesktop {
     clipboard: RefCell<String>,
     html: RefCell<Option<String>>,
+    /// MIME types of the app's own and their text, as last written
+    /// (`Platform::set_clipboard_typed`).
+    types: RefCell<Vec<(String, String)>>,
     /// The clipboard holds an image alone (its last write was one): no
     /// text, as a system clipboard after an image's copy.
     image_only: std::cell::Cell<bool>,
@@ -133,6 +136,7 @@ impl FakeDesktop {
     pub fn copy(&self, text: impl Into<String>) {
         *self.clipboard.borrow_mut() = text.into();
         *self.html.borrow_mut() = None;
+        self.types.borrow_mut().clear();
         self.image_only.set(false);
     }
     /// The clipboard's HTML, if it holds some.
@@ -144,6 +148,27 @@ impl FakeDesktop {
     pub fn copy_html(&self, text: impl Into<String>, html: impl Into<String>) {
         *self.clipboard.borrow_mut() = text.into();
         *self.html.borrow_mut() = Some(html.into());
+        self.types.borrow_mut().clear();
+        self.image_only.set(false);
+    }
+    /// The clipboard's MIME types of the app's own and their text, as last
+    /// written (`ui.clipboard.write { types = … }`, a region's `on_copy`).
+    #[doc(hidden)]
+    pub fn types(&self) -> Vec<(String, String)> {
+        self.types.borrow().clone()
+    }
+    /// Put `text`, `html` and `types` on the clipboard, as a web page's copy
+    /// with types of its own does.
+    #[doc(hidden)]
+    pub fn copy_typed(
+        &self,
+        text: impl Into<String>,
+        html: Option<String>,
+        types: Vec<(String, String)>,
+    ) {
+        *self.clipboard.borrow_mut() = text.into();
+        *self.html.borrow_mut() = html;
+        *self.types.borrow_mut() = types;
         self.image_only.set(false);
     }
     /// The clipboard's image: its width, height and RGBA pixels.
@@ -181,6 +206,7 @@ impl zgx::platform::Platform for FakeDesktop {
     fn set_clipboard_text(&self, text: String) -> bool {
         *self.clipboard.borrow_mut() = text;
         *self.html.borrow_mut() = None;
+        self.types.borrow_mut().clear();
         self.image_only.set(false);
         true
     }
@@ -190,8 +216,28 @@ impl zgx::platform::Platform for FakeDesktop {
     fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
         *self.clipboard.borrow_mut() = text;
         *self.html.borrow_mut() = Some(html);
+        self.types.borrow_mut().clear();
         self.image_only.set(false);
         true
+    }
+    fn set_clipboard_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+    ) -> bool {
+        self.copy_typed(text, html, types.to_vec());
+        true
+    }
+    fn clipboard_types(&self) -> Vec<String> {
+        let types = self.types.borrow();
+        types.iter().map(|(kind, _)| kind.clone()).collect()
+    }
+    fn clipboard_typed(&self, mime: &str) -> Option<String> {
+        let types = self.types.borrow();
+        types
+            .iter()
+            .find_map(|(kind, value)| (kind == mime).then(|| value.clone()))
     }
     fn clipboard_image(&self) -> zgx::platform::Pending<Option<zgx::image::ImageData>> {
         // A copy sharing the pixels.
@@ -206,6 +252,7 @@ impl zgx::platform::Platform for FakeDesktop {
         // An image's copy replaces the text and HTML there.
         *self.image.borrow_mut() = Some(image);
         *self.html.borrow_mut() = None;
+        self.types.borrow_mut().clear();
         self.image_only.set(true);
         Box::pin(async { true })
     }

@@ -12,8 +12,9 @@
 //! flip when the row completes — instead of jittering throughout.
 //!
 //! Repairs, in the spirit of remend's handler set (its katex/html/comparison
-//! handlers don't apply here — zgx shows no raw HTML and has no
-//! math):
+//! handlers don't apply here — zgx has no math, and the inline HTML marks
+//! it shows (`Options::html_marks`) end with their paragraph in the parse,
+//! so an open tag never hangs):
 //! - emphasis parity: `**a`→`**a**`, `*a`→`*a*`, `_a`/`__a`, `~~a`, nested
 //!   closers innermost-first (`**a *b` → `**a *b***`), half-streamed closers
 //!   completed (`**a*` → `**a**`);
@@ -407,6 +408,18 @@ mod tests {
         stays("a **b** and *c* and `d` and ~~e~~");
         stays("[docs](https://x.dev) done");
         stays("");
+    }
+
+    #[test]
+    fn inline_html_marks_never_hang() {
+        // Open tags at a streaming end (`Options::html_marks`) are no
+        // markers: the parse closes them at their paragraph's end.
+        stays("Some <b>bold");
+        stays("Some <strong>bold</strong> and <em>it");
+        stays("a <a href=\"https://x.dev/a_b\">link");
+        stays("<code>x</code> <kbd>Ctrl");
+        stays("a break<br>");
+        stays("a break<br />and <s>gone");
     }
 
     #[test]

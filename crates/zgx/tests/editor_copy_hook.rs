@@ -74,9 +74,11 @@ fn field(plain: bool) -> Field {
                         request.range.clone(),
                         request.text.to_owned(),
                     ));
-                    (!plain).then(|| ClipboardContent {
-                        text: request.text.to_uppercase(),
-                        html: Some(format!("<b>{}</b>", request.text)),
+                    (!plain).then(|| {
+                        ClipboardContent::new(
+                            request.text.to_uppercase(),
+                            Some(format!("<b>{}</b>", request.text)),
+                        )
                     })
                 }),
         ),
@@ -190,7 +192,7 @@ fn a_password_field_never_asks_the_app_nor_copies() {
     assert!(!f.editor.cut_to_clipboard(&f.ui, &f.platform));
     assert!(
         !f.ui
-            .copy_from(&f.editor, false, |_, _| panic!("nothing written"))
+            .copy_from(&f.editor, false, |_| panic!("nothing written"))
     );
     assert!(held(&f).is_none());
     assert!(f.heard.borrow().is_empty(), "the app never hears it");

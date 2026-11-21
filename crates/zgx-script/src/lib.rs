@@ -33,6 +33,8 @@
 pub const BUILD_REV: &str = env!("ZGX_BUILD_REV");
 
 mod actions;
+mod gc_paths;
+pub use gc_paths::{GcFound, GcHolder, GcQuery};
 mod anim;
 mod anime;
 pub mod app_config;
@@ -314,12 +316,23 @@ impl Deadline {
     }
     /// A budget from now, read exactly: one that will shift another.
     fn start(budget: Duration) -> Self {
+        // One reading: the CPU's stand-in is the wall's (`thread_cpu`).
+        #[cfg(not(any(unix, windows)))]
+        {
+            let now = Instant::now();
+            Self {
+                wall: now,
+                cpu: thread_cpu_at(now),
+                budget,
+                #[cfg(target_arch = "wasm32")]
+                lazy: false,
+            }
+        }
+        #[cfg(any(unix, windows))]
         Self {
             wall: Instant::now(),
             cpu: thread_cpu(),
             budget,
-            #[cfg(target_arch = "wasm32")]
-            lazy: false,
         }
     }
     /// Whether its clock has yet to start (`lazy`).
@@ -327,10 +340,15 @@ impl Deadline {
     pub(crate) fn lazy(&self) -> bool {
         self.lazy
     }
-    /// The same budget, its clock started now.
+    /// The same budget, its clock started at `now` (a reading just made).
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn started_now(self) -> Self {
-        Self::start(self.budget)
+    pub(crate) fn started_at(self, now: Instant) -> Self {
+        Self {
+            wall: now,
+            cpu: thread_cpu_at(now),
+            budget: self.budget,
+            lazy: false,
+        }
     }
     /// The same budget with the time `other` has run since it started
     /// taken off the clock.
@@ -340,12 +358,23 @@ impl Deadline {
         if self.lazy {
             return self;
         }
+        // One reading: the CPU's stand-in is the wall's (`thread_cpu`).
+        #[cfg(not(any(unix, windows)))]
+        {
+            let now = Instant::now();
+            Self {
+                wall: self.wall + now.saturating_duration_since(other.wall),
+                cpu: self.cpu + thread_cpu_at(now).saturating_sub(other.cpu),
+                budget: self.budget,
+                #[cfg(target_arch = "wasm32")]
+                lazy: false,
+            }
+        }
+        #[cfg(any(unix, windows))]
         Self {
             wall: self.wall + other.wall.elapsed(),
             cpu: self.cpu + thread_cpu().saturating_sub(other.cpu),
             budget: self.budget,
-            #[cfg(target_arch = "wasm32")]
-            lazy: false,
         }
     }
     /// When its wall time passes its budget: it is exceeded from then on,
@@ -357,6 +386,7 @@ impl Deadline {
     pub(crate) fn cpu_used(&self) -> Duration {
         thread_cpu().saturating_sub(self.cpu)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn exceeded(&self) -> bool {
         #[cfg(any(unix, windows))]
         let (wall, cpu) = (self.wall.elapsed(), thread_cpu().saturating_sub(self.cpu));
@@ -366,6 +396,12 @@ impl Deadline {
             let now = Instant::now();
             (now - self.wall, thread_cpu_at(now).saturating_sub(self.cpu))
         };
+        past_budget(wall, cpu, self.budget, CPU_GRAIN)
+    }
+    /// `exceeded` as of `now`, a reading of the wall clock just made.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn exceeded_at(&self, now: Instant) -> bool {
+        let (wall, cpu) = (now - self.wall, thread_cpu_at(now).saturating_sub(self.cpu));
         past_budget(wall, cpu, self.budget, CPU_GRAIN)
     }
 }
@@ -534,6 +570,8 @@ pub(crate) struct Vm {
     pub(crate) warnings: SharedWarnings,
     /// Makes a pointer event's table (`point_table`), compiled once.
     pub(crate) point: std::cell::OnceCell<mlua::Function>,
+    /// The objects at the last `zgx inspect gc --mark` (their heap addresses).
+    gc_mark: RefCell<Option<std::collections::HashSet<String>>>,
 }
 impl Vm {
     /// A pointer event's table for a handler: `x`, `y`, `local_x`,
@@ -765,6 +803,43 @@ impl Diagnostics {
     }
 }
 pub(crate) type SharedWarnings = Rc<Diagnostics>;
+/// What a host registers by name (`ScriptHost::action`, `function`,
+/// `async_action`): each kind its own names.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Registration {
+    Action,
+    Function,
+    AsyncAction,
+}
+#[cfg(debug_assertions)]
+impl Registration {
+    fn describe(self) -> (&'static str, &'static str) {
+        match self {
+            Registration::Action => ("action", "replace_action"),
+            Registration::Function => ("function", "replace_function"),
+            Registration::AsyncAction => ("async action", "replace_async_action"),
+        }
+    }
+}
+/// A place in the host's code a name was registered from.
+#[cfg(debug_assertions)]
+type Site = &'static std::panic::Location<'static>;
+/// Where a debug build's host registered each name from (`#[track_caller]`):
+/// a name registered again from a site it hasn't been registered from
+/// replaces the earlier handler silently, which apps have shipped as bugs
+/// (two handlers named alike, the later one answering both), so it warns.
+/// Sites a name was registered from before (a host rebuilt, a reload)
+/// don't, nor does `replace_*`. A release build records nothing.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct Registrations {
+    /// Each name's sites so far, and the latest of them.
+    sites: HashMap<(Registration, String), (Vec<Site>, Site)>,
+    /// What those warnings said, for the debug strip (`lint_findings`): the
+    /// scripts' lint, run at each load, shows them first.
+    findings: Vec<String>,
+}
 /// Where script warnings go: stderr and the host's list
 /// ([`ScriptHost::warnings`]). Everything that warns comes through here, so
 /// a host can show them elsewhere too.
@@ -978,6 +1053,15 @@ fn banner(text: &str, dismiss: impl Fn() + 'static) -> View {
 /// show: over any modal or popover, its × taking its own clicks while a
 /// dialog holds focus (a click there reached the dialog's backdrop), and
 /// the pointer passing through the rest. Made only while an error shows.
+/// The lint strip's text: `zgx lint: 3 findings`, then each, a line apiece.
+fn lint_text(found: &[String]) -> String {
+    format!(
+        "zgx lint: {} finding{}\n{}",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" },
+        found.join("\n")
+    )
+}
 /// A debug build's lint findings (`zgx lint: 3 findings` and the first of
 /// them), in the window's lower corner with a dismiss button: no modal, no
 /// error, and only its own area takes the pointer. The rest are in
@@ -1969,6 +2053,9 @@ struct Inner {
     type_errors: Signal<Option<String>>,
     /// What `zgx lint` finds in the scripts as loaded (debug builds).
     lint: Signal<Option<String>>,
+    /// Where each name was registered from (debug builds).
+    #[cfg(debug_assertions)]
+    registrations: RefCell<Registrations>,
     /// The theme file error shown, if any (cleared when the file reads).
     theme_error: RefCell<Option<String>>,
     /// Collects the VMs' garbage as the host goes idle (`zgx::idle`).
@@ -2154,6 +2241,8 @@ impl ScriptHost {
             checker: RefCell::default(),
             type_errors: runtime.signal(None),
             lint: runtime.signal(None),
+            #[cfg(debug_assertions)]
+            registrations: RefCell::default(),
             theme_error: RefCell::default(),
             idle: RefCell::default(),
             #[cfg(feature = "audio")]
@@ -2723,39 +2812,171 @@ impl ScriptHost {
         }
     }
     /// Registers a Rust function scripts can bind with `ui.action(name, arg)`.
+    /// A name registered again replaces the first; in a debug build, from
+    /// a place in the code it wasn't registered from before, that warns
+    /// (stderr, [`warnings`](Self::warnings), the lint strip): use
+    /// `replace_action` to replace one on purpose.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
-        self.0
-            .actions
-            .borrow_mut()
-            .insert(name.into(), Rc::new(action));
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Action,
+            &name,
+            std::panic::Location::caller(),
+            false,
+        );
+        self.0.actions.borrow_mut().insert(name, Rc::new(action));
+    }
+    /// `action`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn replace_action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Action,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        self.0.actions.borrow_mut().insert(name, Rc::new(action));
     }
     /// Registers a Rust function scripts call for its value now, with
     /// `ui.call_sync(name, arg)`: a read of data the host keeps (the rows a
     /// virtualized list shows of a large diff), so the data never has to
     /// be copied into the script whole. It runs on the UI thread: keep it
     /// quick (no I/O; `async_action` is for that). Plugins reach it as
-    /// they reach actions (`expose_action`).
+    /// they reach actions (`expose_action`). A name registered twice warns
+    /// as [`action`](Self::action)'s does (`replace_function` doesn't).
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn function(&self, name: impl Into<String>, function: impl Fn(Value) -> Value + 'static) {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Function,
+            &name,
+            std::panic::Location::caller(),
+            false,
+        );
         self.0
             .functions
             .borrow_mut()
-            .insert(name.into(), Rc::new(function));
+            .insert(name, Rc::new(function));
+    }
+    /// `function`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn replace_function(
+        &self,
+        name: impl Into<String>,
+        function: impl Fn(Value) -> Value + 'static,
+    ) {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Function,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        self.0
+            .functions
+            .borrow_mut()
+            .insert(name, Rc::new(function));
     }
     /// Registers an async Rust function scripts call with `ui.call(name,
     /// arg)`, getting a promise of its result: `Ok` settles it with the
     /// value, `Err` rejects it with the message. The future runs on the
     /// window's tasks (the main thread, so it need not be `Send`), woken by
     /// what it waits for; hand blocking work to a thread and await its
-    /// answer (`zgx::task::latest`).
+    /// answer (`zgx::task::latest`). A name registered twice warns as
+    /// [`action`](Self::action)'s does (`replace_async_action` doesn't).
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn async_action<F, Fut>(&self, name: impl Into<String>, action: F)
     where
         F: Fn(Value) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Value, String>> + 'static,
     {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::AsyncAction,
+            &name,
+            std::panic::Location::caller(),
+            false,
+        );
         self.0.async_actions.borrow_mut().insert(
-            name.into(),
+            name,
             Rc::new(move |arg| -> calls::Call { Box::pin(action(arg)) }),
         );
+    }
+    /// `async_action`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn replace_async_action<F, Fut>(&self, name: impl Into<String>, action: F)
+    where
+        F: Fn(Value) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<Value, String>> + 'static,
+    {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::AsyncAction,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        self.0.async_actions.borrow_mut().insert(
+            name,
+            Rc::new(move |arg| -> calls::Call { Box::pin(action(arg)) }),
+        );
+    }
+    /// A debug build's record of `name` registered from `site`: from a site
+    /// it wasn't registered from before, and not on purpose (`replace`),
+    /// it warns, naming that site and the one it replaces. Each site once.
+    #[cfg(debug_assertions)]
+    #[cold]
+    #[inline(never)]
+    fn registered(&self, kind: Registration, name: &str, site: Site, replace: bool) {
+        let warned = {
+            let mut registrations = self.0.registrations.borrow_mut();
+            let (sites, latest) = registrations
+                .sites
+                .entry((kind, name.to_owned()))
+                .or_insert_with(|| (Vec::new(), site));
+            let new = !sites.contains(&site);
+            let earlier = *latest;
+            *latest = site;
+            if new {
+                sites.push(site);
+            }
+            if !new || replace || sites.len() < 2 {
+                return;
+            }
+            let (what, replace) = kind.describe();
+            let message = format!(
+                "{what} \"{name}\" registered again at {site} replaces the one registered at \
+                 {earlier}: only the later one runs (`{replace}` replaces one on purpose)"
+            );
+            registrations.findings.push(message.clone());
+            message
+        };
+        warning(Some(&self.0.warnings), warned.clone());
+        // Shown with the lint's findings, until the next load lists both.
+        self.0.lint.mutate(|text| {
+            let lines: Vec<&str> = match text.as_deref() {
+                Some(text) => text.lines().skip(1).collect(),
+                None => Vec::new(),
+            };
+            let mut lines: Vec<String> = lines.into_iter().map(str::to_owned).collect();
+            lines.push(warned.clone());
+            *text = Some(lint_text(&lines));
+            true
+        });
     }
     /// An image the app made (a picture it decoded, rendered or processed),
     /// shown by `ui.image { src = "host:<name>" }` and `bg_image =
@@ -3083,6 +3304,18 @@ impl ScriptHost {
             });
             self.0.window_state.borrow_mut().push((false, effect));
         }
+        let popups = ui.observe_popups();
+        let state = self.0.shared.state(
+            windows::POPUPS,
+            popup_value(&popups.with_untracked(Clone::clone)),
+        );
+        let effect = self.0.runtime.effect(move || {
+            let now = popup_value(&popups.get());
+            if state.with_untracked(|was| *was != now) {
+                state.set(now);
+            }
+        });
+        self.0.window_state.borrow_mut().push((false, effect));
     }
     /// Keep `ui.window.full_screen` as whether the window is in full
     /// screen (pass its `WindowInfo::fullscreen`), and
@@ -3399,6 +3632,21 @@ impl ScriptHost {
     /// would otherwise stay until the scripts next ran a while.
     pub fn collect_garbage(&self) {
         collect_garbage(&self.0);
+    }
+    /// A full collection in each VM (`collect_garbage`'s, the conversion cache
+    /// let go of too), and what each held before and after, with what is left
+    /// by object type, userdata type and the chunk each function's code came
+    /// from: to tell garbage a collection frees from what scripts keep.
+    #[doc(hidden)]
+    pub fn gc_report(&self, query: &GcQuery) -> Vec<GcVm> {
+        let loaded = self.0.current.borrow().clone();
+        let vms: Vec<Rc<Vm>> = loaded.iter().flat_map(|l| l._vms.iter().cloned()).collect();
+        let before: Vec<usize> = vms.iter().map(|vm| vm.lua.used_memory()).collect();
+        collect_garbage(&self.0);
+        vms.iter()
+            .zip(before)
+            .map(|(vm, before)| gc_vm(vm, before, query))
+            .collect()
     }
     /// A full collection in each VM and nothing else: one the scripts'
     /// allocations bring on as they run, with none of what the host does as
@@ -3718,14 +3966,12 @@ impl ScriptHost {
             warning(Some(&self.0.warnings), line.clone());
             found.push(line);
         }
-        self.0.lint.set((!found.is_empty()).then(|| {
-            format!(
-                "zgx lint: {} finding{}\n{}",
-                found.len(),
-                if found.len() == 1 { "" } else { "s" },
-                found.join("\n")
-            )
-        }));
+        // The host's own (a name registered twice), first.
+        #[cfg(debug_assertions)]
+        found.splice(0..0, self.0.registrations.borrow().findings.iter().cloned());
+        self.0
+            .lint
+            .set((!found.is_empty()).then(|| lint_text(&found)));
     }
     fn start_check(&self) {
         if self.0.check.get() != Some(true) {
@@ -4795,6 +5041,7 @@ impl ScriptHost {
             locate: self.0.locate.clone(),
             warnings: self.0.warnings.clone(),
             point: Default::default(),
+            gc_mark: Default::default(),
         });
         let store = self
             .0
@@ -5119,6 +5366,30 @@ async fn wake(
 /// Everything `inner`'s loaded VMs can free, freed: two full collections in
 /// each, as one leaves what a userdata's finalizer held (a node's or an
 /// element's, and the closures and values only they reached) for the next.
+/// `ui.window.popups`: each open popup's window as `{ x, y, w, h, kind }`.
+fn popup_value(popups: &[zgx::widgets::PopupInfo]) -> Value {
+    let n = |v: f32| Value::Num(f64::from(v));
+    let list: Vec<Value> = popups
+        .iter()
+        .map(|popup| {
+            let kind = match popup.role {
+                Some(zgx::scene::PopupRole::Menu) => "menu",
+                Some(zgx::scene::PopupRole::Popover) => "popover",
+                Some(zgx::scene::PopupRole::Tooltip) => "tooltip",
+                None => "popup",
+            };
+            // (In key order already: made as a map, not sorted into one.)
+            Value::Map(crate::Map::from([
+                ("h".into(), n(popup.rect.height)),
+                ("kind".into(), Value::from(kind)),
+                ("w".into(), n(popup.rect.width)),
+                ("x".into(), n(popup.rect.x)),
+                ("y".into(), n(popup.rect.y)),
+            ]))
+        })
+        .collect();
+    Value::List(list.into())
+}
 fn collect_garbage(inner: &Inner) {
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
@@ -5383,6 +5654,7 @@ mod tests {
             locate: Rc::default(),
             warnings: Rc::default(),
             point: Default::default(),
+            gc_mark: Default::default(),
         };
         let host = vm
             .lua
@@ -5429,4 +5701,73 @@ mod budget_tests {
         // A runaway is stopped once it reads a tick beyond.
         assert!(past_budget(60 * MS, 3 * tick, 30 * MS, tick));
     }
+}
+
+/// What one script VM held around a full collection (`ScriptHost::gc_report`).
+#[derive(Debug, Clone, Default)]
+#[doc(hidden)]
+pub struct GcVm {
+    /// The VM's name (the app's, or a plugin's).
+    pub name: String,
+    /// Bytes it held before the collection, garbage included.
+    pub before: usize,
+    /// Bytes it holds after: what live objects need.
+    pub after: usize,
+    /// What is left by object type: its name, objects and bytes (largest first).
+    pub by_type: Vec<(String, usize, u64)>,
+    /// Userdata by type: its name, objects and bytes.
+    pub userdata: Vec<(String, usize, u64)>,
+    /// Compiled code by the chunk it came from: its name, functions and the
+    /// bytes of their code (the largest first).
+    pub chunks: Vec<(String, usize, u64)>,
+    /// The mark, the objects since it and the holders asked for.
+    pub found: GcFound,
+}
+
+fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
+    let mut report = GcVm {
+        name: vm.name.clone(),
+        before,
+        after: vm.lua.used_memory(),
+        ..Default::default()
+    };
+    let Ok(dump) = vm.lua.heap_dump() else {
+        return report;
+    };
+    let mut by_type: Vec<(String, usize, u64)> = dump
+        .size_by_type(None)
+        .into_iter()
+        .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
+        .collect();
+    by_type.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.by_type = by_type;
+    let mut userdata: Vec<(String, usize, u64)> = dump
+        .size_by_userdata(None)
+        .into_iter()
+        .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
+        .collect();
+    userdata.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.userdata = userdata;
+    if query.mark || query.since_mark || query.retained.is_some() {
+        report.found = gc_paths::find(dump.to_json(), query, &mut vm.gc_mark.borrow_mut());
+    }
+    // Code by chunk: each function's proto names its source.
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(dump.to_json())
+        && let Some(objects) = json["objects"].as_object()
+    {
+        let mut chunks: std::collections::HashMap<String, (usize, u64)> = Default::default();
+        for object in objects.values() {
+            if object["type"] == "proto" {
+                let source = object["source"].as_str().unwrap_or("?");
+                let entry = chunks.entry(source.to_string()).or_default();
+                entry.0 += 1;
+                entry.1 += object["size"].as_u64().unwrap_or(0);
+            }
+        }
+        let mut chunks: Vec<(String, usize, u64)> =
+            chunks.into_iter().map(|(n, (c, b))| (n, c, b)).collect();
+        chunks.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+        report.chunks = chunks;
+    }
+    report
 }

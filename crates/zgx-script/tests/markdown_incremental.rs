@@ -99,6 +99,18 @@ const BITS: &[&str] = &[
     "<div>\n",
     "</div>\n",
     "<b>",
+    "</b>",
+    "<br>",
+    "<a href=\"u\">",
+    "</a>",
+    "<code>",
+    "https://a.b/c",
+    "www.x.org",
+    "http",
+    "://",
+    "a@b.co",
+    "(",
+    ")",
     "&amp;",
     "&",
     "é",
@@ -427,13 +439,26 @@ fn a_reply_streamed_shows_what_it_shows_at_once() {
             breaks: true,
             ..Options::default()
         },
+        Options {
+            html_marks: true,
+            ..Options::default()
+        },
+        Options {
+            autolinks: true,
+            ..Options::default()
+        },
+        Options {
+            html_marks: true,
+            autolinks: true,
+            ..Options::default()
+        },
     ];
     let mut found = Vec::new();
     for seed in start..start + seeds {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let text = text(&mut rng);
         let pieces = pieces(&text, &mut rng);
-        let options = &options[(seed % 2) as usize];
+        let options = &options[(seed % options.len() as u64) as usize];
         if disagreement(&pieces, options).is_some() {
             let small = smallest(pieces, options);
             found.push(format!(
@@ -451,6 +476,92 @@ fn a_reply_streamed_shows_what_it_shows_at_once() {
         found.len(),
         found.join("\n")
     );
+}
+
+/// A script asks for inline HTML's marks, and has none without asking.
+#[test]
+fn a_script_asks_for_html_marks() {
+    let mut h = Harness::inline(
+        r#"local function show(blocks: any): string
+    local out = {}
+    for _, r in blocks[1].s do
+        table.insert(out, r.x .. (if r.b then "+b" else "") .. (if r.a then ">" .. r.a else ""))
+    end
+    return table.concat(out, "|")
+end
+local text = 'a <b>b</b><br><a href="https://a.b">c</a>'
+local reply = ui.state("reply", text)
+local streamed = ui.markdown(reply, { key = "reply", html_marks = true })
+return ui.column {
+    ui.text { id = "on", show(ui.markdown(text, { html_marks = true })) },
+    ui.text { id = "off", show(ui.markdown(text)) },
+    ui.text { id = "keyed", function() return show(streamed:get()) end },
+    ui.markdown_view { text, html_marks = true },
+}
+"#,
+    );
+    h.settle();
+    assert_eq!(h.text("on"), "a |b+b|\n|c>https://a.b");
+    assert_eq!(h.text("off"), "a bc");
+    assert_eq!(h.text("keyed"), h.text("on"));
+}
+
+/// Markdown's options are read from the table given, not through its
+/// metatable: they are read raw, by names made once.
+#[test]
+fn markdown_options_come_from_the_table_itself() {
+    let mut h = Harness::inline(
+        r#"local function show(blocks: any): string
+    local out = {}
+    for _, r in blocks[1].s do
+        table.insert(out, r.x .. (if r.b then "+b" else ""))
+    end
+    return table.concat(out, "|")
+end
+local text = "one\ntwo <b>b</b>"
+local inherited = setmetatable({}, { __index = { breaks = true, html_marks = true } })
+local view = setmetatable({ text }, { __index = { breaks = true, copy = false } })
+return ui.column {
+    ui.text { id = "own", show(ui.markdown(text, { breaks = true, html_marks = true })) },
+    ui.text { id = "inherited", show(ui.markdown(text, inherited)) },
+    ui.markdown_view(view),
+}
+"#,
+    );
+    h.settle();
+    assert_eq!(h.text("own"), "one\ntwo |b+b");
+    assert_eq!(h.text("inherited"), "one two b");
+}
+
+/// A script asks for autolink literals, and has none without asking.
+#[test]
+fn a_script_asks_for_autolinks() {
+    let mut h = Harness::inline(
+        r#"local function show(blocks: any): string
+    local out = {}
+    for _, r in blocks[1].s do
+        table.insert(out, r.x .. (if r.a then ">" .. r.a else ""))
+    end
+    return table.concat(out, "|")
+end
+local text = "see www.a.com and https://b.c/d."
+local reply = ui.state("reply", text)
+local streamed = ui.markdown(reply, { key = "reply", autolinks = true })
+return ui.column {
+    ui.text { id = "on", show(ui.markdown(text, { autolinks = true })) },
+    ui.text { id = "off", show(ui.markdown(text)) },
+    ui.text { id = "keyed", function() return show(streamed:get()) end },
+    ui.markdown_view { text, autolinks = true },
+}
+"#,
+    );
+    h.settle();
+    assert_eq!(
+        h.text("on"),
+        "see |www.a.com>http://www.a.com| and |https://b.c/d>https://b.c/d|."
+    );
+    assert_eq!(h.text("off"), "see www.a.com and https://b.c/d.");
+    assert_eq!(h.text("keyed"), h.text("on"));
 }
 
 /// A Luau string of `text`, every byte escaped.

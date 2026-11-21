@@ -120,8 +120,11 @@ manager alone: Openbox, i3, a sway without xdg-desktop-portal), zgx shows
 zenity's chooser, GTK's, as rfd and Chromium fall back to GTK's own: modal,
 attached to its window on X11 with zenity 3, and ended when its window closes
 or its request is dropped (the waiting thread sleeps on the process and the
-request together, through a pidfd). Without zenity either, the request fails
-with `BackendUnavailable`. `zenity_dialog_smoke.py` checks it.
+request together, through a pidfd). On a KDE session (`XDG_CURRENT_DESKTOP`
+naming KDE) kdialog's chooser, KDE's own, comes first, run, attached and
+ended as zenity's is; elsewhere kdialog stands in where zenity is missing.
+With neither, the request fails with `BackendUnavailable`.
+`zenity_dialog_smoke.py` and `kdialog_dialog_smoke.py` check them.
 
 ## Popups past the window
 

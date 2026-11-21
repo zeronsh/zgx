@@ -257,32 +257,57 @@ fn luau_puts_focus_and_a_selection_back() {
 #[wasm_bindgen_test]
 fn runaway_luau_is_stopped_by_its_budget_in_the_browser() {
     // No watchdog thread here: the interrupt check counts the budget out,
-    // reading the clock at one safepoint in many. A spinning script is
-    // still stopped soon after its budget, in each of the desktop's cases.
+    // reading the clock at one safepoint in a stride paced to the time
+    // they take. A spinning script is stopped soon after its budget, in
+    // each of the desktop's cases, and where each step is slow (a long
+    // `string.rep`: one look in 1,024 stopped it seconds late, on any
+    // machine). Measured from its budget's start (`last_budget_stop`), and
+    // as wall time where the script writes no state: a state write's
+    // updates run off the script's clock, as long as the machine takes.
     let runtime = Runtime::new();
     let limits = zgx_script::Limits {
         load: std::time::Duration::from_millis(30),
         ..zgx_script::Limits::default()
     };
     let now = || web_sys::window().unwrap().performance().unwrap().now();
-    for code in [
-        "while true do end",
-        "coroutine.wrap(function() while true do end end)()",
-        "local n = ui.state('n', 0) while true do n:set(n:peek() + 1) end",
-        "while true do pcall(function() while true do end end) end",
+    for (code, writes) in [
+        ("while true do end", false),
+        ("coroutine.wrap(function() while true do end end)()", false),
+        (
+            "local n = ui.state('n', 0) while true do n:set(n:peek() + 1) end",
+            true,
+        ),
+        (
+            "while true do pcall(function() while true do end end) end",
+            false,
+        ),
+        ("while true do local _ = string.rep('x', 20000) end", false),
     ] {
-        let host = ScriptHost::inline(&runtime, "spin", code).limits(limits);
-        let started = now();
-        let error = host.reload().expect_err("the script is stopped");
-        let took = now() - started;
-        assert!(
-            format!("{error:?}").contains("time budget"),
-            "{code}: {error:?}"
-        );
-        assert!(
-            took < 300.,
-            "{code}: stopped after {took} ms of a 30 ms budget"
-        );
+        // Twice: the first call's budget starts a stride of safepoints in,
+        // the second's as soon as the first's pace says.
+        for second in [false, true] {
+            let host = ScriptHost::inline(&runtime, "spin", code).limits(limits);
+            let started = now();
+            let error = host.reload().expect_err("the script is stopped");
+            let took = now() - started;
+            assert!(
+                format!("{error:?}").contains("time budget"),
+                "{code}: {error:?}"
+            );
+            let ran = zgx_script::last_budget_stop()
+                .expect("its stop is recorded")
+                .cpu
+                .as_secs_f64()
+                * 1000.;
+            assert!(
+                (30. ..200.).contains(&ran),
+                "{code}: stopped {ran} ms into a 30 ms budget"
+            );
+            assert!(
+                writes || !second || took < 300.,
+                "{code}: stopped after {took} ms of a 30 ms budget"
+            );
+        }
     }
 }
 

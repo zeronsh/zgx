@@ -775,6 +775,8 @@ jobs:
       # HTML and its text through the system pasteboard (ignored locally:
       # it replaces the clipboard of whoever runs it).
       - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard -- --ignored --exact
+      # Types of an app's own, as Chromium's web custom data, the same way.
+      - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::types_round_trip_through_the_system_clipboard -- --ignored --exact
       # The soak (an app used for a while holds what it did), on Metal.
       - run: cargo test -p zgx-script --test soak --locked
       - run: cargo test -p zgx-run --test audit --locked
@@ -897,6 +899,8 @@ jobs:
       # HTML (CF_HTML's fragment) and its text through the system clipboard
       # (ignored locally: it replaces the clipboard of whoever runs it).
       - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard -- --ignored --exact
+      # Types of an app's own, as Chromium's web custom data, the same way.
+      - run: cargo test -p zgx-desktop --lib --locked clipboard::tests::types_round_trip_through_the_system_clipboard -- --ignored --exact
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # Real programs through ConPTY, from the image (zgx-terminal's ignored
@@ -940,9 +944,11 @@ jobs:
       # (`every_shader`), and canvas strokes drawn: FXC once overflowed its
       # stack on the polyline module, which crashed apps on first draw; and an
       # app's own shaders compiled by FXC in a process of its own drawing
-      # as wgpu builds them (`app_shaders_d3d12`). With an empty folder for
-      # the shader cache, every shader compiles.
-      - run: cargo test -p zgx-gpu --test borders --test transforms --test rounded_clip --test adapter --test shader_cache --test every_shader --test canvas --test box_model --test popup_backdrop --test app_shaders_d3d12 --locked
+      # as wgpu builds them (`app_shaders_d3d12`); and renderers on threads
+      # on WARP's one device, made as others draw and as the last one goes
+      # (`renderers_on_threads`, `warp_handover`, #2402). With an empty
+      # folder for the shader cache, every shader compiles.
+      - run: cargo test -p zgx-gpu --test borders --test transforms --test rounded_clip --test adapter --test shader_cache --test every_shader --test canvas --test box_model --test popup_backdrop --test app_shaders_d3d12 --test renderers_on_threads --test warp_handover --locked
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold
           ZGX_EXPECT_COLD_CACHE: "1"
