@@ -7042,7 +7042,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
-    crate::modules::install(lua, &ui)?;
     ui.set(
         "terminal",
         lua.create_function(|lua, table: Table| {

@@ -5262,6 +5262,9 @@ impl ScriptHost {
             scene3d::install,
         );
         lazy.ui(&["json", "number", "sort"], data::install);
+        // (A VM whose scripts call no module makes no `ui.module`: one
+        // closure fewer for every VM to hold and its collector to walk.)
+        lazy.ui(&["module"], modules::install);
         let terms = self.0.terms.clone();
         lazy.ui(&["term"], move |lua, ui| term::install(lua, ui, terms));
         let webs = self.0.webs.clone();
