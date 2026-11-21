@@ -817,7 +817,7 @@ impl FallbackTextLayout {
             }
             let run = &rich.runs()[run_index];
             let line = run.font.line_height.resolve(run.font_size);
-            let newline = grapheme.contains(['\r', '\n']);
+            let newline = breaks_line(grapheme);
             let advance = run.estimated_advance(grapheme, index);
             if newline || width.is_some_and(|w| x > 0. && x + advance > w.max(0.)) {
                 if newline {
@@ -878,7 +878,7 @@ impl FallbackTextLayout {
             let run = &rich.runs()[run_index];
             let line = run.font.line_height.resolve(run.font_size);
             let grapheme = &text[range.clone()];
-            let newline = grapheme.contains(['\r', '\n']);
+            let newline = breaks_line(grapheme);
             let advance = run.estimated_advance(grapheme, index);
             let mut blank = false;
             let wrap = match (wraps, words.as_mut()) {
@@ -1161,10 +1161,10 @@ impl FallbackTextLayout {
         let mut paragraphs: Vec<Paragraph> = Vec::new();
         let mut start = 0;
         for line in text
-            .split_inclusive('\n')
-            .chain((text.is_empty() || text.ends_with('\n')).then_some(""))
+            .split_inclusive(['\n', '\u{1e}'])
+            .chain((text.is_empty() || text.ends_with(['\n', '\u{1e}'])).then_some(""))
         {
-            let body = line.trim_end_matches(['\n', '\r']);
+            let body = line.trim_end_matches(['\n', '\r', '\u{1e}']);
             let base = shaper.shape(body, size, None);
             let height = if normal {
                 base.caret(0).height
@@ -1410,14 +1410,14 @@ impl FallbackTextLayout {
         };
         if text.is_ascii() {
             for range in AsciiClusters::new(text.as_bytes()) {
-                let newline = matches!(text.as_bytes()[range.start], b'\n' | b'\r');
+                let newline = ends_line(text.as_bytes()[range.start]);
                 each(range, newline);
             }
         } else {
             for (index, grapheme) in text.grapheme_indices(true) {
                 each(
                     index..index + grapheme.len(),
-                    grapheme.contains(['\n', '\r']),
+                    breaks_line(grapheme),
                 );
             }
         }
@@ -1446,7 +1446,7 @@ impl FallbackTextLayout {
         let (mut word_end, mut word_ink, mut ink_x) = (0_usize, 0_f32, 0_f32);
         for range in grapheme_ranges(text) {
             let first = bytes[range.start];
-            if matches!(first, b'\n' | b'\r') {
+            if ends_line(first) {
                 cell(range, Rect::new(x, y, 0., height));
                 width = width.max(x);
                 x = 0.;
@@ -1897,6 +1897,53 @@ mod tests {
         assert_eq!(layout.caret(5).y, 28.);
         assert_eq!(layout.hit_test(10., -10.), 2);
     }
+    /// An editor's own line break (U+001E), which the shaper ends a line at
+    /// (cosmic-text's `LineEnding::Rs`), ends one headless as a line feed
+    /// does: plain and rich text, unwrapped and wrapped by word or grapheme.
+    #[test]
+    fn an_editors_own_line_break_ends_a_line_as_a_line_feed_does() {
+        use crate::rich_text::{RichText, TextRun};
+        let rich = |text: &str| {
+            let run = TextRun {
+                range: 0..text.len(),
+                font_size: 10.,
+                ..Default::default()
+            };
+            RichText::new(text, vec![run]).unwrap()
+        };
+        for text in [
+            "ab\u{1e}cd",
+            "ab\u{1e}",
+            "\u{1e}\u{1e}",
+            "let x = 1;\u{1e}let y = 2;\u{1e}console.log(x);",
+            "one two\u{1e}three four five\u{1e}",
+        ] {
+            let lf = text.replace('\u{1e}', "\n");
+            for width in [None, Some(1000.), Some(60.), Some(25.), Some(4.)] {
+                let (a, b) = (
+                    FallbackTextLayout::new(text, 10., width),
+                    FallbackTextLayout::new(&lf, 10., width),
+                );
+                assert_eq!(a.cells, b.cells, "{text:?} at {width:?}");
+                assert_eq!((a.end, a.size), (b.end, b.size), "{text:?} at {width:?}");
+                let (a, b) = (
+                    FallbackTextLayout::with_rich(&rich(text), width),
+                    FallbackTextLayout::with_rich(&rich(&lf), width),
+                );
+                assert_eq!(a.cells, b.cells, "rich {text:?} at {width:?}");
+                assert_eq!(
+                    (a.end, a.size),
+                    (b.end, b.size),
+                    "rich {text:?} at {width:?}"
+                );
+                assert_eq!(
+                    crate::rich_text::fallback_measure(&rich(text), width),
+                    crate::rich_text::fallback_measure(&rich(&lf), width),
+                    "rich {text:?} measured at {width:?}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2092,6 +2139,11 @@ struct Words<'a, B> {
     text: &'a str,
     /// The break opportunities of a text segmented; none for a plain one.
     breaks: Option<B>,
+    /// It holds an editor's own line break (U+001E), a break of its own
+    /// (`separated_at`); and the break opportunity a word ended before it
+    /// took, for the next word.
+    separated: bool,
+    pending: Option<usize>,
 }
 impl<'a> Words<'a, ()> {
     fn new(text: &'a str) -> Words<'a, impl Iterator<Item = usize> + 'a> {
@@ -2102,6 +2154,9 @@ impl<'a> Words<'a, ()> {
         Words {
             text,
             breaks: (!plain).then(|| break_opportunities(text)),
+            // A plain text has none (its bytes are listed above).
+            separated: !plain && text.as_bytes().contains(&0x1e),
+            pending: None,
         }
     }
 }
@@ -2111,6 +2166,7 @@ impl<B: Iterator<Item = usize>> Words<'_, B> {
     fn at(&mut self, start: usize) -> (usize, usize) {
         let text = self.text;
         match &mut self.breaks {
+            Some(_) if self.separated => self.separated_at(start),
             Some(breaks) => {
                 let end = breaks.find(|end| *end > start).unwrap_or(text.len());
                 let ink = text[start..end].trim_end_matches(char::is_whitespace).len();
@@ -2126,6 +2182,36 @@ impl<B: Iterator<Item = usize>> Words<'_, B> {
                 (ink, end)
             }
         }
+    }
+    /// `at` for a text holding an editor's own line breaks (U+001E): a word
+    /// also ends after one, which is no ink, as the shaper ends a line there
+    /// (cosmic-text's `LineEnding::Rs`). Out of line: other text's words are
+    /// found as they were.
+    #[cold]
+    #[inline(never)]
+    fn separated_at(&mut self, start: usize) -> (usize, usize) {
+        let text = self.text;
+        let Some(breaks) = self.breaks.as_mut() else {
+            return (start, start);
+        };
+        let opportunity = match self.pending.take() {
+            Some(end) if end > start => end,
+            _ => breaks.find(|end| *end > start).unwrap_or(text.len()),
+        };
+        let end = match text[start..opportunity].find('\u{1e}') {
+            Some(at) => {
+                if start + at + 1 < opportunity {
+                    self.pending = Some(opportunity);
+                }
+                start + at + 1
+            }
+            None => opportunity,
+        };
+        let mut word = text[start..end].trim_end_matches(char::is_whitespace);
+        while let Some(rest) = word.strip_suffix('\u{1e}') {
+            word = rest.trim_end_matches(char::is_whitespace);
+        }
+        (start + word.len(), end)
     }
     /// How many graphemes `range` of the text holds: a plain text's bytes.
     fn graphemes(&self, range: Range<usize>) -> usize {
@@ -2182,6 +2268,29 @@ fn plain_break_at(bytes: &[u8], at: usize) -> bool {
             _ => false,
         },
     }
+}
+/// Whether a grapheme starting with `byte` ends a line: a line feed, a
+/// carriage return or an editor's own break (U+001E). Text is mostly not
+/// control characters: one compare decides for the rest, the three only
+/// for those, out of line.
+#[inline(always)]
+fn ends_line(byte: u8) -> bool {
+    byte < 0x20 && control_ends_line(byte)
+}
+#[cold]
+#[inline(never)]
+fn control_ends_line(byte: u8) -> bool {
+    matches!(byte, b'\n' | b'\r' | 0x1e)
+}
+/// Whether `grapheme` ends a line: a line feed, a carriage return (with
+/// its line feed) or an editor's own break (U+001E). Each is a grapheme of
+/// its own, so its first byte says.
+#[inline]
+pub(crate) fn breaks_line(grapheme: &str) -> bool {
+    grapheme
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| ends_line(*byte))
 }
 /// Where `text`'s lines may break (UAX #14), as byte offsets: after each
 /// opportunity, and its end.

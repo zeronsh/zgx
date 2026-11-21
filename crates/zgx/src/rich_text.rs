@@ -644,7 +644,7 @@ pub(crate) fn fallback_boxes(rich: &RichText, width: Option<f32>) -> FallbackBox
             run_index += 1;
         }
         let run = &rich.runs[run_index];
-        let newline = grapheme.contains(['\r', '\n']);
+        let newline = crate::text_layout::breaks_line(grapheme);
         // Its grapheme may hold a combining mark past its character. A box
         // over text of its own is its first grapheme's; the rest take none.
         let text_box = rich.boxed
@@ -742,7 +742,7 @@ pub fn fallback_measure(rich: &RichText, width: Option<f32>) -> (f32, f32) {
         }
         let run = &rich.runs[run_index];
         let line = run.font.line_height.resolve(run.font_size);
-        if grapheme == "\n" || grapheme == "\r\n" || grapheme == "\r" {
+        if grapheme == "\n" || grapheme == "\r\n" || grapheme == "\r" || grapheme == "\u{1e}" {
             if limit.is_some_and(|limit| row >= limit) {
                 return (
                     width.map_or(max_x.max(x), |w| {
