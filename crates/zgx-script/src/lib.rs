@@ -111,8 +111,34 @@ mod modules {
         )
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod module_types;
+/// In the browser, which loads no library: no module, and none typed.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub mod module_types {
+    use std::path::{Path, PathBuf};
+    const NONE: &str = "native modules don't load in the browser";
+    pub fn manifest_of_library(_: &Path) -> Result<String, String> {
+        Err(NONE.into())
+    }
+    pub fn of_app(_: &Path) -> (Vec<(PathBuf, String)>, Vec<String>) {
+        (Vec::new(), Vec::new())
+    }
+    pub fn name_of(_: &str) -> Option<String> {
+        None
+    }
+    pub fn module_definitions(_: &str) -> Result<String, String> {
+        Err(NONE.into())
+    }
+    pub fn typed(text: String, _: &[String]) -> (String, Vec<String>) {
+        (text, Vec::new())
+    }
+    pub fn notes(_: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+}
 mod motion;
 mod node;
 mod opens;

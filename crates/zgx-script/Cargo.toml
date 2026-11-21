@@ -84,10 +84,7 @@ zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
 mlua = { package = "zgx-mlua", version = "0.12.10", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
-# Native modules' interface (their manifests are read for `zgx types` in
-# every build: nothing but std), and the system's loader for them
-# (`modules`).
-zgx-module = { path = "../zgx-module", version = "0.1.10", default-features = false }
+# The system's loader for native modules (`modules`).
 libloading = { version = "0.8", optional = true }
 # `ui.zip`: entries' checksums.
 crc32fast = "1"
@@ -119,6 +116,9 @@ web-time = "1.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
+# Native modules' interface: their manifests are read for `zgx types` in
+# every build but the browser's, which loads no library (nothing but std).
+zgx-module = { path = "../zgx-module", version = "0.1.10", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
