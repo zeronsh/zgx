@@ -1417,10 +1417,7 @@ impl FallbackTextLayout {
             }
         } else {
             for (index, grapheme) in text.grapheme_indices(true) {
-                each(
-                    index..index + grapheme.len(),
-                    breaks_line(grapheme),
-                );
+                each(index..index + grapheme.len(), breaks_line(grapheme));
             }
         }
         width = width.max(x);
