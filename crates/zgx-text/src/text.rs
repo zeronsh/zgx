@@ -413,7 +413,7 @@ impl ShapedText {
         set_buffer_text(fonts, &mut buffer, &text, font, size);
         // Editors need a visual row for the caret after a final line ending;
         // add it unless cosmic-text already ended with that empty line.
-        if text.ends_with(['\r', '\n']) && ends_open(&buffer) {
+        if text.ends_with(['\r', '\n', '\u{1e}']) && ends_open(&buffer) {
             buffer.lines.push(cosmic_text::BufferLine::new(
                 "",
                 cosmic_text::LineEnding::None,
@@ -451,8 +451,10 @@ impl ShapedText {
             .runs()
             .first()
             .map_or(1., |run| run.font.line_height.resolve(run.font_size));
-        if rich.options() == Default::default()
-            && rich.text().ends_with(['\r', '\n'])
+        // An editor's line ending in a break of its own (U+001E) keeps its
+        // last row whatever its options.
+        if ((rich.options() == Default::default() && rich.text().ends_with(['\r', '\n']))
+            || rich.text().ends_with('\u{1e}'))
             && ends_open(&buffer)
         {
             let font = rich.runs().last().unwrap();
@@ -467,6 +469,12 @@ impl ShapedText {
                 .last_mut()
                 .unwrap()
                 .set_align(alignment(&font.font));
+            // The buffer was shaped before the row joined it: lay the row out
+            // too, where an editor's own break ends the text.
+            if rich.text().ends_with('\u{1e}') {
+                let last = buffer.lines.len() - 1;
+                buffer.line_layout(fonts, last);
+            }
             buffer.shape_until_scroll(fonts, false);
         }
         let mut offset = 0;
