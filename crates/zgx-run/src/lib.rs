@@ -470,18 +470,43 @@ pub fn run_hosting(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::{cell::RefCell, rc::Rc};
     let configure = host;
-    let script = script_path(path);
+    // A bundle (`zgx build`'s), checked against its manifest: its scripts
+    // as the build compiled them, its modules' libraries for this platform.
+    let bundle = if zgx_script::app_bundle::is_bundle(path) {
+        let opened = zgx_script::app_bundle::open(path)?;
+        if zgx::env::var_os("ZGX_BUNDLE_TIMING").is_some() {
+            eprintln!(
+                "zgx-run: bundle checked in {:.2} ms ({})",
+                opened.checked_in.as_secs_f64() * 1e3,
+                if opened.hashed { "hashed" } else { "known" }
+            );
+        }
+        Some(opened)
+    } else {
+        None
+    };
+    let script = match &bundle {
+        Some(bundle) => bundle.ui.join(&bundle.entry),
+        None => script_path(path),
+    };
     if !script.is_file() {
         return Err(format!("{}: no such script", script.display()).into());
     }
     // Its modules compile on a worker while AppKit, the GPU and the window
-    // are set up, not one by one on the main thread at each `require`.
-    zgx_script::compile_ahead(&script, &[]);
+    // are set up, not one by one on the main thread at each `require` (a
+    // bundle's are compiled already).
+    if bundle.is_none() {
+        zgx_script::compile_ahead(&script, &[]);
+    }
     let (config, app_host, window_config) = AppConfig::read(&script)?;
     // The app's native modules, found before its window opens: one it names
     // that isn't built is said now, not as a script calls it.
     #[cfg(feature = "modules")]
-    let modules = modules_of(script.parent().unwrap_or(Path::new(".")))?;
+    let modules = match &bundle {
+        Some(bundle) => bundle.modules.clone(),
+        None => modules_of(script.parent().unwrap_or(Path::new(".")))?,
+    };
+    let bundle = bundle.map(|bundle| (bundle.ui, bundle.entry));
     let notice = LAUNCH.lock().unwrap().notice.take();
     let WindowConfig {
         frame_autosave,
@@ -539,7 +564,16 @@ pub fn run_hosting(
     }
     app.run(move |cx| {
         // Its packages, what it exposes to plugins, and its plugins.
-        let host = app_host.apply(ScriptHost::new(&cx.ui.runtime, script.clone()));
+        let host = match &bundle {
+            Some((ui, entry)) => ScriptHost::from_files(
+                &cx.ui.runtime,
+                zgx_script::ScriptFiles::Folder(ui.clone()),
+                entry,
+                zgx_script::Code::VerifiedBytecode,
+            ),
+            None => ScriptHost::new(&cx.ui.runtime, script.clone()),
+        };
+        let host = app_host.apply(host);
         let host = host.app_id(&config.app_id).args(args.clone());
         // The launch's files, and what the system opened meanwhile:
         // they wait for the script's `ui.on_open`.

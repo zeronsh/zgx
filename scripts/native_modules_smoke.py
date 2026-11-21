@@ -9,7 +9,9 @@ stops zgx-run before a window opens, naming it; and one whose manifest is
 for another interface is shown in the banner, its scripts not run. Last,
 `zgx run` with a module's crate: built into the cache and loaded, taken
 from the cache the next time, and as its source changes, built again and
-the app restarted with a notice."""
+the app restarted with a notice. And `zgx build`'s bundle of that app run
+by zgx-run: its bytecode and its module's library, checked; one whose
+library was changed is refused before a window opens."""
 import argparse
 import json
 import os
@@ -194,6 +196,40 @@ zgx-module = {{ path = "{ROOT / 'crates/zgx-module'}" }}
         subprocess.run(["pkill", "-KILL", "-P", str(process.pid)], check=False)
 
 
+def bundle_phase(zgx, zgx_run, work, env):
+    app = work / "greet-app"
+    env = dict(env, ZGX_CACHE=str(work / "cache"), ZGX_BUNDLE_TIMING="1")
+    out = work / "dist/greet"
+    # For release, built once (`zgx run` built it for development), then the
+    # cache's.
+    for expected in ("module `greet`: built in", "module `greet`: unchanged, from the cache"):
+        built = subprocess.run([str(zgx), "build", "--out", str(out), str(app)], env=env,
+                               capture_output=True, text=True)
+        assert built.returncode == 0, built.stderr
+        assert expected in built.stdout, built.stdout
+    process, path = launch(zgx_run, out, env)
+    assert path, f"zgx-run stopped: {process.stderr.read()}"
+    try:
+        assert state(path, "said") == '"HELLO, you"', state(path, "said")
+    finally:
+        stop(process)
+    said = process.stderr.read()
+    assert "bundle checked in" in said and "(hashed)" in said, said
+    # Again: known by its stamps, not hashed.
+    process, path = launch(zgx_run, out, env)
+    assert path, f"zgx-run stopped: {process.stderr.read()}"
+    stop(process)
+    said = process.stderr.read()
+    assert "(known)" in said, said
+    # Its module's library changed: refused, before any window.
+    library = next((out / "modules").glob("*/*"))
+    library.write_bytes(library.read_bytes() + b"\0")
+    process, path = launch(zgx_run, out, env)
+    assert path is None, "zgx-run ran a bundle whose library changed"
+    said = process.stderr.read()
+    assert "isn't the library its manifest names" in said, said
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zgx_run", type=pathlib.Path, help="zgx-run, built with its `modules` feature")
@@ -265,10 +301,14 @@ def main():
         for old in (work / f"zgx-inspect-{os.getuid()}").glob("*.sock"):
             old.unlink()
         zgx_run_phase(zgx, work, env)
+        for old in (work / f"zgx-inspect-{os.getuid()}").glob("*.sock"):
+            old.unlink()
+        bundle_phase(zgx, args.zgx_run, work, env)
         print("PASS: zgx-run loads zgx.json's module before the scripts that call it, takes one --module "
               "hands over, shows --notice, stops naming one that isn't built, and shows one it refuses; "
               "zgx run builds a module's crate, takes it from the cache when unchanged, and builds it "
-              "again and restarts the app with a notice as its source changes")
+              "again and restarts the app with a notice as its source changes; and zgx-run runs zgx build's "
+              "bundle of it, hashing it once, and refuses it once its library changes")
     finally:
         xvfb.terminate()
 

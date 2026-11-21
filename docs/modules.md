@@ -171,6 +171,21 @@ While the app runs, Luau files reload as always. When a module's sources change,
 
 The key can't see a path dependency outside the module's folder: keep those inside it, or depend by version or git, which `Cargo.lock` pins.
 
+### `zgx build`
+
+`zgx build my-app` writes the app as a bundle, `dist/<app_id>/` (or `--out`):
+
+```text
+dist/my-app/
+  manifest.json            the app's id and version, every hash
+  ui/                      the app's folder: .luau as bytecode, themes, images and the rest as they are
+  modules/<platform>/      each module's library: x86_64-linux, aarch64-macos…
+```
+
+Each module is built for release for each `--target` (the host's by default) where its key is new, and taken from the cache otherwise, so a release in which only Luau changed compiles no Rust. `zgx-run dist/my-app` runs it: the scripts are read from `ui/` as they are asked for, as the build compiled them. `--version` sets the bundle's version over `zgx.json`'s `version`.
+
+Luau checks no bytecode it loads, so a bundle is trusted as native code is: zgx-run runs one a person or the app's install names, and nothing a script or a plugin names. Opening one checks it against its manifest: each module's library by its SHA-256 every launch, and the scripts by one SHA-256 over the whole `ui/` tree the first time, after which each file's size and time of change are enough (kept in the cache) until one of them changes. A bundle whose scripts or libraries aren't those its manifest names is refused before a window opens.
+
 ## Calling one from Luau
 
 `ui.module(name)` gives a loaded module's functions as a table, each called with its own arguments:
