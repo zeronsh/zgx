@@ -8654,6 +8654,12 @@ impl Scene {
             cold.backdrop_readers.retain(live);
             cold.layer_inputs.retain(live);
             cold.geometry_nodes.retain(|(_, id)| live(id));
+            if !cold.column_memos.is_empty() {
+                cold.column_memos.retain(|id, _| live(id));
+            }
+            if !cold.sticky.is_empty() {
+                cold.sticky.retain(|id, _| live(id));
+            }
         }
         self.popups.retain(live);
         self.popup_roles.retain(|(root, _)| live(root));
@@ -9577,6 +9583,9 @@ impl Scene {
         let Some(maps) = &mut self.cold else { return };
         let mut sticky = std::mem::take(&mut maps.sticky);
         for (id, entry) in &mut sticky {
+            if !self.contains(*id) {
+                continue;
+            }
             let mut transform = self.node(*id).transform;
             if transform.y != entry.placed {
                 entry.own = transform.y;
@@ -14189,6 +14198,7 @@ impl Scene {
             let Some(node) = self
                 .slots
                 .get(id.index as usize)
+                .filter(|s| s.generation == id.generation)
                 .and_then(|s| s.node.as_ref())
             else {
                 continue;
@@ -21997,6 +22007,140 @@ mod tests {
         let reused = scene.append(scene.root(), text("reused"), Style::default());
         assert!(ids.iter().any(|id| id.index == reused.index));
         assert!(ids.iter().all(|id| !scene.contains(*id)));
+        scene.flush();
+    }
+    /// A column streamed into (`column_memos`), killed with its subtree before
+    /// its slots are freed (`kill` without `free_dead`): the next layout and
+    /// flush neither panic on the stale id in `restore_column_reads` nor keep
+    /// it in `column_memos`, and freeing the dead slots afterwards succeeds.
+    #[test]
+    fn a_killed_kept_column_is_skipped_when_restoring_column_reads() {
+        let mut scene = Scene::new(300.0, 4000.0);
+        scene.set_text_measurer(|text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        });
+        let holder = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style::default(),
+        );
+        let column = scene.append(
+            holder,
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(220.0),
+                ..Style::default()
+            },
+        );
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let ids: Vec<_> = (0..80)
+            .map(|i| scene.append(column, text(&format!("block {i}")), wrap.clone()))
+            .collect();
+        let kept = scene.append(scene.root(), text("kept"), Style::default());
+        scene.flush();
+        // A second flush changing the tail populates `memo.sums`.
+        scene.set_text(*ids.last().unwrap(), "block 79 grown to populate sums");
+        scene.flush();
+        let saved_memo = *scene
+            .cold
+            .as_deref()
+            .and_then(|cold| cold.column_memos.get(&column))
+            .expect("expected column_memos entry");
+        assert!(
+            saved_memo.sums.is_some(),
+            "expected column_memos entry with sums populated"
+        );
+        // Clear `READS_KNOWN` on the column by dirtying its tail, then kill
+        // its parent without freeing dead slots.
+        scene.set_text(*ids.last().unwrap(), "block 79 dirty before kill");
+        let killed = scene.kill(holder);
+        scene.set_text(kept, "kept after kill");
+        scene.flush();
+        assert!(
+            scene
+                .cold
+                .as_deref()
+                .is_none_or(|cold| !cold.column_memos.contains_key(&column))
+        );
+        // Even if a stale entry were still in `column_memos`, `restore_column_reads`
+        // skips it by generation without panicking.
+        scene
+            .cold
+            .get_or_insert_default()
+            .column_memos
+            .insert(column, saved_memo);
+        scene.restore_column_reads();
+        scene
+            .cold
+            .as_deref_mut()
+            .unwrap()
+            .column_memos
+            .remove(&column);
+        for id in killed {
+            scene.free_dead(id);
+        }
+        scene.flush();
+    }
+    /// A sticky node killed with its subtree before its slots are freed (`kill`
+    /// without `free_dead`): the next flush skips it in `place_sticky` while
+    /// still placing live sticky nodes, and freeing the dead slots succeeds.
+    #[test]
+    fn a_killed_sticky_node_is_skipped_when_placing_sticky() {
+        let mut scene = Scene::new(300.0, 400.0);
+        let holder = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style::default(),
+        );
+        let dead_sticky = scene.append(holder, text("dead sticky"), Style::default());
+        scene.set_sticky(dead_sticky, Some(0.0));
+        let live_holder = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style::default(),
+        );
+        let live_sticky = scene.append(live_holder, text("live sticky"), Style::default());
+        scene.set_sticky(live_sticky, Some(0.0));
+        scene.flush();
+        let killed = scene.kill(holder);
+        scene.set_text(live_sticky, "live sticky updated");
+        scene.flush();
+        assert!(
+            scene
+                .cold
+                .as_deref()
+                .is_none_or(|cold| !cold.sticky.contains_key(&dead_sticky))
+        );
+        assert!(
+            scene
+                .cold
+                .as_deref()
+                .is_some_and(|cold| cold.sticky.contains_key(&live_sticky))
+        );
+        // Even if a stale entry remained in `sticky`, `place_sticky` skips it.
+        scene.cold.get_or_insert_default().sticky.insert(
+            dead_sticky,
+            Sticky {
+                top: 0.0,
+                own: 0.0,
+                placed: 0.0,
+            },
+        );
+        scene.place_sticky();
+        scene
+            .cold
+            .as_deref_mut()
+            .unwrap()
+            .sticky
+            .remove(&dead_sticky);
+        for id in killed {
+            scene.free_dead(id);
+        }
         scene.flush();
     }
     /// A page taken out whole (`kill`, as a chat's transcript is when
