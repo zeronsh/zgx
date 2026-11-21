@@ -7336,8 +7336,21 @@ impl Ui {
                     {
                         s.damage_shown(layer);
                     }
+                    // A hidden line (`LineInset::hidden`) has no node.
+                    let insets = lines.has_insets();
+                    if insets {
+                        pool.retain(|(line, id)| {
+                            let hidden = lines.inset(*line).hidden;
+                            if hidden {
+                                free.push(*id);
+                            }
+                            !hidden
+                        });
+                    }
                     for i in shown_lines.clone() {
-                        if pool.iter().any(|(line, _)| *line == i) {
+                        if (insets && lines.inset(i).hidden)
+                            || pool.iter().any(|(line, _)| *line == i)
+                        {
                             continue;
                         }
                         let id = free.pop().unwrap_or_else(|| {

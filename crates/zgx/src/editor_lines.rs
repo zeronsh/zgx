@@ -306,12 +306,38 @@ pub struct LineInset {
     pub above: f32,
     /// Points below the line.
     pub below: f32,
+    /// Not shown and no room taken (a closed toggle's lines): the app keeps
+    /// the caret out of it.
+    pub hidden: bool,
 }
 impl LineInset {
+    /// A line's height with its room: its text's `bare` height, or nothing
+    /// when hidden.
+    fn height(&self, bare: f32) -> f32 {
+        if self.hidden {
+            0.
+        } else {
+            bare + self.above + self.below
+        }
+    }
+    /// A line not shown and taking no room.
+    pub const fn hidden() -> Self {
+        Self {
+            left: 0.,
+            above: 0.,
+            below: 0.,
+            hidden: true,
+        }
+    }
     /// `left` points before the line's text, `above` over it and `below`
     /// under it.
     pub const fn new(left: f32, above: f32, below: f32) -> Self {
-        Self { left, above, below }
+        Self {
+            left,
+            above,
+            below,
+            hidden: false,
+        }
     }
 }
 /// Each line's room (`LineInset`), by its index.
@@ -1323,12 +1349,12 @@ impl LinesLayout {
                 .map(|i| {
                     let line = layout.line_text(i);
                     let inset = layout.inset(i);
-                    known
-                        .get(&*line)
-                        .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width))
-                        + inset.above
-                        + inset.below
+                    inset.height(
+                        known
+                            .get(&*line)
+                            .copied()
+                            .unwrap_or_else(|| layout.estimate(&line, width)),
+                    )
                 })
                 .collect();
             drop(known);
@@ -1372,12 +1398,12 @@ impl LinesLayout {
                 let line = layout.line_text(i);
                 let inset = layout.inset(i);
                 each.push(
-                    known
-                        .get(&*line)
-                        .copied()
-                        .unwrap_or_else(|| layout.estimate(&line, width))
-                        + inset.above
-                        + inset.below,
+                    inset.height(
+                        known
+                            .get(&*line)
+                            .copied()
+                            .unwrap_or_else(|| layout.estimate(&line, width)),
+                    ),
                 );
             }
             each.extend_from_slice(&old_each[moved..]);
@@ -1465,6 +1491,10 @@ impl LinesLayout {
         let left = self.inset(i).left;
         wrap.map(|w| if left > 0. { (w - left).max(1.) } else { w })
     }
+    /// Whether its lines have room of their own (`set_line_insets`).
+    pub(crate) fn has_insets(&self) -> bool {
+        self.cache.has_insets()
+    }
     /// Line `i`'s room (`EditorHandle::set_line_insets`).
     #[inline]
     pub(crate) fn inset(&self, i: usize) -> LineInset {
@@ -1496,7 +1526,7 @@ impl LinesLayout {
         if let Some(heights) = &self.heights {
             // Kept without its room: the same text elsewhere has its own.
             let bare = height.max(self.row);
-            let height = bare + inset.above + inset.below;
+            let height = inset.height(bare);
             if heights.borrow().each[i] != height {
                 heights.borrow_mut().set(i, height);
                 self.cache.heights.borrow_mut().insert((*text).into(), bare);
@@ -1963,6 +1993,35 @@ mod tests {
         cache.spans(&first, 0);
         cache.forget_last();
         assert!(lay().heights.is_none());
+    }
+
+    /// A hidden line takes no room: the line after it starts where it
+    /// would have.
+    #[test]
+    fn a_hidden_line_takes_no_room() {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| {
+            if i == 1 {
+                LineInset::hidden()
+            } else {
+                LineInset::default()
+            }
+        })));
+        for wrap in [None, Some(300.)] {
+            cache.forget_last();
+            let layout = cache.layout(
+                || Text::new("one\ntwo\nthree"),
+                None,
+                14.,
+                wrap,
+                &FontStyle::default(),
+                0,
+                shaper,
+            );
+            layout.lines_between(0., 1000.);
+            assert_eq!(layout.height(1), 0., "{wrap:?}");
+            assert_eq!(layout.top(2), layout.top(1), "{wrap:?}");
+        }
     }
 
     /// An indented line is drawn in the width it was wrapped to, not the
