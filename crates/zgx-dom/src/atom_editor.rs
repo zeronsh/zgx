@@ -22,7 +22,7 @@ use zgx::{
     reactive::Runtime,
     scene::Color,
     text_edit::{Atom, TextEditor},
-    widgets::{AtomEvent, AtomListener, AtomStyle, EditorValue},
+    widgets::{AtomCodec, AtomEvent, AtomListener, AtomStyle, EditorValue},
 };
 
 /// A piece of the text as shown: its own text, or an atom's chip.
@@ -55,6 +55,8 @@ struct AtomEditor {
     /// asked meanwhile, shown whole once it commits.
     composing: Cell<bool>,
     stale: Cell<bool>,
+    /// How its atoms go on the clipboard beyond the page.
+    codec: Option<AtomCodec>,
 }
 
 /// A text area's own options, beyond its atoms.
@@ -247,6 +249,25 @@ impl AtomEditor {
         let (anchor, focus) = (units(selection.anchor), units(selection.focus));
         ops::with(|ops| ops.op(&[ops::SELECT, self.root, anchor, focus]));
     }
+    /// A copy or a cut of `start..end` (bytes, the browser's selection): its
+    /// text, and its atoms beside it, handed to the page's copy
+    /// (`zgx_copy_atoms`), the model's selection widened as it widens it.
+    fn copy(&self, start: usize, end: usize) {
+        let (text, json) = {
+            let mut model = self.model.borrow_mut();
+            let (start, end) = {
+                let text = model.text();
+                (floor_char(&text, start), floor_char(&text, end))
+            };
+            model.set_selection(start, end);
+            let range = model.selection().range();
+            let text = model.selected_text().into_owned();
+            let json =
+                zgx::widgets::copied_atoms(&text, range.start, model.atoms(), self.codec.as_ref());
+            (text, json)
+        };
+        crate::js::zgx_copy_atoms(&text, json.as_deref());
+    }
     /// Tell its listener what happened to its atoms, if anything did.
     fn tell(&self) {
         let (changes, atoms, reason, text) = {
@@ -274,6 +295,9 @@ impl AtomEditor {
     /// `data` to the model, over `start..end` (the selection then, in
     /// bytes): its text set as the model's, shown again, its caret put back.
     fn edit(&self, kind: &str, data: &str, start: usize, end: usize) {
+        if kind == "copy" {
+            return self.copy(start, end);
+        }
         match kind {
             // An input method begins: its text is the browser's until it ends.
             "compositionstart" => {
@@ -300,6 +324,13 @@ impl AtomEditor {
             match kind {
                 "insertText" | "insertReplacementText" | "compositionend" => model.insert(&data),
                 "insertFromPaste" | "insertFromDrop" => model.insert_pasted(&data),
+                // A paste with a copy's atoms beside its text: `text\0json`.
+                "insertFromPasteAtoms" => {
+                    let (text, json) = data.split_once('\0').unwrap_or((&data, ""));
+                    let atoms =
+                        zgx::widgets::pasted_atoms(text, json, model.atoms(), self.codec.as_ref());
+                    model.insert_pasted_atoms(text, atoms)
+                }
                 "insertParagraph" | "insertLineBreak" if self.multiline => model.insert("\n"),
                 "deleteContentBackward" => model.delete_backward(false),
                 "deleteWordBackward" => model.delete_backward(true),
@@ -352,6 +383,7 @@ pub(crate) fn mount(block: &mut Block, id: u32, runtime: &Runtime, field: Field,
         on_atoms,
         wash,
         style,
+        codec,
     } = atoms;
     let editor = Rc::new(AtomEditor {
         root: id,
@@ -364,6 +396,7 @@ pub(crate) fn mount(block: &mut Block, id: u32, runtime: &Runtime, field: Field,
         shown: RefCell::default(),
         composing: Cell::new(false),
         stale: Cell::new(false),
+        codec,
     });
     // What it shows while empty, drawn by its style (`.ze[data-placeholder]`).
     if let Some(mut placeholder) = placeholder {

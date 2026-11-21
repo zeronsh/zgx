@@ -563,6 +563,8 @@ pub(crate) struct CodeOptions {
     atom_pointer: Option<Rc<crate::editor_atom_pointer::AtomPointer>>,
     /// `atom_style`: how its atoms show beyond a wash.
     atom_style: Option<crate::editor_atom_style::AtomStyle>,
+    /// `atom_codec`: how its atoms go on the clipboard beyond the app.
+    atom_codec: Option<crate::widgets::AtomCodec>,
 }
 /// `View`'s fields few views set (`View::rare`).
 #[derive(Default)]
@@ -694,6 +696,7 @@ impl Rare {
             && code.on_atoms.is_none()
             && code.atom_wash.is_none()
             && code.atom_style.is_none()
+            && code.atom_codec.is_none()
         {
             return None;
         }
@@ -702,6 +705,7 @@ impl Rare {
             on_atoms: code.on_atoms.take(),
             wash: code.atom_wash.take(),
             style: code.atom_style.take(),
+            codec: code.atom_codec.take(),
         }))
     }
     /// `View::refine`'s part: what an outer view sets over its inner one.
@@ -2081,6 +2085,13 @@ impl View {
     /// `EditorHandle::on_atoms`.
     pub fn on_atoms(mut self, told: impl FnMut(&crate::widgets::AtomEvent<'_>) + 'static) -> Self {
         self.code_mut().on_atoms = Some(Box::new(told));
+        self
+    }
+    /// How a text area's atoms go on the clipboard beyond the app, and come
+    /// back from it (`EditorHandle::set_atom_codec`). (Pin line.)
+    #[doc(hidden)]
+    pub fn atom_codec(mut self, codec: crate::widgets::AtomCodec) -> Self {
+        self.code_mut().atom_codec = Some(codec);
         self
     }
     /// How a text area's atoms show beyond a wash: a mention's colour,
@@ -7682,6 +7693,7 @@ fn open_element(
                 atoms_when,
                 atom_pointer,
                 atom_style,
+                atom_codec,
             } = *code;
             if highlighter.is_some() {
                 editor.set_span_highlighter(highlighter);
@@ -7714,6 +7726,9 @@ fn open_element(
             }
             if atom_style.is_some() {
                 editor.set_atom_style(atom_style);
+            }
+            if let Some(codec) = atom_codec {
+                editor.set_atom_codec(codec);
             }
             if let Some(mut atoms) = atoms_when {
                 let editor = editor.clone();

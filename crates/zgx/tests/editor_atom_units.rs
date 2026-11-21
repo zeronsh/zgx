@@ -10,7 +10,7 @@ use zgx::{
     input::{InputEvent, Key, Modifiers},
     platform::{FilePicker, Pending, Platform},
     text_edit::Atom,
-    widgets::{EditCommand, EditorHandle, Ui},
+    widgets::{ATOMS_TYPE, EditCommand, EditorHandle, Ui},
 };
 
 /// A clipboard in memory, with the app's own types beside the text.
@@ -59,22 +59,30 @@ impl Platform for Clipboard {
     }
 }
 
-/// Two text areas, "a" ("see  now", focused) and "b" (empty).
-fn fields() -> (Ui, EditorHandle, EditorHandle) {
+/// Two text areas that take atoms, "a" ("see  now", focused) and "b"
+/// (empty), and a plain one, "c".
+fn all_fields() -> (Ui, EditorHandle, EditorHandle, EditorHandle) {
     let mut ui = Ui::new(400., 300.);
     let a = ui.signal(String::from("see  now"));
     let b = ui.signal(String::new());
+    let c = ui.signal(String::new());
     let view = ui.mount(
         column()
             .size(400., 300.)
-            .child(text_area("A", a).id("a").w(300.).h(80.))
-            .child(text_area("B", b).id("b").w(300.).h(80.)),
+            .child(text_area("A", a).id("a").w(300.).h(80.).on_atoms(|_| {}))
+            .child(text_area("B", b).id("b").w(300.).h(80.).on_atoms(|_| {}))
+            .child(text_area("C", c).id("c").w(300.).h(80.)),
     );
     ui.prepare_frame();
-    let a = view.find("a").unwrap();
-    let b = view.find("b").unwrap();
+    let [a, b, c] = ["a", "b", "c"].map(|id| view.find(id).unwrap());
     ui.input.focus(&ui.scene, Some(a));
-    let (a, b) = (ui.editor(a).unwrap(), ui.editor(b).unwrap());
+    let [a, b, c] = [a, b, c].map(|node| ui.editor(node).unwrap());
+    (ui, a, b, c)
+}
+
+/// `all_fields` without the plain one.
+fn fields() -> (Ui, EditorHandle, EditorHandle) {
+    let (ui, a, b, _) = all_fields();
     (ui, a, b)
 }
 
@@ -127,6 +135,95 @@ fn shift_arrows_select_an_atom_whole() {
     key(&mut ui, Key::ArrowRight, shift);
     key(&mut ui, Key::ArrowRight, shift);
     assert_eq!(a.selection(), (13, 14));
+}
+
+#[test]
+fn copy_and_paste_carry_an_atom_between_text_areas() {
+    let (ui, a, b, _) = with_atom();
+    let clipboard = Clipboard::default();
+    a.set_selection(0, 17);
+    assert!(ui.edit_command(EditCommand::Copy, &clipboard));
+    assert_eq!(
+        clipboard.clipboard_text().as_deref(),
+        Some("see @file.pdf now")
+    );
+    let json = clipboard
+        .clipboard_typed(ATOMS_TYPE)
+        .expect("its atoms beside the text");
+    assert!(json.contains("\"from\":4,\"to\":13"), "{json}");
+    ui.input.focus(&ui.scene, Some(b.node));
+    ui.prepare_frame();
+    assert!(ui.edit_command(EditCommand::Paste, &clipboard));
+    ui.prepare_frame();
+    assert_eq!(text(&b), "see @file.pdf now");
+    let atoms = b.atoms();
+    assert_eq!(atoms.len(), 1, "the pasted atom is an atom: {atoms:?}");
+    assert_eq!(atoms[0].range, 4..13);
+    // Pasted again after its text: a second, its own id.
+    assert!(ui.edit_command(EditCommand::Paste, &clipboard));
+    let atoms = b.atoms();
+    assert_eq!(atoms.len(), 2);
+    assert_eq!(atoms[1].range, 21..30);
+    assert_ne!(atoms[0].id, atoms[1].id);
+    // One undo takes the paste and its atom.
+    assert!(b.undo());
+    assert_eq!(b.atoms().len(), 1);
+    assert_eq!(text(&b), "see @file.pdf now");
+}
+
+#[test]
+fn a_paste_keeps_the_atoms_payload_and_wash() {
+    let (ui, a, b) = fields();
+    let payload: std::sync::Arc<dyn zgx::text_edit::AtomPayload> = std::sync::Arc::new(7u32);
+    a.set_selection(4, 4);
+    a.insert_atom(
+        "@x",
+        None,
+        Some(zgx::scene::Color(1, 2, 3, 255)),
+        Some(payload.clone()),
+    )
+    .unwrap();
+    let clipboard = Clipboard::default();
+    a.set_selection(4, 6);
+    assert!(ui.edit_command(EditCommand::Cut, &clipboard));
+    assert!(a.atoms().is_empty(), "cut takes it");
+    ui.input.focus(&ui.scene, Some(b.node));
+    ui.prepare_frame();
+    assert!(ui.edit_command(EditCommand::Paste, &clipboard));
+    let atoms = b.atoms();
+    assert_eq!(atoms.len(), 1);
+    let pasted = atoms[0].payload.as_ref().expect("its payload");
+    assert!(std::sync::Arc::ptr_eq(pasted, &payload));
+    assert_eq!(atoms[0].wash, Some(zgx::scene::Color(1, 2, 3, 255)));
+}
+
+#[test]
+fn a_paste_whose_text_changed_since_takes_no_atoms() {
+    let (ui, a, b, _) = with_atom();
+    let clipboard = Clipboard::default();
+    a.set_selection(0, 17);
+    assert!(ui.edit_command(EditCommand::Copy, &clipboard));
+    // Another app wrote the text and left the type (as a stale one can).
+    *clipboard.text.borrow_mut() = Some("other words".into());
+    ui.input.focus(&ui.scene, Some(b.node));
+    assert!(ui.edit_command(EditCommand::Paste, &clipboard));
+    assert_eq!(text(&b), "other words");
+    assert!(b.atoms().is_empty());
+}
+
+#[test]
+fn a_plain_text_area_takes_the_label_alone() {
+    let (ui, a, _, c) = all_fields();
+    a.set_selection(4, 4);
+    a.insert_atom("@file.pdf", None, None, None).unwrap();
+    let clipboard = Clipboard::default();
+    a.set_selection(0, 17);
+    assert!(ui.edit_command(EditCommand::Copy, &clipboard));
+    ui.input.focus(&ui.scene, Some(c.node));
+    ui.prepare_frame();
+    assert!(ui.edit_command(EditCommand::Paste, &clipboard));
+    assert_eq!(text(&c), "see @file.pdf now");
+    assert!(c.atoms().is_empty(), "a plain text area takes no atoms");
 }
 
 #[test]
