@@ -141,6 +141,25 @@ return ui.textarea {
 
 A long text (more than 64 KiB, or 2,000 lines), or one with `highlight`, is laid out by its lines: the lines in view are shaped and drawn, a line keeps its shape until it changes, and where each line starts is a few bytes a line, so a file of 100,000 lines opens in about 20 ms and a keystroke costs about a millisecond ([the code editor example](../../crates/zgx-script/examples/code_editor), `code_editor_bench`). A string over 64 KiB in state is held in chunks of a few kilobytes: the state, the textarea bound to it, its layout and its accessibility value share one copy, and a keystroke's new value shares every chunk but the one it changed (a script reading the state still reads a string). Assistive technology reads such a text a page at a time, as browsers' code editors give it: the lines in view and a page each side (or around the caret, scrolled away), a text run a line, so a keystroke sends the runs of the line it changed.
 
+### Line room
+
+`line_insets = function(line, state) return { left, above, below, hidden } end` gives a textarea's line room of its own, in points: `left` before its text (the line wraps in what it leaves, its carets, clicks and selection moving with it), `above` and `below` it, and `hidden = true` takes the line and its room away (a closed toggle's lines; keep the caret out of them). `state` is what `highlight` was given for the line (what the line before left it; 0 without a highlighter), so a fenced code block's lines know they're inside it. It's asked once for each line text and state, and must depend on nothing but its arguments. A textarea without it lays out and scrolls as before. In the browser, lines take no room of their own yet ([zgx-dom](../dom.md#what-doesnt-map)).
+
+```lua
+return ui.textarea {
+	value = ui.state("note", "# Title\n- one\n- two"),
+	wrap = true,
+	line_insets = function(line, state)
+		if string.sub(line, 1, 2) == "# " then
+			return { above = 16, below = 6 }
+		elseif string.sub(line, 1, 2) == "- " then
+			return { left = 20 }
+		end
+		return nil
+	end,
+}
+```
+
 ## checkbox
 
 A toggle drawn as the platform draws one, a rounded 16-point box beside its label, bound to a boolean state: outlined while off; filled with the accent while on, its checkmark drawing on; a dash while `mixed`. A click on either, or Space, toggles it; Enter goes on to the form (its default action), as a browser's checkbox and AppKit's do. Its colours are the theme's `$accent`, `$accent.text`, `$input.bg` and `$border.strong`, so the system's accent shows where the host gives it. Disabled, it dims.
