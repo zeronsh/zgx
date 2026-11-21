@@ -66,7 +66,17 @@ On an RTX 4090 with NVIDIA's driver 32.0.16.1742 (Windows 11), Direct3D 12 devic
 - **The hang.** `independent_device_lifecycle_stress` (opt-in, 24 threads) sometimes hangs. Every blocked thread is in the driver, on its own locks, or in the kernel releasing an allocation (`NtGdiDdDDIDestroyAllocation2`); no zgx or wgpu lock is held.
 - **Without zgx or wgpu.** `crates/zgx-gpu/examples/d3d12_device_churn.rs` uses Direct3D 12 alone: 24 threads each make a device, a queue, a target and a readback buffer, draw, wait and release, ten times. It hangs within a few runs, with the same stacks, and one driver thread waits in the routine the crash was in.
 
-Apps never do this: a zgx process shares one device among its windows (`GpuContext`). Only tests make devices on many threads (`independent_devices_render_concurrently_with_bounded_workers`, four of them, and the opt-in stress), and CI's Windows runners draw with WARP, which is unaffected. To check a newer driver:
+A process's windows share one context, but every `GpuRenderer::new` made one of its own, with a device of its own: zgx-video renders a video's chunks on threads, a stage each, and its render tests ran twenty at once beside their ffmpeg encoders. On WING-PC that hung half the runs of `zgx-video --test render` (11 of 22), every test blocked in the driver or the kernel making, using or releasing a device. So on Direct3D 12 every context in a process now draws with one device: a GPU's while a context holds it (held weakly, so it goes with the last context and nothing of it stays at rest), WARP's for the process. Vulkan and Metal, untested so, keep a device per context. With it, 0 of 22 runs hung, alternated with the device-per-context build in one binary.
+
+`scripts/windows_device_churn_probe.py` runs both again on a Direct3D 12 GPU (it refuses WARP, which never hung): `independent_device_lifecycle_stress` (24 threads, each making, drawing with and dropping renderers) and zgx-video's render tests, each run in a Job Object of its own and timed out at 180 s, a hang counted:
+
+```powershell
+cargo test -p zgx-gpu --test pixels --locked --no-run
+cargo test -p zgx-video --test render --locked --no-run   # with ffmpeg on PATH
+python scripts/windows_device_churn_probe.py --runs 20
+```
+
+On Direct3D 12 the stress no longer churns devices; on Direct3D 12 alone (no zgx or wgpu) it still does. To check a newer driver:
 
 ```powershell
 cargo run --release -p zgx-gpu --example d3d12_device_churn
