@@ -1122,6 +1122,9 @@ pub(crate) fn install(
                 settle_with(lua, &promise, Kind::Action, action(arg))?;
             } else if let Some(action) = plain {
                 action(arg);
+                if let Some(error) = crate::modules::failure() {
+                    return Err(error);
+                }
                 promise.state.set(Settled::Value(Value::Nil));
             } else {
                 return Err(mlua::Error::runtime(format!(

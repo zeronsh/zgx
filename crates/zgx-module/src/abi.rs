@@ -22,8 +22,11 @@ use std::{ffi::c_void, mem::MaybeUninit};
 /// [`Registrar`], told by their `size`.
 pub const ABI: u32 = 1;
 
-/// The symbol a module exports ([`Entry`]).
-pub const ENTRY: &[u8] = b"zgx_module_v1\0";
+/// What the symbol of a module's entry ([`Entry`]) begins with: the
+/// module's name follows (`zgx_module_v1_words`), so two modules linked
+/// into one program are two symbols. A module's name is letters, digits
+/// and `_`, and its manifest says it.
+pub const ENTRY: &str = "zgx_module_v1_";
 
 /// `nil`.
 pub const NIL: u8 = 0;
@@ -118,18 +121,34 @@ pub struct Api {
     pub flat: unsafe extern "C" fn(value: *const Raw, out: *mut Raw),
 }
 
-/// A module's function, as `ui.call_sync(name, arg)` calls it: `arg` is
-/// lent for the call (a function that keeps it clones it), and what it
-/// writes to `out` is owned, the runtime's from then.
-pub type Function = unsafe extern "C" fn(user: *mut c_void, arg: *const Raw, out: *mut Raw);
-/// A function handed its argument: `arg` is owned by the function, which
-/// frees it or hands it on (what it writes to `out` may be `arg` itself).
-/// For one that keeps or returns what it is given; any other is cheaper
-/// lent its argument ([`Function`]), which the runtime then frees in place.
-pub type FunctionTaking = unsafe extern "C" fn(user: *mut c_void, arg: *mut Raw, out: *mut Raw);
+/// What a call returns when it did what it was asked.
+pub const DONE: u32 = 0;
+/// What a call returns when it couldn't (an argument of the wrong kind): it
+/// wrote why to `out`, a string, where its result would have gone, and the
+/// runtime raises that in the script that called, naming the module and the
+/// function. Any value but [`DONE`] is read as this.
+pub const FAILED: u32 = 1;
+
+/// A module's function, as `ui.call_sync(name, arg)` calls it, and as a
+/// script calls it by name on the module's table (`ui.module`), with any
+/// number of arguments: `args` are `len` values, lent for the call (a
+/// function that keeps one clones it). There is always one to read: called
+/// with none, it is lent a `nil` (and `len` is 0). What it writes to `out`
+/// is owned, the runtime's from then, and it always writes it: its result
+/// and [`DONE`], or why it failed and [`FAILED`].
+pub type Function =
+    unsafe extern "C" fn(user: *mut c_void, args: *const Raw, len: usize, out: *mut Raw) -> u32;
+/// A function handed its argument, the first (any after it the runtime
+/// frees): `arg` is owned by the function, which frees it or hands it on
+/// (what it writes to `out` may be `arg` itself). For one that keeps or
+/// returns what it is given; any other is cheaper lent its arguments
+/// ([`Function`]), which the runtime then frees in place.
+pub type FunctionTaking =
+    unsafe extern "C" fn(user: *mut c_void, arg: *mut Raw, out: *mut Raw) -> u32;
 /// A module's action, as `ui.action(name, arg)` and `ui.invoke` call it:
-/// `arg` lent, as a function's.
-pub type Action = unsafe extern "C" fn(user: *mut c_void, arg: *const Raw);
+/// `arg` lent, as a function's. It writes `out` only when it fails (why,
+/// and [`FAILED`]).
+pub type Action = unsafe extern "C" fn(user: *mut c_void, arg: *const Raw, out: *mut Raw) -> u32;
 /// Frees a registration's `user` when the host that held it goes.
 pub type Free = unsafe extern "C" fn(user: *mut c_void);
 
@@ -192,3 +211,153 @@ pub type Entry = unsafe extern "C" fn(api: *const Api, registrar: *const Registr
 /// The runtime speaks another [`ABI`], or a shorter [`Api`] than this
 /// module needs.
 pub const REFUSED_ABI: u32 = 1;
+
+/// What the symbol of a module's manifest begins with, its name following
+/// as [`ENTRY`]'s. A manifest says what the module is called, what it
+/// registers and with which types, as JSON (docs/modules.md has its
+/// grammar). Data, not a function, all in one piece with no pointer in it,
+/// so it reads the same in the library's file as in memory:
+///
+/// | bytes | |
+/// | --- | --- |
+/// | 16 | [`MANIFEST_MAGIC`] |
+/// | 4 | [`MANIFEST_FORMAT`], little-endian |
+/// | 4 | the JSON's length in bytes, little-endian |
+/// | 4 | [`manifest_sum`] of the JSON, little-endian |
+/// | 4 | zero |
+/// | its length | the JSON, UTF-8 |
+/// | 16 | [`MANIFEST_END`] |
+///
+/// Every module has one: it is how the runtime learns a library's name, and
+/// so its symbols. The runtime finds it in the library's file (the magic,
+/// then the first place where the whole of the above holds), loads the
+/// library, reads the manifest again through this symbol, and refuses a
+/// module where the two differ or that registers anything else than it
+/// says. Tools read it from the file the same way, without running the
+/// module. A manifest that lists no functions (one registering by hand,
+/// `register!`) is held to nothing but its name, and nothing is known of
+/// its types.
+pub const MANIFEST: &str = "zgx_module_manifest_";
+/// What a manifest begins with.
+pub const MANIFEST_MAGIC: [u8; 16] = *b"zgx-module-json\0";
+/// What a manifest ends with.
+pub const MANIFEST_END: [u8; 16] = *b"\0zgx-module-end\0";
+/// The manifest format's own number (and `"zgx_module"` in the JSON).
+pub const MANIFEST_FORMAT: u32 = 1;
+/// How many bytes come before a manifest's JSON.
+pub const MANIFEST_HEAD: usize = 32;
+
+/// A manifest's checksum of its JSON: FNV-1a, 32 bits.
+pub const fn manifest_sum(json: &[u8]) -> u32 {
+    let mut sum: u32 = 0x811c_9dc5;
+    let mut i = 0;
+    while i < json.len() {
+        sum = (sum ^ json[i] as u32).wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    sum
+}
+
+/// A manifest of `json`, as a module's symbol holds it ([`MANIFEST`]): `N`
+/// is the JSON's length and 48 (`zgx_module::module` and `register!` write
+/// this for a module).
+///
+/// # Panics
+/// If `N` isn't that.
+pub const fn manifest<const N: usize>(json: &str) -> [u8; N] {
+    let json = json.as_bytes();
+    assert!(N == MANIFEST_HEAD + json.len() + MANIFEST_END.len());
+    assert!(json.len() <= u32::MAX as usize);
+    let mut out = [0u8; N];
+    let mut at = 0;
+    while at < 16 {
+        out[at] = MANIFEST_MAGIC[at];
+        out[N - 16 + at] = MANIFEST_END[at];
+        at += 1;
+    }
+    let words = [MANIFEST_FORMAT, json.len() as u32, manifest_sum(json)];
+    let mut w = 0;
+    while w < 3 {
+        let bytes = words[w].to_le_bytes();
+        let mut b = 0;
+        while b < 4 {
+            out[16 + w * 4 + b] = bytes[b];
+            b += 1;
+        }
+        w += 1;
+    }
+    let mut i = 0;
+    while i < json.len() {
+        out[MANIFEST_HEAD + i] = json[i];
+        i += 1;
+    }
+    out
+}
+
+/// A manifest of `json`, as [`manifest`] makes one: for a tool that writes
+/// a module's manifest, and for tests.
+pub fn manifest_bytes(json: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(MANIFEST_HEAD + json.len() + 16);
+    out.extend_from_slice(&MANIFEST_MAGIC);
+    for word in [
+        MANIFEST_FORMAT,
+        json.len() as u32,
+        manifest_sum(json.as_bytes()),
+    ] {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(json.as_bytes());
+    out.extend_from_slice(&MANIFEST_END);
+    out
+}
+
+/// The JSON of the first manifest in `bytes` (a library's file, or what
+/// its manifest's symbol points at), if one is whole there: its magic, this format,
+/// a length inside `bytes`, the checksum and the end all as they should be.
+pub fn manifest_in(bytes: &[u8]) -> Option<&str> {
+    let word = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    let mut from = 0;
+    while let Some(found) = find(&bytes[from..], &MANIFEST_MAGIC) {
+        let at = from + found;
+        from = at + 1;
+        let whole = || {
+            let (format, len, sum) = (word(at + 16)?, word(at + 20)? as usize, word(at + 24)?);
+            let json = bytes.get(at + MANIFEST_HEAD..at + MANIFEST_HEAD + len)?;
+            let end = bytes.get(at + MANIFEST_HEAD + len..at + MANIFEST_HEAD + len + 16)?;
+            (format == MANIFEST_FORMAT && end == MANIFEST_END && manifest_sum(json) == sum)
+                .then(|| std::str::from_utf8(json).ok())?
+        };
+        if let Some(json) = whole() {
+            return Some(json);
+        }
+    }
+    None
+}
+fn find(bytes: &[u8], what: &[u8; 16]) -> Option<usize> {
+    // (By its first byte, then the rest: a library is megabytes, and its
+    // manifest is looked for once as it loads.)
+    let mut from = 0;
+    while let Some(at) = bytes[from..].iter().position(|b| *b == what[0]) {
+        let at = from + at;
+        if bytes[at..].starts_with(what) {
+            return Some(at);
+        }
+        from = at + 1;
+    }
+    None
+}
+
+/// Whether `name` can be a module's: letters, digits and `_`, and not
+/// empty.
+pub const fn is_name(name: &str) -> bool {
+    let name = name.as_bytes();
+    let mut i = 0;
+    while i < name.len() {
+        if !(name[i].is_ascii_alphanumeric() || name[i] == b'_') {
+            return false;
+        }
+        i += 1;
+    }
+    !name.is_empty()
+}

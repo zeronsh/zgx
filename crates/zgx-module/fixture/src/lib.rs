@@ -2,7 +2,7 @@
 
 use zgx_module::{Host, Value};
 
-zgx_module::module!(|host: &Host| {
+zgx_module::register!("fixture", |host: &Host| {
     // What it was given, back: every kind of value there and back.
     host.function("fixture.echo", |arg| arg.to_owned());
     // The same, handed its argument: nothing counted.

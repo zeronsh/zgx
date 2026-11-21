@@ -87,6 +87,28 @@ mod meter;
 mod modifiers;
 #[cfg(feature = "modules")]
 mod modules;
+#[cfg(feature = "modules")]
+pub use modules::{RegisteredAction, RegisteredFunction};
+/// Without native modules, no call of a host's function fails as a
+/// module's can, and `ui.module` finds none.
+#[cfg(not(feature = "modules"))]
+mod modules {
+    #[inline(always)]
+    pub(crate) fn failure() -> Option<mlua::Error> {
+        None
+    }
+    pub(crate) fn install(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
+        ui.set(
+            "module",
+            lua.create_function(|_, name: String| -> mlua::Result<()> {
+                Err(mlua::Error::runtime(format!(
+                    "no module named `{name}`: this app's runtime loads no native modules"
+                )))
+            })?,
+        )
+    }
+}
+pub mod module_types;
 mod motion;
 mod node;
 mod opens;
