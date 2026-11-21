@@ -2329,8 +2329,10 @@ impl TextCache {
             },
             Source::Plain { .. } => unreachable!("plain text keeps its caret row"),
         };
-        if caret_row
-            && text.ends_with(['\r', '\n'])
+        // An editor's own break (U+001E) keeps the row after it whatever is
+        // asked, as `ShapedText::with_runs` draws it: a rich text ending in
+        // one measures as tall as it shows.
+        if ((caret_row && text.ends_with(['\r', '\n', '\u{1e}'])) || text.ends_with('\u{1e}'))
             && crate::text::ends_open(&buffer)
             && let Some((font, font_size)) = last
         {
@@ -3153,6 +3155,13 @@ mod tests {
                 ],
             ),
             rich("abc אבג xyz דהו", &[(21, body.clone(), 16.)]),
+            // An editor's own break ending the text (U+001E): its row after
+            // it is measured, as it is drawn.
+            rich("ab\u{1e}", &[(3, body.clone(), 14.)]),
+            rich(
+                "one\u{1e}two\u{1e}",
+                &[(4, bold.clone(), 18.), (8, body.clone(), 14.)],
+            ),
             rich("אבג abc", &[(10, body, 16.)]),
         ];
         let mut cache = TextCache::default();
