@@ -295,6 +295,23 @@ impl Opened {
     pub fn files(&self) -> crate::ScriptFiles {
         crate::ScriptFiles::Folder(self.files.clone())
     }
+
+    /// Reads and checks its scripts on worker threads now, for the first
+    /// load to find them ready, as `compile_ahead` compiles an app's
+    /// sources: call it first thing, before the app's window is made. The
+    /// bytes a worker checked are the bytes that run (handed over, not read
+    /// again); a script not ready in time is read and checked as it is
+    /// asked for, and what no load took goes as the first load ends.
+    pub fn read_ahead(&self) {
+        self.files.read_ahead();
+    }
+
+    /// How many scripts wait read ahead, and whether its workers are done.
+    /// For tests.
+    #[doc(hidden)]
+    pub fn read_ahead_counts(&self) -> (usize, bool) {
+        self.files.ahead_counts()
+    }
 }
 
 pub use crate::checked_files::Checked;

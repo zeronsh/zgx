@@ -1309,6 +1309,93 @@ fn a_bundle_runs_its_bytecode_and_checks_each_file_as_it_is_read() {
     std::fs::remove_dir_all(base).unwrap();
 }
 
+/// A bundle's scripts read and checked ahead, on workers: a load takes the
+/// bytes a worker checked (a script changed on the disk after that still
+/// runs as checked), what no load took goes as the first load ends, and a
+/// script that didn't check out ahead is refused as it is read.
+#[test]
+fn a_bundles_scripts_read_ahead_are_the_bytes_checked() {
+    use zgx_script::app_bundle::{Opened, Options, open, write};
+    let base = std::env::temp_dir().join(format!("zgx-bundle-ahead-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    std::fs::create_dir_all(app.join("parts")).unwrap();
+    std::fs::write(
+        app.join("app.luau"),
+        "local part = require(\"./parts/part\")\nreturn ui.text { id = \"out\", part.say() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("parts/part.luau"),
+        "return { say = function() return \"as checked\" end }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("parts/unused.luau"), "return 1\n").unwrap();
+    let out = base.join("dist");
+    write(
+        &app,
+        &Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let ready = |opened: &Opened, scripts: usize| {
+        let started = std::time::Instant::now();
+        while opened.read_ahead_counts() != (scripts, true) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "{:?}",
+                opened.read_ahead_counts()
+            );
+            std::thread::yield_now();
+        }
+    };
+    let run_it = |opened: &Opened| {
+        let files = opened.files();
+        TestApp::try_new(move |runtime| {
+            ScriptHost::from_files(
+                runtime,
+                files.clone(),
+                "app.luau",
+                zgx_script::Code::VerifiedBytecode,
+            )
+        })
+    };
+    let part = out.join("ui/parts/part.luau");
+    let checked = std::fs::read(&part).unwrap();
+    let mut changed = checked.clone();
+    *changed.last_mut().unwrap() ^= 1;
+
+    let opened = open(&out).unwrap();
+    opened.read_ahead();
+    ready(&opened, 3);
+    // Changed on the disk after its check: the load runs what was checked.
+    std::fs::write(&part, &changed).unwrap();
+    let mut run = run_it(&opened).unwrap();
+    assert_eq!(run.text("out"), "as checked");
+    drop(run);
+    // What no load took (`unused.luau`) went as the load ended; a load
+    // after reads the disk, and the change is refused.
+    assert_eq!(opened.read_ahead_counts(), (0, true));
+    let refused = run_it(&opened).err().expect("refused");
+    assert!(
+        refused.contains("isn't the file its bundle's manifest names"),
+        "{refused}"
+    );
+
+    // Changed before the workers read it: not ready, and refused as read.
+    let opened = open(&out).unwrap();
+    opened.read_ahead();
+    ready(&opened, 2);
+    let refused = run_it(&opened).err().expect("refused");
+    assert!(
+        refused.contains("isn't the file its bundle's manifest names"),
+        "{refused}"
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 /// A package a bundled app lends its plugins (a design system in its own
 /// folder) is the bundle's bytecode: a plugin, whose own files are source
 /// on the disk, requires its modules as the app does.
