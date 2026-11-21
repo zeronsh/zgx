@@ -795,6 +795,72 @@ mod tests {
         assert_eq!(value.get(), "axb");
     }
 
+    /// "see @file.pdf now" in a text area, the atom on "@file.pdf" (4..13).
+    fn store_with_atom() -> (Ui, TextStore, zgx::reactive::Signal<String>, u64) {
+        let mut ui = Ui::new(400., 200.);
+        let value = ui.signal("see  now".to_owned());
+        let view = ui.mount(text_area("Notes", value.clone()).size(300., 100.));
+        ui.prepare_frame();
+        ui.input.focus(&ui.scene, Some(view.node()));
+        let editor = ui.focused_editor().unwrap();
+        editor.set_selection(4, 4);
+        let id = editor.insert_atom("@file.pdf", None, None, None).unwrap();
+        let mut store = TextStore::new();
+        store.focus(ui.focused_editor());
+        (ui, store, value, id)
+    }
+
+    /// A composition typed right after an atom, and one right before it,
+    /// commit beside it, the atom whole and the caret after what went in.
+    #[test]
+    fn a_composition_beside_an_atom_commits_without_splitting_it() {
+        let (_ui, mut store, value, id) = store_with_atom();
+        let atom = || store_atoms(&_ui);
+        store.set_selection(13, 13, false);
+        store.start_composition(13..13);
+        store.replace(13, 13, &utf16("に"));
+        store.replace(13, 14, &utf16("日"));
+        store.end_composition();
+        assert_eq!(value.get(), "see @file.pdf日 now");
+        assert_eq!(atom(), [zgx::text_edit::Atom::new(id, 4..13)]);
+        assert_eq!(store.selection(), (14, 14, false));
+        store.set_selection(4, 4, false);
+        store.start_composition(4..4);
+        store.replace(4, 4, &utf16("火"));
+        store.end_composition();
+        assert_eq!(value.get(), "see 火@file.pdf日 now");
+        assert_eq!(atom(), [zgx::text_edit::Atom::new(id, 7..16)]);
+    }
+
+    /// A selection the input method sets inside an atom (and a
+    /// reconversion over part of one) takes it whole, never a piece of its
+    /// label.
+    #[test]
+    fn a_reconversion_into_an_atom_never_splits_it() {
+        let (ui, mut store, value, _) = store_with_atom();
+        store.set_selection(6, 6, false);
+        let (caret, ..) = store.selection();
+        assert!(caret == 4 || caret == 13, "{caret}");
+        store.start_composition(2..6);
+        store.replace(2, 6, &utf16("X"));
+        store.end_composition();
+        let now = value.get();
+        assert!(
+            store_atoms(&ui).len() == 1 && now.contains("@file.pdf") || !now.contains("le.pdf"),
+            "the atom stays whole or goes whole: {now} {:?}",
+            store_atoms(&ui)
+        );
+        assert_eq!(
+            now.matches("@fi").count(),
+            now.matches("@file.pdf").count(),
+            "{now}"
+        );
+    }
+
+    fn store_atoms(ui: &Ui) -> Vec<zgx::text_edit::Atom> {
+        ui.focused_editor().unwrap().atoms()
+    }
+
     /// An editor's input mode (HTML's `inputmode`) is the input scope the
     /// framework asks for: the touch keyboard Windows shows.
     #[test]
