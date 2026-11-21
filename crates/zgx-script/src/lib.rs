@@ -108,9 +108,39 @@ mod modules {
         )
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub mod app_bundle;
+mod checked_files;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod module_build;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
 pub mod module_types;
+/// In the browser, which loads no library: no module, and none typed.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub mod module_types {
+    use std::path::{Path, PathBuf};
+    const NONE: &str = "native modules don't load in the browser";
+    pub fn manifest_of_library(_: &Path) -> Result<String, String> {
+        Err(NONE.into())
+    }
+    pub fn of_app(_: &Path) -> (Vec<(PathBuf, String)>, Vec<String>) {
+        (Vec::new(), Vec::new())
+    }
+    pub fn name_of(_: &str) -> Option<String> {
+        None
+    }
+    pub fn module_definitions(_: &str) -> Result<String, String> {
+        Err(NONE.into())
+    }
+    pub fn typed(text: String, _: &[String]) -> (String, Vec<String>) {
+        (text, Vec::new())
+    }
+    pub fn notes(_: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+}
 mod motion;
 mod node;
 mod opens;
@@ -1210,7 +1240,7 @@ pub(crate) enum Files {
     /// A bundle's folder on the disk (`zgx build`'s `ui/`), read file by
     /// file as asked, each checked against its manifest as it is read, and
     /// loaded as its `Code` allows.
-    Folder(app_bundle::Checked, Code),
+    Folder(checked_files::Checked, Code),
 }
 /// Why a reload in place (`ScriptHost::retarget`) or a trial load
 /// (`ScriptHost::validate`) failed.
@@ -1251,7 +1281,7 @@ pub enum ScriptFiles {
     /// A bundle's folder on the disk, `zgx build`'s, as `app_bundle::open`
     /// found it (`Opened::files`): read as its files are asked for, each
     /// checked against the bundle's manifest as it is read.
-    Folder(app_bundle::Checked),
+    Folder(checked_files::Checked),
 }
 impl ScriptFiles {
     fn with(self, code: Code) -> Files {

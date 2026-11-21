@@ -21,7 +21,7 @@
 use crate::module_build::{self, Profile, Source, file_hash};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zgx_module::abi;
@@ -298,47 +298,7 @@ impl Opened {
     }
 }
 
-/// A bundle's `ui/` as [`open`] found it: each file's SHA-256, from its
-/// manifest. Made by [`open`] alone, so a host reading a folder as a
-/// bundle's (`ScriptFiles::Folder`) reads only files that check out.
-#[derive(Clone, Debug)]
-pub struct Checked {
-    pub(crate) dir: Arc<Path>,
-    sums: Arc<HashMap<String, [u8; 32]>>,
-}
-
-impl Checked {
-    /// The file at `path`, under its `ui/`, if it is the one its manifest
-    /// names: a file the manifest doesn't name isn't there; one changed
-    /// since the build is refused.
-    pub(crate) fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        use std::io::{Error, ErrorKind};
-        let absent = || Error::new(ErrorKind::NotFound, "not in the app's bundle");
-        let rel = path.strip_prefix(&*self.dir).map_err(|_| absent())?;
-        let mut key = String::new();
-        for part in rel.components() {
-            match part {
-                Component::Normal(name) => {
-                    if !key.is_empty() {
-                        key.push('/');
-                    }
-                    key.push_str(name.to_str().ok_or_else(absent)?);
-                }
-                Component::CurDir => {}
-                _ => return Err(absent()),
-            }
-        }
-        let sum = self.sums.get(&key).ok_or_else(absent)?;
-        let bytes = std::fs::read(path)?;
-        if Sha256::digest(&bytes)[..] != sum[..] {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "isn't the file its bundle's manifest names (changed since it was built)",
-            ));
-        }
-        Ok(bytes)
-    }
-}
+pub use crate::checked_files::Checked;
 
 /// `zgx-run <bundle>`: the bundle in `dir`, checked against its manifest
 /// (see the module's docs), with its modules for this platform.
@@ -392,10 +352,7 @@ pub fn open(dir: &Path) -> Result<Opened, String> {
         sums.insert(rel.clone(), sum);
     }
     Ok(Opened {
-        files: Checked {
-            dir: ui.as_path().into(),
-            sums: Arc::new(sums),
-        },
+        files: Checked::new(ui.as_path().into(), Arc::new(sums)),
         ui,
         entry: manifest["entry"].as_str().unwrap_or("app.luau").to_owned(),
         app_id: string("app_id"),
