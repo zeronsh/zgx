@@ -344,9 +344,12 @@ impl LineInset {
         }
     }
 }
-/// Each line's room (`LineInset`), by its index.
+/// Each line's room (`LineInset`), given its index, its text and what the
+/// line before it left its highlighter (`Highlighter`'s state; 0 for the
+/// first line, or with no highlighter): a fenced code block's lines know
+/// they are inside it as their colours do.
 #[doc(hidden)]
-pub type LineInsets = Rc<dyn Fn(usize) -> LineInset>;
+pub type LineInsets = Rc<dyn Fn(usize, &str, u32) -> LineInset>;
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
 pub type LineSpans = Vec<(Range<usize>, SpanStyle)>;
 /// A `Highlighter` that styles its ranges (`SpanStyle`) beyond colouring
@@ -921,19 +924,53 @@ impl LineCache {
         self.rare_set.get()
             && (self.rare.borrow().as_ref()).is_some_and(|rare| rare.insets.is_some())
     }
-    /// Line `i`'s room (`set_insets`): none for an editor without.
+    /// Line `i` of `layout`'s room (`set_insets`): none for an editor
+    /// without.
     #[inline]
-    pub(crate) fn inset(&self, i: usize) -> LineInset {
+    pub(crate) fn inset(&self, layout: &LinesLayout, i: usize) -> LineInset {
         if !self.rare_set.get() {
             return LineInset::default();
         }
-        self.inset_of(i)
+        self.inset_of(layout, i)
     }
     #[cold]
     #[inline(never)]
-    fn inset_of(&self, i: usize) -> LineInset {
-        let insets = (self.rare.borrow().as_ref()).and_then(|rare| rare.insets.clone());
-        insets.map_or_else(LineInset::default, |insets| insets(i))
+    fn inset_of(&self, layout: &LinesLayout, i: usize) -> LineInset {
+        let Some(insets) = (self.rare.borrow().as_ref()).and_then(|rare| rare.insets.clone())
+        else {
+            return LineInset::default();
+        };
+        let before = self.state_before(layout, i);
+        insets(i, &layout.line_text(i), before)
+    }
+    /// What the line before line `i` left its highlighter (0 for the first,
+    /// or with none): the states above it found first, each once.
+    fn state_before(&self, layout: &LinesLayout, i: usize) -> u32 {
+        if i == 0 {
+            return 0;
+        }
+        let Some(highlight) = self.highlighter.borrow().clone() else {
+            return 0;
+        };
+        self.states_through(&highlight, layout, i);
+        self.states.borrow()[i - 1]
+    }
+    /// What each line above line `i` leaves the next, found as far as it.
+    #[inline]
+    fn states_through(&self, highlight: &SpanHighlighter, layout: &LinesLayout, i: usize) {
+        loop {
+            let known = self.states.borrow().len();
+            if known >= i {
+                break;
+            }
+            let before = if known == 0 {
+                0
+            } else {
+                self.states.borrow()[known - 1]
+            };
+            let (_, leaves) = self.highlight(highlight, &layout.line_text(known), before);
+            self.push_state(&mut self.states.borrow_mut(), leaves);
+        }
     }
     /// Style lines with `highlighter` (none: the editor's style).
     pub(crate) fn set_highlighter(&self, highlighter: Option<SpanHighlighter>) {
@@ -1076,19 +1113,7 @@ impl LineCache {
     #[inline(always)]
     fn highlighted_spans(&self, layout: &LinesLayout, i: usize) -> Option<Rc<LineSpans>> {
         let highlight = self.highlighter.borrow().clone()?;
-        loop {
-            let known = self.states.borrow().len();
-            if known >= i {
-                break;
-            }
-            let before = if known == 0 {
-                0
-            } else {
-                self.states.borrow()[known - 1]
-            };
-            let (_, leaves) = self.highlight(&highlight, &layout.line_text(known), before);
-            self.push_state(&mut self.states.borrow_mut(), leaves);
-        }
+        self.states_through(&highlight, layout, i);
         let before = if i == 0 {
             0
         } else {
@@ -1507,7 +1532,7 @@ impl LinesLayout {
     /// Line `i`'s room (`EditorHandle::set_line_insets`).
     #[inline]
     pub(crate) fn inset(&self, i: usize) -> LineInset {
-        self.cache.inset(i)
+        self.cache.inset(self, i)
     }
     /// Line `i`, shaped.
     pub(crate) fn line(&self, i: usize) -> Rc<dyn TextLayout> {
@@ -1830,7 +1855,7 @@ mod tests {
     #[test]
     fn insets_move_carets_hits_and_wrapping() {
         let cache = Rc::new(LineCache::default());
-        cache.set_insets(Some(Rc::new(|i| {
+        cache.set_insets(Some(Rc::new(|i, _: &str, _| {
             if i == 1 {
                 LineInset::new(36., 8., 4.)
             } else {
@@ -1870,7 +1895,7 @@ mod tests {
     #[test]
     fn insets_hold_unwrapped_too() {
         let cache = Rc::new(LineCache::default());
-        cache.set_insets(Some(Rc::new(|i| {
+        cache.set_insets(Some(Rc::new(|i, _: &str, _| {
             if i == 0 {
                 LineInset::new(0., 10., 6.)
             } else {
@@ -1918,7 +1943,7 @@ mod tests {
                 };
                 (spans, state + 1)
             })));
-            cache.set_insets(Some(Rc::new(|i| match i {
+            cache.set_insets(Some(Rc::new(|i, _: &str, _| match i {
                 1 => LineInset::new(0., 24., 0.),
                 2 => LineInset::new(0., 12., 0.),
                 3 => LineInset::new(32., 8., 0.),
@@ -2009,7 +2034,7 @@ mod tests {
     #[test]
     fn a_hidden_line_takes_no_room() {
         let cache = Rc::new(LineCache::default());
-        cache.set_insets(Some(Rc::new(|i| {
+        cache.set_insets(Some(Rc::new(|i, _: &str, _| {
             if i == 1 {
                 LineInset::hidden()
             } else {
@@ -2038,7 +2063,7 @@ mod tests {
     #[test]
     fn an_indented_line_draws_in_the_width_it_wraps_to() {
         let cache = Rc::new(LineCache::default());
-        cache.set_insets(Some(Rc::new(|i| {
+        cache.set_insets(Some(Rc::new(|i, _: &str, _| {
             if i == 1 {
                 LineInset::new(36., 0., 0.)
             } else {

@@ -611,6 +611,15 @@ export type HighlightSpan = {
 	-- `"mono"`: in the monospaced font (inline code); shapes its line.
 	font: "mono"?,
 }
+-- A textarea line's room (`line_insets`), in points: before its text (it
+-- wraps in what this leaves), above and below it; `hidden` takes the line
+-- and its room away (a closed toggle's lines).
+export type LineInset = {
+	left: number?,
+	above: number?,
+	below: number?,
+	hidden: boolean?,
+}
 -- A number, or a number token: a standard one (`"$radius.md"`, see
 -- `NumberToken`) or an app's (`"$terminal.inset"`), hence any string.
 export type Num = number | string
@@ -9401,6 +9410,13 @@ export type InputProps = {
 	-- state, a table the same one only as itself). It must depend on
 	-- nothing but its arguments.
 	highlight: ((line: string, state: any) -> ({ HighlightSpan }?, any))?,
+	-- Several lines only: a line's room (`LineInset`): a list item's
+	-- indent, a heading's or a quote's space above and below. Given the
+	-- line and the state `highlight` was given for it (0 without one), so
+	-- a fenced block's lines know they're inside it. Asked once for each
+	-- line text and state, it must depend on nothing but its arguments.
+	-- An editor without it lays out as before.
+	line_insets: ((line: string, state: any) -> LineInset?)?,
 	-- Several lines only: ranges of the whole text marked behind it (a
 	-- search's matches), `{ { from, to, color? }, … }` in bytes counted
 	-- from 1; only those in view are drawn.
