@@ -90,6 +90,7 @@ export function zgx_init(baseCss, onDispatch, onFlush, onEvent, onKeys) {
   document.addEventListener("compositionstart", onCompositionStart, true);
   document.addEventListener("compositionend", onCompositionEnd, true);
   document.addEventListener("keydown", onEditKey, true);
+  document.addEventListener("selectionchange", onEditSelection);
 }
 
 // A link with no href (`role=link`): Enter presses it, as it does a link.
@@ -1926,6 +1927,48 @@ function pointAt(el, at) {
     seen += length;
   }
   return [el, el.childNodes.length];
+}
+
+// The chip (an atom of a text area over a model) `node`, a point of a
+// selection, is inside, if any.
+function chipOf(node) {
+  for (let at = node; at; at = at.parentNode) {
+    if (at.nodeType === 1 && at.hasAttribute("data-atom")) return at;
+    if (at.$$e !== undefined) return null;
+  }
+  return null;
+}
+
+// A selection with an end inside a chip, as the model has it: a caret at
+// the chip's nearer edge, a selection taking the chip whole (the browser
+// leaves a point inside one where it was put there, or dragged there).
+function onEditSelection() {
+  const selection = document.getSelection();
+  if (!selection || selection.rangeCount === 0) return;
+  const { anchorNode, anchorOffset, focusNode, focusOffset } = selection;
+  const anchorChip = chipOf(anchorNode);
+  const focusChip = chipOf(focusNode);
+  if (!anchorChip && !focusChip) return;
+  const el = editHost(anchorChip || focusChip);
+  if (!el) return;
+  const at = (node, offset) => textOffset(el, node, offset);
+  const edges = (chip) => {
+    const start = at(chip.parentNode, Array.prototype.indexOf.call(chip.parentNode.childNodes, chip));
+    return [start, start + chip.textContent.length];
+  };
+  let anchor = at(anchorNode, anchorOffset);
+  let focus = at(focusNode, focusOffset);
+  if (anchor === focus) {
+    const [start, end] = edges(anchorChip || focusChip);
+    anchor = focus = anchor - start < end - anchor ? start : end;
+  } else {
+    const forward = anchor < focus;
+    if (anchorChip) anchor = edges(anchorChip)[forward ? 0 : 1];
+    if (focusChip) focus = edges(focusChip)[forward ? 1 : 0];
+  }
+  const [aNode, aOffset] = pointAt(el, anchor);
+  const [fNode, fOffset] = pointAt(el, focus);
+  selection.setBaseAndExtent(aNode, aOffset, fNode, fOffset);
 }
 
 // `el`'s selection set from its model's (UTF-16 units), while it has the focus.

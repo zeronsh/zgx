@@ -346,3 +346,115 @@ fn a_replacement_takes_its_target_range_and_a_delete_the_models() {
     assert_eq!(value.get(), "ask  the end");
     assert!(chips(&el).is_empty(), "the chip, whole");
 }
+
+/// The browser's selection from `from` in `a` to `to` in `b` (text nodes).
+fn select_nodes(a: &web_sys::Node, from: u32, b: &web_sys::Node, to: u32) {
+    let selection = document().get_selection().unwrap().unwrap();
+    selection.set_base_and_extent(a, from, b, to).unwrap();
+}
+
+#[wasm_bindgen_test]
+fn a_selection_into_a_chip_takes_it_whole() {
+    let (_mounted, el, value) = note("ask Ada now", Some((4, 7)));
+    el.focus().unwrap();
+    let head = el.first_child().unwrap();
+    let label = el
+        .query_selector("[data-atom]")
+        .unwrap()
+        .unwrap()
+        .first_child()
+        .unwrap();
+    select_nodes(&head, 2, &label, 1);
+    before_input(&el, "deleteContentBackward", None);
+    assert_eq!(value.get(), "as now", "the chip went whole");
+    assert!(chips(&el).is_empty());
+}
+
+fn compose(el: &web_sys::HtmlElement, kind: &str, data: &str) {
+    let init = web_sys::CompositionEventInit::new();
+    init.set_bubbles(true);
+    init.set_data(data);
+    let event = web_sys::CompositionEvent::new_with_event_init_dict(kind, &init).unwrap();
+    el.dispatch_event(&event).unwrap();
+    zgx_dom::flush();
+}
+
+#[wasm_bindgen_test]
+fn an_input_method_right_beside_a_chip_leaves_it_whole() {
+    let (_mounted, el, value) = note("ask Ada", Some((4, 7)));
+    caret_at_end(&el);
+    compose(&el, "compositionstart", "");
+    el.append_child(&document().create_text_node("にほん"))
+        .unwrap();
+    compose(&el, "compositionend", "日本");
+    assert_eq!(value.get(), "ask Ada日本");
+    assert_eq!(chips(&el), ["Ada"]);
+    assert_eq!(caret(&el), 9, "the caret after what was committed");
+    // Right before it: the end of the text before the chip.
+    let head = el.first_child().unwrap();
+    select_nodes(&head, 4, &head, 4);
+    compose(&el, "compositionstart", "");
+    compose(&el, "compositionend", "火");
+    assert_eq!(value.get(), "ask 火Ada日本");
+    assert_eq!(chips(&el), ["Ada"]);
+    assert_eq!(caret(&el), 5);
+}
+
+/// Wait for the browser's tasks (a `selectionchange` is one).
+async fn tick() {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        web_sys::window()
+            .unwrap()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0)
+            .unwrap();
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+}
+
+/// The browser's selection in `el`'s text, UTF-16 units, anchor and focus.
+fn selected(el: &web_sys::HtmlElement) -> (u32, u32) {
+    let selection = document().get_selection().unwrap().unwrap();
+    let at = |node: web_sys::Node, offset: u32| {
+        let range = document().create_range().unwrap();
+        range.set_start(el, 0).unwrap();
+        range.set_end(&node, offset).unwrap();
+        String::from(range.to_string()).encode_utf16().count() as u32
+    };
+    (
+        at(selection.anchor_node().unwrap(), selection.anchor_offset()),
+        at(selection.focus_node().unwrap(), selection.focus_offset()),
+    )
+}
+
+#[wasm_bindgen_test]
+async fn a_selection_shown_into_a_chip_takes_it_whole_and_a_caret_its_nearer_edge() {
+    let (_mounted, el, _) = note("ask Ada now", Some((4, 7)));
+    el.focus().unwrap();
+    let head = el.first_child().unwrap();
+    let label = el
+        .query_selector("[data-atom]")
+        .unwrap()
+        .unwrap()
+        .first_child()
+        .unwrap();
+    select_nodes(&head, 2, &label, 1);
+    tick().await;
+    assert_eq!(selected(&el), (2, 7), "the chip whole");
+    select_nodes(&label, 2, &head, 1);
+    tick().await;
+    assert_eq!(selected(&el), (7, 1), "backwards too");
+    select_nodes(&label, 1, &label, 1);
+    tick().await;
+    assert_eq!(selected(&el), (4, 4), "a caret at the nearer edge");
+    let chip: web_sys::HtmlElement = el
+        .query_selector("[data-atom]")
+        .unwrap()
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    assert_eq!(
+        chip.style().get_property_value("user-select").unwrap(),
+        "all",
+        "a drag or a double click selects it whole"
+    );
+}
