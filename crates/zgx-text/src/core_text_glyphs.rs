@@ -1,9 +1,11 @@
-//! Glyphs swash can't draw, drawn by Core Text (macOS): faces whose shapes
-//! are only in Apple's `hvgl` table, as macOS 26's PingFang keeps them
-//! (zgx-cosmic-text's `Font::needs_platform_outlines`). The glyph comes out
+//! Glyphs drawn by Core Text (macOS) for the faces only Core Text can read
+//! (Apple's `hvgl`, as macOS 26's PingFang keeps them: zgx-cosmic-text's
+//! `Font::needs_platform_outlines`); every other face's are swash's,
+//! thickened as CoreGraphics does (`text::glyph_image`). The glyph comes out
 //! as swash's would: an alpha mask at the cache key's size and subpixel
 //! offset, placed from the pen position, for the atlas to take like any
-//! other. Text in faces swash draws never comes here.
+//! other. Its strokes are thickened as macOS's font smoothing thickens them
+//! for the text's colour (`CacheKeyFlags::SMOOTHING`, `text::smoothing`).
 use cosmic_text::{CacheKey, CacheKeyFlags, FontSystem, Placement, SwashContent, SwashImage};
 use std::{cell::RefCell, collections::HashMap, ffi::c_void};
 
@@ -59,6 +61,11 @@ unsafe extern "C" {
         directory: bool,
     ) -> CFTypeRef;
     fn CFRelease(object: CFTypeRef);
+    fn CFGetTypeID(object: CFTypeRef) -> usize;
+    fn CFNumberGetTypeID() -> usize;
+    fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut c_void) -> bool;
+    fn CFPreferencesCopyAppValue(key: CFTypeRef, application: CFTypeRef) -> CFTypeRef;
+    static kCFPreferencesCurrentApplication: CFTypeRef;
 }
 #[link(name = "CoreText", kind = "framework")]
 unsafe extern "C" {
@@ -105,10 +112,12 @@ unsafe extern "C" {
     fn CGContextSetGrayFillColor(context: CFTypeRef, gray: f64, alpha: f64);
     fn CGContextSetShouldAntialias(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSmoothFonts(context: CFTypeRef, on: bool);
+    fn CGContextSetAllowsFontSmoothing(context: CFTypeRef, on: bool);
     fn CGContextSetAllowsFontSubpixelPositioning(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSubpixelPositionFonts(context: CFTypeRef, on: bool);
     fn CGContextSetAllowsFontSubpixelQuantization(context: CFTypeRef, on: bool);
     fn CGContextSetShouldSubpixelQuantizeFonts(context: CFTypeRef, on: bool);
+    fn CGContextClearRect(context: CFTypeRef, rect: CGRect);
 }
 /// `kCGImageAlphaOnly`: a context of one alpha byte a pixel.
 const ALPHA_ONLY: u32 = 7;
@@ -120,6 +129,8 @@ const UTF8: u32 = 0x0800_0100;
 const SINT32: isize = 3;
 /// The weight axis's tag, as Core Text identifies axes.
 const WGHT: i32 = i32::from_be_bytes(*b"wght");
+/// The optical size axis's.
+const OPSZ: i32 = i32::from_be_bytes(*b"opsz");
 /// Core Text fonts kept, by face, size, slant and weight: each glyph a size draws
 /// alike, so a run of them makes one font. A zoom gives sizes enough to
 /// clear it now and then.
@@ -139,21 +150,114 @@ impl Drop for Owned {
 struct Cache {
     /// Each face's descriptor (none: Core Text can't read it).
     faces: HashMap<cosmic_text::fontdb::ID, Option<Owned>>,
-    /// Fonts made from them.
-    fonts: HashMap<(cosmic_text::fontdb::ID, u32, bool, u16), Owned>,
+    /// Fonts made from them, by face, size, slant, weight and optical size.
+    fonts: HashMap<(cosmic_text::fontdb::ID, u32, bool, u16, u16), Owned>,
 }
 thread_local! {
     static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
+    /// The bitmap glyphs are drawn into, kept: made, set up and released
+    /// for each glyph, a context costs as much as the glyph's drawing.
+    static CANVAS: RefCell<Option<Canvas>> = const { RefCell::new(None) };
 }
+/// A one-byte-a-pixel context over `pixels`, `width` by `height`, set up to
+/// draw glyphs as macOS draws its text: each glyph cleared for and drawn in
+/// its bottom left corner (Core Graphics' origin), then copied out.
+struct Canvas {
+    // Dropped (released) before `pixels`, which it draws into.
+    context: Owned,
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+impl Canvas {
+    /// One at least `width` by `height`, grown in steps of 64 so a few
+    /// sizes make all of them.
+    fn at_least(width: usize, height: usize) -> Option<Canvas> {
+        let (width, height) = (width.next_multiple_of(64), height.next_multiple_of(64));
+        let mut pixels = vec![0u8; width * height];
+        // SAFETY: `pixels` is the context's `width` by `height` bytes, kept
+        // beside it in `Canvas` and dropped after it.
+        unsafe {
+            let context = CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                width,
+                height,
+                8,
+                width,
+                std::ptr::null(),
+                ALPHA_ONLY,
+            );
+            if context.is_null() {
+                return None;
+            }
+            CGContextSetAllowsFontSmoothing(context, true);
+            CGContextSetShouldAntialias(context, true);
+            CGContextSetAllowsFontSubpixelPositioning(context, true);
+            CGContextSetShouldSubpixelPositionFonts(context, true);
+            CGContextSetAllowsFontSubpixelQuantization(context, false);
+            CGContextSetShouldSubpixelQuantizeFonts(context, false);
+            Some(Canvas {
+                context: Owned(context),
+                pixels,
+                width,
+                height,
+            })
+        }
+    }
+}
+/// The largest canvas kept between glyphs, a side in pixels: a glyph past
+/// it (a heading zoomed far in) draws in one of its own, let go after.
+const KEPT_CANVAS: usize = 256;
 
-/// `key`'s glyph through Core Text, if its face's shapes are where only
-/// the platform draws them (`Font::needs_platform_outlines`).
+/// `key`'s glyph through Core Text, as macOS draws its own text; none for a
+/// colour face's (emoji: swash draws their bitmaps and layers) or an inline
+/// box's (it draws nothing), or where Core Text can't read the face.
 pub(crate) fn glyph_image(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
+    if key.flags.contains(CacheKeyFlags::INLINE_BOX) {
+        return None;
+    }
     let font = fonts.get_font(key.font_id, key.font_weight)?;
+    // Only the faces swash can't draw: asked of every glyph swash draws
+    // nothing for (a space), Core Text for the rest drew nothing more.
     if !font.needs_platform_outlines() {
         return None;
     }
     draw(fonts, key)
+}
+
+/// Whether macOS thickens text as its font smoothing does: unless the user
+/// turned it off (`defaults write -g AppleFontSmoothing -int 0`), as Core
+/// Text's own drawing reads it. Read once.
+pub(crate) fn font_smoothing_allowed() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        let key = b"AppleFontSmoothing";
+        // SAFETY: the key and the value are owned and released here; the
+        // value is read as a number only if it is one.
+        unsafe {
+            let key = Owned(CFStringCreateWithBytes(
+                std::ptr::null(),
+                key.as_ptr(),
+                key.len() as isize,
+                UTF8,
+                false,
+            ));
+            if key.0.is_null() {
+                return true;
+            }
+            let value = CFPreferencesCopyAppValue(key.0, kCFPreferencesCurrentApplication);
+            if value.is_null() {
+                return true;
+            }
+            let value = Owned(value);
+            if CFGetTypeID(value.0) != CFNumberGetTypeID() {
+                return true;
+            }
+            let mut level = 1i32;
+            // Only an explicit 0 turns it off.
+            !CFNumberGetValue(value.0, SINT32, (&raw mut level).cast()) || level != 0
+        }
+    })
 }
 
 /// `key`'s glyph through Core Text whatever its face; for tests to set
@@ -191,10 +295,14 @@ fn descriptor(fonts: &mut FontSystem, id: cosmic_text::fontdb::ID) -> Option<Own
             return None;
         }
         // Core Text gives another font for a name it doesn't know: kept only
-        // if its name is the face's.
-        let by_name = Owned(CTFontDescriptorCreateWithNameAndSize(cf_name.0, 0.));
-        if !by_name.0.is_null() && named(by_name.0, &name) {
-            return Some(Owned(CFRetain(by_name.0)));
+        // if its name is the face's. Not for the system's hidden faces
+        // (`.SFNS-Regular`): asked for by name, Core Text gives Times and
+        // logs that it did; their file has them.
+        if !name.starts_with('.') {
+            let by_name = Owned(CTFontDescriptorCreateWithNameAndSize(cf_name.0, 0.));
+            if !by_name.0.is_null() && named(by_name.0, &name) {
+                return Some(Owned(CFRetain(by_name.0)));
+            }
         }
         let all = match path.as_deref().and_then(|path| path.to_str()) {
             Some(path) => CTFontManagerCreateFontDescriptorsFromURL(
@@ -257,7 +365,13 @@ unsafe fn named(descriptor: CFTypeRef, name: &str) -> bool {
 /// slants a synthetic italic (14 degrees).
 fn font_for(cache: &mut Cache, fonts: &mut FontSystem, key: CacheKey) -> Option<CFTypeRef> {
     let italic = key.flags.contains(CacheKeyFlags::FAKE_ITALIC);
-    let slot = (key.font_id, key.font_size_bits, italic, key.font_weight.0);
+    let slot = (
+        key.font_id,
+        key.font_size_bits,
+        italic,
+        key.font_weight.0,
+        key.font_optical,
+    );
     if let Some(font) = cache.fonts.get(&slot) {
         return Some(font.0);
     }
@@ -278,22 +392,28 @@ fn font_for(cache: &mut Cache, fonts: &mut FontSystem, key: CacheKey) -> Option<
     // SAFETY: the descriptor lives in the cache; what is made is owned.
     let font = unsafe {
         // At the weight it was shaped at, as swash sets `wght` (PingFang is
-        // one variable face, Medium by default, Regular at 400): Core Text
-        // leaves a face without the axis as it is.
-        let tag = WGHT;
-        let axis = Owned(CFNumberCreate(
-            std::ptr::null(),
-            SINT32,
-            (&raw const tag).cast(),
-        ));
-        let weighted = Owned(CTFontDescriptorCreateCopyWithVariation(
-            descriptor.0,
-            axis.0,
-            f64::from(key.font_weight.0),
-        ));
+        // one variable face, Medium by default, Regular at 400), and at its
+        // optical size where it was shaped at one, as swash sets `opsz`:
+        // Core Text leaves a face without the axis as it is.
+        let vary = |descriptor: CFTypeRef, tag: i32, value: f64| {
+            let axis = Owned(CFNumberCreate(
+                std::ptr::null(),
+                SINT32,
+                (&raw const tag).cast(),
+            ));
+            Owned(CTFontDescriptorCreateCopyWithVariation(
+                descriptor, axis.0, value,
+            ))
+        };
+        let weighted = vary(descriptor.0, WGHT, f64::from(key.font_weight.0));
         let at = match weighted.0.is_null() {
             true => descriptor.0,
             false => weighted.0,
+        };
+        let sized = (key.font_optical > 0).then(|| vary(at, OPSZ, f64::from(key.font_optical)));
+        let at = match &sized {
+            Some(sized) if !sized.0.is_null() => sized.0,
+            _ => at,
         };
         CTFontCreateWithFontDescriptor(at, size, &skew)
     };
@@ -330,37 +450,56 @@ fn draw(fonts: &mut FontSystem, key: CacheKey) -> Option<SwashImage> {
         let bottom = (rect.origin.y + dy).floor() as i32 - 1;
         let top = (rect.origin.y + rect.size.height + dy).ceil() as i32 + 1;
         let (width, height) = ((right - left) as u32, (top - bottom) as u32);
-        let mut data = vec![0u8; width as usize * height as usize];
-        // SAFETY: `data` is the context's `width` by `height` bytes and
-        // outlives it; the context is released before `data` is moved.
-        unsafe {
-            let context = CGBitmapContextCreate(
-                data.as_mut_ptr().cast(),
-                width as usize,
-                height as usize,
-                8,
-                width as usize,
-                std::ptr::null(),
-                ALPHA_ONLY,
-            );
-            if context.is_null() {
-                return None;
-            }
-            let context = Owned(context);
-            CGContextSetGrayFillColor(context.0, 1., 1.);
-            CGContextSetShouldAntialias(context.0, true);
-            CGContextSetShouldSmoothFonts(context.0, false);
-            CGContextSetAllowsFontSubpixelPositioning(context.0, true);
-            CGContextSetShouldSubpixelPositionFonts(context.0, true);
-            CGContextSetAllowsFontSubpixelQuantization(context.0, false);
-            CGContextSetShouldSubpixelQuantizeFonts(context.0, false);
-            // The pen where its offset puts it, from the box's corner.
-            let at = CGPoint {
-                x: dx - f64::from(left),
-                y: dy - f64::from(bottom),
+        let (w, h) = (width as usize, height as usize);
+        let data = CANVAS.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            let mut own = None;
+            let canvas = if w > KEPT_CANVAS || h > KEPT_CANVAS {
+                own.insert(Canvas::at_least(w, h)?)
+            } else {
+                if kept.as_ref().is_none_or(|c| c.width < w || c.height < h) {
+                    let (was_w, was_h) = kept.as_ref().map_or((0, 0), |c| (c.width, c.height));
+                    *kept = None;
+                    *kept = Some(Canvas::at_least(w.max(was_w), h.max(was_h))?);
+                }
+                kept.as_mut()?
             };
-            CTFontDrawGlyphs(font, &glyph, &at, 1, context.0);
-        }
+            let context = canvas.context.0;
+            // SAFETY: the context lives in the canvas, its pixels beside it;
+            // what it draws stays in the corner cleared for it.
+            unsafe {
+                let corner = CGRect {
+                    origin: CGPoint::default(),
+                    size: CGSize {
+                        width: f64::from(width),
+                        height: f64::from(height),
+                    },
+                };
+                CGContextClearRect(context, corner);
+                // Font smoothing thickens strokes, the more the lighter the
+                // fill, as macOS's own text is thickened by its colour's (four
+                // steps, plus one: `text::smoothing`; 0 not smoothed). An
+                // alpha-only context keeps only the coverage, so the fill
+                // colour says how much.
+                let smoothing = (key.flags & CacheKeyFlags::SMOOTHING).bits() >> 6;
+                CGContextSetShouldSmoothFonts(context, smoothing > 0);
+                let level = smoothing.saturating_sub(1).min(4);
+                CGContextSetGrayFillColor(context, f64::from(level) * 0.25, 1.);
+                // The pen where its offset puts it, from the box's corner.
+                let at = CGPoint {
+                    x: dx - f64::from(left),
+                    y: dy - f64::from(bottom),
+                };
+                CTFontDrawGlyphs(font, &glyph, &at, 1, context);
+            }
+            // Its rows, top first: the corner's are the canvas's last `h`.
+            let mut data = Vec::with_capacity(w * h);
+            for row in canvas.height - h..canvas.height {
+                let start = row * canvas.width;
+                data.extend_from_slice(&canvas.pixels[start..start + w]);
+            }
+            Some(data)
+        })?;
         let mut image = SwashImage::new();
         image.content = SwashContent::Mask;
         image.placement = Placement {

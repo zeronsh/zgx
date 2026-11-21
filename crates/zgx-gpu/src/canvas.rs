@@ -2200,6 +2200,7 @@ fn draw_label(
         size.1,
         &label.text.font,
         zoom,
+        label.text.color,
     );
     // An upright text wholly within its clip's box (inside its corners)
     // needs no mask; one wholly past it, no drawing.
@@ -2397,7 +2398,9 @@ fn label_box(label: &CanvasText, text: &mut crate::text::CpuTextRaster) -> (f32,
 }
 /// `text` rasterized by `raster` at `scale` device pixels a point, each
 /// glyph placed as the GPU renderer places it (`styled_glyphs`: below 2x on
-/// whole pixels): its position and image in pixels.
+/// whole pixels) and thickened as it does for `color` (macOS's font
+/// smoothing): its position and image in pixels.
+#[allow(clippy::too_many_arguments)]
 fn rasterize_scaled(
     raster: &mut crate::text::CpuTextRaster,
     text: &str,
@@ -2406,14 +2409,19 @@ fn rasterize_scaled(
     height: f32,
     font: &zgx::text_layout::FontStyle,
     scale: f32,
+    color: zgx::scene::Color,
 ) -> Vec<(i32, i32, Arc<cosmic_text::SwashImage>)> {
     // Laid out in points once, placed at this scale each time.
     let lines = raster.layout(text, size, width, height, font);
     let runs = lines.iter().map(crate::text::LaidLine::run);
     let glyphs = crate::styled_glyphs(Vec::new(), runs, scale, |_, _| 0);
+    let smoothing = crate::text::smoothing(color);
     glyphs
         .into_iter()
-        .filter_map(|glyph| Some((glyph.x as i32, glyph.y as i32, raster.glyph(glyph.key)?)))
+        .filter_map(|glyph| {
+            let key = crate::text::smoothed(glyph.key, smoothing);
+            Some((glyph.x as i32, glyph.y as i32, raster.glyph(key)?))
+        })
         .collect()
 }
 /// `image` as a JPEG file's bytes at `quality` (1 to 100). JPEG keeps no

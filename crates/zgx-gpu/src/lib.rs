@@ -1658,10 +1658,17 @@ const SHARP_TEXT_BELOW: f32 = 2.;
 /// A glyph quad's `options.y` below `SHARP_TEXT_BELOW`: a mask whose coverage
 /// `draw.wgsl` firms by its colour (`firm`).
 const FIRM_GLYPH: f32 = 1.25;
-/// A glyph's `options.y`: straight alpha, firmed below `SHARP_TEXT_BELOW` if a
-/// mask (a colour glyph's own colours stay as they are).
+/// Whether a mask glyph's coverage is firmed at `scale` (`FIRM_GLYPH`):
+/// below `SHARP_TEXT_BELOW`, but not on macOS, whose font smoothing has
+/// thickened the glyph already (`text::smoothing`). The GPU's quads
+/// (`glyph_texture`) and the software raster (`glyph_coverage`) both ask.
+fn firms_glyphs(scale: f32) -> bool {
+    scale < SHARP_TEXT_BELOW && !cfg!(target_os = "macos")
+}
+/// A glyph's `options.y`: straight alpha, firmed where `firms_glyphs` says
+/// if a mask (a colour glyph's own colours stay as they are).
 fn glyph_texture(color: bool, scale: f32) -> f32 {
-    if !color && scale < SHARP_TEXT_BELOW {
+    if !color && firms_glyphs(scale) {
         FIRM_GLYPH
     } else {
         1.
@@ -2034,6 +2041,15 @@ struct Shaped {
     quads: Vec<TextQuad>,
     /// Whether `quads` hold colour glyphs (`COLOR_GLYPH`).
     colored: bool,
+    /// How much its glyphs' keys are thickened (`text::smoothing`, macOS):
+    /// its colour's level, `PER_RUN` for rich text's (each glyph its run's),
+    /// none until keyed for its colours (`smooth_glyphs`).
+    #[cfg(target_os = "macos")]
+    smoothing: Option<u8>,
+    /// The colour plain text's `smoothing` was taken from: the same again,
+    /// and its level isn't worked out again each frame.
+    #[cfg(target_os = "macos")]
+    smoothed_for: Option<zgx::scene::Color>,
     atlas_epoch: u64,
     last_used: u64,
     /// The prepared text these glyphs were laid out from, kept while drawn.
@@ -2051,6 +2067,55 @@ impl Shaped {
             // as many shapes as when it held those.)
             + self.quads.capacity() * std::mem::size_of::<Quad>()
     }
+}
+/// `Shaped::smoothing` of rich text: each glyph's key thickened by its
+/// run's colour.
+#[cfg(target_os = "macos")]
+const PER_RUN: u8 = u8::MAX;
+/// Key `shaped`'s glyphs for macOS's font smoothing (`text::smoothing`) by
+/// its colour, `color`, or each rich run's, unless they are already: its
+/// quads then hold other glyphs, placed again from the new ones.
+#[cfg(target_os = "macos")]
+fn smooth_glyphs(shaped: &mut Shaped, color: zgx::scene::Color) {
+    if shaped.rich.is_none() && shaped.smoothing.is_some() && shaped.smoothed_for == Some(color) {
+        return;
+    }
+    let want = match shaped.rich {
+        Some(_) => PER_RUN,
+        None => text::smoothing(color),
+    };
+    if shaped.smoothing == Some(want) {
+        return;
+    }
+    match &shaped.rich {
+        Some(rich) => {
+            let runs = rich.runs();
+            // A run's level worked out once, not per glyph (a colour's
+            // luminance takes three powers): glyphs come run by run.
+            let mut last: Option<(usize, u8)> = None;
+            for glyph in &mut shaped.glyphs {
+                let level = match last {
+                    Some((run, level)) if run == glyph.run => level,
+                    _ => {
+                        let level = runs
+                            .get(glyph.run)
+                            .map_or(0, |run| text::smoothing(run.color));
+                        last = Some((glyph.run, level));
+                        level
+                    }
+                };
+                glyph.key = text::smoothed(glyph.key, level);
+            }
+        }
+        None => {
+            for glyph in &mut shaped.glyphs {
+                glyph.key = text::smoothed(glyph.key, want);
+            }
+        }
+    }
+    shaped.smoothing = Some(want);
+    shaped.smoothed_for = Some(color);
+    shaped.atlas_epoch = u64::MAX;
 }
 /// The atlas's key: cosmic-text's, losslessly, with its scalar fields
 /// packed into words so it hashes and compares in a few operations.
@@ -5228,6 +5293,10 @@ pub struct GpuRenderer {
     shaped_like: FxHashMap<u64, NodeId>,
     shaped_bytes: usize,
     fresh: bool,
+    /// `text::font_smoothing_epoch` its text was drawn at: another, and its
+    /// next frame draws all of it again (`text::set_font_smoothing`).
+    #[cfg(target_os = "macos")]
+    smoothing_epoch: u64,
     /// Consecutive presented frames whose damage covered the window.
     whole_frames: u32,
     /// The scene flush the retained target was last rendered from.
@@ -6083,6 +6152,8 @@ impl GpuRenderer {
             shaped_like: FxHashMap::default(),
             shaped_bytes: 0,
             fresh: true,
+            #[cfg(target_os = "macos")]
+            smoothing_epoch: text::font_smoothing_epoch(),
             whole_frames: 0,
             rendered_serial: None,
             copies: Vec::new(),
@@ -6997,6 +7068,23 @@ impl GpuRenderer {
             self.idle = false;
             if let Some(views) = &mut self.views {
                 views.owed = false;
+            }
+        }
+        // Text drawn thicker or lighter since (`text::set_font_smoothing`):
+        // every text's glyphs again, its layers' too. macOS only: elsewhere
+        // nothing of it is compiled, so `render` is as it was.
+        #[cfg(target_os = "macos")]
+        {
+            let smoothing = text::font_smoothing_epoch();
+            if smoothing != self.smoothing_epoch {
+                self.smoothing_epoch = smoothing;
+                // The level a colour keys to changed: each text's asked again.
+                for shaped in self.shapes.values_mut() {
+                    shaped.smoothed_for = None;
+                }
+                self.flush_pending();
+                self.layers.clear();
+                self.fresh = true;
             }
         }
         let presented = std::mem::take(&mut self.present_stats);
@@ -11090,6 +11178,10 @@ impl GpuRenderer {
                                     decoration.color = decoration.color_in(new);
                                 }
                                 shaped.rich = Some(new.clone());
+                                #[cfg(target_os = "macos")]
+                                {
+                                    shaped.smoothing = None;
+                                }
                                 shaped.atlas_epoch = self.atlas_epoch.wrapping_sub(1);
                             }
                             shaped.rich != rich
@@ -11136,8 +11228,11 @@ impl GpuRenderer {
                                 bounds.height.to_bits().hash(&mut hasher);
                                 hasher.finish()
                             });
-                            // (A twin's quads come with whether they hold colour glyphs.)
+                            // (A twin's quads come with whether they hold colour glyphs,
+                            // and its glyphs with how they are thickened.)
                             let mut twin_colored = false;
+                            #[cfg(target_os = "macos")]
+                            let mut twin_smoothing = (None, None);
                             let twin = content
                                 .and_then(|content| self.shaped_like.get(&content))
                                 .and_then(|id| self.shapes.get(id))
@@ -11153,6 +11248,10 @@ impl GpuRenderer {
                                 })
                                 .map(|twin| {
                                     spare_glyphs.extend_from_slice(&twin.glyphs);
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        twin_smoothing = (twin.smoothing, twin.smoothed_for);
+                                    }
                                     let placed = twin.atlas_epoch == self.atlas_epoch;
                                     if placed {
                                         spare_quads.extend_from_slice(&twin.quads);
@@ -11275,6 +11374,10 @@ impl GpuRenderer {
                                 glyphs,
                                 quads: spare_quads,
                                 colored: twin_colored,
+                                #[cfg(target_os = "macos")]
+                                smoothing: twin_smoothing.0,
+                                #[cfg(target_os = "macos")]
+                                smoothed_for: twin_smoothing.1,
                                 atlas_epoch: epoch.unwrap_or(0),
                                 last_used: self.frame,
                                 prepared,
@@ -11286,6 +11389,19 @@ impl GpuRenderer {
                                     self.shaped_like.clear();
                                 }
                                 insert_in::<MODE, _, _>(&mut self.shaped_like, content, item.id);
+                            }
+                        }
+                        // On macOS, its glyphs thickened as its colour has macOS's
+                        // own text thickened: a new colour, new glyphs. Compiled
+                        // only there, so elsewhere this function is as it was.
+                        #[cfg(target_os = "macos")]
+                        {
+                            let held = match fresh.as_mut() {
+                                Some(shaped) => Some(shaped),
+                                None => self.shapes.get_mut(&item.id),
+                            };
+                            if let Some(shaped) = held {
+                                smooth_glyphs(shaped, color);
                             }
                         }
                         let snap = |value: f32| (value * self.scale).round() / self.scale;
@@ -15775,6 +15891,7 @@ impl GpuRenderer {
             && self.entries.len() < 8192
             && (self.shelves.area() - self.unheld_area()) * 8
                 > u64::from(self.atlas_size).pow(2) * 3
+            && !self.levels_replaced()
         {
             let size = (self.atlas_size * 2).min(MAX_ATLAS);
             if !self.grow_atlas(size) {
@@ -15794,6 +15911,42 @@ impl GpuRenderer {
             .filter_map(|(_, entry)| *entry)
             .map(|e| u64::from(e.width + 2) * u64::from(e.height + 2))
             .sum()
+    }
+    /// macOS: whether most of the atlas's glyphs no text holds are those of
+    /// glyphs it does hold at another font smoothing level (a colour
+    /// animating through the levels, its text the same): given back, they
+    /// leave the room they took, as no new text would. Off macOS there are
+    /// no levels.
+    fn levels_replaced(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            let level = |key: &AtlasKey| AtlasKey {
+                words: [
+                    key.words[0],
+                    key.words[1] & !cosmic_text::CacheKeyFlags::SMOOTHING.bits(),
+                    key.words[2],
+                    key.words[3],
+                ],
+                ..*key
+            };
+            let held = self.held_glyphs();
+            let held_unlevelled: FxHashSet<AtlasKey> = held.iter().map(level).collect();
+            let (mut unheld, mut replaced) = (0_u64, 0_u64);
+            for (key, entry) in &self.entries {
+                let Some(e) = entry else { continue };
+                if held.contains(key) {
+                    continue;
+                }
+                let texels = u64::from(e.width + 2) * u64::from(e.height + 2);
+                unheld += texels;
+                if held_unlevelled.contains(&level(key)) {
+                    replaced += texels;
+                }
+            }
+            replaced * 2 >= unheld && unheld > 0
+        }
+        #[cfg(not(target_os = "macos"))]
+        false
     }
     /// The glyphs of the text the renderer holds (`shapes`).
     fn held_glyphs(&self) -> FxHashSet<AtlasKey> {
@@ -21442,10 +21595,10 @@ pub fn glyph_image(
     text::glyph_image(swash, fonts, key)
 }
 /// A mask glyph's coverage `a` as `draw.wgsl` draws it in `color` at
-/// `scale`: firmed below `SHARP_TEXT_BELOW` (`firm`, `firmness`).
+/// `scale`: firmed where `firms_glyphs` says (`firm`, `firmness`).
 #[doc(hidden)]
 pub fn glyph_coverage(a: f32, color: Color, scale: f32) -> f32 {
-    if scale >= SHARP_TEXT_BELOW {
+    if !firms_glyphs(scale) {
         return a;
     }
     let luma = (0.2126 * color.0 as f32 + 0.7152 * color.1 as f32 + 0.0722 * color.2 as f32) / 255.;
@@ -23235,6 +23388,10 @@ mod atlas_glyph_errors_tests {
                 .collect(),
             quads: Vec::new(),
             colored: false,
+            #[cfg(target_os = "macos")]
+            smoothing: None,
+            #[cfg(target_os = "macos")]
+            smoothed_for: None,
             atlas_epoch: 0,
             last_used: 0,
             prepared: None,
