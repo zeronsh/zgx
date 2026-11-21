@@ -22,6 +22,9 @@ def main():
     parser.add_argument('--burst', action='store_true',
                         help="Pinyin typed as fast as a person types it (30 ms a key, nothing awaited between): "
                              "every preedit reaches the editor and each word commits")
+    parser.add_argument('--atom', action='store_true',
+                        help="native_ime --atom: Pinyin composed right after an atom and right before it commits "
+                             "beside it, the atom whole and moved, the caret after each commit")
     parser.add_argument('--input-modes', action='store_true',
                         help="native_ime --input-modes: each field's input mode reaches the input method as its "
                              "content purpose (email, then digits)")
@@ -89,7 +92,7 @@ def main():
                 if time.monotonic()>deadline or ime.poll() is not None: raise RuntimeError('Fcitx startup failed')
                 time.sleep(.1)
             with (args.output/'protocol.log').open('w') as protocol, (args.output/'application.log').open('w') as log:
-                command = [str(args.binary.resolve())] + (['--input-modes'] if args.input_modes else [])
+                command = [str(args.binary.resolve())] + (['--input-modes'] if args.input_modes else []) + (['--atom'] if args.atom else [])
                 app = subprocess.Popen(command, env=native, stdout=log, stderr=protocol)
                 deadline = time.monotonic()+10
                 while 'MODEL ' not in (args.output/'application.log').read_text():
@@ -172,6 +175,39 @@ def main():
                 time.sleep(.3)
                 engine = subprocess.check_output(['fcitx5-remote','-n'],env=env,text=True).strip()
                 assert engine == 'pinyin', engine
+                if args.atom:
+                    def settled(text, atoms, selection, what, timeout=8):
+                        deadline=time.monotonic()+timeout
+                        while True:
+                            trace=(args.output/'application.log').read_text()
+                            models=re.findall(r'MODEL \d+ first=(".*?") second=',trace)
+                            found=re.findall(r'ATOMS first (\[.*?\]) selection=(\(\d+, \d+\))',trace)
+                            now=(json.loads(models[-1]) if models else None, found[-1] if found else None)
+                            if now == (text, (atoms, selection)): return now
+                            if time.monotonic()>deadline or app.poll() is not None:
+                                raise AssertionError(f'{what}: the first field shows {now}, not {(text, (atoms, selection))}')
+                            time.sleep(.05)
+                    checks={}
+                    key('End')
+                    checks['start']=settled('see @file.pdf','[4..13]','(13, 13)','at the end')
+                    type_text('nihao'); key('space')
+                    checks['after']=settled('see @file.pdf你好','[4..13]','(19, 19)','composed after the atom')
+                    key('Home')
+                    for _ in range(4): key('Right')
+                    checks['caret before it']=settled('see @file.pdf你好','[4..13]','(4, 4)','the caret before the atom')
+                    type_text('nihao'); key('space')
+                    checks['before']=settled('see 你好@file.pdf你好','[10..19]','(10, 10)','composed before the atom')
+                    commits=re.findall(r'COMMIT first (".*?")',(args.output/'application.log').read_text())
+                    checks['commits']=[json.loads(c) for c in commits]
+                    if checks['commits'] != ['你好','你好']:
+                        raise AssertionError(f"commits: {checks['commits']}")
+                    subprocess.run(['grim',str((args.output/'atom.png').resolve())],env=env,check=False)
+                    subprocess.run(['swaymsg',f'[pid={app.pid}] kill'],env=env,capture_output=True)
+                    app.wait(timeout=25)
+                    result=dict(result='pass', backend='native Wayland text-input-v3 / Sway / Fcitx5 Pinyin', checks=checks)
+                    (args.output/'result.json').write_text(json.dumps(result,indent=2,ensure_ascii=False)+'\n')
+                    print('PASS: pinyin committed right after an atom and right before it (text-input-v3), the atom whole and moved, the caret after each commit')
+                    return
                 if args.burst:
                     # Each round all at once: the input method's updates
                     # come while the editor is still answering the last
