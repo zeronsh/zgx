@@ -152,6 +152,9 @@ pub struct AccessibilityTree {
     /// Where the text node showing a node's runs was when they were placed
     /// (`Scene::text_lines`): moved (scrolled in its field), they are again.
     run_boxes: HashMap<NodeId, zgx::scene::Rect>,
+    /// The atoms a field's runs took as one character each (`fold_units`),
+    /// for the fields that have any.
+    run_units: HashMap<NodeId, std::sync::Arc<[zgx::semantics::TextUnit]>>,
     /// The scene's `language_revision` at the last update: changed, every
     /// node is projected again, its language perhaps an ancestor's.
     language_revision: u64,
@@ -531,6 +534,25 @@ impl AccessibilityTree {
     fn text_position(&self, owner: NodeId, byte: usize) -> Option<accesskit::TextPosition> {
         let ids = self.text_runs.get(&owner)?;
         Some(run_position(ids, &self.text_positions, byte))
+    }
+    /// `runs` with each of `units` (a field's atoms) one character, kept as
+    /// the runs' atoms for `id`.
+    fn fold_units(
+        &mut self,
+        id: NodeId,
+        runs: Vec<TextRunData>,
+        units: Option<&std::sync::Arc<[zgx::semantics::TextUnit]>>,
+    ) -> Vec<TextRunData> {
+        match units {
+            Some(units) => {
+                self.run_units.insert(id, units.clone());
+                fold_units(runs, units)
+            }
+            None => {
+                self.run_units.remove(&id);
+                runs
+            }
+        }
     }
     /// Label `id`'s text runs as AccessKit's `TextRun` nodes, given ids
     /// kept across updates, into `nodes`.
@@ -1176,6 +1198,7 @@ impl AccessibilityTree {
                             && cached.value() == read_value.as_deref().filter(|_| !heading)
                     })
                     && self.blocks.contains(&id) == block
+                    && self.run_units.get(&id) == semantic.text_units.as_ref()
                     && self.text_runs.get(&id).is_none_or(|ids| {
                         ids.iter().all(|run| {
                             self.cache.contains_key(run) && self.text_positions.contains_key(run)
@@ -1247,6 +1270,7 @@ impl AccessibilityTree {
                     let value = text_value.unwrap_or("");
                     let lines = shown_box.map(|rect| vec![estimated_line(value, rect)]);
                     if let Some(runs) = text_run_data_on(value, block, lines.as_deref(), scale) {
+                        let runs = self.fold_units(id, runs, semantic.text_units.as_ref());
                         self.push_runs(id, cut_runs(runs, &cuts), &mut nodes);
                     }
                 } else if let Some((dx, dy, now)) = shifted {
@@ -1288,9 +1312,11 @@ impl AccessibilityTree {
                     if let Some(runs) =
                         text_run_data_on(text_value.unwrap_or(""), block, lines.as_deref(), scale)
                     {
+                        let runs = self.fold_units(id, runs, semantic.text_units.as_ref());
                         self.push_runs(id, cut_runs(runs, &cuts), &mut nodes);
                     } else {
                         self.text_runs.remove(&id);
+                        self.run_units.remove(&id);
                     }
                 }
                 if let Some(ids) = self.text_runs.get(&id) {
@@ -1313,6 +1339,7 @@ impl AccessibilityTree {
                 }
             } else {
                 self.text_runs.remove(&id);
+                self.run_units.remove(&id);
                 self.blocks.remove(&id);
             }
             if let Some(selection) = semantic.document_selection {
@@ -1525,6 +1552,7 @@ impl AccessibilityTree {
         }
         self.text_runs.retain(|owner, _| visible.contains(owner));
         self.run_boxes.retain(|owner, _| visible.contains(owner));
+        self.run_units.retain(|owner, _| visible.contains(owner));
         self.blocks.retain(|owner| visible.contains(owner));
         self.long_runs.retain(|owner, _| visible.contains(owner));
         let nodes = ordered
@@ -1595,6 +1623,96 @@ fn run_position(
             after.saturating_sub(1)
         },
     }
+}
+/// `runs` with each of a field's atoms (`units`) one character: a reader
+/// steps over it and reads it whole, by its label where it has one (the
+/// run's text says the label there; its places stay the field's bytes). An
+/// atom whose text, or label, is longer than a character can be (255 bytes)
+/// stays as it is.
+fn fold_units(runs: Vec<TextRunData>, units: &[zgx::semantics::TextUnit]) -> Vec<TextRunData> {
+    // (One a character can't hold is left as its characters.)
+    let unit_of = |start: usize| {
+        units.iter().find(|unit| {
+            unit.range.start <= start
+                && start < unit.range.end
+                && unit.range.len() <= 255
+                && unit
+                    .label
+                    .as_ref()
+                    .is_none_or(|l| !l.is_empty() && l.len() <= 255)
+        })
+    };
+    runs.into_iter()
+        .map(|run| {
+            let count = run.lengths.len();
+            if !(0..count).any(|i| unit_of(run.offsets[i]).is_some()) {
+                return run;
+            }
+            let mut out = TextRunData {
+                value: String::with_capacity(run.value.len()),
+                lengths: Vec::with_capacity(count),
+                offsets: vec![run.offsets[0]],
+                words: Vec::new(),
+                geometry: None,
+                wraps: run.wraps,
+            };
+            let mut places: Vec<(f32, f32)> = Vec::with_capacity(count);
+            let base = run.offsets[0];
+            let mut i = 0;
+            while i < count {
+                let start = run.offsets[i];
+                let text = &run.value[start - base..run.offsets[i + 1] - base];
+                // The rest of an atom this character begins (or is in),
+                // within this run.
+                let mut end = i + 1;
+                let unit = unit_of(start);
+                if let Some(unit) = unit {
+                    while end < count && run.offsets[end] < unit.range.end {
+                        end += 1;
+                    }
+                }
+                let whole = &run.value[start - base..run.offsets[end] - base];
+                let first = unit.is_none_or(|unit| unit.range.start == start);
+                let said = match (unit, first) {
+                    (Some(unit), true) => unit.label.as_deref().unwrap_or(whole),
+                    _ => whole,
+                };
+                if end == i + 1 {
+                    // One character: an atom's says its label.
+                    let said = if unit.is_some() && first { said } else { text };
+                    if run.words.contains(&(i as u8)) {
+                        out.words.push(out.lengths.len() as u8);
+                    }
+                    out.value.push_str(said);
+                    out.lengths.push(said.len() as u8);
+                    out.offsets.push(run.offsets[i + 1]);
+                    if let Some(g) = &run.geometry {
+                        places.push((g.positions[i], g.widths[i]));
+                    }
+                    i += 1;
+                    continue;
+                }
+                if (i..end).any(|at| run.words.contains(&(at as u8))) {
+                    out.words.push(out.lengths.len() as u8);
+                }
+                out.value.push_str(said);
+                out.lengths.push(said.len() as u8);
+                out.offsets.push(run.offsets[end]);
+                if let Some(g) = &run.geometry {
+                    let (a, b) = (g.positions[i], g.positions[end - 1] + g.widths[end - 1]);
+                    places.push((a.min(b), (b - a).abs()));
+                }
+                i = end;
+            }
+            out.geometry = run.geometry.map(|g| RunGeometry {
+                bounds: g.bounds,
+                positions: places.iter().map(|(p, _)| *p).collect(),
+                widths: places.iter().map(|(_, w)| *w).collect(),
+                rtl: g.rtl,
+            });
+            out
+        })
+        .collect()
 }
 /// `runs` without the characters of the controls inline in their text
 /// (`cuts`): a run is split where one stands, its places kept, so the
@@ -2219,6 +2337,63 @@ mod editor_text_tests {
             (zoomed.height() - plain.height() * 2.).abs() < 0.5,
             "{plain:?} {zoomed:?}"
         );
+    }
+
+    /// A text area with an atom over "@file.pdf" (4..13), named `name`,
+    /// and its first text run as AccessKit has it.
+    fn atom_run(name: Option<&str>) -> accesskit::Node {
+        let mut ui = Ui::new(400., 300.);
+        let value = ui.signal("see  now".to_owned());
+        let view = ui.mount(text_area("Notes", value.clone()).size(300., 200.));
+        ui.prepare_frame();
+        ui.input.focus(&ui.scene, Some(view.node()));
+        let editor = ui.focused_editor().unwrap();
+        editor.set_selection(4, 4);
+        let id = editor.insert_atom("@file.pdf", None, None, None).unwrap();
+        editor.set_atom_name(id, name.map(std::sync::Arc::from));
+        ui.prepare_frame();
+        let mut adapter = AccessibilityTree::new();
+        let update = adapter.update(
+            &ui.scene.borrow(),
+            &ui.semantics.borrow(),
+            Some(view.node()),
+            "Test",
+            1.,
+        );
+        update
+            .nodes
+            .into_iter()
+            .find(|(_, node)| node.role() == accesskit::Role::TextRun)
+            .map(|(_, node)| node)
+            .expect("a run")
+    }
+
+    /// An atom (a mention's chip) is one character of its text run: a
+    /// screen reader steps over it, and reads it, as one unit.
+    #[test]
+    fn an_atom_is_one_unit_of_its_text_run() {
+        let run = atom_run(None);
+        assert_eq!(run.value(), Some("see @file.pdf now"));
+        let lengths = run.character_lengths();
+        assert_eq!(
+            lengths.len(),
+            "see ".len() + 1 + " now".len(),
+            "{lengths:?}"
+        );
+        assert_eq!(lengths[4], 9, "\"@file.pdf\" is one character of 9 bytes");
+        let words = run.word_starts();
+        assert!(!words.contains(&5), "no word starts inside it: {words:?}");
+    }
+
+    /// A named atom reads as its name, still one character standing for
+    /// the field's bytes of it.
+    #[test]
+    fn a_named_atom_reads_as_its_name() {
+        let run = atom_run(Some("Quarterly report"));
+        assert_eq!(run.value(), Some("see Quarterly report now"));
+        let lengths = run.character_lengths();
+        assert_eq!(lengths.len(), 9);
+        assert_eq!(lengths[4] as usize, "Quarterly report".len());
     }
 
     #[test]
