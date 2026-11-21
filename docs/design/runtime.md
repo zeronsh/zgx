@@ -188,37 +188,44 @@ A panic in a module ends the process: nothing unwinds across an `extern "C"` fun
 
 ## 3. What a module call costs
 
-The requirement is no measurable cost. As built: a call into a loaded module costs 10 instructions more than the same function linked into the program (0.41% of the smallest call a script can make), a module's reads cost what linked-in reads cost, and Zeron's module costs less than the code it replaced.
+The requirement is no measurable cost. As built: a call into a loaded module costs 14 instructions more than the same function linked into the program (0.57% of the smallest call a script can make), a module's reads cost what linked-in reads cost, and Zeron's module costs less than the code it replaced on four of its five paths.
 
-Two measurements, both in retired instructions (user mode), release builds.
+Two measurements, both in instructions as valgrind counts them, release builds.
 
-**The same function, linked in and loaded** (`crates/zgx-script/examples/module_call_bench.rs`): a script calls it a million times (rows: 100,000), each arm the least of three runs, the process's setup subtracted.
+**The same function, linked in and loaded** (`crates/zgx-script/examples/module_call_bench.rs`): a script calls it in a loop, each arm run at 5 and at 25 rounds and the two subtracted, so the process's setup is not in it. Instructions a call:
 
 | A script's `ui.call_sync` of | Linked in | Loaded | Difference |
 | --- | --- | --- | --- |
-| a function of a string, returning a number | 2,453.1 instr | 2,463.1 instr | +10.0 (+0.41%) |
-| a function reading four fields of each of 200 rows | 71,464 instr | 71,585 instr | +121 (+0.17%) |
-| a function returning its argument, lent it | 3,905 instr | 3,955 instr | +50 (+1.3%) |
+| a function of a string, returning a number | 2,449.07 | 2,463.07 | +14.00 (+0.57%) |
+| a function reading four fields of each of 200 rows | 71,463.68 | 71,584.67 | +121.00 (+0.17%) |
+| a function returning its argument, lent it | 3,904.27 | 3,959.27 | +55.00 (+1.4%) |
+| a function returning its argument, handed it (`function_taking`) | 3,895.27 | 3,912.93 | +17.67 (+0.45%) |
 
-- **Entering a module costs 10 instructions.** One more indirect call than a host's own function, which is itself called through a pointer; and the runtime frees the lent argument by `Value`'s general drop, where a linked-in function that knows it was handed a string frees it in place.
-- **Reading costs what linked-in code's reading costs**: under one instruction a row.
-- **Returning the argument costs 50** when the function is lent it: it counts the string to keep it, where a linked-in function is handed it. A function registered as `function_taking` is handed its argument too; that case was not measured.
+- **Entering a module costs 14 instructions.** One more indirect call than a host's own function, which is itself called through a pointer; and the runtime frees the lent argument by `Value`'s general drop, where a linked-in function that knows it was handed a string frees it in place.
+- **Reading costs what linked-in code's reading costs**: 121 over 800 fields read, about half an instruction a row once entering is taken off.
+- **Returning the argument costs 55** when the function is lent it: it counts the string to keep it, where a linked-in function is handed it. **Handed it, 18**: a function registered as `function_taking` counts nothing, and costs 4 more than entering alone.
 
-**Zeron's long-reply code, as its own Rust and as a module** (section 2's proof; both in one binary, chosen at launch; medians of 5 runs of the process, the two ways interleaved, each run the median of 21 rounds of 20,000 calls or one setting aside):
+**Zeron's long-reply code, as its own Rust and as a module** (section 2's proof; both in one binary, chosen at launch). Each loop of 20,000 calls was run at 2 to 22 rounds, a process each, and the row is the median of the 20 differences between one count of rounds and the next; setting aside is the difference between 20 and 220 rounds. Instructions are the test's own thread's:
 
 | | Linked in | Loaded |
 | --- | --- | --- |
-| `ui.call_sync("chat.reply_blocks", id)`: a string in, a held list out | 2,347.3 instr, 175 ns (168–177) | 2,347.0 instr, 166 ns (165–174) |
-| `ui.call_sync("chat.reply_run", { id, key })`: two fields read, a held list out | 7,010 instr, 574 ns (557–594) | 6,909 instr, 559 ns (543–561) |
-| Setting a 2,001-block reply aside, once as its row is built | 3.42 M instr, 234 µs (229–236) | 1.99 M instr, 151 µs (139–243) |
+| `ui.call_sync("chat.reply_blocks", id)`: a string in, a held list of 2,001 out | 3,911 | 3,921 |
+| `ui.call_sync("chat.reply_run", { id, key })`, the last run: two fields read, a held list out | 9,391 | 9,287 |
+| The same, the first run | 8,594 | 8,510 |
+| `ui.call_sync("chat.reply_run_of", { id, block })`: two fields read, a key out | 8,545 | 8,423 |
+| The same loop calling a function that does nothing with `{ id, key }` | 6,688 | 6,675 |
+| Setting a 2,001-block reply aside, once as its row is built | 3,404,160 (234 µs) | 1,985,702 (151 µs) |
 
-Instructions agreed between runs to within 2 a call.
+- **A row is good to about 10 instructions.** The collector's work lands in one round or the next, so single rounds range widely (`reply_blocks`: 3,284 to 4,604); the median and the mean over all 20 rounds agree to within 13 on every row.
+- **The two arms' empty loops differ by 13**, the fifth row. That is not attributed; a row's difference is good to that much less.
+- **`reply_blocks` is the boundary alone**, a string in and a held list out: 11 over, 24 once the empty loop's 13 is taken off. The other three are under the linked-in code by 84 to 122.
+- **The call rows have no timings.** Earlier figures for the first two rows (2,347 instructions; 7,010 and 6,909) were of calls made after the reply had been let go of, which answer nil at once: the bench set the reply aside again before its loops. It now checks in the script that each function answers before any loop runs. Setting aside was measured rightly then and counts the same now.
 
 The module is the app's code moved line for line, with two differences that explain why it comes out under the linked-in code rather than level with it: it reads each block's fields once where the original reads some twice, and it borrows strings the original clones. Neither is the boundary; both are what a port to borrowed values does. What the boundary itself costs is the first table.
 
 How it got here, on the 2,001-block pass, as each version of the interface was measured: a call for each field read, +55%; a row's fields in one call, +23%; the fields named, in one call, +10.7%; reading in place, the table above.
 
-Both tables were counted with the kernel's counter on the dev machine, at the commit before the span's font change; they are to be taken again under cachegrind on the final commits.
+Both tables were counted on the dev machine (Ryzen 9 5900X) under valgrind 3.22, as CI's gate counts (`scripts/perf/same_run.c` preloaded, addresses not randomized): the first by cachegrind at a55d2b713, Zeron's by callgrind's count of each thread, on its branch. Setting aside's times are the kernel counter's run's, taken earlier.
 
 ## 4. Building modules, and the cache
 
