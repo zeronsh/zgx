@@ -94,11 +94,11 @@ unsafe fn text<'a>(ptr: *const u8, len: usize) -> &'a str {
     unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }
 }
 
-/// Whether `tag` is a kind a module counts itself: a list or a map, whose
-/// count is at a stated place. (A string's is std's `Rc`'s own.)
+/// Whether `tag` is a kind a module counts itself: a string, a list or a
+/// map, whose count is at a stated place.
 #[inline(always)]
 fn counted(tag: u8) -> bool {
-    matches!(tag, abi::LIST | abi::MAP)
+    matches!(tag, abi::STR | abi::LIST | abi::MAP)
 }
 
 /// A value a module owns: what a function returns, and what it keeps. The
@@ -184,8 +184,8 @@ impl Drop for Value {
     #[inline]
     fn drop(&mut self) {
         let at: *mut Raw = &mut self.raw;
-        // SAFETY: An owned value. A list or a map held elsewhere too is one
-        // hold fewer, as its own drop is; the last hold, a string, and any
+        // SAFETY: An owned value. A string, a list or a map held elsewhere
+        // too is one hold fewer, as its own drop is; the last hold, and any
         // kind held another way, the runtime frees.
         unsafe {
             let tag = tag(at);
@@ -487,9 +487,9 @@ impl<'a> Ref<'a> {
     /// It, owned: counted, not copied.
     #[inline]
     pub fn to_owned(self) -> Value {
-        // SAFETY: A lent value. A list or a map is held once more, as its
-        // own clone holds it; a number, a boolean and `nil` are their
-        // three words; a string and any other kind the runtime clones.
+        // SAFETY: A lent value. A string, a list or a map is held once more,
+        // as its own clone holds it; a number, a boolean and `nil` are their
+        // three words; any other kind the runtime clones.
         unsafe {
             let tag = tag(self.at);
             if counted(tag) {

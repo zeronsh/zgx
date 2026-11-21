@@ -4,10 +4,10 @@
 //! A value is three words ([`Raw`]): a byte saying which kind, then what it
 //! holds. A string holds a pointer to its text and its length; a list and
 //! a map hold a pointer to their items, their count before them, and how
-//! many. A module reads text, items and fields in place, and counts a list
-//! or a map in place. It asks the runtime to make a value, to count or
-//! free a string, to free a list or a map it held last, and to open a
-//! value held some other way.
+//! many, as does a string its text. A module reads text, items and fields
+//! in place, and counts a string, a list or a map in place. It asks the
+//! runtime to make a value, to free one it held last, and to open a value
+//! held some other way.
 //!
 //! Every part of that layout is stated in zgx-script's own types (`Value`
 //! is `#[repr(u8)]`; its string, its counted slice and a map's field are
@@ -32,7 +32,7 @@ pub const BOOL: u8 = 1;
 /// A number: an `f64` at [`HELD_AT`].
 pub const NUM: u8 = 2;
 /// A string: a pointer to its UTF-8 at [`HELD_AT`], its length in bytes
-/// after it. Counted by the runtime ([`Api::clone`], [`Api::release`]).
+/// after it; its count before its text, as a list's before its items.
 pub const STR: u8 = 3;
 /// A long string, held in pieces: [`Api::flat`] gives it as one.
 pub const TEXT: u8 = 4;
@@ -55,9 +55,8 @@ pub const BOOL_AT: usize = 1;
 /// Where a value holds its number, or its pointer; a length is a word
 /// after.
 pub const HELD_AT: usize = 8;
-/// How far before a list's items or a map's fields its count is: how many
-/// hold it. (A list and a map point at their items, as a string at its
-/// text.)
+/// How far before a string's text, a list's items or a map's fields its
+/// count is: how many hold it.
 pub const COUNT_BEFORE: usize = 16;
 /// A map's field's size in bytes, and a map's stride.
 pub const FIELD_SIZE: usize = 40;
@@ -103,11 +102,11 @@ pub struct Api {
     /// the items counted, not copied. `nil` if it isn't a list or they
     /// aren't in it.
     pub slice: unsafe extern "C" fn(list: *const Raw, from: usize, to: usize, out: *mut Raw),
-    /// The same value once more: counted, not copied. (A list and a map a
-    /// module counts itself, at [`COUNT_BEFORE`]; this is for a string and the
+    /// The same value once more: counted, not copied. (A string, a list and
+    /// a map a module counts itself, at [`COUNT_BEFORE`]; this is for the
     /// kinds it can't read.)
     pub clone: unsafe extern "C" fn(value: *const Raw, out: *mut Raw),
-    /// Gives an owned value back: a string, the last hold on a list or a
+    /// Gives an owned value back: the last hold on a string, a list or a
     /// map (a module lets go of any other hold itself, at [`COUNT_BEFORE`]),
     /// or a kind it can't read.
     pub release: unsafe extern "C" fn(value: *mut Raw),
