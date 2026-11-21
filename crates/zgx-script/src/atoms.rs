@@ -3,6 +3,7 @@
 //! carrying a plain value. The editor keeps them (`zgx::text_edit::Atom`);
 //! what a script adds rides in the atom's payload, so it moves with the atom
 //! through edits and comes back with it on undo.
+use crate::Field;
 use crate::value::Value;
 use std::sync::{Arc, atomic::AtomicU64, atomic::Ordering};
 use zgx::{
@@ -48,7 +49,7 @@ pub(crate) fn value_json(value: &Value) -> Option<String> {
             }
             Value::Map(fields) => {
                 out.push('{');
-                for (i, (key, item)) in fields.iter().enumerate() {
+                for (i, Field(key, item)) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push(',');
                     }
@@ -159,8 +160,8 @@ pub(crate) fn item(atom: &Atom, chars: (usize, usize)) -> Value {
 pub(crate) fn with_label(item: Value, label: &str) -> Value {
     match item {
         Value::Map(fields) => {
-            let mut all: Vec<(std::rc::Rc<str>, Value)> = fields.to_vec();
-            all.push((std::rc::Rc::from("label"), Value::Str(label.into())));
+            let mut all: Vec<crate::Field> = fields.to_vec();
+            all.push(crate::Field("label".into(), Value::Str(label.into())));
             Value::record(all)
         }
         other => other,

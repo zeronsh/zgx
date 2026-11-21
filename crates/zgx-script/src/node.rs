@@ -430,11 +430,11 @@ pub(crate) fn from_json(v: serde_json::Value) -> Value {
             Value::List(a.into_iter().map(from_json).collect::<Vec<_>>().into())
         }
         // Empty, still an object: a script sending it back sends `{}`.
-        serde_json::Value::Object(o) if o.is_empty() => Value::Map(Rc::new([])),
+        serde_json::Value::Object(o) if o.is_empty() => Value::Map(crate::Map::default()),
         serde_json::Value::Object(o) => {
-            let mut fields: Vec<(Rc<str>, Value)> = o
+            let mut fields: Vec<crate::Field> = o
                 .into_iter()
-                .map(|(k, v)| (k.into(), from_json(v)))
+                .map(|(k, v)| crate::Field(k.into(), from_json(v)))
                 .collect();
             // Sorted, as maps are, whatever order serde_json keeps.
             fields.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1572,9 +1572,9 @@ pub(crate) struct Span {
     pub underline: Option<bool>,
     pub strike: bool,
     /// `font`: as `ui.text`'s, `"mono"` or a family's name.
-    pub font: Option<Rc<str>>,
+    pub font: Option<crate::Str>,
     /// `lang`: the language its text is in, over its paragraph's.
-    pub lang: Option<Rc<str>>,
+    pub lang: Option<crate::Str>,
     /// Those of its options given a state or a function, and what it was
     /// given: read as the paragraph is built, so a change builds it again.
     /// Empty for most spans.
@@ -1967,7 +1967,7 @@ pub(crate) enum GradientLit {
 pub(crate) enum Lit {
     Num(f32),
     Bool(bool),
-    Str(Rc<str>),
+    Str(crate::Str),
     Color(Color),
     Pair(f32, f32),
     Len(Length),

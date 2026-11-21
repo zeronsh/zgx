@@ -2,10 +2,11 @@
 //! between, and each object key one string however many objects name it
 //! (10,000 messages' `id` share one).
 
+use crate::Field;
+use crate::Str;
 use crate::value::Value;
 use rustc_hash::FxHashMap;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
-use std::rc::Rc;
 
 /// `text`, which must be JSON whole, as a value: objects as maps (their keys
 /// sorted, the last of a key given twice kept, as serde_json's map keeps
@@ -29,16 +30,16 @@ pub(crate) fn parse_bytes(text: &[u8]) -> serde_json::Result<Value> {
 /// then be copied.
 #[derive(Default)]
 struct Keys {
-    known: FxHashMap<Box<str>, Rc<str>>,
+    known: FxHashMap<Box<str>, Str>,
     items: Vec<Value>,
-    fields: Vec<(Rc<str>, Value)>,
+    fields: Vec<Field>,
 }
 impl Keys {
-    fn get(&mut self, key: &str) -> Rc<str> {
+    fn get(&mut self, key: &str) -> Str {
         if let Some(known) = self.known.get(key) {
             return known.clone();
         }
-        let made: Rc<str> = key.into();
+        let made: Str = key.into();
         self.known.insert(key.into(), made.clone());
         made
     }
@@ -79,13 +80,13 @@ impl<'de> Visitor<'de> for Json<'_> {
         while let Some(item) = items.next_element_seed(Json(&mut *self.0))? {
             self.0.items.push(item);
         }
-        Ok(Value::List(self.0.items.drain(from..).collect()))
+        Ok(Value::List(crate::List::taken(&mut self.0.items, from)))
     }
     fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Value, A::Error> {
         let from = self.0.fields.len();
         while let Some(key) = entries.next_key_seed(Key(&mut *self.0))? {
             let value = entries.next_value_seed(Json(&mut *self.0))?;
-            self.0.fields.push((key, value));
+            self.0.fields.push(Field(key, value));
         }
         let fields = &mut self.0.fields[from..];
         // Sorted, as maps are (often they come so); a key given twice keeps
@@ -94,33 +95,33 @@ impl<'de> Visitor<'de> for Json<'_> {
         if !fields.is_sorted_by(|a, b| a.0 < b.0) {
             fields.sort_by(|a, b| a.0.cmp(&b.0));
             if fields.windows(2).any(|w| w[0].0 == w[1].0) {
-                let mut kept: Vec<(Rc<str>, Value)> = Vec::with_capacity(fields.len());
-                for (key, value) in self.0.fields.drain(from..) {
+                let mut kept: Vec<Field> = Vec::with_capacity(fields.len());
+                for Field(key, value) in self.0.fields.drain(from..) {
                     match kept.last_mut() {
                         Some(last) if last.0 == key => last.1 = value,
-                        _ => kept.push((key, value)),
+                        _ => kept.push(Field(key, value)),
                     }
                 }
                 return Ok(Value::Map(kept.into()));
             }
         }
-        Ok(Value::Map(self.0.fields.drain(from..).collect()))
+        Ok(Value::Map(crate::Map::taken(&mut self.0.fields, from)))
     }
 }
 
 struct Key<'a>(&'a mut Keys);
 impl<'de> DeserializeSeed<'de> for Key<'_> {
-    type Value = Rc<str>;
-    fn deserialize<D: Deserializer<'de>>(self, reader: D) -> Result<Rc<str>, D::Error> {
+    type Value = Str;
+    fn deserialize<D: Deserializer<'de>>(self, reader: D) -> Result<Str, D::Error> {
         reader.deserialize_str(self)
     }
 }
 impl<'de> Visitor<'de> for Key<'_> {
-    type Value = Rc<str>;
+    type Value = Str;
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str("a key")
     }
-    fn visit_str<E>(self, key: &str) -> Result<Rc<str>, E> {
+    fn visit_str<E>(self, key: &str) -> Result<Str, E> {
         Ok(self.0.get(key))
     }
 }

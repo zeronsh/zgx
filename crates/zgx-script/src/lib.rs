@@ -47,6 +47,7 @@ mod calls;
 mod canvas;
 pub mod check;
 mod command;
+mod counted;
 mod data;
 mod design;
 pub mod driver;
@@ -137,8 +138,8 @@ pub fn window_size_value(width: f32, height: f32) -> Value {
 }
 pub use rules::GuardKind;
 pub use value::{
-    ElementHandle, Folded, PathKey, Shared, Store, Unfold, Value, tables_converted,
-    values_converted, values_filed,
+    ElementHandle, Field, Folded, List, Map, PathKey, Shared, Slice, Store, Str, Unfold, Value,
+    WeakSlice, tables_converted, values_converted, values_filed,
 };
 pub use windows::{Window, WindowExtras};
 
@@ -3263,11 +3264,11 @@ impl ScriptHost {
         fn rect(rect: Option<zgx::scene::Rect>) -> Value {
             rect.map_or(Value::Nil, |r| {
                 let n = |v: f32| Value::Num(f64::from(v));
-                Value::Map(Rc::from([
-                    (Rc::from("height"), n(r.height)),
-                    (Rc::from("width"), n(r.width)),
-                    (Rc::from("x"), n(r.x)),
-                    (Rc::from("y"), n(r.y)),
+                Value::Map(crate::Map::from_iter([
+                    (Str::from("height"), n(r.height)),
+                    (Str::from("width"), n(r.width)),
+                    (Str::from("x"), n(r.x)),
+                    (Str::from("y"), n(r.y)),
                 ]))
             })
         }
@@ -5375,12 +5376,13 @@ fn popup_value(popups: &[zgx::widgets::PopupInfo]) -> Value {
                 Some(zgx::scene::PopupRole::Tooltip) => "tooltip",
                 None => "popup",
             };
-            Value::Map(Rc::from([
-                (Rc::from("h"), n(popup.rect.height)),
-                (Rc::from("kind"), Value::from(kind)),
-                (Rc::from("w"), n(popup.rect.width)),
-                (Rc::from("x"), n(popup.rect.x)),
-                (Rc::from("y"), n(popup.rect.y)),
+            // (In key order already: made as a map, not sorted into one.)
+            Value::Map(crate::Map::from([
+                ("h".into(), n(popup.rect.height)),
+                ("kind".into(), Value::from(kind)),
+                ("w".into(), n(popup.rect.width)),
+                ("x".into(), n(popup.rect.x)),
+                ("y".into(), n(popup.rect.y)),
             ]))
         })
         .collect();

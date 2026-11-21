@@ -11,6 +11,7 @@
 //! - `ui.debounced(state, ms)` is a read-only state following `state` once
 //!   it has stayed unchanged for `ms` (a search box's query): one timer,
 //!   begun again on each change, gone with its owner.
+use crate::Slice;
 use crate::{
     calls::{TaskState, drive},
     errors::{self, Failure, UiError},
@@ -121,7 +122,7 @@ impl Pages {
             Ok((items, next)) => {
                 let added = match items {
                     Value::List(items) => items,
-                    Value::Nil => Rc::from([]),
+                    Value::Nil => Slice::from([]),
                     _ => {
                         self.fail(Rc::new(Failure::new(
                             errors::Kind::Raised,
@@ -171,7 +172,7 @@ fn paged(lua: &Lua, load: Function) -> mlua::Result<Table> {
     let env = env(lua)?;
     let runtime = env.runtime.clone();
     let pages = Rc::new(Pages {
-        items: runtime.signal(Value::List(Rc::from([]))),
+        items: runtime.signal(Value::List(Slice::from([]))),
         loading: runtime.signal(Value::Bool(true)),
         status: runtime.signal(Value::Str("loading".into())),
         done: runtime.signal(Value::Bool(false)),
