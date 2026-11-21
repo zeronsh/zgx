@@ -72,20 +72,19 @@ What stays in the runtime is what an app must not have to build: layout, text, t
 
 Built: `crates/zgx-module` (the interface and a Rust API over it), `crates/zgx-script/src/modules.rs` (the runtime's side), `crates/zgx-script/tests/native_modules.rs`.
 
-A module is a Rust crate built as a `cdylib`. It depends on `zgx-module`, which has no dependencies, and on nothing of zgx. It exports one symbol, `zgx_module_v1`, and the runtime calls it with two tables of C functions.
+A module is a Rust crate built as a `cdylib`. It depends on `zgx-module` (and its macros) and on nothing of zgx. It exports two symbols ending in its name: its entry, `zgx_module_v1_<name>`, which the runtime calls with two tables of C functions, and its manifest, `zgx_module_manifest_<name>`, which says what it registers with which types. [docs/modules.md](../modules.md) is the guide.
 
 ```rust
-use zgx_module::{Host, Value};
-
-zgx_module::module!(|host: &Host| {
-    host.function("words.count", |text| {
-        let n = text.str().map_or(0, |s| s.split_whitespace().count());
-        Value::from(n as f64)
-    });
-});
+#[zgx_module::module(name = "words")]
+mod words {
+    #[zgx_module::export]
+    fn count(text: &str) -> f64 {
+        text.split_whitespace().count() as f64
+    }
+}
 ```
 
-Scripts call it as they call a host's function today: `ui.call_sync("words.count", text)`. To a script, and to `expose_action`'s rules for plugins, a module's function is a host function.
+Scripts call it as a member of the module's table, typed from its manifest (`ui.module("words").count(text)`), or by name as they call a host's function (`ui.call_sync("words.count", text)`), untyped. To `expose_action`'s rules for plugins, a module's function is a host function.
 
 ### Why a C interface
 
