@@ -1477,6 +1477,7 @@ impl QuadStyle {
     }
     /// `paint_bounds` without its shadows: where the box itself and its
     /// outline paint.
+    #[doc(hidden)]
     pub fn body_bounds(&self, bounds: Rect) -> Rect {
         match self.outline.filter(Outline::visible) {
             Some(outline) => bounds.union(outline.outer(bounds)),
