@@ -3,6 +3,8 @@
 // Each file loads its own `common` (a Harness of its own, which files
 // add methods to), as it did as a binary of its own.
 #![allow(clippy::duplicate_mod)]
+#[path = "../atom_clipboard.rs"]
+mod atom_clipboard;
 #[path = "../atom_pointer.rs"]
 mod atom_pointer;
 #[path = "../atom_style.rs"]

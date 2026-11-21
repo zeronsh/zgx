@@ -615,6 +615,8 @@ pub struct DomAtoms {
     pub wash: Option<crate::scene::Color>,
     /// How its atoms show beyond a wash (`View::atom_style`).
     pub style: Option<crate::editor_atom_style::AtomStyle>,
+    /// How its atoms go on the clipboard beyond the page (`View::atom_codec`).
+    pub codec: Option<crate::widgets::AtomCodec>,
 }
 pub enum ElementKind {
     Box(Layout),
