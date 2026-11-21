@@ -286,16 +286,23 @@ def drew_on_raster(output, probe_log, logs_present=False):
     else it passed on the GPU. With `ZGX_SHADER_LOG=1` (`logs_present`)
     they show its first present marked too (`zgx: first frame presented`),
     as a GPU window's is: what a probe waits on before reading pixels, and
-    the menu bar's wait on macOS. 0, or a status saying why."""
+    the menu bar's wait on macOS; and saying the raster drew it (`drawn by
+    the raster`), as a failed probe's evidence names its path. 0, or a
+    status saying why."""
     logs = [probe_log, *(p for p in output.rglob("*.log") if p.is_file())] if output.exists() else [probe_log]
     text = "\n".join(p.read_text(errors="replace") for p in logs)
     raster, gpu = text.count("raster present"), text.count("render forced=")
     marked = "zgx: first frame presented" in text
+    named = ", drawn by the raster" in text
     with probe_log.open("a") as log:
         print(f"raster check: {raster} raster presents, {gpu} GPU renders, first present marked: {marked}", file=log)
     if not (raster and not gpu):
         return "not on the raster"
-    return 0 if marked or not logs_present else "the raster window never marked its first present"
+    if not logs_present:
+        return 0
+    if not marked:
+        return "the raster window never marked its first present"
+    return 0 if named else "the first present's line didn't say the raster drew it"
 
 
 def main():

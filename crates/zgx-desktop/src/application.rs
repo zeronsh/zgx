@@ -1935,6 +1935,9 @@ struct Host {
     /// A GPU renderer couldn't be made for content only it draws: the
     /// raster draws on without it, and none is tried again.
     gpu_refused: bool,
+    /// Its GPU renderer took over from the raster (`raster_to_gpu`): what
+    /// the first present's line says of the path it drew by.
+    from_raster: bool,
     /// When to try making a renderer again after the GPU device was lost
     /// (`recover_renderer`), while none could be made.
     renderer_retry: Option<std::time::Instant>,
@@ -2430,6 +2433,7 @@ impl Host {
             renderer: None,
             raster: None,
             gpu_refused: false,
+            from_raster: false,
             renderer_retry: None,
             error_banner: None,
             render_fault: None,
@@ -3344,7 +3348,7 @@ impl Host {
                             first_mark(&FIRST_RENDER, "first frame rendered");
                             self.native.render(&scene, damage)?;
                             // Drawn and shown at once: presented.
-                            note_first_present();
+                            note_first_present(|| "the raster".into());
                             // Shown: the next waits for the compositor's
                             // frame, as a GPU present's does.
                             self.present_ready = false;
@@ -3521,7 +3525,17 @@ impl Host {
                     self.scale_factor,
                 );
                 self.native.apply();
-                note_first_present();
+                let from_raster = self.from_raster;
+                note_first_present(|| {
+                    let info = renderer.adapter_info();
+                    format!(
+                        "the GPU on {} ({:?}, {:?}){}",
+                        info.name,
+                        info.device_type,
+                        info.backend,
+                        if from_raster { ", from the raster" } else { "" }
+                    )
+                });
                 // Commits the transaction (macOS; elsewhere there is none).
                 #[allow(dropping_copy_types)]
                 drop(transaction);
@@ -4340,6 +4354,7 @@ impl Host {
         let raster = self.raster.take();
         self.recover_renderer();
         if self.renderer.is_some() {
+            self.from_raster = true;
             zgx_gpu::present_log::log(|| "raster to gpu".into());
             // Its popups in windows of their own again, where the platform
             // shows them so.
@@ -9743,13 +9758,15 @@ fn first_mark(once: &std::sync::Once, what: &str) {
 /// `ZGX_SHADER_LOG=1`, written alone to stderr: what a probe times a start
 /// by, or waits on before reading the window's pixels (ZGX_PROFILE's spans
 /// would slow them). The GPU renderer's present and the raster window's
-/// (drawn and shown at once) alike.
-fn note_first_present() {
+/// (drawn and shown at once) alike; the line also says which drew it
+/// (`drawn_by`, asked only for that line), so a probe's evidence names the
+/// path a failed run took.
+fn note_first_present(drawn_by: impl FnOnce() -> String) {
     FIRST_PRESENT.call_once(|| {
         let mark = first_present_mark();
         zgx::profile::mark(&mark);
         if zgx::env::var_os("ZGX_SHADER_LOG").is_some_and(|v| v != "0") {
-            eprintln!("zgx: {mark}");
+            eprintln!("zgx: {mark}, drawn by {}", drawn_by());
         }
     });
 }
