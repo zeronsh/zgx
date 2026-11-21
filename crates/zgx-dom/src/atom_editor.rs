@@ -30,7 +30,13 @@ use zgx::{
 #[derive(Clone, PartialEq)]
 enum Piece {
     Text(String),
-    Chip { id: u64, label: String, css: String },
+    Chip {
+        id: u64,
+        label: String,
+        css: String,
+        /// What a reader reads for it: its name, or its text.
+        spoken: String,
+    },
 }
 
 /// A piece as shown, and its nodes: a text's, or a chip's span and its
@@ -113,6 +119,13 @@ impl zgx::widgets::TextEdits for Edits {
         self.0.changed(true);
         Some(id)
     }
+    fn set_atom_name(&self, id: u64, name: Option<std::sync::Arc<str>>) -> bool {
+        let found = self.0.model.borrow_mut().set_atom_name(id, name);
+        if found {
+            self.0.render(false, false);
+        }
+        found
+    }
     fn undo(&self) -> bool {
         let done = self.0.model.borrow_mut().undo();
         self.0.changed(done);
@@ -189,9 +202,11 @@ impl AtomEditor {
             if atom.range.start > at {
                 pieces.push(Piece::Text(text[at..atom.range.start].to_owned()));
             }
+            let label = text[atom.range.clone()].to_owned();
             pieces.push(Piece::Chip {
                 id: atom.id,
-                label: text[atom.range.clone()].to_owned(),
+                spoken: atom.name.as_deref().unwrap_or(&label).to_owned(),
+                label,
                 css: self.chip_css(atom),
             });
             at = atom.range.end;
@@ -246,11 +261,21 @@ impl AtomEditor {
                     label: None,
                 }
             }
-            Piece::Chip { id, label, css } => {
+            Piece::Chip {
+                id,
+                label,
+                css,
+                spoken,
+            } => {
                 let node = ops.id();
                 ops.op(&[ops::CREATE, node, Tag::Span as u32]);
                 ops.op_str(ops::ATTR, node, "contenteditable");
                 ops.str("false");
+                // One unit to a reader, read by its name (or its text).
+                ops.op_str(ops::ATTR, node, "role");
+                ops.str("img");
+                ops.op_str(ops::ATTR, node, "aria-label");
+                ops.str(spoken);
                 ops.op_str(ops::ATTR, node, "data-atom");
                 ops.str(&id.to_string());
                 ops.op_str(ops::STYLE, node, css);

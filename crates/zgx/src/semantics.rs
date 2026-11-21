@@ -248,6 +248,18 @@ pub struct SemanticRare {
     pub active_descendant: Option<NodeId>,
     /// Its place in a grid, or a grid's size (boxed: only grids have one).
     pub table: Option<Box<TablePlace>>,
+    /// A text field's atoms (chips): stretches of its value a reader takes
+    /// as one unit, read as their label where they have one.
+    pub text_units: Option<std::sync::Arc<[TextUnit]>>,
+}
+/// One of a text field's atoms as assistive technology reads it
+/// (`SemanticRare::text_units`): its UTF-8 bytes of the value, and what is
+/// read for them where that isn't the text itself (a mention's name).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextUnit {
+    pub range: std::ops::Range<usize>,
+    pub label: Option<String>,
 }
 /// None set, for a node with none to read as.
 static NO_RARE: SemanticRare = SemanticRare {
@@ -266,6 +278,7 @@ static NO_RARE: SemanticRare = SemanticRare {
     shortcut: None,
     active_descendant: None,
     table: None,
+    text_units: None,
 };
 /// A [`SemanticRare`] made as one is first assigned to. A node's copy shares
 /// it until one of them assigns ([`Semantics::update`] copies each node it
@@ -583,6 +596,25 @@ impl Semantics {
         }
         node.text_selection = Some(selection);
         node.read_only = read_only;
+        self.revision = self.revision.wrapping_add(1);
+        entry.revision = self.revision;
+    }
+    /// A text field's atoms as a reader takes them (`text_units`), none for
+    /// no atoms. Missing nodes are ignored.
+    #[doc(hidden)]
+    pub fn update_text_units(&mut self, id: NodeId, units: Vec<TextUnit>) {
+        if self.buried(id) {
+            return;
+        }
+        let Some(entry) = self.nodes.get_mut(&id) else {
+            return;
+        };
+        let node = &mut entry.node;
+        let now = (!units.is_empty()).then(|| std::sync::Arc::from(units));
+        if node.text_units == now {
+            return;
+        }
+        node.text_units = now;
         self.revision = self.revision.wrapping_add(1);
         entry.revision = self.revision;
     }
