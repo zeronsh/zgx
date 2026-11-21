@@ -1451,6 +1451,7 @@ impl Session {
                     ("error", host.error().with_untracked(Clone::clone)),
                     ("types", host.type_errors().with_untracked(Clone::clone)),
                     ("lint", host.lint_findings().with_untracked(Clone::clone)),
+                    ("notice", host.notice_shown()),
                 ] {
                     if let Some(message) = message {
                         lines.push(format!("{what}: {message}"));

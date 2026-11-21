@@ -113,6 +113,13 @@ mod modules {
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
+pub mod app_bundle;
+mod checked_files;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod module_build;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
 pub mod module_types;
 /// In the browser, which loads no library: no module, and none typed.
 #[cfg(target_arch = "wasm32")]
@@ -843,6 +850,9 @@ pub(crate) struct Warnings {
 pub(crate) struct Diagnostics {
     calls: Cell<u64>,
     warnings: RefCell<Warnings>,
+    /// What the app's runner said as it started it (`ScriptHost::notice`),
+    /// made by the first notice: a host given none has none.
+    notice: RefCell<Option<Signal<Option<String>>>>,
 }
 impl Diagnostics {
     pub(crate) fn borrow(&self) -> std::cell::Ref<'_, Warnings> {
@@ -1314,7 +1324,15 @@ pub(crate) enum Files {
     Bundle(&'static Bundle, Code),
     /// Files held in memory (`ScriptHost::from_files`).
     Memory(std::sync::Arc<MemoryFiles>, Code),
+    /// A bundle's folder on the disk (`zgx build`'s `ui/`), read file by
+    /// file as asked, each checked against its manifest as it is read, and
+    /// loaded as its `Code` allows.
+    Folder(checked_files::Checked, Code),
 }
+// Every host holds one, and each `require` clones it: a pointer and a word,
+// whatever its kind (a larger one moved the heap's layout under every
+// scene of the perf gate).
+const _: () = assert!(std::mem::size_of::<Files>() <= 16);
 /// Why a reload in place (`ScriptHost::retarget`) or a trial load
 /// (`ScriptHost::validate`) failed.
 #[doc(hidden)]
@@ -1351,12 +1369,17 @@ pub enum ScriptFiles {
     Bundle(&'static Bundle),
     /// Files held in memory: an update downloaded, say.
     Memory(std::sync::Arc<MemoryFiles>),
+    /// A bundle's folder on the disk, `zgx build`'s, as `app_bundle::open`
+    /// found it (`Opened::files`): read as its files are asked for, each
+    /// checked against the bundle's manifest as it is read.
+    Folder(checked_files::Checked),
 }
 impl ScriptFiles {
     fn with(self, code: Code) -> Files {
         match self {
             ScriptFiles::Bundle(bundle) => Files::Bundle(bundle, code),
             ScriptFiles::Memory(memory) => Files::Memory(memory, code),
+            ScriptFiles::Folder(checked) => Files::Folder(checked, code),
         }
     }
 }
@@ -1384,17 +1407,19 @@ impl Files {
     /// source, it just fails to parse.
     fn chunk<'a>(&self, chunk: mlua::chunk::Chunk<'a>) -> mlua::chunk::Chunk<'a> {
         match self {
-            Files::Bundle(_, Code::VerifiedBytecode) | Files::Memory(_, Code::VerifiedBytecode) => {
-                chunk
-            }
-            Files::Bundle(_, Code::Source) | Files::Memory(_, Code::Source) | Files::Disk => {
-                chunk.set_mode(mlua::chunk::ChunkMode::Text)
-            }
+            Files::Bundle(_, Code::VerifiedBytecode)
+            | Files::Memory(_, Code::VerifiedBytecode)
+            | Files::Folder(_, Code::VerifiedBytecode) => chunk,
+            Files::Bundle(_, Code::Source)
+            | Files::Memory(_, Code::Source)
+            | Files::Folder(_, Code::Source)
+            | Files::Disk => chunk.set_mode(mlua::chunk::ChunkMode::Text),
         }
     }
     pub(crate) fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         match self {
             Files::Disk => std::fs::read(path),
+            Files::Folder(checked, _) => checked.read(path),
             Files::Memory(files, _) => files.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's files")
             }),
@@ -1409,6 +1434,7 @@ impl Files {
             Files::Disk => None,
             Files::Bundle(bundle, _) => Some(PathBuf::from(bundle.root)),
             Files::Memory(memory, _) => Some(PathBuf::from(memory.root_path())),
+            Files::Folder(checked, _) => Some(checked.dir().to_path_buf()),
         }
     }
     /// The packages it holds (none on the disk: `ScriptHost::package`).
@@ -1417,6 +1443,19 @@ impl Files {
             Files::Disk => Vec::new(),
             Files::Bundle(bundle, _) => bundle.packages(),
             Files::Memory(memory, _) => memory.packages(),
+            // As `build::bundle` stores them: `.packages/<name>/`.
+            Files::Folder(checked, _) => {
+                let mut names: Vec<String> =
+                    std::fs::read_dir(checked.dir().join(bundle::build::PACKAGES))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter(|entry| entry.path().is_dir())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect();
+                names.sort();
+                names
+            }
         }
     }
     fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String> {
@@ -1424,7 +1463,7 @@ impl Files {
     }
     fn is_dir(&self, path: &std::path::Path) -> bool {
         match self {
-            Files::Disk => path.is_dir(),
+            Files::Disk | Files::Folder(..) => path.is_dir(),
             Files::Bundle(bundle, _) => bundle.is_dir(path),
             Files::Memory(files, _) => files.is_dir(path),
         }
@@ -1432,7 +1471,7 @@ impl Files {
     /// The files in directory `dir`.
     fn list(&self, dir: &std::path::Path) -> Vec<PathBuf> {
         match self {
-            Files::Disk => std::fs::read_dir(dir)
+            Files::Disk | Files::Folder(..) => std::fs::read_dir(dir)
                 .into_iter()
                 .flatten()
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
@@ -1653,6 +1692,20 @@ fn require_module<const LENDING: bool>(
     } else {
         files
     };
+    // A module of the app's own checked bundle (a package it lends, its
+    // design system, say) is the bundle's bytecode whichever VM requires
+    // it: a plugin's reads it as the app's does, and can't change it. (A
+    // VM reading the bundle already, the app's, asks nothing more: `within`
+    // costs each require a walk of its path.)
+    let files = match files {
+        Files::Folder(..) => files,
+        files => match host.upgrade().map(|h| h.files.borrow().clone()) {
+            Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(checked.dir(), &path)) => {
+                app
+            }
+            _ => files,
+        },
+    };
     // While the host watches its files: who requires what (`reloads`).
     let tracker = if LENDING || !reloads::recording() {
         None
@@ -1737,7 +1790,7 @@ fn require_module<const LENDING: bool>(
             .and_then(|h| h.sources.compiled(&path, &code))
             // Compiled ahead while the app's window was made (`compile_ahead`).
             .or_else(|| sources::prefetched(&code)),
-        Files::Bundle(..) | Files::Memory(..) => None,
+        Files::Bundle(..) | Files::Memory(..) | Files::Folder(..) => None,
     };
     let bytecode = match package.as_deref() {
         Some(package) => package.bytecode(),
@@ -2422,7 +2475,7 @@ impl ScriptHost {
     /// for the disk's (always read as source).
     fn code_mode(&self) -> Code {
         match &*self.0.files.borrow() {
-            Files::Bundle(_, code) | Files::Memory(_, code) => *code,
+            Files::Bundle(_, code) | Files::Memory(_, code) | Files::Folder(_, code) => *code,
             Files::Disk => Code::Source,
         }
     }
@@ -2455,6 +2508,7 @@ impl ScriptHost {
             match files {
                 Files::Bundle(bundle, _) => *files = Files::Bundle(bundle, code),
                 Files::Memory(memory, _) => *files = Files::Memory(memory.clone(), code),
+                Files::Folder(checked, _) => *files = Files::Folder(checked.clone(), code),
                 Files::Disk => {}
             }
         })
@@ -3863,6 +3917,26 @@ impl ScriptHost {
             _ => None,
         }
     }
+    /// A line for the person running the app, from what runs it rather
+    /// than its scripts (`zgx run`'s "module `words` changed: restarted"):
+    /// on stderr, and in the banner while no error is shown, until it is
+    /// dismissed or another notice replaces it. Loads don't clear it. Give
+    /// it before `view`: a view built before a host's first notice shows
+    /// none.
+    #[doc(hidden)]
+    pub fn notice(&self, message: impl Into<String>) {
+        let message = message.into();
+        eprintln!("{message}");
+        let mut notice = self.0.warnings.notice.borrow_mut();
+        let signal = notice.get_or_insert_with(|| self.0.runtime.signal(None));
+        signal.set(Some(message));
+    }
+    /// The notice shown (`notice`), if any.
+    #[doc(hidden)]
+    pub fn notice_shown(&self) -> Option<String> {
+        let notice = self.0.warnings.notice.borrow();
+        notice.as_ref().and_then(|n| n.with_untracked(Clone::clone))
+    }
     /// The latest load or script error, shown over the interface until fixed.
     pub fn error(&self) -> Signal<Option<String>> {
         self.0.error.clone()
@@ -3959,7 +4033,7 @@ impl ScriptHost {
         if !cfg!(debug_assertions)
             || matches!(
                 *self.0.files.borrow(),
-                Files::Bundle(..) | Files::Memory(..)
+                Files::Bundle(..) | Files::Memory(..) | Files::Folder(..)
             )
             || zgx::env::var_os("ZGX_LINT").is_some_and(|v| v == "0")
         {
@@ -4380,7 +4454,7 @@ impl ScriptHost {
             }
             if matches!(
                 *host.0.files.borrow(),
-                Files::Bundle(..) | Files::Memory(..)
+                Files::Bundle(..) | Files::Memory(..) | Files::Folder(..)
             ) && host.0.managed.borrow().is_empty()
             {
                 return;
@@ -4465,6 +4539,8 @@ impl ScriptHost {
             },
         );
         let (error, type_errors) = (self.0.error.clone(), self.0.type_errors.clone());
+        let notice = self.0.warnings.notice.borrow().clone();
+        let dismiss_notice = notice.clone();
         let lint = self.0.lint.clone();
         let (dismiss_error, dismiss_types, dismiss_lint) =
             (error.clone(), type_errors.clone(), lint.clone());
@@ -4554,14 +4630,31 @@ impl ScriptHost {
             root.child_when(
                 move || {
                     show_errors
-                        .then(|| error.get().or_else(|| type_errors.get()))
+                        .then(|| {
+                            error
+                                .get()
+                                .or_else(|| type_errors.get())
+                                .or_else(|| notice.as_ref().and_then(|n| n.get()))
+                        })
                         .flatten()
                 },
                 move |message, cx| {
                     let (error, types) = (dismiss_error.clone(), dismiss_types.clone());
+                    let notice = dismiss_notice.clone();
                     let banner = banner(&message, move || {
-                        error.set(None);
-                        types.set(None);
+                        // What it shows: an error first, the notice when
+                        // there is none.
+                        let shown = error.with_untracked(Option::is_some)
+                            || types.with_untracked(Option::is_some);
+                        match &notice {
+                            Some(notice) if !shown => {
+                                notice.set(None);
+                            }
+                            _ => {
+                                error.set(None);
+                                types.set(None);
+                            }
+                        }
                     });
                     error_layer(banner, cx)
                 },
@@ -4685,8 +4778,13 @@ impl ScriptHost {
         loaded
     }
     fn load_anew(&self) -> Result<Loaded, String> {
-        // What `compile_ahead` compiled goes as this load ends.
+        // What `compile_ahead` compiled goes as this load ends, and what a
+        // bundle's files read ahead.
         let _ahead = sources::ReleaseAhead;
+        let _read = checked_files::ReleaseRead(match &*self.0.files.borrow() {
+            Files::Folder(checked, _) => Some(checked.clone()),
+            _ => None,
+        });
         if let Some(tracker) = tracking(&self.0) {
             tracker.begin(self.app_key());
         }
@@ -5028,6 +5126,11 @@ impl ScriptHost {
             }
             (Files::Memory(memory, _), Script::File(path) | Script::Plugin { path, .. })
                 if plugin && !path.starts_with(memory.root_path()) =>
+            {
+                Files::Disk
+            }
+            (Files::Folder(checked, _), Script::File(path) | Script::Plugin { path, .. })
+                if plugin && !path.starts_with(checked.dir()) =>
             {
                 Files::Disk
             }
