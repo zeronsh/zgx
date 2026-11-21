@@ -15,7 +15,8 @@ use crate::{
 };
 use std::{
     cell::{Cell, RefCell},
-    rc::Rc,
+    collections::HashMap,
+    rc::{Rc, Weak},
 };
 use zgx::{
     compose::__dom::DomAtoms,
@@ -59,6 +60,77 @@ struct AtomEditor {
     codec: Option<AtomCodec>,
 }
 
+thread_local! {
+    /// The text areas with atoms mounted, by node: what a script edits
+    /// through its element (`text_edits`).
+    static EDITORS: RefCell<HashMap<u32, Weak<AtomEditor>>> = RefCell::default();
+}
+
+/// The text area with atoms mounted at `node`, as scripts edit it
+/// (`NodeHandle::text_edits`): none for other nodes.
+pub(crate) fn text_edits(node: u32) -> Option<Rc<dyn zgx::widgets::TextEdits>> {
+    let editor = EDITORS.with(|editors| editors.borrow().get(&node)?.upgrade())?;
+    Some(Rc::new(Edits(editor)))
+}
+
+/// A text area with atoms, as scripts edit it: each edit its model's, the
+/// text shown and told as a person's edit is.
+struct Edits(Rc<AtomEditor>);
+impl zgx::widgets::TextEdits for Edits {
+    fn text(&self) -> String {
+        self.0.model.borrow().text().into_owned()
+    }
+    fn atoms(&self) -> Vec<Atom> {
+        self.0.model.borrow().atoms().to_vec()
+    }
+    fn insert_atom(
+        &self,
+        label: &str,
+        range: Option<std::ops::Range<usize>>,
+        wash: Option<Color>,
+        payload: Option<std::sync::Arc<dyn zgx::text_edit::AtomPayload>>,
+    ) -> Option<u64> {
+        // At the caret: the page's, which moves without an edit (a click).
+        if range.is_none()
+            && let Some(at) = crate::js::zgx_edit_selection(self.0.root)
+            && let [start, end] = *at
+        {
+            let mut model = self.0.model.borrow_mut();
+            let (start, end) = {
+                let text = model.text();
+                (
+                    floor_char(&text, start as usize),
+                    floor_char(&text, end as usize),
+                )
+            };
+            model.set_selection(start, end);
+        }
+        let id = self
+            .0
+            .model
+            .borrow_mut()
+            .insert_atom(label, range, wash, payload)?;
+        self.0.changed(true);
+        Some(id)
+    }
+    fn undo(&self) -> bool {
+        let done = self.0.model.borrow_mut().undo();
+        self.0.changed(done);
+        done
+    }
+    fn redo(&self) -> bool {
+        let done = self.0.model.borrow_mut().redo();
+        self.0.changed(done);
+        done
+    }
+    fn can_undo(&self) -> bool {
+        self.0.model.borrow().can_undo()
+    }
+    fn can_redo(&self) -> bool {
+        self.0.model.borrow().can_redo()
+    }
+}
+
 /// A text area's own options, beyond its atoms.
 pub(crate) struct Field {
     pub(crate) label: String,
@@ -86,6 +158,17 @@ impl Drop for AtomEditor {
             .flat_map(|shown| std::iter::once(shown.node).chain(shown.label))
             .collect();
         ops::with(|ops| ops.free(&ids));
+        let root = self.root;
+        // (Its slot may be another's by now: a node mounted again.)
+        let _ = EDITORS.try_with(|editors| {
+            let mut editors = editors.borrow_mut();
+            if editors
+                .get(&root)
+                .is_some_and(|weak| weak.strong_count() == 0)
+            {
+                editors.remove(&root);
+            }
+        });
     }
 }
 
@@ -267,6 +350,19 @@ impl AtomEditor {
             (text, json)
         };
         crate::js::zgx_copy_atoms(&text, json.as_deref());
+    }
+    /// After an edit made other than by a `beforeinput` (a script's): its
+    /// value set where its text `changed`, shown again, its caret put back,
+    /// and its listener told.
+    fn changed(&self, changed: bool) {
+        if changed {
+            let text = self.model.borrow().text().into_owned();
+            self.value.set(text);
+        }
+        self.render(false, true);
+        if changed {
+            self.tell();
+        }
     }
     /// Tell its listener what happened to its atoms, if anything did.
     fn tell(&self) {
@@ -450,5 +546,6 @@ pub(crate) fn mount(block: &mut Block, id: u32, runtime: &Runtime, field: Field,
             }
         });
     }
+    EDITORS.with(|editors| editors.borrow_mut().insert(id, Rc::downgrade(&editor)));
     block.hold(editor);
 }

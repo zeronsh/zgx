@@ -38,6 +38,7 @@ extern "C" {
     pub(crate) fn zgx_clipboard_types() -> Vec<String>;
     pub(crate) fn zgx_clipboard_typed(mime: &str) -> Option<String>;
     pub(crate) fn zgx_copy_atoms(text: &str, atoms: Option<&str>);
+    pub(crate) fn zgx_edit_selection(id: u32) -> Option<Box<[f64]>>;
     pub(crate) fn zgx_open_url(url: &str) -> bool;
     pub(crate) fn zgx_scroll_into_view(id: u32, block: &str, inline: &str, animate: i32) -> bool;
     pub(crate) fn zgx_measure(font: &str, text: &str) -> Box<[f64]>;
