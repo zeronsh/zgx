@@ -9654,10 +9654,26 @@ export type AtomLook = {
 	color: Color?,
 	weight: number?,
 	underline: (boolean | { color: Color?, offset: number? })?,
-	icon: { src: string?, code: string?, size: number?, gap: number?, tint: Color? }?,
+	-- `bg`, `radius` and `pad`: a rounded well behind the icon, `pad`
+	-- points around it.
+	icon: {
+		src: string?,
+		code: string?,
+		size: number?,
+		gap: number?,
+		tint: Color?,
+		bg: Color?,
+		radius: number?,
+		pad: number?,
+	}?,
 	-- Its text shown as a picture instead (an equation), sized in EM of the
 	-- textarea's text: one caret unit, its text kept for copy and search.
 	svg: { src: string?, code: string?, width: number, height: number, descent: number? }?,
+	-- Room inside its wash, in points: `x` on both sides, `{ x, y }`, or
+	-- `{ left, right, y }`; `y` hugs the wash around the text.
+	padding: (number | { number })?,
+	-- The corners of its wash, in points.
+	radius: number?,
 }
 export type AtomItem = {
 	id: string?,

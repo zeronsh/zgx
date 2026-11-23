@@ -550,3 +550,100 @@ fn a_chip_is_read_as_one_unit_by_its_text_or_its_name() {
         Some("Bo Jensen")
     );
 }
+
+/// A small SVG, as an atom's icon.
+const DOT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8"/></svg>"#;
+
+#[wasm_bindgen_test]
+fn its_chips_take_their_padding_corners_and_icons() {
+    use zgx::widgets::{AtomIcon, AtomStyle};
+    let icon = |tint: Option<Color>, well: Option<Color>| {
+        let svg = zgx::svg::SvgData::new(DOT.as_bytes().to_vec()).unwrap();
+        AtomIcon {
+            svg: std::sync::Arc::new(match tint {
+                Some(tint) => svg.tinted(tint),
+                None => svg,
+            }),
+            size: 12.,
+            gap: 3.,
+            bg: well,
+            radius: 6.,
+            pad: 2.,
+        }
+    };
+    let runtime = Runtime::new();
+    let value = runtime.signal(String::from("ask Ada and Bo"));
+    let host = host();
+    let plain = icon(None, None);
+    let _mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        text_area("Message", value)
+            .atoms_when(move |editor| {
+                let mut own = Atom::new(editor.new_atom_id(), 12..14);
+                own.style = Some(std::sync::Arc::new(AtomStyle {
+                    icon: Some(plain.clone()),
+                    radius: Some(2.),
+                    ..Default::default()
+                }));
+                vec![Atom::new(editor.new_atom_id(), 4..7), own]
+            })
+            .atom_wash(Color(200, 220, 255, 255))
+            .atom_style(AtomStyle {
+                padding: Some([6., 4., 1.]),
+                radius: Some(9.),
+                icon: Some(icon(
+                    Some(Color(255, 0, 0, 255)),
+                    Some(Color(0, 0, 255, 255)),
+                )),
+                ..Default::default()
+            }),
+    );
+    zgx_dom::flush();
+    let list = host.query_selector_all("[data-atom]").unwrap();
+    let chip = |i| {
+        list.item(i)
+            .unwrap()
+            .dyn_into::<web_sys::HtmlElement>()
+            .unwrap()
+    };
+    let style = |el: &web_sys::Element, name: &str| {
+        web_sys::window()
+            .unwrap()
+            .get_computed_style(el)
+            .unwrap()
+            .unwrap()
+            .get_property_value(name)
+            .unwrap()
+    };
+    // The text area's look: its padding and corners.
+    let first = chip(0);
+    assert_eq!(
+        first.text_content().unwrap(),
+        "Ada",
+        "the label alone is its text"
+    );
+    assert_eq!(style(&first, "padding-left"), "6px");
+    assert_eq!(style(&first, "padding-right"), "4px");
+    assert_eq!(style(&first, "padding-top"), "1px");
+    assert_eq!(style(&first, "border-top-left-radius"), "9px");
+    // Its icon: tinted, so a mask over the tint, in a blue well.
+    let well = first.first_element_child().expect("a well");
+    assert_eq!(well.get_attribute("aria-hidden").as_deref(), Some("true"));
+    assert_eq!(style(&well, "background-color"), "rgb(0, 0, 255)");
+    assert_eq!(style(&well, "padding-left"), "2px");
+    assert_eq!(style(&well, "margin-right"), "3px");
+    let picture = well.first_element_child().expect("the icon");
+    assert_eq!(style(&picture, "width"), "12px");
+    assert_eq!(style(&picture, "background-color"), "rgb(255, 0, 0)");
+    assert!(style(&picture, "mask-image").contains("data:image/svg+xml;base64,"));
+    // An atom's own look over the text area's: its icon untinted, no well,
+    // its own corners, the text area's padding.
+    let second = chip(1);
+    assert_eq!(second.text_content().unwrap(), "Bo");
+    assert_eq!(style(&second, "border-top-left-radius"), "2px");
+    assert_eq!(style(&second, "padding-left"), "6px");
+    let picture = second.first_element_child().expect("its icon");
+    assert_eq!(style(&picture, "margin-right"), "3px");
+    assert!(style(&picture, "background-image").contains("data:image/svg+xml;base64,"));
+}
