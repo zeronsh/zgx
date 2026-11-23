@@ -486,6 +486,69 @@ impl Table {
         }
     }
 
+    /// As [`Table::raw_set`], with the memory limit set aside for the set
+    /// instead of a protected call around it: only the system running out
+    /// of memory can fail it, and that aborts. A key Lua would refuse (nil,
+    /// NaN) or a read-only table takes `raw_set`'s path and its error.
+    ///
+    /// zgx patch: not in upstream mlua (see `vendor/mlua/ZGX_PATCH.md`).
+    pub fn raw_set_relaxed(&self, key: impl IntoLua, value: impl IntoLua) -> Result<()> {
+        let lua = self.0.lua.lock();
+        let state = lua.state();
+        unsafe {
+            let _sg = StackGuard::new(state);
+            check_stack(state, 5)?;
+
+            lua.push_ref(&self.0);
+            key.push_into_stack(&lua)?;
+            value.push_into_stack(&lua)?;
+
+            #[cfg(feature = "luau")]
+            self.check_readonly_write(&lua)?;
+
+            if !Self::is_valid_key(state, -2) {
+                return protect_lua!(state, 3, 0, fn(state) ffi::lua_rawset(state, -3));
+            }
+            // SAFETY: the key is valid and the table writable, so with the
+            // limit ignored `lua_rawset` raises none of its errors (the
+            // allocator aborts rather than return null), and it runs no
+            // collection step.
+            crate::memory::MemoryState::relax_limit_with(state, || ffi::lua_rawset(state, -3));
+            ffi::lua_pop(state, 1);
+            Ok(())
+        }
+    }
+
+    /// As [`Table::raw_set_relaxed`], for a field named `key`: the key's
+    /// string made with the limit set aside too, not in a protected call of
+    /// its own (each `&str` key a pcall and a new C closure otherwise).
+    ///
+    /// zgx patch: not in upstream mlua (see `vendor/mlua/ZGX_PATCH.md`).
+    pub fn raw_set_field_relaxed(&self, key: &str, value: impl IntoLua) -> Result<()> {
+        let lua = self.0.lua.lock();
+        let state = lua.state();
+        unsafe {
+            let _sg = StackGuard::new(state);
+            check_stack(state, 5)?;
+
+            lua.push_ref(&self.0);
+            #[cfg(feature = "luau")]
+            self.check_readonly_write(&lua)?;
+            // SAFETY: with the limit ignored, `lua_pushlstring` raises none of
+            // its errors (the allocator aborts rather than return null), and
+            // its collection step runs only userdata destructors and the
+            // interrupt with `gc >= 0`, as `make_userdata_relaxed` says.
+            crate::memory::MemoryState::relax_limit_with(state, || {
+                ffi::lua_pushlstring(state, key.as_ptr() as *const std::os::raw::c_char, key.len());
+            });
+            value.push_into_stack(&lua)?;
+            // A string key is always valid; the table is writable (above).
+            crate::memory::MemoryState::relax_limit_with(state, || ffi::lua_rawset(state, -3));
+            ffi::lua_pop(state, 1);
+            Ok(())
+        }
+    }
+
     /// Gets the value associated to `key` without invoking metamethods.
     pub fn raw_get<V: FromLua>(&self, key: impl IntoLua) -> Result<V> {
         let lua = self.0.lua.lock();

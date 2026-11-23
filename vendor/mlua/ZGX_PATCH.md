@@ -61,6 +61,22 @@ about a third was mlua's handling of values rather than zgx's work:
    what the heap's layout made its hash probe cost: the atom costs the
    same whatever the layout.
 
+5. **`Lua::create_table_relaxed`, `Table::raw_set_relaxed`,
+   `Table::raw_set_field_relaxed`** (`src/state.rs`, `src/table.rs`): as `create_table_with_capacity` and `raw_set`, with the
+   memory limit set aside for the one allocation, as for userdata (2), not
+   a protected call around it (each a pcall and a new C closure). A key Lua
+   would refuse, or a read-only table, takes the protected path and its
+   error; a field's `&str` key is made the same way, not in a protected
+   call of its own. zgx-script's Luau templates make a small table for each node they
+   stamp from a script's holes (`templates.rs`), where the protected call
+   cost more than the table (zgx #2368).
+   `Lua::over_memory_limit` says whether a state holds more than its
+   limit: relaxed allocations count toward it, and a caller making them
+   for a script in a loop (zgx-script's `ui.__stamp`, `ui.__pack`) checks
+   it first and fails, so a script can overshoot by one call's relaxed
+   allocations at most, however it loops (a test in zgx-script's
+   `memory_limit_stamps` checks it).
+
 zgx-script uses both in `node.rs`: `fill_from` walks a node's properties
 with `for_each_borrowed` (a key's atom names its property; a colour
 written out is parsed where it lies; a child node is read without a

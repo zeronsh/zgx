@@ -191,6 +191,12 @@ name = "compile_ahead"
 path = "tests/compile_ahead.rs"
 
 [[test]]
+# Its own process: it runs itself once with templates, once without (the
+# compile caches are the process's).
+name = "templates_corpus"
+path = "tests/templates_corpus.rs"
+
+[[test]]
 # Its own process: the packages' compiled modules are the process's.
 name = "package_bytecode"
 path = "tests/package_bytecode.rs"

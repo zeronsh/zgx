@@ -102,6 +102,31 @@ mod scene3d;
 mod socket;
 mod sorted;
 mod sources;
+mod templates;
+/// What the template rewrite makes of `source`: the constructors it stamps,
+/// and each it leaves as written with why (its corpus test's report).
+#[doc(hidden)]
+pub fn __templates_report(source: &str) -> (usize, Vec<String>) {
+    templates::report(source)
+}
+/// Stamps made on this thread so far (the corpus test's proof that the
+/// templates ran).
+#[doc(hidden)]
+pub fn __templates_stamped() -> u64 {
+    templates::stamps()
+}
+/// Templates alive on this thread: those of chunks not yet freed (the
+/// memory test's count).
+#[doc(hidden)]
+pub fn __templates_live() -> usize {
+    templates::live()
+}
+/// What the templates alive on this thread keep in Rust, in bytes (the
+/// rest-memory measure's count).
+#[doc(hidden)]
+pub fn __templates_bytes() -> usize {
+    templates::bytes()
+}
 mod term;
 pub mod test_runner;
 pub mod testing;
@@ -864,6 +889,10 @@ pub(crate) fn warn(lua: &Lua, message: &str) {
 }
 /// The script line calling into Rust (`app.luau:12`), if it has one.
 pub(crate) fn call_site(lua: &Lua) -> Option<String> {
+    // A template's node: the line its call is written on (`templates`).
+    if let Some((_, short, line)) = templates::stamping() {
+        return Some(format!("{short}:{line}"));
+    }
     lua.inspect_stack(1, |d| {
         let source = d.source().short_src.map(|s| s.into_owned());
         (source, d.current_line())
@@ -1640,6 +1669,10 @@ fn require_module<const LENDING: bool>(
         .unwrap_or(&path)
         .to_string_lossy()
         .into_owned();
+    // Its templates made for this VM, if they're on (`templates`): the
+    // chunk takes them as it starts. What the caches compile is the same
+    // rewritten source (`templates::for_compile`).
+    let templated = templates::register(lua, &code);
     // A lent package's module: compiled once for all the plugins
     // requiring it, hot-reloading or not (its source is the same in each
     // VM). The app's resolver compiles none of this in (`LENDING`).
@@ -1690,9 +1723,10 @@ fn require_module<const LENDING: bool>(
         Some(package) => package.bytecode(),
         None => compiled.as_deref().and_then(sources::Compiled::bytecode),
     };
-    let loaded = match bytecode {
-        Some(bytecode) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
-        None => files.chunk(lua.load(code)),
+    let loaded = match (bytecode, &templated) {
+        (Some(bytecode), _) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
+        (None, Some(source)) => files.chunk(lua.load(source.as_bytes())),
+        (None, None) => files.chunk(lua.load(code)),
     };
     // Its top level's registrations are its own, and so are the globals it
     // sets (the sandbox's one table: every chunk's).
@@ -5251,6 +5285,9 @@ impl ScriptHost {
         let name = &vm.name;
         let fail = |error: mlua::Error| describe(name, &error);
         let (lua, limits) = (&vm.lua, self.0.limits);
+        // Its templates made for this VM, if they're on (`templates`): the
+        // chunk takes them as it starts.
+        let templated = templates::register(lua, code);
         // Building runs untracked: reading state while describing the tree
         // must not subscribe whatever is currently mounting.
         let compiled = match (&files, script) {
@@ -5263,9 +5300,13 @@ impl ScriptHost {
         };
         let result = self.0.runtime.untracked(|| {
             vm.guard(limits.load, || {
-                let loaded = match compiled.as_deref().and_then(sources::Compiled::bytecode) {
-                    Some(bytecode) => lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary),
-                    None => files.chunk(lua.load(code)),
+                let bytecode = compiled.as_deref().and_then(sources::Compiled::bytecode);
+                let loaded = match (bytecode, &templated) {
+                    (Some(bytecode), _) => {
+                        lua.load(bytecode).set_mode(mlua::chunk::ChunkMode::Binary)
+                    }
+                    (None, Some(source)) => files.chunk(lua.load(source.as_bytes())),
+                    (None, None) => files.chunk(lua.load(code)),
                 };
                 loaded.set_name(format!("@{name}")).eval::<mlua::Value>()
             })
@@ -5425,6 +5466,8 @@ const STATE_LISTED_FROM: usize = 64 * 1024;
 /// while the app is in use, so a page shown again is instant).
 fn trim_idle(inner: &Inner) {
     value::forget_streamed_edits();
+    // Templates' prototypes and nodes made once: made again as stamped.
+    templates::trim();
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
         markdown::rest(&vm.lua);
