@@ -151,21 +151,25 @@ fn submenu_honors_explicit_placement_offset_and_flips_when_room_is_short() {
         let child = ui.signal(false);
         let mounted = ui.mount(
             row().pl(x_offset).child(
-                menu("Actions", root.clone(), button().w(120.).h(28.).child(text("Actions")))
-                    .w(200.)
-                    .p(4.)
-                    .child(
-                        submenu("More", child.clone())
-                            .trigger_id("more")
-                            .id("sub")
-                            .w(180.)
-                            .placement(Placement {
-                                side: Side::Right,
-                                align: Edge::Start,
-                                offset: 11.,
-                            })
-                            .child(menu_item("Child")),
-                    ),
+                menu(
+                    "Actions",
+                    root.clone(),
+                    button().w(120.).h(28.).child(text("Actions")),
+                )
+                .w(200.)
+                .p(4.)
+                .child(
+                    submenu("More", child.clone())
+                        .trigger_id("more")
+                        .id("sub")
+                        .w(180.)
+                        .placement(Placement {
+                            side: Side::Right,
+                            align: Edge::Start,
+                            offset: 11.,
+                        })
+                        .child(menu_item("Child")),
+                ),
             ),
         );
         ui.prepare_frame();

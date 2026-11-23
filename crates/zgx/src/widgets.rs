@@ -7559,14 +7559,17 @@ impl Ui {
                         None => 0,
                     };
                     if e.has_atoms() {
-                        let base_style = code.atoms().and_then(|atoms| atoms.atom_style.borrow().clone());
+                        let base_style = code
+                            .atoms()
+                            .and_then(|atoms| atoms.atom_style.borrow().clone());
                         let decorations = washed_atoms(
                             &e,
                             code.atoms().and_then(|atoms| atoms.atom_wash.get()),
                             base_style.as_deref(),
                             &plain,
                         );
-                        let first = decorations.partition_point(|(range, _, _)| range.end < shown_from);
+                        let first =
+                            decorations.partition_point(|(range, _, _)| range.end < shown_from);
                         for (range, mark, py) in &decorations[first..] {
                             let rects = layout.selection_within(
                                 range.clone(),
@@ -7678,11 +7681,14 @@ impl Ui {
                     })
                 {
                     let atoms = code.atoms_made();
-                    let mut wanted: Vec<(
+                    // Each picture or atom icon to show: where, what, and
+                    // its well (colour, corner radius, padding) if it has one.
+                    type Wanted = (
                         Rect,
                         std::sync::Arc<crate::svg::SvgData>,
                         Option<(Color, f32, f32)>,
-                    )> = Vec::new();
+                    );
+                    let mut wanted: Vec<Wanted> = Vec::new();
                     if pictured && let Some(lines) = &long_lines {
                         let shown = draw_hint.line_cache().pictures_between(
                             lines,
@@ -7755,8 +7761,8 @@ impl Ui {
                         s.remove(shown.pop().unwrap().node);
                     }
                     for (k, (rect, svg, well)) in wanted.into_iter().enumerate() {
-                        let needs_mount = k == shown.len()
-                            || shown[k].well.is_some() != well.is_some();
+                        let needs_mount =
+                            k == shown.len() || shown[k].well.is_some() != well.is_some();
                         if needs_mount {
                             let node = if let Some((bg, radius, pad)) = well {
                                 let quad = crate::scene::QuadStyle {
@@ -7849,11 +7855,7 @@ impl Ui {
                     let atom_radius = if e.has_atoms() {
                         code.atoms()
                             .and_then(|atoms| {
-                                atoms
-                                    .atom_style
-                                    .borrow()
-                                    .as_deref()
-                                    .and_then(|s| s.radius)
+                                atoms.atom_style.borrow().as_deref().and_then(|s| s.radius)
                             })
                             .or_else(|| {
                                 e.atoms()
