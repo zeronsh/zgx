@@ -20910,6 +20910,9 @@ export type SubmenuProps = {
 	-- label, a value, a chevron); the label and a "›" otherwise. It opens
 	-- when the pointer moves onto it.
 	trigger: Node?,
+	-- Where it opens beside its trigger (side, alignment, offset). Without
+	-- one, it opens beside the trigger with the default submenu offset.
+	placement: Placement?,
 }
 export type WebViewProps = {
 	-- Size and position.

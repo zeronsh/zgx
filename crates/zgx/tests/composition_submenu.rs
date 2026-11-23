@@ -141,3 +141,54 @@ fn right_to_left_the_arrows_open_and_close_submenus_mirrored() {
     assert!(!child.get());
     assert_eq!(ui.input.focused(), Some(more), "back on its trigger");
 }
+
+#[test]
+fn submenu_honors_explicit_placement_offset_and_flips_when_room_is_short() {
+    use zgx::compose::{Placement, PlacementEdge as Edge, PlacementSide as Side};
+    let make = |x_offset: f32| {
+        let mut ui = Ui::new(500., 400.);
+        let root = ui.signal(true);
+        let child = ui.signal(false);
+        let mounted = ui.mount(
+            row().pl(x_offset).child(
+                menu("Actions", root.clone(), button().w(120.).h(28.).child(text("Actions")))
+                    .w(200.)
+                    .p(4.)
+                    .child(
+                        submenu("More", child.clone())
+                            .trigger_id("more")
+                            .id("sub")
+                            .w(180.)
+                            .placement(Placement {
+                                side: Side::Right,
+                                align: Edge::Start,
+                                offset: 11.,
+                            })
+                            .child(menu_item("Child")),
+                    ),
+            ),
+        );
+        ui.prepare_frame();
+        child.set(true);
+        ui.prepare_frame();
+        ui.prepare_frame();
+        let trig = ui.scene.borrow().bounds(mounted.find("more").unwrap());
+        let sub = ui.scene.borrow().bounds(mounted.find("sub").unwrap());
+        (trig, sub)
+    };
+    let (trig, sub) = make(20.);
+    assert!(
+        (sub.x - (trig.x + trig.width + 11.)).abs() < 0.5,
+        "expected submenu at trigger right + 11, got sub={sub:?}, trig={trig:?}"
+    );
+    assert!(
+        (sub.y - trig.y).abs() < 0.5,
+        "expected submenu aligned to trigger top, got sub={sub:?}, trig={trig:?}"
+    );
+    // Near the right edge: flips left, keeping the same offset from the trigger.
+    let (trig_r, sub_r) = make(260.);
+    assert!(
+        (sub_r.x + sub_r.width - (trig_r.x - 11.)).abs() < 0.5,
+        "expected flipped submenu ending at trigger left - 11, got sub={sub_r:?}, trig={trig_r:?}"
+    );
+}

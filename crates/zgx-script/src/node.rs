@@ -1441,6 +1441,7 @@ pub(crate) enum Kind {
         open: Signal<Value>,
         /// Its own trigger row (a `ui.menu_item` with content).
         trigger: Option<Rc<Node>>,
+        placement: Option<zgx::compose::Placement>,
     },
     /// `ui.component(fn)`: `fn(props)` runs as each instance mounts, with
     /// its own `ui.use_state` state, effects and mount hooks.
@@ -6796,6 +6797,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                                 mlua::Value::Nil => None,
                                 node => Some(expect_node(node, "`trigger`")?),
                             },
+                            placement: placement_of(table.get("placement")?)?,
                         },
                     ),
                     Some(&table),

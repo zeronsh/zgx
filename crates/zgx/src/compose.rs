@@ -5556,6 +5556,7 @@ fn mount_portal_panel(
         });
         (size, styles, painted)
     });
+    let explicit_placement = placement;
     let placement = placement.unwrap_or_default();
     let panel_focusable = view.focusable.unwrap_or(true);
     let layout_target = is_menu.then(|| ui.signal(None));
@@ -5616,15 +5617,30 @@ fn mount_portal_panel(
     let mut over_focus = None;
     if let Some(anchor) = anchor {
         if is_submenu {
-            crate::compose_popover::mount_submenu(
-                screens.clone(),
-                ui,
-                owner,
-                anchor,
-                portal.overlay,
-                portal.position,
-                panel,
-            );
+            if let Some(at) = explicit_placement {
+                crate::compose_popover::mount(
+                    screens.clone(),
+                    ui,
+                    owner,
+                    anchor,
+                    portal.overlay,
+                    portal.position,
+                    panel,
+                    at,
+                    None,
+                    None,
+                );
+            } else {
+                crate::compose_popover::mount_submenu(
+                    screens.clone(),
+                    ui,
+                    owner,
+                    anchor,
+                    portal.overlay,
+                    portal.position,
+                    panel,
+                );
+            }
         } else {
             // `open_over`'s item, among the menu's.
             let over_item = over.map(|id| {
