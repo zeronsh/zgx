@@ -36,6 +36,9 @@ enum Piece {
         css: String,
         /// What a reader reads for it: its name, or its text.
         spoken: String,
+        /// Its icon's look (a span before its label), and its well's (a span
+        /// around it), if it has them.
+        icon: Option<(String, Option<String>)>,
     },
 }
 
@@ -45,6 +48,9 @@ struct Shown {
     piece: Piece,
     node: u32,
     label: Option<u32>,
+    /// A chip's icon's span, and its well's.
+    icon: Option<u32>,
+    well: Option<u32>,
 }
 
 /// A text area with atoms, mounted.
@@ -152,6 +158,26 @@ pub(crate) struct Field {
     pub(crate) placeholder: Option<Box<dyn FnMut() -> String>>,
 }
 
+/// `bytes` in base64 (a data URL's).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// `at` in `text`, on a character's start (the browser's offsets and the
 /// model's text could disagree for a moment).
 fn floor_char(text: &str, at: usize) -> usize {
@@ -168,7 +194,12 @@ impl Drop for AtomEditor {
             .shown
             .get_mut()
             .iter()
-            .flat_map(|shown| std::iter::once(shown.node).chain(shown.label))
+            .flat_map(|shown| {
+                std::iter::once(shown.node)
+                    .chain(shown.label)
+                    .chain(shown.icon)
+                    .chain(shown.well)
+            })
             .collect();
         ops::with(|ops| ops.free(&ids));
         let root = self.root;
@@ -208,6 +239,7 @@ impl AtomEditor {
                 spoken: atom.name.as_deref().unwrap_or(&label).to_owned(),
                 label,
                 css: self.chip_css(atom),
+                icon: self.icon_css(atom),
             });
             at = atom.range.end;
         }
@@ -219,14 +251,23 @@ impl AtomEditor {
     /// How atom `atom` shows: its wash, and its look beyond it (its own over
     /// the text area's).
     fn chip_css(&self, atom: &Atom) -> String {
-        // Selected whole, as the model selects it (a drag into it, a
-        // double click on a word of it).
-        let mut css = String::from("border-radius:4px;user-select:all;-webkit-user-select:all;");
+        let own = atom.style.as_deref();
+        let base = self.style.as_ref();
+        // Its wash's corners and the room inside it, as the desktop's chip;
+        // selected whole, as the model selects it (a drag into it, a double
+        // click on a word of it).
+        let radius = own.and_then(|s| s.radius).or(base.and_then(|s| s.radius));
+        let padding = own.and_then(|s| s.padding).or(base.and_then(|s| s.padding));
+        let mut css = format!(
+            "border-radius:{}px;user-select:all;-webkit-user-select:all;",
+            radius.unwrap_or(4.)
+        );
+        if let Some([left, right, y]) = padding {
+            css.push_str(&format!("padding:{y}px {right}px {y}px {left}px;"));
+        }
         if let Some(wash) = atom.wash.or(self.wash) {
             css.push_str(&format!("background:{};", css_color(wash)));
         }
-        let own = atom.style.as_deref();
-        let base = self.style.as_ref();
         let color = own.and_then(|s| s.color).or(base.and_then(|s| s.color));
         let weight = own.and_then(|s| s.weight).or(base.and_then(|s| s.weight));
         let underline = own
@@ -249,6 +290,51 @@ impl AtomEditor {
         }
         css
     }
+    /// How atom `atom`'s icon shows (its own over the text area's), as the
+    /// style of a span before its label: the picture at its size, its gap
+    /// after it, a tinted one (or one in the text's colour) as a mask over
+    /// that colour, and its well's background, padding and corners. None
+    /// for an atom without one. The span holds no text: the chip's text is
+    /// its label alone, as the editor's offsets count it.
+    fn icon_css(&self, atom: &Atom) -> Option<(String, Option<String>)> {
+        let own = atom.style.as_deref().and_then(|s| s.icon.as_ref());
+        let icon = own.or(self.style.as_ref().and_then(|s| s.icon.as_ref()))?;
+        let url = format!(
+            "url(\"data:image/svg+xml;base64,{}\")",
+            base64(icon.svg.bytes())
+        );
+        let size = icon.size.max(0.);
+        let gap = format!("margin-right:{}px;", icon.gap.max(0.));
+        let mut css =
+            format!("display:inline-block;width:{size}px;height:{size}px;vertical-align:-0.15em;");
+        let paint = match icon.svg.tint() {
+            Some(tint) => Some(css_color(tint)),
+            None if icon.svg.is_current_color() => Some("currentColor".to_owned()),
+            None => None,
+        };
+        match paint {
+            Some(paint) => css.push_str(&format!(
+                "background-color:{paint};-webkit-mask:{url} center/contain no-repeat;\
+                 mask:{url} center/contain no-repeat;"
+            )),
+            None => css.push_str(&format!("background:{url} center/contain no-repeat;")),
+        }
+        // Its well: a span of its own around it, so a mask clips the picture
+        // alone; the gap after the well.
+        let well = icon.bg.map(|well| {
+            format!(
+                "display:inline-block;line-height:0;vertical-align:-0.15em;padding:{}px;\
+                 border-radius:{}px;background:{};{gap}",
+                icon.pad.max(0.),
+                icon.radius.max(0.),
+                css_color(well)
+            )
+        });
+        if well.is_none() {
+            css.push_str(&gap);
+        }
+        Some((css, well))
+    }
     /// A node showing `piece`, made.
     fn make(&self, ops: &mut Ops, piece: &Piece) -> Shown {
         match piece {
@@ -259,6 +345,8 @@ impl AtomEditor {
                     piece: piece.clone(),
                     node,
                     label: None,
+                    icon: None,
+                    well: None,
                 }
             }
             Piece::Chip {
@@ -266,6 +354,7 @@ impl AtomEditor {
                 label,
                 css,
                 spoken,
+                icon,
             } => {
                 let node = ops.id();
                 ops.op(&[ops::CREATE, node, Tag::Span as u32]);
@@ -279,6 +368,28 @@ impl AtomEditor {
                 ops.op_str(ops::ATTR, node, "data-atom");
                 ops.str(&id.to_string());
                 ops.op_str(ops::STYLE, node, css);
+                // Its icon, before its label.
+                let (mut icon_node, mut well_node) = (None, None);
+                if let Some((look, well)) = icon {
+                    let span = ops.id();
+                    ops.op(&[ops::CREATE, span, Tag::Span as u32]);
+                    ops.op_str(ops::STYLE, span, look);
+                    let outer = match well {
+                        Some(well) => {
+                            let around = ops.id();
+                            ops.op(&[ops::CREATE, around, Tag::Span as u32]);
+                            ops.op_str(ops::STYLE, around, well);
+                            ops.op(&[ops::APPEND, around, span]);
+                            well_node = Some(around);
+                            around
+                        }
+                        None => span,
+                    };
+                    ops.op_str(ops::ATTR, outer, "aria-hidden");
+                    ops.str("true");
+                    ops.op(&[ops::APPEND, node, outer]);
+                    icon_node = Some(span);
+                }
                 let text = ops.id();
                 ops.op_str(ops::TEXT, text, label);
                 ops.op(&[ops::APPEND, node, text]);
@@ -286,6 +397,8 @@ impl AtomEditor {
                     piece: piece.clone(),
                     node,
                     label: Some(text),
+                    icon: icon_node,
+                    well: well_node,
                 }
             }
         }
@@ -320,7 +433,12 @@ impl AtomEditor {
             let before = shown.get(old_end).map(|s| s.node);
             let gone: Vec<u32> = shown[start..old_end]
                 .iter()
-                .flat_map(|s| std::iter::once(s.node).chain(s.label))
+                .flat_map(|s| {
+                    std::iter::once(s.node)
+                        .chain(s.label)
+                        .chain(s.icon)
+                        .chain(s.well)
+                })
                 .collect();
             for s in &shown[start..old_end] {
                 ops.op(&[ops::REMOVE, s.node]);

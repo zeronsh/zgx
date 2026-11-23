@@ -43,6 +43,12 @@ impl SvgData {
     pub fn tint(&self) -> Option<Color> {
         self.tint
     }
+    /// Whether it is tinted with the text colour the view inherits
+    /// (`current_color`).
+    #[doc(hidden)]
+    pub fn is_current_color(&self) -> bool {
+        self.current_color
+    }
     /// A copy painted in `color`: each pixel takes its red, green and blue, and its
     /// alpha is scaled by the colour's. Replaces `current_color`.
     pub fn tinted(&self, color: Color) -> Self {
