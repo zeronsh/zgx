@@ -75,8 +75,8 @@ const SPARE_TEXT: usize = 32;
 const SPARE_LONG_LINES: usize = 16;
 const SPARE_LONG_TEXT: usize = 256;
 
-/// A run as shaped: its range, font, size, and padding across.
-type Span = (Range<usize>, FontStyle, f32, f32);
+/// A run as shaped: its range, font, size, and horizontal padding `(before, after)`.
+type Span = (Range<usize>, FontStyle, f32, (f32, f32));
 /// The spans that determine shapes: merged runs of one font and size.
 #[derive(Clone, PartialEq)]
 struct Key {
@@ -92,12 +92,13 @@ impl Key {
     fn of(rich: &RichText, caret_row: bool) -> Self {
         let mut spans: smallvec::SmallVec<[Span; 1]> = smallvec::SmallVec::new();
         for run in rich.runs() {
+            let across = run.across_padding();
             match spans.last_mut() {
                 Some((range, font, size, padding))
                     if *font == run.font
                         && *size == run.font_size
-                        && *padding == 0.
-                        && run.padding[0] == 0.
+                        && *padding == (0., 0.)
+                        && across == (0., 0.)
                         && range.end == run.range.start =>
                 {
                     range.end = run.range.end;
@@ -106,7 +107,7 @@ impl Key {
                     run.range.clone(),
                     run.font.clone(),
                     run.font_size,
-                    run.padding[0],
+                    across,
                 )),
             }
         }
@@ -155,14 +156,15 @@ impl Key {
     fn rich_hash_with(text_hash: u64, rich: &RichText, caret_row: bool) -> u64 {
         let mut hasher = TextHash::hasher_after(text_hash);
         caret_row.hash(&mut hasher);
-        let mut span: Option<(Range<usize>, &FontStyle, f32, f32)> = None;
+        let mut span: Option<(Range<usize>, &FontStyle, f32, (f32, f32))> = None;
         for run in rich.runs() {
+            let across = run.across_padding();
             match &mut span {
                 Some((range, font, size, padding))
                     if **font == run.font
                         && *size == run.font_size
-                        && *padding == 0.
-                        && run.padding[0] == 0.
+                        && *padding == (0., 0.)
+                        && across == (0., 0.)
                         && range.end == run.range.start =>
                 {
                     range.end = run.range.end;
@@ -171,7 +173,7 @@ impl Key {
                     if let Some((range, font, size, padding)) = span.take() {
                         Self::hash_span(&mut hasher, &range, font, size, padding);
                     }
-                    span = Some((run.range.clone(), &run.font, run.font_size, run.padding[0]));
+                    span = Some((run.range.clone(), &run.font, run.font_size, across));
                 }
             }
         }
@@ -195,11 +197,12 @@ impl Key {
         range: &Range<usize>,
         font: &FontStyle,
         size: f32,
-        padding: f32,
+        padding: (f32, f32),
     ) {
         range.hash(hasher);
         size.to_bits().hash(hasher);
-        padding.to_bits().hash(hasher);
+        padding.0.to_bits().hash(hasher);
+        padding.1.to_bits().hash(hasher);
         font.weight.hash(hasher);
         font.italic.hash(hasher);
     }
@@ -208,7 +211,7 @@ impl Key {
     fn plain(text: &Arc<str>, font_size: f32, font: &FontStyle, caret_row: bool) -> Self {
         Self {
             text: text.clone(),
-            spans: smallvec::smallvec![(0..text.len(), font.clone(), font_size, 0.)],
+            spans: smallvec::smallvec![(0..text.len(), font.clone(), font_size, (0., 0.))],
             caret_row,
         }
     }
@@ -218,7 +221,7 @@ impl Key {
         let mut hasher = FxHasher::default();
         text.hash(&mut hasher);
         true.hash(&mut hasher);
-        Self::hash_span(&mut hasher, &(0..text.len()), font, font_size, 0.);
+        Self::hash_span(&mut hasher, &(0..text.len()), font, font_size, (0., 0.));
         hasher.finish()
     }
     /// `plain_hash`, from `text`'s bytes' hash (`TextHash`; as `Key::rich_hash_with`).
@@ -227,7 +230,7 @@ impl Key {
     fn plain_hash_from(text_hash: u64, text: &str, font_size: f32, font: &FontStyle) -> u64 {
         let mut hasher = TextHash::hasher_after(text_hash);
         true.hash(&mut hasher);
-        Self::hash_span(&mut hasher, &(0..text.len()), font, font_size, 0.);
+        Self::hash_span(&mut hasher, &(0..text.len()), font, font_size, (0., 0.));
         hasher.finish()
     }
     /// Whether this is plain text's key (`plain_hash`).
@@ -239,7 +242,7 @@ impl Key {
     fn plain_at(&self, len: usize, font_size: f32, font: &FontStyle) -> bool {
         self.caret_row
             && matches!(&self.spans[..], [(range, f, size, padding)]
-                if *range == (0..len) && f == font && *size == font_size && *padding == 0.)
+                if *range == (0..len) && f == font && *size == font_size && *padding == (0., 0.))
     }
 }
 
@@ -2121,7 +2124,7 @@ impl TextCache {
                     let mut at = 0;
                     while index < runs.len() {
                         let run = &runs[index];
-                        if run.padding[0] != 0. || run.range.start != at {
+                        if run.across_padding() != (0., 0.) || run.range.start != at {
                             return None;
                         }
                         let mut end = index + 1;
@@ -2129,7 +2132,7 @@ impl TextCache {
                             && runs[end].font == run.font
                             && runs[end].font_size == run.font_size
                             && runs[end].range.start == runs[end - 1].range.end
-                            && runs[end].padding[0] == 0.
+                            && runs[end].across_padding() == (0., 0.)
                         {
                             end += 1;
                         }

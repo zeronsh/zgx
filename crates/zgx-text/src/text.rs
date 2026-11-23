@@ -2220,22 +2220,29 @@ fn rich_buffer_built<const BOX_SPANS: bool>(
             && runs[end].font_size == run.font_size
             && runs[end].range.start == runs[end - 1].range.end
             // A padded run's room goes around it alone (an inline box is one).
-            && run.padding[0] == 0.
-            && runs[end].padding[0] == 0.
+            && run.across_padding() == (0., 0.)
+            && runs[end].across_padding() == (0., 0.)
         {
             end += 1;
         }
         let mut attributes = attrs(&run.font, run.font_size.max(1.));
-        if run.padding[0] > 0. {
-            // Negative down: all of it before the text (`TextRun::padding`),
-            // which the shaper takes as a negative padding.
-            let across = if run.padding[1] < 0. {
-                leads = true;
-                -2. * run.padding[0]
+        let (before, after) = run.across_padding();
+        if before > 0. || after > 0. {
+            let size = run.font_size.max(1.);
+            // Negative down: asymmetric edge padding (`TextRun::padding`):
+            // lead-only uses negative padding, trailing or both use edges.
+            if run.padding[1] < 0. {
+                if before > 0. {
+                    leads = true;
+                }
+                if after > 0. {
+                    attributes = attributes.padding_edges(before / size, after / size);
+                } else {
+                    attributes = attributes.padding(-before / size);
+                }
             } else {
-                run.padding[0]
-            };
-            attributes = attributes.padding(across / run.font_size.max(1.));
+                attributes = attributes.padding(before / size);
+            }
             if run.font.features.is_inline_box() {
                 let boxes = boxes.get_or_insert_with(|| rich.inline_boxes());
                 attributes = attributes.inline_box(box_at(boxes, run.range.start));
@@ -3035,8 +3042,9 @@ pub fn rich_decorations_in<'a>(
                         Rect::new(left, top, right - left, height + 2. * run.padding[1])
                     } else if run.padding != [0.; 2] || run.radius > 0. {
                         let (above, below) = (run.font_size * 0.92, run.font_size * 0.24);
-                        let top = line.line_y - above - run.padding[1];
-                        Rect::new(left, top, right - left, above + below + 2. * run.padding[1])
+                        let py = run.padding[1].max(0.);
+                        let top = line.line_y - above - py;
+                        Rect::new(left, top, right - left, above + below + 2. * py)
                     } else {
                         Rect::new(left, line.line_top, right - left, line.line_height)
                     };
@@ -3059,13 +3067,15 @@ pub fn rich_decorations_in<'a>(
                         strike: false,
                     });
                 }
-                // A lead's room (an atom's icon, `TextRun::padding` negative
-                // down) is no text: its lines start after it, as the web's
-                // decorations cover the text, not an inline box's padding.
-                let left = if run.padding[1] < 0. {
-                    (left + 2. * run.padding[0]).min(right)
+                // Edge padding (`TextRun::padding` negative down: an atom's
+                // icon/inset room) is no text: its lines cover the text only.
+                let (left, right) = if run.padding[1] < 0. {
+                    let (before, after) = run.across_padding();
+                    let left = (left + before).min(right);
+                    let right = (right - after).max(left);
+                    (left, right)
                 } else {
-                    left
+                    (left, right)
                 };
                 for (decoration, y, strike) in [
                     (
@@ -3301,5 +3311,66 @@ mod wash_tests {
         )
         .unwrap();
         assert_eq!(washes(&apart).len(), 2, "two spans side by side: two");
+    }
+
+    #[test]
+    fn asymmetric_atom_edge_padding_shapes_lead_and_trail() {
+        let mut fonts = FontSystem::new();
+        let width_of = |fonts: &mut FontSystem, padding: [f32; 2]| {
+            let rich = RichText::new(
+                "a x b",
+                vec![
+                    TextRun {
+                        range: 0..2,
+                        font_size: 14.,
+                        ..Default::default()
+                    },
+                    TextRun {
+                        range: 2..3,
+                        font_size: 14.,
+                        padding,
+                        underline: Some(zgx::rich_text::Decoration::new(1.)),
+                        ..Default::default()
+                    },
+                    TextRun {
+                        range: 3..5,
+                        font_size: 14.,
+                        ..Default::default()
+                    },
+                ],
+            )
+            .unwrap();
+            let buffer = rich_buffer(fonts, &rich, None, None);
+            let run = buffer.layout_runs().next().unwrap();
+            let g = run.glyphs.iter().find(|g| g.start == 2).unwrap();
+            let ul = rich_decorations(&buffer, &rich, fonts)
+                .into_iter()
+                .find(|d| !d.background && d.run == 1)
+                .unwrap();
+            (g.x, g.w, ul.bounds.x, ul.bounds.width)
+        };
+        let (px, pw, pul_x, pul_w) = width_of(&mut fonts, [0.; 2]);
+        // Trail-only: 7pt after 'x'
+        let (tx, tw, tul_x, tul_w) = width_of(&mut fonts, [0., -8.]);
+        assert!((tx - px).abs() < 0.25, "trail-only keeps glyph start: {px} {tx}");
+        assert!(
+            ((tw - pw) - 7.).abs() < 0.5,
+            "trail-only widens glyph advance by 7pt: {pw} -> {tw}"
+        );
+        assert!(
+            (tul_x - pul_x).abs() < 0.25 && (tul_w - pul_w).abs() < 0.5,
+            "trail-only trims underline back to text width: plain=({pul_x},{pul_w}) trail=({tul_x},{tul_w})"
+        );
+        // Combined lead (21pt) + trail (7pt) on a 1-char atom
+        let (cx, cw, cul_x, cul_w) = width_of(&mut fonts, [10.5, -8.]);
+        assert!((cx - px).abs() < 0.25, "glyph box starts at lead edge: {px} {cx}");
+        assert!(
+            ((cw - pw) - 28.).abs() < 0.75,
+            "lead+trail widens glyph advance by 28pt: {pw} -> {cw}"
+        );
+        assert!(
+            ((cul_x - pul_x) - 21.).abs() < 0.75 && (cul_w - pul_w).abs() < 0.75,
+            "underline skips 21pt lead and 7pt trail: plain=({pul_x},{pul_w}) both=({cul_x},{cul_w})"
+        );
     }
 }

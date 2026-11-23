@@ -144,14 +144,27 @@ pub struct TextRun {
     /// before and after the run's text (it takes space in the line); both
     /// widen its background, which then hugs the text (its font's content
     /// area) instead of filling the line: an inline code chip. Negative
-    /// down: all the room across goes before its text, none after (an
-    /// editor atom's leading icon, a run of one grapheme), for a run with no
-    /// background.
+    /// down: asymmetric edge padding for a run with no background (an editor
+    /// atom's leading room `2 * padding[0]` before its first char, and
+    /// trailing room `-(padding[1] + 1)` after its last).
     pub padding: [f32; 2],
     /// The background's corner radius.
     pub radius: f32,
 }
 impl TextRun {
+    /// Horizontal inline padding `(before, after)` in points.
+    #[doc(hidden)]
+    pub fn across_padding(&self) -> (f32, f32) {
+        if self.padding[1] < 0. {
+            (
+                (2. * self.padding[0]).max(0.),
+                (-(self.padding[1] + 1.)).max(0.),
+            )
+        } else {
+            let x = self.padding[0].max(0.);
+            (x, x)
+        }
+    }
     /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
     /// em a cell, zero-width characters none, and the run's padding on its
     /// first and last.
@@ -163,7 +176,8 @@ impl TextRun {
         };
         let first = (at == self.range.start) as u8 as f32;
         let last = (at + grapheme.len() == self.range.end) as u8 as f32;
-        (glyph + (first + last) * self.padding[0]).max(0.)
+        let (before, after) = self.across_padding();
+        (glyph + first * before + last * after).max(0.)
     }
 }
 
@@ -482,7 +496,7 @@ impl RichText {
                 // A run's padding across takes room in its line.
                 a.range == b.range
                     && a.font_size == b.font_size
-                    && a.padding[0] == b.padding[0]
+                    && a.across_padding() == b.across_padding()
                     && a.font == b.font
             })
     }
@@ -497,7 +511,7 @@ impl RichText {
             || self.runs.iter().zip(other.runs.iter()).any(|(a, b)| {
                 a.range != b.range
                     || a.font_size != b.font_size
-                    || a.padding[0] != b.padding[0]
+                    || a.across_padding() != b.across_padding()
                     || a.font != b.font
             })
     }

@@ -812,7 +812,7 @@ fn shape_run(
 #[inline(never)]
 fn pad(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, attrs: &Attrs) {
     if let Some(spacing) = attrs.padding_opt {
-        if spacing.0.is_nan() {
+        if spacing.cell().is_some() {
             snap_to_cells(glyphs, line, spacing);
             return;
         }
@@ -822,12 +822,13 @@ fn pad(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, attrs: &At
         let Some(padding) = attrs.padding_opt else {
             continue;
         };
-        if padding.0.is_nan() {
+        // Asymmetric edges (an editor atom's padding), negative (lead only),
+        // or symmetric positive padding.
+        let (before, after) = if let Some(edges) = padding.as_edges() {
+            edges
+        } else if padding.0.is_nan() {
             continue;
-        }
-        // Negative: that much room before the span only (an editor atom's
-        // leading icon), none after.
-        let (before, after) = if padding.0 < 0. {
+        } else if padding.0 < 0. {
             (-padding.0, 0.)
         } else {
             (padding.0, padding.0)
@@ -1688,7 +1689,10 @@ fn lead_starts(attrs_list: &AttrsList, span_range: &Range<usize>) -> Vec<usize> 
         .filter(|(range, attrs)| {
             span_range.start < range.start
                 && range.start < span_range.end
-                && attrs.as_attrs().padding_opt.is_some_and(|padding| padding.0 < 0.)
+                && attrs
+                    .as_attrs()
+                    .padding_opt
+                    .is_some_and(|padding| padding.0 < 0. || padding.as_edges().is_some_and(|(b, _)| b > 0.))
         })
         .map(|(range, _)| range.start - span_range.start)
         .collect()

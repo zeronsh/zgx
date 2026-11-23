@@ -691,8 +691,13 @@ struct CodeAtoms {
     /// and text's revisions the line cache's atom spans are of.
     atom_style: RefCell<Option<std::sync::Arc<crate::editor_atom_style::AtomStyle>>>,
     atom_spans_of: Cell<Option<(u64, u64)>>,
-    /// Its atoms' icons, shown: each node and what it shows.
-    atom_icons: RefCell<Vec<(NodeId, std::sync::Arc<crate::svg::SvgData>)>>,
+    /// Its atoms' icons, shown: each node (Svg or Panel well wrapping Svg) and what it shows.
+    atom_icons: RefCell<Vec<ShownAtomIcon>>,
+}
+struct ShownAtomIcon {
+    node: NodeId,
+    svg: std::sync::Arc<crate::svg::SvgData>,
+    well: Option<(Color, f32, f32)>,
 }
 impl CodeHint {
     /// What its atoms need, if any has been set.
@@ -896,25 +901,36 @@ fn hit_out_of_atoms(
     }
 }
 /// `plain` decorations with `e`'s atoms' washes among them, by start (the
-/// text area's `wash` for those with none of their own).
+/// text area's `wash` for those with none of their own), plus each atom's
+/// vertical chip padding (`padding[2]`) if set.
 #[cold]
 #[inline(never)]
-fn washed_atoms<'a>(
+fn washed_atoms(
     e: &TextEditor,
     wash: Option<Color>,
-    plain: &'a [(std::ops::Range<usize>, Color)],
-) -> std::borrow::Cow<'a, [(std::ops::Range<usize>, Color)]> {
-    let mut marked: Vec<(std::ops::Range<usize>, Color)> = e
+    base_style: Option<&crate::editor_atom_style::AtomStyle>,
+    plain: &[(std::ops::Range<usize>, Color)],
+) -> Vec<(std::ops::Range<usize>, Color, Option<f32>)> {
+    let mut marked: Vec<(std::ops::Range<usize>, Color, Option<f32>)> = e
         .atoms()
         .iter()
-        .filter_map(|atom| atom.wash.or(wash).map(|color| (atom.range.clone(), color)))
+        .filter_map(|atom| {
+            let color = atom.wash.or(wash)?;
+            let py = atom
+                .style
+                .as_deref()
+                .and_then(|own| own.padding)
+                .or_else(|| base_style.and_then(|b| b.padding))
+                .map(|p| p[2].max(0.));
+            Some((atom.range.clone(), color, py))
+        })
         .collect();
     if marked.is_empty() {
-        return std::borrow::Cow::Borrowed(plain);
+        return plain.iter().map(|(r, c)| (r.clone(), *c, None)).collect();
     }
-    marked.extend(plain.iter().cloned());
-    marked.sort_by_key(|(range, _)| range.start);
-    std::borrow::Cow::Owned(marked)
+    marked.extend(plain.iter().map(|(r, c)| (r.clone(), *c, None)));
+    marked.sort_by_key(|(range, _, _)| range.start);
+    marked
 }
 /// After a text area's draw: what happened to its atoms told to its
 /// `on_atoms` (or let go, with none to tell), then its `on_drawn`. Asked
@@ -7538,42 +7554,68 @@ impl Ui {
                 let mut ends = Vec::new();
                 {
                     let plain = code.decorations.borrow();
-                    // Atoms wash their label, among the decorations by start.
-                    let decorations: std::borrow::Cow<'_, [(std::ops::Range<usize>, Color)]> =
-                        if e.has_atoms() {
-                            washed_atoms(
-                                &e,
-                                code.atoms().and_then(|atoms| atoms.atom_wash.get()),
-                                &plain,
-                            )
-                        } else {
-                            std::borrow::Cow::Borrowed(&plain[..])
-                        };
-                    // Those in the text in view: from where the first line
-                    // shown starts (all of them, if it is short).
                     let shown_from = match &long_lines {
                         Some(lines) => lines.line_range(lines.line_at(scroll.1)).start,
                         None => 0,
                     };
-                    let first = decorations.partition_point(|(range, _)| range.end < shown_from);
-                    for (range, mark) in &decorations[first..] {
-                        let rects = layout.selection_within(
-                            range.clone(),
-                            scroll.1,
-                            scroll.1 + inner_height,
+                    if e.has_atoms() {
+                        let base_style = code.atoms().and_then(|atoms| atoms.atom_style.borrow().clone());
+                        let decorations = washed_atoms(
+                            &e,
+                            code.atoms().and_then(|atoms| atoms.atom_wash.get()),
+                            base_style.as_deref(),
+                            &plain,
                         );
-                        if rects.is_empty()
-                            && long_lines.as_ref().is_some_and(|lines| {
-                                lines.top(lines.line_of(range.start)) > scroll.1 + inner_height
-                            })
-                        {
-                            break;
+                        let first = decorations.partition_point(|(range, _, _)| range.end < shown_from);
+                        for (range, mark, py) in &decorations[first..] {
+                            let rects = layout.selection_within(
+                                range.clone(),
+                                scroll.1,
+                                scroll.1 + inner_height,
+                            );
+                            if rects.is_empty()
+                                && long_lines.as_ref().is_some_and(|lines| {
+                                    lines.top(lines.line_of(range.start)) > scroll.1 + inner_height
+                                })
+                            {
+                                break;
+                            }
+                            shaped.extend(rects.into_iter().map(|r| {
+                                let (y, h) = match py {
+                                    Some(py) => {
+                                        let pill_h = (size * 1.16 + 2. * py.max(0.)).min(r.height);
+                                        (r.y + (r.height - pill_h) / 2., pill_h)
+                                    }
+                                    None => (r.y, r.height),
+                                };
+                                crate::scene::TextMark {
+                                    rect: Rect::new(r.x - scroll.0, y - scroll.1, r.width, h),
+                                    color: *mark,
+                                }
+                            }));
+                            ends.push(shaped.len());
                         }
-                        shaped.extend(rects.into_iter().map(|r| crate::scene::TextMark {
-                            rect: Rect::new(r.x - scroll.0, r.y - scroll.1, r.width, r.height),
-                            color: *mark,
-                        }));
-                        ends.push(shaped.len());
+                    } else {
+                        let first = plain.partition_point(|(range, _)| range.end < shown_from);
+                        for (range, mark) in &plain[first..] {
+                            let rects = layout.selection_within(
+                                range.clone(),
+                                scroll.1,
+                                scroll.1 + inner_height,
+                            );
+                            if rects.is_empty()
+                                && long_lines.as_ref().is_some_and(|lines| {
+                                    lines.top(lines.line_of(range.start)) > scroll.1 + inner_height
+                                })
+                            {
+                                break;
+                            }
+                            shaped.extend(rects.into_iter().map(|r| crate::scene::TextMark {
+                                rect: Rect::new(r.x - scroll.0, r.y - scroll.1, r.width, r.height),
+                                color: *mark,
+                            }));
+                            ends.push(shaped.len());
+                        }
                     }
                 }
                 if (!marks.is_empty() || !shaped.is_empty())
@@ -7636,7 +7678,11 @@ impl Ui {
                     })
                 {
                     let atoms = code.atoms_made();
-                    let mut wanted: Vec<(Rect, std::sync::Arc<crate::svg::SvgData>)> = Vec::new();
+                    let mut wanted: Vec<(
+                        Rect,
+                        std::sync::Arc<crate::svg::SvgData>,
+                        Option<(Color, f32, f32)>,
+                    )> = Vec::new();
                     if pictured && let Some(lines) = &long_lines {
                         let shown = draw_hint.line_cache().pictures_between(
                             lines,
@@ -7648,6 +7694,7 @@ impl Ui {
                             (
                                 Rect::new(r.x - scroll.0, r.y - scroll.1, r.width, r.height),
                                 svg,
+                                None,
                             )
                         }));
                     }
@@ -7681,39 +7728,114 @@ impl Ui {
                             else {
                                 continue;
                             };
-                            let size = icon.size.max(0.);
+                            let pad_left = atom
+                                .style
+                                .as_deref()
+                                .and_then(|own| own.padding)
+                                .or_else(|| base.as_deref().and_then(|b| b.padding))
+                                .map_or(0., |p| p[0].max(0.));
+                            let icon_size = icon.size.max(0.);
+                            let well_pad = icon.well_pad();
+                            let side = icon_size + 2. * well_pad;
+                            let well = icon.bg.map(|bg| (bg, icon.radius.max(0.), well_pad));
                             wanted.push((
                                 Rect::new(
-                                    r.x - scroll.0,
-                                    r.y - scroll.1 + (r.height - size) / 2.,
-                                    size,
-                                    size,
+                                    r.x - scroll.0 + pad_left,
+                                    r.y - scroll.1 + (r.height - side) / 2.,
+                                    side,
+                                    side,
                                 ),
                                 icon.svg,
+                                well,
                             ));
                         }
                     }
                     let mut shown = atoms.atom_icons.borrow_mut();
                     while shown.len() > wanted.len() {
-                        s.remove(shown.pop().unwrap().0);
+                        s.remove(shown.pop().unwrap().node);
                     }
-                    for (k, (rect, svg)) in wanted.into_iter().enumerate() {
-                        if k == shown.len() {
-                            let id = s.append(
-                                viewport,
-                                NodeKind::Svg(svg.clone()),
-                                fixed(rect.width, rect.height),
+                    for (k, (rect, svg, well)) in wanted.into_iter().enumerate() {
+                        let needs_mount = k == shown.len()
+                            || shown[k].well.is_some() != well.is_some();
+                        if needs_mount {
+                            let node = if let Some((bg, radius, pad)) = well {
+                                let quad = crate::scene::QuadStyle {
+                                    fill: bg,
+                                    radius,
+                                    ..Default::default()
+                                };
+                                let panel = s.append(
+                                    viewport,
+                                    NodeKind::Panel {
+                                        layout: Layout::Overlay,
+                                        quad,
+                                    },
+                                    fixed(rect.width, rect.height),
+                                );
+                                let glyph_size = (rect.width - 2. * pad).max(0.);
+                                let child = s.append(
+                                    panel,
+                                    NodeKind::Svg(svg.clone()),
+                                    fixed(glyph_size, glyph_size),
+                                );
+                                s.set_transform(child, Transform { x: pad, y: pad });
+                                panel
+                            } else {
+                                s.append(
+                                    viewport,
+                                    NodeKind::Svg(svg.clone()),
+                                    fixed(rect.width, rect.height),
+                                )
+                            };
+                            s.set_transform(
+                                node,
+                                Transform {
+                                    x: rect.x,
+                                    y: rect.y,
+                                },
                             );
-                            shown.push((id, svg.clone()));
+                            let entry = ShownAtomIcon { node, svg, well };
+                            if k == shown.len() {
+                                shown.push(entry);
+                            } else {
+                                let old = std::mem::replace(&mut shown[k], entry);
+                                s.remove(old.node);
+                            }
+                            continue;
                         }
-                        let (id, was) = &mut shown[k];
-                        if !std::sync::Arc::ptr_eq(was, &svg) {
-                            s.set_kind(*id, NodeKind::Svg(svg.clone()));
-                            *was = svg;
+                        let entry = &mut shown[k];
+                        if let Some((bg, radius, pad)) = well {
+                            if entry.well != Some((bg, radius, pad)) {
+                                let quad = crate::scene::QuadStyle {
+                                    fill: bg,
+                                    radius,
+                                    ..Default::default()
+                                };
+                                s.set_kind(
+                                    entry.node,
+                                    NodeKind::Panel {
+                                        layout: Layout::Overlay,
+                                        quad,
+                                    },
+                                );
+                                entry.well = Some((bg, radius, pad));
+                            }
+                            if let Some(&child) = s.children(entry.node).first() {
+                                if !std::sync::Arc::ptr_eq(&entry.svg, &svg) {
+                                    s.set_kind(child, NodeKind::Svg(svg.clone()));
+                                    entry.svg = svg;
+                                }
+                                let glyph_size = (rect.width - 2. * pad).max(0.);
+                                s.set_style(child, fixed(glyph_size, glyph_size));
+                                s.set_transform(child, Transform { x: pad, y: pad });
+                            }
+                        } else if !std::sync::Arc::ptr_eq(&entry.svg, &svg) {
+                            s.set_kind(entry.node, NodeKind::Svg(svg.clone()));
+                            entry.svg = svg;
                         }
-                        s.set_style(*id, fixed(rect.width, rect.height));
+                        s.set_style(entry.node, fixed(rect.width, rect.height));
                         s.set_transform(
-                            *id,
+                            entry.node,
                             Transform {
                                 x: rect.x,
                                 y: rect.y,
@@ -7724,7 +7846,25 @@ impl Ui {
                 // The decorations, over the current line: a node of their own.
                 if !shaped.is_empty() || code.decoration_text.get().is_some() {
                     let size = (inner_width, inner_height);
-                    let radius = theme.number_untracked(tok::MARK_RADIUS);
+                    let atom_radius = if e.has_atoms() {
+                        code.atoms()
+                            .and_then(|atoms| {
+                                atoms
+                                    .atom_style
+                                    .borrow()
+                                    .as_deref()
+                                    .and_then(|s| s.radius)
+                            })
+                            .or_else(|| {
+                                e.atoms()
+                                    .iter()
+                                    .find_map(|a| a.style.as_deref().and_then(|s| s.radius))
+                            })
+                    } else {
+                        None
+                    };
+                    let radius = atom_radius
+                        .map_or_else(|| theme.number_untracked(tok::MARK_RADIUS), |r| r.max(0.));
                     show_decorations(&mut s, code, size, (shaped, ends), radius);
                 }
                 // Under the text in view, each row of a range a node.

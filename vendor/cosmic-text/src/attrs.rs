@@ -265,10 +265,39 @@ impl LetterSpacing {
     pub fn is_inline_box(self) -> bool {
         self.0.to_bits() == INLINE_BOX
     }
+
+    /// zgx: asymmetric inline padding (`before` and `after` the span, in EM,
+    /// up to ~8 EM each at 1/256 EM resolution): a negative quiet NaN with a
+    /// non-zero 22-bit payload, disjoint from `GRID` (positive) and
+    /// `INLINE_BOX` (zero payload).
+    pub fn edges(before: f32, after: f32) -> Option<Self> {
+        let enc = |v: f32| {
+            if !v.is_finite() || v <= 0. {
+                0u32
+            } else {
+                (v * EDGES_SCALE).round().min(EDGES_MAX as f32) as u32
+            }
+        };
+        let b = enc(before);
+        let a = enc(after);
+        let payload = (b << 11) | a;
+        (payload != 0).then(|| Self(f32::from_bits(INLINE_BOX | payload)))
+    }
+
+    /// zgx: asymmetric inline padding `(before, after)` in EM, if set.
+    pub fn as_edges(self) -> Option<(f32, f32)> {
+        let bits = self.0.to_bits();
+        let payload = bits & EDGES_PAYLOAD;
+        (bits & !EDGES_PAYLOAD == INLINE_BOX && payload != 0)
+            .then(|| ((payload >> 11) as f32 / EDGES_SCALE, (payload & EDGES_MAX) as f32 / EDGES_SCALE))
+    }
 }
 
 /// zgx: an inline box's mark, a negative quiet NaN (`LetterSpacing::INLINE_BOX`).
 const INLINE_BOX: u32 = 0xffc0_0000;
+const EDGES_PAYLOAD: u32 = 0x003f_ffff;
+const EDGES_MAX: u32 = 0x07ff;
+const EDGES_SCALE: f32 = 256.0;
 
 /// zgx: an inline box's size and alignment, in its span's features
 /// (`Attrs::inline_box`): its width, height and baseline (`f32` bits), how it
@@ -353,7 +382,7 @@ impl Hash for LetterSpacing {
 
         let bits = if self.0.is_nan() {
             // zgx: a grid's payload is its cell; an inline box has its own.
-            if self.cell().is_some() || self.is_inline_box() {
+            if self.cell().is_some() || self.is_inline_box() || self.as_edges().is_some() {
                 self.0.to_bits()
             } else {
                 CANONICAL_NAN_BITS
@@ -545,6 +574,12 @@ impl<'a> Attrs<'a> {
     /// zgx: set the span's inline padding (in EM)
     pub const fn padding(mut self, padding: f32) -> Self {
         self.padding_opt = Some(LetterSpacing(padding));
+        self
+    }
+
+    /// zgx: set asymmetric inline padding before and after the span (in EM)
+    pub fn padding_edges(mut self, before: f32, after: f32) -> Self {
+        self.padding_opt = LetterSpacing::edges(before, after);
         self
     }
 
@@ -773,8 +808,11 @@ impl AttrsList {
     #[cold]
     #[inline(never)]
     pub fn holds_leads(&self) -> bool {
-        self.spans_iter()
-            .any(|(_, attrs)| attrs.padding_opt.is_some_and(|padding| padding.0 < 0.))
+        self.spans_iter().any(|(_, attrs)| {
+            attrs
+                .padding_opt
+                .is_some_and(|padding| padding.0 < 0. || padding.as_edges().is_some_and(|(b, _)| b > 0.))
+        })
     }
 
     /// zgx: whether a span is an inline box (`Attrs::inline_box`).
