@@ -42,6 +42,9 @@ export const internal = [
   // Until Wing makes the audio API public (with zgx-dom's): then a page
   // beside reference/3d.
   'docs/reference/audio.md',
+  // Native modules and the value layout they read: unstable before 1.0,
+  // then pages beside the Luau set's.
+  'docs/value-types.md',
 ];
 
 export const sets = [

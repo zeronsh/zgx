@@ -8,7 +8,7 @@
 //! Run: cargo run --release -p zgx-script --example library_scroll_lazy_bench
 //! (`ROWS` sets the rows, `STEPS` the 600-point scrolls: 10, each about 17
 //! rows in.)
-use std::rc::Rc;
+use zgx_script::Slice;
 use zgx_script::Value;
 use zgx_script::testing::TestApp;
 
@@ -144,7 +144,7 @@ fn main() {
     app.ui.scene.borrow_mut().resize(1000., 700.);
     app.host
         .shared("bench.rows", Value::Nil)
-        .set(Value::List(Rc::from(rows)));
+        .set(Value::List(Slice::from(rows)));
     app.frames(5);
     assert_eq!(app.error(), None);
     if zgx_fingerprint::on() {

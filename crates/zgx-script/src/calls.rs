@@ -11,6 +11,7 @@
 //! settles. A rejection nothing handles is reported as a script error.
 //! Everything a promise calls back runs on the script's budget; a script
 //! that has reloaded since hears nothing.
+use crate::Field;
 use crate::{
     Vm,
     errors::{Failure, Kind, UiError},
@@ -790,12 +791,12 @@ fn sending(
 /// A response as a script reads it: `status`, `ok` (2xx), `headers`
 /// (lower-case names), `body` (text) and `json` (when it is JSON).
 fn response_value(response: Response) -> Value {
-    let headers: Vec<(Rc<str>, Value)> = {
-        let mut headers: Vec<(Rc<str>, Value)> = response
+    let headers: Vec<Field> = {
+        let mut headers: Vec<Field> = response
             .headers
             .iter()
             .map(|(name, value)| {
-                (
+                Field(
                     name.to_lowercase().into(),
                     Value::Str(value.as_str().into()),
                 )
@@ -805,7 +806,7 @@ fn response_value(response: Response) -> Value {
         headers.dedup_by(|a, b| a.0 == b.0);
         headers
     };
-    let json = headers.iter().any(|(name, value)| {
+    let json = headers.iter().any(|Field(name, value)| {
         &**name == "content-type" && matches!(value, Value::Str(v) if v.contains("json"))
     });
     let body = String::from_utf8_lossy(&response.body);
@@ -814,15 +815,15 @@ fn response_value(response: Response) -> Value {
     } else {
         Value::Nil
     };
-    let mut fields: Vec<(Rc<str>, Value)> = vec![
-        ("body".into(), Value::Str(body.as_ref().into())),
-        ("headers".into(), Value::Map(headers.into())),
-        ("json".into(), parsed),
-        (
+    let mut fields: Vec<Field> = vec![
+        Field("body".into(), Value::Str(body.as_ref().into())),
+        Field("headers".into(), Value::Map(headers.into())),
+        Field("json".into(), parsed),
+        Field(
             "ok".into(),
             Value::Bool((200..300).contains(&response.status)),
         ),
-        ("status".into(), Value::Num(response.status as f64)),
+        Field("status".into(), Value::Num(response.status as f64)),
     ];
     fields.sort_by(|a, b| a.0.cmp(&b.0));
     Value::Map(fields.into())
