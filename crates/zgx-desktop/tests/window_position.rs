@@ -6,7 +6,14 @@
 //! first, far from where it was. The windows here are never shown (AppKit
 //! placed them wrong as they were made); with one screen this checks only
 //! that one, with two or more at least one is not the key window's.
+//!
+//! It makes its windows straight from winit, so `ZGX_OFFSCREEN` cannot hide
+//! them: with it set the test is skipped, and puts nothing on the screen.
 fn main() {
+    if std::env::var_os("ZGX_OFFSCREEN").is_some_and(|v| !v.is_empty() && v != "0") {
+        println!("window_position: skipped, ZGX_OFFSCREEN is set (its windows are real ones)");
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
         use winit::{
