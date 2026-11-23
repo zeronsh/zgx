@@ -28,6 +28,12 @@ pub struct AtomStyle {
     /// Its text shown as a picture instead (an equation): one caret unit, its
     /// text kept for copy, search and assistive technology.
     pub svg: Option<AtomSvg>,
+    /// Chip padding `[left, right, y]` in points: `left` and `right` add
+    /// horizontal room inside the atom wash, and `y` hugs the wash around the
+    /// text vertically (matching `ui.text` inline chips).
+    pub padding: Option<[f32; 3]>,
+    /// Corner radius of the atom wash, in points.
+    pub radius: Option<f32>,
 }
 
 /// An atom shown as a picture: `width` and `height` in EM of the text area's
@@ -75,7 +81,8 @@ pub struct AtomUnderline {
 }
 
 /// An atom's leading icon: `size` points square, `gap` points before its
-/// text, centred on its first line.
+/// text, centred on its first line, optionally seated inside a rounded well
+/// (`bg`, `radius`, `pad`).
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct AtomIcon {
@@ -83,20 +90,39 @@ pub struct AtomIcon {
     pub svg: Arc<SvgData>,
     /// Its width and height, in points.
     pub size: f32,
-    /// The room between it and the text, in points.
+    /// The room between it (or its well) and the text, in points.
     pub gap: f32,
+    /// Optional rounded well background behind the icon.
+    pub bg: Option<Color>,
+    /// Well corner radius, in points.
+    pub radius: f32,
+    /// Padding inside the well on each side of the icon, in points.
+    pub pad: f32,
 }
 
 impl PartialEq for AtomIcon {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.svg, &other.svg) && self.size == other.size && self.gap == other.gap
+        Arc::ptr_eq(&self.svg, &other.svg)
+            && self.size == other.size
+            && self.gap == other.gap
+            && self.bg == other.bg
+            && self.radius == other.radius
+            && self.pad == other.pad
     }
 }
 
 impl AtomIcon {
-    /// The room it takes before the text: itself and its gap.
+    /// Padding around the icon when seated in a well (`0` without `bg`).
+    pub(crate) fn well_pad(&self) -> f32 {
+        if self.bg.is_some() {
+            self.pad.max(0.)
+        } else {
+            0.
+        }
+    }
+    /// The room it takes before the text: itself, its well, and its gap.
     pub(crate) fn room(&self) -> f32 {
-        (self.size.max(0.) + self.gap.max(0.)).max(0.)
+        (self.size.max(0.) + 2. * self.well_pad() + self.gap.max(0.)).max(0.)
     }
 }
 
@@ -112,6 +138,8 @@ impl AtomStyle {
             underline: own.underline.or(self.underline),
             icon: own.icon.clone().or_else(|| self.icon.clone()),
             svg: own.svg.clone().or_else(|| self.svg.clone()),
+            padding: own.padding.or(self.padding),
+            radius: own.radius.or(self.radius),
         }
     }
     /// Whether it shows anything.
@@ -121,9 +149,13 @@ impl AtomStyle {
             && self.underline.is_none()
             && self.icon.is_none()
             && self.svg.is_none()
+            && self.padding.is_none()
+            && self.radius.is_none()
     }
     /// The spans that show an atom over `range` of `text` so: its style over
-    /// all of it, and the icon's room before its first character.
+    /// all of it, leading room before its first character, and trailing room
+    /// after its last. Emitted strictly sorted and disjoint so `runs()` stays
+    /// on its linear fast path.
     pub(crate) fn spans(
         &self,
         text: &str,
@@ -152,20 +184,58 @@ impl AtomStyle {
             look: (!look.is_empty()).then(|| name(look.clone())),
             ..SpanStyle::default()
         };
-        if let Some(icon) = &self.icon {
-            let first = text[range.start..range.end]
-                .chars()
-                .next()
-                .map_or(range.end, |c| range.start + c.len_utf8());
-            let mut lead = style;
-            lead.look = Some(name(SpanLook {
-                lead: Some(icon.room()),
+        let pad_left = self.padding.map_or(0., |p| p[0].max(0.));
+        let pad_right = self.padding.map_or(0., |p| p[1].max(0.));
+        let lead = pad_left + self.icon.as_ref().map_or(0., AtomIcon::room);
+        let trail = pad_right;
+
+        let slice = &text[range.start..range.end];
+        let first = slice
+            .chars()
+            .next()
+            .map_or(range.end, |c| range.start + c.len_utf8());
+        let last_start = slice
+            .chars()
+            .next_back()
+            .map_or(range.start, |c| range.end - c.len_utf8());
+
+        if first >= range.end {
+            // Single-character atom: combine lead and trail on the one span.
+            if lead > 0. || trail > 0. {
+                let mut edge = style;
+                edge.look = Some(name(SpanLook {
+                    lead: (lead > 0.).then_some(lead),
+                    trail: (trail > 0.).then_some(trail),
+                    ..look
+                }));
+                out.push((range, edge));
+            } else if style != SpanStyle::default() {
+                out.push((range, style));
+            }
+            return;
+        }
+
+        let mut mid_start = range.start;
+        if lead > 0. {
+            let mut lead_style = style;
+            lead_style.look = Some(name(SpanLook {
+                lead: Some(lead),
+                ..look.clone()
+            }));
+            out.push((range.start..first, lead_style));
+            mid_start = first;
+        }
+        let mid_end = if trail > 0. { last_start } else { range.end };
+        if mid_start < mid_end && style != SpanStyle::default() {
+            out.push((mid_start..mid_end, style));
+        }
+        if trail > 0. {
+            let mut trail_style = style;
+            trail_style.look = Some(name(SpanLook {
+                trail: Some(trail),
                 ..look
             }));
-            out.push((range.start..first, lead));
-        }
-        if style != SpanStyle::default() {
-            out.push((range, style));
+            out.push((last_start..range.end, trail_style));
         }
     }
 }

@@ -150,8 +150,10 @@ pub(crate) struct SpanLook {
     /// How far below the baseline its underline sits, in points.
     pub(crate) underline_offset: Option<f32>,
     /// Room before its text only, in points: where an atom's leading icon
-    /// draws (`AtomStyle::icon`); it moves with the text's first word.
+    /// and left padding draw (`AtomStyle::icon`, `AtomStyle::padding`).
     pub(crate) lead: Option<f32>,
+    /// Room after its text only, in points: an atom's right padding.
+    pub(crate) trail: Option<f32>,
     /// Its text shown as a picture (an equation, an atom's): over U+FFFC
     /// characters, each one that picture's box; over other text, the span's
     /// text one box, its text kept for copy and search.
@@ -163,6 +165,7 @@ impl SpanLook {
         self.underline_color.is_none()
             && self.underline_offset.is_none()
             && self.lead.is_none()
+            && self.trail.is_none()
             && self.picture.is_none()
     }
     /// Whether it is `other` (the same picture, not an equal one).
@@ -170,6 +173,7 @@ impl SpanLook {
         self.underline_color == other.underline_color
             && self.underline_offset == other.underline_offset
             && self.lead == other.lead
+            && self.trail == other.trail
             && match (&self.picture, &other.picture) {
                 (Some((a, at)), Some((b, bt))) => std::sync::Arc::ptr_eq(a, b) && at == bt,
                 (a, b) => a.is_none() && b.is_none(),
@@ -334,11 +338,15 @@ pub(crate) fn styled_line(
             }
             font.italic |= style.italic;
             let look = style.look.and_then(|id| look(looks, id));
-            // A lead is room before only: half of it across (its run is one
-            // grapheme, so as much in all), negative down (`TextRun::padding`).
-            let padding = match look.and_then(|look| look.lead) {
-                Some(lead) if lead > 0. => [lead / 2., -1.],
-                _ => [0.; 2],
+            // Edge padding is room before and/or after the atom's text:
+            // `padding[1] < 0` encodes `before = 2 * padding[0]`,
+            // `after = -(padding[1] + 1)` (`TextRun::across_padding`).
+            let lead = look.and_then(|l| l.lead).filter(|v| *v > 0.).unwrap_or(0.);
+            let trail = look.and_then(|l| l.trail).filter(|v| *v > 0.).unwrap_or(0.);
+            let padding = if lead > 0. || trail > 0. {
+                [lead / 2., -1. - trail]
+            } else {
+                [0.; 2]
             };
             crate::rich_text::TextRun {
                 range,

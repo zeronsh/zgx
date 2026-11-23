@@ -958,9 +958,11 @@ impl FallbackTextLayout {
             .runs()
             .iter()
             .map(|run| {
+                let (before, after) = run.across_padding();
                 run.range.len() as f32
                     * (run.font_size * 0.6 + run.font.letter_spacing.pixels()).max(0.)
-                    + 2. * run.padding[0].abs()
+                    + before
+                    + after
             })
             .sum();
         widest > width.max(0.)

@@ -37,8 +37,13 @@ fn mention() -> AtomStyle {
             svg: icon(),
             size: 16.,
             gap: 4.,
+            bg: None,
+            radius: 0.,
+            pad: 0.,
         }),
         svg: None,
+        padding: None,
+        radius: None,
     }
 }
 
@@ -206,6 +211,9 @@ fn an_atoms_own_icon_wins_over_the_text_areas() {
             svg: own.clone(),
             size: 12.,
             gap: 2.,
+            bg: None,
+            radius: 0.,
+            pad: 0.,
         }),
         ..AtomStyle::default()
     }));
@@ -216,4 +224,107 @@ fn an_atoms_own_icon_wins_over_the_text_areas() {
     assert_eq!(shown[0].width, 12.);
     // Its other fields are the text area's.
     assert_eq!(run_at(&ui, &editor, "Ada").color, INK);
+}
+
+#[test]
+fn a_chip_atom_pads_both_edges_and_seats_its_icon_in_a_well() {
+    let well_bg = Color(24, 24, 28, 255);
+    let chip_bg = Color(42, 42, 48, 255);
+    let style = AtomStyle {
+        color: Some(INK),
+        padding: Some([2., 7., 2.4]),
+        radius: Some(5.),
+        icon: Some(AtomIcon {
+            svg: icon(),
+            size: 13.,
+            gap: 2.,
+            bg: Some(well_bg),
+            radius: 3.,
+            pad: 2.,
+        }),
+        ..AtomStyle::default()
+    };
+    let (ui, editor, _) = field("see shell.png ok", (4, 13), 300., Some(style));
+    editor.set_atom_wash(Some(chip_bg));
+    // Re-prepare so wash is laid out.
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+
+    // Unstyled baseline width of "shell.png"
+    let (plain_ui, plain_editor, _) = field("see shell.png ok", (4, 13), 300., None);
+    let plain_box = plain_editor.range_boxes(4..13)[0];
+    let _ = plain_ui;
+
+    let chip_box = editor.range_boxes(4..13)[0];
+    // Extra width = pad_left (2) + well (13 + 4 = 17) + gap (2) + pad_right (7) = 28pt
+    let extra = chip_box.width - plain_box.width;
+    assert!(
+        (extra - 28.).abs() < 1.0,
+        "expected ~28pt chip room (2+17+2+7), got {extra:.2} (chip={chip_box:?}, plain={plain_box:?})"
+    );
+
+    // The trailing character gets the 7pt right padding.
+    let last_plain = plain_editor.range_boxes(12..13)[0];
+    let last_chip = editor.range_boxes(12..13)[0];
+    let trail = last_chip.width - last_plain.width;
+    assert!(
+        (trail - 7.).abs() < 1.0,
+        "expected ~7pt right padding on last char, got {trail:.2}"
+    );
+
+    // Well Panel (17x17, radius 3) sits 2pt inside the chip's left edge,
+    // and its Svg child (13x13) sits 2pt inside the well on both axes.
+    let nodes = descendants(&ui, editor.node);
+    let scene = ui.scene.borrow();
+    let well_panel = nodes
+        .iter()
+        .copied()
+        .find(|id| {
+            matches!(
+                scene.kind(*id),
+                NodeKind::Panel { quad, .. } if quad.fill == well_bg && (quad.radius - 3.).abs() < 0.01
+            )
+        })
+        .expect("icon well panel should be mounted");
+    let well_rect = scene.transformed_bounds(well_panel);
+    assert_eq!((well_rect.width, well_rect.height), (17., 17.));
+    assert!(
+        (well_rect.x - (chip_box.x + 2.)).abs() < 0.75,
+        "well sits pad_left=2pt from chip left: well={well_rect:?} chip={chip_box:?}"
+    );
+    let svg_child = scene.children(well_panel)[0];
+    let svg_rect = scene.transformed_bounds(svg_child);
+    assert_eq!((svg_rect.width, svg_rect.height), (13., 13.));
+    assert!(
+        (svg_rect.x - (well_rect.x + 2.)).abs() < 0.5
+            && (svg_rect.y - (well_rect.y + 2.)).abs() < 0.5,
+        "svg sits pad=2pt inside well: svg={svg_rect:?} well={well_rect:?}"
+    );
+}
+
+#[test]
+fn a_single_char_chip_atom_combines_lead_and_trail_padding() {
+    let style = AtomStyle {
+        color: Some(INK),
+        padding: Some([2., 7., 2.]),
+        radius: Some(5.),
+        icon: Some(AtomIcon {
+            svg: icon(),
+            size: 13.,
+            gap: 2.,
+            bg: Some(Color(24, 24, 28, 255)),
+            radius: 3.,
+            pad: 2.,
+        }),
+        ..AtomStyle::default()
+    };
+    let (_plain_ui, plain_editor, _) = field("a x b", (2, 3), 300., None);
+    let plain_box = plain_editor.range_boxes(2..3)[0];
+    let (_ui, editor, _) = field("a x b", (2, 3), 300., Some(style));
+    let chip_box = editor.range_boxes(2..3)[0];
+    let extra = chip_box.width - plain_box.width;
+    assert!(
+        (extra - 28.).abs() < 1.0,
+        "1-char chip must include both lead (21) and trail (7): extra={extra:.2}"
+    );
 }

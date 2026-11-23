@@ -1624,7 +1624,8 @@ fn icon_spec(icon: &Table) -> mlua::Result<SpanIcon> {
 }
 /// How a textarea's atoms show beyond a wash (`atom_style = { color,
 /// weight, underline = { color, offset } | true, icon = { src, size, gap,
-/// tint } }`, or an atom's own `style`): colours as written, resolved where
+/// tint, bg, radius, pad }, padding = x | { x, y } | { left, right, y },
+/// radius = n }`, or an atom's own `style`): colours as written, resolved where
 /// it is lowered.
 pub(crate) struct AtomLook {
     pub color: Option<Value>,
@@ -1634,6 +1635,37 @@ pub(crate) struct AtomLook {
     /// `svg = { src | code, width, height, descent }` (EM): its text shown
     /// as that picture.
     pub svg: Option<(String, [f32; 3])>,
+    /// Chip padding `[left, right, y]` in points.
+    pub padding: Option<[f32; 3]>,
+    /// Atom wash corner radius in points.
+    pub radius: Option<f32>,
+}
+/// Parse atom `padding`: `x`, `{ x, y }`, or `{ left, right, y }`.
+fn atom_padding(value: &Value) -> Option<[f32; 3]> {
+    match value {
+        Value::Num(x) if x.is_finite() => {
+            let x = (*x as f32).max(0.);
+            Some([x, x, 0.])
+        }
+        Value::List(l) if !l.is_empty() => {
+            let at = |i: usize| {
+                l.get(i)
+                    .and_then(Value::as_f64)
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(0.) as f32
+            };
+            if l.len() >= 3 {
+                Some([at(0).max(0.), at(1).max(0.), at(2).max(0.)])
+            } else if l.len() == 2 {
+                let x = at(0).max(0.);
+                Some([x, x, at(1).max(0.)])
+            } else {
+                let x = at(0).max(0.);
+                Some([x, x, 0.])
+            }
+        }
+        _ => None,
+    }
 }
 /// `style`'s mention look, if it sets any of it.
 pub(crate) fn atom_look(style: &Table) -> mlua::Result<Option<AtomLook>> {
@@ -1665,18 +1697,30 @@ pub(crate) fn atom_look(style: &Table) -> mlua::Result<Option<AtomLook>> {
         })?),
         None => None,
     };
+    let padding = style
+        .raw_get::<Option<Value>>("padding")?
+        .as_ref()
+        .and_then(atom_padding);
+    let radius = style
+        .raw_get::<Option<f64>>("radius")?
+        .filter(|r| r.is_finite())
+        .map(|r| (r as f32).max(0.));
     let look = AtomLook {
         color: (!matches!(color, Value::Nil)).then_some(color),
         weight: weight.map(|w| w.clamp(1., 1000.) as u16),
         underline,
         icon,
         svg,
+        padding,
+        radius,
     };
     Ok((look.color.is_some()
         || look.weight.is_some()
         || look.underline.is_some()
         || look.icon.is_some()
-        || look.svg.is_some())
+        || look.svg.is_some()
+        || look.padding.is_some()
+        || look.radius.is_some())
     .then_some(look))
 }
 /// An atom's `svg = { src | code, width, height, descent }` (EM).
@@ -1696,7 +1740,8 @@ fn atom_svg(svg: &Value) -> Option<(String, [f32; 3])> {
     ))
 }
 /// An atom's own `style` (a value from its item) as a mention look, if it
-/// sets any of it: as `atom_look`, its icon `{ src | code, size, gap, tint }`.
+/// sets any of it: as `atom_look`, its icon `{ src | code, size, gap, tint,
+/// bg, radius, pad }`.
 pub(crate) fn atom_look_of(style: &Value) -> Option<AtomLook> {
     let field = |key: &str| {
         style
@@ -1732,9 +1777,12 @@ pub(crate) fn atom_look_of(style: &Value) -> Option<AtomLook> {
                 .field("tint")
                 .filter(|v| !matches!(v, Value::Nil))
                 .cloned(),
-            bg: None,
-            radius: 0.,
-            pad: 0.,
+            bg: icon
+                .field("bg")
+                .filter(|v| !matches!(v, Value::Nil))
+                .cloned(),
+            radius: number(icon.field("radius")).map_or(0., |n| (n as f32).max(0.)),
+            pad: number(icon.field("pad")).map_or(0., |n| (n as f32).max(0.)),
         })
     });
     let look = AtomLook {
@@ -1743,12 +1791,16 @@ pub(crate) fn atom_look_of(style: &Value) -> Option<AtomLook> {
         underline,
         icon,
         svg: style.field("svg").and_then(atom_svg),
+        padding: style.field("padding").and_then(atom_padding),
+        radius: number(style.field("radius")).map(|r| (r as f32).max(0.)),
     };
     (look.color.is_some()
         || look.weight.is_some()
         || look.underline.is_some()
         || look.icon.is_some()
-        || look.svg.is_some())
+        || look.svg.is_some()
+        || look.padding.is_some()
+        || look.radius.is_some())
     .then_some(look)
 }
 /// `span`'s rare options, made as the first is set. Out of line: most

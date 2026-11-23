@@ -7081,6 +7081,9 @@ fn atom_style_of(
             },
             size: icon.size,
             gap: icon.gap,
+            bg: icon.bg.as_ref().and_then(color),
+            radius: icon.radius,
+            pad: icon.pad,
         }
     });
     zgx::widgets::AtomStyle {
@@ -7103,6 +7106,8 @@ fn atom_style_of(
                 height: *height,
                 descent: *descent,
             }),
+        padding: look.padding,
+        radius: look.radius,
     }
 }
 /// An atom as a script reads it (`{ id, from, to, data?, style? }`,
