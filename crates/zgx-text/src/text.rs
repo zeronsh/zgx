@@ -3428,7 +3428,10 @@ mod wash_tests {
         let (px, pw, pul_x, pul_w) = width_of(&mut fonts, [0.; 2]);
         // Trail-only: 7pt after 'x'
         let (tx, tw, tul_x, tul_w) = width_of(&mut fonts, [0., -8.]);
-        assert!((tx - px).abs() < 0.25, "trail-only keeps glyph start: {px} {tx}");
+        assert!(
+            (tx - px).abs() < 0.25,
+            "trail-only keeps glyph start: {px} {tx}"
+        );
         assert!(
             ((tw - pw) - 7.).abs() < 0.5,
             "trail-only widens glyph advance by 7pt: {pw} -> {tw}"
@@ -3439,7 +3442,10 @@ mod wash_tests {
         );
         // Combined lead (21pt) + trail (7pt) on a 1-char atom
         let (cx, cw, cul_x, cul_w) = width_of(&mut fonts, [10.5, -8.]);
-        assert!((cx - px).abs() < 0.25, "glyph box starts at lead edge: {px} {cx}");
+        assert!(
+            (cx - px).abs() < 0.25,
+            "glyph box starts at lead edge: {px} {cx}"
+        );
         assert!(
             ((cw - pw) - 28.).abs() < 0.75,
             "lead+trail widens glyph advance by 28pt: {pw} -> {cw}"

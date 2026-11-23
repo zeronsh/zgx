@@ -103,12 +103,7 @@ impl Key {
                 {
                     range.end = run.range.end;
                 }
-                _ => spans.push((
-                    run.range.clone(),
-                    run.font.clone(),
-                    run.font_size,
-                    across,
-                )),
+                _ => spans.push((run.range.clone(), run.font.clone(), run.font_size, across)),
             }
         }
         Self {
@@ -156,7 +151,9 @@ impl Key {
     fn rich_hash_with(text_hash: u64, rich: &RichText, caret_row: bool) -> u64 {
         let mut hasher = TextHash::hasher_after(text_hash);
         caret_row.hash(&mut hasher);
-        let mut span: Option<(Range<usize>, &FontStyle, f32, (f32, f32))> = None;
+        // A span as `Span` is, its font borrowed from the run.
+        type Open<'a> = (Range<usize>, &'a FontStyle, f32, (f32, f32));
+        let mut span: Option<Open<'_>> = None;
         for run in rich.runs() {
             let across = run.across_padding();
             match &mut span {
