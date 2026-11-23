@@ -3796,11 +3796,15 @@ fn kind_view(
             label,
             open,
             trigger,
+            placement,
         } => {
-            let view = submenu(
+            let mut view = submenu(
                 label.clone(),
                 bridge(need(&mut cx), open, Value::truthy, Value::Bool),
             );
+            if let Some(at) = placement {
+                view = view.placement(*at);
+            }
             match trigger {
                 // A menu item is the row; anything else goes in one.
                 Some(node) if matches!(node.kind, Kind::MenuItem(..)) => {
