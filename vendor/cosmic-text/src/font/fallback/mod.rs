@@ -226,6 +226,10 @@ pub struct FontFallbackIter<'a> {
     /// the `last - 2`th. One word, not a list: every word's search is made
     /// and moved, and few reach the last stage.
     last: u32,
+    /// zgx: whether the search has a first font for the word, given or
+    /// known (`pass_default`, `pass_to`): only then does a word of Latin and
+    /// common characters ask the platform (`platform_waits`).
+    given: bool,
 }
 
 impl<'a> FontFallbackIter<'a> {
@@ -263,6 +267,7 @@ impl<'a> FontFallbackIter<'a> {
             ideal_weight,
             optical,
             last: 0,
+            given: false,
         }
     }
 
@@ -293,6 +298,7 @@ impl<'a> FontFallbackIter<'a> {
     /// face (`gave_default`), that face known already.
     pub(crate) fn pass_default(&mut self) {
         self.default_i = 1;
+        self.given = true;
     }
 
     /// zgx patch: where the search stands, its default family passed, for
@@ -310,6 +316,7 @@ impl<'a> FontFallbackIter<'a> {
     /// zgx patch: as `next` leaves it after giving the font found at `place`.
     pub(crate) fn pass_to(&mut self, place: SearchPlace) {
         self.default_i = 1;
+        self.given = true;
         self.script_i = place.script_i;
         self.common_i = place.common_i;
         self.other_i = place.other_i;
@@ -329,7 +336,7 @@ impl<'a> FontFallbackIter<'a> {
         attrs: &crate::Attrs<'_>,
         scripts: &[Script],
     ) -> Option<(Arc<Font>, SearchPlace)> {
-        if self.has_platform() && self.platform_has_faces() {
+        if !self.platform_waits() && self.has_platform() && self.platform_has_faces() {
             return None;
         }
         self.font_system.first_fallback(attrs, scripts)
@@ -344,10 +351,21 @@ impl<'a> FontFallbackIter<'a> {
         font: &Arc<Font>,
         place: SearchPlace,
     ) {
-        if self.has_platform() && self.platform_has_faces() {
+        if !self.platform_waits() && self.has_platform() && self.platform_has_faces() {
             return;
         }
         self.font_system.keep_first_fallback(attrs, scripts, font, place);
+    }
+
+    /// zgx: whether the platform's stage waits for the word's first font: in
+    /// a word of Latin and common characters alone (no `scripts`), whose
+    /// family has no face of its own, the platform's face for one of them
+    /// (Core Text's for `…`) took the whole word, which drew apart from the
+    /// words beside it. That first font is the search's, as theirs; the
+    /// platform's are for what it lacks, character by character.
+    #[inline]
+    fn platform_waits(&self) -> bool {
+        self.scripts.is_empty()
     }
 
     /// zgx: whether a platform fallback is installed: only then its stage
@@ -661,7 +679,7 @@ impl<'a> FontFallbackIter<'a> {
         // zgx: the platform's own choice for the characters the faces
         // above lack (macOS: Core Text's, as Chrome asks it), before the
         // lists, which can't name the faces it takes.
-        if self.has_platform() {
+        if self.has_platform() && (self.given || !self.platform_waits()) {
             if let Some(font) = self.next_platform() {
                 return Some(font);
             }
@@ -796,6 +814,7 @@ impl Iterator for FontFallbackIter<'_> {
         let mut fallbacks = mem::take(&mut self.font_system.fallbacks);
         let item = self.next_item(&fallbacks);
         mem::swap(&mut fallbacks, &mut self.font_system.fallbacks);
+        self.given |= item.is_some();
         item
     }
 }

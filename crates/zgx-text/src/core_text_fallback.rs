@@ -457,13 +457,28 @@ fn has_axis(font: CFTypeRef, tag: i32) -> bool {
     }
 }
 
+/// The standard font for `locale`'s script tried for a character the text's
+/// families lack, before Core Text's substitute: Chrome's for Japanese,
+/// Korean and Chinese (`chrome_standard_families`), all sans. None for the
+/// rest, where Chrome's is Times: a sans face's missing character (Geist
+/// has no `…`) drew in a serif. Core Text's substitute from the system font
+/// is AppKit's choice there, a sans (SF) at the text's weight.
+pub(crate) fn standard_families(locale: &str) -> &'static [&'static str] {
+    match chrome_standard_families(locale) {
+        ["Times"] => &[],
+        families => families,
+    }
+}
+
 /// Chrome's standard font for `locale`'s script on macOS
 /// (`locale_settings_mac.grd`'s `IDS_STANDARD_FONT_FAMILY_*`), which Blink
 /// tries for a character the text's families lack before Core Text's
 /// substitute (`FontFallbackList::GetFontData`'s `-webkit-standard`, by the
 /// content language's script): Japanese, Korean, simplified and traditional
-/// Chinese (Hong Kong and Macau take traditional), else Times.
-pub(crate) fn standard_families(locale: &str) -> &'static [&'static str] {
+/// Chinese (Hong Kong and Macau take traditional), else Times. For text
+/// drawn as Chrome draws it (`install_chrome_core_text_fallback`); zgx's
+/// own is `standard_families`.
+pub(crate) fn chrome_standard_families(locale: &str) -> &'static [&'static str] {
     let mut subtags = locale.split(['-', '_']).map(str::to_ascii_lowercase);
     let language = subtags.next().unwrap_or_default();
     let rest: Vec<String> = subtags.collect();
@@ -485,4 +500,30 @@ pub(crate) fn standard_families(locale: &str) -> &'static [&'static str] {
 #[doc(hidden)]
 pub fn install_core_text_fallback(fonts: &mut cosmic_text::FontSystem) {
     fonts.set_platform_fallback(Some(Box::new(face)), standard_families);
+}
+
+/// Install Core Text's fallback on `fonts` with Chrome's standard fonts
+/// first (`chrome_standard_families`: Times for Latin text), for text drawn
+/// as Chrome draws it.
+#[doc(hidden)]
+pub fn install_chrome_core_text_fallback(fonts: &mut cosmic_text::FontSystem) {
+    fonts.set_platform_fallback(Some(Box::new(face)), chrome_standard_families);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latin_text_has_no_standard_font_and_chromes_is_times() {
+        assert_eq!(standard_families("en-US"), &[] as &[&str]);
+        assert_eq!(standard_families("fr"), &[] as &[&str]);
+        assert_eq!(standard_families("ja-JP"), &["Hiragino Kaku Gothic ProN"]);
+        assert_eq!(
+            standard_families("zh-Hant-HK"),
+            &["PingFang TC", "Heiti TC"]
+        );
+        assert_eq!(chrome_standard_families("en-US"), &["Times"]);
+        assert_eq!(chrome_standard_families("ko"), &["Apple SD Gothic Neo"]);
+    }
 }
