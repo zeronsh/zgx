@@ -28,6 +28,7 @@ use tracing::{trace, warn};
 
 use super::app_state::ApplicationDelegate;
 use super::cursor::cursor_from_icon;
+use super::placement;
 use super::monitor::{self, flip_window_screen_coordinates, get_display_id};
 use super::observer::RunLoop;
 use super::view::WinitView;
@@ -569,9 +570,57 @@ fn new_window(
             Some(Fullscreen::Borderless(None)) => NSScreen::mainScreen(mtm),
             None => None,
         };
-        let frame = match &screen {
-            Some(screen) => screen.frame(),
-            None => {
+        // zgx patch: a window given a position (and no fullscreen screen) is
+        // made on the screen that holds its top left, its rect relative to
+        // that screen and its size read at that screen's scale (see
+        // `placement`). AppKit reads a rect given without a screen relative
+        // to the key window's, and moves a window asked for elsewhere onto
+        // that one, its height mirrored.
+        let screens = NSScreen::screens(mtm);
+        let placed = match (&screen, attrs.position) {
+            (None, Some(position)) => {
+                let frames: Vec<placement::Screen> = screens
+                    .iter()
+                    .map(|screen| {
+                        let frame = screen.frame();
+                        placement::Screen {
+                            x: frame.origin.x,
+                            y: frame.origin.y,
+                            width: frame.size.width,
+                            height: frame.size.height,
+                            scale: screen.backingScaleFactor() as f64,
+                        }
+                    })
+                    .collect();
+                let units = |physical: bool, (a, b): (f64, f64)| {
+                    if physical {
+                        placement::Units::Physical(a, b)
+                    } else {
+                        placement::Units::Logical(a, b)
+                    }
+                };
+                let position = match position {
+                    Position::Physical(p) => units(true, (p.x as f64, p.y as f64)),
+                    Position::Logical(p) => units(false, (p.x, p.y)),
+                };
+                let size = match attrs.inner_size {
+                    Some(Size::Physical(s)) => units(true, (s.width as f64, s.height as f64)),
+                    Some(Size::Logical(s)) => units(false, (s.width, s.height)),
+                    None => units(false, (800.0, 600.0)),
+                };
+                placement::place(&frames, position, size)
+                    // SAFETY: `placed.screen` indexes `frames`, made from `screens`.
+                    .map(|placed| (unsafe { screens.objectAtIndex(placed.screen) }, placed))
+            },
+            _ => None,
+        };
+        let frame = match (&screen, &placed) {
+            (Some(screen), _) => screen.frame(),
+            (None, Some((_, placed))) => NSRect::new(
+                NSPoint::new(placed.x, placed.y),
+                NSSize::new(placed.width, placed.height),
+            ),
+            (None, None) => {
                 let scale_factor = NSScreen::mainScreen(mtm)
                     .map(|screen| screen.backingScaleFactor() as f64)
                     .unwrap_or(1.0);
@@ -582,18 +631,8 @@ fn new_window(
                     },
                     None => NSSize::new(800.0, 600.0),
                 };
-                let position = match attrs.position {
-                    Some(position) => {
-                        let position = position.to_logical(scale_factor);
-                        flip_window_screen_coordinates(NSRect::new(
-                            NSPoint::new(position.x, position.y),
-                            size,
-                        ))
-                    },
-                    // This value is ignored by calling win.center() below
-                    None => NSPoint::new(0.0, 0.0),
-                };
-                NSRect::new(position, size)
+                // This position is ignored by calling win.center() below
+                NSRect::new(NSPoint::new(0.0, 0.0), size)
             },
         };
 
@@ -631,33 +670,12 @@ fn new_window(
             masks |= NSWindowStyleMask::FullSizeContentView;
         }
 
-        // AppKit reads a new window's content rect relative to a screen,
-        // the key window's when none is given, and moves a window asked for
-        // on another screen onto that one, its height mirrored: placed on
-        // the screen its top left is on, in that screen's coordinates, it
-        // stays where it was asked to be.
-        let placed_on = match (&screen, attrs.position) {
-            (None, Some(_)) => {
-                let top_left = NSPoint::new(frame.origin.x, frame.origin.y + frame.size.height);
-                NSScreen::screens(mtm).into_iter().find(|screen| {
-                    let on = screen.frame();
-                    (on.origin.x..on.origin.x + on.size.width).contains(&top_left.x)
-                        && (on.origin.y..=on.origin.y + on.size.height).contains(&top_left.y)
-                })
-            },
-            _ => None,
-        };
-        let window: Option<Retained<WinitWindow>> = match &placed_on {
-            Some(placed_on) => {
-                let origin = placed_on.frame().origin;
-                let rect = NSRect::new(
-                    NSPoint::new(frame.origin.x - origin.x, frame.origin.y - origin.y),
-                    frame.size,
-                );
+        let window: Option<Retained<WinitWindow>> = match &placed {
+            Some((placed_on, _)) => {
                 unsafe {
                     msg_send_id![
                         super(mtm.alloc().set_ivars(())),
-                        initWithContentRect: rect,
+                        initWithContentRect: frame,
                         styleMask: masks,
                         backing: NSBackingStoreType::NSBackingStoreBuffered,
                         defer: false,
