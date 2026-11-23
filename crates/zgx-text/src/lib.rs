@@ -11,7 +11,9 @@ use zgx::scene::Scene;
 mod core_text_fallback;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
-pub use core_text_fallback::{core_text_advance, install_core_text_fallback};
+pub use core_text_fallback::{
+    core_text_advance, install_chrome_core_text_fallback, install_core_text_fallback,
+};
 #[cfg(target_os = "macos")]
 mod core_text_glyphs;
 #[doc(hidden)]

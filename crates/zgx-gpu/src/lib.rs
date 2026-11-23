@@ -17,7 +17,10 @@ mod compile;
 mod composition;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
-pub use zgx_text::{core_text_advance, install_core_text_fallback, rest_core_text_glyphs};
+pub use zgx_text::{
+    core_text_advance, install_chrome_core_text_fallback, install_core_text_fallback,
+    rest_core_text_glyphs,
+};
 #[cfg(d3d11)]
 mod d3d11_frame;
 #[cfg(target_os = "linux")]
