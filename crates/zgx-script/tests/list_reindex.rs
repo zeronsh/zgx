@@ -18,7 +18,7 @@ return ui.list {
 }
 "##;
 fn rows(list: &[(&str, f64)]) -> Value {
-    Value::List(std::rc::Rc::from(
+    Value::List(zgx_script::Slice::from(
         list.iter()
             .map(|(id, h)| Value::record([("id", Value::from(*id)), ("h", Value::Num(*h))]))
             .collect::<Vec<_>>(),
@@ -89,7 +89,7 @@ return ui.column {
     app.ui.scene.borrow_mut().resize(400., 800.);
     let list: Vec<(String, f64)> = (0..40).map(|i| (format!("r{i}"), 30.)).collect();
     let as_rows = |list: &[(String, f64)]| {
-        Value::List(std::rc::Rc::from(
+        Value::List(zgx_script::Slice::from(
             list.iter()
                 .map(|(id, h)| {
                     Value::record([("id", Value::from(id.as_str())), ("h", Value::Num(*h))])

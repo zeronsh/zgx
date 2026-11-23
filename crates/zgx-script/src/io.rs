@@ -4,6 +4,7 @@
 //! picked in them (`ui.read_file`, `ui.write_file`). A script reaches only
 //! files the user chose, as a web page does; reads and writes run off the
 //! main thread. A plugin gets none of it unless its host grants it.
+use crate::Str;
 use crate::{
     calls::{PromiseUd, pending, settle_failing, settle_with},
     value::Value,
@@ -156,10 +157,10 @@ pub(crate) fn file_value(path: &Path) -> Value {
         .map_or(0, |m| m.len());
     Value::Map(
         vec![
-            (Rc::from("name"), Value::Str(name.into())),
-            (Rc::from("path"), Value::Str(path.to_string_lossy().into())),
-            (Rc::from("size"), Value::Num(size as f64)),
-            (Rc::from("type"), Value::Str(media_type(path).into())),
+            (Str::from("name"), Value::Str(name.into())),
+            (Str::from("path"), Value::Str(path.to_string_lossy().into())),
+            (Str::from("size"), Value::Num(size as f64)),
+            (Str::from("type"), Value::Str(media_type(path).into())),
         ]
         .into(),
     )

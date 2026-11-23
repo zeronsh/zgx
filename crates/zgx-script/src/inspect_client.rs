@@ -1,6 +1,7 @@
 //! The other end of devtools ([`crate::inspect`, with the `inspect`
 //! feature]): finding this user's running apps and asking one, for `zgx
 //! inspect` and its MCP server.
+use crate::Field;
 use crate::Value;
 use std::{
     io::{BufRead, BufReader, Write},
@@ -194,7 +195,7 @@ pub fn request(pid: u32, request: &Value) -> Result<String, String> {
     let request = match (token, request) {
         (Some(token), Value::Map(fields)) => {
             let mut fields: Vec<_> = fields.iter().cloned().collect();
-            fields.push(("token".into(), Value::from(token.as_str())));
+            fields.push(Field("token".into(), Value::from(token.as_str())));
             Value::record(fields)
         }
         (_, request) => request.clone(),

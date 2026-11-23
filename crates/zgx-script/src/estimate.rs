@@ -579,7 +579,7 @@ mod tests {
         assert_eq!(of(vec![("kind", Value::from("big"))]), 101.);
         assert_eq!(of(vec![("kind", Value::from("other"))]), 1001.);
         assert_eq!(of(vec![]), 1001.);
-        let two = Value::List(Rc::from(vec![Value::Num(1.), Value::Num(2.)]));
+        let two = Value::List(crate::Slice::from(vec![Value::Num(1.), Value::Num(2.)]));
         assert_eq!(
             of(vec![("kind", Value::from("big")), ("items", two.clone())]),
             20101.
@@ -588,7 +588,7 @@ mod tests {
             of(vec![("kind", Value::from("big")), ("tags", two)]),
             20111. - 20000.
         );
-        let none = Value::List(Rc::from(Vec::new()));
+        let none = Value::List(crate::Slice::from(Vec::new()));
         assert_eq!(of(vec![("kind", Value::from("big")), ("tags", none)]), 101.);
     }
     #[test]

@@ -6,10 +6,10 @@ mod common;
 use common::Harness;
 use std::{
     path::{Path, PathBuf},
-    rc::Rc,
     time::{Duration, Instant},
 };
 use zgx::reactive::Runtime;
+use zgx_script::Slice;
 use zgx_script::{ScriptHost, Value};
 
 /// A command's handler, run as a menu would.
@@ -126,7 +126,7 @@ fn updates_share_what_they_do_not_touch() {
     assert!(h.host.run_command("edit"));
     let after = tabs(&doc.with_untracked(Clone::clone));
     let same = |a: &Value, b: &Value| match (a, b) {
-        (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
+        (Value::Map(a), Value::Map(b)) => Slice::ptr_eq(a, b),
         _ => false,
     };
     assert!(same(&before[0], &after[0]) && same(&before[2], &after[2]));
@@ -141,7 +141,7 @@ fn updates_share_what_they_do_not_touch() {
     let Value::Map(value) = value else {
         panic!("a map")
     };
-    assert!(Rc::ptr_eq(&kept, &value));
+    assert!(Slice::ptr_eq(&kept, &value));
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn republished_values_keep_what_did_not_change_and_its_tables() {
     let picked = h.host.shared("picked", Value::Nil);
     let rows_of = |v: &Value| v.field("rows").unwrap().list().to_vec();
     let ptr = |v: &Value| match v {
-        Value::Map(m) => Rc::as_ptr(m) as *const u8 as usize,
+        Value::Map(m) => Slice::as_ptr(m) as *const u8 as usize,
         _ => 0,
     };
     doc.set(doc_of(vec![row("a", "x"), row("b", "y")]));

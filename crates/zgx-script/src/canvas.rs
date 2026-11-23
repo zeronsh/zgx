@@ -3,6 +3,7 @@
 //! canvas's size or the state it reads changes; equal drawings keep their
 //! pixels. Colours may name theme tokens (`"$accent"`): the drawing reads
 //! them as it reads state, so a theme change draws it again.
+use crate::Str;
 use crate::node::parse_color;
 use mlua::{Lua, Table, UserData, UserDataMethods};
 use std::{cell::RefCell, rc::Rc};
@@ -938,9 +939,9 @@ fn render_canvas(
             Some(Ok(Rendered::Written)) => Ok(crate::Value::Nil),
             Some(Ok(Rendered::Appended(bytes, width, height))) => Ok(crate::Value::Map(
                 vec![
-                    (Rc::from("bytes"), crate::Value::Num(bytes as f64)),
-                    (Rc::from("width"), crate::Value::Num(f64::from(width))),
-                    (Rc::from("height"), crate::Value::Num(f64::from(height))),
+                    (Str::from("bytes"), crate::Value::Num(bytes as f64)),
+                    (Str::from("width"), crate::Value::Num(f64::from(width))),
+                    (Str::from("height"), crate::Value::Num(f64::from(height))),
                 ]
                 .into(),
             )),

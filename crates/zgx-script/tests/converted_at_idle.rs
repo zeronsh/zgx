@@ -4,7 +4,7 @@
 mod common;
 
 use common::Harness;
-use std::rc::Rc;
+use zgx_script::Slice;
 use zgx_script::Value;
 
 fn rows(n: usize) -> Value {
@@ -27,7 +27,7 @@ return ui.column {
 #[test]
 fn a_long_list_replaced_is_let_go_of_as_the_window_goes_idle() {
     let mut h = Harness::inline(APP);
-    let shared = h.host.shared("rows", Value::List(Rc::from([])));
+    let shared = h.host.shared("rows", Value::List(Slice::from([])));
     h.settle();
     h.host.collect_garbage();
     let before = h.host.script_heap();
@@ -35,7 +35,7 @@ fn a_long_list_replaced_is_let_go_of_as_the_window_goes_idle() {
     let Value::List(items) = &long else {
         unreachable!()
     };
-    let held = Rc::downgrade(items);
+    let held = Slice::downgrade(items);
     shared.set(long.clone());
     h.settle();
     assert_eq!(h.text("count"), "5000", "the script read it");
@@ -58,7 +58,7 @@ fn a_long_list_replaced_is_let_go_of_as_the_window_goes_idle() {
 #[test]
 fn what_a_state_still_shows_stays_converted() {
     let mut h = Harness::inline(APP);
-    let shared = h.host.shared("rows", Value::List(Rc::from([])));
+    let shared = h.host.shared("rows", Value::List(Slice::from([])));
     let long = rows(1_000);
     shared.set(long.clone());
     h.settle();

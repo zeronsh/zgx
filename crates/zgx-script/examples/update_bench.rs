@@ -92,13 +92,13 @@ fn rows_value(tick: usize) -> Value {
             } else {
                 0
             };
-            Value::Map(std::rc::Rc::from([
-                (std::rc::Rc::from("id"), Value::Num(i as f64)),
-                (std::rc::Rc::from("label"), Value::Str(label(i, at).into())),
+            Value::Map(zgx_script::Map::from([
+                ("id".into(), Value::Num(i as f64)),
+                ("label".into(), Value::Str(label(i, at).into())),
             ]))
         })
         .collect();
-    Value::List(std::rc::Rc::from(rows))
+    Value::List(zgx_script::Slice::from(rows))
 }
 /// Rows of a label each, ten of whose labels change each update.
 fn rows_rust(ui: &Ui, ticks: usize) -> (View, Step) {
@@ -141,7 +141,7 @@ fn rows_rust(ui: &Ui, ticks: usize) -> (View, Step) {
 }
 /// The rows each update publishes, made beforehand, published in turn.
 fn rows_published(host: &ScriptHost, ticks: usize) -> Step {
-    let rows = host.shared("rows", Value::List(std::rc::Rc::from([])));
+    let rows = host.shared("rows", Value::List(zgx_script::Slice::from([])));
     let published: Vec<Value> = gate_marks::outside(|| (0..=ticks).map(rows_value).collect());
     Box::new(move |_, tick, _| {
         rows.set(published[tick].clone());

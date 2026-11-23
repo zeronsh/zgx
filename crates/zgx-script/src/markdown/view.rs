@@ -7,6 +7,7 @@
 //! language and a Copy button, tables lay out their cells in rows. Colours
 //! and sizes are the theme's tokens.
 use super::{Incremental, Options, PENDING_LINK_URL};
+use crate::Field;
 use crate::value::{Value, identity};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 use zgx::{
@@ -66,7 +67,7 @@ impl<'a> RunFields<'a> {
             };
         };
         let mut out = Self::default();
-        for (key, value) in fields.iter() {
+        for Field(key, value) in fields.iter() {
             let on = matches!(value, Value::Bool(true));
             match &**key {
                 "x" => out.text = Some(value),

@@ -4,6 +4,7 @@
 //! segmented control, stepper, disclosure, accordion and separator, each a
 //! [`Library`] kind of node, built by [`register`]'s functions and lowered by
 //! [`lower`]. Toasts (`ui.toast`) are `data.rs`'s.
+use crate::List;
 use crate::{
     Vm,
     lower::{Lowering, bridge, lower, need, shortcut_label},
@@ -1381,7 +1382,7 @@ pub(crate) fn view(
             placeholder,
         } => {
             // Options by their value's text; written back as the value itself.
-            let values: Rc<[Value]> = options.iter().map(|(v, _, _)| v.clone()).collect();
+            let values: List = options.iter().map(|(v, _, _)| v.clone()).collect();
             let texts: Vec<String> = values.iter().map(Value::to_string).collect();
             let chosen = bridge_with(
                 need(&mut cx),
@@ -1411,7 +1412,7 @@ pub(crate) fn view(
             options,
         } => {
             // The chosen option's value, as its index both ways.
-            let values: Rc<[Value]> = options.iter().map(|(v, _)| v.clone()).collect();
+            let values: List = options.iter().map(|(v, _)| v.clone()).collect();
             let index = {
                 let values = values.clone();
                 move |v: &Value| values.iter().position(|o| o == v).unwrap_or(0)
@@ -1453,7 +1454,7 @@ pub(crate) fn view(
             })
         }
         Library::Accordion { open } => {
-            let ids: Rc<[Value]> = node
+            let ids: List = node
                 .children
                 .iter()
                 .map(|c| section(&c.kind).map_or(Value::Nil, |(id, _)| id.clone()))
