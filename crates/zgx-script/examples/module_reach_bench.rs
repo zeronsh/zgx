@@ -8,6 +8,11 @@
 //! a job run there: a module's `Ui::post` (`ARM=module`), or a value sent
 //! with `zgx::task::latest` to a task that reads it (`ARM=host`); each one
 //! waits for the last to run, so neither coalesces.
+//! `CASE=upsert`: `N` batches of 500 changed rows into a list of 10,000,
+//! keyed by `id`: a module's `Shared::upsert` (`ARM=module`, through
+//! `Api::shared_upsert`), or the host setting the whole list with those
+//! rows changed (`ARM=host`, what a module that can't patch does). It
+//! prints the time a batch takes too.
 //!
 //! It prints nothing to compare by itself: count it at two `N`s under
 //! cachegrind and take the difference over the difference of `N`
@@ -34,6 +39,22 @@ mod reach {
             }
             Value::NIL
         });
+        let rows = host.shared("rows", Value::NIL).unwrap();
+        host.function("bench.upsert", move |count| {
+            for i in 0..count.num().unwrap_or(0.) as usize {
+                rows.upsert(
+                    "id",
+                    super::batch(i).map(|(id, title)| {
+                        Value::record([
+                            ("id", Value::from(id.as_str())),
+                            ("title", Value::from(title.as_str())),
+                        ])
+                    }),
+                )
+                .unwrap();
+            }
+            Value::NIL
+        });
         let ui = host.ui();
         host.function("bench.ui", move |_| {
             *UI.lock().unwrap() = Some(ui.clone());
@@ -51,6 +72,17 @@ mod reach {
     }
 }
 
+/// The list's length, and a batch's.
+const LIST: usize = 10_000;
+const BATCH: usize = 500;
+/// Batch `i`'s rows: every 20th row from `i`, titled with `i`.
+fn batch(i: usize) -> impl Iterator<Item = (String, String)> {
+    (0..BATCH).map(move |j| (format!("r{}", (j * 20 + i) % LIST), format!("b{i}")))
+}
+fn row(id: &str, title: &str) -> Value {
+    Value::record([("id", Value::from(id)), ("title", Value::from(title))])
+}
+
 fn main() {
     let module = std::env::var("ARM").is_ok_and(|arm| arm == "module");
     let case = std::env::var("CASE").unwrap_or_else(|_| "set".into());
@@ -61,12 +93,38 @@ fn main() {
     let app = TestApp::new(|runtime| {
         let host = ScriptHost::inline(runtime, "bench", "return ui.column {}");
         host.shared("n", Value::Num(0.));
+        host.shared(
+            "rows",
+            Value::List(zgx_script::Slice::from(
+                (0..LIST)
+                    .map(|i| row(&format!("r{i}"), "x"))
+                    .collect::<Vec<_>>(),
+            )),
+        );
         // SAFETY: This program's own `register!` entry.
         unsafe { host.enter_module(reach::zgx_module_v1, &reach::zgx_module_manifest) }.unwrap();
         host
     });
     let call = |name: &str, arg: Value| app.host.registered_function(name).unwrap()(arg).unwrap();
+    let started = std::time::Instant::now();
     match (case.as_str(), module) {
+        ("upsert", true) => {
+            call("bench.upsert", Value::Num(n as f64));
+        }
+        ("upsert", false) => {
+            let shared = app.host.shared("rows", Value::Nil);
+            for i in 0..n {
+                let Value::List(held) = shared.get() else {
+                    unreachable!()
+                };
+                let mut next = held.to_vec();
+                for (id, title) in batch(i) {
+                    let at: usize = id[1..].parse().unwrap();
+                    next[at] = row(&id, &title);
+                }
+                shared.set(Value::List(zgx_script::Slice::from(next)));
+            }
+        }
         ("set", true) => {
             call("bench.set", Value::Num(n as f64));
         }
@@ -125,7 +183,12 @@ fn main() {
             }
             thread.join().unwrap();
         }
-        _ => panic!("CASE=set|post"),
+        _ => panic!("CASE=set|post|upsert"),
     }
-    println!("{} {case}: {n}", if module { "module" } else { "host" });
+    let took = started.elapsed();
+    println!(
+        "{} {case}: {n}, {:.1} µs each",
+        if module { "module" } else { "host" },
+        took.as_secs_f64() * 1e6 / n.max(1) as f64
+    );
 }

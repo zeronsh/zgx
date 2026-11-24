@@ -183,6 +183,22 @@ typedef struct zgx_api {
     /* A handle to the host of the script waiting on `promise`, to keep: any
      * thread. */
     void *(*promise_host)(const void *promise);
+    /* Writes `rows` (a list, taken) into the list a shared state holds, by
+     * each row's string field `key`: a row whose key the list has replaces
+     * the first row with that key, in its place; the rest are added at the
+     * end in order; of two given with one key the last is written. One pass
+     * over the list, the rows not given kept as they are; a state holding
+     * nothing (`nil`) yet becomes a list of them. ZGX_DONE, or ZGX_FAILED
+     * with why in `out` (a row with no string at `key`, `rows` not a list,
+     * or the state holding something not a list), nothing written. ZGX_DONE
+     * once its host is gone. */
+    uint32_t (*shared_upsert)(const void *shared, const uint8_t *key, size_t key_len,
+                              zgx_value *rows, zgx_value *out);
+    /* Removes the rows of the list a shared state holds whose string field
+     * `key` is one of `keys` (`len` of them, lent): every such row. Not 0
+     * if any was. */
+    uint32_t (*shared_remove)(const void *shared, const uint8_t *key, size_t key_len,
+                              const zgx_bytes *keys, size_t len);
 } zgx_api;
 
 /* What a call returns: done, or failed. Failing, it wrote why (a string)

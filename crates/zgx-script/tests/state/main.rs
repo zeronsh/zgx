@@ -73,6 +73,8 @@ mod retarget;
 mod router;
 #[path = "../script.rs"]
 mod script;
+#[path = "../shared_upsert.rs"]
+mod shared_upsert;
 #[path = "../socket.rs"]
 mod socket;
 #[path = "../state.rs"]
