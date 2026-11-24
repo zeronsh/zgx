@@ -1,0 +1,11 @@
+[package]
+name = "zgx-fingerprint"
+description = "The perf gate's output check: each flush's paint and damage, hashed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+zgx = { path = "../../../crates/zgx", default-features = false }

@@ -214,8 +214,7 @@ fn main() {
         [255, 0, 0, 255],
         "its pass wasn't read"
     );
-    // One reading a picture: left out, its layer composited as painted
-    // (Direct3D 11 has no pictures for shaders yet), named once.
+    // One reading a picture: drawn through it, the picture's colour.
     let picture =
         std::sync::Arc::new(zgx::image::ImageData::new(1, 1, vec![10, 200, 30, 255]).unwrap());
     let with_picture = zgx::decoration::FillShader::with_inputs(
@@ -231,8 +230,9 @@ fn main() {
     let pictured = draw(|scene, id| scene.set_layer_shader(id, Some(with_picture)))
         .expect("a frame with a layer shader reading a picture draws");
     assert_eq!(
-        pictured, layered,
-        "a layer shader reading a picture draws its layer as painted"
+        at(&pictured, 120, 120),
+        [10, 200, 30, 255],
+        "its picture wasn't read"
     );
 
     // A GPU view draws (`view_host`): its painter's colour, on the views'
@@ -280,6 +280,28 @@ fn main() {
             middle[1] > 180 && middle[0] < 90 && middle[2] < 140,
             "the GPU view didn't draw its painter's colour: {middle:?}"
         );
+
+        // A layer shader reading the view by name: drawn through it, the
+        // painter's colour (its frame painted after the passes, ahead of
+        // the frame sampling it).
+        let with_view = zgx::decoration::FillShader::with_inputs(
+            "fn layer(input: LayerInput) -> vec4<f32> {
+    return vec4(zgx_app(vec2(0.5)).rgb, 1.0);
+}",
+            None,
+            zgx::decoration::ShaderInputs {
+                views: vec![("app".into(), painter.id())],
+                ..Default::default()
+            },
+        );
+        let viewed = draw(|scene, id| scene.set_layer_shader(id, Some(with_view)))
+            .expect("a frame with a layer shader reading a GPU view draws");
+        let [r, g, b, a] = at(&viewed, 120, 120);
+        assert!(
+            g > 180 && r < 90 && b < 140 && a == 255,
+            "its GPU view wasn't read: {:?}",
+            [r, g, b, a]
+        );
     }
 
     let left_out = GpuRenderer::debug_d3d11_left_out();
@@ -287,12 +309,7 @@ fn main() {
         !left_out.contains(&"images a GPU view draws"),
         "a GPU view was left out: {left_out:?}"
     );
-    let kind = "layer shaders reading pictures or GPU views: drawn as painted";
-    assert_eq!(
-        left_out,
-        [kind],
-        "only shaders reading pictures or views are left out"
-    );
+    assert!(left_out.is_empty(), "left out: {left_out:?}");
     println!("d3d11_left_out: {left_out:?}");
 }
 

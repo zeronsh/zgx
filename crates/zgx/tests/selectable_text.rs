@@ -239,11 +239,15 @@ fn a_long_press_on_a_button_in_text_selects_its_word_and_never_clicks_it() {
     let mut ui = Ui::new(400., 300.);
     let clicks = Rc::new(Cell::new(0));
     let counted = clicks.clone();
+    // A button whose label is text to select (`selectable(true)`; one that
+    // doesn't say so is left out: `a_selection_across_a_button_leaves_its_
+    // label_out`).
     document(
         &mut ui,
         vec![
             text("Before"),
             button()
+                .selectable(true)
                 .child(text("Press"))
                 .on_click(move || counted.set(counted.get() + 1)),
             text("After"),
@@ -338,8 +342,11 @@ fn select_all_and_presses_elsewhere() {
         ]),
     );
     ui.prepare_frame();
-    // Nothing selected or pressed yet: select-all has no region.
-    assert!(!ui.dispatch(shortcut("a")).default_prevented);
+    // Nothing selected or pressed yet: select-all takes the only region,
+    // as a page's does.
+    assert!(ui.dispatch(shortcut("a")).default_prevented);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "First\n\nLast");
     press(&mut ui, 4., 10., false);
     release(&mut ui, 4., 10.);
     assert!(ui.dispatch(shortcut("a")).default_prevented);
@@ -354,7 +361,10 @@ fn select_all_and_presses_elsewhere() {
     let outside = ui.scene.borrow().bounds(texts(&ui)[4]);
     press(&mut ui, outside.x + 2., outside.y + 2., false);
     assert!(!ui.has_text_selection());
-    assert!(!ui.dispatch(shortcut("a")).default_prevented);
+    // Select-all after, with no region pressed in: the only one again.
+    assert!(ui.dispatch(shortcut("a")).default_prevented);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "First\n\nLast");
 }
 
 #[test]
@@ -646,6 +656,34 @@ fn a_selection_outlives_virtual_rows_recycled_out_of_view() {
     // Row 0 is still mounted in the overscan; what shows is still selected.
     assert!(ui.selected_text().starts_with("Header\n"));
     assert!(ui.selected_text().ends_with("Row 1\nRo"));
+}
+
+/// A drag's autoscroll steps on the interface's clock: on a test's own,
+/// wall time passing before the drag (a loaded machine) neither stalls it
+/// nor speeds it, and it scrolls as far as the interface's time says.
+#[test]
+fn a_drag_past_an_edge_scrolls_on_the_interfaces_clock() {
+    let clock = zgx::clock::VirtualClock::new();
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let _view = rows(&mut ui, offset.clone());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    press(&mut ui, 0., 30., false);
+    move_to(&mut ui, 40., 160.);
+    let deadline = ui
+        .next_interaction_deadline()
+        .expect("autoscroll scheduled");
+    assert_eq!(
+        deadline,
+        clock.now() + std::time::Duration::from_millis(16),
+        "its first step a refresh on, on the interface's clock"
+    );
+    for step in 1..=5 {
+        clock.advance(std::time::Duration::from_millis(16 * step), || {});
+        ui.advance_interactions(clock.now()).unwrap();
+    }
+    assert!(offset.get() > 0., "scrolled in 80 ms: {}", offset.get());
+    release(&mut ui, 40., 160.);
 }
 
 #[test]
@@ -2235,4 +2273,66 @@ fn a_selection_parked_in_a_row_mounted_again_another_way_keeps_its_size() {
     ui.prepare_frame();
     assert_eq!(ui.selected_text(), "ow 1\nRow 2\nRow");
     assert_eq!(highlighted(&ui).len(), 3);
+}
+
+/// Select All with no region pressed in yet: the region under the
+/// pointer's last place, else the only region; with several and none under
+/// the pointer, nothing.
+#[test]
+fn select_all_with_no_region_pressed_takes_the_one_under_the_pointer_or_the_only_one() {
+    let two = |ui: &mut Ui| {
+        ui.mount(
+            column()
+                .w(300.)
+                .gap(20.)
+                .text_size(10.)
+                .line_height(20.)
+                .child(column().selectable(true).child(text("First region")))
+                .child(column().selectable(true).child(text("Second region"))),
+        );
+        ui.prepare_frame();
+    };
+    // The only region.
+    let mut ui = Ui::new(400., 300.);
+    document(&mut ui, vec![text("Only region")]);
+    ui.dispatch(shortcut("a"));
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "Only region");
+    // Two, the pointer last over the second.
+    let mut ui = Ui::new(400., 300.);
+    two(&mut ui);
+    move_to(&mut ui, 5., 50.);
+    ui.dispatch(shortcut("a"));
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "Second region");
+    // Two, the pointer never over either: nothing.
+    let mut ui = Ui::new(400., 300.);
+    two(&mut ui);
+    ui.dispatch(shortcut("a"));
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "");
+}
+
+/// A button's label is left out of a selection across it, as a browser
+/// leaves it, unless the button says `selectable(true)` itself.
+#[test]
+fn a_selection_across_a_button_leaves_its_label_out() {
+    for opted_in in [false, true] {
+        let mut ui = Ui::new(400., 300.);
+        let mut label = button().child(text("Click"));
+        if opted_in {
+            label = label.selectable(true);
+        }
+        document(&mut ui, vec![text("Before"), label, text("After")]);
+        press(&mut ui, 1., 10., false);
+        release(&mut ui, 1., 10.);
+        ui.dispatch(shortcut("a"));
+        ui.prepare_frame();
+        let selected = ui.selected_text();
+        assert_eq!(selected.contains("Click"), opted_in, "{selected:?}");
+        assert!(
+            selected.contains("Before") && selected.contains("After"),
+            "{selected:?}"
+        );
+    }
 }

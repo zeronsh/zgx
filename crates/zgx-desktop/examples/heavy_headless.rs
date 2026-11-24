@@ -100,6 +100,9 @@ fn main() {
         let at_update = ALLOCATIONS.load(Relaxed);
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+        }
         let laid = Instant::now();
         let at_layout = ALLOCATIONS.load(Relaxed);
         let stats = gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
@@ -185,6 +188,9 @@ fn without_rendering(mut ui: Ui, mut work: Heavy, ticks: usize) {
         }
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+        }
         rects += report.damage.len();
         nodes += report.layout_nodes;
         zgx::profile::frame();

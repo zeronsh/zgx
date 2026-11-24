@@ -25,7 +25,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let editor = cx.ui.focused_editor().unwrap();
         if smoke {
             let scene = cx.ui.scene.clone();
-            let semantics = cx.ui.semantics.clone();
             let window = cx.window.clone();
             cx.tasks.spawn(async move {
                 for _ in 0..200 {
@@ -35,10 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let viewport = scene.bounds(scene.parent(editor.caret).unwrap());
                         let caret = scene.bounds(editor.caret);
                         let bounds = scene.bounds(editor.node);
-                        // Its text node, scrolled with its text (a text area's
-                        // lines show apart, each placed in it).
-                        let text = semantics.borrow().text_node(editor.node).unwrap();
-                        let scroll = viewport.y - scene.bounds(text).y;
+                        let scroll = editor.scroll_offset().1;
                         println!("PAGING anchor={} focus={} caret_y={:.2} caret_h={:.2} viewport_y={:.2} viewport_h={:.2} width={:.2} scroll={:.2} readonly={} unchanged={}",
                             selection.anchor, selection.focus, caret.y, caret.height, viewport.y, viewport.height,
                             bounds.width, scroll, readonly.get(), value.get() == original);

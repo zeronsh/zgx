@@ -151,6 +151,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .size(240., 30.)
                     .select_on_focus(true)
             });
+            // Text dropped in from another app, as a rich destination takes
+            // it: its text and, where the source offered it, its HTML.
+            let rich = div()
+                .id("rich")
+                .size(240., 30.)
+                .bg(rgba(0x3d7ef722))
+                .on_drop(|dropped: &zgx::input::DraggedText, _| {
+                    println!("RICH {:?} {:?}", dropped.text(), dropped.html());
+                });
             cx.render(
                 column()
                     .w_full()
@@ -160,7 +169,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .child(chip)
                     .child(tab("tab"))
                     .child(bar)
-                    .child(words),
+                    .child(words)
+                    .child(rich),
             );
             #[cfg(target_os = "macos")]
             cx.tasks.spawn(async move {

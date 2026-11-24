@@ -169,6 +169,8 @@ pub struct TextOptions {
     /// The most lines shown; `None` shows them all.
     pub line_clamp: Option<std::num::NonZeroU32>,
 }
+/// `FallbackTextLayout::place_words`, as `place_text` calls it.
+type PlaceWords = fn(&str, f32, f32, f32, &mut dyn FnMut(Range<usize>, Rect)) -> (Rect, (f32, f32));
 /// Canonical OpenType feature settings. Tags use four ASCII bytes such as
 /// `*b"liga"`; the last occurrence of a tag wins. Sorted storage gives equivalent
 /// declarations identical font-cache keys. Unsupported tags are ignored by fonts.
@@ -204,6 +206,20 @@ impl FontFeatures {
     /// The settings, sorted by tag.
     pub fn settings(&self) -> &[([u8; 4], u32)] {
         self.0.as_deref().unwrap_or(&[])
+    }
+    /// These features with `tag` set to `value`, in place of any it had.
+    #[doc(hidden)]
+    #[cold]
+    #[inline(never)]
+    pub fn with_feature(&self, tag: [u8; 4], value: u32) -> Self {
+        // Sorted and each tag once, as `settled` keeps them; made here, so
+        // the paths that make features don't change for this one.
+        let mut settings = self.settings().to_vec();
+        match settings.binary_search_by_key(&tag, |(t, _)| *t) {
+            Ok(at) => settings[at].1 = value,
+            Err(at) => settings.insert(at, (tag, value)),
+        }
+        Self(Some(settings.into()))
     }
     /// zgx's own tag for hyphenation (`_hyp`: no font's feature can have it,
     /// registered tags being lowercase letters and digits and font vendors'
@@ -417,6 +433,28 @@ impl FontFeatures {
             (Self::BOX_ALIGN, align),
             (Self::BOX_RAISE, f32::to_bits(raise)),
         ]))
+    }
+    /// zgx's own tag for a span that is a box of its own (`_ibx`, never
+    /// given to a font, as `HYPHENS`): CSS's `display: inline-flex` on it,
+    /// its line height and padding its box, which its line's box holds as
+    /// CSS's does (`TextSpan::inline_box`). Text without one pays nothing.
+    #[doc(hidden)]
+    pub const BOX_SPAN: [u8; 4] = *b"_ibx";
+    /// Whether these are a span that is a box of its own (`BOX_SPAN`).
+    #[doc(hidden)]
+    pub fn is_box_span(&self) -> bool {
+        self.settings()
+            .iter()
+            .any(|(tag, value)| *tag == Self::BOX_SPAN && *value != 0)
+    }
+    /// These saying a span that is a box of its own (`BOX_SPAN`).
+    #[doc(hidden)]
+    pub fn with_box_span(&self) -> Self {
+        if self.is_box_span() {
+            return self.clone();
+        }
+        let others = self.settings().iter().copied();
+        Self::settled(others.chain([(Self::BOX_SPAN, 1)]))
     }
     /// These saying no inline box (an ellipsis cloned from a box's run).
     pub fn without_inline_box(&self) -> Self {
@@ -777,7 +815,11 @@ impl FallbackTextLayout {
     /// Mixed-size approximate cells used when no native rich shaper is installed.
     pub fn with_rich(rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
         if rich.has_inline_boxes() {
-            return Self::with_boxes(rich, width);
+            return Self::with_boxes(rich, width).0;
+        }
+        // Wider than its width unwrapped: wrapped by word (`with_rich_words`).
+        if let Some(w) = width.filter(|w| Self::rich_may_pass(rich, *w)) {
+            return Self::with_rich_words(rich, w);
         }
         let mut cells: Vec<(Range<usize>, Rect)> = Vec::new();
         let (mut x, mut y, mut max_x, mut pitch) = (0_f32, 0_f32, 0_f32, 0_f32);
@@ -789,7 +831,7 @@ impl FallbackTextLayout {
             }
             let run = &rich.runs()[run_index];
             let line = run.font.line_height.resolve(run.font_size);
-            let newline = grapheme.contains(['\r', '\n']);
+            let newline = breaks_line(grapheme);
             let advance = run.estimated_advance(grapheme, index);
             if newline || width.is_some_and(|w| x > 0. && x + advance > w.max(0.)) {
                 if newline {
@@ -825,19 +867,187 @@ impl FallbackTextLayout {
         };
         layout.finished(rich, width)
     }
-    /// `with_rich` for text with inline boxes (`fallback_boxes`).
+    /// `with_rich` for text that may be wider than its width `width`: wrapped
+    /// by word, as the shaper wraps (`Words`): a line breaks before a word
+    /// whose ink doesn't fit, its spaces hanging past the edge (shown only to
+    /// it, not counted in the row's width); a word wider than the line breaks
+    /// by grapheme.
+    #[inline(never)]
+    fn with_rich_words(rich: &crate::rich_text::RichText, width: f32) -> Self {
+        let mut cells: Vec<(Range<usize>, Rect)> = Vec::new();
+        let (mut x, mut y, mut max_x, mut pitch) = (0_f32, 0_f32, 0_f32, 0_f32);
+        let mut row_start = 0;
+        let mut run_index = 0;
+        let text = rich.text();
+        let wraps = Some(width);
+        let mut words = Some(Words::new(text));
+        let (mut word_end, mut word_ink) = (0_usize, 0_f32);
+        // Where the row's ink ends: spaces hanging past a wrapped row's edge don't widen it.
+        let mut ink_x = 0_f32;
+        for range in grapheme_ranges(text) {
+            let index = range.start;
+            while rich.runs()[run_index].range.end <= index {
+                run_index += 1;
+            }
+            let run = &rich.runs()[run_index];
+            let line = run.font.line_height.resolve(run.font_size);
+            let grapheme = &text[range.clone()];
+            let newline = breaks_line(grapheme);
+            let advance = run.estimated_advance(grapheme, index);
+            let mut blank = false;
+            let wrap = match (wraps, words.as_mut()) {
+                _ if newline => true,
+                (Some(w), Some(words)) => {
+                    blank = grapheme.chars().all(char::is_whitespace);
+                    let starts = index >= word_end;
+                    if starts {
+                        let ink_end;
+                        (ink_end, word_end) = words.at(index);
+                        word_ink = Self::rich_ink(rich, run_index, index..ink_end);
+                    }
+                    // A word starting here: its ink must fit (summed apart from the row's, so allowing for
+                    // rounding: text laid out at its own width keeps its lines). Inside one wider than the line,
+                    // by grapheme; spaces hang past the edge.
+                    x > 0.
+                        && if starts {
+                            x + word_ink > w.max(0.) + 1e-3
+                        } else {
+                            !blank && x + advance > w.max(0.)
+                        }
+                }
+                _ => false,
+            };
+            if wrap {
+                if newline {
+                    pitch = pitch.max(line);
+                }
+                for (_, rect) in &mut cells[row_start..] {
+                    rect.height = pitch;
+                }
+                max_x = max_x.max(match wraps {
+                    Some(w) if !newline => ink_x.max(x.min(w.max(0.))),
+                    _ => x,
+                });
+                y += pitch;
+                x = 0.;
+                ink_x = 0.;
+                pitch = 0.;
+                row_start = cells.len();
+                if newline {
+                    pitch = line;
+                    continue;
+                }
+            }
+            pitch = pitch.max(line);
+            cells.push((
+                range,
+                match wraps {
+                    // A space hanging past a wrapped line's edge shows (selected, aligned) only to the edge.
+                    Some(w) if blank && x + advance > w => {
+                        let at = x.min(w.max(0.));
+                        Rect::new(at, y, (w.max(0.) - at).max(0.), pitch)
+                    }
+                    _ => Rect::new(x, y, advance, pitch),
+                },
+            ));
+            x += advance;
+            if !blank {
+                ink_x = x;
+            }
+        }
+        for (_, rect) in &mut cells[row_start..] {
+            rect.height = pitch;
+        }
+        let layout = Self {
+            cells,
+            end: Rect::new(x, y, 1., pitch),
+            size: (max_x.max(x), y + pitch),
+        };
+        layout.finished(rich, Some(width))
+    }
+    /// Whether `rich` laid out unwrapped could be wider than `width`: its runs' bytes at their widest estimated
+    /// advance, and their padding (`TextRun::estimated_advance`). Text that can't never wraps.
+    fn rich_may_pass(rich: &crate::rich_text::RichText, width: f32) -> bool {
+        let widest: f32 = rich
+            .runs()
+            .iter()
+            .map(|run| {
+                let (before, after) = run.across_padding();
+                run.range.len() as f32
+                    * (run.font_size * 0.6 + run.font.letter_spacing.pixels()).max(0.)
+                    + before
+                    + after
+            })
+            .sum();
+        widest > width.max(0.)
+    }
+    /// The estimated advances of `rich`'s graphemes in `range`, its run at or after `run_index`.
+    fn rich_ink(
+        rich: &crate::rich_text::RichText,
+        mut run_index: usize,
+        range: Range<usize>,
+    ) -> f32 {
+        let start = range.start;
+        let mut ink = 0.;
+        for grapheme in grapheme_ranges(&rich.text()[range]) {
+            let at = start + grapheme.start;
+            while rich.runs()[run_index].range.end <= at {
+                run_index += 1;
+            }
+            ink += rich.runs()[run_index]
+                .estimated_advance(&rich.text()[at..start + grapheme.end], at);
+        }
+        ink
+    }
+    /// `with_rich` as a layout of its own, which says where its inline boxes
+    /// are (`TextLayout::inline_boxes`) when it has them: what a scene with
+    /// no rich shaper shapes with.
+    pub(crate) fn rich_layout(
+        rich: &crate::rich_text::RichText,
+        width: Option<f32>,
+    ) -> Box<dyn TextLayout> {
+        if rich.has_inline_boxes() {
+            return Self::placed(rich, width);
+        }
+        Box::new(Self::with_rich(rich, width))
+    }
+    /// `rich_layout` for text with inline boxes. Rare, out of line.
     #[cold]
     #[inline(never)]
-    fn with_boxes(rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
+    fn placed(rich: &crate::rich_text::RichText, width: Option<f32>) -> Box<dyn TextLayout> {
+        let (layout, places) = Self::with_boxes(rich, width);
+        Box::new(PlacedFallback { layout, places })
+    }
+    /// `with_rich` for text with inline boxes (`fallback_boxes`), and where
+    /// each box is: its character's offset, left and top.
+    #[cold]
+    #[inline(never)]
+    fn with_boxes(rich: &crate::rich_text::RichText, width: Option<f32>) -> (Self, Places) {
         let boxes = crate::rich_text::fallback_boxes(rich, width);
         let (x, y, height) = boxes.end;
         let wide = boxes.rows.iter().fold(0_f32, |w, row| w.max(row.2));
-        Self {
+        // Each box's character, and its top, before its cells move.
+        let held: Vec<(usize, f32)> = boxes
+            .places
+            .iter()
+            .filter_map(|&(cell, top)| Some((boxes.cells.get(cell)?.0.start, top)))
+            .collect();
+        let layout = Self {
             cells: boxes.cells,
             end: Rect::new(x, y, 1., height),
             size: (wide, y + height),
         }
-        .finished(rich, width)
+        .finished(rich, width);
+        // Each box where its cell ended up (aligned, kept by a clamp).
+        let mut kept = layout.cells.iter();
+        let places = held
+            .into_iter()
+            .filter_map(|(at, top)| {
+                let (_, rect) = kept.find(|(kept, _)| kept.start == at)?;
+                Some((at, rect.x, top))
+            })
+            .collect();
+        (layout, places)
     }
     /// Where each of `rich`'s inline boxes is at `width` (as
     /// `TextLayout::inline_boxes`): its character's offset, left and top.
@@ -846,19 +1056,7 @@ impl FallbackTextLayout {
         rich: &crate::rich_text::RichText,
         width: Option<f32>,
     ) -> Vec<(usize, f32, f32)> {
-        let boxes = crate::rich_text::fallback_boxes(rich, width);
-        let layout = Self::with_boxes(rich, width);
-        // Both in order: each found from where the last was.
-        let mut kept = layout.cells.iter();
-        boxes
-            .places
-            .iter()
-            .filter_map(|&(cell, top)| {
-                let (range, _) = boxes.cells.get(cell)?;
-                let (_, rect) = kept.find(|(kept, _)| kept == range)?;
-                Some((range.start, rect.x, top))
-            })
-            .collect()
+        Self::with_boxes(rich, width).1.into_vec()
     }
     /// `with_rich`'s cells cut as its clamp says, and aligned.
     #[inline(always)]
@@ -916,6 +1114,7 @@ impl FallbackTextLayout {
             layout.size = crate::rich_text::fallback_measure(rich, width);
         }
         layout.align(
+            rich.text(),
             width,
             rich.runs()
                 .first()
@@ -949,11 +1148,11 @@ impl FallbackTextLayout {
     /// collapses advances to zero; native glyph shaping may overlap instead.
     pub fn with_font(text: &str, size: f32, max_width: Option<f32>, font: &FontStyle) -> Self {
         let mut cells = Vec::new();
-        let (end, size) = Self::place(text, size, max_width, font, |range, rect| {
+        let (end, size) = Self::place_text(text, size, max_width, font, |range, rect| {
             cells.push((range, rect))
         });
         let mut layout = Self { cells, end, size };
-        layout.align(max_width, font.align);
+        layout.align(text, max_width, font.align);
         layout
     }
     /// `text` as `shaper` lays it out, with `font`'s letter spacing: the
@@ -978,10 +1177,10 @@ impl FallbackTextLayout {
         let mut paragraphs: Vec<Paragraph> = Vec::new();
         let mut start = 0;
         for line in text
-            .split_inclusive('\n')
-            .chain((text.is_empty() || text.ends_with('\n')).then_some(""))
+            .split_inclusive(['\n', '\u{1e}'])
+            .chain((text.is_empty() || text.ends_with(['\n', '\u{1e}'])).then_some(""))
         {
-            let body = line.trim_end_matches(['\n', '\r']);
+            let body = line.trim_end_matches(['\n', '\r', '\u{1e}']);
             let base = shaper.shape(body, size, None);
             let height = if normal {
                 base.caret(0).height
@@ -1096,10 +1295,12 @@ impl FallbackTextLayout {
             end,
             size,
         };
-        layout.align(max_width, font.align);
+        layout.align(text, max_width, font.align);
         layout
     }
-    fn align(&mut self, width: Option<f32>, alignment: TextAlign) {
+    /// Each row of `text`'s cells moved across `width` as `alignment` says, by its ink: spaces ending it hang, as
+    /// they do where the shaper aligns.
+    fn align(&mut self, text: &str, width: Option<f32>, alignment: TextAlign) {
         let Some(width) = width.filter(|w| w.is_finite() && *w > 0.) else {
             return;
         };
@@ -1115,10 +1316,18 @@ impl FallbackTextLayout {
             while end < self.cells.len() && self.cells[end].1.y == y {
                 end += 1;
             }
-            let row_width = self.cells[start..end]
+            let row = &self.cells[start..end];
+            let inked = |range: &Range<usize>| {
+                !text
+                    .get(range.clone())
+                    .is_some_and(|g| g.chars().all(char::is_whitespace))
+            };
+            let row_width = row
                 .iter()
+                .filter(|(range, _)| inked(range))
                 .map(|(_, r)| r.x + r.width)
-                .fold(0_f32, f32::max);
+                .reduce(f32::max)
+                .unwrap_or_else(|| row.iter().map(|(_, r)| r.x + r.width).fold(0_f32, f32::max));
             let shift = (width - row_width).max(0.) * factor;
             for (_, rect) in &mut self.cells[start..end] {
                 rect.x += shift;
@@ -1157,7 +1366,30 @@ impl FallbackTextLayout {
         max_width: Option<f32>,
         font: &FontStyle,
     ) -> (f32, f32) {
-        Self::place(text, size, max_width, font, |_, _| {}).1
+        Self::place_text(text, size, max_width, font, |_, _| {}).1
+    }
+    /// `place`, or for text wider than its width unwrapped, wrapped by word
+    /// (`place_words`): apart from `place`, which stays as it was for text
+    /// that fits.
+    fn place_text(
+        text: &str,
+        size: f32,
+        max_width: Option<f32>,
+        font: &FontStyle,
+        mut cell: impl FnMut(Range<usize>, Rect),
+    ) -> (Rect, (f32, f32)) {
+        let finite = if size.is_finite() { size.max(1.) } else { 1. };
+        let advance = (finite as f64 * 0.6 + font.letter_spacing.pixels() as f64)
+            .clamp(0., f32::MAX as f64) as f32;
+        if let Some(w) = max_width.filter(|w| *w > 0. && text.len() as f32 * advance > *w) {
+            let height = font.line_height.resolve(finite);
+            // Through a pointer, its cells through a `dyn`: the word path kept
+            // out of what rustc inlines into `place`'s callers (with it in
+            // reach, unrelated scene code compiled differently).
+            let words: PlaceWords = Self::place_words;
+            return words(text, advance, height, w, &mut cell);
+        }
+        Self::place(text, size, max_width, font, cell)
     }
     fn place(
         text: &str,
@@ -1194,16 +1426,83 @@ impl FallbackTextLayout {
         };
         if text.is_ascii() {
             for range in AsciiClusters::new(text.as_bytes()) {
-                let newline = matches!(text.as_bytes()[range.start], b'\n' | b'\r');
+                let newline = ends_line(text.as_bytes()[range.start]);
                 each(range, newline);
             }
         } else {
             for (index, grapheme) in text.grapheme_indices(true) {
-                each(
-                    index..index + grapheme.len(),
-                    grapheme.contains(['\n', '\r']),
-                );
+                each(index..index + grapheme.len(), breaks_line(grapheme));
             }
+        }
+        width = width.max(x);
+        (
+            Rect::new(x, y, 1., height),
+            (width, (y + height).min(f32::MAX)),
+        )
+    }
+    /// `place` for text wider than its width `w`: wrapped by word, as the
+    /// shaper wraps (`Words`). A line breaks before a word whose ink doesn't
+    /// fit, its spaces hanging past the edge (shown only to it, and not
+    /// counted in the line's width); a word wider than a line breaks by
+    /// grapheme.
+    #[inline(never)]
+    fn place_words(
+        text: &str,
+        advance: f32,
+        height: f32,
+        w: f32,
+        cell: &mut dyn FnMut(Range<usize>, Rect),
+    ) -> (Rect, (f32, f32)) {
+        let bytes = text.as_bytes();
+        let mut words = Words::new(text);
+        let (mut x, mut y, mut width) = (0_f32, 0_f32, 0_f32);
+        let (mut word_end, mut word_ink, mut ink_x) = (0_usize, 0_f32, 0_f32);
+        for range in grapheme_ranges(text) {
+            let first = bytes[range.start];
+            if ends_line(first) {
+                cell(range, Rect::new(x, y, 0., height));
+                width = width.max(x);
+                x = 0.;
+                ink_x = 0.;
+                y = (y + height).min(f32::MAX);
+                continue;
+            }
+            let blank = if range.len() == 1 {
+                first.is_ascii_whitespace()
+            } else {
+                text[range.clone()].chars().all(char::is_whitespace)
+            };
+            let starts = range.start >= word_end;
+            if starts {
+                let ink_end;
+                (ink_end, word_end) = words.at(range.start);
+                word_ink = words.graphemes(range.start..ink_end) as f32 * advance;
+            }
+            // A word starting here: its ink must fit (summed apart from the row's, so allowing for
+            // rounding). Inside one wider than the line, by grapheme; spaces hang past the edge.
+            let wrap = x > 0.
+                && if starts {
+                    x + word_ink > w + 1e-3
+                } else {
+                    !blank && x + advance > w
+                };
+            if wrap {
+                width = width.max(ink_x.max(x.min(w)));
+                x = 0.;
+                ink_x = 0.;
+                y = (y + height).min(f32::MAX);
+            }
+            if blank && x + advance > w {
+                // A space hanging past the edge shows (selected, aligned) only to it.
+                let at = x.min(w);
+                cell(range, Rect::new(at, y, w - at, height));
+            } else {
+                cell(range, Rect::new(x, y, advance, height));
+                if !blank {
+                    ink_x = x + advance;
+                }
+            }
+            x = (x + advance).min(f32::MAX);
         }
         width = width.max(x);
         (
@@ -1270,6 +1569,43 @@ impl Iterator for AsciiClusters<'_> {
         };
         self.at = start + len;
         Some(start..self.at)
+    }
+}
+/// Where a layout's inline boxes are (`TextLayout::inline_boxes`): each
+/// one's character's offset, left and top.
+type Places = Box<[(usize, f32, f32)]>;
+/// A fallback layout of text with inline boxes, and where they are
+/// (`FallbackTextLayout::rich_layout`): plain text's layouts don't carry
+/// them.
+struct PlacedFallback {
+    layout: FallbackTextLayout,
+    places: Places,
+}
+impl TextLayout for PlacedFallback {
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        self.places.to_vec()
+    }
+    fn cache_weight(&self) -> Option<usize> {
+        let places = std::mem::size_of_val(&*self.places);
+        Some(self.layout.cache_weight()?.saturating_add(places))
+    }
+    fn size(&self) -> (f32, f32) {
+        self.layout.size()
+    }
+    fn hit_test(&self, x: f32, y: f32) -> usize {
+        self.layout.hit_test(x, y)
+    }
+    fn hit_position(&self, x: f32, y: f32) -> TextPosition {
+        self.layout.hit_position(x, y)
+    }
+    fn caret_position(&self, position: TextPosition) -> Rect {
+        self.layout.caret_position(position)
+    }
+    fn caret(&self, byte_offset: usize) -> Rect {
+        self.layout.caret(byte_offset)
+    }
+    fn selection(&self, range: Range<usize>) -> Vec<Rect> {
+        self.layout.selection(range)
     }
 }
 impl TextLayout for FallbackTextLayout {
@@ -1344,9 +1680,10 @@ impl TextLayout for FallbackTextLayout {
                 break;
             }
             if r.width > 0. {
+                // Touching, but for rounding once a row is moved (aligned): one rect.
                 if let Some(last) = result.last_mut()
                     && last.y == r.y
-                    && last.x + last.width >= r.x
+                    && last.x + last.width + 1e-3 >= r.x
                 {
                     *last = last.union(*r);
                     continue;
@@ -1363,6 +1700,47 @@ impl TextLayout for FallbackTextLayout {
 }
 #[cfg(test)]
 mod tests {
+    /// A plain text's breaks found by its bytes (`plain_break_at`) are UAX #14's (`break_opportunities`): every
+    /// text of up to five of its characters, each kind, and longer ones.
+    #[test]
+    fn plain_text_breaks_by_its_bytes_as_by_unicode() {
+        let alphabet = *b"aZ7 \n\r.,:;'";
+        let mut text = Vec::new();
+        let mut check = |text: &[u8]| {
+            let s = std::str::from_utf8(text).unwrap();
+            let unicode: Vec<usize> = super::break_opportunities(s).collect();
+            let plain: Vec<usize> = (1..=text.len())
+                .filter(|&at| super::plain_break_at(text, at))
+                .collect();
+            assert_eq!(plain, unicode, "{s:?}");
+            // Word by word from the start, each found from one space or line break to the next.
+            let mut words = Vec::new();
+            let mut at = 0;
+            while at < text.len() {
+                at = super::plain_word_end(text, at);
+                words.push(at);
+            }
+            assert_eq!(words, unicode, "{s:?}, word by word");
+        };
+        fn each(alphabet: &[u8], text: &mut Vec<u8>, left: usize, check: &mut impl FnMut(&[u8])) {
+            check(text);
+            if left == 0 {
+                return;
+            }
+            for &b in alphabet {
+                text.push(b);
+                each(alphabet, text, left - 1, check);
+                text.pop();
+            }
+        }
+        each(&alphabet, &mut text, 5, &mut check);
+        for long in [
+            "Share it in the plugin store. Publish 1.0.0, then 1.1.0: don't wait;  ok",
+            "  leading spaces\r\n\r\nand lines\n\n",
+        ] {
+            check(long.as_bytes());
+        }
+    }
     /// `grapheme_ranges` is `grapheme_indices`' ranges, ASCII or not.
     #[test]
     fn grapheme_ranges_are_grapheme_indices() {
@@ -1531,6 +1909,53 @@ mod tests {
         assert_eq!(layout.hit_test(100., 30.), 5);
         assert_eq!(layout.caret(5).y, 28.);
         assert_eq!(layout.hit_test(10., -10.), 2);
+    }
+    /// An editor's own line break (U+001E), which the shaper ends a line at
+    /// (cosmic-text's `LineEnding::Rs`), ends one headless as a line feed
+    /// does: plain and rich text, unwrapped and wrapped by word or grapheme.
+    #[test]
+    fn an_editors_own_line_break_ends_a_line_as_a_line_feed_does() {
+        use crate::rich_text::{RichText, TextRun};
+        let rich = |text: &str| {
+            let run = TextRun {
+                range: 0..text.len(),
+                font_size: 10.,
+                ..Default::default()
+            };
+            RichText::new(text, vec![run]).unwrap()
+        };
+        for text in [
+            "ab\u{1e}cd",
+            "ab\u{1e}",
+            "\u{1e}\u{1e}",
+            "let x = 1;\u{1e}let y = 2;\u{1e}console.log(x);",
+            "one two\u{1e}three four five\u{1e}",
+        ] {
+            let lf = text.replace('\u{1e}', "\n");
+            for width in [None, Some(1000.), Some(60.), Some(25.), Some(4.)] {
+                let (a, b) = (
+                    FallbackTextLayout::new(text, 10., width),
+                    FallbackTextLayout::new(&lf, 10., width),
+                );
+                assert_eq!(a.cells, b.cells, "{text:?} at {width:?}");
+                assert_eq!((a.end, a.size), (b.end, b.size), "{text:?} at {width:?}");
+                let (a, b) = (
+                    FallbackTextLayout::with_rich(&rich(text), width),
+                    FallbackTextLayout::with_rich(&rich(&lf), width),
+                );
+                assert_eq!(a.cells, b.cells, "rich {text:?} at {width:?}");
+                assert_eq!(
+                    (a.end, a.size),
+                    (b.end, b.size),
+                    "rich {text:?} at {width:?}"
+                );
+                assert_eq!(
+                    crate::rich_text::fallback_measure(&rich(text), width),
+                    crate::rich_text::fallback_measure(&rich(&lf), width),
+                    "rich {text:?} measured at {width:?}"
+                );
+            }
+        }
     }
 }
 
@@ -1718,6 +2143,167 @@ pub fn min_content_lines(text: &str) -> String {
         start = end;
     }
     lines
+}
+/// Where a text's words end as it is walked forward (UAX #14's break opportunities), and how far each one's ink
+/// reaches. A text of only ASCII letters, digits, spaces, line breaks and `.,:;'` (most of an interface's) breaks
+/// after its runs of spaces and its line breaks alone (`plain_break_at`, as `break_opportunities` finds), found by
+/// its bytes; any other is segmented.
+struct Words<'a, B> {
+    text: &'a str,
+    /// The break opportunities of a text segmented; none for a plain one.
+    breaks: Option<B>,
+    /// It holds an editor's own line break (U+001E), a break of its own
+    /// (`separated_at`); and the break opportunity a word ended before it
+    /// took, for the next word.
+    separated: bool,
+    pending: Option<usize>,
+}
+impl<'a> Words<'a, ()> {
+    fn new(text: &'a str) -> Words<'a, impl Iterator<Item = usize> + 'a> {
+        let plain = text.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b' ' | b'\n' | b'\r' | b'.' | b',' | b':' | b';' | b'\'')
+        });
+        Words {
+            text,
+            breaks: (!plain).then(|| break_opportunities(text)),
+            // A plain text has none (its bytes are listed above).
+            separated: !plain && text.as_bytes().contains(&0x1e),
+            pending: None,
+        }
+    }
+}
+impl<B: Iterator<Item = usize>> Words<'_, B> {
+    /// The word starting at `start` (after the last's end, in order): where its ink ends (before the spaces and
+    /// line break ending it) and where it ends.
+    fn at(&mut self, start: usize) -> (usize, usize) {
+        let text = self.text;
+        match &mut self.breaks {
+            Some(_) if self.separated => self.separated_at(start),
+            Some(breaks) => {
+                let end = breaks.find(|end| *end > start).unwrap_or(text.len());
+                let ink = text[start..end].trim_end_matches(char::is_whitespace).len();
+                (start + ink, end)
+            }
+            None => {
+                let bytes = text.as_bytes();
+                let end = plain_word_end(bytes, start);
+                let mut ink = end;
+                while ink > start && bytes[ink - 1].is_ascii_whitespace() {
+                    ink -= 1;
+                }
+                (ink, end)
+            }
+        }
+    }
+    /// `at` for a text holding an editor's own line breaks (U+001E): a word
+    /// also ends after one, which is no ink, as the shaper ends a line there
+    /// (cosmic-text's `LineEnding::Rs`). Out of line: other text's words are
+    /// found as they were.
+    #[cold]
+    #[inline(never)]
+    fn separated_at(&mut self, start: usize) -> (usize, usize) {
+        let text = self.text;
+        let Some(breaks) = self.breaks.as_mut() else {
+            return (start, start);
+        };
+        let opportunity = match self.pending.take() {
+            Some(end) if end > start => end,
+            _ => breaks.find(|end| *end > start).unwrap_or(text.len()),
+        };
+        let end = match text[start..opportunity].find('\u{1e}') {
+            Some(at) => {
+                if start + at + 1 < opportunity {
+                    self.pending = Some(opportunity);
+                }
+                start + at + 1
+            }
+            None => opportunity,
+        };
+        let mut word = text[start..end].trim_end_matches(char::is_whitespace);
+        while let Some(rest) = word.strip_suffix('\u{1e}') {
+            word = rest.trim_end_matches(char::is_whitespace);
+        }
+        (start + word.len(), end)
+    }
+    /// How many graphemes `range` of the text holds: a plain text's bytes.
+    fn graphemes(&self, range: Range<usize>) -> usize {
+        match self.breaks {
+            Some(_) => grapheme_ranges(&self.text[range]).count(),
+            None => range.len(),
+        }
+    }
+}
+/// Where a plain text's word starting at `start` ends: its first break
+/// opportunity past it (`plain_break_at`), found from one space or line break
+/// to the next rather than byte by byte.
+fn plain_word_end(bytes: &[u8], start: usize) -> usize {
+    let len = bytes.len();
+    let mut from = start;
+    loop {
+        let Some(found) = bytes
+            .get(from..)
+            .and_then(|rest| rest.iter().position(|b| matches!(b, b' ' | b'\n' | b'\r')))
+        else {
+            return len;
+        };
+        let mut at = from + found;
+        match bytes[at] {
+            // After a line break (a carriage return's and its line feed's together).
+            b'\n' => return at + 1,
+            b'\r' => return at + 1 + usize::from(bytes.get(at + 1) == Some(&b'\n')),
+            _ => {
+                while at < len && bytes[at] == b' ' {
+                    at += 1;
+                }
+                if at == len || plain_break_at(bytes, at) {
+                    return at;
+                }
+                // Before a line break or `.,:;`: on to the next.
+                from = at;
+            }
+        }
+    }
+}
+/// Whether a plain text (`Words`) may break at byte `at`: its end, after a line break (a carriage return's, unless a
+/// line feed follows), or after a run of spaces where the next isn't a space, a line break or `.,:;`.
+fn plain_break_at(bytes: &[u8], at: usize) -> bool {
+    let Some(&before) = at.checked_sub(1).and_then(|i| bytes.get(i)) else {
+        return false;
+    };
+    match bytes.get(at) {
+        None => true,
+        Some(&next) => match before {
+            b'\n' => true,
+            b'\r' => next != b'\n',
+            // Not before punctuation that never starts a line (UAX #14's IS: `.,:;`), even after spaces.
+            b' ' => !matches!(next, b' ' | b'\n' | b'\r' | b'.' | b',' | b':' | b';'),
+            _ => false,
+        },
+    }
+}
+/// Whether a grapheme starting with `byte` ends a line: a line feed, a
+/// carriage return or an editor's own break (U+001E). Text is mostly not
+/// control characters: one compare decides for the rest, the three only
+/// for those, out of line.
+#[inline(always)]
+fn ends_line(byte: u8) -> bool {
+    byte < 0x20 && control_ends_line(byte)
+}
+#[cold]
+#[inline(never)]
+fn control_ends_line(byte: u8) -> bool {
+    matches!(byte, b'\n' | b'\r' | 0x1e)
+}
+/// Whether `grapheme` ends a line: a line feed, a carriage return (with
+/// its line feed) or an editor's own break (U+001E). Each is a grapheme of
+/// its own, so its first byte says.
+#[inline]
+pub(crate) fn breaks_line(grapheme: &str) -> bool {
+    grapheme
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| ends_line(*byte))
 }
 /// Where `text`'s lines may break (UAX #14), as byte offsets: after each
 /// opportunity, and its end.

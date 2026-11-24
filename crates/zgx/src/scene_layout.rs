@@ -644,10 +644,22 @@ impl Scene {
     /// is set aside by its style, which has none (`w_calc`); one from points
     /// with a content limit is set aside here, its kept results with it,
     /// as `measure_unsized` does for `min_content`: a copy, so that
-    /// `min_content` keeps it to itself, inlined.
+    /// `min_content` keeps it to itself, inlined. Its own largest width is
+    /// set aside too: CSS's max-content is what it holds on one line, which
+    /// a `max_w` then caps (`fit-content`'s min of it and the room), not a
+    /// width its text wraps in first.
     fn max_content_width(&mut self, id: NodeId, probe: Constraints) -> f32 {
         let node = self.node_mut(id);
         let saved = (node.style.width.take(), node.style.width_percent.take());
+        let saved_max = (
+            node.style.max_width.take(),
+            node.style.layout_options.clone(),
+        );
+        if let Some(options) = node.style.layout_options.as_mut()
+            && options.max_width.is_some()
+        {
+            std::sync::Arc::make_mut(options).max_width = None;
+        }
         let kept = (
             node.measurement.take(),
             std::mem::take(&mut node.alternates),
@@ -656,6 +668,7 @@ impl Scene {
         let width = self.measure(id, probe).0;
         let node = self.node_mut(id);
         (node.style.width, node.style.width_percent) = saved;
+        (node.style.max_width, node.style.layout_options) = saved_max;
         (node.measurement, node.alternates, node.sizes) = kept;
         width
     }
@@ -964,6 +977,13 @@ impl Scene {
                     if scene.node(*child).style.layout_options.is_some() {
                         scene.map_size_calcs(*child, &mut mapped, bases);
                         scene.map_grid_place(*child, &mut mapped);
+                    }
+                    // A replaced box's own unsized drawing fills it, as
+                    // where zgx lays it out (`drawing_fill`).
+                    if scene.node(*child).boxed & super::DRAWING != 0
+                        && mapped.size == t::Size::auto()
+                    {
+                        mapped.size = t::Size::from_percent(1., 1.);
                     }
                     // A `contents` child clips as the child it lays out as.
                     mapped.overflow = overflow(super::clips(&scene.node(laid).style));

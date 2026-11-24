@@ -88,6 +88,9 @@ pub enum GuardKind {
 }
 
 type Guard = dyn Fn(GuardKind, &str) -> Result<(), String>;
+/// What `ScriptHost::web_guard` asks of a page's navigation: the `ui.web`
+/// id it was made under (none for an anonymous one), and the URL.
+type WebGuard = dyn Fn(Option<&str>, &str) -> Result<(), String>;
 
 /// A `ui.persist` key the guard refused: what a run holds of it, and what
 /// that began as.
@@ -101,6 +104,8 @@ pub(crate) struct Rules {
     /// Prefixes only the app's VM may use, without their last dot.
     reserved: RefCell<Vec<String>>,
     guard: RefCell<Option<Rc<Guard>>>,
+    /// Asked of pages in place of `guard` when set (`web_guard`).
+    web_guard: RefCell<Option<Rc<WebGuard>>>,
     /// What `ui.persist` keys the guard refused hold, by script and key.
     held: RefCell<HashMap<(String, String), Held>>,
 }
@@ -114,6 +119,9 @@ impl Rules {
     }
     pub fn set_guard(&self, guard: Rc<Guard>) {
         *self.guard.borrow_mut() = Some(guard);
+    }
+    pub fn set_web_guard(&self, guard: Rc<WebGuard>) {
+        *self.web_guard.borrow_mut() = Some(guard);
     }
     /// The reserved prefix `name` falls under, if any: `zeron` holds `zeron`
     /// and `zeron.x`, not `zeronish`.
@@ -130,6 +138,16 @@ impl Rules {
     /// The values held, let go of.
     pub fn take_held(&self) -> HashMap<(String, String), Held> {
         std::mem::take(&mut *self.held.borrow_mut())
+    }
+    /// What the web guard says of the page `web` going to `url`, or with
+    /// none the guard (`GuardKind::Web`, by the URL). It runs with nothing
+    /// here borrowed.
+    pub fn check_web(&self, web: Option<&str>, url: &str) -> Result<(), String> {
+        let web_guard = self.web_guard.borrow().clone();
+        match web_guard {
+            Some(web_guard) => web_guard(web, url),
+            None => self.check(GuardKind::Web, url),
+        }
     }
     /// What the guard says of reaching `name`. It runs with nothing here
     /// borrowed: it may set another.
@@ -199,12 +217,34 @@ fn guarded(lua: &Lua, kind: GuardKind, name: &str) -> mlua::Result<()> {
         .map_err(|why| mlua::Error::runtime(format!("{kind:?} `{name}`: {why}")))
 }
 
+/// Whether the app's VM may show `url` in the page made as `ui.web(web)`
+/// (none, an anonymous one): the host's web guard, else its guard.
+#[inline]
+pub(crate) fn guard_web(lua: &Lua, web: Option<&str>, url: &str) -> mlua::Result<()> {
+    if !ACTIVE.get() {
+        return Ok(());
+    }
+    web_guarded(lua, web, url)
+}
+#[cold]
+#[inline(never)]
+fn web_guarded(lua: &Lua, web: Option<&str>, url: &str) -> mlua::Result<()> {
+    let Some(rules) = lua.app_data_ref::<Guarded>().map(|g| g.0.clone()) else {
+        return Ok(());
+    };
+    rules
+        .check_web(web, url)
+        .map_err(|why| mlua::Error::runtime(format!("{:?} `{url}`: {why}", GuardKind::Web)))
+}
+
 /// Whether a navigation the platform is about to start may (`WebView`'s
-/// navigation policy, for a web view of the app's VM). Refused, it says so
+/// navigation policy, for a web view of the app's VM, made as `ui.web(web)`:
+/// a main frame's, an iframe's, a redirect's alike). Refused, it says so
 /// where a script's error shows. `about:blank` reaches nothing, and is what
 /// a page given as `html` loads under, asked as it was given.
 pub(crate) fn navigation_allowed(
     vm: &Weak<crate::Vm>,
+    web: Option<&str>,
     request: &zgx::web_view::NavigationRequest,
 ) -> bool {
     if !ACTIVE.get() || request.url == "about:blank" {
@@ -213,7 +253,7 @@ pub(crate) fn navigation_allowed(
     let Some(vm) = vm.upgrade() else {
         return true;
     };
-    match guarded(&vm.lua, GuardKind::Web, &request.url) {
+    match web_guarded(&vm.lua, web, &request.url) {
         Ok(()) => true,
         Err(error) => {
             vm.report(error);

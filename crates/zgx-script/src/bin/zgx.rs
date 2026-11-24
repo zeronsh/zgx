@@ -3,8 +3,15 @@
 //! `zgx new <name> [--template T] [--i18n]` writes a Luau app that runs at
 //! once, with its tests and a CI workflow (`zgx_script::scaffold`).
 //!
-//! `zgx run [--inspect] <app> [args…]` runs the app by zgx-run (beside this
-//! binary, or on PATH), as `zgx audit` audits it.
+//! `zgx run [--inspect] [--release] [--window <name>] <app> [args…]` runs the app by zgx-run
+//! (beside this binary, or on PATH), as `zgx audit` audits it: first
+//! building each native module zgx.json names whose sources changed
+//! (`zgx_script::module_build`), and building one again and restarting the
+//! app as its sources change.
+//!
+//! `zgx build [--out <dir>] [--target <triple>]… [--version <v>] <app>`
+//! writes the app as a bundle (`zgx_script::app_bundle`), which `zgx-run
+//! <bundle>` runs.
 //!
 //! `zgx check [--nonstrict] <file-or-dir>...` type checks Luau scripts
 //! with luau-lsp and the bundled `ui`/`anime` definitions, printing
@@ -31,7 +38,8 @@ use std::{path::PathBuf, process::ExitCode};
 use zgx_script::check::{CheckError, Options, Report, check};
 
 const USAGE: &str = "usage: zgx new <name> [--template basic|router|list|form|plugins] [--i18n]
-       zgx run [--inspect] <app.luau-or-dir> [args...]
+       zgx run [--inspect] [--release] [--window <name>] <app.luau-or-dir> [args...]
+       zgx build [--out <dir>] [--target <triple>]... [--version <v>] <app-dir>
        zgx check [--nonstrict] <file-or-dir>...
        zgx lint [--format text|json] <file-or-dir>...
        zgx lint --rules
@@ -48,7 +56,18 @@ are clean. --i18n writes its text as ui.t messages with locales/en.json.
 
 run: opens the app in a window and reloads it as its files change
 (zgx-run, beside zgx or on PATH; `zgx-run --help` says what zgx.json sets).
+The native modules zgx.json names are built first if their sources changed
+(cached by a hash of them; --release builds them for release), and as their
+sources change while it runs, built again and the app restarted.
+
+build: the app as a bundle (dist/<app_id>, or --out): its scripts compiled
+to bytecode, its other files as they are, each native module's library for
+each --target (the host's by default; built for release if its sources
+changed, else from the cache) and a manifest of hashes. `zgx-run <bundle>`
+runs it.
 --inspect serves devtools (`zgx inspect help`).
+--window <name> opens the window of that name among zgx.json's
+named_windows first.
 
 check: type checks zgx Luau scripts with luau-lsp, the bundled ui/anime
 types, the standard platform and the new type solver. Strict mode applies
@@ -108,6 +127,24 @@ fn types(args: Vec<String>) -> ExitCode {
                     if changed { "wrote" } else { "unchanged:" },
                     file.display()
                 );
+                // A native module `zgx.json` names that has no library to
+                // read (not built yet) is left untyped: say which.
+                let (modules, untyped) = zgx_script::module_types::of_app(&dir);
+                for (library, manifest) in &modules {
+                    if let Some(name) = zgx_script::module_types::name_of(manifest) {
+                        println!("  module `{name}`: {}", library.display());
+                    }
+                }
+                let manifests: Vec<String> = modules
+                    .iter()
+                    .map(|(_, manifest)| manifest.clone())
+                    .collect();
+                for why in untyped
+                    .into_iter()
+                    .chain(zgx_script::module_types::notes(&manifests))
+                {
+                    eprintln!("zgx types: {why}");
+                }
             }
             Err(error) => {
                 eprintln!("zgx types: {error}");
@@ -256,30 +293,258 @@ fn zgx_run() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("zgx-run"))
 }
 
-/// `zgx run [--inspect] <app.luau-or-dir> [args…]`: the app in a window,
-/// reloading as it changes, by zgx-run. On Unix zgx-run takes this
-/// process's place, so signals and the exit status are its own.
+/// `zgx run [--inspect] [--release] [--window <name>] <app.luau-or-dir> [args…]`: the app in a
+/// window, reloading as it changes, by zgx-run. An app with no native
+/// modules has zgx-run take this process's place (on Unix), so signals and
+/// the exit status are its own. One with modules is watched from here: each
+/// is built if its sources changed and handed to zgx-run, and as a
+/// module's sources change it is built again and the app started again.
 fn run(args: Vec<String>) -> ExitCode {
-    if args.is_empty() {
+    let release = args.iter().any(|a| a == "--release");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--release").collect();
+    // The app: the first word that isn't a flag or a flag's value
+    // (`--window <name>`).
+    let Some(app) = args
+        .iter()
+        .enumerate()
+        .find(|(i, a)| !a.starts_with("--") && (*i == 0 || args[i - 1] != "--window"))
+        .map(|(_, a)| a)
+    else {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
-    }
-    let run = zgx_run();
-    let mut command = std::process::Command::new(&run);
-    command.args(&args);
-    #[cfg(unix)]
-    let error = std::os::unix::process::CommandExt::exec(&mut command);
-    #[cfg(not(unix))]
-    let error = match command.status() {
-        Ok(status) => return ExitCode::from(status.code().unwrap_or(2).clamp(0, 255) as u8),
-        Err(error) => error,
     };
+    let path = PathBuf::from(app);
+    let dir = if path.is_dir() {
+        path.clone()
+    } else {
+        path.parent()
+            .map_or_else(|| PathBuf::from("."), PathBuf::from)
+    };
+    let modules = match zgx_script::module_build::modules_of(&dir) {
+        Ok(modules) => modules,
+        Err(error) => {
+            eprintln!("zgx run: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let run = zgx_run();
+    if modules.is_empty() {
+        let mut command = std::process::Command::new(&run);
+        command.args(&args);
+        #[cfg(unix)]
+        let error = std::os::unix::process::CommandExt::exec(&mut command);
+        #[cfg(not(unix))]
+        let error = match command.status() {
+            Ok(status) => return ExitCode::from(status.code().unwrap_or(2).clamp(0, 255) as u8),
+            Err(error) => error,
+        };
+        return cannot_run(&run, &error);
+    }
+    let profile = if release {
+        zgx_script::module_build::Profile::Release
+    } else {
+        zgx_script::module_build::Profile::Dev
+    };
+    supervise(&run, &args, &modules, profile)
+}
+
+fn cannot_run(run: &std::path::Path, error: &std::io::Error) -> ExitCode {
     eprintln!(
         "zgx run: couldn't run {} ({error}); install zgx-run beside zgx or on PATH \
          (cargo install zgx-run)",
         run.display()
     );
     ExitCode::from(2)
+}
+
+/// Each module's library for this run: built if its sources changed, a
+/// library zgx.json names as it is. None if one didn't build (cargo said
+/// why).
+fn modules_built(
+    modules: &[(String, zgx_script::module_build::Source)],
+    profile: zgx_script::module_build::Profile,
+) -> Option<Vec<(String, PathBuf)>> {
+    use zgx_script::module_build::{Source, ensure};
+    let mut libraries = Vec::new();
+    for (name, source) in modules {
+        match source {
+            Source::Library(library) => libraries.push((name.clone(), library.clone())),
+            Source::Crate(dir) => match ensure(name, dir, profile, None) {
+                Ok(built) => {
+                    if built.built {
+                        eprintln!(
+                            "zgx run: module `{name}` built in {:.2} s",
+                            built.built_in.as_secs_f64()
+                        );
+                    }
+                    libraries.push((name.clone(), built.library));
+                }
+                Err(error) => {
+                    eprintln!("zgx run: {error}");
+                    return None;
+                }
+            },
+        }
+    }
+    Some(libraries)
+}
+
+/// A source file as last looked at: its path, length and time of change.
+type Stamp = (PathBuf, u64, Option<std::time::SystemTime>);
+
+/// What each crate's sources were when last looked at.
+fn stamps(modules: &[(String, zgx_script::module_build::Source)]) -> Vec<(String, Vec<Stamp>)> {
+    modules
+        .iter()
+        .filter_map(|(name, source)| match source {
+            zgx_script::module_build::Source::Crate(dir) => Some((
+                name.clone(),
+                zgx_script::module_build::sources(dir)
+                    .into_iter()
+                    .map(|file| {
+                        let meta = std::fs::metadata(&file).ok();
+                        let len = meta.as_ref().map_or(0, |m| m.len());
+                        let modified = meta.and_then(|m| m.modified().ok());
+                        (file, len, modified)
+                    })
+                    .collect(),
+            )),
+            zgx_script::module_build::Source::Library(_) => None,
+        })
+        .collect()
+}
+
+/// zgx-run with the modules' libraries, started again with a notice each
+/// time a module's sources change and it builds; ends as the app does.
+fn supervise(
+    run: &std::path::Path,
+    args: &[String],
+    modules: &[(String, zgx_script::module_build::Source)],
+    profile: zgx_script::module_build::Profile,
+) -> ExitCode {
+    let Some(mut libraries) = modules_built(modules, profile) else {
+        return ExitCode::from(1);
+    };
+    let start = |libraries: &[(String, PathBuf)], notice: Option<&str>| {
+        let mut command = std::process::Command::new(run);
+        for (name, library) in libraries {
+            command
+                .arg("--module")
+                .arg(format!("{name}={}", library.display()));
+        }
+        if let Some(notice) = notice {
+            command.arg("--notice").arg(notice);
+        }
+        command.args(args).spawn()
+    };
+    let mut child = match start(&libraries, None) {
+        Ok(child) => child,
+        Err(error) => return cannot_run(run, &error),
+    };
+    let mut seen = stamps(modules);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if let Ok(Some(status)) = child.try_wait() {
+            return ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8);
+        }
+        let now = stamps(modules);
+        if now == seen {
+            continue;
+        }
+        let changed: Vec<String> = now
+            .iter()
+            .filter(|(name, files)| {
+                seen.iter()
+                    .find(|(n, _)| n == name)
+                    .is_none_or(|(_, before)| before != files)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        // An editor's save can be several writes: once they stop.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        seen = stamps(modules);
+        let names = changed
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let Some(rebuilt) = modules_built(modules, profile) else {
+            eprintln!(
+                "zgx run: module {names} changed and didn't build: the app runs on as it was"
+            );
+            continue;
+        };
+        // The same libraries (a change that made the same key: a file
+        // saved unchanged): nothing to start again.
+        if rebuilt == libraries {
+            continue;
+        }
+        libraries = rebuilt;
+        let notice = format!("module {names} changed, restarting");
+        eprintln!("zgx run: {notice}");
+        let _ = child.kill();
+        let _ = child.wait();
+        child = match start(
+            &libraries,
+            Some(&format!("module {names} changed: restarted")),
+        ) {
+            Ok(child) => child,
+            Err(error) => return cannot_run(run, &error),
+        };
+    }
+}
+
+/// `zgx build [--out <dir>] [--target <triple>]… [--version <v>] <app-dir>`.
+fn build(args: Vec<String>) -> ExitCode {
+    let mut options = zgx_script::app_bundle::Options::default();
+    let mut app = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => options.out = args.next().map(PathBuf::from),
+            "--target" => options.targets.extend(args.next()),
+            "--version" => options.version = args.next(),
+            _ if app.is_none() && !arg.starts_with("--") => app = Some(PathBuf::from(arg)),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(app) = app else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let started = std::time::Instant::now();
+    match zgx_script::app_bundle::write(&app, &options) {
+        Ok(written) => {
+            for module in &written.modules {
+                println!(
+                    "module `{}`: {} ({})",
+                    module.name,
+                    if module.built {
+                        format!("built in {:.2} s", module.built_in.as_secs_f64())
+                    } else {
+                        "unchanged, from the cache".into()
+                    },
+                    module.library.display()
+                );
+            }
+            println!(
+                "wrote {} in {:.2} s: {} files, {} scripts compiled in {:.2} s",
+                written.dir.display(),
+                started.elapsed().as_secs_f64(),
+                written.files,
+                written.scripts,
+                written.ui_in.as_secs_f64()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("zgx build: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `zgx video …`: handed to zgx-video (beside this binary, or on PATH), which
@@ -315,6 +580,7 @@ fn main() -> ExitCode {
         Some("inspect") => return inspect(args.collect()),
         Some("audit") => return audit(args.collect()),
         Some("run") => return run(args.collect()),
+        Some("build") => return build(args.collect()),
         Some("video") => return video(args.collect()),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
@@ -467,14 +733,27 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   node <target>        find <target>
   state [name] [--full]                  set <name> <json>
   click <target>       type <target> <text>      key <keys>
+  type --no-click <text>                 where focus is, no click first
   hover <target|x,y>   right-click <target|x,y>  drag <from> <to|x,y>
-  scroll <target> <dy> command <id>
+  files hover <target|x,y> <path…>       files drop <target|x,y> <path…>   files leave
+                       files dragged in from a file manager, as the host hears them
+                       (drop: a FileDrop each, then FilesDrop, Linux's order; macOS
+                       and Windows deliver FilesDrop after a queue)
+  text-drop <target|x,y> --text T [--html H] [--hover-only]
+                       text dragged in from another app, let go there
+  prefers reduced-motion on|off|system   what zgx reads as the system's (never its setting)
+  scroll <target|x,y> <dy> [dx]  command <id>
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
   frames [n] [--runs N] [--all] [--since MARK|FRAME] [--until MARK|FRAME] [--summary] [--keep N]
   reloads              each hot reload's path, partial or full, and why
   mark [name]          switch [name] [on|off]
+  clock [freeze|thaw|advance <ms>]
+  gc [--top N] [--retained KIND] [--sample N] [--mark] [--since-mark] [--lua-only]
+                       a full Luau collection: heap before and after, what is left; --retained
+                       State: the chains of holders from a root; --mark, then --since-mark: what
+                       survives after it
   wait <target> [--text T] [--gone] [--timeout MS]
   snapshot <target> [--width PX] [--out file.png]
   record               record stop [--out gesture.tape]
@@ -483,6 +762,9 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   search [query] [--next] [--prev] [--all] [--close]
                        find in page: count, current, the first matches
   zoom [in|out|reset|150%]               the window's zoom and its viewport
+  clipboard [set --text T | --html H | --image file.png | --files PATH…]
+                       the window's clipboard (its own under ZGX_CLIPBOARD=memory or ZGX_OFFSCREEN);
+                       set it, then `key cmd+v` pastes it
   memory [--human]                       what the app holds, a line each, as JSON
   sleep <ms>           raw <json>
   help                 what the app answers
@@ -501,6 +783,8 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let mut human = false;
     let mut words: Vec<String> = Vec::new();
     let mut flags: Vec<(String, Option<String>)> = Vec::new();
+    // `clipboard set --files`'s paths, absolute: the app may run elsewhere.
+    let mut files: Vec<String> = Vec::new();
     // Where `snapshot` copies its picture, or `record stop` writes its tape.
     let mut out: Option<String> = None;
     let mut args = args.into_iter();
@@ -527,7 +811,27 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--all" | "--full" | "--gone" | "--next" | "--prev" | "--close" | "--summary" => {
-                flags.push((arg[2..].to_string(), None))
+                flags.push((arg[2..].replace('-', "_"), None))
+            }
+            "--no-click" => flags.push(("no_click".into(), None)),
+            "--hover-only" => flags.push(("hover_only".into(), None)),
+            // Paths, up to the next flag.
+            "--files" => {
+                while args
+                    .as_slice()
+                    .first()
+                    .is_some_and(|a| !a.starts_with("--"))
+                {
+                    let path = args.next().unwrap_or_default();
+                    files.push(match std::path::absolute(&path) {
+                        Ok(path) => path.display().to_string(),
+                        Err(_) => path,
+                    });
+                }
+                if files.is_empty() {
+                    eprintln!("zgx inspect: --files takes one path or more");
+                    return ExitCode::from(2);
+                }
             }
             "--out" => match args.next() {
                 Some(path) => out = Some(path),
@@ -537,7 +841,8 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 }
             },
             "--depth" | "--budget" | "--text" | "--timeout" | "--width" | "--runs" | "--since"
-            | "--until" | "--keep" | "--repeat" | "--every" => {
+            | "--until" | "--keep" | "--repeat" | "--every" | "--html" | "--image" | "--top"
+            | "--retained" | "--sample" => {
                 flags.push((arg[2..].to_string(), args.next()));
             }
             _ => words.push(arg),
@@ -619,6 +924,15 @@ fn inspect(args: Vec<String>) -> ExitCode {
                 }
             }
         }
+        "type" if flags.iter().any(|(name, _)| name == "no_click") => {
+            if words.len() > 2 {
+                eprintln!(
+                    "zgx inspect: type --no-click takes the text alone: it types where focus is"
+                );
+                return ExitCode::from(2);
+            }
+            put("text", arg(1));
+        }
         "type" => {
             put("target", arg(1));
             put("text", arg(2));
@@ -627,11 +941,33 @@ fn inspect(args: Vec<String>) -> ExitCode {
             put("target", arg(1));
             put("to", arg(2));
         }
+        "files" => {
+            put("action", arg(1));
+            put("at", arg(2));
+            let paths: Vec<Value> = words
+                .iter()
+                .skip(3)
+                .map(|path| match std::path::absolute(path) {
+                    Ok(path) => Value::from(path.display().to_string().as_str()),
+                    Err(_) => Value::from(path.as_str()),
+                })
+                .collect();
+            if !paths.is_empty() {
+                fields.push(("files".into(), Value::List(paths.into())));
+            }
+        }
+        "text-drop" => put("at", arg(1)),
+        "prefers" => {
+            put("name", arg(1));
+            put("value", arg(2));
+        }
         "scroll" => {
             put("target", arg(1));
             put("dy", arg(2));
+            put("dx", arg(3));
         }
         "key" => put("keys", arg(1)),
+        "clipboard" => put("action", arg(1)),
         "command" => put("id", arg(1)),
         "state" => put("name", arg(1)),
         "sleep" => put("ms", arg(1)),
@@ -642,6 +978,11 @@ fn inspect(args: Vec<String>) -> ExitCode {
         "switch" => {
             put("name", arg(1));
             put("on", arg(2));
+        }
+        "gc" => {}
+        "clock" => {
+            put("action", arg(1));
+            put("ms", arg(2));
         }
         "set" => {
             put("name", arg(1));
@@ -654,6 +995,10 @@ fn inspect(args: Vec<String>) -> ExitCode {
             }
         }
         _ => {}
+    }
+    if !files.is_empty() {
+        let files = files.iter().map(|f| Value::from(f.as_str())).collect();
+        fields.push(("files".into(), Value::List(files)));
     }
     for (name, value) in flags {
         let key = if name == "timeout" {
@@ -678,9 +1023,10 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let fields: Vec<(String, Value)> = fields
         .into_iter()
         .map(|(k, v)| match (&*k, &v) {
-            ("dy" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every", Value::Str(s)) => {
-                (k, s.parse::<f64>().map(Value::Num).unwrap_or(v))
-            }
+            (
+                "dy" | "dx" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every",
+                Value::Str(s),
+            ) => (k, s.parse::<f64>().map(Value::Num).unwrap_or(v)),
             _ => (k, v),
         })
         .collect();
@@ -865,10 +1211,41 @@ const TOOLS: &[Tool] = &[
         "Drag with the primary button from a node (its middle) or \"x,y\" to a node or \"x,y\", in steps as a hand moves.",
     ),
     (
+        "zgx_files",
+        "files",
+        &[
+            ("action", "string", true),
+            ("at", "string", false),
+            ("files", "array", false),
+        ],
+        "Files dragged in from a file manager, as the desktop host hears them: action `hover` (over `at`, a node or \"x,y\"), `drop` (let go there: a FileDrop each, then FilesDrop, Linux's order; macOS and Windows deliver FilesDrop after a queue) or `leave`; `files` are paths.",
+    ),
+    (
+        "zgx_text_drop",
+        "text-drop",
+        &[
+            ("at", "string", true),
+            ("text", "string", false),
+            ("html", "string", false),
+            ("hover_only", "boolean", false),
+        ],
+        "Text dragged in from another app (a browser's selection), as the desktop host hears it: over `at` (a node or \"x,y\") and let go there with `text` and `html`; with hover_only, over it and gone, for a destination's highlight.",
+    ),
+    (
+        "zgx_prefers",
+        "prefers",
+        &[("name", "string", true), ("value", "string", true)],
+        "What zgx reads as a system preference, set in this process alone (never the system's own setting): name `reduced-motion`, value `on`, `off` or `system`.",
+    ),
+    (
         "zgx_type",
         "type",
-        &[("target", "string", true), ("text", "string", true)],
-        "Click a node (an input), then type text into it.",
+        &[
+            ("target", "string", false),
+            ("text", "string", true),
+            ("no_click", "boolean", false),
+        ],
+        "Click a node (an input), then type text into it; with no_click (and no target), type where focus is, the caret and selection left as they are.",
     ),
     (
         "zgx_key",
@@ -879,7 +1256,11 @@ const TOOLS: &[Tool] = &[
     (
         "zgx_scroll",
         "scroll",
-        &[("target", "string", true), ("dy", "number", true)],
+        &[
+            ("target", "string", true),
+            ("dy", "number", true),
+            ("dx", "number", false),
+        ],
         "Scroll the viewport under a node by dy points (down is positive).",
     ),
     (
@@ -939,6 +1320,25 @@ const TOOLS: &[Tool] = &[
         "Mark now, so zgx_frames with since=name reads only the frames after.",
     ),
     (
+        "zgx_gc",
+        "gc",
+        &[
+            ("top", "number", false),
+            ("retained", "string", false),
+            ("sample", "number", false),
+            ("mark", "boolean", false),
+            ("since_mark", "boolean", false),
+            ("lua_only", "boolean", false),
+        ],
+        "Run a full Luau collection in each script VM and report the heap before and after (garbage freed), and what is left by object type, userdata type and the chunk its code came from: tell garbage from a leak by running it again after the same actions. `retained` names a kind (a userdata type such as State, `table`, `function`, or part of a function's name or chunk) and prints the chains of holders from a root to those objects (registry → .key → upvalue → …, each function with its chunk:line), the commonest `sample` of them with counts. `mark` remembers the objects there are now; after more actions, `since_mark` lists what survived a collection that wasn't there then, and with `retained` only holders of those. Every `retained` answer also says how many of the matches a Luau holder alone reaches (the rest are held through Rust's handles); `lua_only` shows those Luau holders' chains instead of the handle chains.",
+    ),
+    (
+        "zgx_clock",
+        "clock",
+        &[("action", "string", false), ("ms", "number", false)],
+        "Freeze every animation, timer, caret and frame at one time (action freeze), move it on by hand (advance with ms), or let it run again (thaw); no action says which. A screenshot run freezes it so spinners, carets and transitions are the same each time (also ZGX_FREEZE_TIME=1 at launch).",
+    ),
+    (
         "zgx_switch",
         "switch",
         &[("name", "string", false), ("on", "boolean", false)],
@@ -953,13 +1353,25 @@ const TOOLS: &[Tool] = &[
             ("gone", "boolean", false),
             ("timeout_ms", "number", false),
         ],
-        "Wait until a node shows (holding text, if given), or is gone; fails with why after the timeout.",
+        "Wait until a node shows (holding text, if given: in what it says or a field's value), or is gone; fails with why after the timeout.",
     ),
     (
         "zgx_snapshot",
         "snapshot",
         &[("target", "string", true), ("width", "number", false)],
         "A picture of a node as the window last drew it (a PNG, at most width pixels wide): to see what it looks like.",
+    ),
+    (
+        "zgx_clipboard",
+        "clipboard",
+        &[
+            ("action", "string", false),
+            ("text", "string", false),
+            ("html", "string", false),
+            ("image", "string", false),
+            ("files", "array", false),
+        ],
+        "The window's clipboard: what it holds (its text, HTML, image's size and files), or with action `set` put text, html (both: a rich copy), the picture at image (a file) or files (paths, as a file manager copies them; an app's own clipboard only) there. Then a key (cmd+v / ctrl+v) pastes it as a person's paste. An off-screen session (ZGX_CLIPBOARD=memory) has a clipboard of its own, so this never touches the person's.",
     ),
     (
         "zgx_record",
@@ -1052,6 +1464,8 @@ fn mcp() -> ExitCode {
                                 .map(|(arg, ty, _)| {
                                     let schema = if *ty == "any" {
                                         Value::record([("description", Value::from("any JSON value"))])
+                                    } else if *ty == "array" {
+                                        Value::record([("type", Value::from("array")), ("items", Value::record([("type", Value::from("string"))]))])
                                     } else {
                                         Value::record([("type", Value::from(*ty))])
                                     };

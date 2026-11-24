@@ -34,7 +34,6 @@ pub struct Raster {
     pub pixels: Vec<u32>,
     width: usize,
     height: usize,
-    font: Font,
     styled_fonts: std::rc::Rc<std::cell::RefCell<Option<zgx_gpu::text::CpuTextRaster>>>,
     styled_glyphs: HashMap<StyledGlyphKey, StyledGlyphImages>,
     rich_glyphs: RichGlyphCache,
@@ -51,12 +50,35 @@ pub struct Raster {
     rendered: Option<u64>,
     /// Scroll moves applied by moving pixels already drawn (for tests).
     scroll_copies: u64,
+    /// Layers drawn into mattes (`isolated`), for tests.
+    #[cfg(test)]
+    layers_drawn: usize,
     /// The text services the scene is laid out with (`share_text`): plain
     /// text drawn from their layout, as the GPU renderer draws it.
     shared_text: Option<std::rc::Rc<std::cell::RefCell<SharedText>>>,
     /// What the last frame changed: what it repainted and the views whose
     /// pixels it moved (`changed`).
     changed: Vec<Rect>,
+}
+/// The bundled font plain text falls back to (text a raster draws without
+/// its scene's text services, `share_text`), parsed the first time one
+/// draws with it, once for every raster in the process. Parsed, it holds
+/// every glyph's outline (about 17 MB); a window whose text goes through its
+/// scene's services may never need it.
+fn bundled_font() -> &'static Font {
+    BUNDLED.get_or_init(|| {
+        Font::from_bytes(
+            include_bytes!("../assets/DejaVuSans.ttf") as &[u8],
+            FontSettings::default(),
+        )
+        .expect("bundled font")
+    })
+}
+static BUNDLED: std::sync::OnceLock<Font> = std::sync::OnceLock::new();
+/// Whether the bundled font has been parsed (`bundled_font`): for tests.
+#[doc(hidden)]
+pub fn bundled_font_parsed() -> bool {
+    BUNDLED.get().is_some()
 }
 /// Text services a raster shares with its scene, and the glyph images it
 /// drew from them.
@@ -87,11 +109,6 @@ impl Raster {
             pixels: vec![0x10141c; width * height],
             width,
             height,
-            font: Font::from_bytes(
-                include_bytes!("../assets/DejaVuSans.ttf") as &[u8],
-                FontSettings::default(),
-            )
-            .expect("bundled font"),
             styled_fonts: Default::default(),
             styled_glyphs: HashMap::new(),
             rich_glyphs: Vec::new(),
@@ -104,6 +121,8 @@ impl Raster {
             selected: None,
             rendered: None,
             scroll_copies: 0,
+            #[cfg(test)]
+            layers_drawn: 0,
             shared_text: None,
             changed: Vec::new(),
         }
@@ -544,11 +563,36 @@ impl Raster {
         {
             return;
         }
+        let output = Rect::new(
+            x - self.origin.0,
+            y - self.origin.1,
+            width as f32,
+            height as f32,
+        );
+        // A transformed layer samples back through its matrix (from this
+        // target's origin), nearest texel, as transformed images do.
+        let matrix = item.projective().map(|matrix| {
+            use zgx::affine::{Affine, Projective};
+            let (x, y) = self.origin;
+            Projective::from(Affine::translation(x, y))
+                .then(matrix)
+                .then(Projective::from(Affine::translation(-x, -y)))
+        });
+        let inverse = match matrix.map(|matrix| matrix.inverse()) {
+            Some(None) => return,
+            Some(inverse) => inverse,
+            None => None,
+        };
+        // Its mattes are drawn only for the area being painted that it
+        // reaches: a layer outside it costs nothing.
+        let painted = matrix.map_or(output, |matrix| matrix.bounds(output));
+        let Some(visible) = intersect(painted, clip) else {
+            return;
+        };
         let make = |background| Self {
             pixels: vec![background; width * height],
             width,
             height,
-            font: self.font.clone(),
             styled_fonts: self.styled_fonts.clone(),
             styled_glyphs: HashMap::new(),
             rich_glyphs: Vec::new(),
@@ -561,9 +605,15 @@ impl Raster {
             selected: None,
             rendered: None,
             scroll_copies: 0,
+            #[cfg(test)]
+            layers_drawn: 0,
             shared_text: self.shared_text.clone(),
             changed: Vec::new(),
         };
+        #[cfg(test)]
+        {
+            self.layers_drawn += 1;
+        }
         let mut black = make(0);
         let mut white = make(0xffffff);
         let mut items = scene.layer_items(Some(item.id));
@@ -598,32 +648,8 @@ impl Raster {
             };
             image.pixels()[(ty * image.width() as usize + tx) * 4 + 3] as f32 / 255.
         };
-        let output = Rect::new(
-            x - self.origin.0,
-            y - self.origin.1,
-            width as f32,
-            height as f32,
-        );
         // Mixed with the pixels under it by its blend mode.
         let mode = scene.blend(item.id);
-        // A transformed layer samples back through its matrix (from this
-        // target's origin), nearest texel, as transformed images do.
-        let matrix = item.projective().map(|matrix| {
-            use zgx::affine::{Affine, Projective};
-            let (x, y) = self.origin;
-            Projective::from(Affine::translation(x, y))
-                .then(matrix)
-                .then(Projective::from(Affine::translation(-x, -y)))
-        });
-        let inverse = match matrix.map(|matrix| matrix.inverse()) {
-            Some(None) => return,
-            Some(inverse) => inverse,
-            None => None,
-        };
-        let painted = matrix.map_or(output, |matrix| matrix.bounds(output));
-        let Some(visible) = intersect(painted, clip) else {
-            return;
-        };
         if item.effects.blur_radius > 0. {
             self.blur(visible, item.effects.blur_radius.ceil().min(64.) as usize)
         }
@@ -770,6 +796,64 @@ impl Raster {
         if let zgx::image::ImageEffect::Characters(pixel) = image.effect() {
             return self.characters(bounds, clip, image, effects, pixel, reveal);
         }
+        if image.transform() == zgx::affine::Affine::IDENTITY && image.dither() <= 0. {
+            return self.image_upright(bounds, clip, image, effects);
+        }
+        self.image_mapped(bounds, clip, image, effects);
+    }
+    /// `image` neither transformed nor dithered: the column of it a pixel
+    /// shows depends on the pixel's column alone, the row on its row, so
+    /// each is worked out once (as `image_mapped` works them out for every
+    /// pixel), and the pixels a row covers are blended along it.
+    fn image_upright(
+        &mut self,
+        bounds: Rect,
+        clip: Rect,
+        image: &zgx::image::ImageData,
+        effects: Effects,
+    ) {
+        let Some(visible) = intersect(bounds, clip) else {
+            return;
+        };
+        let (x0, y0, x1, y1) = self.region(visible);
+        let (width, height) = (image.width(), image.height());
+        // The texel at `at` along a side from `start`, `size` long and
+        // `texels` across; none outside it.
+        let texel = |at: f32, start: f32, size: f32, texels: u32| {
+            (at >= start && at < start + size)
+                .then(|| (((at - start) / size * texels as f32).max(0.) as u32).min(texels - 1))
+        };
+        let columns: Vec<Option<u32>> = (x0..x1)
+            .map(|x| texel(x as f32 + 0.5, bounds.x, bounds.width, width))
+            .collect();
+        let pixels = image.pixels();
+        for y in y0..y1 {
+            let local_y = y as f32 + 0.5;
+            let Some(sy) = texel(local_y, bounds.y, bounds.height, height) else {
+                continue;
+            };
+            let opacity = effects.opacity * edge_alpha(local_y, bounds, effects.edge_fade);
+            let row = &pixels[(sy * width * 4) as usize..((sy + 1) * width * 4) as usize];
+            let line = &mut self.pixels[y * self.width + x0..y * self.width + x1];
+            for (pixel, sx) in line.iter_mut().zip(&columns) {
+                let Some(sx) = sx else {
+                    continue;
+                };
+                let i = *sx as usize * 4;
+                let [r, g, b, a] = [row[i], row[i + 1], row[i + 2], row[i + 3]];
+                blend(pixel, Color(r, g, b, a), opacity);
+            }
+        }
+    }
+    /// `image` through its transform, dithered on the screen's grid if it
+    /// is: each pixel sampled where it maps back to.
+    fn image_mapped(
+        &mut self,
+        bounds: Rect,
+        clip: Rect,
+        image: &zgx::image::ImageData,
+        effects: Effects,
+    ) {
         let transform = image.paint_transform(bounds);
         let Some(inverse) = transform.inverse() else {
             return;
@@ -1041,28 +1125,55 @@ impl Raster {
             return;
         };
         let (x0, y0, x1, y1) = self.region(visible);
+        // A row's pixels whose centres lie inside the box past its corners'
+        // curve and its border, by more than half a pixel (and a margin for
+        // rounding), are covered whole: the fill's colour, its coverage
+        // math (a distance with a square root a pixel) left out. A terminal
+        // repaints its background under every frame of output: that math
+        // was most of a frame on the raster. The rest of the row (its ends,
+        // the rows through the corners and the border) as before.
+        let radius = style
+            .radius
+            .max(0.)
+            .min(bounds.width.min(bounds.height) * 0.5);
+        let border = style.border_width.max(0.);
+        let (cx, cy) = (
+            bounds.x + bounds.width * 0.5,
+            bounds.y + bounds.height * 0.5,
+        );
+        const MARGIN: f32 = 1e-2;
+        let reach_x = bounds.width * 0.5 - border - 0.5 - MARGIN;
+        let reach_y = bounds.height * 0.5 - radius.max(border + 0.5) - MARGIN;
+        let whole = quad_color(&style, 1., 1.);
         for y in y0..y1 {
-            for x in x0..x1 {
+            let amount = effects.opacity * edge_alpha(y as f32, bounds, effects.edge_fade);
+            let (from, to) = match whole {
+                Some(_) if reach_x >= 0. && (y as f32 + 0.5 - cy).abs() <= reach_y => {
+                    // x + 0.5 within `reach_x` of the centre.
+                    let from = (cx - reach_x - 0.5).ceil().max(x0 as f32) as usize;
+                    let to = ((cx + reach_x - 0.5).floor() + 1.).min(x1 as f32).max(0.) as usize;
+                    (from.min(x1), to.max(from.min(x1)))
+                }
+                _ => (x1, x1),
+            };
+            let row = y * self.width;
+            for x in (x0..from).chain(to..x1) {
                 let d = rounded_distance(x as f32 + 0.5, y as f32 + 0.5, bounds, style.radius);
                 let outer = (0.5 - d).clamp(0., 1.);
-                let inner = (0.5 - d - style.border_width.max(0.)).clamp(0., 1.);
-                let amount = effects.opacity * edge_alpha(y as f32, bounds, effects.edge_fade);
-                let a = style.fill.3 as f32 / 255. * inner
-                    + style.border_color.3 as f32 / 255. * (outer - inner);
-                if a > 0. {
-                    let channel = |fill: u8, border: u8| {
-                        ((fill as f32 * style.fill.3 as f32 / 255. * inner
-                            + border as f32 * style.border_color.3 as f32 / 255. * (outer - inner))
-                            / a)
-                            .round() as u8
-                    };
-                    let c = Color(
-                        channel(style.fill.0, style.border_color.0),
-                        channel(style.fill.1, style.border_color.1),
-                        channel(style.fill.2, style.border_color.2),
-                        (a * 255.).round() as u8,
-                    );
-                    blend(&mut self.pixels[y * self.width + x], c, amount);
+                let inner = (0.5 - d - border).clamp(0., 1.);
+                if let Some(c) = quad_color(&style, inner, outer) {
+                    blend(&mut self.pixels[row + x], c, amount);
+                }
+            }
+            if let Some(c) = whole.filter(|_| from < to) {
+                let span = &mut self.pixels[row + from..row + to];
+                // Opaque at full opacity: the colour itself (`blend` gives it).
+                if c.3 == 255 && amount >= 1. {
+                    span.fill((c.0 as u32) << 16 | (c.1 as u32) << 8 | c.2 as u32);
+                } else {
+                    for pixel in span {
+                        blend(pixel, c, amount);
+                    }
                 }
             }
         }
@@ -1075,6 +1186,9 @@ impl Raster {
         clip: Rect,
         effects: Effects,
     ) {
+        if self.shared_rich_text(text, bounds, clip, effects) {
+            return;
+        }
         let Some(clip) = intersect(bounds, clip) else {
             return;
         };
@@ -1234,7 +1348,11 @@ impl Raster {
         let (x0, y0, x1, y1) = self.region(clip);
         // Its origin on a whole pixel, as the GPU renderer snaps it.
         let (ox, oy) = (bounds.x.round() as i32, bounds.y.round() as i32);
+        // Thickened for its colour as the GPU renderer keys its glyphs
+        // (macOS's font smoothing; none elsewhere).
+        let smoothing = zgx_gpu::text::smoothing(color);
         for (key, x, y) in places {
+            let key = zgx_gpu::text::smoothed(key, smoothing);
             if !images.contains_key(&key) {
                 let image = zgx_gpu::glyph_image(swash, &mut fonts, key);
                 *image_bytes += image.as_ref().map_or(0, |i| i.data.capacity());
@@ -1247,46 +1365,8 @@ impl Raster {
             let Some(image) = &images[&key] else {
                 continue;
             };
-            let gx = ox + x as i32 + image.placement.left;
-            let gy = oy + y as i32 - image.placement.top;
-            let color = selected_ink(&self.selected, bounds, gx, gy, image, color);
-            for by in 0..image.placement.height as usize {
-                let py = gy + by as i32;
-                if py < y0 as i32 || py >= y1 as i32 {
-                    continue;
-                }
-                for bx in 0..image.placement.width as usize {
-                    let px = gx + bx as i32;
-                    if px < x0 as i32 || px >= x1 as i32 {
-                        continue;
-                    }
-                    let i = by * image.placement.width as usize + bx;
-                    let (ink, alpha) = match image.content {
-                        cosmic_text::SwashContent::Mask => (
-                            color,
-                            zgx_gpu::glyph_coverage(image.data[i] as f32 / 255., color, 1.),
-                        ),
-                        cosmic_text::SwashContent::Color => (
-                            Color(
-                                image.data[i * 4],
-                                image.data[i * 4 + 1],
-                                image.data[i * 4 + 2],
-                                color.3,
-                            ),
-                            image.data[i * 4 + 3] as f32 / 255.,
-                        ),
-                        cosmic_text::SwashContent::SubpixelMask => (
-                            color,
-                            zgx_gpu::glyph_coverage(image.data[i * 4] as f32 / 255., color, 1.),
-                        ),
-                    };
-                    blend(
-                        &mut self.pixels[py as usize * self.width + px as usize],
-                        ink,
-                        effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade) * alpha,
-                    );
-                }
-            }
+            let at = (ox + x as i32, oy + y as i32);
+            self.shared_glyph(image, at, color, (x0, y0, x1, y1), bounds, effects);
         }
         // Its underlines in its colour, as the GPU draws them: on whole
         // pixels.
@@ -1305,6 +1385,163 @@ impl Raster {
                 }
             }
         }
+        true
+    }
+    /// A shared glyph `image` drawn with its pen at `at` in `color`, within
+    /// `region` (`x0, y0, x1, y1`), coverage as the GPU renderer draws it at
+    /// 1x (`glyph_coverage`).
+    fn shared_glyph(
+        &mut self,
+        image: &cosmic_text::SwashImage,
+        at: (i32, i32),
+        color: Color,
+        (x0, y0, x1, y1): (usize, usize, usize, usize),
+        bounds: Rect,
+        effects: Effects,
+    ) {
+        let gx = at.0 + image.placement.left;
+        let gy = at.1 - image.placement.top;
+        let color = selected_ink(&self.selected, bounds, gx, gy, image, color);
+        for by in 0..image.placement.height as usize {
+            let py = gy + by as i32;
+            if py < y0 as i32 || py >= y1 as i32 {
+                continue;
+            }
+            for bx in 0..image.placement.width as usize {
+                let px = gx + bx as i32;
+                if px < x0 as i32 || px >= x1 as i32 {
+                    continue;
+                }
+                let i = by * image.placement.width as usize + bx;
+                let (ink, alpha) = match image.content {
+                    cosmic_text::SwashContent::Mask => (
+                        color,
+                        zgx_gpu::glyph_coverage(image.data[i] as f32 / 255., color, 1.),
+                    ),
+                    cosmic_text::SwashContent::Color => (
+                        Color(
+                            image.data[i * 4],
+                            image.data[i * 4 + 1],
+                            image.data[i * 4 + 2],
+                            color.3,
+                        ),
+                        image.data[i * 4 + 3] as f32 / 255.,
+                    ),
+                    cosmic_text::SwashContent::SubpixelMask => (
+                        color,
+                        zgx_gpu::glyph_coverage(image.data[i * 4] as f32 / 255., color, 1.),
+                    ),
+                };
+                blend(
+                    &mut self.pixels[py as usize * self.width + px as usize],
+                    ink,
+                    effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade) * alpha,
+                );
+            }
+        }
+    }
+    /// Rich text from the shared services (`share_text`), laid out and each
+    /// glyph placed and keyed as the GPU renderer does at 1x, thickened for
+    /// its run's colour: false without them. Its decorations on whole
+    /// pixels, backgrounds under the glyphs and lines over them.
+    fn shared_rich_text(
+        &mut self,
+        text: &zgx::rich_text::RichText,
+        bounds: Rect,
+        clip: Rect,
+        effects: Effects,
+    ) -> bool {
+        const IMAGE_BUDGET: usize = 8 * 1024 * 1024;
+        let Some(shared) = self.shared_text.clone() else {
+            return false;
+        };
+        let mut shared = shared.borrow_mut();
+        let SharedText {
+            fonts,
+            cache,
+            swash,
+            images,
+            image_bytes,
+            drawn,
+        } = &mut *shared;
+        let mut fonts = fonts.borrow_mut();
+        let (places, decorations, key) = zgx_gpu::rich_glyph_places(
+            &mut fonts,
+            &mut cache.borrow_mut(),
+            text,
+            bounds.width,
+            bounds.height,
+            1.,
+        );
+        drawn.extend(key);
+        let Some(clip) = intersect(bounds, clip) else {
+            return true;
+        };
+        let region = self.region(clip);
+        // Its origin on a whole pixel, as the GPU renderer snaps it.
+        let (ox, oy) = (bounds.x.round() as i32, bounds.y.round() as i32);
+        let paint = |raster: &mut Self, background: bool| {
+            for d in decorations.iter().filter(|d| d.background == background) {
+                let (left, top) = (
+                    (d.bounds.x + ox as f32).round(),
+                    (d.bounds.y + oy as f32).round(),
+                );
+                let right = (d.bounds.x + ox as f32 + d.bounds.width).round();
+                let bottom = (d.bounds.y + oy as f32 + d.bounds.height).round();
+                let line = Rect::new(left, top, right - left, (bottom - top).max(1.));
+                let Some(shown) = intersect(line, clip) else {
+                    continue;
+                };
+                let (lx0, ly0, lx1, ly1) = raster.region(shown);
+                for py in ly0..ly1 {
+                    let alpha = effects.opacity * edge_alpha(py as f32, bounds, effects.edge_fade);
+                    for pixel in
+                        &mut raster.pixels[py * raster.width + lx0..py * raster.width + lx1]
+                    {
+                        blend(pixel, d.color, alpha);
+                    }
+                }
+            }
+        };
+        paint(self, true);
+        // A run's level worked out once, not per glyph (as the renderer).
+        let mut last: Option<(usize, Color, u8)> = None;
+        for (key, x, y, run) in places {
+            let (color, smoothing) = match last {
+                Some((at, color, smoothing)) if at == run => (color, smoothing),
+                _ => {
+                    let color = text
+                        .runs()
+                        .get(run)
+                        .map_or(Color(0, 0, 0, 255), |r| r.color);
+                    let smoothing = zgx_gpu::text::smoothing(color);
+                    last = Some((run, color, smoothing));
+                    (color, smoothing)
+                }
+            };
+            let key = zgx_gpu::text::smoothed(key, smoothing);
+            if !images.contains_key(&key) {
+                let image = zgx_gpu::glyph_image(swash, &mut fonts, key);
+                *image_bytes += image.as_ref().map_or(0, |i| i.data.capacity());
+                if *image_bytes > IMAGE_BUDGET {
+                    images.clear();
+                    *image_bytes = 0;
+                }
+                images.insert(key, image);
+            }
+            let Some(image) = &images[&key] else {
+                continue;
+            };
+            self.shared_glyph(
+                image,
+                (ox + x as i32, oy + y as i32),
+                color,
+                region,
+                bounds,
+                effects,
+            );
+        }
+        paint(self, false);
         true
     }
     #[allow(clippy::too_many_arguments)]
@@ -1421,7 +1658,7 @@ impl Raster {
             let (m, bitmap) = self
                 .glyphs
                 .entry((ch, size.to_bits()))
-                .or_insert_with(|| self.font.rasterize(ch, size));
+                .or_insert_with(|| bundled_font().rasterize(ch, size));
             if x + m.advance_width > bounds.x + bounds.width {
                 x = bounds.x;
                 baseline += line_height;
@@ -1548,6 +1785,19 @@ fn pack(s: [u64; 3], n: u64) -> u32 {
 }
 fn blend(pixel: &mut u32, c: Color, opacity: f32) {
     let a = (c.3 as f32 * opacity.clamp(0., 1.)).round() as u32;
+    // What the sums below come to at either end: the pixel as it was, or
+    // the colour.
+    match a {
+        0 => {
+            *pixel &= 0xff_ffff;
+            return;
+        }
+        255 => {
+            *pixel = ((c.0 as u32) << 16) | ((c.1 as u32) << 8) | c.2 as u32;
+            return;
+        }
+        _ => {}
+    }
     let inv = 255 - a;
     let r = (c.0 as u32 * a + ((*pixel >> 16) & 255) * inv + 127) / 255;
     let g = (c.1 as u32 * a + ((*pixel >> 8) & 255) * inv + 127) / 255;
@@ -1590,6 +1840,75 @@ fn edge_alpha(y: f32, bounds: Rect, fade: f32) -> f32 {
 mod tests {
     use super::*;
     use zgx::scene::{Effects, Layout, NodeKind, Style, Transform};
+
+    /// A quad's pixels inside its box, past its corners and its border, are
+    /// filled without the coverage math (`quad`), exactly as that math
+    /// paints them: every pixel the same as each pixel computed in full,
+    /// over many boxes (sizes and places between pixels, radii, borders,
+    /// fills opaque, translucent and clear, opacity, edge fades, clips).
+    #[test]
+    fn a_quads_inside_is_filled_as_its_coverage_paints_it() {
+        let (w, h) = (64usize, 48usize);
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |range: f32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 10_000) as f32 / 10_000. * range
+        };
+        let scene = Scene::new(w as f32, h as f32);
+        let node = scene.root();
+        for case in 0..400 {
+            let bounds = Rect::new(next(30.) - 6., next(24.) - 6., next(56.), next(44.));
+            let clip = match case % 3 {
+                0 => Rect::new(0., 0., w as f32, h as f32),
+                1 => Rect::new(next(20.), next(16.), next(50.), next(40.)),
+                _ => Rect::new(-5., -5., w as f32 + 10., h as f32 + 10.),
+            };
+            let alpha = [255u8, 128, 0, 255][case % 4];
+            let style = zgx::scene::QuadStyle {
+                fill: Color(next(255.) as u8, next(255.) as u8, next(255.) as u8, alpha),
+                radius: [0., 3., 8.5, 20.][case % 4 / 2 + case % 2],
+                border_color: Color(next(255.) as u8, 40, 200, [255u8, 90][case % 2]),
+                border_width: [0., 1., 2.5, 4.][(case / 3) % 4],
+                ..Default::default()
+            };
+            let effects = Effects {
+                opacity: [1., 0.6][(case / 5) % 2],
+                edge_fade: [0., 6.][(case / 7) % 2],
+                ..Effects::default()
+            };
+            let mut raster = Raster::new(w, h);
+            for (i, pixel) in raster.pixels.iter_mut().enumerate() {
+                *pixel = (i as u32).wrapping_mul(2_654_435_761) & 0x00ff_ffff;
+            }
+            let mut expected = raster.pixels.clone();
+            raster.quad(node, bounds, clip, style.clone(), effects);
+            // Every pixel in full, as `quad` did before.
+            if let Some(visible) = intersect(bounds, clip) {
+                let (x0, y0, x1, y1) = raster.region(visible);
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let d =
+                            rounded_distance(x as f32 + 0.5, y as f32 + 0.5, bounds, style.radius);
+                        let outer = (0.5 - d).clamp(0., 1.);
+                        let inner = (0.5 - d - style.border_width.max(0.)).clamp(0., 1.);
+                        let amount =
+                            effects.opacity * edge_alpha(y as f32, bounds, effects.edge_fade);
+                        if let Some(c) = quad_color(&style, inner, outer) {
+                            blend(&mut expected[y * w + x], c, amount);
+                        }
+                    }
+                }
+            }
+            let differ = (0..w * h).find(|&i| raster.pixels[i] != expected[i]);
+            assert_eq!(
+                differ.map(|i| (i % w, i / w, raster.pixels[i], expected[i])),
+                None,
+                "case {case}: {bounds:?} {clip:?} {style:?} {effects:?}"
+            );
+        }
+    }
     #[test]
     fn a_selection_recolours_the_glyphs_it_holds_and_rounds_its_highlight() {
         let mut scene = Scene::new(120., 40.);
@@ -1688,6 +2007,105 @@ mod tests {
         assert_eq!(raster.pixels[6 * 40 + 6], 0x14283c);
         assert_eq!(raster.pixels[14 * 40 + 12], 0xff0000);
         assert_eq!(raster.pixels[40 + 20], 0xc86400);
+    }
+    /// An image neither transformed nor dithered is drawn a row at a time
+    /// (`image_upright`), exactly as sampling each pixel paints it
+    /// (`image_mapped`): over many images (sizes, drawn larger and smaller,
+    /// at places between pixels; texels opaque, translucent and clear), at
+    /// opacities, with edge fades, under clips.
+    #[test]
+    fn an_upright_image_is_drawn_as_each_pixel_samples_it() {
+        let (w, h) = (48usize, 40usize);
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = |range: f32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 10_000) as f32 / 10_000. * range
+        };
+        for case in 0..400 {
+            let (iw, ih) = (1 + next(24.) as u32, 1 + next(20.) as u32);
+            let texels: Vec<u8> = (0..iw * ih)
+                .flat_map(|_| {
+                    let alpha = match next(4.) as u32 {
+                        0 => 0,
+                        1 => 255,
+                        _ => next(256.) as u8,
+                    };
+                    [next(256.) as u8, next(256.) as u8, next(256.) as u8, alpha]
+                })
+                .collect();
+            let image = zgx::image::ImageData::new(iw, ih, texels).unwrap();
+            // Whole-pixel places and sizes half the time, as a row's canvas
+            // is drawn.
+            let whole = case % 2 == 0;
+            let at = |v: f32| if whole { v.round() } else { v };
+            let bounds = Rect::new(
+                at(next(40.) - 8.),
+                at(next(32.) - 6.),
+                if case % 4 == 0 {
+                    iw as f32
+                } else {
+                    at(1. + next(40.))
+                },
+                if case % 4 == 0 {
+                    ih as f32
+                } else {
+                    at(1. + next(32.))
+                },
+            );
+            let clip = if case % 3 == 0 {
+                Rect::new(0., 0., w as f32, h as f32)
+            } else {
+                Rect::new(next(20.), next(16.), 4. + next(40.), 4. + next(30.))
+            };
+            let effects = Effects {
+                opacity: [1., 1., 0.5, next(1.)][case % 4],
+                edge_fade: if case % 5 == 0 { next(8.) } else { 0. },
+                ..Default::default()
+            };
+            let mut fast = Raster::new(w, h);
+            let mut each = Raster::new(w, h);
+            for (i, pixel) in fast.pixels.iter_mut().enumerate() {
+                *pixel = (i as u32).wrapping_mul(0x9e37_79b9) & 0xff_ffff;
+            }
+            each.pixels.copy_from_slice(&fast.pixels);
+            fast.image_upright(bounds, clip, &image, effects);
+            each.image_mapped(bounds, clip, &image, effects);
+            assert!(
+                fast.pixels == each.pixels,
+                "case {case}: {iw}x{ih} in {bounds:?} under {clip:?}, {effects:?}"
+            );
+        }
+    }
+    /// `blend` of a clear or an opaque colour comes to what its sums do.
+    #[test]
+    fn blending_at_either_end_comes_to_its_sums() {
+        let summed = |pixel: u32, c: Color, opacity: f32| {
+            let a = (c.3 as f32 * opacity.clamp(0., 1.)).round() as u32;
+            let mix = |source: u8, shift: u32| {
+                (source as u32 * a + ((pixel >> shift) & 255) * (255 - a) + 127) / 255
+            };
+            (mix(c.0, 16) << 16) | (mix(c.1, 8) << 8) | mix(c.2, 0)
+        };
+        let mut seed = 0x2545_f491_u32;
+        for _ in 0..20_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let [r, g, b, pick] = seed.to_le_bytes();
+            let alpha = [0, 255, pick][(pick % 3) as usize];
+            let opacity = [1., 0., 0.5, 2.][(seed >> 7) as usize % 4];
+            let pixel = seed.rotate_left(11);
+            let c = Color(r, g, b, alpha);
+            let mut blended = pixel;
+            blend(&mut blended, c, opacity);
+            assert_eq!(
+                blended,
+                summed(pixel, c, opacity),
+                "{pixel:#x} {c:?} {opacity}"
+            );
+        }
     }
     fn scene() -> Scene {
         let mut s = Scene::new(100., 80.);
@@ -2271,6 +2689,28 @@ fn dithered([r, g, b, a]: [u8; 4], x: u32, y: u32) -> [u8; 4] {
     let level = |c: u8| (c as f32 * gain).round().min(255.) as u8;
     [level(r), level(g), level(b), a]
 }
+/// The colour a quad paints a pixel covered `inner` by its fill and
+/// `outer` by its border's outer edge (`inner` ≤ `outer`): none where it
+/// paints nothing.
+fn quad_color(style: &zgx::scene::QuadStyle, inner: f32, outer: f32) -> Option<Color> {
+    let a =
+        style.fill.3 as f32 / 255. * inner + style.border_color.3 as f32 / 255. * (outer - inner);
+    if a <= 0. {
+        return None;
+    }
+    let channel = |fill: u8, border: u8| {
+        ((fill as f32 * style.fill.3 as f32 / 255. * inner
+            + border as f32 * style.border_color.3 as f32 / 255. * (outer - inner))
+            / a)
+            .round() as u8
+    };
+    Some(Color(
+        channel(style.fill.0, style.border_color.0),
+        channel(style.fill.1, style.border_color.1),
+        channel(style.fill.2, style.border_color.2),
+        (a * 255.).round() as u8,
+    ))
+}
 fn rounded_distance(x: f32, y: f32, bounds: Rect, radius: f32) -> f32 {
     let r = radius.max(0.).min(bounds.width.min(bounds.height) * 0.5);
     let qx = (x - bounds.x - bounds.width * 0.5).abs() - bounds.width * 0.5 + r;
@@ -2393,6 +2833,72 @@ mod isolation_tests {
         raster.render(&scene, &d);
         let partial = raster.pixels.clone();
         raster.render(&scene, &[Rect::new(0., 0., 40., 30.)]);
+        assert_eq!(partial, raster.pixels);
+    }
+    #[test]
+    fn a_layer_away_from_the_damage_is_not_drawn() {
+        let mut scene = Scene::new(60., 30.);
+        let root = scene.root();
+        let root = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                width: Some(60.),
+                height: Some(30.),
+                ..Default::default()
+            },
+        );
+        // A faded group at the left, a box at the right that changes.
+        let group = scene.append(
+            root,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                width: Some(20.),
+                height: Some(20.),
+                ..Default::default()
+            },
+        );
+        scene.set_isolated(group, true);
+        scene.set_effects(
+            group,
+            Effects {
+                opacity: 0.5,
+                ..Default::default()
+            },
+        );
+        scene.append(
+            group,
+            NodeKind::Rect(Color(255, 0, 0, 255)),
+            Style {
+                width: Some(20.),
+                height: Some(20.),
+                ..Default::default()
+            },
+        );
+        let right = scene.append(
+            root,
+            NodeKind::Rect(Color(0, 0, 255, 255)),
+            Style {
+                width: Some(10.),
+                height: Some(10.),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(right, Transform { x: 45., y: 5. });
+        let mut raster = Raster::new(60, 30);
+        let d = scene.flush().damage;
+        raster.render(&scene, &d);
+        assert_eq!(raster.layers_drawn, 1, "drawn with the first frame");
+        scene.set_kind(right, NodeKind::Rect(Color(0, 255, 0, 255)));
+        let d = scene.flush().damage;
+        assert!(d.iter().all(|r| r.x >= 20.), "damage away from it: {d:?}");
+        raster.render(&scene, &d);
+        assert_eq!(raster.layers_drawn, 1, "nothing of it was repainted");
+        assert_eq!(raster.pixels[10 * 60 + 50], 0x00ff00);
+        // As a whole frame paints it.
+        let partial = raster.pixels.clone();
+        raster.render(&scene, &[Rect::new(0., 0., 60., 30.)]);
+        assert_eq!(raster.layers_drawn, 2);
         assert_eq!(partial, raster.pixels);
     }
 }

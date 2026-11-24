@@ -38,7 +38,7 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `weight` | `number` | `400` | 100 to 900 |
 | `bold` | `boolean` | `false` | weight 700 |
 | `italic` | `boolean` | `false` | |
-| `font` | `string` | the host's | `"mono"` (or `"monospace"`), `"sans"`, `"serif"`, or a family name |
+| `font` | `string` | the host's | `"mono"` (or `"monospace"`), `"sans"`, `"serif"`, or a family name: installed, the host's, or one the script loaded ([fonts](#fonts)) |
 | `align` | `"start" \| "left" \| "center" \| "right"` | `"start"` | within the text's own box |
 | `wrap` | `boolean \| "balance"` | `false` | wrap at the box's width; `"balance"` balances the lines, as CSS's `text-wrap: balance` (see [properties](properties.md)) |
 | `lines` | `number` | none | at most this many lines |
@@ -146,7 +146,7 @@ return ui.column {
 ui.markdown_view(props: MarkdownViewProps) -> Node
 ```
 
-`ui.markdown_view { text }` draws markdown: paragraphs and headings of styled runs (bold, italic, struck, `code`, links), lists, quotes, rules, tables, and code blocks with their language and a Copy button, in the theme's colours and sizes (`$surface.sunken`, `$border.subtle`, `$text.tertiary`, `$font.size.*`), selectable as prose is. Its text is a string, a template, a state's (`"{reply}"`) or a function. As the text changes it parses only what changed and builds only the blocks whose value changed, so a reply streaming in grows by its last block, and every block before it keeps its nodes, layout and paint. A state's text given as it is (`"{reply}"`) is read where it lies, not copied; streamed in with `reply:append(token)`, a long one (past 64 KB) is parsed from what was appended, without comparing the document again. Options: `breaks` (single newlines break lines), `paths` (repository paths are files), `copy = false` (no Copy buttons); the rest are a column's styles (`gap` between blocks is 10).
+`ui.markdown_view { text }` draws markdown: paragraphs and headings of styled runs (bold, italic, struck, `code`, links), lists, quotes, rules, tables, and code blocks with their language and a Copy button, in the theme's colours and sizes (`$surface.sunken`, `$border.subtle`, `$text.tertiary`, `$font.size.*`), selectable as prose is. Its text is a string, a template, a state's (`"{reply}"`) or a function. As the text changes it parses only what changed and builds only the blocks whose value changed, so a reply streaming in grows by its last block, and every block before it keeps its nodes, layout and paint. A state's text given as it is (`"{reply}"`) is read where it lies, not copied; streamed in with `reply:append(token)`, a long one (past 64 KB) is parsed from what was appended, without comparing the document again. Options: `breaks` (single newlines break lines), `paths` (repository paths are files), `html_marks` (inline HTML's marks style their text, as `ui.markdown`'s option), `autolinks` (`https://…`, `www.…` and emails in the text are links, as `ui.markdown`'s option), `copy = false` (no Copy buttons); the rest are a column's styles (`gap` between blocks is 10).
 
 ```lua
 local reply = ui.state("reply", "Some **bold** text, then code:\n\n```lua\nprint(1)\n```")
@@ -160,13 +160,15 @@ ui.markdown(text: string, opts: MarkdownOptions?) -> { MarkdownBlock }
 ui.markdown(text: State<string>, opts: MarkdownOptions?) -> ReadOnlyState<{ MarkdownBlock }>
 ```
 
-`ui.markdown` parses markdown (CommonMark with tables, strikethrough and task lists; raw HTML dropped) into blocks for a script to draw its own way. A block has `t`: `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`), `ul` and `ol` (`start`, `items`: each item a list of blocks), `quote` (`b`: blocks), `hr`, `table` (`head`: cells, `rows`: rows of cells, a cell being runs; `align`, only when the source aligns a column: each column's `"start"`, `"center"`, `"end"` or `""`) and `img` (`src`, `alt`). A picture on a line of its own (only blanks beside it) is an `img` block, splitting its paragraph there: the words before it a `p`, the picture, the words after it another, and no empty `p` where it took a paragraph's place. Among words it is a run with `img` (its source) and `x` its alt text. A tight list item's text is a `p` with `tight`. Quotes and lists nest 64 levels at most (a list level counts two); deeper ones show as the deepest level's blocks. A run is `{ x = text, b?, i?, c? (code), s? (strike), a? (link), f? (a file), img? (a picture's source) }`. The types say so: a `MarkdownBlock` is a union by `t`, so `if b.t == "code" then … b.lang … end` is checked, and a run is a `MarkdownRun`.
+`ui.markdown` parses markdown (CommonMark with tables, strikethrough and task lists; raw HTML dropped, but for the inline marks `html_marks` reads) into blocks for a script to draw its own way. A block has `t`: `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`), `ul` and `ol` (`start`, `items`: each item a list of blocks), `quote` (`b`: blocks), `hr`, `table` (`head`: cells, `rows`: rows of cells, a cell being runs; `align`, only when the source aligns a column: each column's `"start"`, `"center"`, `"end"` or `""`) and `img` (`src`, `alt`). A picture on a line of its own (only blanks beside it) is an `img` block, splitting its paragraph there: the words before it a `p`, the picture, the words after it another, and no empty `p` where it took a paragraph's place. Among words it is a run with `img` (its source) and `x` its alt text. A tight list item's text is a `p` with `tight`. Quotes and lists nest 64 levels at most (a list level counts two); deeper ones show as the deepest level's blocks. A run is `{ x = text, b?, i?, c? (code), s? (strike), a? (link), f? (a file), img? (a picture's source) }`. The types say so: a `MarkdownBlock` is a union by `t`, so `if b.t == "code" then … b.lang … end` is checked, and a run is a `MarkdownRun`.
 
 | Option | Type | Default | |
 |---|---|---|---|
 | `key` | `string` | none | names a text that grows (a reply streaming in): each call parses only its new end, and its earlier blocks are the very tables of the last call, so a `ui.each` over them builds only the blocks that changed. A marker left open at the end (`**bold`, a link's address half there) shows closed until the closer arrives, so the text does not restyle and reflow when it does; such a link's `a` is `"zgx:pending-link"` (style it, but it goes nowhere yet) |
 | `breaks` | `boolean` | `false` | single newlines break lines, as people's messages show them |
 | `paths` | `boolean` | `false` | repository paths (`src/main.rs:12`), code spans that are a path whole and relative links that read as one are files: runs with `f` |
+| `html_marks` | `boolean` | `false` | inline HTML's marks style their text, as a web chat showing GitHub-sanitized HTML does: `b`/`strong` bold, `i`/`em` italic, `s`/`del`/`strike` struck, `code`/`kbd`/`samp`/`tt` code, `a href="…"` a link (its `href` alone, and only a relative one or `http`, `https`, `mailto`, `xmpp`, `irc`, `ircs`; an `a` without one is no link), and `br` a line break. Names are any case. A closer ends its own tag's mark, a stray one does nothing, and a tag left open ends with its paragraph, heading, cell or item. Other tags (`sub`, `sup`, `span`, `u`, …) are dropped and their text kept; block HTML is dropped either way. A streaming open tag marks what has come, with nothing to mend |
+| `autolinks` | `boolean` | `false` | GFM's autolink literals are links, as a web chat rendering with remark-gfm shows them: `https://…` and `http://…` (any case) to the text as written, `www.…` to `http://` and the text, and an email (`a@b.co`) to `mailto:`. A literal starts at a line's start, after a space or after `*`, `_`, `~` or `(`, and needs a domain, with no `_` in its last two parts and no period needed (`https://localhost:3000` and `www.localhost` link, as micromark's, remark-gfm's, do); it runs to a space or a `<`, leaving out trailing `?!.,:*_~`, a `)` its own `(`s don't balance, and a trailing entity-like `&name;`, as the markdown writes it (`https://a.b/c&amp;` links to `https://a.b/c`). `ftp://` is no link (remark-gfm links none, though GFM's spec does). Code, links and repository files hold none; marks on the text stay, with the link added. A URL streaming in is linked as it grows, so its runs end as a whole parse's |
 | `lazy` | `boolean` \| `number` | `false` | with `key`: a text of 4 KB or more (`true`; a number sets the bytes) that lands whole, not by appends (a long reply opened at once), comes back at once with one entry a block, and is parsed over the next frames, the end first, so no frame parses all of it. A block not parsed yet is `{ t = "pending", hint, lines, from, to }`: what it is by its first line (`"p"`, `"h"`, `"code"`, `"list"`, `"quote"`, `"table"`, `"hr"`), its lines, and its bytes in the text as `string.sub` takes them, for holding its place (a windowed transcript's boxes) and finding text in it. A block keeps its index from the first answer, and one parsed stays the same table. A computed around the call runs again as blocks come in (the end's, a block asked for with `first`, all). Appends to it parse as ever; shorter texts, and text with link reference definitions, parse at once |
 | `first` | `number` | none | with `lazy`: parse block `first` (from 1) before the other pending ones (a search found something in it) |
 
@@ -209,9 +211,67 @@ return ui.column {
 }
 ```
 
+## Fonts
+
+`font` names a family the system has installed, one the host registered, or one the script loaded. `ui.load_font(src)` loads a TrueType or OpenType file (`.ttf`, `.otf`, `.ttc`, up to 64 MiB) for every window: `src` is a path from the script's directory, a `File` the user picked, or `{ base64 = text }`: a font's bytes in base64, as a server or a host's call hands them over (a font the app downloaded). It returns a promise of the family names the file holds, which is what `font` then names. Text in those families, `ui.text` and a canvas's `c:text` alike, lays out and draws again in it; another file of the same family (its bold, its italic) adds that face beside the others.
+
+```lua
+-- The system's sans until Inter loads, and if it can't.
+local family = ui.state("family", "sans")
+local _ = ui.task(function()
+	local loaded, families = pcall(function()
+		return ui.load_font("fonts/Inter-Regular.ttf"):await() -- { "Inter" }
+	end)
+	if loaded then
+		family:set(families[1])
+	end
+end)
+return ui.text { "Handgloves", font = function() return family:get() end, text_size = 24 }
+```
+
+A canvas's `draw` runs again when a state it reads changes: have it read one the load sets (`family` above) so `c:measure_text` measures in the font once it is there.
+
+A file that is not a font rejects the promise (`kind` `"io"`), as do one that can't be read and text that isn't base64. A plugin's fonts come from its directory or below (or a file the user picked), and only with `Capability::Fonts` (`fonts` in `zgx.json`): a loaded font is the app's too, so the host decides.
+
+## Measuring text
+
+`ui.measure_text(text, style?) -> { w, h }` gives the points `text` takes, as the app lays it out, without mounting anything: a table's column fitted to its widest cell on a header's double-click, or a label's room. `style` takes a canvas text's font options (`size`, 14 by default as a `ui.text`'s, `font`, `weight`, `italic`, `tabular`, `line_height`, `letter_spacing`), and `max_w` wraps it to lines at most that wide (`h` is then the paragraph's height, `w` its widest line).
+
+```luau
+local widest = 0
+for _, row in rows:peek() do
+	widest = math.max(widest, ui.measure_text(row.name, { size = 13 }).w)
+end
+width:set(widest + 16)
+```
+
+On the desktop it measures in the app's fonts (the system's and its own, as `ui.render_canvas` does); in the browser, as the page lays the text out, once a view is mounted (before then it raises an error). Inside a canvas's `draw`, `c:measure_text` measures as that canvas draws.
+
 ## Selectable text
 
 Text is not selectable unless asked, as in native apps. `selectable = true` on any node makes the text in it and everything it holds selectable as a web page's is: one selection runs across its texts, paragraphs, list rows and spans in document order. Drag to select; a double press selects a word and a triple press a paragraph, and dragging after either extends by words or paragraphs; Shift extends; ⌘A / Ctrl+A selects it all and ⌘C / Ctrl+C copies plain text (a tab between texts side by side, a blank line between blocks set apart). A secondary press on selected text offers Copy and Select All. Links and buttons inside still click; a drag that starts on one selects. Holding a drag past a scroll viewport's edge scrolls it, and a selection in `ui.list`'s rows outlives the rows it recycles. `selectable = false` keeps a part out (a toolbar, a timestamp). `ui.markdown_view` is selectable already; drawing `ui.markdown`'s blocks yourself, put `selectable = true` on the node you draw them in, as above. [crates/zgx-script/examples/selectable](../../crates/zgx-script/examples/selectable/app.luau) draws a whole document (`cargo run -p zgx-script --example selectable`). The highlight follows CSS's `::selection`. `selection_color` and `selected_text_color` on the selectable node set its background and the selected glyphs' colour (a colour, a `"$token"`, a state or a function). The tokens `$selection`, `$selection.inactive` (window at the back), `$selection.text` and `$selection.text.inactive` (transparent, the default, keeps the glyphs' colours) and `$selection.radius` style it per subtree through `theme`: `ui.column { selectable = true, theme = { ["selection.text"] = "#ffffff", ["selection.radius"] = 3 }, … }`. Prose the examples ship (the agent trace, the streaming transcript, the notes preview) is selectable, as a browser's would be; controls and chrome are not.
+
+`on_copy` on the selectable node says what a copy out of it puts on the clipboard, for ⌘C / Ctrl+C, the Edit menu and the selection's Copy alike: a quote copied with its source, say. It hears `{ text, html, leaves, rows }`, the selection's plain text and HTML as they would go on the clipboard; for each text node the selection spans in order, the id of the element it is in inside the region (`false` for none); and for each `ui.list` it spans, `{ list, first, last }`, the list's id and the first and last rows (from 1), mounted or not, so a Select All over rows scrolled away still finds what they cite; and returns `{ text, html, types }` (a missing `text` keeps the selection's; `types`, MIME types of the app's own and their text, go beside them in the same copy, where a web page's paste reads them and `ui.clipboard.read_type` reads them back: see the clipboard in `state.md`), or nil to copy as usual. A region without one is never asked and costs nothing. A leaf is known by an element's `id` only, not by a `ui.list` row's `key`: give the text in a row an `id` to know it.
+
+```lua
+local sources: { [string]: string } = { q1 = "Darwin, On the Origin of Species" }
+
+return ui.column {
+	selectable = true,
+	on_copy = function(request)
+		local first = request.leaves[1]
+		local source = if first then sources[first] else nil
+		if not source then
+			return nil
+		end
+		return {
+			text = `{request.text} ({source})`,
+			html = `<blockquote>{request.html}</blockquote><cite>{source}</cite>`,
+		}
+	end,
+	ui.text { "Endless forms most beautiful.", id = "q1" },
+}
+```
 
 On macOS a selection, or an input's, also answers the system's text services: the context menu offers Look Up “…” (⌃⌘D looks up without it), the Services menu takes it as plain text, and a service returning text replaces an editable selection. Selected text drags into inputs, where it moves (Option copies), and into other apps as plain text; a password's never leaves its field ([Rust: dragging text](../drag-drop.md#dragging-text)).
 

@@ -83,6 +83,10 @@ fn started() -> bool {
                 // from now on; no arguments.
                 let ready = unsafe { (api.gtk_init_check)(null_mut(), null_mut()) } != 0;
                 if ready {
+                    // SAFETY: on GTK's thread, after its initialization,
+                    // before any page; first, as it starts the bridge again
+                    // (which sets the socket's `embed`, wrapped below).
+                    unsafe { filter_bridge_events(api) };
                     // SAFETY: the display GTK opened, on its thread; an X
                     // display's name has a colon (":0"), a Wayland one's not.
                     let name = unsafe {
@@ -658,28 +662,17 @@ impl Gtk {
             }
             let im = (api.g_object_new)(im_context_type(api), std::ptr::null::<c_char>());
             (api.webkit_web_view_set_input_method_context)(view, im);
-            let window = match offscreen_type(api) {
-                Some(kind) => {
-                    let window = (api.g_object_new)(kind, std::ptr::null::<c_char>());
-                    // Taken for a window on screen, it is asked which monitor
-                    // it is on as the page realizes (GDK warned of a window
-                    // with no origin): embedded in the root window, it has
-                    // one, the root's.
-                    (api.gtk_widget_realize)(window);
-                    (api.gdk_offscreen_window_set_embedder)(
-                        (api.gtk_widget_get_window)(window),
-                        (api.gdk_get_default_root_window)(),
-                    );
-                    window
-                }
-                None => (api.gtk_offscreen_window_new)(),
-            };
+            let window = page_window(api);
             // No window a screen reader should follow: focus given to the
             // page activates this one, and a reader taking it for the active
-            // window would leave the app's (ATK_ROLE_FILLER).
-            (api.atk_object_set_role)((api.gtk_widget_get_accessible)(window), 20);
+            // window would leave the app's (ATK_ROLE_FILLER). Nor it nor the
+            // view a reader should hear (`keep_from_readers`).
+            let accessible = (api.gtk_widget_get_accessible)(window);
+            (api.atk_object_set_role)(accessible, 20);
             (api.gtk_window_resize)(window, 1, 1);
             (api.gtk_container_add)(window, view);
+            keep_from_readers(api, accessible);
+            keep_from_readers(api, (api.gtk_widget_get_accessible)(view));
             let page = Rc::new(Page {
                 id: spec.id,
                 window,
@@ -993,6 +986,260 @@ fn profile_directories(name: &str) -> (String, String) {
             base("XDG_CACHE_HOME", ".cache")
         ),
     )
+}
+
+// What a screen reader hears of GTK's side.
+//
+// A page's `GtkOffscreenWindow` is GTK's toplevel, not a window anyone sees,
+// and its accessible's parent is GTK's application, not the app's window:
+// focus given to the page focuses and activates it and the view in it.
+// Orca 50 took the window for the active one (from its focus event, and
+// from its active state when it asked at a key), found it had no top-level
+// and cleared its own focus, so it lost the page and its browse mode
+// (heading keys, the caret a click placed). The page's content reaches a
+// reader through the web process's tree, which the page's box embeds
+// (`report_plug_id`). So GTK's side of a page, its window's and view's
+// accessibles, sends no event (dropped before AT-SPI's bridge sends it) and
+// is neither active nor focused when asked; every other object, those of
+// the web process's tree included, is as it was.
+
+/// An AT-SPI bridge listener: a `GSignalEmissionHook`.
+type Hook = unsafe extern "C" fn(Ptr, c_uint, *const c_void, Ptr) -> gtk::gboolean;
+/// `AtkUtilClass::add_global_event_listener`.
+type AddListener = unsafe extern "C" fn(Hook, *const c_char) -> c_uint;
+/// A page's window: offscreen (`offscreen_type`), or GTK's own where that
+/// can't be made.
+///
+/// # Safety
+///
+/// On GTK's thread, after its initialization.
+unsafe fn page_window(api: &Api) -> Ptr {
+    // SAFETY: the caller's.
+    unsafe {
+        match offscreen_type(api) {
+            Some(kind) => {
+                let window = (api.g_object_new)(kind, std::ptr::null::<c_char>());
+                // Taken for a window on screen, it is asked which monitor
+                // it is on as the page realizes (GDK warned of a window
+                // with no origin): embedded in the root window, it has
+                // one, the root's.
+                (api.gtk_widget_realize)(window);
+                (api.gdk_offscreen_window_set_embedder)(
+                    (api.gtk_widget_get_window)(window),
+                    (api.gdk_get_default_root_window)(),
+                );
+                window
+            }
+            None => (api.gtk_offscreen_window_new)(),
+        }
+    }
+}
+
+/// GTK's side of the pages, by address: their offscreen windows' and views'
+/// accessibles, from their pages' opening to their finalization
+/// (`keep_from_readers`).
+static GTK_SIDE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+/// `AtkObjectClass::ref_state_set`.
+type RefStateSet = unsafe extern "C" fn(Ptr) -> Ptr;
+/// The classes whose `ref_state_set` `quiet_states` replaced: their types
+/// and the functions it calls.
+static STATE_SETS: Mutex<Vec<(gtk::GType, RefStateSet)>> = Mutex::new(Vec::new());
+
+/// Keep `accessible`, GTK's side of a page, from screen readers: its events
+/// dropped (`dispatch`), and neither active nor focused when asked
+/// (`quiet_states`).
+///
+/// # Safety
+///
+/// On GTK's thread; `accessible` a live `AtkObject`.
+unsafe fn keep_from_readers(api: &Api, accessible: Ptr) {
+    GTK_SIDE.lock().unwrap().push(accessible as usize);
+    // Kept until it is finalized, not only destroyed: its events go unheard
+    // while it goes, and an object made later where it was is never taken
+    // for it.
+    unsafe extern "C" fn forget(_: Ptr, accessible: Ptr) {
+        GTK_SIDE
+            .lock()
+            .unwrap()
+            .retain(|&known| known != accessible as usize);
+    }
+    // SAFETY: a live GObject, on GTK's thread; `forget` runs as it is
+    // finalized, given its address.
+    unsafe { (api.g_object_weak_ref)(accessible, forget, null_mut()) };
+    // SAFETY: an `AtkObject`'s class, on GTK's thread: a `GObjectClass`
+    // (its size GObject's), then ten functions, then `ref_state_set`, in
+    // GObject's class instance, the object's first field; its type the
+    // class's first.
+    unsafe {
+        let class = *(accessible as *const Ptr);
+        let mut query = std::mem::zeroed::<gtk::GTypeQuery>();
+        (api.g_type_query)(20 << 2, &mut query);
+        let slot = (class as *mut u8)
+            .add(query.class_size as usize + 10 * std::mem::size_of::<Ptr>())
+            as *mut Option<RefStateSet>;
+        let Some(original) = *slot else {
+            return;
+        };
+        if original as usize == quiet_states as RefStateSet as usize {
+            return;
+        }
+        STATE_SETS
+            .lock()
+            .unwrap()
+            .push((*(class as *const gtk::GType), original));
+        *slot = Some(quiet_states);
+    }
+}
+
+/// `ref_state_set` for a class with GTK's side of a page among its
+/// instances: its own, without active and focused for those.
+unsafe extern "C" fn quiet_states(accessible: Ptr) -> Ptr {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the class's type, which `accessible` is one of (a subclass made
+    // from it afterwards copied this function).
+    let original = STATE_SETS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(kind, _)| unsafe { (api.g_type_check_instance_is_a)(accessible, *kind) } != 0)
+        .map(|&(_, original)| original);
+    let Some(original) = original else {
+        return null_mut();
+    };
+    // SAFETY: the class's own function, for its instance.
+    let states = unsafe { original(accessible) };
+    if !states.is_null() && from_gtk_side(accessible as usize, &GTK_SIDE.lock().unwrap()) {
+        // SAFETY: the state set it returned; ATK_STATE_ACTIVE, ATK_STATE_FOCUSED.
+        unsafe {
+            (api.atk_state_set_remove_state)(states, 1);
+            (api.atk_state_set_remove_state)(states, 11);
+        }
+    }
+    states
+}
+/// GTK's own `add_global_event_listener`, which `add_listener` registers
+/// through.
+static GTK_ADD_LISTENER: OnceLock<AddListener> = OnceLock::new();
+/// The bridge's listeners, one a slot: `TRAMPOLINES[i]` calls `LISTENERS[i]`.
+static LISTENERS: Mutex<[Option<Hook>; TRAMPOLINES.len()]> = Mutex::new([None; TRAMPOLINES.len()]);
+macro_rules! trampolines {
+    ($($slot:literal)*) => {
+        [$({
+            unsafe extern "C" fn trampoline(
+                hint: Ptr,
+                count: c_uint,
+                values: *const c_void,
+                data: Ptr,
+            ) -> gtk::gboolean {
+                // SAFETY: the arguments GObject gave this hook.
+                unsafe { dispatch($slot, hint, count, values, data) }
+            }
+            trampoline as Hook
+        },)*]
+    };
+}
+/// A hook a slot, for listeners told apart without their hook data (the
+/// bridge registers about ten functions).
+static TRAMPOLINES: [Hook; 16] = trampolines!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
+
+/// Put the bridge's listeners behind `add_listener`: the bridge is
+/// started again with GTK's `add_global_event_listener` wrapped, since it
+/// may have registered them in `gtk_init`, with a reader already running.
+/// Where GTK has no bridge, nothing changes.
+///
+/// # Safety
+///
+/// On GTK's thread, after `gtk_init`, before any page.
+unsafe fn filter_bridge_events(api: &Api) {
+    let (Some(init), Some(cleanup)) = (api.atk_bridge_adaptor_init, api.atk_bridge_adaptor_cleanup)
+    else {
+        return;
+    };
+    // SAFETY: ATK's utility class, which GTK set up, on GTK's thread:
+    // `AtkUtilClass` is a `GObjectClass` (its size GObject's), then
+    // `add_global_event_listener`. The bridge's cleanup removes its
+    // listeners and lets it start again, which registers them anew.
+    unsafe {
+        let mut query = std::mem::zeroed::<gtk::GTypeQuery>();
+        (api.g_type_query)(20 << 2, &mut query);
+        let class = (api.g_type_class_ref)((api.atk_util_get_type)());
+        let slot = (class as *mut u8).add(query.class_size as usize) as *mut Option<AddListener>;
+        let Some(gtk_add) = *slot else {
+            return;
+        };
+        cleanup();
+        let _ = GTK_ADD_LISTENER.set(gtk_add);
+        *slot = Some(add_listener);
+        init(null_mut(), null_mut());
+    }
+}
+
+/// The bridge registers `listener` for `event_type`: through a trampoline,
+/// which drops the events of GTK's side of the pages.
+unsafe extern "C" fn add_listener(listener: Hook, event_type: *const c_char) -> c_uint {
+    let Some(&gtk_add) = GTK_ADD_LISTENER.get() else {
+        return 0;
+    };
+    let hook = {
+        let mut listeners = LISTENERS.lock().unwrap();
+        let slot = listeners
+            .iter()
+            .position(|known| known.is_some_and(|known| known as usize == listener as usize))
+            .or_else(|| listeners.iter().position(Option::is_none));
+        match slot {
+            Some(slot) => {
+                listeners[slot] = Some(listener);
+                TRAMPOLINES[slot]
+            }
+            // More functions than slots: the rest unfiltered.
+            None => listener,
+        }
+    };
+    // SAFETY: GTK's function, with a hook of the same signature.
+    unsafe { gtk_add(hook, event_type) }
+}
+
+/// An emission's: unless its source is GTK's side of a page, the bridge's
+/// listener in `slot` hears it.
+///
+/// # Safety
+///
+/// `values` holds `count` `GValue`s, as GObject passes a hook.
+unsafe fn dispatch(
+    slot: usize,
+    hint: Ptr,
+    count: c_uint,
+    values: *const c_void,
+    data: Ptr,
+) -> gtk::gboolean {
+    let Some(listener) = LISTENERS.lock().unwrap()[slot] else {
+        return 1;
+    };
+    // SAFETY: the first value, there when `count` says so.
+    if count > 0 && from_gtk_side(unsafe { source(values) }, &GTK_SIDE.lock().unwrap()) {
+        // Kept: the next emission is heard too.
+        return 1;
+    }
+    // SAFETY: the bridge's listener, with the arguments GObject gave.
+    unsafe { listener(hint, count, values, data) }
+}
+
+/// The emitting instance: the first `GValue`'s pointer (`{ GType, data[2] }`,
+/// the instance in `data[0]`), as the bridge's listeners read it.
+///
+/// # Safety
+///
+/// `values` points to a `GValue` holding an object.
+unsafe fn source(values: *const c_void) -> usize {
+    // SAFETY: the caller's.
+    unsafe { *(values as *const usize).add(1) }
+}
+
+/// Whether `source` is GTK's side of a page, one of `gtk_side`: matched by
+/// address, the accessibles GTK gave the pages' windows and views, nothing
+/// else.
+fn from_gtk_side(source: usize, gtk_side: &[usize]) -> bool {
+    source != 0 && gtk_side.contains(&source)
 }
 
 type Embed = unsafe extern "C" fn(Ptr, *const c_char);
@@ -1455,6 +1702,26 @@ impl Page {
                 Command::Print => self.print(null_mut()),
                 Command::OpenDevtools => {
                     (api.webkit_web_inspector_show)((api.webkit_web_view_get_inspector)(view));
+                }
+                Command::ClearSiteData { host, reply } => {
+                    // The view's profile's manager, kept until it answers.
+                    let manager =
+                        (api.g_object_ref)((api.webkit_web_view_get_website_data_manager)(view));
+                    let clear = Box::new(SiteClear {
+                        page: self.id,
+                        reply,
+                        host,
+                        all: null_mut(),
+                        ours: null_mut(),
+                        count: 0,
+                    });
+                    (api.webkit_website_data_manager_fetch)(
+                        manager,
+                        gtk::WEBKIT_WEBSITE_DATA_ALL,
+                        null_mut(),
+                        Some(site_data_fetched),
+                        Box::into_raw(clear) as Ptr,
+                    );
                 }
                 Command::Find {
                     text,
@@ -3164,6 +3431,103 @@ unsafe extern "C" fn evaluated(view: Ptr, result: Ptr, data: Ptr) {
         }
     });
 }
+/// A `clear_site_data` under way, on GTK's thread: whose answer it is, the
+/// site, and once fetched, every record (`all`, owned) and the site's
+/// (`ours`, borrowed from it).
+struct SiteClear {
+    page: u64,
+    reply: u64,
+    host: String,
+    all: *mut gtk::GList,
+    ours: *mut gtk::GList,
+    count: usize,
+}
+impl SiteClear {
+    /// Hand `result` to the page's `clear_site_data` caller, on the UI thread.
+    fn answer(&self, result: Result<usize, String>) {
+        let (page, reply) = (self.page, self.reply);
+        deliver(move || {
+            if let Some(page) = ui_page(page)
+                && let Some(done) = page.site_clears.borrow_mut().remove(&reply)
+            {
+                done(result);
+            }
+        });
+    }
+}
+/// What `finish` left in `error`, freed; `None` without one.
+unsafe fn take_error(api: &Api, error: *mut gtk::GError) -> Option<String> {
+    (!error.is_null()).then(|| {
+        // SAFETY: a GError WebKit set, read and freed once.
+        unsafe {
+            let message = string((*error).message);
+            (api.g_error_free)(error);
+            message
+        }
+    })
+}
+unsafe extern "C" fn site_data_fetched(manager: Ptr, result: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the box `Command::ClearSiteData` made, taken once; the result
+    // finished as WebKit's call requires; the list WebKit gives is ours
+    // (each record referenced), walked before it is freed.
+    unsafe {
+        let mut clear = Box::from_raw(data as *mut SiteClear);
+        let mut error = null_mut();
+        let all = (api.webkit_website_data_manager_fetch_finish)(manager, result, &mut error);
+        if let Some(message) = take_error(api, error) {
+            clear.answer(Err(message));
+            (api.g_object_unref)(manager);
+            return;
+        }
+        // WebKit names each record by its site's registrable domain: the
+        // host or one it is under.
+        let mut node = all;
+        while !node.is_null() {
+            let record = (*node).data;
+            let name = string((api.webkit_website_data_get_name)(record));
+            if zgx::web_view::site_matches(&clear.host, &name) {
+                clear.ours = (api.g_list_prepend)(clear.ours, record);
+                clear.count += 1;
+            }
+            node = (*node).next;
+        }
+        clear.all = all;
+        if clear.count == 0 {
+            clear.answer(Ok(0));
+            (api.g_list_free_full)(all, Some(api.webkit_website_data_unref));
+            (api.g_object_unref)(manager);
+            return;
+        }
+        let ours = clear.ours;
+        (api.webkit_website_data_manager_remove)(
+            manager,
+            gtk::WEBKIT_WEBSITE_DATA_ALL,
+            ours,
+            null_mut(),
+            Some(site_data_removed),
+            Box::into_raw(clear) as Ptr,
+        );
+    }
+}
+unsafe extern "C" fn site_data_removed(manager: Ptr, result: Ptr, data: Ptr) {
+    let api = gtk::api().expect("GTK runs");
+    // SAFETY: the box `site_data_fetched` passed on, taken once; its lists
+    // freed once the removal finished, the records with the list that
+    // owns them; the manager's reference let go.
+    unsafe {
+        let clear = Box::from_raw(data as *mut SiteClear);
+        let mut error = null_mut();
+        (api.webkit_website_data_manager_remove_finish)(manager, result, &mut error);
+        match take_error(api, error) {
+            Some(message) => clear.answer(Err(message)),
+            None => clear.answer(Ok(clear.count)),
+        }
+        (api.g_list_free)(clear.ours);
+        (api.g_list_free_full)(clear.all, Some(api.webkit_website_data_unref));
+        (api.g_object_unref)(manager);
+    }
+}
 unsafe extern "C" fn serve_scheme(request: Ptr, _: Ptr) {
     let api = gtk::api().expect("GTK runs");
     GTK.with(|gtk| {
@@ -3554,6 +3918,12 @@ enum Command {
     Window(u64),
     /// `WebView::print`: GTK's print dialog for the page.
     Print,
+    /// `WebView::clear_site_data`: the records of `host`'s site, answered
+    /// under `reply` (`UiPage::site_clears`).
+    ClearSiteData {
+        host: String,
+        reply: u64,
+    },
     /// `WebView::find`, answered under `reply` (`UiPage::finds`).
     Find {
         text: String,
@@ -3672,15 +4042,88 @@ fn ui_page(id: u64) -> Option<Rc<UiPage>> {
 type Reply = Box<dyn FnOnce(ScriptResult)>;
 /// What gets a find's answer.
 type FindReply = Box<dyn FnOnce(FindResult)>;
+type SiteClearReply = Box<dyn FnOnce(Result<usize, String>)>;
 /// A page, on the UI thread: what its controller, box and painter share.
+/// The longest a page's commands wait for zgx's accessibility as focus
+/// enters it (`UiPage::hold`): a window with nothing to redraw sends none.
+const HOLD_AT_MOST: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Commands kept back, in order, while held; passed on at once otherwise.
+struct Hold<T> {
+    held: Option<Vec<T>>,
+}
+impl<T> Default for Hold<T> {
+    fn default() -> Self {
+        Self { held: None }
+    }
+}
+impl<T> Hold<T> {
+    /// Start holding; false if already holding.
+    fn start(&mut self) -> bool {
+        if self.held.is_some() {
+            return false;
+        }
+        self.held = Some(Vec::new());
+        true
+    }
+    /// `item` back to send now, or kept (`None`).
+    fn pass(&mut self, item: T) -> Option<T> {
+        match &mut self.held {
+            Some(held) => {
+                held.push(item);
+                None
+            }
+            None => Some(item),
+        }
+    }
+    /// Stop holding: what was kept, in order.
+    fn release(&mut self) -> Vec<T> {
+        self.held.take().unwrap_or_default()
+    }
+}
+
+/// After `after`, page `id`'s held commands go (`UiPage::release`), on the
+/// UI thread through `deliver`: whether or not a frame came.
+fn release_later(
+    id: u64,
+    after: std::time::Duration,
+    deliver: impl FnOnce(Box<dyn FnOnce() + Send>) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        deliver(Box::new(move || {
+            if let Some(page) = ui_page(id) {
+                page.release();
+            }
+        }));
+    });
+}
+
+/// zgx's accessibility has sent what this frame changed (the window's
+/// focus among it), or had nothing to send: pages focus enters send what
+/// they held.
+pub(crate) fn accessibility_sent() {
+    let pages: Vec<_> =
+        UI_PAGES.with(|pages| pages.borrow().values().filter_map(Weak::upgrade).collect());
+    for page in pages {
+        if page.held.borrow().held.is_some() {
+            page.release();
+        }
+    }
+}
+
 struct UiPage {
     id: u64,
+    /// Commands kept back while focus enters the page (`Hold`).
+    held: RefCell<Hold<Command>>,
     web: WeakWebView,
     gpu: zgx::gpu_view::GpuView,
     schemes: Vec<SchemeHandler>,
     replies: RefCell<HashMap<u64, Reply>>,
     /// What gets each find's answer, under the same ids as `replies`.
     finds: RefCell<HashMap<u64, FindReply>>,
+    /// What gets each `clear_site_data`'s answer, under the same ids.
+    site_clears: RefCell<HashMap<u64, SiteClearReply>>,
     next_reply: Cell<u64>,
     /// The box showing it, and its scene.
     node: Cell<Option<NodeId>>,
@@ -3739,7 +4182,11 @@ impl UiPage {
     fn embed(&self, bus: String, path: String) {
         let count = self.embeddings.get() + 1;
         self.embeddings.set(count);
-        *self.embedding.borrow_mut() = Some(format!("zgx-atspi-embed\n{bus}\n{path}\n{count}"));
+        // Named WebKitGTK, as the page's own nodes are: a reader takes the
+        // box, focused, with the script it reads the page with.
+        *self.embedding.borrow_mut() = Some(format!(
+            "zgx-atspi-embed\n{bus}\n{path}\n{count}\nWebKitGTK"
+        ));
         if let Some(handle) = &*self.handle.borrow() {
             // Projected again: its node's revision moves.
             handle.touch_semantics();
@@ -3752,12 +4199,34 @@ impl UiPage {
         }
     }
     fn send(&self, command: Command) {
+        if let Some(command) = self.held.borrow_mut().pass(command) {
+            self.run_on_gtk(command);
+        }
+    }
+    fn run_on_gtk(&self, command: Command) {
         let id = self.id;
         on_gtk(move |gtk| {
             if let Some(page) = gtk.page(id) {
                 page.run(command);
             }
         });
+    }
+    /// Keep the page's commands back while focus enters it, until zgx's
+    /// accessibility has said so (`accessibility_sent`) or `HOLD_AT_MOST`
+    /// has passed: a reader hears the page's box focused first, then what
+    /// the page focuses in it, not the other way about.
+    fn hold(&self) {
+        if !self.held.borrow_mut().start() {
+            return;
+        }
+        release_later(self.id, HOLD_AT_MOST, deliver);
+    }
+    /// The commands kept back, sent in order.
+    fn release(&self) {
+        let held = self.held.borrow_mut().release();
+        for command in held {
+            self.run_on_gtk(command);
+        }
     }
     /// The cursor the page set: its box's (one of zgx's), or an image the
     /// window shows over it; the window's cursor follows now (`cursor_changed`).
@@ -3811,6 +4280,9 @@ impl UiPage {
     fn local(&self, x: f32, y: f32) -> Option<(f64, f64)> {
         let (node, scene) = (self.node.get()?, self.scene.borrow().upgrade()?);
         let scene = scene.try_borrow().ok()?;
+        if !scene.contains(node) {
+            return None;
+        }
         let bounds = scene.bounds(node);
         let shown = scene.window_rect(node, bounds);
         let scale = self.scale.get() as f64;
@@ -4041,6 +4513,7 @@ impl UiPage {
                 }
             }
             InputEvent::Focus => {
+                self.hold();
                 self.send(Command::Focus(true));
                 // By Tab (or Shift+Tab), as into a browser's frame: the
                 // page's first focusable element (or its last).
@@ -4136,6 +4609,16 @@ impl WebViewBackend for GtkWebView {
     fn clear_find(&self) {
         self.0.send(Command::ClearFind);
     }
+    fn clear_site_data(&self, url: &str, done: Box<dyn FnOnce(Result<usize, String>)>) {
+        let Some(host) = zgx::web_view::site_host(url) else {
+            return done(Err(format!("{url} has no site")));
+        };
+        let page = &self.0;
+        let id = page.next_reply.get() + 1;
+        page.next_reply.set(id);
+        page.site_clears.borrow_mut().insert(id, done);
+        page.send(Command::ClearSiteData { host, reply: id });
+    }
 }
 impl Drop for GtkWebView {
     fn drop(&mut self) {
@@ -4189,6 +4672,7 @@ fn backend(
         schemes: schemes.clone(),
         replies: RefCell::new(HashMap::new()),
         finds: RefCell::new(HashMap::new()),
+        site_clears: RefCell::new(HashMap::new()),
         next_reply: Cell::new(0),
         node: Cell::new(None),
         scene: RefCell::new(Weak::new()),
@@ -4211,6 +4695,7 @@ fn backend(
         pressed: Cell::new(None),
         dragging: RefCell::new(None),
         exporting: RefCell::new(None),
+        held: RefCell::new(Hold::default()),
     });
     let spec = Spec {
         id: web.id(),
@@ -4682,6 +5167,9 @@ pub(crate) fn ime_area(ui: &Ui) -> Option<Rect> {
     let (x, y, w, h) = page.caret.get()?;
     let node = page.node.get()?;
     let scene = ui.scene.borrow();
+    if !scene.contains(node) {
+        return None;
+    }
     let bounds = scene.bounds(node);
     let scale = page.scale.get().max(0.01);
     let rect = Rect::new(
@@ -5003,6 +5491,215 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Commands sent as focus enters a page (its focus, the Tab into it,
+    /// keys typed meanwhile) are kept back and then sent all, in order;
+    /// once released, they pass straight through.
+    #[test]
+    fn a_hold_keeps_every_command_in_order_and_then_lets_them_pass() {
+        let mut hold = Hold::default();
+        assert_eq!(hold.pass(1), Some(1), "not holding: sent at once");
+        assert!(hold.start());
+        assert!(!hold.start(), "one hold at a time");
+        for key in 2..=6 {
+            assert_eq!(hold.pass(key), None);
+        }
+        assert_eq!(hold.release(), vec![2, 3, 4, 5, 6]);
+        assert_eq!(hold.release(), Vec::<i32>::new());
+        assert_eq!(hold.pass(7), Some(7));
+    }
+
+    /// With no frame to send accessibility (an idle window), the held
+    /// commands still go, once the bound has passed.
+    #[test]
+    fn held_commands_go_after_the_bound_without_a_frame() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let start = std::time::Instant::now();
+        release_later(u64::MAX, HOLD_AT_MOST, move |release| {
+            let _ = sender.send(release);
+        });
+        // The release itself, however late a loaded machine makes it (the
+        // ceiling only keeps a broken release from hanging the run); never
+        // before the bound.
+        let release = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("released without a frame");
+        assert!(start.elapsed() >= HOLD_AT_MOST, "released before the bound");
+        // No page by that id: nothing to send.
+        release();
+    }
+
+    /// Only a page window's own accessible is matched: not a null source,
+    /// not another object, even one beside it in memory.
+    #[test]
+    fn events_are_dropped_by_their_source_page_window_alone() {
+        let windows = [0x1000, 0x2000];
+        assert!(from_gtk_side(0x1000, &windows));
+        assert!(from_gtk_side(0x2000, &windows));
+        assert!(!from_gtk_side(0x1008, &windows));
+        assert!(!from_gtk_side(0x3000, &windows));
+        assert!(!from_gtk_side(0, &windows));
+        assert!(!from_gtk_side(0x1000, &[]));
+    }
+
+    /// Pages' GTK side made and closed, as `Gtk::open` and `Gtk::close` do
+    /// (an entry for the view):
+    /// focused, neither the window's nor the view's accessible says it is
+    /// active or focused; each leaves the registry as it is finalized; a
+    /// window made afterwards, no page's, says it is active when it is.
+    /// Needs a display (CI runs it under Xvfb); skipped without one.
+    #[test]
+    fn gtk_side_is_quiet_until_finalized_and_other_windows_stay_active() {
+        let Some(api) = gtk::api() else {
+            eprintln!("skipped: no GTK");
+            return;
+        };
+        // Three calls only this test makes, looked up here.
+        let libraries = ["libatk-1.0.so.0", "libglib-2.0.so.0", "libgtk-3.so.0"]
+            // SAFETY: system libraries GTK has loaded already.
+            .map(|name| unsafe { libloading::Library::new(name) }.expect("GTK's libraries"));
+        // SAFETY: each the function's declared C signature.
+        let ref_state_set = *unsafe {
+            libraries[0].get::<unsafe extern "C" fn(Ptr) -> Ptr>(b"atk_object_ref_state_set\0")
+        }
+        .unwrap();
+        // SAFETY: as above.
+        let contains_state = *unsafe {
+            libraries[0].get::<unsafe extern "C" fn(Ptr, c_int) -> gtk::gboolean>(
+                b"atk_state_set_contains_state\0",
+            )
+        }
+        .unwrap();
+        // SAFETY: as above.
+        let iteration = *unsafe {
+            libraries[1].get::<unsafe extern "C" fn(Ptr, gtk::gboolean) -> gtk::gboolean>(
+                b"g_main_context_iteration\0",
+            )
+        }
+        .unwrap();
+        // SAFETY: as above.
+        let entry_new =
+            *unsafe { libraries[2].get::<unsafe extern "C" fn() -> Ptr>(b"gtk_entry_new\0") }
+                .unwrap();
+        // GTK's calls all on one thread of the test's own.
+        std::thread::spawn(move || unsafe {
+            if (api.gtk_init_check)(null_mut(), null_mut()) == 0 {
+                eprintln!("skipped: no display");
+                return;
+            }
+            // As GTK's thread does (`started`): an X error about an
+            // offscreen window, which has no X window, would end the test.
+            (api.gdk_error_trap_push)();
+            let focus = |window: Ptr| {
+                let event = (api.gdk_event_new)(gtk::GDK_FOCUS_CHANGE);
+                let focus_event = event as *mut gtk::GdkEventFocus;
+                (*focus_event).window = (api.g_object_ref)((api.gtk_widget_get_window)(window));
+                (*focus_event).send_event = 1;
+                (*focus_event).in_ = 1;
+                (api.gtk_widget_send_focus_change)(window, focus_event);
+                (api.gdk_event_free)(event);
+            };
+            // ATK_STATE_ACTIVE, ATK_STATE_FOCUSED.
+            let says = |accessible: Ptr, state: c_int| {
+                let states = ref_state_set(accessible);
+                let says = contains_state(states, state) != 0;
+                (api.g_object_unref)(states);
+                says
+            };
+            let mut made = Vec::new();
+            for _ in 0..3 {
+                let window = page_window(api);
+                // A focusable widget for the view: WebKit's objects made here
+                // would be unreffed at the process's exit, off GTK's thread,
+                // which aborts it.
+                let view = entry_new();
+                (api.gtk_container_add)(window, view);
+                (api.gtk_widget_show_all)(window);
+                let accessibles =
+                    [window, view].map(|widget| (api.gtk_widget_get_accessible)(widget));
+                for accessible in accessibles {
+                    keep_from_readers(api, accessible);
+                }
+                (api.gtk_widget_grab_focus)(view);
+                focus(window);
+                for accessible in accessibles {
+                    assert!(
+                        !says(accessible, 1),
+                        "GTK's side of a page says it is active"
+                    );
+                    assert!(
+                        !says(accessible, 11),
+                        "GTK's side of a page says it is focused"
+                    );
+                }
+                made.extend(accessibles.map(|accessible| accessible as usize));
+                (api.gtk_widget_destroy)(window);
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while made
+                .iter()
+                .any(|known| GTK_SIDE.lock().unwrap().contains(known))
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "closed pages' accessibles still kept: {made:x?}"
+                );
+                iteration(null_mut(), 0);
+            }
+            let other = page_window(api);
+            (api.gtk_widget_show_all)(other);
+            focus(other);
+            assert!(
+                says((api.gtk_widget_get_accessible)(other), 1),
+                "a window no page's is not active"
+            );
+            (api.gtk_widget_destroy)(other);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// The bridge's listener in a slot hears an emission unless its first
+    /// `GValue`'s instance is a page's window.
+    #[test]
+    fn a_trampoline_passes_on_all_but_a_page_windows_events() {
+        static HEARD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe extern "C" fn listener(
+            _: Ptr,
+            _: c_uint,
+            _: *const c_void,
+            _: Ptr,
+        ) -> gtk::gboolean {
+            HEARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            1
+        }
+        let slot = TRAMPOLINES.len() - 1;
+        LISTENERS.lock().unwrap()[slot] = Some(listener);
+        // A GValue: { GType, data[2] }, the instance first in `data`.
+        let (window, page_content) = (0x7a00_usize, 0x7b00_usize);
+        GTK_SIDE.lock().unwrap().push(window);
+        let emit = |source: usize| {
+            let value = [0usize, source, 0];
+            // SAFETY: one GValue-shaped value, as GObject passes a hook.
+            unsafe { TRAMPOLINES[slot](null_mut(), 1, value.as_ptr() as *const c_void, null_mut()) }
+        };
+        assert_eq!(emit(page_content), 1);
+        assert_eq!(HEARD.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(emit(window), 1, "the hook stays");
+        assert_eq!(
+            HEARD.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a page window's is dropped"
+        );
+        GTK_SIDE.lock().unwrap().retain(|&w| w != window);
+        assert_eq!(emit(window), 1);
+        assert_eq!(
+            HEARD.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "a closed page's window is heard again"
+        );
+        LISTENERS.lock().unwrap()[slot] = None;
+    }
 
     /// What a page's drop script gets: its own drag, text or files, as
     /// JSON its `atob` and `JSON` read.

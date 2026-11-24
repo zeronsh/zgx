@@ -143,12 +143,28 @@ pub struct TextRun {
     /// Room around the run, as CSS's inline padding: across, it is added
     /// before and after the run's text (it takes space in the line); both
     /// widen its background, which then hugs the text (its font's content
-    /// area) instead of filling the line: an inline code chip.
+    /// area) instead of filling the line: an inline code chip. Negative
+    /// down: asymmetric edge padding for a run with no background (an editor
+    /// atom's leading room `2 * padding[0]` before its first char, and
+    /// trailing room `-(padding[1] + 1)` after its last).
     pub padding: [f32; 2],
     /// The background's corner radius.
     pub radius: f32,
 }
 impl TextRun {
+    /// Horizontal inline padding `(before, after)` in points.
+    #[doc(hidden)]
+    pub fn across_padding(&self) -> (f32, f32) {
+        if self.padding[1] < 0. {
+            (
+                (2. * self.padding[0]).max(0.),
+                (-(self.padding[1] + 1.)).max(0.),
+            )
+        } else {
+            let x = self.padding[0].max(0.);
+            (x, x)
+        }
+    }
     /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
     /// em a cell, zero-width characters none, and the run's padding on its
     /// first and last.
@@ -160,7 +176,8 @@ impl TextRun {
         };
         let first = (at == self.range.start) as u8 as f32;
         let last = (at + grapheme.len() == self.range.end) as u8 as f32;
-        (glyph + (first + last) * self.padding[0]).max(0.)
+        let (before, after) = self.across_padding();
+        (glyph + first * before + last * after).max(0.)
     }
 }
 
@@ -292,6 +309,10 @@ pub struct RichText {
     /// Whether a run holds an inline box: what reads them asks this, not
     /// each run.
     boxed: bool,
+    /// Whether a run is a span that is a box of its own
+    /// (`FontFeatures::is_box_span`): what lays them out asks this, not
+    /// each run.
+    box_spans: bool,
     text: Arc<str>,
     runs: Arc<[TextRun]>,
 }
@@ -327,13 +348,17 @@ impl RichText {
             overflow: Default::default(),
             line_clamp: None,
             boxed: false,
+            box_spans: false,
             text,
             runs,
         })
     }
     /// With inline `boxes` (see [`InlineBox`]), in order of their offsets.
     /// Errs unless each is at an [`INLINE_BOX_CHAR`] that is a run of its
-    /// own. Sizes that aren't finite are zero; no boxes, none.
+    /// own, or at the start of a run of other text, which then shows as the
+    /// box: as wide as it, its first character, the rest none (an editor
+    /// atom shown as a picture). Sizes that aren't finite are zero; no
+    /// boxes, none.
     pub fn with_inline_boxes(
         mut self,
         boxes: impl Into<Vec<InlineBox>>,
@@ -350,12 +375,17 @@ impl RichText {
         for b in &boxes {
             let end = b.at + INLINE_BOX_TEXT.len();
             let run = rest.find(|run| run.range.start >= b.at);
-            let (false, Some(run), Some(INLINE_BOX_TEXT)) = (
-                last.is_some_and(|last| b.at <= last),
-                run.filter(|run| run.range == (b.at..end)),
-                self.text.get(b.at..end),
-            ) else {
-                return Err("an inline box must be at a replacement character run of its own");
+            // At a replacement character run of its own; or at a run of other
+            // text, which then shows as the box (an editor atom shown as a
+            // picture, its text kept for copy and search).
+            let held = |run: &&mut TextRun| {
+                run.range.start == b.at
+                    && (run.range.end == end && self.text.get(b.at..end) == Some(INLINE_BOX_TEXT)
+                        || !self.text[b.at..].starts_with(INLINE_BOX_CHAR))
+            };
+            let (false, Some(run)) = (last.is_some_and(|last| b.at <= last), run.filter(held))
+            else {
+                return Err("an inline box must be at a run of its own");
             };
             b.sanitized().on_run(run);
             last = Some(b.at);
@@ -383,12 +413,27 @@ impl RichText {
     ) -> Result<Self, &'static str> {
         let mut remade = Self::new(text, runs)?;
         remade.boxed = self.boxed;
+        remade.box_spans = self.box_spans;
         Ok(remade)
     }
     /// Whether it has inline boxes.
     #[inline]
     pub fn has_inline_boxes(&self) -> bool {
         self.boxed
+    }
+    /// Said to hold a span that is a box of its own (a run's font features
+    /// `is_box_span`), as its maker knows: text not said so lays none out.
+    #[doc(hidden)]
+    pub fn with_box_spans(mut self) -> Self {
+        self.box_spans = true;
+        self
+    }
+    /// Whether it is said to hold a span that is a box of its own
+    /// (`with_box_spans`).
+    #[doc(hidden)]
+    #[inline]
+    pub fn has_box_spans(&self) -> bool {
+        self.box_spans
     }
     /// The same text with its boxes' sizes changed to `sized`'s (width,
     /// height, baseline), in order (where its layout measured what they
@@ -451,7 +496,7 @@ impl RichText {
                 // A run's padding across takes room in its line.
                 a.range == b.range
                     && a.font_size == b.font_size
-                    && a.padding[0] == b.padding[0]
+                    && a.across_padding() == b.across_padding()
                     && a.font == b.font
             })
     }
@@ -466,7 +511,7 @@ impl RichText {
             || self.runs.iter().zip(other.runs.iter()).any(|(a, b)| {
                 a.range != b.range
                     || a.font_size != b.font_size
-                    || a.padding[0] != b.padding[0]
+                    || a.across_padding() != b.across_padding()
                     || a.font != b.font
             })
     }
@@ -613,10 +658,23 @@ pub(crate) fn fallback_boxes(rich: &RichText, width: Option<f32>) -> FallbackBox
             run_index += 1;
         }
         let run = &rich.runs[run_index];
-        let newline = grapheme.contains(['\r', '\n']);
-        // Its grapheme may hold a combining mark past its character.
-        let inline = grapheme
-            .starts_with(INLINE_BOX_TEXT)
+        let newline = crate::text_layout::breaks_line(grapheme);
+        // Its grapheme may hold a combining mark past its character. A box
+        // over text of its own is its first grapheme's; the rest take none.
+        let text_box = rich.boxed
+            && !grapheme.starts_with(INLINE_BOX_TEXT)
+            && run.font.features.is_inline_box();
+        // The rest of a box's text is the box's cell: one place, as wide as
+        // it (a zero-width cell would read as a line's end).
+        if text_box
+            && index != run.range.start
+            && let Some((cell, _)) = out.cells.last_mut()
+        {
+            cell.end = index + grapheme.len();
+            continue;
+        }
+        let inline = (grapheme.starts_with(INLINE_BOX_TEXT)
+            || (text_box && index == run.range.start))
             .then(|| run.font.features.inline_box(index))
             .flatten();
         let advance = inline
@@ -698,7 +756,7 @@ pub fn fallback_measure(rich: &RichText, width: Option<f32>) -> (f32, f32) {
         }
         let run = &rich.runs[run_index];
         let line = run.font.line_height.resolve(run.font_size);
-        if grapheme == "\n" || grapheme == "\r\n" || grapheme == "\r" {
+        if grapheme == "\n" || grapheme == "\r\n" || grapheme == "\r" || grapheme == "\u{1e}" {
             if limit.is_some_and(|limit| row >= limit) {
                 return (
                     width.map_or(max_x.max(x), |w| {
@@ -888,12 +946,44 @@ mod tests {
     fn rich_text_stays_forty_bytes() {
         assert_eq!(std::mem::size_of::<RichText>(), 40);
     }
+    /// A box over a run of text (an editor atom's picture): the box's width
+    /// on its first grapheme, none on the rest of it, and the text after it
+    /// its own.
+    #[test]
+    fn a_box_over_text_takes_its_width_and_the_text_after_follows() {
+        let text = "area is x^2 here";
+        let rich = RichText::new(text, vec![run(0..8), run(8..11), run(11..16)])
+            .unwrap()
+            .with_inline_boxes(vec![InlineBox {
+                width: 28.,
+                height: 16.,
+                ..InlineBox::new(8)
+            }])
+            .unwrap();
+        let cells = fallback_boxes(&rich, None).cells;
+        let at = |i: usize| cells.iter().find(|(r, _)| r.start == i).unwrap().1;
+        let boxed = cells.iter().find(|(r, _)| r.start == 8).unwrap();
+        assert_eq!(boxed.0, 8..11, "one cell for the box's text");
+        assert_eq!(boxed.1.width, 28.);
+        assert_eq!(at(11).x, at(8).x + 28.);
+        assert!(at(12).width > 0., "the text after it has its width");
+        // A layout of it lists its box where its cell is, as `inline_places`.
+        let laid = crate::text_layout::FallbackTextLayout::rich_layout(&rich, None);
+        assert_eq!(
+            laid.inline_boxes(),
+            crate::text_layout::FallbackTextLayout::inline_places(&rich, None)
+        );
+    }
     #[test]
     fn inline_boxes_are_validated() {
         let text = format!("a{INLINE_BOX_CHAR}b");
         let rich = || RichText::new(text.as_str(), vec![run(0..1), run(1..4), run(4..5)]).unwrap();
         assert!(rich().with_inline_boxes(vec![InlineBox::new(1)]).is_ok());
-        assert!(rich().with_inline_boxes(vec![InlineBox::new(0)]).is_err());
+        // A run of other text shows as its box (an editor atom's picture);
+        // one not at a run's start is no box.
+        assert!(rich().with_inline_boxes(vec![InlineBox::new(0)]).is_ok());
+        let word = || RichText::new("abc", vec![run(0..3)]).unwrap();
+        assert!(word().with_inline_boxes(vec![InlineBox::new(1)]).is_err());
         let merged = RichText::new(text.as_str(), vec![run(0..4), run(4..5)]).unwrap();
         assert!(merged.with_inline_boxes(vec![InlineBox::new(1)]).is_err());
         let two = format!("{INLINE_BOX_CHAR}{INLINE_BOX_CHAR}");

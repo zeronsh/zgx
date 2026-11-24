@@ -127,6 +127,9 @@ pub fn run(scene_name: String) {
             );
         }
         let report = scene.flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&scene, &report);
+        }
         gpu.render(&scene, &report.damage).expect("a frame");
     }
     println!(

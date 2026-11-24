@@ -168,6 +168,80 @@ return ui.column { box("a"), box("b"), ui.text { saved } }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// `app:command` runs the Edit menu's items as the desktop's menu does:
+/// Select All of the selectable text last pressed in (a long list of
+/// rows), a copy of it through the region's `on_copy`, and in a field
+/// Select All, cut and paste.
+#[test]
+fn a_tests_edit_commands_reach_what_the_desktops_menu_does() {
+    let dir = app(
+        "edit",
+        &[(
+            "edit.test.luau",
+            r##"
+test("select all and copy a long list through its on_copy", function()
+    local app = mount("edit.luau")
+    app:click("#transcript:probe row 1")
+    expect(app:command("select-all")).to_be(true)
+    expect(app:command("copy")).to_be(true)
+    -- Every row, mounted or not, by the list's id.
+    expect(app:state("heard")).to_be("transcript:probe 1-300")
+    expect(app:clipboard()).to_contain("[copied] Row 1")
+end)
+
+test("a field selects all, cuts and pastes", function()
+    local app = mount("edit.luau")
+    app:type("#field", "words")
+    expect(app:command("select-all")).to_be(true)
+    expect(app:command("cut")).to_be(true)
+    expect(app:clipboard()).to_be("words")
+    expect(app:text("#field")).to_be("")
+    expect(app:command("paste")).to_be(true)
+    expect(app:text("#field")).to_be("words")
+end)
+
+test("nothing selected copies nothing, and an unknown command fails", function()
+    local app = mount("edit.luau")
+    expect(app:command("copy")).to_be(false)
+    local ok, message = pcall(function() app:command("undo-everything") end)
+    expect(ok).to_be(false)
+    expect(tostring(message)).to_contain("no command `undo-everything`")
+end)
+"##,
+        )],
+    );
+    std::fs::write(
+        dir.join("edit.luau"),
+        r##"
+local heard = ui.state("heard", "")
+local value = ui.state("value", "")
+return ui.column {
+    ui.input { id = "field", label = "Field", value = value, w = 200 },
+    ui.list {
+        id = "transcript:probe",
+        selectable = true,
+        h = 400,
+        count = 300,
+        height = 20,
+        on_copy = function(request)
+            local spans = {}
+            for _, span in request.rows do
+                table.insert(spans, `{span.list} {span.first}-{span.last}`)
+            end
+            heard:set(table.concat(spans, ", "))
+            return { text = "[copied] " .. request.text }
+        end,
+        row = function(i) return ui.text { "Row " .. i } end,
+    },
+}
+"##,
+    )
+    .unwrap();
+    let (code, text) = run(&dir, &[]);
+    assert_eq!(code, Some(0), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_test_answers_the_desktops_dialogs_and_resizes_the_window() {
     let dir = app(
@@ -1102,4 +1176,58 @@ return ui.column { w = 200, h = 300,
     let (code, text) = run(&dir, &[]);
     assert_eq!(code, Some(0), "{text}");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_test_reads_the_named_states_and_how_many_the_scripts_hold() {
+    let dir = app(
+        "states",
+        &[(
+            "states.test.luau",
+            r##"
+test("states lists names in order and retained_states counts States", function()
+    local app = mount()
+    local names = app:states()
+    expect(#names >= 3).to_be(true)
+    local sorted = table.clone(names)
+    table.sort(sorted)
+    expect(table.concat(names, ",")).to_be(table.concat(sorted, ","))
+    expect(app:retained_states() >= 1).to_be(true)
+end)
+"##,
+        )],
+    );
+    let (code, text) = run(&dir, &[]);
+    assert_eq!(code, Some(0), "{text}");
+}
+
+#[test]
+fn a_run_removes_the_storage_of_runs_that_were_killed() {
+    let dir = app(
+        "stale-storage",
+        &[("a.test.luau", "test(\"mounts\", function() mount() end)\n")],
+    );
+    let tmp = common::temp_dir("stale-storage-tmp");
+    // A process that is gone (a pid beyond any the system hands out), and one
+    // that is alive (this test's).
+    let gone = tmp.join("zgx-test-storage-4194999-0");
+    let alive = tmp.join(format!("zgx-test-storage-{}-0", std::process::id()));
+    for path in [&gone, &alive] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let out = zgx()
+        .arg("test")
+        .arg(&dir)
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(!gone.exists(), "a dead run's storage goes");
+    assert!(alive.exists(), "a live process's stays");
 }

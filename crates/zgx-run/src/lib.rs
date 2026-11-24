@@ -12,6 +12,7 @@ use zgx_script::{Command, ScriptHost};
 pub mod audit;
 #[cfg(feature = "fetch")]
 mod fetch;
+pub mod schema;
 /// Give `host` the fetcher `run` gives a script (feature `fetch`, on by
 /// default): `ui.fetch` and remote images over HTTP and HTTPS, each request
 /// on a thread of its own, its body streamed to the script as it arrives,
@@ -110,7 +111,8 @@ pub fn accelerator(text: &str) -> Option<MenuAccelerator> {
 ///
 /// ```json
 /// { "title": "Mail", "width": 1100, "height": 720, "min_width": 640,
-///   "min_height": 400, "titlebar": "inset", "glass": true, "app_id": "mail" }
+///   "min_height": 400, "titlebar": "inset", "traffic_lights": { "x": 18, "y": 22 },
+///   "glass": true, "app_id": "mail" }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
@@ -149,6 +151,149 @@ struct WindowConfig {
     /// How tall `titlebar: "inset"`'s caption buttons are on Windows, in the
     /// content's points (`caption_height`; `WindowOptions::caption_height`).
     caption_height: Option<f64>,
+    /// Where `titlebar: "inset"`'s traffic lights go on macOS: the close
+    /// button's top left in the content's points (`traffic_lights`,
+    /// `{ "x": 18, "y": 22 }`; `WindowOptions::traffic_lights`).
+    traffic_lights: Option<(f64, f64)>,
+    /// Its glass, frame, level and the rest
+    /// (`zgx_script::window_look::LOOK_KEYS`).
+    look: zgx_script::window_look::WindowLook,
+    /// The script a named window opens (`named_windows.<name>.script`), beside
+    /// the app's; none, the app's own.
+    script: Option<PathBuf>,
+}
+
+/// `zgx.json`'s window keys: those a platform's block (`"macos"`,
+/// `"windows"`, `"linux"`) may hold, besides the look's
+/// (`zgx_script::window_look::LOOK_KEYS`).
+pub(crate) const WINDOW_KEYS: [&str; 12] = [
+    "title",
+    "width",
+    "height",
+    "min_width",
+    "max_width",
+    "max_height",
+    "min_height",
+    "titlebar",
+    "caption_height",
+    "traffic_lights",
+    "frame_autosave",
+    "visible",
+];
+
+/// `zgx.json`'s keys of the app as a whole, besides its window's (and
+/// `zgx_script::app_config::KEYS`, its host's): none of them may differ by
+/// platform.
+pub(crate) const APP_KEYS: [&str; 5] = [
+    "$schema",
+    "app_id",
+    "application_id",
+    "named_windows",
+    "first",
+];
+
+/// The window's options, as `config` and `window` say them.
+fn options_of(config: &AppConfig, window: WindowConfig) -> WindowOptions {
+    let WindowConfig {
+        look,
+        frame_autosave,
+        visible,
+        max_size,
+        caption_height,
+        traffic_lights,
+        script: _,
+    } = window;
+    let mut options = WindowOptions {
+        title: config.title.clone(),
+        width: config.width,
+        height: config.height,
+        min_size: config.min_size,
+        max_size,
+        titlebar: config.titlebar,
+        caption_height,
+        traffic_lights,
+        glass: config.glass.then(zgx_desktop::Glass::default),
+        frame_autosave,
+        visible,
+        ..Default::default()
+    };
+    apply_look(&mut options, &look);
+    options
+}
+
+/// The options of the window `window` names among the `named_windows` of
+/// a bundle's `zgx.json` (none: the one its `first` names, else its top
+/// level's), on this platform, as zgx-run opens it, and the script that
+/// window opens, if one of its own: for a Rust host that opens its own
+/// windows from what its app's `zgx.json` says. The file is checked as
+/// the bundle's others are: changed or removed since it was built, it is
+/// an error. So is what the file says wrong, or a name it doesn't have.
+/// (Hidden from the docs until this Rust interface is settled.)
+#[doc(hidden)]
+pub fn window_options_in(
+    bundle: &zgx_script::app_bundle::Opened,
+    window: Option<&str>,
+) -> Result<(WindowOptions, Option<PathBuf>), String> {
+    let (config, _, mut window) = AppConfig::read_bundle(bundle, window)?;
+    let own = window.script.take();
+    Ok((
+        options_of(&config, window),
+        own.map(|own| bundle.ui.join(own)),
+    ))
+}
+
+/// [`window_options_in`] for an app run from its folder.
+#[doc(hidden)]
+pub fn window_options(
+    script: &Path,
+    window: Option<&str>,
+) -> Result<(WindowOptions, Option<PathBuf>), String> {
+    let (config, _, mut window) = AppConfig::read_window(script, window)?;
+    let own = window.script.take();
+    let dir = script.parent().unwrap_or(Path::new("."));
+    Ok((options_of(&config, window), own.map(|own| dir.join(own))))
+}
+
+/// `look` laid onto `options`: what it says replaces the option's default.
+fn apply_look(options: &mut WindowOptions, look: &zgx_script::window_look::WindowLook) {
+    use zgx_script::window_look::{Level, Material};
+    if let Some(glass) = look.glass {
+        let material = match glass.material {
+            Material::Hud => zgx_desktop::GlassMaterial::Hud,
+            Material::Liquid => zgx_desktop::GlassMaterial::Liquid,
+            Material::UnderWindowBackground => zgx_desktop::GlassMaterial::UnderWindowBackground,
+            Material::UnderPageBackground => zgx_desktop::GlassMaterial::UnderPageBackground,
+            Material::WindowBackground => zgx_desktop::GlassMaterial::WindowBackground,
+            Material::ContentBackground => zgx_desktop::GlassMaterial::ContentBackground,
+            Material::Titlebar => zgx_desktop::GlassMaterial::Titlebar,
+            Material::HeaderView => zgx_desktop::GlassMaterial::HeaderView,
+            Material::Sidebar => zgx_desktop::GlassMaterial::Sidebar,
+            Material::Menu => zgx_desktop::GlassMaterial::Menu,
+            Material::Popover => zgx_desktop::GlassMaterial::Popover,
+            Material::Sheet => zgx_desktop::GlassMaterial::Sheet,
+            Material::ToolTip => zgx_desktop::GlassMaterial::ToolTip,
+            Material::FullScreenUi => zgx_desktop::GlassMaterial::FullScreenUi,
+            Material::Selection => zgx_desktop::GlassMaterial::Selection,
+        };
+        let made = zgx_desktop::Glass::new(material);
+        options.glass = Some(if glass.plain { made.plain() } else { made });
+    }
+    let set = |option: &mut bool, given: Option<bool>| {
+        if let Some(given) = given {
+            *option = given;
+        }
+    };
+    set(&mut options.decorations, look.decorations);
+    set(&mut options.resizable, look.resizable);
+    set(&mut options.transparent, look.transparent);
+    set(&mut options.shadow, look.shadow);
+    set(&mut options.covers_display, look.covers_display);
+    if let Some(level) = look.level {
+        options.level = match level {
+            Level::Normal => zgx_desktop::WindowLevel::Normal,
+            Level::AlwaysOnTop => zgx_desktop::WindowLevel::AlwaysOnTop,
+        };
+    }
 }
 impl AppConfig {
     /// The config for the script at `script`: its directory's `zgx.json`
@@ -162,22 +307,26 @@ impl AppConfig {
     fn read(
         script: &Path,
     ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        Self::read_window(script, None)
+    }
+    /// As [`read`](Self::read), for the window `window` names among
+    /// `zgx.json`'s `named_windows` (none: the one `first` names, else the
+    /// top level's).
+    fn read_window(
+        script: &Path,
+        window: Option<&str>,
+    ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        Self::read_for(script, zgx_script::window_look::this_platform(), window)
+    }
+    /// As [`read_window`](Self::read_window), on `platform`. Every window
+    /// it names is read on every platform too, so what one says wrong is
+    /// told wherever the app runs.
+    fn read_for(
+        script: &Path,
+        platform: &str,
+        window: Option<&str>,
+    ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
         let dir = script.parent().unwrap_or(Path::new("."));
-        let name = dir
-            .canonicalize()
-            .ok()
-            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "app".into());
-        let mut config = AppConfig {
-            title: name.clone(),
-            width: 960.,
-            height: 640.,
-            min_size: None,
-            titlebar: zgx_desktop::Titlebar::Standard,
-            glass: false,
-            app_id: name,
-            application_id: None,
-        };
         // Or, for one release, the name it had before the rename to zgx.
         let old = dir.join("zgui.json"); // rename-to-zgx: keep
         let mut path = dir.join("zgx.json");
@@ -185,17 +334,51 @@ impl AppConfig {
             eprintln!("zgx: {} is deprecated; name it zgx.json", old.display());
             path = old;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Ok((
-                config,
-                Default::default(),
-                WindowConfig {
-                    frame_autosave: None,
-                    visible: true,
-                    max_size: None,
-                    caption_height: None,
-                },
-            ));
+        let text = std::fs::read_to_string(&path).ok();
+        Self::read_text(dir, &path, text, platform, window)
+    }
+    /// As [`read_window`](Self::read_window), a bundle's `zgx.json` read
+    /// through its checked files: one its manifest doesn't name is none,
+    /// and one changed or removed since it was built is refused.
+    fn read_bundle(
+        bundle: &zgx_script::app_bundle::Opened,
+        window: Option<&str>,
+    ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        let path = bundle.ui.join("zgx.json");
+        let text = match bundle.file("zgx.json")? {
+            None => None,
+            Some(bytes) => {
+                Some(String::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?)
+            }
+        };
+        let platform = zgx_script::window_look::this_platform();
+        Self::read_text(&bundle.ui, &path, text, platform, window)
+    }
+    /// The window `window` names of the `zgx.json` `text` (none: there is
+    /// none), read from `path` in `dir`, on `platform`.
+    fn read_text(
+        dir: &Path,
+        path: &Path,
+        text: Option<String>,
+        platform: &str,
+        window: Option<&str>,
+    ) -> Result<(Self, zgx_script::app_config::AppHost, WindowConfig), String> {
+        use zgx_script::window_look::PLATFORMS;
+        let name = dir
+            .canonicalize()
+            .ok()
+            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "app".into());
+        let Some(text) = text else {
+            if let Some(window) = window {
+                return Err(format!(
+                    "no {} names a window `{window}` (`named_windows`)",
+                    path.display()
+                ));
+            }
+            let empty = serde_json::Map::new();
+            let (config, window) = Self::resolve(&name, path, &empty, platform, None)?;
+            return Ok((config, Default::default(), window));
         };
         let fail = |e: String| format!("{}: {e}", path.display());
         let json: serde_json::Value =
@@ -203,8 +386,161 @@ impl AppConfig {
         let object = json
             .as_object()
             .ok_or_else(|| fail("not an object".into()))?;
+        // Its named windows, and which opens first.
+        // (`named_windows`, not `windows`: that is Windows' platform block.)
+        let windows = match object.get("named_windows") {
+            None => serde_json::Map::new(),
+            Some(serde_json::Value::Object(windows)) => {
+                for (name, window) in windows {
+                    if !window.is_object() {
+                        return Err(fail(format!(
+                            "`named_windows.{name}` is not an object of window keys"
+                        )));
+                    }
+                }
+                windows.clone()
+            }
+            Some(_) => {
+                return Err(fail(
+                    "`named_windows` is not an object of windows by name".into(),
+                ));
+            }
+        };
+        let names = || {
+            let names: Vec<&str> = windows.keys().map(String::as_str).collect();
+            if names.is_empty() {
+                "none".to_owned()
+            } else {
+                names.join(", ")
+            }
+        };
+        let first = match object.get("first") {
+            None => None,
+            Some(serde_json::Value::String(first)) if windows.contains_key(first) => {
+                Some(first.as_str())
+            }
+            Some(serde_json::Value::String(first)) => {
+                return Err(fail(format!(
+                    "`first` is `{first}`, which `named_windows` doesn't name (it names {})",
+                    names()
+                )));
+            }
+            Some(_) => return Err(fail("`first` is not a window's name".into())),
+        };
+        let chosen = match window {
+            Some(window) if !windows.contains_key(window) => {
+                return Err(fail(format!(
+                    "no window `{window}`: `named_windows` names {}",
+                    names()
+                )));
+            }
+            Some(window) => Some(window),
+            None => first,
+        };
+        // Every window, on every platform: what any says wrong is told
+        // here, wherever this runs.
+        for named in std::iter::once(None).chain(windows.keys().map(|name| Some(name.as_str()))) {
+            for other in PLATFORMS {
+                let window = named.and_then(|name| windows.get(name)?.as_object());
+                Self::resolve(&name, path, object, other, window).map_err(|e| match named {
+                    Some(named) => format!("{e} (window `{named}`, on {other})"),
+                    None => format!("{e} (on {other})"),
+                })?;
+            }
+        }
+        let named = chosen.and_then(|name| windows.get(name)?.as_object());
+        let (config, window) = Self::resolve(&name, path, object, platform, named)?;
+        let app = zgx_script::app_config::from_object(dir, object).map_err(fail)?;
+        Ok((config, app, window))
+    }
+    /// The window `object` (a `zgx.json`) says on `platform`: `named`, one
+    /// of its `named_windows`, if given. Each window key is read from the first of
+    /// its layers that has it, the most specific first: the named window's
+    /// platform block, the named window, the top level's platform block,
+    /// the top level (shallow: a table such as `glass` is the layer's whole).
+    fn resolve(
+        name: &str,
+        path: &Path,
+        object: &serde_json::Map<String, serde_json::Value>,
+        platform: &str,
+        named: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(Self, WindowConfig), String> {
+        use zgx_script::window_look::{Given, LOOK_KEYS, PLATFORMS, WindowLook, check_block};
+        let mut config = AppConfig {
+            title: name.to_owned(),
+            width: 960.,
+            height: 640.,
+            min_size: None,
+            titlebar: zgx_desktop::Titlebar::Standard,
+            glass: false,
+            app_id: name.to_owned(),
+            application_id: None,
+        };
+        let fail = |e: String| format!("{}: {e}", path.display());
+        // The window's keys a platform's block may hold; every block is
+        // checked, this platform's or not.
+        let window_keys: Vec<&str> = WINDOW_KEYS
+            .iter()
+            .copied()
+            .chain(LOOK_KEYS.iter().map(|key| key.name))
+            .collect();
+        let blocks_of =
+            |within: &serde_json::Map<String, serde_json::Value>, at: &str| -> Result<(), String> {
+                for name in PLATFORMS {
+                    match within.get(name) {
+                        None => {}
+                        Some(serde_json::Value::Object(block)) => {
+                            check_block(name, block.keys().map(String::as_str), &window_keys)
+                                .map_err(|e| fail(format!("{at}{e}")))?
+                        }
+                        Some(_) => {
+                            return Err(fail(format!(
+                                "{at}`{name}` is not an object of window keys"
+                            )));
+                        }
+                    }
+                }
+                Ok(())
+            };
+        blocks_of(object, "")?;
+        for key in object.keys() {
+            if !window_keys.contains(&key.as_str())
+                && !APP_KEYS.contains(&key.as_str())
+                && !PLATFORMS.contains(&key.as_str())
+                && !zgx_script::app_config::KEYS.contains(&key.as_str())
+            {
+                return Err(fail(format!("unknown key `{key}`")));
+            }
+        }
+        if let Some(named) = named {
+            blocks_of(named, "a named window's ")?;
+            for key in named.keys() {
+                if !window_keys.contains(&key.as_str())
+                    && !PLATFORMS.contains(&key.as_str())
+                    && key != "script"
+                {
+                    return Err(fail(format!(
+                        "a named window has `{key}`, which isn't a window key"
+                    )));
+                }
+            }
+        }
+        fn block_of<'a>(
+            within: &'a serde_json::Map<String, serde_json::Value>,
+            platform: &str,
+        ) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+            within.get(platform).and_then(serde_json::Value::as_object)
+        }
+        let mut layers: Vec<&serde_json::Map<String, serde_json::Value>> = Vec::with_capacity(4);
+        if let Some(named) = named {
+            layers.extend(block_of(named, platform));
+            layers.push(named);
+        }
+        layers.extend(block_of(object, platform));
+        layers.push(object);
+        let get = |key: &str| layers.iter().find_map(|layer| layer.get(key));
         let number = |key: &str| -> Result<Option<f64>, String> {
-            match object.get(key) {
+            match get(key) {
                 None => Ok(None),
                 Some(v) => v
                     .as_f64()
@@ -213,7 +549,7 @@ impl AppConfig {
             }
         };
         let string = |key: &str| -> Result<Option<String>, String> {
-            match object.get(key) {
+            match get(key) {
                 None => Ok(None),
                 Some(v) => v
                     .as_str()
@@ -221,29 +557,6 @@ impl AppConfig {
                     .ok_or_else(|| fail(format!("`{key}` is not a string"))),
             }
         };
-        for key in object.keys() {
-            if ![
-                "title",
-                "width",
-                "height",
-                "min_width",
-                "max_width",
-                "max_height",
-                "min_height",
-                "titlebar",
-                "caption_height",
-                "glass",
-                "app_id",
-                "application_id",
-                "frame_autosave",
-                "visible",
-            ]
-            .contains(&key.as_str())
-                && !zgx_script::app_config::KEYS.contains(&key.as_str())
-            {
-                return Err(fail(format!("unknown key `{key}`")));
-            }
-        }
         if let Some(title) = string("title")? {
             config.title = title;
         }
@@ -265,6 +578,25 @@ impl AppConfig {
             }
             height => height,
         };
+        // `{ "x": 18, "y": 22 }`: the close button's top left.
+        let traffic_lights = match get("traffic_lights") {
+            None => None,
+            Some(value) => {
+                let at = value.as_object().filter(|at| at.len() == 2);
+                let coordinate = |key: &str| {
+                    at.and_then(|at| at.get(key)?.as_f64())
+                        .filter(|v| v.is_finite())
+                };
+                match (coordinate("x"), coordinate("y")) {
+                    (Some(x), Some(y)) => Some((x, y)),
+                    _ => {
+                        return Err(fail(
+                            "`traffic_lights` is not `{ \"x\": <points>, \"y\": <points> }`".into(),
+                        ));
+                    }
+                }
+            }
+        };
         config.titlebar = match string("titlebar")?.as_deref() {
             None | Some("standard") => zgx_desktop::Titlebar::Standard,
             Some("inset") => zgx_desktop::Titlebar::Inset,
@@ -275,13 +607,9 @@ impl AppConfig {
                 )));
             }
         };
-        config.glass = match object.get("glass") {
-            None => false,
-            Some(v) => v
-                .as_bool()
-                .ok_or_else(|| fail("`glass` is not a boolean".into()))?,
-        };
-        let visible = match object.get("visible") {
+        let look = WindowLook::parse(|key| get(key).map(Given::from)).map_err(fail)?;
+        config.glass = look.glass.is_some();
+        let visible = match get("visible") {
             None => true,
             Some(v) => v
                 .as_bool()
@@ -291,7 +619,7 @@ impl AppConfig {
             config.app_id = id;
         }
         config.application_id = string("application_id")?;
-        let frame_autosave = match object.get("frame_autosave") {
+        let frame_autosave = match get("frame_autosave") {
             None | Some(serde_json::Value::Bool(false)) => None,
             Some(serde_json::Value::Bool(true)) => Some(config.app_id.clone()),
             Some(serde_json::Value::String(name)) if !name.is_empty() => Some(name.clone()),
@@ -299,15 +627,27 @@ impl AppConfig {
                 return Err(fail("`frame_autosave` is not true, false or a name".into()));
             }
         };
-        let app = zgx_script::app_config::from_object(dir, object).map_err(fail)?;
+        let script = match named.and_then(|named| named.get("script")) {
+            None => None,
+            Some(serde_json::Value::String(script)) if !script.is_empty() => {
+                Some(PathBuf::from(script))
+            }
+            Some(_) => {
+                return Err(fail(
+                    "a named window's `script` is not a file's name".into(),
+                ));
+            }
+        };
         Ok((
             config,
-            app,
             WindowConfig {
+                look,
                 frame_autosave,
                 visible,
                 max_size,
                 caption_height,
+                traffic_lights,
+                script,
             },
         ))
     }
@@ -320,6 +660,86 @@ pub fn script_path(path: &Path) -> PathBuf {
     } else {
         path.to_path_buf()
     }
+}
+
+/// What `zgx run` hands the runtime: each module's library by name, built
+/// and cached for this run (`--module words=<library>`), in place of where
+/// zgx.json's `modules` would find it; and a line to show as the app
+/// starts (`--notice`: "module `words` changed: restarted").
+#[derive(Default)]
+struct Launch {
+    modules: Vec<(String, PathBuf)>,
+    notice: Option<String>,
+    window: Option<String>,
+}
+static LAUNCH: std::sync::Mutex<Launch> = std::sync::Mutex::new(Launch {
+    modules: Vec::new(),
+    notice: None,
+    window: None,
+});
+
+/// The window to open first, by its name among zgx.json's `named_windows`
+/// (`zgx-run --window <name>`): set before [`run`]. One it doesn't name is
+/// an error that lists those it does.
+pub fn set_window(name: impl Into<String>) {
+    LAUNCH.lock().unwrap().window = Some(name.into());
+}
+
+/// The library to load for the module `name` instead of the one zgx.json's
+/// `modules` names (as `zgx run` builds it): set before [`run`].
+pub fn set_module(name: impl Into<String>, library: impl Into<PathBuf>) {
+    let mut launch = LAUNCH.lock().unwrap();
+    let name = name.into();
+    launch.modules.retain(|(n, _)| *n != name);
+    launch.modules.push((name, library.into()));
+}
+
+/// A line the app shows in its banner once its scripts have loaded, and on
+/// stderr: what `zgx run` says of why it started it again.
+pub fn set_notice(notice: impl Into<String>) {
+    LAUNCH.lock().unwrap().notice = Some(notice.into());
+}
+
+/// The native modules the app at `dir` loads, by name: each library `zgx
+/// run` handed over, else the one zgx.json's `modules` names (a library's
+/// path, or a crate whose newest build is taken). A module zgx.json names
+/// with no library to load is an error: its scripts would call it.
+#[cfg(feature = "modules")]
+fn modules_of(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let given = std::mem::take(&mut LAUNCH.lock().unwrap().modules);
+    let named = zgx_script::module_types::named_in(dir)?;
+    let (found, missing) = zgx_script::module_types::of_app(dir);
+    let mut modules = Vec::new();
+    for name in named {
+        if let Some((_, library)) = given.iter().find(|(n, _)| *n == name) {
+            modules.push((name, library.clone()));
+            continue;
+        }
+        let library = found
+            .iter()
+            .find(|(_, manifest)| {
+                zgx_script::module_types::name_of(manifest).as_deref() == Some(name.as_str())
+            })
+            .map(|(library, _)| library.clone());
+        match library {
+            Some(library) => modules.push((name, library)),
+            None => {
+                let why = missing
+                    .iter()
+                    .find(|why| why.starts_with(&format!("module `{name}`")))
+                    .cloned()
+                    .unwrap_or_else(|| format!("module `{name}`: no library to load"));
+                return Err(why);
+            }
+        }
+    }
+    // One `zgx run` built that zgx.json doesn't name is loaded too.
+    for (name, library) in given {
+        if !modules.iter().any(|(n, _)| *n == name) {
+            modules.push((name, library));
+        }
+    }
+    Ok(modules)
 }
 
 /// Run the script at `path` (a file, or a directory with `app.luau`) as an
@@ -372,33 +792,67 @@ pub fn run_hosting(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::{cell::RefCell, rc::Rc};
     let configure = host;
-    let script = script_path(path);
+    // A bundle (`zgx build`'s), checked against its manifest: its scripts
+    // as the build compiled them, its modules' libraries for this platform.
+    let bundle = if zgx_script::app_bundle::is_bundle(path) {
+        let opened = zgx_script::app_bundle::open(path)?;
+        // Its scripts read and checked while the window is made.
+        opened.read_ahead();
+        if zgx::env::var_os("ZGX_BUNDLE_TIMING").is_some() {
+            eprintln!(
+                "zgx-run: bundle checked in {:.2} ms",
+                opened.checked_in.as_secs_f64() * 1e3
+            );
+        }
+        Some(opened)
+    } else {
+        None
+    };
+    let mut script = match &bundle {
+        Some(bundle) => bundle.ui.join(&bundle.entry),
+        None => script_path(path),
+    };
     if !script.is_file() {
         return Err(format!("{}: no such script", script.display()).into());
     }
-    // Its modules compile on a worker while AppKit, the GPU and the window
-    // are set up, not one by one on the main thread at each `require`.
-    zgx_script::compile_ahead(&script, &[]);
-    let (config, app_host, window_config) = AppConfig::read(&script)?;
-    let WindowConfig {
-        frame_autosave,
-        visible,
-        max_size,
-        caption_height,
-    } = window_config;
-    let options = WindowOptions {
-        title: config.title.clone(),
-        width: config.width,
-        height: config.height,
-        min_size: config.min_size,
-        max_size,
-        titlebar: config.titlebar,
-        caption_height,
-        glass: config.glass.then(zgx_desktop::Glass::default),
-        frame_autosave,
-        visible,
-        ..Default::default()
+    // The window to open: the one `--window` names among zgx.json's
+    // `named_windows`, else its
+    // `first`, else its top level's; a named window may open a script of
+    // its own, beside the app's.
+    let window = LAUNCH.lock().unwrap().window.take();
+    let (config, app_host, mut window_config) = match &bundle {
+        // A bundle's zgx.json, checked as its other files are.
+        Some(bundle) => AppConfig::read_bundle(bundle, window.as_deref())?,
+        None => AppConfig::read_window(&script, window.as_deref())?,
     };
+    let mut entry = bundle.as_ref().map(|bundle| bundle.entry.clone());
+    if let Some(own) = window_config.script.take() {
+        let dir = script.parent().unwrap_or(Path::new(".")).to_path_buf();
+        script = dir.join(&own);
+        if !script.is_file() {
+            return Err(format!("{}: no such script", script.display()).into());
+        }
+        if let Some(entry) = &mut entry {
+            *entry = own.to_string_lossy().into_owned();
+        }
+    }
+    // Its modules compile on a worker while AppKit, the GPU and the window
+    // are set up, not one by one on the main thread at each `require` (a
+    // bundle's are compiled already).
+    if bundle.is_none() {
+        zgx_script::compile_ahead(&script, &[]);
+    }
+    // The app's native modules, found before its window opens: one it names
+    // that isn't built is said now, not as a script calls it.
+    #[cfg(feature = "modules")]
+    let modules = match &bundle {
+        Some(bundle) => bundle.modules.clone(),
+        None => modules_of(script.parent().unwrap_or(Path::new(".")))?,
+    };
+    let bundle = bundle.map(|bundle| (bundle.files(), entry.unwrap_or(bundle.entry)));
+    let notice = LAUNCH.lock().unwrap().notice.take();
+    let options = options_of(&config, window_config);
+    let visible = options.visible;
     let launched: Vec<PathBuf> = args
         .iter()
         .map(PathBuf::from)
@@ -434,7 +888,16 @@ pub fn run_hosting(
     }
     app.run(move |cx| {
         // Its packages, what it exposes to plugins, and its plugins.
-        let host = app_host.apply(ScriptHost::new(&cx.ui.runtime, script.clone()));
+        let host = match &bundle {
+            Some((files, entry)) => ScriptHost::from_files(
+                &cx.ui.runtime,
+                files.clone(),
+                entry,
+                zgx_script::Code::VerifiedBytecode,
+            ),
+            None => ScriptHost::new(&cx.ui.runtime, script.clone()),
+        };
+        let host = app_host.apply(host);
         let host = host.app_id(&config.app_id).args(args.clone());
         // The launch's files, and what the system opened meanwhile:
         // they wait for the script's `ui.on_open`.
@@ -480,9 +943,37 @@ pub fn run_hosting(
         fetch::install(&host);
         #[cfg(feature = "socket")]
         socket::install(&host);
+        #[cfg(feature = "audio")]
+        play_through(&host, cx);
+        // Its modules, before the scripts that call them. One that won't
+        // load (another interface, a library that isn't what its manifest
+        // says) is shown, and the scripts don't run.
+        #[cfg(feature = "modules")]
+        let loaded = modules.iter().try_for_each(|(name, library)| {
+            // SAFETY: The app's own module: zgx.json, the app's own file,
+            // names it, or `zgx run` built it from what zgx.json names.
+            unsafe { host.load_module(library) }.map_err(|why| format!("module `{name}`: {why}"))
+        });
+        #[cfg(not(feature = "modules"))]
+        let loaded: Result<(), String> = Ok(());
         configure(&host);
-        let _ = host.reload();
-        cx.tasks.spawn(host.watch(Duration::from_millis(250)));
+        // What `zgx run` says of why it started the app (before its view,
+        // which shows it).
+        if let Some(notice) = &notice
+            && loaded.is_ok()
+        {
+            host.notice(notice.clone());
+        }
+        match loaded {
+            Ok(()) => {
+                let _ = host.reload();
+                cx.tasks.spawn(host.watch(Duration::from_millis(250)));
+            }
+            Err(why) => {
+                eprintln!("zgx-run: {why}");
+                host.error().set(Some(why));
+            }
+        }
         let menus_follow = serve_commands(&host, cx);
         // The script's windows (`ui.window`): each open while its state is.
         let windows_follow = follow_windows(&host, cx);
@@ -496,6 +987,7 @@ pub fn run_hosting(
         let devtools = devtools_asked
             .then(|| inspect(&host, cx, handle, &script))
             .flatten();
+
         let keep = std::cell::RefCell::new(Some((menus_follow, windows_follow, devtools)));
         cx.on_closed(move || {
             saving.save();
@@ -503,6 +995,25 @@ pub fn run_hosting(
         });
     })?;
     Ok(())
+}
+
+/// `host`'s scripts play through the application's engine
+/// (`WindowFactory::audio`), made at their first `audio` call: their
+/// `playing` states follow voices ending, and `audio.ui_sounds_enabled` the
+/// user's setting. For a Rust host that makes its own window. The listener
+/// it keeps lives with the host's engine, the app's lifetime.
+#[cfg(feature = "audio")]
+pub fn play_through(host: &ScriptHost, cx: &zgx_desktop::WindowContext) {
+    let heard = host.clone();
+    let listening = cx.windows.on_audio(move |event| match event {
+        zgx_desktop::AudioEvent::VoicesEnded(ids) => heard.voices_ended(ids),
+        zgx_desktop::AudioEvent::UiSounds(on) => heard.set_ui_sounds_enabled(*on),
+    });
+    let factory = cx.windows.clone();
+    host.set_audio(move || {
+        let _ = &listening;
+        factory.audio()
+    });
 }
 
 static INSPECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -627,7 +1138,7 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
             if wanted && !shown {
                 let (min_size, max_size) = host.window_size_limits(&window.id);
                 let extras = host.window_extras(&window.id);
-                let options = WindowOptions {
+                let mut options = WindowOptions {
                     title: window.title.clone(),
                     min_size,
                     max_size,
@@ -646,6 +1157,7 @@ pub fn follow_windows(host: &ScriptHost, cx: &zgx_desktop::WindowContext) -> zgx
                         .is_none_or(|visible| visible.with_untracked(Value::truthy)),
                     ..Default::default()
                 };
+                apply_look(&mut options, &extras.look);
                 let (view_host, state, id) = (host.clone(), window.open.clone(), window.id.clone());
                 let own = extras.state.clone();
                 let visible = extras.visible.clone();
@@ -816,6 +1328,355 @@ mod tests {
         let error = AppConfig::read(&script).unwrap_err();
         assert!(error.contains("is not a folder"), "{error}");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_zgx_json_places_an_inset_title_bars_traffic_lights() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-lights-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        let lights = |script: &Path| AppConfig::read(script).map(|read| read.2.traffic_lights);
+        assert_eq!(lights(&script), Ok(None));
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "titlebar": "inset", "traffic_lights": { "x": 18, "y": 22.5 } }"#,
+        )
+        .unwrap();
+        assert_eq!(lights(&script), Ok(Some((18., 22.5))));
+        for wrong in [
+            r#"{ "traffic_lights": [18, 22] }"#,
+            r#"{ "traffic_lights": { "x": 18 } }"#,
+            r#"{ "traffic_lights": { "x": 18, "y": "22" } }"#,
+            r#"{ "traffic_lights": { "x": 18, "y": 22, "z": 1 } }"#,
+        ] {
+            std::fs::write(dir.join("zgx.json"), wrong).unwrap();
+            let error = lights(&script).unwrap_err();
+            assert!(
+                error.contains("`traffic_lights` is not"),
+                "{wrong}: {error}"
+            );
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A platform's block replaces the window's keys on that platform,
+    /// shallow and per key: a table (`glass`) is the block's whole, and
+    /// the keys it doesn't have stay the window's.
+    #[test]
+    fn a_platforms_block_replaces_the_window_keys_it_has() {
+        use zgx_script::window_look::{Glass, Level, Material};
+        let dir = std::env::temp_dir().join(format!("zgx-run-platforms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "title": "A", "decorations": false, "level": "always_on_top",
+                 "glass": { "material": "sidebar", "plain": true },
+                 "macos": { "decorations": true, "glass": { "material": "hud" } },
+                 "windows": { "title": "B", "caption_height": 38 } }"#,
+        )
+        .unwrap();
+        let on = |platform: &str| AppConfig::read_for(&script, platform, None).unwrap();
+        let (mac, _, mac_window) = on("macos");
+        assert_eq!(mac_window.look.decorations, Some(true));
+        assert_eq!(
+            mac_window.look.glass,
+            Some(Glass {
+                material: Material::Hud,
+                plain: false
+            }),
+            "the block's glass whole: its `plain` isn't the window's"
+        );
+        assert_eq!(
+            (mac.title.as_str(), mac_window.look.level),
+            ("A", Some(Level::AlwaysOnTop))
+        );
+        let (linux, _, linux_window) = on("linux");
+        assert_eq!(linux_window.look.decorations, Some(false));
+        assert_eq!(
+            linux_window.look.glass,
+            Some(Glass {
+                material: Material::Sidebar,
+                plain: true
+            })
+        );
+        assert_eq!(
+            (linux.title.as_str(), linux_window.caption_height),
+            ("A", None)
+        );
+        let (windows, _, windows_window) = on("windows");
+        assert_eq!(
+            (windows.title.as_str(), windows_window.caption_height),
+            ("B", Some(38.))
+        );
+        assert_eq!(windows_window.look.decorations, Some(false));
+        // What a block may not hold, told on every platform (a slip in
+        // `"windows"` on a Mac too).
+        for (json, said) in [
+            (
+                r#"{ "macos": { "app_id": "x" } }"#,
+                "`macos` has `app_id`, which isn't a window key that can differ by platform",
+            ),
+            (
+                r#"{ "linux": { "windows": {} } }"#,
+                "`linux` holds `windows`: a platform's block holds window keys, not another block",
+            ),
+            (
+                r#"{ "windows": 3 }"#,
+                "`windows` is not an object of window keys",
+            ),
+            (
+                r#"{ "windows": { "titel": "x" } }"#,
+                "`windows` has `titel`",
+            ),
+            (r#"{ "ios": { "title": "x" } }"#, "unknown key `ios`"),
+            (
+                r#"{ "linux": { "glass": "yes" } }"#,
+                "`glass` is not a boolean or { material, plain }",
+            ),
+        ] {
+            std::fs::write(dir.join("zgx.json"), json).unwrap();
+            for platform in zgx_script::window_look::PLATFORMS {
+                let error = AppConfig::read_for(&script, platform, None).unwrap_err();
+                assert!(error.contains(said), "{json} on {platform}: {error}");
+            }
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The look's keys reach the window's options as the platform's calls
+    /// take them; what they don't say keeps the options' defaults.
+    #[test]
+    fn a_windows_look_reaches_its_options() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-look-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        let options = |json: &str| {
+            std::fs::write(dir.join("zgx.json"), json).unwrap();
+            let (_, _, window) = AppConfig::read(&script).unwrap();
+            let mut options = WindowOptions::default();
+            apply_look(&mut options, &window.look);
+            options
+        };
+        let plain = options("{}");
+        let defaults = WindowOptions::default();
+        assert_eq!(
+            (
+                plain.glass,
+                plain.decorations,
+                plain.resizable,
+                plain.transparent,
+                plain.shadow,
+                plain.covers_display,
+                plain.level
+            ),
+            (
+                defaults.glass,
+                defaults.decorations,
+                defaults.resizable,
+                defaults.transparent,
+                defaults.shadow,
+                defaults.covers_display,
+                defaults.level
+            )
+        );
+        let intro = options(
+            r#"{ "transparent": true, "decorations": false, "resizable": false, "covers_display": true,
+                 "level": "always_on_top", "shadow": false,
+                 "glass": { "material": "under_window_background", "plain": true } }"#,
+        );
+        assert!(
+            intro.transparent
+                && !intro.decorations
+                && !intro.resizable
+                && intro.covers_display
+                && !intro.shadow
+        );
+        assert_eq!(intro.level, zgx_desktop::WindowLevel::AlwaysOnTop);
+        assert_eq!(
+            intro.glass,
+            Some(
+                zgx_desktop::Glass::new(zgx_desktop::GlassMaterial::UnderWindowBackground).plain()
+            )
+        );
+        assert_eq!(
+            options(r#"{ "glass": true }"#).glass,
+            Some(zgx_desktop::Glass::default())
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A named window's key comes from the first layer that has it: its
+    /// platform's block, the window, the top level's platform block, the
+    /// top level.
+    #[test]
+    fn a_named_windows_keys_come_from_its_layers_in_order() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-named-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        // `title` at all four layers; `width` at three; `height` at two;
+        // `shadow` at the top alone.
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "title": "top", "width": 100, "height": 10, "shadow": false,
+                 "macos": { "title": "top macos", "width": 200 },
+                 "named_windows": {
+                     "main": { "title": "main", "width": 300, "height": 30,
+                               "macos": { "title": "main macos" },
+                               "linux": { "width": 400 } },
+                     "intro": {}
+                 } }"#,
+        )
+        .unwrap();
+        let read = |platform: &str, window: Option<&str>| {
+            let (config, _, window) = AppConfig::read_for(&script, platform, window).unwrap();
+            (
+                config.title,
+                config.width,
+                config.height,
+                window.look.shadow,
+            )
+        };
+        let main = |platform| read(platform, Some("main"));
+        assert_eq!(main("macos"), ("main macos".into(), 300., 30., Some(false)));
+        assert_eq!(main("linux"), ("main".into(), 400., 30., Some(false)));
+        assert_eq!(main("windows"), ("main".into(), 300., 30., Some(false)));
+        // A named window with nothing of its own: the top level's, by platform.
+        assert_eq!(
+            read("macos", Some("intro")),
+            ("top macos".into(), 200., 10., Some(false))
+        );
+        assert_eq!(
+            read("linux", Some("intro")),
+            ("top".into(), 100., 10., Some(false))
+        );
+        // None named, no `first`: the top level's.
+        assert_eq!(read("linux", None), ("top".into(), 100., 10., Some(false)));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// `first` names the window that opens unless `--window` names
+    /// another; a name zgx.json doesn't have is an error listing those it
+    /// does. A named window may open a script of its own.
+    #[test]
+    fn the_first_window_is_the_one_asked_for_or_first() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-first-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "first": "main", "named_windows": {
+                   "main": { "title": "Main" },
+                   "intro": { "title": "Intro", "transparent": true, "script": "intro.luau" } } }"#,
+        )
+        .unwrap();
+        let title =
+            |window: Option<&str>| AppConfig::read_window(&script, window).map(|read| read.0.title);
+        assert_eq!(title(None).as_deref(), Ok("Main"), "first");
+        assert_eq!(title(Some("intro")).as_deref(), Ok("Intro"), "asked for");
+        let error = title(Some("gallery")).unwrap_err();
+        assert!(
+            error.contains("no window `gallery`: `named_windows` names intro, main"),
+            "{error}"
+        );
+        let (options, own) = window_options(&script, Some("intro")).unwrap();
+        assert!(options.transparent);
+        assert_eq!(own, Some(dir.join("intro.luau")));
+        assert_eq!(
+            window_options(&script, Some("main")).unwrap().1,
+            None,
+            "the app's own script"
+        );
+        for (json, said) in [
+            (
+                r#"{ "first": "nope", "named_windows": { "main": {} } }"#,
+                "`first` is `nope`, which `named_windows` doesn't name (it names main)",
+            ),
+            (
+                r#"{ "named_windows": { "main": 3 } }"#,
+                "`named_windows.main` is not an object of window keys",
+            ),
+            (
+                r#"{ "named_windows": { "main": { "app_id": "x" } } }"#,
+                "a named window has `app_id`, which isn't a window key",
+            ),
+            (
+                r#"{ "named_windows": { "main": { "script": 3 } } }"#,
+                "a named window's `script` is not a file's name",
+            ),
+            // A slip in a window that isn't opening, on another platform:
+            // told all the same.
+            (
+                r#"{ "first": "main", "named_windows": { "main": {}, "intro": { "windows": { "level": "top" } } } }"#,
+                "`level` is `top`: one of normal, always_on_top (window `intro`, on windows)",
+            ),
+        ] {
+            std::fs::write(dir.join("zgx.json"), json).unwrap();
+            let error = AppConfig::read_window(&script, None).unwrap_err();
+            assert!(error.contains(said), "{json}: {error}");
+        }
+        std::fs::remove_file(dir.join("zgx.json")).unwrap();
+        let error = AppConfig::read_window(&script, Some("main")).unwrap_err();
+        assert!(error.contains("names a window `main`"), "{error}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A bundle's windows are read through its checked files: a zgx.json
+    /// changed, or removed, on the disk since it was built is refused (it
+    /// would be another app's window), and a bundle with none opens the
+    /// defaults.
+    #[test]
+    fn a_bundles_windows_are_read_checked() {
+        let dir =
+            std::env::temp_dir().join(format!("zgx-run-bundle-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("app.luau"), "return ui.text 'x'").unwrap();
+        std::fs::write(
+            app.join("zgx.json"),
+            r#"{ "title": "Bundled", "first": "intro", "named_windows": { "intro": { "transparent": true, "decorations": false } } }"#,
+        )
+        .unwrap();
+        let made = |name: &str| {
+            let out = dir.join(name);
+            zgx_script::app_bundle::write(
+                &app,
+                &zgx_script::app_bundle::Options {
+                    out: Some(out.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            zgx_script::app_bundle::open(&out).unwrap()
+        };
+        let bundle = made("whole");
+        let (options, own) = window_options_in(&bundle, None).unwrap();
+        assert!(options.transparent && !options.decorations, "first's");
+        assert_eq!((options.title.as_str(), own), ("Bundled", None));
+        // Changed on the disk: refused, whatever it says now.
+        let on_disk = bundle.ui.join("zgx.json");
+        std::fs::write(&on_disk, r#"{ "title": "Other", "named_windows": {} }"#).unwrap();
+        let error = window_options_in(&bundle, None).unwrap_err();
+        assert!(
+            error.contains("isn't the file its bundle's manifest names"),
+            "{error}"
+        );
+        // Removed: refused too, not read as none.
+        std::fs::remove_file(&on_disk).unwrap();
+        assert!(window_options_in(&bundle, None).is_err(), "removed");
+        // A bundle built without one: the defaults, and no window by name.
+        std::fs::remove_file(app.join("zgx.json")).unwrap();
+        let bare = made("bare");
+        assert_eq!(window_options_in(&bare, None).unwrap().0.title, "ui");
+        let error = window_options_in(&bare, Some("intro")).unwrap_err();
+        assert!(error.contains("names a window `intro`"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

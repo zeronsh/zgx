@@ -780,3 +780,139 @@ fn a_picture_refused_then_allowed_is_fetched_on_the_next_load() {
     h.frames(2);
     assert_eq!(*urls.borrow(), ["https://img.test/a.png"]);
 }
+
+// The web guard: pages asked by the id they were made under.
+
+const TABS: &str = r##"
+local tab = ui.web("tab")
+local loose = ui.web()
+local said = ui.state("said", "")
+return ui.column {
+    ui.button { id = "load", w = 10, h = 10, on_click = function()
+        local ok, why = pcall(function() loose:load("http://plain.test/loose") end)
+        said:set(if ok then "loaded" else tostring(why))
+    end },
+    ui.text { id = "said", function() return said:get() end },
+    ui.webview { web = tab, id = "tab", w = 200, h = 40 },
+    ui.webview { web = loose, id = "loose", w = 200, h = 40 },
+    ui.webview { id = "own", w = 200, h = 40, src = "http://plain.test/own" },
+}
+"##;
+
+type WebAsked = Rc<RefCell<Vec<(Option<String>, String)>>>;
+
+/// `TABS` under a web guard letting `http:` only into the page `tab`, and a
+/// guard that refuses everything (never asked of pages while the web guard
+/// is set): what each was asked.
+fn web_guarded() -> (Harness, WebAsked, Asked) {
+    let (web_asked, asked): (WebAsked, Asked) = Default::default();
+    let (told_web, told) = (web_asked.clone(), asked.clone());
+    let h = Harness::with_desktop(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", TABS);
+        host.guard(move |kind, name| {
+            told.borrow_mut().push((kind, name.to_owned()));
+            Err("not in a preview".into())
+        });
+        host.web_guard(move |web, url| {
+            told_web
+                .borrow_mut()
+                .push((web.map(str::to_owned), url.to_owned()));
+            match web == Some("tab") || url.starts_with("https:") {
+                true => Ok(()),
+                false => Err("https only here".into()),
+            }
+        });
+        host
+    });
+    (h, web_asked, asked)
+}
+fn web_named(h: &mut Harness, id: &str) -> WebView {
+    h.ui.prepare_frame();
+    let node = h.find(id).expect("the web view");
+    match h.natives.content(node) {
+        Some(NativeContent::Web(web)) => web,
+        _ => panic!("{id} is no web view"),
+    }
+}
+
+/// A main frame, an iframe and a redirect of the page made as `ui.web("tab")`
+/// are each asked with its id; an anonymous page's with none; and the
+/// guard isn't asked of pages at all.
+#[test]
+fn the_web_guard_is_told_which_page_navigates() {
+    let (mut h, web_asked, asked) = web_guarded();
+    let tab = web_named(&mut h, "tab");
+    let main = navigation("http://plain.test/main", NavigationKind::Link);
+    let iframe = NavigationRequest {
+        main_frame: false,
+        ..navigation("http://plain.test/frame", NavigationKind::Other)
+    };
+    let redirect = NavigationRequest {
+        source_url: "http://plain.test/main".into(),
+        ..navigation("http://plain.test/moved", NavigationKind::Other)
+    };
+    for request in [&main, &iframe, &redirect] {
+        assert!(tab.allows(request), "{}", request.url);
+    }
+    let tab_id = Some("tab".to_owned());
+    assert_eq!(
+        web_asked.borrow()[web_asked.borrow().len() - 3..],
+        [
+            (tab_id.clone(), "http://plain.test/main".to_owned()),
+            (tab_id.clone(), "http://plain.test/frame".to_owned()),
+            (tab_id, "http://plain.test/moved".to_owned()),
+        ]
+    );
+    // The anonymous page: no id, so `http:` is refused, its iframe too.
+    let loose = web_named(&mut h, "loose");
+    assert!(!loose.allows(&main));
+    assert!(!loose.allows(&iframe));
+    assert!(loose.allows(&navigation("https://secure.test/", NavigationKind::Link)));
+    assert_eq!(
+        web_asked.borrow().last().unwrap(),
+        &(None, "https://secure.test/".to_owned())
+    );
+    assert!(h.error().unwrap_or_default().contains("https only here"));
+    assert!(
+        !asked
+            .borrow()
+            .iter()
+            .any(|(kind, _)| *kind == GuardKind::Web),
+        "the guard was asked of a page: {:?}",
+        asked.borrow()
+    );
+}
+
+/// What a script loads is asked too: refused, the page doesn't go there and
+/// the script hears why; a webview's own `src` (no `ui.web` id) likewise.
+#[test]
+fn a_page_the_web_guard_refuses_loads_nothing() {
+    let (mut h, web_asked, _) = web_guarded();
+    let loose = web_named(&mut h, "loose");
+    h.click("load");
+    h.settle();
+    assert!(
+        h.text("said").contains("https only here"),
+        "{}",
+        h.text("said")
+    );
+    assert_ne!(loose.url(), "http://plain.test/loose");
+    assert!(
+        web_asked
+            .borrow()
+            .contains(&(None, "http://plain.test/own".to_owned())),
+        "{:?}",
+        web_asked.borrow()
+    );
+    assert_ne!(web_named(&mut h, "own").url(), "http://plain.test/own");
+}
+
+/// With no web guard, the guard decides of pages as before.
+#[test]
+fn with_no_web_guard_the_guard_decides_of_pages() {
+    let (mut h, asked) = guarded(TABS, |_, name| name.starts_with("https:"));
+    let tab = web_named(&mut h, "tab");
+    assert!(!tab.allows(&navigation("http://plain.test/main", NavigationKind::Link)));
+    assert!(tab.allows(&navigation("https://secure.test/", NavigationKind::Link)));
+    assert!(was_asked(&asked, GuardKind::Web, "http://plain.test/main"));
+}

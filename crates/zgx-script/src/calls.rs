@@ -11,6 +11,7 @@
 //! settles. A rejection nothing handles is reported as a script error.
 //! Everything a promise calls back runs on the script's budget; a script
 //! that has reloaded since hears nothing.
+use crate::Field;
 use crate::{
     Vm,
     errors::{Failure, Kind, UiError},
@@ -112,6 +113,22 @@ impl Body {
     /// A body kept whole, for the response's `body`.
     pub(crate) fn kept() -> Self {
         Self::new(None)
+    }
+    /// The request is `caller`'s (a plugin's name; `None` for the app's),
+    /// under `policy`: for one made with no script running (a sound's file,
+    /// fetched in the browser).
+    #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+    pub(crate) fn asked_as(
+        &self,
+        caller: Option<Rc<str>>,
+        policy: &crate::fetch_policy::SharedPolicy,
+    ) {
+        if let Some(caller) = caller {
+            let _ = self.0.caller.set(caller);
+        }
+        if let Some(policy) = policy.borrow().clone() {
+            let _ = self.0.policy.set(policy);
+        }
     }
     /// Write the next piece of the body. Nothing hears it once the request
     /// is cancelled (`is_open` is false).
@@ -306,11 +323,13 @@ fn hear(waiter: Waiter, settled: &Settled) {
         } => {
             let Some(vm) = vm.upgrade() else { return };
             let result = match settled {
-                Settled::Value(value) => on_value.map(|f| vm.call::<()>(&f, value.clone())),
+                Settled::Value(value) => {
+                    on_value.map(|f| vm.call_as::<()>("the on_value handler", &f, value.clone()))
+                }
                 Settled::Error(error) => on_error.map(|f| {
                     vm.lua
                         .create_userdata(UiError::of(error.clone()))
-                        .and_then(|error| vm.call::<()>(&f, error))
+                        .and_then(|error| vm.call_as::<()>("the on_error handler", &f, error))
                 }),
                 Settled::Pending => None,
             };
@@ -491,6 +510,10 @@ pub(crate) fn pending(lua: &Lua, name: String) -> mlua::Result<Rc<Promise>> {
         caller: env.vm.clone(),
         abort: RefCell::default(),
     }))
+}
+/// Settle `promise` with `value` now (a caller batching what it wakes).
+pub(crate) fn resolve(promise: &Rc<Promise>, value: Value) {
+    promise.settle(Ok(value));
 }
 /// Settle `promise` with what `future` gives, on the window's tasks.
 pub(crate) fn settle_with(
@@ -741,7 +764,11 @@ fn sending(
         let vm = env(lua)?.vm.clone();
         *body.0.progress.borrow_mut() = Some(Box::new(move |sent, total| {
             if let Some(vm) = vm.upgrade()
-                && let Err(e) = vm.call::<()>(&on_progress, (sent as f64, total as f64))
+                && let Err(e) = vm.call_as::<()>(
+                    "the on_progress handler",
+                    &on_progress,
+                    (sent as f64, total as f64),
+                )
             {
                 vm.report(e);
             }
@@ -774,12 +801,12 @@ fn sending(
 /// A response as a script reads it: `status`, `ok` (2xx), `headers`
 /// (lower-case names), `body` (text) and `json` (when it is JSON).
 fn response_value(response: Response) -> Value {
-    let headers: Vec<(Rc<str>, Value)> = {
-        let mut headers: Vec<(Rc<str>, Value)> = response
+    let headers: Vec<Field> = {
+        let mut headers: Vec<Field> = response
             .headers
             .iter()
             .map(|(name, value)| {
-                (
+                Field(
                     name.to_lowercase().into(),
                     Value::Str(value.as_str().into()),
                 )
@@ -789,7 +816,7 @@ fn response_value(response: Response) -> Value {
         headers.dedup_by(|a, b| a.0 == b.0);
         headers
     };
-    let json = headers.iter().any(|(name, value)| {
+    let json = headers.iter().any(|Field(name, value)| {
         &**name == "content-type" && matches!(value, Value::Str(v) if v.contains("json"))
     });
     let body = String::from_utf8_lossy(&response.body);
@@ -798,15 +825,15 @@ fn response_value(response: Response) -> Value {
     } else {
         Value::Nil
     };
-    let mut fields: Vec<(Rc<str>, Value)> = vec![
-        ("body".into(), Value::Str(body.as_ref().into())),
-        ("headers".into(), Value::Map(headers.into())),
-        ("json".into(), parsed),
-        (
+    let mut fields: Vec<Field> = vec![
+        Field("body".into(), Value::Str(body.as_ref().into())),
+        Field("headers".into(), Value::Map(headers.into())),
+        Field("json".into(), parsed),
+        Field(
             "ok".into(),
             Value::Bool((200..300).contains(&response.status)),
         ),
-        ("status".into(), Value::Num(response.status as f64)),
+        Field("status".into(), Value::Num(response.status as f64)),
     ];
     fields.sort_by(|a, b| a.0.cmp(&b.0));
     Value::Map(fields.into())
@@ -957,13 +984,13 @@ impl Listener {
         };
         batch(&self.runtime, || {
             if let Some(f) = &self.on_chunk
-                && let Err(error) = vm.call::<()>(f, text)
+                && let Err(error) = vm.call_as::<()>("the on_chunk handler", f, text)
             {
                 vm.report(error);
             }
             if let Some(f) = &self.on_event {
                 for event in events {
-                    if let Err(error) = vm.call::<()>(f, event) {
+                    if let Err(error) = vm.call_as::<()>("the on_event handler", f, event) {
                         vm.report(error);
                     }
                 }
@@ -1105,6 +1132,9 @@ pub(crate) fn install(
                 settle_with(lua, &promise, Kind::Action, action(arg))?;
             } else if let Some(action) = plain {
                 action(arg);
+                if let Some(error) = crate::modules::failure() {
+                    return Err(error);
+                }
                 promise.state.set(Settled::Value(Value::Nil));
             } else {
                 return Err(mlua::Error::runtime(format!(

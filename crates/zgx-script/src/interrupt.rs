@@ -50,7 +50,11 @@
 //! `Lua::exec_raw` closure runs inside. A Rust panic must not reach Luau's
 //! frames: it would unwind past `lua_pcall` without restoring the VM's call
 //! state.
+// The watchdog's thread, and what it alone runs, are not built for the
+// browser, which has no threads (`Interrupts::publish`).
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 use crate::Deadline;
+use crate::time::Instant;
 use mlua::{Lua, ffi};
 use std::{
     cell::{Cell, RefCell},
@@ -60,7 +64,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicPtr, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// Luau's interrupt slot as Rust writes it: the same size and alignment as
@@ -291,6 +295,86 @@ struct Watchdog {
 /// budget is spent. Only a call running almost its whole budget runs its
 /// last moments with the interrupt set.
 const EARLY: u64 = 5_000_000;
+/// In the browser, how many interrupt checks one in looks at most
+/// (`check`): where safepoints are quick.
+#[cfg(target_arch = "wasm32")]
+const WASM_CHECK_EVERY: u32 = 1024;
+/// In the browser, how many safepoints into a call its first look comes at
+/// most, where its budget starts (`Deadline::lazy`): most calls (a row's
+/// text and style functions) end first and read no clock. Fewer where the
+/// thread's looks came slowly (`WasmLooks::first`), so slow safepoints (a
+/// Rust call, a long `string.rep`) don't hold a runaway call long before it.
+#[cfg(target_arch = "wasm32")]
+const WASM_FIRST_LOOK: u32 = 256;
+/// In the browser, the stride after a call's first look: short, as nothing
+/// is known yet of how long its safepoints take (`pace` lengthens it).
+#[cfg(target_arch = "wasm32")]
+const WASM_SECOND_LOOK: u32 = 16;
+/// In the browser, the time between looks the stride is paced to (`pace`):
+/// a runaway call is stopped about this long past its budget, however long
+/// its safepoints take.
+#[cfg(target_arch = "wasm32")]
+const WASM_LOOK_GAP: Duration = Duration::from_millis(1);
+/// In the browser, a call found out of time: every check looks until the
+/// next call starts (`check`).
+#[cfg(target_arch = "wasm32")]
+const OUT_OF_TIME: u32 = u32::MAX;
+/// In the browser, how the thread's checks look (`check`), set afresh as
+/// each call starts (`Interrupts::publish`).
+#[cfg(target_arch = "wasm32")]
+struct WasmLooks {
+    /// Checks since the last that looked, or `OUT_OF_TIME`.
+    checks: Cell<u32>,
+    /// One check in how many looks (`pace`).
+    stride: Cell<u32>,
+    /// How many safepoints into the next call its first look comes: cut to
+    /// a stride `pace` made shorter, and doubled as each call starts, up to
+    /// `WASM_FIRST_LOOK`.
+    first: Cell<u32>,
+    /// When the call's checks last looked, if they have.
+    looked: Cell<Option<Instant>>,
+}
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WASM_LOOKS: WasmLooks = const {
+        WasmLooks {
+            checks: Cell::new(0),
+            stride: Cell::new(WASM_FIRST_LOOK),
+            first: Cell::new(WASM_FIRST_LOOK),
+            looked: Cell::new(None),
+        }
+    };
+}
+/// A check looking at `now`: after a call's first look, `WASM_SECOND_LOOK`
+/// (or the first look's stride, if shorter);
+/// then paced so looks come about `WASM_LOOK_GAP` apart, fewer checks apart
+/// where they came later, twice as many where they came in under half of
+/// it, from 1 to `WASM_CHECK_EVERY`.
+#[cfg(target_arch = "wasm32")]
+fn pace(now: Instant) {
+    WASM_LOOKS.with(|looks| {
+        let paced = match looks.looked.replace(Some(now)) {
+            // No fewer safepoints than the first look waited for, where
+            // the thread's looks came slowly (`WasmLooks::first`).
+            None => WASM_SECOND_LOOK.min(looks.first.get()),
+            Some(last) => {
+                let gap = now.saturating_duration_since(last);
+                let stride = looks.stride.get();
+                if gap > WASM_LOOK_GAP {
+                    let scaled = u128::from(stride) * WASM_LOOK_GAP.as_nanos() / gap.as_nanos();
+                    let scaled = scaled.max(1) as u32;
+                    looks.first.set(looks.first.get().min(scaled));
+                    scaled
+                } else if gap < WASM_LOOK_GAP / 2 {
+                    stride.saturating_mul(2).min(WASM_CHECK_EVERY)
+                } else {
+                    stride
+                }
+            }
+        };
+        looks.stride.set(paced);
+    });
+}
 impl Watchdog {
     /// The process's watchdog.
     fn get() -> &'static Watchdog {
@@ -307,14 +391,19 @@ impl Watchdog {
             #[cfg(test)]
             wakes: AtomicU64::new(0),
         }));
-        let thread = std::thread::Builder::new()
-            .name("zgx script watchdog".into())
-            .spawn(move || {
-                prompt_wakes();
-                watchdog.run()
-            })
-            .expect("the script watchdog thread");
-        let _ = watchdog.thread.set(thread.thread().clone());
+        // In the browser (wasm32) there are no threads: calls set their own
+        // interrupt (`Interrupts::publish`).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let thread = std::thread::Builder::new()
+                .name("zgx script watchdog".into())
+                .spawn(move || {
+                    prompt_wakes();
+                    watchdog.run()
+                })
+                .expect("the script watchdog thread");
+            let _ = watchdog.thread.set(thread.thread().clone());
+        }
         watchdog
     }
     /// A call due at `due` started: wake if that is before the next wake.
@@ -610,8 +699,32 @@ impl Installed {
                 // Set early (`EARLY`): the check decides when the budget is
                 // spent, so the stop stays as prompt as the check's.
                 let due = nanos(deadline).saturating_sub(EARLY).max(1);
-                alarm.due.store(due, Ordering::SeqCst);
-                self.watchdog.wake_by(due);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    alarm.due.store(due, Ordering::SeqCst);
+                    self.watchdog.wake_by(due);
+                }
+                // No threads in the browser, so no watchdog: the call starts
+                // with its interrupt set, as the watchdog would have set it,
+                // and the check counts its budget out.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    alarm.due.store(due | FIRED, Ordering::SeqCst);
+                    // Set as it starts, fired at its due time as far as a
+                    // stop's report goes: no clock read for it.
+                    alarm.fired_at.store(due, Ordering::SeqCst);
+                    // A new call's first look is `WasmLooks::first`
+                    // safepoints in, where its budget starts: a shorter call
+                    // reads no clock.
+                    WASM_LOOKS.with(|looks| {
+                        let first = looks.first.get().saturating_mul(2).min(WASM_FIRST_LOOK);
+                        looks.first.set(first);
+                        looks.checks.set(1);
+                        looks.stride.set(first);
+                        looks.looked.set(None);
+                    });
+                    alarm.set(true);
+                }
             }
             None => {
                 alarm.due.store(0, Ordering::SeqCst);
@@ -732,6 +845,11 @@ thread_local! {
     /// The first stop of the last call stopped on this thread.
     static LAST_STOP: Cell<Option<(u64, BudgetStop)>> = const { Cell::new(None) };
 }
+/// Which call was last stopped for its time on this thread (none yet): a
+/// mark that a load's stop changes.
+pub(crate) fn stop_mark() -> Option<u64> {
+    LAST_STOP.with(|stop| stop.get().map(|(at, _)| at))
+}
 /// The last call stopped for its time on this thread, as it was stopped.
 pub(crate) fn last_stop() -> Option<BudgetStop> {
     LAST_STOP.with(|stop| stop.get().map(|(_, stop)| stop))
@@ -833,6 +951,31 @@ unsafe extern "C-unwind" fn every_64th(state: *mut ffi::lua_State) {
 ///
 /// `state` is the running thread of a VM Luau is executing, at a safepoint.
 unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
+    // No watchdog in the browser: a call runs with its interrupt set from
+    // its start (`publish`), so every safepoint lands here, and reading the
+    // clock there (`performance.now`, through JS) cost more than the short
+    // calls it watched. One check in a stride looks, up to `WASM_CHECK_EVERY`
+    // where safepoints are quick, fewer where they are slow (`pace`): a
+    // runaway loop is stopped about `WASM_LOOK_GAP` after its budget, and a
+    // collection the allocator asked for waits as long. Once a call is out
+    // of time every check looks, as on the desktop: the safepoint after a
+    // `pcall` that caught the stop raises it again, outside it.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let skip = WASM_LOOKS.with(|looks| match looks.checks.get() {
+            OUT_OF_TIME => false,
+            n => {
+                let next = n + 1;
+                looks
+                    .checks
+                    .set(if next >= looks.stride.get() { 0 } else { next });
+                n != 0
+            }
+        });
+        if skip {
+            return Verdict::Continue;
+        }
+    }
     // SAFETY: reads the thread's VM's main thread.
     let main = unsafe { ffi::lua_mainthread(state) } as usize;
     let watch = WATCHES
@@ -871,7 +1014,38 @@ unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
         unsafe { watch.steer_goal(state, live) };
         watch.set_memory_alarm();
     }
+    // In the browser, one reading of the clock per look: it starts a lazy
+    // budget, paces the stride and decides.
+    #[cfg(target_arch = "wasm32")]
+    let looked = watch.deadline.get().map(|_| {
+        let now = Instant::now();
+        pace(now);
+        now
+    });
     match watch.deadline.get() {
+        // Its first look: the budget starts now (`Deadline::lazy`).
+        #[cfg(target_arch = "wasm32")]
+        Some(d) if d.lazy() => {
+            let started = looked.map(|now| d.started_at(now));
+            // Due from its start, as `publish` sets it from a call's: a
+            // stop's account (`record_stop`) counts from there, and tells
+            // this call's stop from the last's (a lazy budget's due time
+            // was the same for every call).
+            if let Some(started) = started {
+                let due = nanos(started.due()).saturating_sub(EARLY).max(1);
+                watch.alarm.due.store(due | FIRED, Ordering::SeqCst);
+                watch.alarm.fired_at.store(due, Ordering::SeqCst);
+            }
+            watch.deadline.set(started);
+            Verdict::Continue
+        }
+        #[cfg(target_arch = "wasm32")]
+        Some(d) if looked.is_some_and(|now| d.exceeded_at(now)) => {
+            record_stop(&watch.alarm, &d);
+            WASM_LOOKS.with(|looks| looks.checks.set(OUT_OF_TIME));
+            Verdict::OutOfTime
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         Some(d) if d.exceeded() => {
             record_stop(&watch.alarm, &d);
             Verdict::OutOfTime

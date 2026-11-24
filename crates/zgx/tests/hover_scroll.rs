@@ -9,20 +9,41 @@ use zgx::{compose::prelude::*, input::InputEvent, widgets::Ui};
 
 const ROWS: usize = 1000;
 
+/// What is raised (`z`) in the scene, taking its hit tests by the walk that
+/// keeps paint order.
+#[derive(Clone, Copy, PartialEq)]
+enum Raised {
+    Nothing,
+    /// One of the rows: their column paints out of document order.
+    ARow,
+    /// A part inside one row (a row's badge, a menu's button): the rows'
+    /// column paints in document order.
+    InsideARow,
+}
+
 #[test]
 fn hover_follows_rows_scrolling_under_a_still_pointer_and_its_hit_test_is_bounded() {
-    rows_scrolling_under_a_still_pointer(false);
+    rows_scrolling_under_a_still_pointer(Raised::Nothing);
 }
 
-/// The same with a raised node elsewhere in the window (a sticky header, a
-/// `z`), which takes every hit test of the scene by the walk that keeps
-/// paint order: bounded as the plain one is.
+/// The same with one of the rows raised (a `z`), which takes every hit test
+/// of the scene by the walk that keeps paint order: bounded, each row looked
+/// at once.
 #[test]
-fn with_a_raised_node_in_the_scene_too() {
-    rows_scrolling_under_a_still_pointer(true);
+fn with_a_raised_row_too() {
+    rows_scrolling_under_a_still_pointer(Raised::ARow);
 }
 
-fn rows_scrolling_under_a_still_pointer(raised: bool) {
+/// The same with a part of a row raised, as an app's rows raise a badge or
+/// a button: the walk keeping paint order still searches the rows, which
+/// paint in document order, as the plain one does. (Before, it looked at
+/// every row, whatever was raised.)
+#[test]
+fn with_a_part_of_a_row_raised_the_rows_are_searched() {
+    rows_scrolling_under_a_still_pointer(Raised::InsideARow);
+}
+
+fn rows_scrolling_under_a_still_pointer(raised: Raised) {
     let mut ui = Ui::new(300., 400.);
     let offset = ui.signal(0_f32);
     let view = ui.mount(
@@ -48,9 +69,13 @@ fn rows_scrolling_under_a_still_pointer(raised: bool) {
     );
     ui.prepare_frame();
     let row = |i: usize| view.find(&format!("row-{i}")).unwrap();
-    if raised {
-        let raised = row(500);
-        ui.scene.borrow_mut().set_z(raised, 1);
+    let lifted = match raised {
+        Raised::Nothing => None,
+        Raised::ARow => Some(row(500)),
+        Raised::InsideARow => Some(ui.scene.borrow().children(row(500))[0]),
+    };
+    if let Some(lifted) = lifted {
+        ui.scene.borrow_mut().set_z(lifted, 1);
         ui.prepare_frame();
     }
     // The pointer rests over the third row and stays there.
@@ -74,13 +99,17 @@ fn rows_scrolling_under_a_still_pointer(raised: bool) {
     );
     // Each frame's hit test enters the row under the pointer alone: its
     // parts, not every row's (5 nodes a row; walked whole, 5,000 a frame).
-    // In a plain scene it finds that row by searching the rows (`hit_rows`),
-    // looking at none of the others; with a raised node, whose walk keeps
-    // paint order, it looks at each row once. Debug builds count (a release
+    // It finds that row by searching the rows (`hit_rows`), looking at none
+    // of the others, wherever the rows paint in document order; with a row
+    // raised, the walk keeping paint order looks at each row once. Debug builds count (a release
     // build says 0).
     if cfg!(debug_assertions) {
         let most = *walked.iter().max().unwrap();
-        let bound = if raised { ROWS as u64 + 16 } else { 32 };
+        let bound = if raised == Raised::ARow {
+            ROWS as u64 + 16
+        } else {
+            32
+        };
         assert!(most > 0, "a scroll frame refreshes hover");
         assert!(
             most <= bound,

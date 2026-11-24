@@ -193,6 +193,10 @@ impl FileDialogs {
         if self.owner.is_closed() {
             return Err(FileDialogError::WindowClosed);
         }
+        // Off-screen (`ZGX_OFFSCREEN`): no panel shows; it is as if cancelled.
+        if !crate::window_chrome::may_show() {
+            return Ok(None);
+        }
         let parent = self
             .native
             .borrow()
@@ -231,6 +235,10 @@ impl FileDialogs {
         options.validate()?;
         if self.owner.is_closed() {
             return Err(FileDialogError::WindowClosed);
+        }
+        // Off-screen: no alert shows; it is as if cancelled.
+        if !crate::window_chrome::may_show() {
+            return Ok(crate::PromptResponse::Cancel);
         }
         let parent = self
             .native
@@ -525,17 +533,27 @@ mod tests {
         };
         let cancel = Arc::new(Cancel::new());
         let waiting = cancel.clone();
-        let started = std::time::Instant::now();
+        let spawned = std::time::Instant::now();
         let thread = std::thread::spawn(move || {
+            let running = spawned.elapsed();
             let wake = waiting.wake().unwrap();
             while crate::linux_dbus::wait(&connection, wake) {}
-            started.elapsed()
+            (running, std::time::Instant::now())
         });
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(!thread.is_finished(), "nothing came and nothing cancelled");
+        let cancelled = std::time::Instant::now();
         cancel.cancel();
         assert!(cancel.is_cancelled());
-        assert!(thread.join().unwrap() < std::time::Duration::from_secs(5));
+        // From the cancel, not from the spawn: on a starved runner the thread
+        // may start late (a run whose tests took 19 s, not 5, failed when the
+        // spawn was counted), and the 200 ms before it was never the wake's.
+        let (running, woke) = thread.join().unwrap();
+        let wake = woke.saturating_duration_since(cancelled);
+        assert!(
+            wake < std::time::Duration::from_secs(10),
+            "woke {wake:?} after the cancel; the thread ran {running:?} after its spawn"
+        );
     }
     #[test]
     fn invalid_filter_does_not_reach_native_cstring_conversion() {
@@ -569,7 +587,10 @@ mod tests {
         drop(future);
         assert_eq!(Arc::strong_count(&retained), 2);
         tx.send(()).unwrap();
-        for _ in 0..100 {
+        // The worker drops it as its work returns, once scheduled: on a busy
+        // runner that took longer than the 100 ms this once waited.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
             if Arc::strong_count(&retained) == 1 {
                 return;
             }

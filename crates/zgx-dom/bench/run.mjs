@@ -13,6 +13,7 @@ import { chromium } from "playwright-core";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 
 const RUNS = +(process.env.RUNS || 10);
 const WARMUP = +(process.env.WARMUP || 3);
@@ -108,7 +109,23 @@ const median = (xs) => {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 };
 
+// In a page: when the frame after the table's first button appears is
+// painted (`window.firstFrame`, ms from the navigation's start).
+const firstFrame = () => {
+  const seen = () => {
+    if (window.firstFrame !== undefined || !document.querySelector('[data-id="run"]')) return false;
+    requestAnimationFrame(() => {
+      window.firstFrame = performance.now();
+    });
+    return true;
+  };
+  new MutationObserver((_, observer) => {
+    if (seen()) observer.disconnect();
+  }).observe(document, { childList: true, subtree: true });
+};
+
 const results = {};
+const startups = {};
 const memories = {};
 const scrolls = {};
 for (const { name } of pages) {
@@ -169,6 +186,22 @@ for (const { name } of pages) {
     };
   }
   memories[name] = mem;
+  // Startup: load to first frame, from the navigation's start to the
+  // frame after the table's first button is in the document (what each page
+  // shows first), the median of 5 fresh loads.
+  // Each in a context of its own: nothing cached, the module fetched and
+  // compiled afresh, as a first visit.
+  const loads = [];
+  for (let i = 0; i < 5; i++) {
+    const context = await browser.newContext();
+    const fresh = await context.newPage();
+    await fresh.addInitScript(firstFrame);
+    await fresh.goto(`${base}/${name}/`);
+    await fresh.waitForFunction(() => window.firstFrame !== undefined);
+    loads.push(await fresh.evaluate(() => window.firstFrame));
+    await context.close();
+  }
+  startups[name] = median(loads);
   await page.close();
 }
 await browser.close();
@@ -201,3 +234,23 @@ for (const n of names) {
     console.log(`\n${n}: virtual list of 10,000 rows, ${scrolls[n].mounted} rows mounted after scrolling; ${scrolls[n].perStep.toFixed(2)} ms of script, style and layout per 280 px scroll step`);
   }
 }
+
+// Startup and what a page loads of WebAssembly, raw and gzipped.
+const wasmFiles = (dir) =>
+  fs
+    .readdirSync(dir, { recursive: true })
+    .filter((f) => f.endsWith(".wasm"))
+    .map((f) => fs.readFileSync(path.join(dir, f)));
+console.log();
+console.log(`| Load (median of 5) | ${names.join(" | ")} |`);
+console.log(`| --- | ${names.map(() => "---").join(" | ")} |`);
+console.log(`| startup: load to first frame (ms) | ${names.map((n) => startups[n].toFixed(1)).join(" | ")} |`);
+const sizes = Object.fromEntries(
+  pages.map(({ name, dir }) => {
+    const files = wasmFiles(dir);
+    const raw = files.reduce((a, f) => a + f.length, 0);
+    const gz = files.reduce((a, f) => a + zlib.gzipSync(f).length, 0);
+    return [name, files.length ? `${(raw / 1024).toFixed(0)} KB (${(gz / 1024).toFixed(0)} KB gzipped)` : "none"];
+  }),
+);
+console.log(`| WebAssembly | ${names.map((n) => sizes[n]).join(" | ")} |`);

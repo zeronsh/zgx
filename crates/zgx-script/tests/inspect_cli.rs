@@ -57,6 +57,18 @@ fn the_mcp_server_says_what_it_offers() {
         lines[1].contains(r#""required":["target"]"#),
         "targets required where they are"
     );
+    // A clipboard's files are a list of paths; `type` may go without a
+    // target (`no_click`).
+    assert!(
+        lines[1].contains(r#""files":{"items":{"type":"string"},"type":"array"}"#),
+        "{}",
+        lines[1]
+    );
+    assert!(
+        lines[1].contains(r#""no_click":{"type":"boolean"}"#),
+        "{}",
+        lines[1]
+    );
     assert!(
         lines[2].contains(r#""isError":true"#) && lines[2].contains("no tool zgx_nope"),
         "{}",
@@ -88,4 +100,14 @@ fn key_value_words_are_the_commands_fields() {
     // A number reads as one: no complaint about it (no app answers here).
     let said = run(&["frames", "n=300", "since=drag"]);
     assert!(!said.contains("takes a number"), "{said}");
+    // `type --no-click` takes the text alone; `--files` one path or more.
+    let said = run(&["type", "--no-click", "#name", "text"]);
+    assert!(
+        said.contains("type --no-click takes the text alone"),
+        "{said}"
+    );
+    let said = run(&["type", "--no-click", "text"]);
+    assert!(!said.contains("takes the text alone"), "{said}");
+    let said = run(&["clipboard", "set", "--files", "--app", "1"]);
+    assert!(said.contains("--files takes one path or more"), "{said}");
 }

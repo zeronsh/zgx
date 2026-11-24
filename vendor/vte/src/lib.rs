@@ -606,6 +606,31 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             return 1;
         }
 
+        // zgx: ASCII is UTF-8 as it is: dispatched straight, up to the first
+        // byte that isn't, without a check that went over it all once more.
+        // From such a byte on, the rest is checked as before (the next call).
+        #[cfg(test)]
+        let ascii = match tests::CHECK_ALL.with(|check| check.get()) {
+            true => 0,
+            false => {
+                tests::STRAIGHT.with(|straight| straight.set(straight.get() + 1));
+                Self::ground_dispatch_ascii(performer, &bytes[..plain_chars])
+            },
+        };
+        #[cfg(not(test))]
+        let ascii = Self::ground_dispatch_ascii(performer, &bytes[..plain_chars]);
+        if ascii == plain_chars {
+            let mut processed = plain_chars;
+            if processed < num_bytes {
+                self.state = State::Escape;
+                self.reset_params();
+                processed += 1;
+            }
+            return processed;
+        } else if ascii > 0 {
+            return ascii;
+        }
+
         match str::from_utf8(&bytes[..plain_chars]) {
             Ok(parsed) => {
                 Self::ground_dispatch(performer, parsed);
@@ -717,6 +742,31 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         }
     }
 
+    /// zgx: `ground_dispatch` for `bytes` up to the first that isn't ASCII:
+    /// how many it dispatched.
+    #[inline]
+    fn ground_dispatch_ascii<P: Perform>(performer: &mut P, bytes: &[u8]) -> usize {
+        let mut at = 0;
+        while at < bytes.len() {
+            let end = at + printable_run(&bytes[at..]);
+            if end > at {
+                // SAFETY: printable ASCII is UTF-8.
+                performer.print_str(unsafe { str::from_utf8_unchecked(&bytes[at..end]) });
+                at = end;
+                if at == bytes.len() {
+                    break;
+                }
+            }
+            match bytes[at] {
+                0x00..=0x1F => performer.execute(bytes[at]),
+                0x7F => performer.print('\x7f'),
+                _ => return at,
+            }
+            at += 1;
+        }
+        bytes.len()
+    }
+
     /// Handle ground dispatch of print/execute for all characters in a string.
     #[inline]
     fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
@@ -725,8 +775,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         let bytes = text.as_bytes();
         let mut at = 0;
         while at < bytes.len() {
-            let run = bytes[at..].iter().position(|byte| !matches!(byte, 0x20..=0x7E));
-            let end = run.map_or(bytes.len(), |run| at + run);
+            let end = at + printable_run(&bytes[at..]);
             if end > at {
                 // SAFETY: ASCII, so on character boundaries.
                 performer.print_str(unsafe { text.get_unchecked(at..end) });
@@ -744,6 +793,31 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             at += c.len_utf8();
         }
     }
+}
+
+/// How many bytes at the start of `bytes` are printable ASCII
+/// (`0x20..=0x7E`): eight at a time, the word holding the first other byte
+/// (and the last few bytes) one at a time.
+// zgx: a log's lines are long runs, and a byte at a time cost them most.
+#[inline]
+fn printable_run(bytes: &[u8]) -> usize {
+    const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
+    const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
+    let mut at = 0;
+    while let Some(word) = bytes.get(at..at + 8) {
+        let word = u64::from_ne_bytes(word.try_into().unwrap());
+        // A byte below 0x20 sets its high bit in the first, one of 0x7F or
+        // above in the second (carries only ever add bits after such a
+        // byte); a word of printable bytes sets none.
+        let below = word.wrapping_sub(ONES * 0x20) & !word;
+        let above = word.wrapping_add(ONES) | word;
+        if (below | above) & HIGH != 0 {
+            break;
+        }
+        at += 8;
+    }
+    let rest = &bytes[at..];
+    at + rest.iter().position(|byte| !matches!(byte, 0x20..=0x7E)).unwrap_or(rest.len())
 }
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
@@ -1638,6 +1712,9 @@ mod tests {
         const PIECES: &[&[u8]] = &[
             b"a",
             b"word ",
+            b"a line of a log, longer than a word or two",
+            b"1234567",
+            b"12345678",
             b"~",
             b" ",
             b"\t",
@@ -1674,7 +1751,7 @@ mod tests {
             // In chunks of any length, as reads end anywhere.
             let mut at = 0;
             while at < bytes.len() {
-                let end = (at + 1 + next(16)).min(bytes.len());
+                let end = (at + 1 + next(80)).min(bytes.len());
                 parser.advance(&mut runs, &bytes[at..end]);
                 by_one.advance(&mut one, &bytes[at..end]);
                 at = end;
@@ -1682,6 +1759,126 @@ mod tests {
             assert_eq!(runs.dispatched.dispatched, one.dispatched, "{bytes:?}");
             longest = runs.runs.iter().map(|run| run.len()).max().unwrap_or(0).max(longest);
         }
-        assert!(longest > 4, "{longest}");
+        assert!(longest > 16, "{longest}");
+    }
+
+    std::thread_local! {
+        /// zgx: every span checked as UTF-8 first, as before ASCII went
+        /// straight, to check the straight way against.
+        pub(super) static CHECK_ALL: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+        /// zgx: how many spans went the straight way.
+        pub(super) static STRAIGHT: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+
+    /// zgx: random output (ASCII, controls, DEL, UTF-8 of two and four
+    /// bytes, C1 controls raw and encoded, bytes never UTF-8, a character cut
+    /// at a read's end) dispatches the same with ASCII going straight as with
+    /// every span checked as UTF-8 first, in reads of any length.
+    #[test]
+    fn ascii_going_straight_dispatches_as_checking_every_span_did() {
+        const PIECES: &[&[u8]] = &[
+            b"a",
+            b"word ",
+            b"a line of a log, longer than a word or two",
+            b"\t",
+            b"\r\n",
+            b"\x07",
+            b"\x7f",
+            b"\x00",
+            b"\x1b[31m",
+            b"\x1b]0;title\x07",
+            b"\x1bP1$q\x1b\\",
+            b"\xc3\xa9",
+            b"\xf0\x9f\x98\x80",
+            b"\xc2\x9b",
+            b"\x9b",
+            b"\xff",
+            b"\xe2\x82",
+            b"\xe2\x82\xac",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % below as u64) as usize
+        };
+        let straight_before = STRAIGHT.with(|straight| straight.get());
+        for _ in 0..500 {
+            let mut bytes = Vec::new();
+            for _ in 0..next(60) {
+                bytes.extend_from_slice(PIECES[next(PIECES.len())]);
+            }
+            let (mut straight, mut checked) = (Dispatcher::default(), Dispatcher::default());
+            let (mut parser, mut checking) = (Parser::new(), Parser::new());
+            let mut at = 0;
+            while at < bytes.len() {
+                let end = (at + 1 + next(40)).min(bytes.len());
+                parser.advance(&mut straight, &bytes[at..end]);
+                CHECK_ALL.with(|check| check.set(true));
+                checking.advance(&mut checked, &bytes[at..end]);
+                CHECK_ALL.with(|check| check.set(false));
+                at = end;
+            }
+            assert_eq!(straight.dispatched, checked.dispatched, "{bytes:?}");
+        }
+        let straight = STRAIGHT.with(|straight| straight.get()) - straight_before;
+        assert!(straight > 1000, "{straight}");
+    }
+
+    #[test]
+    fn a_printable_run_ends_at_the_first_other_byte_wherever_it_is() {
+        // Every other byte value at every place in up to four words, from
+        // every alignment.
+        let mut bytes = [b'x'; 32];
+        for len in 0..=bytes.len() {
+            for offset in 0..=8.min(bytes.len() - len) {
+                assert_eq!(printable_run(&bytes[offset..offset + len]), len);
+            }
+        }
+        for other in (0..=255u8).filter(|byte| !(0x20..=0x7E).contains(byte)) {
+            for at in 0..bytes.len() {
+                bytes[at] = other;
+                for offset in 0..=at {
+                    assert_eq!(printable_run(&bytes[offset..]), at - offset, "{other:#x} at {at}");
+                }
+                bytes[at] = b'x';
+            }
+        }
+        // Every printable byte, and two others in one word.
+        for printable in 0x20..=0x7Eu8 {
+            assert_eq!(printable_run(&[printable; 19]), 19);
+        }
+        assert_eq!(printable_run(b"ab\xff\x00cdefgh"), 2);
+        assert_eq!(printable_run(b"ab\x1f\x7fcdefgh"), 2);
+
+        // Random streams, mostly printable, against a byte at a time, from
+        // every place in them.
+        let by_one = |bytes: &[u8]| {
+            bytes.iter().position(|byte| !(0x20..=0x7E).contains(byte)).unwrap_or(bytes.len())
+        };
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..2000 {
+            let len = (next() % 70) as usize;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| match next() % 40 {
+                    0 => next() as u8,
+                    _ => 0x20 + (next() % 0x5F) as u8,
+                })
+                .collect();
+            for at in 0..=bytes.len() {
+                assert_eq!(
+                    printable_run(&bytes[at..]),
+                    by_one(&bytes[at..]),
+                    "{bytes:?} from {at}"
+                );
+            }
+        }
     }
 }

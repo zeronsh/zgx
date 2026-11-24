@@ -103,6 +103,22 @@ fn drawn_alike(
     steps: usize,
     dy: f32,
     levels: u8,
+    change: impl FnMut(usize),
+) -> u64 {
+    drawn_alike_on(&mut gpu, name, scale, ui, offset, steps, dy, levels, change)
+}
+
+/// `drawn_alike` on a renderer the caller keeps, to ask after it how it drew.
+#[allow(clippy::too_many_arguments)]
+fn drawn_alike_on(
+    gpu: &mut GpuRenderer,
+    name: &str,
+    scale: f32,
+    ui: &mut Ui,
+    offset: &Signal<f32>,
+    steps: usize,
+    dy: f32,
+    levels: u8,
     mut change: impl FnMut(usize),
 ) -> u64 {
     let (w, h) = ((W * scale) as u32, (H * scale) as u32);
@@ -623,7 +639,10 @@ fn clips_fading_at_their_head_as_the_view_comes_back() {
     let _gpu = gpu_fixture();
     for scale in SCALES {
         let (w, h) = ((W * scale) as u32, (H * scale) as u32);
-        let gpu = GpuRenderer::new(w, h).unwrap();
+        let mut gpu = GpuRenderer::new(w, h).unwrap();
+        // (Off macOS, a see-through window's frames don't draw in a single
+        // pass, so none goes straight to the screen, below.)
+        gpu.set_background(zgx::scene::Color(0, 0, 0, 255));
         let mut ui = Ui::new(W, H);
         let offset = ui.signal(0_f32);
         let mut page = column().w(W).gap(12.);
@@ -648,13 +667,33 @@ fn clips_fading_at_their_head_as_the_view_comes_back() {
             ),
         );
         let to = offset.clone();
-        // (A jump first, which repaints, to come back from.)
-        let copies = drawn_alike(gpu, "head", scale, &mut ui, &offset, 31, -6., 1, |step| {
-            if step == 0 {
-                to.set(600.);
-            }
-        });
-        assert_eq!(copies, 30, "head at {scale}x");
+        // (A jump first, which repaints, to come back from. It repaints all
+        // the view shows, here the window. Drawn whole in a single pass,
+        // straight to the screen, it leaves the retained pixels behind, so
+        // the step after it repaints too, and the 29 after that copy; drawn
+        // into the retained target (Direct3D 11 draws no frame in a single
+        // pass), the 30 after it copy.)
+        let copies = drawn_alike_on(
+            &mut gpu,
+            "head",
+            scale,
+            &mut ui,
+            &offset,
+            31,
+            -6.,
+            1,
+            |step| {
+                if step == 0 {
+                    to.set(600.);
+                }
+            },
+        );
+        let expected = if gpu.debug_single_pass_frames() > 0 {
+            29
+        } else {
+            30
+        };
+        assert_eq!(copies, expected, "head at {scale}x");
     }
 }
 

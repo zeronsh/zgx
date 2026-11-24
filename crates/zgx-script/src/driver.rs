@@ -276,6 +276,27 @@ pub fn first_text(scene: &Scene, node: NodeId) -> Option<String> {
     None
 }
 
+/// The value of `node`, or of the first node inside it with one, depth
+/// first: what a field, an editor or a slider holds, as assistive
+/// technology reads it (a text's value is its text, left to [`first_text`]).
+#[doc(hidden)]
+pub fn first_value(ui: &Ui, node: NodeId) -> Option<String> {
+    let scene = ui.scene.borrow();
+    let semantics = ui.semantics.borrow();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if let Some(value) = semantics
+            .get(n)
+            .filter(|s| s.role != Role::Label)
+            .and_then(|s| s.value.clone())
+        {
+            return Some(value);
+        }
+        stack.extend(scene.children(n).iter().rev());
+    }
+    None
+}
+
 /// The rows of list `list` that are mounted, top to bottom.
 pub fn rows(scene: &Scene, list: NodeId) -> Vec<NodeId> {
     // A list holds a viewport, which holds the content, which holds the rows.
@@ -886,6 +907,8 @@ pub struct TreeLine {
     pub line: Line,
     /// It doesn't show (`shows`): hidden, or in a closed panel.
     pub hidden: bool,
+    /// A toggle button pressed or not (`aria-pressed`), if it is one.
+    pub pressed: Option<bool>,
 }
 
 /// The tree under `from` (the view, by default), one node a line: its
@@ -948,6 +971,7 @@ pub fn tree_lines(
                         checked: s.and_then(|s| s.checked),
                     },
                     hidden: !shows(&scene, node),
+                    pressed: s.and_then(|s| s.pressed),
                 });
             } else {
                 hidden += 1;
@@ -1021,18 +1045,23 @@ fn fold(lines: Vec<TreeLine>) -> Vec<TreeLine> {
 
 /// [`tree`]'s lines as text: indented two spaces a level.
 pub fn tree_text(lines: &[Line], hidden: usize) -> String {
-    let lines: Vec<(&Line, bool)> = lines.iter().map(|line| (line, false)).collect();
+    let lines: Vec<_> = lines.iter().map(|line| (line, false, None)).collect();
     lines_text(&lines, hidden)
 }
 /// [`tree_lines`]' lines as text, as [`tree_text`], a node that doesn't
 /// show saying so.
 pub fn tree_lines_text(lines: &[TreeLine], hidden: usize) -> String {
-    let lines: Vec<(&Line, bool)> = lines.iter().map(|l| (&l.line, l.hidden)).collect();
+    let lines: Vec<_> = lines
+        .iter()
+        .map(|l| (&l.line, l.hidden, l.pressed))
+        .collect();
     lines_text(&lines, hidden)
 }
-fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
+/// Each line with whether it doesn't show and, a toggle button, whether
+/// it is pressed.
+fn lines_text(lines: &[(&Line, bool, Option<bool>)], hidden: usize) -> String {
     let mut out = String::new();
-    for &(line, not_shown) in lines {
+    for &(line, not_shown, pressed) in lines {
         let _ = write!(out, "{}@{}", "  ".repeat(line.depth), line.number);
         if let Some(id) = &line.id {
             let _ = write!(out, " #{id}");
@@ -1061,6 +1090,11 @@ fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
             Some(false) => out.push_str(" unchecked"),
             None => {}
         }
+        match pressed {
+            Some(true) => out.push_str(" pressed"),
+            Some(false) => out.push_str(" not-pressed"),
+            None => {}
+        }
         out.push('\n');
     }
     if hidden > 0 {
@@ -1070,6 +1104,28 @@ fn lines_text(lines: &[(&Line, bool)], hidden: usize) -> String {
         );
     }
     out
+}
+
+/// What a reader hears of a paragraph whose text is `value` with `controls`
+/// inline in it (`zgx::semantics::heard`, as the desktop's accessibility tree
+/// says it): its text in quotes, each control as `[role "name"]` where it
+/// stands. `"step " [button "Citation 1"] "."`.
+fn reads(
+    semantics: &zgx::semantics::Semantics,
+    value: &str,
+    controls: &[(std::ops::Range<usize>, NodeId)],
+) -> String {
+    zgx::semantics::heard(value, controls)
+        .into_iter()
+        .map(|part| match part {
+            zgx::semantics::Heard::Text(text) => format!("{:?}", clip(&text, 120)),
+            zgx::semantics::Heard::Control(id) => match semantics.get(id) {
+                Some(s) => format!("[{} {:?}]", semantic_role_name(s), s.label),
+                None => "[control]".into(),
+            },
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What there is to know of `node`: its number, kind, where the script made
@@ -1099,6 +1155,12 @@ pub fn node(
         }
         if let Some(value) = &s.value {
             out.push(("value".into(), clip(value, 200)));
+            // A paragraph with controls inline in it (a citation): what a
+            // reader hears, which the value alone doesn't say.
+            let controls = semantics.inline_controls(node);
+            if !controls.is_empty() {
+                out.push(("reads".into(), reads(&semantics, value, &controls)));
+            }
         }
         if let Some(placeholder) = &s.placeholder {
             out.push(("placeholder".into(), placeholder.clone()));
@@ -1117,6 +1179,11 @@ pub fn node(
         }
         if s.expanded == Some(true) {
             flags.push("expanded");
+        }
+        match s.pressed {
+            Some(true) => flags.push("pressed"),
+            Some(false) => flags.push("not-pressed"),
+            None => {}
         }
         if !flags.is_empty() {
             out.push(("state".into(), flags.join(" ")));

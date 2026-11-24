@@ -135,6 +135,9 @@ impl Bench {
     fn frame(&mut self) {
         self.app.frame();
         let report = self.app.ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&self.app.ui.scene.borrow(), &report);
+        }
         if let Some(drawing) = &mut self.drawing {
             drawing.draw(&self.app.ui.scene.borrow(), &report.damage);
         }
@@ -279,7 +282,7 @@ fn dashboard(make: MakeDrawing) {
 }
 
 fn sketch(make: MakeDrawing) {
-    // A name of one length whatever the process's id (see `code`).
+    // A folder name of one length whatever the process's id (see `code`).
     let dir = std::env::temp_dir().join(format!("zgx-apps-bench-{:010}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("busy.json");
@@ -359,9 +362,12 @@ fn source(lines: usize) -> String {
 
 fn code(make: MakeDrawing) {
     let lines = size("LINES", 100_000);
-    // A name of one length whatever the process's id: the editor shows and
-    // measures the path (a 7-digit id cost 37 K more than a 6-digit one).
-    let path = std::env::temp_dir().join(format!("zgx-apps-bench-{:010}.rs", std::process::id()));
+    // One name whatever the process's id: the editor shows and measures the
+    // file's name (a 7-digit id cost 37 K more than a 6-digit one, and any
+    // id drew other glyphs, so the output changed run to run).
+    let dir = std::env::temp_dir().join(format!("zgx-apps-bench-{:010}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bench.rs");
     std::fs::write(&path, source(lines)).unwrap();
     let mut b = Bench::new("code_editor", (1100., 760.), &[], make);
     b.app.desktop.clone().unwrap().pick([&path]);
@@ -412,7 +418,7 @@ fn code(make: MakeDrawing) {
         let letter = char::from(b'a' + (k % 26) as u8);
         b.app.ui.dispatch(InputEvent::Text(letter.to_string()));
     });
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn chat(make: MakeDrawing) {

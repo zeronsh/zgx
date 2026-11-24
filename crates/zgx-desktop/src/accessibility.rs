@@ -152,6 +152,9 @@ pub struct AccessibilityTree {
     /// Where the text node showing a node's runs was when they were placed
     /// (`Scene::text_lines`): moved (scrolled in its field), they are again.
     run_boxes: HashMap<NodeId, zgx::scene::Rect>,
+    /// The atoms a field's runs took as one character each (`fold_units`),
+    /// for the fields that have any.
+    run_units: HashMap<NodeId, std::sync::Arc<[zgx::semantics::TextUnit]>>,
     /// The scene's `language_revision` at the last update: changed, every
     /// node is projected again, its language perhaps an ancestor's.
     language_revision: u64,
@@ -179,6 +182,9 @@ struct Walk {
     /// Those nodes and the root.
     visible: HashSet<NodeId>,
     children: HashMap<NodeId, Vec<AccessibleId>>,
+    /// The controls inline in a paragraph's text (`SemanticNode::inline_range`),
+    /// by paragraph: most trees have none.
+    inline: HashMap<NodeId, Vec<(NodeId, AccessibleId)>>,
     list_items: HashMap<NodeId, (usize, usize)>,
     /// Nodes painted at no opacity: shown again, the tree has more in it.
     faded_out: HashSet<NodeId>,
@@ -529,6 +535,25 @@ impl AccessibilityTree {
         let ids = self.text_runs.get(&owner)?;
         Some(run_position(ids, &self.text_positions, byte))
     }
+    /// `runs` with each of `units` (a field's atoms) one character, kept as
+    /// the runs' atoms for `id`.
+    fn fold_units(
+        &mut self,
+        id: NodeId,
+        runs: Vec<TextRunData>,
+        units: Option<&std::sync::Arc<[zgx::semantics::TextUnit]>>,
+    ) -> Vec<TextRunData> {
+        match units {
+            Some(units) => {
+                self.run_units.insert(id, units.clone());
+                fold_units(runs, units)
+            }
+            None => {
+                self.run_units.remove(&id);
+                runs
+            }
+        }
+    }
     /// Label `id`'s text runs as AccessKit's `TextRun` nodes, given ids
     /// kept across updates, into `nodes`.
     fn push_runs(
@@ -697,6 +722,7 @@ impl AccessibilityTree {
             None => self.walk_scene(scene, semantics, scale),
         };
         let (visible, children, list_items) = (&walk.visible, &walk.children, &walk.list_items);
+        let inline = &walk.inline;
         // Fields saying what is wrong with them, and the text that shows it
         // (most trees have none: no node is looked up for one).
         let any_errors = semantics.has_errors();
@@ -738,6 +764,20 @@ impl AccessibilityTree {
             let revision = semantics
                 .node_revision(id)
                 .expect("projected semantic node");
+            // The controls inline in its text, where each stands in it:
+            // none but in a paragraph with a citation or the like.
+            let cuts: Vec<(std::ops::Range<usize>, AccessibleId)> = match inline.get(&id) {
+                None => Vec::new(),
+                Some(controls) => {
+                    let mut cuts: Vec<_> = (controls.iter())
+                        .filter_map(|(node, control)| {
+                            Some((semantics.get(*node)?.inline_range.clone()?, *control))
+                        })
+                        .collect();
+                    cuts.sort_by_key(|(range, _)| range.start);
+                    cuts
+                }
+            };
             // Names alone: a node as sent keeps what was sent, before its
             // geometry or text is looked at (moved, it goes with the next
             // full update, as geometry does for any client).
@@ -747,11 +787,19 @@ impl AccessibilityTree {
                 && self.cache.get(&native).is_some_and(|cached| {
                     let runs = self.text_runs.get(&id).map_or(&[][..], Vec::as_slice);
                     cached.is_disabled() == disabled
-                        && cached.children().iter().eq(children
-                            .get(&id)
-                            .into_iter()
-                            .flatten()
-                            .chain(runs))
+                        && if cuts.is_empty() {
+                            cached.children().iter().eq(children
+                                .get(&id)
+                                .into_iter()
+                                .flatten()
+                                .chain(runs))
+                        } else {
+                            {
+                                let kids = children.get(&id).map_or(&[][..], Vec::as_slice);
+                                cached.children()
+                                    == in_reading_order(kids, runs, &cuts, &self.text_positions)
+                            }
+                        }
                 })
             {
                 continue;
@@ -812,7 +860,12 @@ impl AccessibilityTree {
                         && cached.position_in_set()
                             == semantic.position_in_set.or(counted.map(|c| c.0))
                         && cached.size_of_set() == semantic.size_of_set.or(counted.map(|c| c.1))
-                        && cached.children().iter().eq(kids.iter().chain(runs))
+                        && if cuts.is_empty() {
+                            cached.children().iter().eq(kids.iter().chain(runs))
+                        } else {
+                            cached.children()
+                                == in_reading_order(kids, runs, &cuts, &self.text_positions)
+                        }
                 })
                 && runs.iter().all(|run| {
                     self.cache.contains_key(run) && self.text_positions.contains_key(run)
@@ -859,6 +912,14 @@ impl AccessibilityTree {
                     None => n.set_label(semantic.label.clone()),
                 }
                 value
+            };
+            // What it reads as: without the text of the controls inline in
+            // it, which read as themselves where they stand.
+            let read_value: Option<std::borrow::Cow<str>> = match text_value {
+                Some(value) if !cuts.is_empty() => {
+                    Some(zgx::semantics::heard_value(value, &cuts).into())
+                }
+                value => value.map(Into::into),
             };
             if let Some(active) = semantic.active_descendant.filter(|a| visible.contains(a)) {
                 n.set_active_descendant(self.id(active));
@@ -929,7 +990,7 @@ impl AccessibilityTree {
             // to the platform (its level, on macOS), or the document would
             // read it twice.
             let heading = semantic.role == Role::Heading;
-            if let Some(v) = text_value.filter(|_| !heading) {
+            if let Some(v) = read_value.as_deref().filter(|_| !heading) {
                 n.set_value(v);
             }
             if let Some(placeholder) = &semantic.placeholder {
@@ -939,6 +1000,16 @@ impl AccessibilityTree {
                 n.set_toggled(if semantic.mixed {
                     accesskit::Toggled::Mixed
                 } else if v {
+                    accesskit::Toggled::True
+                } else {
+                    accesskit::Toggled::False
+                });
+            }
+            // A toggle button (`aria-pressed`): a button with its state,
+            // which each platform reads as one (ATK's toggle button and
+            // pressed, macOS's toggle, UIA's Toggle pattern).
+            if let Some(pressed) = semantic.pressed.filter(|_| semantic.checked.is_none()) {
+                n.set_toggled(if pressed {
                     accesskit::Toggled::True
                 } else {
                     accesskit::Toggled::False
@@ -1124,9 +1195,10 @@ impl AccessibilityTree {
                     .and_then(|native| self.cache.get(native))
                     .is_some_and(|cached| {
                         cached.role() == semantic_role(semantic)
-                            && cached.value() == text_value.filter(|_| !heading)
+                            && cached.value() == read_value.as_deref().filter(|_| !heading)
                     })
                     && self.blocks.contains(&id) == block
+                    && self.run_units.get(&id) == semantic.text_units.as_ref()
                     && self.text_runs.get(&id).is_none_or(|ids| {
                         ids.iter().all(|run| {
                             self.cache.contains_key(run) && self.text_positions.contains_key(run)
@@ -1198,7 +1270,8 @@ impl AccessibilityTree {
                     let value = text_value.unwrap_or("");
                     let lines = shown_box.map(|rect| vec![estimated_line(value, rect)]);
                     if let Some(runs) = text_run_data_on(value, block, lines.as_deref(), scale) {
-                        self.push_runs(id, runs, &mut nodes);
+                        let runs = self.fold_units(id, runs, semantic.text_units.as_ref());
+                        self.push_runs(id, cut_runs(runs, &cuts), &mut nodes);
                     }
                 } else if let Some((dx, dy, now)) = shifted {
                     self.run_boxes.insert(id, now);
@@ -1239,9 +1312,11 @@ impl AccessibilityTree {
                     if let Some(runs) =
                         text_run_data_on(text_value.unwrap_or(""), block, lines.as_deref(), scale)
                     {
-                        self.push_runs(id, runs, &mut nodes);
+                        let runs = self.fold_units(id, runs, semantic.text_units.as_ref());
+                        self.push_runs(id, cut_runs(runs, &cuts), &mut nodes);
                     } else {
                         self.text_runs.remove(&id);
+                        self.run_units.remove(&id);
                     }
                 }
                 if let Some(ids) = self.text_runs.get(&id) {
@@ -1256,10 +1331,15 @@ impl AccessibilityTree {
                     if !text {
                         n.add_action(Action::SetTextSelection);
                     }
-                    native_children.extend(ids.iter().copied());
+                    if cuts.is_empty() {
+                        native_children.extend(ids.iter().copied());
+                    } else {
+                        native_children = in_reading_order(kids, ids, &cuts, &self.text_positions);
+                    }
                 }
             } else {
                 self.text_runs.remove(&id);
+                self.run_units.remove(&id);
                 self.blocks.remove(&id);
             }
             if let Some(selection) = semantic.document_selection {
@@ -1435,12 +1515,17 @@ impl AccessibilityTree {
                 parents.insert(*id, parent);
             }
         }
-        for (id, _) in &ordered {
+        let mut inline: HashMap<NodeId, Vec<(NodeId, AccessibleId)>> = HashMap::default();
+        for (id, semantic) in &ordered {
             if *id == scene.root() {
                 continue;
             }
             let child = self.id(*id);
-            children.entry(parents[id]).or_default().push(child);
+            let parent = parents[id];
+            children.entry(parent).or_default().push(child);
+            if semantic.inline_range.is_some() && semantic.logical_parent == Some(parent) {
+                inline.entry(parent).or_default().push((*id, child));
+            }
         }
         // Where each list's items are in it ("3 of 5", as a browser's
         // `<li>` reads), for items the app doesn't say it of: only a tree
@@ -1467,6 +1552,7 @@ impl AccessibilityTree {
         }
         self.text_runs.retain(|owner, _| visible.contains(owner));
         self.run_boxes.retain(|owner, _| visible.contains(owner));
+        self.run_units.retain(|owner, _| visible.contains(owner));
         self.blocks.retain(|owner| visible.contains(owner));
         self.long_runs.retain(|owner, _| visible.contains(owner));
         let nodes = ordered
@@ -1480,6 +1566,7 @@ impl AccessibilityTree {
                 nodes,
                 visible,
                 children,
+                inline,
                 list_items,
                 faded_out,
                 scale,
@@ -1537,6 +1624,185 @@ fn run_position(
         },
     }
 }
+/// `runs` with each of a field's atoms (`units`) one character: a reader
+/// steps over it and reads it whole, by its label where it has one (the
+/// run's text says the label there; its places stay the field's bytes). An
+/// atom whose text, or label, is longer than a character can be (255 bytes)
+/// stays as it is.
+fn fold_units(runs: Vec<TextRunData>, units: &[zgx::semantics::TextUnit]) -> Vec<TextRunData> {
+    // (One a character can't hold is left as its characters.)
+    let unit_of = |start: usize| {
+        units.iter().find(|unit| {
+            unit.range.start <= start
+                && start < unit.range.end
+                && unit.range.len() <= 255
+                && unit
+                    .label
+                    .as_ref()
+                    .is_none_or(|l| !l.is_empty() && l.len() <= 255)
+        })
+    };
+    runs.into_iter()
+        .map(|run| {
+            let count = run.lengths.len();
+            if !(0..count).any(|i| unit_of(run.offsets[i]).is_some()) {
+                return run;
+            }
+            let mut out = TextRunData {
+                value: String::with_capacity(run.value.len()),
+                lengths: Vec::with_capacity(count),
+                offsets: vec![run.offsets[0]],
+                words: Vec::new(),
+                geometry: None,
+                wraps: run.wraps,
+            };
+            let mut places: Vec<(f32, f32)> = Vec::with_capacity(count);
+            let base = run.offsets[0];
+            let mut i = 0;
+            while i < count {
+                let start = run.offsets[i];
+                let text = &run.value[start - base..run.offsets[i + 1] - base];
+                // The rest of an atom this character begins (or is in),
+                // within this run.
+                let mut end = i + 1;
+                let unit = unit_of(start);
+                if let Some(unit) = unit {
+                    while end < count && run.offsets[end] < unit.range.end {
+                        end += 1;
+                    }
+                }
+                let whole = &run.value[start - base..run.offsets[end] - base];
+                let first = unit.is_none_or(|unit| unit.range.start == start);
+                let said = match (unit, first) {
+                    (Some(unit), true) => unit.label.as_deref().unwrap_or(whole),
+                    _ => whole,
+                };
+                if end == i + 1 {
+                    // One character: an atom's says its label.
+                    let said = if unit.is_some() && first { said } else { text };
+                    if run.words.contains(&(i as u8)) {
+                        out.words.push(out.lengths.len() as u8);
+                    }
+                    out.value.push_str(said);
+                    out.lengths.push(said.len() as u8);
+                    out.offsets.push(run.offsets[i + 1]);
+                    if let Some(g) = &run.geometry {
+                        places.push((g.positions[i], g.widths[i]));
+                    }
+                    i += 1;
+                    continue;
+                }
+                if (i..end).any(|at| run.words.contains(&(at as u8))) {
+                    out.words.push(out.lengths.len() as u8);
+                }
+                out.value.push_str(said);
+                out.lengths.push(said.len() as u8);
+                out.offsets.push(run.offsets[end]);
+                if let Some(g) = &run.geometry {
+                    let (a, b) = (g.positions[i], g.positions[end - 1] + g.widths[end - 1]);
+                    places.push((a.min(b), (b - a).abs()));
+                }
+                i = end;
+            }
+            out.geometry = run.geometry.map(|g| RunGeometry {
+                bounds: g.bounds,
+                positions: places.iter().map(|(p, _)| *p).collect(),
+                widths: places.iter().map(|(_, w)| *w).collect(),
+                rtl: g.rtl,
+            });
+            out
+        })
+        .collect()
+}
+/// `runs` without the characters of the controls inline in their text
+/// (`cuts`): a run is split where one stands, its places kept, so the
+/// control's node goes between the halves (`in_reading_order`).
+fn cut_runs(
+    runs: Vec<TextRunData>,
+    cuts: &[(std::ops::Range<usize>, AccessibleId)],
+) -> Vec<TextRunData> {
+    if cuts.is_empty() {
+        return runs;
+    }
+    let cut = |offset: usize| cuts.iter().any(|(range, _)| range.contains(&offset));
+    let mut out = Vec::with_capacity(runs.len() + cuts.len());
+    for run in runs {
+        let count = run.lengths.len();
+        if !(0..count).any(|i| cut(run.offsets[i])) {
+            out.push(run);
+            continue;
+        }
+        // Each stretch of characters kept, as a run of its own.
+        let mut i = 0;
+        while i < count {
+            if cut(run.offsets[i]) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < count && !cut(run.offsets[i]) {
+                i += 1;
+            }
+            let (from, to) = (
+                run.offsets[start] - run.offsets[0],
+                run.offsets[i] - run.offsets[0],
+            );
+            let geometry = run.geometry.as_ref().map(|g| {
+                let (first, last) = (g.positions[start], g.positions[i - 1] + g.widths[i - 1]);
+                let (x0, x1) = if g.rtl {
+                    (g.bounds.x1 - last as f64, g.bounds.x1 - first as f64)
+                } else {
+                    (g.bounds.x0 + first as f64, g.bounds.x0 + last as f64)
+                };
+                RunGeometry {
+                    bounds: accesskit::Rect::new(x0, g.bounds.y0, x1, g.bounds.y1),
+                    positions: g.positions[start..i].iter().map(|p| p - first).collect(),
+                    widths: g.widths[start..i].to_vec(),
+                    rtl: g.rtl,
+                }
+            });
+            out.push(TextRunData {
+                value: run.value[from..to].to_owned(),
+                lengths: run.lengths[start..i].to_vec(),
+                offsets: run.offsets[start..=i].to_vec(),
+                words: (run.words.iter())
+                    .filter(|w| (start..i).contains(&(**w as usize)))
+                    .map(|w| w - start as u8)
+                    .collect(),
+                geometry,
+                wraps: run.wraps && i == count,
+            });
+        }
+    }
+    out
+}
+/// A text node's children as a reader goes through them: `kids`, then its
+/// `runs` with each control inline in its text (`cuts`) before the first
+/// run past where it stands.
+fn in_reading_order(
+    kids: &[AccessibleId],
+    runs: &[AccessibleId],
+    cuts: &[(std::ops::Range<usize>, AccessibleId)],
+    positions: &HashMap<AccessibleId, (NodeId, Vec<usize>)>,
+) -> Vec<AccessibleId> {
+    let mut out: Vec<AccessibleId> = (kids.iter().copied())
+        .filter(|kid| !cuts.iter().any(|(_, control)| control == kid))
+        .collect();
+    let mut cuts = cuts.iter().peekable();
+    for run in runs {
+        let at = positions
+            .get(run)
+            .and_then(|(_, offsets)| offsets.first().copied());
+        while let Some((_, control)) =
+            cuts.next_if(|(range, _)| at.is_some_and(|at| range.start <= at))
+        {
+            out.push(*control);
+        }
+        out.push(*run);
+    }
+    out.extend(cuts.map(|(_, control)| *control));
+    out
+}
 /// `value`'s runs; a `block`'s end with a line break (zero-width in
 /// `value`, at its end) unless its text already does.
 fn text_run_data(value: &str, block: bool) -> Option<Vec<TextRunData>> {
@@ -1561,10 +1827,13 @@ fn field_lines(
 ) -> Option<Vec<zgx::scene::TextLine>> {
     let mut lines = Vec::new();
     for (start, node) in apart {
+        if !scene.contains(*node) {
+            return None;
+        }
         let zgx::scene::NodeKind::Text { text, .. } = scene.kind(*node) else {
             return None;
         };
-        if !scene.contains(*node) || value.get(*start..start + text.len())? != &**text {
+        if value.get(*start..start + text.len())? != &**text {
             return None;
         }
         for mut line in scene.text_lines(*node)? {
@@ -1813,6 +2082,9 @@ fn semantic_role(semantic: &zgx::semantics::SemanticNode) -> accesskit::Role {
         accesskit::Role::MenuItemRadio
     } else if semantic.role == Role::MenuItem && semantic.checked.is_some() {
         accesskit::Role::MenuItemCheckBox
+    } else if semantic.pressed.is_some() && semantic.checked.is_none() {
+        // A toggle button: a button with its state (`toggled`).
+        accesskit::Role::Button
     } else {
         role(semantic.role)
     }
@@ -2068,6 +2340,63 @@ mod editor_text_tests {
             (zoomed.height() - plain.height() * 2.).abs() < 0.5,
             "{plain:?} {zoomed:?}"
         );
+    }
+
+    /// A text area with an atom over "@file.pdf" (4..13), named `name`,
+    /// and its first text run as AccessKit has it.
+    fn atom_run(name: Option<&str>) -> accesskit::Node {
+        let mut ui = Ui::new(400., 300.);
+        let value = ui.signal("see  now".to_owned());
+        let view = ui.mount(text_area("Notes", value.clone()).size(300., 200.));
+        ui.prepare_frame();
+        ui.input.focus(&ui.scene, Some(view.node()));
+        let editor = ui.focused_editor().unwrap();
+        editor.set_selection(4, 4);
+        let id = editor.insert_atom("@file.pdf", None, None, None).unwrap();
+        editor.set_atom_name(id, name.map(std::sync::Arc::from));
+        ui.prepare_frame();
+        let mut adapter = AccessibilityTree::new();
+        let update = adapter.update(
+            &ui.scene.borrow(),
+            &ui.semantics.borrow(),
+            Some(view.node()),
+            "Test",
+            1.,
+        );
+        update
+            .nodes
+            .into_iter()
+            .find(|(_, node)| node.role() == accesskit::Role::TextRun)
+            .map(|(_, node)| node)
+            .expect("a run")
+    }
+
+    /// An atom (a mention's chip) is one character of its text run: a
+    /// screen reader steps over it, and reads it, as one unit.
+    #[test]
+    fn an_atom_is_one_unit_of_its_text_run() {
+        let run = atom_run(None);
+        assert_eq!(run.value(), Some("see @file.pdf now"));
+        let lengths = run.character_lengths();
+        assert_eq!(
+            lengths.len(),
+            "see ".len() + 1 + " now".len(),
+            "{lengths:?}"
+        );
+        assert_eq!(lengths[4], 9, "\"@file.pdf\" is one character of 9 bytes");
+        let words = run.word_starts();
+        assert!(!words.contains(&5), "no word starts inside it: {words:?}");
+    }
+
+    /// A named atom reads as its name, still one character standing for
+    /// the field's bytes of it.
+    #[test]
+    fn a_named_atom_reads_as_its_name() {
+        let run = atom_run(Some("Quarterly report"));
+        assert_eq!(run.value(), Some("see Quarterly report now"));
+        let lengths = run.character_lengths();
+        assert_eq!(lengths.len(), 9);
+        assert_eq!(lengths[4] as usize, "Quarterly report".len());
     }
 
     #[test]
@@ -4236,6 +4565,52 @@ mod vocabulary_tests {
             assert!(found[0].supports_action(Action::Focus), "{role:?}");
         }
     }
+    /// A tree item's depth (`aria-level`), as a number and followed: a row
+    /// whose depth changes in place is told at its new depth, the same node,
+    /// in the update of what changed.
+    #[test]
+    fn a_tree_items_level_follows_its_depth_without_a_rebuild() {
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        let depth = ui.signal(1_usize);
+        let read = depth.clone();
+        ui.mount(
+            column()
+                .child(
+                    row()
+                        .role(Role::TreeItem)
+                        .accessible_label("Fixed")
+                        .level(2)
+                        .child(text("Fixed")),
+                )
+                .child(
+                    row()
+                        .role(Role::TreeItem)
+                        .accessible_label("Moved")
+                        .level_when(move || read.get())
+                        .child(text("Moved")),
+                ),
+        );
+        let mut tree = AccessibilityTree::new();
+        let first = frame(&mut ui, &mut tree, None);
+        let level_of = |update: &TreeUpdate, label: &str| {
+            update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == accesskit::Role::TreeItem && n.label() == Some(label))
+                .map(|(id, n)| (*id, n.level()))
+        };
+        assert_eq!(level_of(&first, "Fixed").unwrap().1, Some(2));
+        let (moved, level) = level_of(&first, "Moved").unwrap();
+        assert_eq!(level, Some(1));
+        depth.set(3);
+        let next = frame(&mut ui, &mut tree, None);
+        assert_eq!(
+            level_of(&next, "Moved"),
+            Some((moved, Some(3))),
+            "the same node, told at its new depth"
+        );
+    }
 }
 
 /// What AT-SPI reads of zgx's tree, through the adapter AccessKit's Linux
@@ -4603,5 +4978,22 @@ mod language_tests {
         language.set("zh-HK".into());
         ui.prepare_frame();
         assert_eq!(sent(&mut adapter, &ui), [some("zh-HK"), None, None]);
+    }
+
+    #[test]
+    fn field_lines_returns_none_for_a_removed_line_node() {
+        let mut scene = Scene::new(200., 100.);
+        let line = scene.append(
+            scene.root(),
+            zgx::scene::NodeKind::Text {
+                text: std::sync::Arc::from("hello"),
+                color: zgx::scene::Color(255, 255, 255, 255),
+                font_size: 14.,
+            },
+            zgx::scene::Style::default(),
+        );
+        scene.flush();
+        scene.remove(line);
+        assert!(field_lines(&scene, &[(0, line)], "hello").is_none());
     }
 }

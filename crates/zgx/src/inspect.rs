@@ -91,6 +91,9 @@ struct Inner {
     hooks: RefCell<Vec<Hook>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     state: RefCell<State>,
+    /// The window's native views (pages, terminals), as its host shows them:
+    /// where devtools ask where a point's input goes (`zgx inspect route`).
+    natives: RefCell<Option<crate::native_view::NativeViews>>,
 }
 type Hook = Rc<dyn Fn(bool)>;
 /// Layout and geometry revisions, the pointer and the viewport.
@@ -168,7 +171,16 @@ impl Inspector {
             hooks: RefCell::default(),
             wake: RefCell::default(),
             state: RefCell::default(),
+            natives: RefCell::default(),
         }))
+    }
+    /// The window's native views (`NativeViews`), set by its host.
+    pub fn set_native_views(&self, natives: crate::native_view::NativeViews) {
+        *self.0.natives.borrow_mut() = Some(natives);
+    }
+    /// The window's native views, if its host set them.
+    pub fn native_views(&self) -> Option<crate::native_view::NativeViews> {
+        self.0.natives.borrow().clone()
     }
     /// Whether the host must call [`Inspector::update`] each frame. Off,
     /// this flag is all an inspector costs.

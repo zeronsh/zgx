@@ -15,6 +15,7 @@
 //! An answer is `{"ok":true,"text":…,"data":…}`: `text` is what the CLI
 //! prints (compact, a node a line), `data` the same as JSON. A failure is
 //! `{"ok":false,"error":…}`. See `docs/agents/inspect.md`.
+use crate::time::Instant;
 use crate::{ScriptHost, Value, driver};
 use std::{
     collections::VecDeque,
@@ -25,9 +26,9 @@ use std::{
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
     task::{Poll, Waker},
-    time::{Duration, Instant},
+    time::Duration,
 };
-use zgx::{compose::ViewHandle, inspect::Inspector, widgets::Ui};
+use zgx::{compose::ViewHandle, inspect::Inspector, platform::PlatformService, widgets::Ui};
 
 /// What a session answers with: at once, or once a wait is over.
 pub enum Reply {
@@ -50,6 +51,132 @@ struct Parts {
     marks: std::cell::RefCell<std::collections::HashMap<String, u64>>,
 }
 
+/// `route`'s answer: where pointer input at `(x, y)` goes, a native view
+/// (a page, a terminal) or zgx's interface, the step that decided it
+/// (`PlaneSplit::route_explained`), and the native views under the point
+/// with every node each is registered at and whether that node shows: one
+/// page registered at two nodes is shown by only one of them.
+fn route_report(
+    ui: &Ui,
+    natives: Option<&zgx::native_view::NativeViews>,
+    x: f32,
+    y: f32,
+) -> (String, Value) {
+    use zgx::native_view::{PointerRoute, RouteWhy};
+    let at = format!("{x:.0},{y:.0}");
+    let Some(natives) = natives else {
+        return (
+            format!("{at}: the interface (this window has no native views)"),
+            Value::record([
+                ("route", Value::from("ui")),
+                ("why", Value::from("no native views")),
+            ]),
+        );
+    };
+    let n = |node: zgx::scene::NodeId| format!("@{}", driver::number(node));
+    let split = natives.split();
+    let scene = ui.scene.borrow();
+    let (route, why) = split.route_explained(&scene, &ui.input, x, y);
+    let because = match why {
+        RouteWhy::NoNativeViews => "this window shows no native views".to_string(),
+        RouteWhy::Busy => "the input state was busy (mid-dispatch)".to_string(),
+        RouteWhy::NothingHit => "nothing there takes input".to_string(),
+        RouteWhy::Overlay(node) => format!("{} is drawn over the native view there", n(node)),
+        RouteWhy::Listener(node) => format!("{} in front listens for it", n(node)),
+        RouteWhy::Disabled(node) => format!("{} is disabled", n(node)),
+        RouteWhy::NotShown(node) => format!("{} isn't shown", n(node)),
+        RouteWhy::OutsideScope { native, scope } => format!(
+            "{} is outside the active modal scope, {} (a dialog or menu still open, or one never closed)",
+            n(native),
+            n(scope)
+        ),
+        RouteWhy::Native(node) => format!("{} takes it", n(node)),
+    };
+    let goes = match route {
+        PointerRoute::Native(node) => format!("the native view {}", n(node)),
+        PointerRoute::Ui => "the interface".to_string(),
+    };
+    let mut lines = vec![format!("{at}: {goes}: {because}")];
+    // The native views whose box holds the point, and where each is registered.
+    let views = natives.views();
+    let mut under = Vec::new();
+    for placement in split.natives() {
+        let Some(r) = placement.visible() else {
+            continue;
+        };
+        if !(x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height) {
+            continue;
+        }
+        let Some((_, content)) = views.iter().find(|(node, _)| *node == placement.node) else {
+            continue;
+        };
+        let at: Vec<(zgx::scene::NodeId, bool)> = views
+            .iter()
+            .filter(|(_, other)| other.same(content))
+            .map(|(node, _)| (*node, scene.contains(*node) && scene.layout_visible(*node)))
+            .collect();
+        let listed = at
+            .iter()
+            .map(|(node, shown)| {
+                format!(
+                    "{} ({})",
+                    n(*node),
+                    if *shown { "shown" } else { "not shown" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "  {} {}: registered at {listed}",
+            content.label(),
+            n(placement.node)
+        ));
+        if at.len() > 1 {
+            lines.push(format!(
+                "  one {} registered at {} nodes: its host shows it in one of them, so clicks on the others reach nothing",
+                content.label(),
+                at.len()
+            ));
+        }
+        under.push(Value::record([
+            ("node", Value::Num(driver::number(placement.node) as f64)),
+            ("content", Value::from(content.label().as_str())),
+            (
+                "registered",
+                Value::List(
+                    at.iter()
+                        .map(|(node, shown)| {
+                            Value::record([
+                                ("node", Value::Num(driver::number(*node) as f64)),
+                                ("shown", Value::Bool(*shown)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]));
+    }
+    let data = Value::record([
+        (
+            "route",
+            Value::from(match route {
+                PointerRoute::Native(_) => "native",
+                PointerRoute::Ui => "ui",
+            }),
+        ),
+        (
+            "node",
+            match route {
+                PointerRoute::Native(node) => Value::Num(driver::number(node) as f64),
+                PointerRoute::Ui => Value::Nil,
+            },
+        ),
+        ("why", Value::from(because.as_str())),
+        ("under", Value::List(under.into())),
+    ]);
+    (lines.join("\n"), data)
+}
+
 fn ok(text: String, data: Value) -> String {
     Value::record([
         ("ok", Value::Bool(true)),
@@ -58,6 +185,131 @@ fn ok(text: String, data: Value) -> String {
     ])
     .to_json()
 }
+/// `clipboard`: what the window's clipboard holds (its text, HTML, image,
+/// files and types of an app's own: `Platform::clipboard_types`), or with `action` `set`, put `text` and `html` there (either
+/// alone; both as a rich copy), the picture at `image` (a file) or `files`
+/// (paths, as a file manager copies them; an app's own clipboard only). An
+/// off-screen session's is its own (`ZGX_CLIPBOARD=memory`), so a QA script
+/// sets it and then presses ⌘V (`key`), the app pasting it as a person's
+/// paste: through the editor's `on_paste`.
+async fn clipboard(platform: Option<PlatformService>, request: &Value) -> String {
+    let Some(platform) = platform else {
+        return failed("no clipboard here: it needs a desktop window");
+    };
+    let field = |name: &str| request.field(name).map(|v| v.to_string());
+    if field("action").as_deref() == Some("set") {
+        let (text, html) = (field("text"), field("html"));
+        // Files, as a file manager copies them: a list, or one path.
+        let files: Vec<std::path::PathBuf> = match request.field("files") {
+            Some(Value::List(files)) => files.iter().map(|f| f.to_string().into()).collect(),
+            Some(file @ Value::Str(_)) => vec![file.to_string().into()],
+            _ => Vec::new(),
+        };
+        if !files.is_empty() {
+            let count = files.len();
+            return match platform.0.set_clipboard_files(files) {
+                true => ok(
+                    format!(
+                        "the clipboard holds {count} file{}",
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    Value::Nil,
+                ),
+                false => failed(
+                    "the clipboard didn't take the files: only a clipboard of the app's own \
+                     (ZGX_CLIPBOARD=memory) does",
+                ),
+            };
+        }
+        if let Some(path) = field("image") {
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) => return failed(format!("{path}: {e}")),
+            };
+            let image = match zgx_gpu::assets::decode_image(&bytes) {
+                Ok(image) => image,
+                Err(e) => return failed(format!("{path}: {e}")),
+            };
+            let (width, height) = (image.width(), image.height());
+            return match platform.0.set_clipboard_image(image).await {
+                true => ok(
+                    format!("the clipboard holds a {width}x{height} image"),
+                    Value::Nil,
+                ),
+                false => failed("the clipboard didn't take the image"),
+            };
+        }
+        let written = match (text, html) {
+            (Some(text), Some(html)) => platform.0.set_clipboard_rich_text(text, html),
+            (None, Some(html)) => platform.0.set_clipboard_rich_text(String::new(), html),
+            (Some(text), None) => platform.0.set_clipboard_text(text),
+            (None, None) => {
+                return failed("clipboard set takes `text`, `html`, `image` or `files`");
+            }
+        };
+        return match written {
+            true => ok("set the clipboard".into(), Value::Nil),
+            false => failed("the clipboard didn't take it"),
+        };
+    }
+    let (text, html) = (platform.0.clipboard_text(), platform.0.clipboard_html());
+    let image = platform.0.clipboard_image().await;
+    let size = image
+        .as_ref()
+        .map(|i| format!("{}x{}", i.width(), i.height()));
+    let files: Vec<String> = (platform.0.clipboard_files().iter())
+        .map(|f| f.display().to_string())
+        .collect();
+    let types: Vec<(String, String)> = (platform.0.clipboard_types().into_iter())
+        .filter_map(|kind| Some((kind.clone(), platform.0.clipboard_typed(&kind)?)))
+        .collect();
+    let line = |name: &str, value: &Option<String>| match value {
+        Some(value) => format!("{name}: {value:?}"),
+        None => format!("{name}: none"),
+    };
+    ok(
+        [
+            line("text", &text),
+            line("html", &html),
+            line("image", &size),
+            match files.is_empty() {
+                true => "files: none".to_string(),
+                false => format!("files: {files:?}"),
+            },
+            match types.is_empty() {
+                true => "types: none".to_string(),
+                false => (types.iter())
+                    .map(|(kind, value)| format!("type {kind}: {value:?}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            },
+        ]
+        .join("\n"),
+        Value::record([
+            ("text", text.as_deref().map_or(Value::Nil, Value::from)),
+            ("html", html.as_deref().map_or(Value::Nil, Value::from)),
+            ("image", size.as_deref().map_or(Value::Nil, Value::from)),
+            (
+                "files",
+                Value::List(files.iter().map(|f| Value::from(f.as_str())).collect()),
+            ),
+            (
+                "types",
+                Value::List(
+                    (types.iter())
+                        .map(|(kind, value)| {
+                            Value::record([
+                                ("type", Value::from(kind.as_str())),
+                                ("value", Value::from(value.as_str())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]),
+    )
+}
+
 fn failed(error: impl Into<String>) -> String {
     let error: String = error.into();
     Value::record([
@@ -559,11 +811,13 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   set     name value                             set a named state (value is JSON)
   click   target                                 press and release at its middle
   hover   target|x,y                             move the pointer there, as a hand does
+  route   target|x,y                             where a click there goes, a native view (a page) or the
+                                                 UI, and what decided it (an overlay, a listener, a scope)
   right-click target|x,y                         click the context button there (a context menu opens)
   drag    target|x,y to                          drag with the primary button; `to` is a target or x,y
   type    target text                            click it, then type text
   key     keys                                   e.g. \"Enter\", \"cmd+k\", \"alt+ArrowDown\"
-  scroll  target dy                              scroll the viewport under it
+  scroll  target|x,y dy [dx]                     scroll the viewport under it
   snapshot target [width=4096]                   its pixels as the window last drew them: a PNG, user-only
   record  [stop]                                 record the window's wheel input; stop answers the tape
   replay  target tape [repeat=1] [every]         play a tape back through the window's input path: its
@@ -573,9 +827,15 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   contributions                                  each plugin's targets: where, live matches, error
   elements                                       named elements by the context they read (provide)
   lint                                           zgx lint over the app's scripts, file:line
-  frames  [n=10] [runs=5] [all] [since] [keep]   the last frames that did anything: their phases, GPU
-                                                 time, notes, what ran and why (since: a mark or frame)
+  frames  [n=10] [runs=5] [all] [since] [until] [summary] [keep]
+                                                 the last frames that did anything: their phases, GPU
+                                                 time, notes, what ran and why (since, until: a mark or
+                                                 frame; summary: what they cost together)
+  reloads                                        each hot reload: files, partial or full, and why
   mark    [name=mark]                            mark now: `frames since=name` reads what follows
+  clock   [freeze|thaw|advance <ms>]             freeze every animation, timer and caret at one time (also ZGX_FREEZE_TIME=1 at launch), move it by hand, or let it run
+  gc      [top] [retained] [sample=5] [mark] [since_mark] [lua_only]
+                                                 a full Luau collection in each VM: heap before and after, what is left by type, userdata and code chunk; retained=State: what holds those objects, from a root; mark, then since_mark: what survives after it
   switch  [name] [on]                            list fast paths, or switch one on or off, to compare
   search  [query] [next] [prev] [all] [n=5] [close]  find in page: the count, the current match, the first n
   zoom    [to: in|out|reset|1.5|150%]            the window's zoom (Cmd/Ctrl +, -, 0) and its viewport in points
@@ -733,6 +993,133 @@ impl Session {
                 );
                 Ok((driver::tree_lines_text(&shown, hidden), data))
             })(),
+            "gc" => {
+                let top = number("top").map_or(10, |n| n.max(1.) as usize);
+                let flag = |key: &str| field(key).is_some_and(|v| v.truthy());
+                let query = crate::GcQuery {
+                    top,
+                    retained: text("retained"),
+                    sample: number("sample").map_or(5, |n| n.max(1.) as usize),
+                    mark: flag("mark"),
+                    lua_only: flag("lua_only"),
+                    since_mark: flag("since_mark"),
+                };
+                let report = self.0.host.gc_report(&query);
+                let mb = |bytes: usize| format!("{:.2} MB", bytes as f64 / 1_048_576.);
+                let kb = |bytes: u64| format!("{:.1} KB", bytes as f64 / 1024.);
+                let mut lines = Vec::new();
+                let mut vms = Vec::new();
+                for vm in &report {
+                    lines.push(format!(
+                        "{}: {} before, {} after a full collection ({} of garbage)",
+                        vm.name,
+                        mb(vm.before),
+                        mb(vm.after),
+                        mb(vm.before.saturating_sub(vm.after))
+                    ));
+                    lines.push("  by type:".to_string());
+                    for (name, count, bytes) in vm.by_type.iter().take(top) {
+                        lines.push(format!("    {name}: {count} objects, {}", kb(*bytes)));
+                    }
+                    if !vm.userdata.is_empty() {
+                        lines.push("  userdata:".to_string());
+                        for (name, count, bytes) in vm.userdata.iter().take(top) {
+                            lines.push(format!("    {name}: {count}, {}", kb(*bytes)));
+                        }
+                    }
+                    lines.push("  code by chunk:".to_string());
+                    for (name, count, bytes) in vm.chunks.iter().take(top) {
+                        lines.push(format!("    {name}: {count} functions, {}", kb(*bytes)));
+                    }
+                    let found = &vm.found;
+                    if let Some(count) = found.marked {
+                        lines.push(format!("  marked {count} objects"));
+                    }
+                    if found.no_mark {
+                        lines.push("  no mark: run `gc --mark` first".to_string());
+                    }
+                    if !found.since.is_empty() {
+                        lines.push("  survived since the mark:".to_string());
+                        for (name, count, bytes) in found.since.iter().take(top) {
+                            lines.push(format!("    {name}: {count}, {}", kb(*bytes)));
+                        }
+                    }
+                    if query.retained.is_some() {
+                        lines.push(format!(
+                            "  {} objects match, {} reachable without Rust's handles; held by:",
+                            found.matched, found.lua_reachable
+                        ));
+                        for holder in &found.holders {
+                            lines.push(format!("    {} ×", holder.count));
+                            for step in &holder.path {
+                                lines.push(format!("      {step}"));
+                            }
+                        }
+                    }
+                    let list = |items: &[(String, usize, u64)]| {
+                        Value::List(
+                            items
+                                .iter()
+                                .take(top)
+                                .map(|(name, count, bytes)| {
+                                    Value::record([
+                                        ("name", Value::from(name.as_str())),
+                                        ("count", Value::Num(*count as f64)),
+                                        ("bytes", Value::Num(*bytes as f64)),
+                                    ])
+                                })
+                                .collect::<Vec<_>>()
+                                .into(),
+                        )
+                    };
+                    vms.push(Value::record([
+                        ("name", Value::from(vm.name.as_str())),
+                        ("before", Value::Num(vm.before as f64)),
+                        ("after", Value::Num(vm.after as f64)),
+                        ("by_type", list(&vm.by_type)),
+                        ("userdata", list(&vm.userdata)),
+                        ("chunks", list(&vm.chunks)),
+                        (
+                            "marked",
+                            vm.found.marked.map_or(Value::Nil, |n| Value::Num(n as f64)),
+                        ),
+                        ("since", list(&vm.found.since)),
+                        ("matched", Value::Num(vm.found.matched as f64)),
+                        (
+                            "holders",
+                            Value::List(
+                                vm.found
+                                    .holders
+                                    .iter()
+                                    .map(|h| {
+                                        Value::record([
+                                            ("count", Value::Num(h.count as f64)),
+                                            (
+                                                "path",
+                                                Value::List(
+                                                    h.path
+                                                        .iter()
+                                                        .map(|s| Value::from(s.as_str()))
+                                                        .collect::<Vec<_>>()
+                                                        .into(),
+                                                ),
+                                            ),
+                                        ])
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            ),
+                        ),
+                    ]));
+                }
+                if report.is_empty() {
+                    lines.push("no script is loaded".to_string());
+                }
+                Ok((
+                    lines.join("\n"),
+                    Value::record([("vms", Value::List(vms.into()))]),
+                ))
+            }
             "node" => target(&ui).map(|node| {
                 let fields = driver::node(&ui, self.0.inspector.as_ref(), node);
                 let text = fields
@@ -835,6 +1222,10 @@ impl Session {
                 driver::click_at(&mut ui, b);
                 (format!("clicked @{}", driver::number(node)), Value::Nil)
             }),
+            "route" => point_of(&ui, "target").map(|(x, y)| {
+                let natives = self.0.inspector.as_ref().and_then(|i| i.native_views());
+                route_report(&ui, natives.as_ref(), x, y)
+            }),
             "hover" => point_of(&ui, "target").map(|at| {
                 driver::hover_at(&mut ui, at);
                 (format!("pointer at {:.0},{:.0}", at.0, at.1), Value::Nil)
@@ -857,9 +1248,131 @@ impl Session {
                     Value::Nil,
                 ))
             })(),
+            // Files dragged in from a file manager, as the desktop host
+            // hears them (`zgx::outside_drag`): hovering, dropped (a
+            // `FileDrop` each, then `FilesDrop`, Linux's order; macOS and
+            // Windows deliver `FilesDrop` after a queue), or gone.
+            "files" => (|| {
+                let action = text("action").ok_or("files takes `hover`, `drop` or `leave`")?;
+                let files: Vec<std::path::PathBuf> = match field("files") {
+                    Some(Value::List(files)) => {
+                        files.iter().map(|f| f.to_string().into()).collect()
+                    }
+                    Some(file @ Value::Str(_)) => vec![file.to_string().into()],
+                    _ => Vec::new(),
+                };
+                match action.as_str() {
+                    "leave" => {
+                        ui.dispatch(zgx::input::InputEvent::FileHoverCancelled);
+                        Ok(("the files' drag left".to_string(), Value::Nil))
+                    }
+                    "hover" | "drop" => {
+                        let (x, y) = point_of(&ui, "at")?;
+                        if files.is_empty() {
+                            return Err(format!("files {action} takes one path or more"));
+                        }
+                        let count = files.len();
+                        if action == "hover" {
+                            for path in files {
+                                ui.dispatch(zgx::input::InputEvent::FileHover { x, y, path });
+                            }
+                            return Ok((format!("{count} files over {x:.0},{y:.0}"), Value::Nil));
+                        }
+                        let taken = zgx::outside_drag::drop_files(x, y, files.into(), |event| {
+                            Some(Ok::<_, std::convert::Infallible>(
+                                ui.dispatch(event).default_prevented,
+                            ))
+                        })
+                        .unwrap_or(false);
+                        Ok((
+                            format!(
+                                "{count} files dropped at {x:.0},{y:.0}: {}",
+                                if taken { "taken" } else { "not taken" }
+                            ),
+                            Value::record([("taken", Value::Bool(taken))]),
+                        ))
+                    }
+                    other => Err(format!(
+                        "files takes `hover`, `drop` or `leave`, not `{other}`"
+                    )),
+                }
+            })(),
+            // Text dragged in from another app (a browser's selection), as
+            // the desktop host hears it: over the point, then let go there
+            // (or, `hover_only`, over it and gone, for a destination's
+            // highlight).
+            "text-drop" => (|| {
+                let (x, y) = point_of(&ui, "at")?;
+                let over = zgx::outside_drag::text_over(&ui, x, y);
+                if field("hover_only").is_some_and(|v| v.truthy()) {
+                    zgx::outside_drag::text_out(&ui);
+                    return Ok((
+                        format!(
+                            "text over {x:.0},{y:.0}: {}",
+                            if over {
+                                "would drop"
+                            } else {
+                                "nothing takes it"
+                            }
+                        ),
+                        Value::record([("over", Value::Bool(over))]),
+                    ));
+                }
+                let dropped = text("text").ok_or("text-drop takes a `text`")?;
+                let html = text("html");
+                let taken = zgx::outside_drag::text_dropped(&ui, x, y, &dropped, html.as_deref());
+                Ok((
+                    format!(
+                        "text dropped at {x:.0},{y:.0}: {}",
+                        if taken { "taken" } else { "not taken" }
+                    ),
+                    Value::record([("over", Value::Bool(over)), ("taken", Value::Bool(taken))]),
+                ))
+            })(),
+            // What zgx reads as the system's preference, set in this process
+            // alone (never the system's own setting).
+            "prefers" => (|| {
+                let name = text("name").ok_or("prefers takes `reduced-motion`")?;
+                if name != "reduced-motion" {
+                    return Err(format!("prefers knows `reduced-motion`, not `{name}`"));
+                }
+                let set = match text("value").as_deref() {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    Some("system") => None,
+                    _ => return Err("prefers reduced-motion takes `on`, `off` or `system`".into()),
+                };
+                ui.theme().override_reduced_motion(set);
+                let now = ui.theme().system_preferences().reduced_motion;
+                Ok((
+                    format!(
+                        "reduced motion {} ({})",
+                        if now { "on" } else { "off" },
+                        if set.is_some() {
+                            "set here; the system's own is unchanged"
+                        } else {
+                            "the system's"
+                        }
+                    ),
+                    Value::record([("reduced_motion", Value::Bool(now))]),
+                ))
+            })(),
             "type" => (|| {
-                let (node, b) = reach(&ui)?;
                 let typed = text("text").ok_or("type takes a `text`")?;
+                // Where focus is, with the caret and selection as they
+                // are: a click would move them.
+                if field("no_click").is_some_and(|v| v.truthy()) {
+                    if field("target").is_some() {
+                        return Err("type --no-click types where focus is: give no target".into());
+                    }
+                    let focused = ui.input.focused().ok_or("nothing has focus to type into")?;
+                    ui.dispatch(zgx::input::InputEvent::Text(typed));
+                    return Ok((
+                        format!("typed into @{}", driver::number(focused)),
+                        Value::Nil,
+                    ));
+                }
+                let (node, b) = reach(&ui)?;
                 driver::click_at(&mut ui, b);
                 ui.dispatch(zgx::input::InputEvent::Text(typed));
                 Ok((format!("typed into @{}", driver::number(node)), Value::Nil))
@@ -872,7 +1385,20 @@ impl Session {
                     return Ok((format!("pressed {keys} alone"), Value::Nil));
                 }
                 let (key, modifiers) = driver::parse_keys(&keys)?;
-                driver::press(&mut ui, key, modifiers);
+                // ⌘C, ⌘X, ⌘V nothing in the view took go to the clipboard
+                // as a window's do (`Ui::clipboard_shortcut`): an editor's
+                // `on_paste` hears a paste driven from here too.
+                let taken = ui.dispatch(zgx::input::InputEvent::KeyDown {
+                    key: key.clone(),
+                    modifiers,
+                    repeat: false,
+                });
+                if !taken.default_prevented
+                    && let Some(platform) = self.0.host.0.platform.borrow().clone()
+                {
+                    ui.clipboard_shortcut(&key, modifiers, &*platform.0);
+                }
+                ui.dispatch(zgx::input::InputEvent::KeyUp { key, modifiers });
                 Ok((format!("pressed {keys}"), Value::Nil))
             })(),
             "snapshot" => (|| {
@@ -898,11 +1424,18 @@ impl Session {
                     ]),
                 ))
             })(),
-            "scroll" => (|| {
-                let node = reachable(&ui)?;
-                driver::scroll(&mut ui, node, number("dy").unwrap_or(100.) as f32);
-                Ok((format!("scrolled @{}", driver::number(node)), Value::Nil))
-            })(),
+            "scroll" => point_of(&ui, "target").map(|(x, y)| {
+                // Any target `click` and `hover` take, or a point; a trackpad's sideways motion with `dx`.
+                let delta_y = number("dy").unwrap_or(100.) as f32;
+                let delta_x = number("dx").unwrap_or(0.) as f32;
+                ui.dispatch(zgx::input::InputEvent::Scroll {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                });
+                (format!("scrolled at {x:.0},{y:.0}"), Value::Nil)
+            }),
             "command" => (|| {
                 let id = text("id").ok_or("command takes an `id`")?;
                 if self.0.host.run_command(&id) {
@@ -918,6 +1451,7 @@ impl Session {
                     ("error", host.error().with_untracked(Clone::clone)),
                     ("types", host.type_errors().with_untracked(Clone::clone)),
                     ("lint", host.lint_findings().with_untracked(Clone::clone)),
+                    ("notice", host.notice_shown()),
                 ] {
                     if let Some(message) = message {
                         lines.push(format!("{what}: {message}"));
@@ -1196,9 +1730,46 @@ impl Session {
                     Value::record([
                         ("name", Value::from(name.as_str())),
                         ("frame", Value::Num(after as f64)),
+                        // Now, on the frames' clock (their `ended_ms`): a
+                        // tool timing input it sends lines its own clock up
+                        // with theirs by this.
+                        ("ms", Value::Num(zgx::trace::now_ms())),
                     ]),
                 ))
             }
+            "clock" => (|| {
+                let action = text("action").unwrap_or_default();
+                match action.as_str() {
+                    "" | "state" => {}
+                    "freeze" => zgx::clock::freeze(),
+                    "thaw" => zgx::clock::thaw(),
+                    "advance" => {
+                        let ms = number("ms").ok_or("`clock advance` takes `ms`")?;
+                        let by = std::time::Duration::from_secs_f64(ms.max(0.) / 1000.);
+                        if !zgx::clock::advance_frozen(by, || {}) {
+                            return Err("the clock isn't frozen (`clock freeze` first)".into());
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "`clock` takes freeze, thaw, advance <ms> or nothing, not `{other}`"
+                        ));
+                    }
+                }
+                let elapsed = zgx::clock::frozen_elapsed();
+                let text = match elapsed {
+                    Some(elapsed) => format!("frozen, {} ms in", elapsed.as_millis()),
+                    None => "running".to_string(),
+                };
+                let data = Value::record([
+                    ("frozen", Value::Bool(elapsed.is_some())),
+                    (
+                        "elapsed_ms",
+                        elapsed.map_or(Value::Nil, |e| Value::Num(e.as_secs_f64() * 1000.)),
+                    ),
+                ]);
+                Ok((text, data))
+            })(),
             "switch" => (|| {
                 let set = match field("on") {
                     None => None,
@@ -1240,6 +1811,11 @@ impl Session {
                 let session = self.clone();
                 let request = request.clone();
                 return Reply::Later(Box::pin(async move { session.wait(&request).await }));
+            }
+            "clipboard" => {
+                let platform = self.0.host.0.platform.borrow().clone();
+                let request = request.clone();
+                return Reply::Later(Box::pin(async move { clipboard(platform, &request).await }));
             }
             "record" => {
                 let stop = field("stop").is_some_and(|v| v.truthy());
@@ -1403,16 +1979,39 @@ impl Session {
         })
     }
 
-    /// This window's size, and its popups open (`windows`).
-    fn about(&self) -> Option<(zgx::scene::Rect, Vec<String>)> {
+    /// This window's size, and its popups wanted open (`windows`), each as
+    /// text and as a record: what it is, its role, whether it shows or is
+    /// held back (the app at the back), and its box.
+    fn about(&self) -> Option<(zgx::scene::Rect, Vec<Panel>)> {
         let ui = self.0.ui.upgrade()?;
         let scene = ui.scene.borrow();
         let size = scene.bounds(scene.root());
-        let popups = scene.popups().to_vec();
+        let roots = scene.wanted_popups().to_vec();
+        let panels: Vec<_> = roots
+            .iter()
+            .map(|root| {
+                let role = scene.popup_role(*root).map_or("popup", |role| match role {
+                    zgx::scene::PopupRole::Menu => "menu",
+                    zgx::scene::PopupRole::Popover => "popover",
+                    zgx::scene::PopupRole::Tooltip => "tooltip",
+                });
+                (
+                    *root,
+                    role,
+                    scene.in_held_popup(*root),
+                    scene.popup_bounds(*root),
+                )
+            })
+            .collect();
         drop(scene);
-        let popups = popups
+        let popups = panels
             .into_iter()
-            .map(|popup| driver::describe(&ui, popup))
+            .map(|(root, role, held, bounds)| Panel {
+                what: driver::describe(&ui, root),
+                role,
+                held,
+                bounds,
+            })
             .collect();
         Some((size, popups))
     }
@@ -1608,11 +2207,26 @@ impl Session {
                     }
                 })
                 .collect();
-            let unnamed = frame
-                .writes
-                .iter()
-                .filter(|(s, _)| !names.contains_key(s))
-                .count();
+            // The rest by where the script made them (`500 × rows.luau:12
+            // use_state`), most first; those no maker named, counted.
+            let sites: std::collections::HashMap<usize, &Rc<str>> =
+                frame.sites.iter().map(|(s, site)| (*s, site)).collect();
+            let mut made: Vec<(Rc<str>, usize)> = Vec::new();
+            let mut unnamed = 0;
+            for (signal, _) in frame.writes.iter().filter(|(s, _)| !names.contains_key(s)) {
+                match sites.get(signal) {
+                    Some(site) => match made.iter_mut().find(|(m, _)| Rc::ptr_eq(m, site)) {
+                        Some((_, n)) => *n += 1,
+                        None => made.push(((*site).clone(), 1)),
+                    },
+                    None => unnamed += 1,
+                }
+            }
+            made.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            writes.extend(made.into_iter().map(|(site, n)| match n {
+                1 => site.to_string(),
+                n => format!("{n} × {site}"),
+            }));
             if unnamed > 0 {
                 writes.push(format!("{unnamed} unnamed"));
             }
@@ -1870,9 +2484,12 @@ impl Session {
                 (Ok(_), true) => false,
                 (Ok(node), false) => match &want {
                     None => true,
+                    // What it says, or what a field in it holds.
                     Some(text) => {
-                        let scene = ui.scene.borrow();
-                        driver::first_text(&scene, *node).is_some_and(|t| t.contains(text.as_str()))
+                        let shown = driver::first_text(&ui.scene.borrow(), *node);
+                        shown.is_some_and(|t| t.contains(text.as_str()))
+                            || driver::first_value(&ui, *node)
+                                .is_some_and(|v| v.contains(text.as_str()))
                     }
                 },
                 (Err(_), false) => false,
@@ -1892,10 +2509,16 @@ impl Session {
             }
             if Instant::now() >= deadline {
                 let why = match found {
-                    Ok(node) => format!(
-                        "still there: {}",
-                        driver::first_text(&ui.scene.borrow(), node).unwrap_or_default()
-                    ),
+                    Ok(node) => {
+                        let shown = driver::first_text(&ui.scene.borrow(), node);
+                        match driver::first_value(&ui, node) {
+                            Some(value) => format!(
+                                "still there: {}, holding {value:?}",
+                                shown.unwrap_or_default()
+                            ),
+                            None => format!("still there: {}", shown.unwrap_or_default()),
+                        }
+                    }
                     Err(error) => error,
                 };
                 return failed(format!("timed out after {timeout} ms ({why})"));
@@ -1989,6 +2612,15 @@ fn window_session(name: &str) -> Result<Session, String> {
         }
     })
 }
+/// A popup panel as `windows` lists it: its window shows it in a panel of its
+/// own where the host has them (macOS, Windows, X11), or in the window.
+struct Panel {
+    what: String,
+    role: &'static str,
+    /// Held back: wanted open, not shown nor hit, the app being at the back.
+    held: bool,
+    bounds: Option<zgx::scene::Rect>,
+}
 /// `windows`: the main window and the app's others, each with its size and
 /// its popups open (menus, popovers past the window: targets inside reach
 /// them, as the window's own nodes).
@@ -2006,9 +2638,32 @@ fn windows(main: &Session) -> (String, Value) {
             line.push_str(&format!("  \"{title}\""));
         }
         for popup in &popups {
-            line.push_str(&format!("\n  popup {popup}"));
+            line.push_str(&format!(
+                "\n  popup {}  {}  {}  owner {id}",
+                popup.what,
+                popup.role,
+                if popup.held { "held" } else { "shown" },
+            ));
         }
         lines.push(line);
+        let panels = popups.iter().map(|popup| {
+            let mut fields = vec![
+                ("what", Value::from(popup.what.as_str())),
+                ("role", Value::from(popup.role)),
+                ("owner", Value::from(id.as_str())),
+                ("shown", Value::Bool(!popup.held)),
+                ("held", Value::Bool(popup.held)),
+            ];
+            if let Some(b) = popup.bounds {
+                fields.extend([
+                    ("x", Value::Num(b.x.round() as f64)),
+                    ("y", Value::Num(b.y.round() as f64)),
+                    ("width", Value::Num(b.width.round() as f64)),
+                    ("height", Value::Num(b.height.round() as f64)),
+                ]);
+            }
+            Value::record(fields)
+        });
         data.push(Value::record([
             ("id", Value::from(id.as_str())),
             ("title", Value::from(title.as_str())),
@@ -2016,16 +2671,29 @@ fn windows(main: &Session) -> (String, Value) {
             ("height", Value::Num(size.height.round() as f64)),
             (
                 "popups",
-                Value::List(popups.iter().map(|p| Value::from(p.as_str())).collect()),
+                Value::List(
+                    popups
+                        .iter()
+                        .map(|p| Value::from(p.what.as_str()))
+                        .collect(),
+                ),
             ),
+            ("panels", Value::List(panels.collect::<Vec<_>>().into())),
         ]));
     }
     (lines.join("\n"), Value::List(data.into()))
 }
 
-/// A socket answering a session: it serves while this lives.
+/// A socket answering a session: it serves while this lives. Dropped, it
+/// stops listening and takes its files away together, so `zgx inspect
+/// list` names no app it can't reach.
 pub struct Server {
     path: PathBuf,
+    /// Its files (the socket and the file naming the app; on Windows the
+    /// one file naming its port and token) as it made them: it removes
+    /// each only while it still is, never another server's at the path.
+    files: Vec<(PathBuf, Mark)>,
+    listening: Option<Listening>,
 }
 impl Server {
     /// Where it listens (a socket, or on Windows the file naming its port
@@ -2036,8 +2704,81 @@ impl Server {
 }
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if let Some(listening) = self.listening.take() {
+            listening.stop();
+        }
+        for (path, mark) in &self.files {
+            if Mark::of(path).as_ref() == Some(mark) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
+}
+
+/// A file as a server made it: its device and inode (Unix), or its text
+/// (elsewhere: the port and token written in it).
+#[derive(PartialEq)]
+enum Mark {
+    #[cfg(unix)]
+    Node(u64, u64),
+    #[cfg(not(unix))]
+    Text(String),
+}
+impl Mark {
+    /// What the file at `path` is now.
+    fn of(path: &std::path::Path) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::symlink_metadata(path).ok()?;
+            Some(Mark::Node(meta.dev(), meta.ino()))
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::read_to_string(path).ok().map(Mark::Text)
+        }
+    }
+}
+
+/// A server's accepting thread, and what stops it.
+struct Listening {
+    thread: std::thread::JoinHandle<()>,
+    /// Unix: the end of a pair the thread polls beside the socket; closed,
+    /// it wakes and ends. Windows: the port it accepts on, connected to
+    /// once to wake it after `stopped` is set.
+    #[cfg(unix)]
+    wake: std::os::unix::net::UnixStream,
+    #[cfg(not(unix))]
+    port: u16,
+    #[cfg(not(unix))]
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Listening {
+    /// Stop accepting, the listener closed once this returns.
+    fn stop(self) {
+        #[cfg(unix)]
+        drop(self.wake);
+        #[cfg(not(unix))]
+        {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        }
+        let _ = self.thread.join();
+    }
+}
+
+/// Write `text` to `path` as a new file (a new inode, so the server that
+/// wrote it knows it as its own), readable only by this user.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let fresh = path.with_extension("json.new");
+    std::fs::write(&fresh, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&fresh, path)
 }
 
 /// Before the view mounts, for a host about to serve devtools: what it
@@ -2064,7 +2805,7 @@ pub fn serve(
     make_private_dir(&dir)?;
     let pid = std::process::id();
     let queue = Queue::default();
-    let path = listen(&dir, pid, about, queue.clone())?;
+    let (path, files, listening) = listen(&dir, pid, about, queue.clone())?;
     spawn(Box::pin(async move {
         loop {
             let (request, reply) = queue.next().await;
@@ -2075,7 +2816,11 @@ pub fn serve(
             let _ = reply.send(answer);
         }
     }));
-    Ok(Server { path })
+    Ok(Server {
+        path,
+        files,
+        listening: Some(listening),
+    })
 }
 
 #[cfg(unix)]
@@ -2147,34 +2892,79 @@ fn connection(stream: impl std::io::Read + Write, queue: Queue, token: Option<St
     }
 }
 
+/// What `listen` made: where it listens, its files, and its thread.
+type Listen = (PathBuf, Vec<(PathBuf, Mark)>, Listening);
+
 #[cfg(unix)]
-fn listen(dir: &std::path::Path, pid: u32, about: &str, queue: Queue) -> std::io::Result<PathBuf> {
-    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+fn listen(dir: &std::path::Path, pid: u32, about: &str, queue: Queue) -> std::io::Result<Listen> {
+    use std::os::{
+        fd::AsRawFd,
+        unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
+    };
     let path = crate::inspect_client::socket_path(dir, pid)?;
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let about_path = dir.join(format!("{pid}.json"));
-    std::fs::write(
+    write_private(
         &about_path,
-        Value::record([("pid", Value::Num(pid as f64)), ("app", Value::from(about))]).to_json(),
+        &Value::record([("pid", Value::Num(pid as f64)), ("app", Value::from(about))]).to_json(),
     )?;
-    std::fs::set_permissions(&about_path, std::fs::Permissions::from_mode(0o600))?;
-    std::thread::Builder::new()
+    let files = [path.clone(), about_path]
+        .into_iter()
+        .filter_map(|file| Mark::of(&file).map(|mark| (file, mark)))
+        .collect();
+    // The thread waits on the socket and on `woken`, which the server's
+    // other end closing (`Listening::stop`) makes readable.
+    let (wake, woken) = UnixStream::pair()?;
+    listener.set_nonblocking(true)?;
+    let thread = std::thread::Builder::new()
         .name("zgx-inspect".into())
         .spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let queue = queue.clone();
-                let _ = std::thread::Builder::new()
-                    .name("zgx-inspect-client".into())
-                    .spawn(move || connection(stream, queue, None));
+            let mut fds = [
+                libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: woken.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            loop {
+                // SAFETY: two pollfds, both of descriptors this thread owns.
+                let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+                if ready < 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return;
+                }
+                if fds[1].revents != 0 {
+                    return;
+                }
+                while let Ok((stream, _)) = listener.accept() {
+                    // Its requests block on their answers.
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
+                    let queue = queue.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("zgx-inspect-client".into())
+                        .spawn(move || connection(stream, queue, None));
+                }
             }
         })?;
-    Ok(path)
+    Ok((path, files, Listening { thread, wake }))
 }
 
 #[cfg(not(unix))]
-fn listen(dir: &std::path::Path, pid: u32, about: &str, queue: Queue) -> std::io::Result<PathBuf> {
+fn listen(dir: &std::path::Path, pid: u32, about: &str, queue: Queue) -> std::io::Result<Listen> {
     use std::net::TcpListener;
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
@@ -2191,9 +2981,9 @@ fn listen(dir: &std::path::Path, pid: u32, about: &str, queue: Queue) -> std::io
             )
     });
     let path = dir.join(format!("{pid}.json"));
-    std::fs::write(
+    write_private(
         &path,
-        Value::record([
+        &Value::record([
             ("pid", Value::Num(pid as f64)),
             ("app", Value::from(about)),
             ("port", Value::Num(port as f64)),
@@ -2201,15 +2991,33 @@ fn listen(dir: &std::path::Path, pid: u32, about: &str, queue: Queue) -> std::io
         ])
         .to_json(),
     )?;
-    std::thread::Builder::new()
+    let files = Mark::of(&path)
+        .map(|mark| (path.clone(), mark))
+        .into_iter()
+        .collect();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = stopped.clone();
+    let thread = std::thread::Builder::new()
         .name("zgx-inspect".into())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
+                // Woken to stop (`Listening::stop`): the listener closes.
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
                 let (queue, token) = (queue.clone(), token.clone());
                 let _ = std::thread::Builder::new()
                     .name("zgx-inspect-client".into())
                     .spawn(move || connection(stream, queue, Some(token)));
             }
         })?;
-    Ok(path)
+    Ok((
+        path,
+        files,
+        Listening {
+            thread,
+            port,
+            stopped,
+        },
+    ))
 }

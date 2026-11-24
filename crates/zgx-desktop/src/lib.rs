@@ -63,10 +63,16 @@ mod mimalloc_tag_tests {
             .expect("vmmap runs");
         let summary = String::from_utf8_lossy(&summary.stdout);
         drop(held);
-        assert!(summary.contains("Memory Tag 240"), "{summary}");
+        // macOS 27's vmmap names tag 240 "App-Specific Tag 1"
+        assert!(
+            summary.contains("Memory Tag 240") || summary.contains("App-Specific Tag 1 "),
+            "{summary}"
+        );
     }
 }
 pub mod app_menu;
+#[cfg(feature = "audio")]
+mod audio;
 mod clipboard;
 mod composition;
 mod contain;
@@ -75,6 +81,8 @@ pub mod file_dialog;
 mod linux_dbus;
 #[cfg(target_os = "linux")]
 mod linux_icon;
+#[cfg(target_os = "linux")]
+mod linux_kdialog;
 #[cfg(target_os = "linux")]
 mod linux_spelling;
 #[cfg(target_os = "linux")]
@@ -111,6 +119,8 @@ mod url;
 mod wayland_blur;
 #[cfg(target_os = "linux")]
 mod wayland_data;
+#[cfg(target_os = "linux")]
+mod wayland_output;
 mod window_chrome;
 mod window_info;
 mod window_place;
@@ -147,6 +157,8 @@ pub use app_menu::{
     APPLICATION_MENU, AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, MenuAction,
     StandardItem, app_menu_bar, has_native_app_menu,
 };
+#[cfg(feature = "audio")]
+pub use audio::{AudioEvent, AudioListening};
 pub use composition::{CompositionLayer, WindowComposition};
 pub use file_dialog::{
     FileDialogError, FileDialogOptions, FileDialogResult, FileDialogs, FileFilter,
@@ -155,10 +167,16 @@ pub use native_events::{ApplicationEvent, ApplicationEventError};
 pub use native_prompt::{PromptButtons, PromptLevel, PromptOptions, PromptResponse};
 pub use url::{OpenUrlError, open_url};
 pub use window_chrome::{Glass, GlassMaterial, Titlebar};
+#[doc(hidden)]
+pub use window_chrome::{TitlebarArea, TitlebarResize, debug_titlebar_mid_resize};
 pub use window_info::{
     DisplayInfo, DisplaySelector, FullScreenTransition, WindowBounds, WindowCapabilities,
     WindowInfo, WindowLevel,
 };
+/// zgx-audio, as [`WindowFactory::audio`] makes its engine (the `audio`
+/// feature).
+#[cfg(feature = "audio")]
+pub use zgx_audio;
 mod native_host;
 #[cfg(any(windows, test))]
 mod windows_caption;

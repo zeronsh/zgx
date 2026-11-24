@@ -24,16 +24,30 @@
 //!
 //! The `ui` and `anime` libraries are documented in `docs/scripting.md`.
 #![warn(missing_docs)]
+
+/// The commit this crate was built from: its full 40-hex id, or `"unknown"`
+/// when it was built from no git checkout and no packaged crate saying one
+/// (a tarball, say). Read from git's own files when it builds, so a cargo
+/// git checkout, a worktree and a path build each say what they hold.
+#[doc(hidden)]
+pub const BUILD_REV: &str = env!("ZGX_BUILD_REV");
+
 mod actions;
+mod gc_paths;
+pub use gc_paths::{GcFound, GcHolder, GcQuery};
 mod anim;
 mod anime;
 pub mod app_config;
 pub mod app_types;
+#[cfg(feature = "audio")]
+mod audio;
+mod b64;
 mod bundle;
 mod calls;
 mod canvas;
 pub mod check;
 mod command;
+mod counted;
 mod data;
 mod design;
 pub mod driver;
@@ -41,8 +55,11 @@ mod element;
 mod elements_report;
 mod estimate;
 mod fetch_policy;
+mod frames;
+mod journal;
 mod json;
 pub use elements_report::{ElementGroup, ElementsReport, ListedElement};
+mod atoms;
 mod errors;
 #[cfg(target_os = "macos")]
 mod file_events;
@@ -54,8 +71,10 @@ mod file_events;
 mod file_events;
 mod folder;
 mod form;
+mod gpu;
 mod handlers;
 mod hook_targets;
+mod host_views;
 mod i18n;
 #[cfg(feature = "inspect")]
 pub mod inspect;
@@ -70,6 +89,65 @@ mod lower;
 pub mod markdown;
 mod meter;
 mod modifiers;
+#[cfg(feature = "modules")]
+mod modules;
+#[cfg(feature = "modules")]
+#[doc(hidden)]
+pub use modules::{RegisteredAction, RegisteredFunction};
+/// Without native modules, no call of a host's function fails as a
+/// module's can, and `ui.module` finds none.
+#[cfg(not(feature = "modules"))]
+mod modules {
+    #[inline(always)]
+    pub(crate) fn failure() -> Option<mlua::Error> {
+        None
+    }
+    pub(crate) fn install(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
+        ui.set(
+            "module",
+            lua.create_function(|_, name: String| -> mlua::Result<()> {
+                Err(mlua::Error::runtime(format!(
+                    "no module named `{name}`: this app's runtime loads no native modules"
+                )))
+            })?,
+        )
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod app_bundle;
+mod checked_files;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod module_build;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod module_types;
+/// In the browser, which loads no library: no module, and none typed.
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub mod module_types {
+    use std::path::{Path, PathBuf};
+    const NONE: &str = "native modules don't load in the browser";
+    pub fn manifest_of_library(_: &Path) -> Result<String, String> {
+        Err(NONE.into())
+    }
+    pub fn of_app(_: &Path) -> (Vec<(PathBuf, String)>, Vec<String>) {
+        (Vec::new(), Vec::new())
+    }
+    pub fn name_of(_: &str) -> Option<String> {
+        None
+    }
+    pub fn module_definitions(_: &str) -> Result<String, String> {
+        Err(NONE.into())
+    }
+    pub fn typed(text: String, _: &[String]) -> (String, Vec<String>) {
+        (text, Vec::new())
+    }
+    pub fn notes(_: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+}
 mod motion;
 mod node;
 mod opens;
@@ -83,6 +161,7 @@ mod rules;
 pub mod scaffold;
 #[cfg(feature = "scene3d")]
 mod scene3d;
+pub use host_views::host_view;
 mod socket;
 mod sorted;
 mod sources;
@@ -90,14 +169,21 @@ mod term;
 pub mod test_runner;
 pub mod testing;
 mod theme;
+mod time;
 mod timers;
 mod token_lint;
 mod transform;
 mod value;
 mod variants;
+#[cfg(target_arch = "wasm32")]
+mod web;
+pub mod window_look;
 mod windows;
+#[cfg(not(target_arch = "wasm32"))]
+mod work;
+mod zip;
 
-pub use bundle::{Bundle, BundleFile, build};
+pub use bundle::{Bundle, BundleFile, MemoryFiles, build};
 pub use calls::{Body, Request, Response};
 pub use command::{Command, DroppedShortcut};
 pub use design::DesignLint;
@@ -105,27 +191,32 @@ pub use fetch_policy::{FetchPolicy, Url};
 pub use persist::app_data_dir;
 pub use socket::{Message, Socket, SocketRequest};
 pub use windows::WindowState;
+/// zgx-audio, as `ScriptHost::set_audio` takes its engine (the `audio`
+/// feature).
+#[cfg(feature = "audio")]
+pub use zgx_audio;
 /// A window's size as `ui.window.size` and `win.size` hold it.
 pub fn window_size_value(width: f32, height: f32) -> Value {
     windows::size(width, height)
 }
 pub use rules::GuardKind;
 pub use value::{
-    ElementHandle, Folded, PathKey, Shared, Store, Unfold, Value, tables_converted,
-    values_converted, values_filed,
+    ElementHandle, Field, Folded, List, Map, PathKey, Place, Shared, Slice, Store, Str, Unfold,
+    Value, WeakSlice, tables_converted, values_converted, values_filed,
 };
 pub use windows::{Window, WindowExtras};
 
+use crate::time::Instant;
 use mlua::Lua;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
-    time::{Duration, Instant, SystemTime},
+    time::Duration,
 };
 use zgx::{
-    compose::{View, prelude::*, switch},
+    compose::{NodeHandle, View, prelude::*, switch},
     reactive::{Runtime, Signal},
 };
 
@@ -169,7 +260,7 @@ pub(crate) type Functions = Rc<RefCell<HashMap<String, Rc<dyn Fn(Value) -> Value
 
 /// One script's VM.
 /// `.luaurc`'s `aliases` in `dir`, resolved against it.
-fn read_aliases(dir: &std::path::Path, files: Files) -> HashMap<String, PathBuf> {
+fn read_aliases(dir: &std::path::Path, files: &Files) -> HashMap<String, PathBuf> {
     let Ok(text) = files.read_to_string(&dir.join(".luaurc")) else {
         return HashMap::new();
     };
@@ -224,6 +315,13 @@ pub(crate) struct Deadline {
     wall: Instant,
     cpu: Duration,
     budget: Duration,
+    /// In the browser, an outermost call's budget starts at the first check
+    /// that looks (`interrupt::check`), not as the call does: reading the
+    /// clock (`performance.now`, through JS) cost more than most calls, and
+    /// a call that ends before that check never reads it. Until then `wall`
+    /// and `cpu` mean nothing.
+    #[cfg(target_arch = "wasm32")]
+    lazy: bool,
 }
 /// How old a CPU-time reading an outermost call's budget may start from:
 /// reading the thread's CPU clock costs more than a short call itself, and a
@@ -232,13 +330,16 @@ pub(crate) struct Deadline {
 /// past it. Starts that shift another budget (a nested call, work off the
 /// clock) read the clock afresh: an early start there would give the outer
 /// call back more than it spent, every time.
+#[cfg(any(unix, windows))]
 const CPU_READING_AGE: Duration = Duration::from_millis(1);
+#[cfg(any(unix, windows))]
 thread_local! {
     /// The thread's last CPU-time reading, and the last instant it is fresh.
     /// An unrepresentable expiry is beyond every representable instant.
     static CPU_READING: Cell<Option<(Option<Instant>, Duration)>> = const { Cell::new(None) };
 }
 /// The thread's CPU time, or a reading of it at most `CPU_READING_AGE` old.
+#[cfg(any(unix, windows))]
 fn recent_thread_cpu(now: Instant) -> Duration {
     CPU_READING.with(|reading| match reading.get() {
         Some((until, cpu)) if until.is_none_or(|until| now <= until) => cpu,
@@ -252,24 +353,85 @@ fn recent_thread_cpu(now: Instant) -> Duration {
 impl Deadline {
     /// A budget from now, its CPU start a recent reading (`CPU_READING_AGE`).
     fn start_recent(budget: Duration) -> Self {
-        let wall = Instant::now();
-        Self {
-            wall,
-            cpu: recent_thread_cpu(wall),
+        // Started at the first check that looks (`lazy`).
+        #[cfg(target_arch = "wasm32")]
+        return Self {
+            wall: clock_start(),
+            cpu: Duration::ZERO,
             budget,
+            lazy: true,
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let wall = Instant::now();
+            Self {
+                wall,
+                #[cfg(any(unix, windows))]
+                cpu: recent_thread_cpu(wall),
+                // Wall time stands in for the CPU's (`thread_cpu`): read once.
+                #[cfg(not(any(unix, windows)))]
+                cpu: thread_cpu_at(wall),
+                budget,
+            }
         }
     }
     /// A budget from now, read exactly: one that will shift another.
     fn start(budget: Duration) -> Self {
+        // One reading: the CPU's stand-in is the wall's (`thread_cpu`).
+        #[cfg(not(any(unix, windows)))]
+        {
+            let now = Instant::now();
+            Self {
+                wall: now,
+                cpu: thread_cpu_at(now),
+                budget,
+                #[cfg(target_arch = "wasm32")]
+                lazy: false,
+            }
+        }
+        #[cfg(any(unix, windows))]
         Self {
             wall: Instant::now(),
             cpu: thread_cpu(),
             budget,
         }
     }
+    /// Whether its clock has yet to start (`lazy`).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn lazy(&self) -> bool {
+        self.lazy
+    }
+    /// The same budget, its clock started at `now` (a reading just made).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn started_at(self, now: Instant) -> Self {
+        Self {
+            wall: now,
+            cpu: thread_cpu_at(now),
+            budget: self.budget,
+            lazy: false,
+        }
+    }
     /// The same budget with the time `other` has run since it started
     /// taken off the clock.
     fn shifted(self, other: &Deadline) -> Self {
+        // Not started: nothing has been counted to take off.
+        #[cfg(target_arch = "wasm32")]
+        if self.lazy {
+            return self;
+        }
+        // One reading: the CPU's stand-in is the wall's (`thread_cpu`).
+        #[cfg(not(any(unix, windows)))]
+        {
+            let now = Instant::now();
+            Self {
+                wall: self.wall + now.saturating_duration_since(other.wall),
+                cpu: self.cpu + thread_cpu_at(now).saturating_sub(other.cpu),
+                budget: self.budget,
+                #[cfg(target_arch = "wasm32")]
+                lazy: false,
+            }
+        }
+        #[cfg(any(unix, windows))]
         Self {
             wall: self.wall + other.wall.elapsed(),
             cpu: self.cpu + thread_cpu().saturating_sub(other.cpu),
@@ -285,13 +447,23 @@ impl Deadline {
     pub(crate) fn cpu_used(&self) -> Duration {
         thread_cpu().saturating_sub(self.cpu)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn exceeded(&self) -> bool {
-        past_budget(
-            self.wall.elapsed(),
-            thread_cpu().saturating_sub(self.cpu),
-            self.budget,
-            CPU_GRAIN,
-        )
+        #[cfg(any(unix, windows))]
+        let (wall, cpu) = (self.wall.elapsed(), thread_cpu().saturating_sub(self.cpu));
+        // Wall time stands in for the CPU's (`thread_cpu`): read once.
+        #[cfg(not(any(unix, windows)))]
+        let (wall, cpu) = {
+            let now = Instant::now();
+            (now - self.wall, thread_cpu_at(now).saturating_sub(self.cpu))
+        };
+        past_budget(wall, cpu, self.budget, CPU_GRAIN)
+    }
+    /// `exceeded` as of `now`, a reading of the wall clock just made.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn exceeded_at(&self, now: Instant) -> bool {
+        let (wall, cpu) = (now - self.wall, thread_cpu_at(now).saturating_sub(self.cpu));
+        past_budget(wall, cpu, self.budget, CPU_GRAIN)
     }
 }
 /// How coarse the thread's CPU clock is (`thread_cpu`): exact on Unix; a
@@ -396,8 +568,19 @@ fn thread_cpu() -> Duration {
 /// Without a thread CPU clock, wall time stands in.
 #[cfg(not(any(unix, windows)))]
 fn thread_cpu() -> Duration {
+    thread_cpu_at(Instant::now())
+}
+/// [`thread_cpu`] as of `now`, a reading of the wall clock already made.
+#[cfg(not(any(unix, windows)))]
+fn thread_cpu_at(now: Instant) -> Duration {
+    now.saturating_duration_since(clock_start())
+}
+/// When this thread first read the clock for a budget: what its stand-in
+/// CPU time counts from, and a budget not yet started holds.
+#[cfg(not(any(unix, windows)))]
+fn clock_start() -> Instant {
     thread_local! { static START: Instant = Instant::now(); }
-    START.with(|s| s.elapsed())
+    START.with(|start| *start)
 }
 
 /// What a script reads of time and chance, on a virtual clock: Luau's own
@@ -417,7 +600,7 @@ fn on_virtual_clock(lua: &Lua) -> mlua::Result<()> {
             Some(date) => time.call::<mlua::Value>(date),
             None => Ok(mlua::Value::Number(
                 zgx::clock::system_now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                    .duration_since(crate::time::SystemTime::UNIX_EPOCH)
                     .map_or(0., |date| date.as_secs() as f64),
             )),
         })?,
@@ -448,6 +631,8 @@ pub(crate) struct Vm {
     pub(crate) warnings: SharedWarnings,
     /// Makes a pointer event's table (`point_table`), compiled once.
     pub(crate) point: std::cell::OnceCell<mlua::Function>,
+    /// The objects at the last `zgx inspect gc --mark` (their heap addresses).
+    gc_mark: RefCell<Option<std::collections::HashSet<String>>>,
 }
 impl Vm {
     /// A pointer event's table for a handler: `x`, `y`, `local_x`,
@@ -525,6 +710,11 @@ impl Vm {
     /// it rebuilds) off the script's clock: the budget stops runaway
     /// scripts, not the updates they cause.
     pub(crate) fn off_clock<R>(&self, f: impl FnOnce() -> R) -> R {
+        // A budget not yet started has nothing to take off.
+        #[cfg(target_arch = "wasm32")]
+        if self.deadline.get().is_some_and(|d| d.lazy()) {
+            return f();
+        }
         let started = Deadline::start(Duration::ZERO);
         let result = f();
         if let Some(d) = self.deadline.get() {
@@ -549,11 +739,161 @@ impl Vm {
     ) -> mlua::Result<R> {
         self.guard(self.budget, || f.call(args))
     }
+    /// `call`, for `f` as `role` ("the row function of ui.each"): an error
+    /// it raises, or one in what it returned, says which function it was
+    /// and where it is defined (`in_role`). Always inlined: its caller
+    /// calls `call` as it would without the role (no instance of its own
+    /// to pull `guard` in), and the naming is a cold call in the error arm.
+    #[inline(always)]
+    pub(crate) fn call_as<R: mlua::FromLuaMulti>(
+        &self,
+        role: &'static str,
+        f: &mlua::Function,
+        args: impl mlua::IntoLuaMulti,
+    ) -> mlua::Result<R> {
+        match self.call(f, args) {
+            Ok(value) => Ok(value),
+            Err(error) => Err(in_role(error, role, f)),
+        }
+    }
+    /// `report`, for an error `f` raised as `role` (`in_role`): for a call
+    /// made with `call` on a hot path, named in its error arm alone.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn report_as(&self, error: mlua::Error, role: &str, f: &mlua::Function) {
+        self.report(in_role(error, role, f));
+    }
     pub(crate) fn report(&self, error: mlua::Error) {
         let message = describe(&self.name, &error);
         eprintln!("{message}");
         report(&self.errors, message);
     }
+}
+
+/// The `file:line` a line of an error starts with (`app.luau:12: …`), if
+/// it does.
+fn starts_located(line: &str) -> bool {
+    let mut parts = line.splitn(3, ':');
+    let (Some(file), Some(number), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !file.is_empty()
+        && !file.contains(char::is_whitespace)
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An error's text saying where in the script it was raised: a Rust
+/// function's error (an argument it refused) names no line as Luau's own
+/// errors do (`app.luau:12: attempt to …`), only its traceback does. Its
+/// first line naming no line then takes the traceback's first script
+/// frame, after the kind (`runtime error: app.luau:12: …`), as Luau's sit.
+/// Lines saying which function it was in (`in …:`, `in_role`) stay above.
+fn located(text: &str) -> String {
+    let Some((head, trace)) = text.split_once("\nstack traceback:") else {
+        return text.to_string();
+    };
+    // The first frame in the script, not a Rust function's (`[C]`).
+    let Some(at) = trace.lines().map(str::trim).find_map(|frame| {
+        let (at, rest) = frame.split_once(": ")?;
+        (starts_located(&format!("{at}: ")) && !at.starts_with('[') && rest.starts_with("in "))
+            .then_some(at)
+    }) else {
+        return text.to_string();
+    };
+    let mut lines: Vec<String> = head.lines().map(str::to_string).collect();
+    let Some(first) = lines
+        .iter_mut()
+        .find(|line| !(line.starts_with("in ") && line.ends_with(':')))
+    else {
+        return text.to_string();
+    };
+    const KINDS: [&str; 3] = ["runtime error: ", "memory error: ", "callback error: "];
+    let (kind, message) = KINDS
+        .iter()
+        .find_map(|kind| {
+            first
+                .strip_prefix(kind)
+                .map(|rest| (*kind, rest.to_string()))
+        })
+        .unwrap_or(("", first.clone()));
+    if starts_located(&message) {
+        return text.to_string();
+    }
+    *first = format!("{kind}{at}: {message}");
+    format!("{}\nstack traceback:{trace}", lines.join("\n"))
+}
+
+/// Where script function `f` is defined, as `app.luau:40`: `None` for a
+/// Rust function, or one with no line.
+pub(crate) fn defined_at(f: &mlua::Function) -> Option<String> {
+    let info = f.info();
+    if info.what == "C" {
+        return None;
+    }
+    let source = info.short_src?;
+    let line = info.line_defined?;
+    Some(format!("{source}:{line}"))
+}
+
+/// `role` and where `f` is defined, as an error names a function: "the row
+/// function of ui.each (defined at app.luau:40)".
+pub(crate) fn named(role: &str, f: &mlua::Function) -> String {
+    match defined_at(f) {
+        Some(at) => format!("{role} (defined at {at})"),
+        None => role.to_string(),
+    }
+}
+
+/// `error`, raised calling `f` as `role`, saying first which function it
+/// was: "in the row function of ui.each (defined at app.luau:40):", above
+/// the error and its traceback. An error a function raised in what it
+/// returned (a value of the wrong type) has no traceback: this is where it
+/// was. Cold: success never comes here.
+#[cold]
+#[inline(never)]
+pub(crate) fn in_role(error: mlua::Error, role: &str, f: &mlua::Function) -> mlua::Error {
+    // mlua's own context error: its `Arc`, though `Error` isn't `Send`
+    // here (the VM never leaves its thread).
+    #[allow(clippy::arc_with_non_send_sync)]
+    let cause = std::sync::Arc::new(error);
+    mlua::Error::WithContext {
+        context: format!("in {}:", named(role, f)),
+        cause,
+    }
+}
+
+/// What `f`, called as `role`, returned (`got`) that zgx can't take, at
+/// `f`'s definition as Luau places an error (`file:line: …`), since nothing
+/// else is left to point at once it has returned: "app.luau:40: the row
+/// function of ui.each returned nothing; return a ui node". `wanted` is
+/// what to return.
+#[cold]
+#[inline(never)]
+pub(crate) fn returned(
+    role: &str,
+    f: &mlua::Function,
+    got: &mlua::Value,
+    wanted: &str,
+) -> mlua::Error {
+    let what = match got {
+        mlua::Value::Nil => "nothing".to_string(),
+        // Luau's numbers are one type, whatever mlua reads them as.
+        mlua::Value::Integer(_) | mlua::Value::Number(_) => "a number".to_string(),
+        other => {
+            let name = other.type_name();
+            let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("{article} {name}")
+        }
+    };
+    let at = defined_at(f)
+        .map(|at| format!("{at}: "))
+        .unwrap_or_default();
+    mlua::Error::runtime(format!("{at}{role} returned {what}; return {wanted}"))
 }
 
 /// Make `message` the error shown, telling what follows the error (the
@@ -587,7 +927,7 @@ impl Drop for CallEnd<'_> {
 
 /// An error with Rust-side frames removed from its traceback.
 fn describe(name: &str, error: &mlua::Error) -> String {
-    let text = error.to_string();
+    let text = located(&error.to_string());
     let lines: Vec<_> = text
         .lines()
         .filter(|line| line.trim() != "[C]: in ?")
@@ -664,6 +1004,9 @@ pub(crate) struct Warnings {
 pub(crate) struct Diagnostics {
     calls: Cell<u64>,
     warnings: RefCell<Warnings>,
+    /// What the app's runner said as it started it (`ScriptHost::notice`),
+    /// made by the first notice: a host given none has none.
+    notice: RefCell<Option<Signal<Option<String>>>>,
 }
 impl Diagnostics {
     pub(crate) fn borrow(&self) -> std::cell::Ref<'_, Warnings> {
@@ -674,6 +1017,43 @@ impl Diagnostics {
     }
 }
 pub(crate) type SharedWarnings = Rc<Diagnostics>;
+/// What a host registers by name (`ScriptHost::action`, `function`,
+/// `async_action`): each kind its own names.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Registration {
+    Action,
+    Function,
+    AsyncAction,
+}
+#[cfg(debug_assertions)]
+impl Registration {
+    fn describe(self) -> (&'static str, &'static str) {
+        match self {
+            Registration::Action => ("action", "replace_action"),
+            Registration::Function => ("function", "replace_function"),
+            Registration::AsyncAction => ("async action", "replace_async_action"),
+        }
+    }
+}
+/// A place in the host's code a name was registered from.
+#[cfg(debug_assertions)]
+type Site = &'static std::panic::Location<'static>;
+/// Where a debug build's host registered each name from (`#[track_caller]`):
+/// a name registered again from a site it hasn't been registered from
+/// replaces the earlier handler silently, which apps have shipped as bugs
+/// (two handlers named alike, the later one answering both), so it warns.
+/// Sites a name was registered from before (a host rebuilt, a reload)
+/// don't, nor does `replace_*`. A release build records nothing.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct Registrations {
+    /// Each name's sites so far, and the latest of them.
+    sites: HashMap<(Registration, String), (Vec<Site>, Site)>,
+    /// What those warnings said, for the debug strip (`lint_findings`): the
+    /// scripts' lint, run at each load, shows them first.
+    findings: Vec<String>,
+}
 /// Where script warnings go: stderr and the host's list
 /// ([`ScriptHost::warnings`]). Everything that warns comes through here, so
 /// a host can show them elsewhere too.
@@ -887,6 +1267,15 @@ fn banner(text: &str, dismiss: impl Fn() + 'static) -> View {
 /// show: over any modal or popover, its × taking its own clicks while a
 /// dialog holds focus (a click there reached the dialog's backdrop), and
 /// the pointer passing through the rest. Made only while an error shows.
+/// The lint strip's text: `zgx lint: 3 findings`, then each, a line apiece.
+fn lint_text(found: &[String]) -> String {
+    format!(
+        "zgx lint: {} finding{}\n{}",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" },
+        found.join("\n")
+    )
+}
 /// A debug build's lint findings (`zgx lint: 3 findings` and the first of
 /// them), in the window's lower corner with a dismiss button: no modal, no
 /// error, and only its own area takes the pointer. The rest are in
@@ -983,6 +1372,9 @@ pub enum Capability {
     /// `ui.open_folder`: a folder the user picks, with everything inside
     /// it to list, read and write.
     Folders,
+    /// `ui.load_font`: a font file from its directory (or one the user
+    /// picked) added to every window's text, the app's too.
+    Fonts,
     /// `ui.term`: terminal sessions, to read and to type into.
     Terminals,
     /// `ui.web` and `ui.webview`: web pages.
@@ -990,6 +1382,14 @@ pub enum Capability {
     /// `ui.window`: windows of its own, which could pose as the app's or
     /// the system's (asking for a password).
     Windows,
+    /// `audio`: sounds played into a bus of the plugin's own (the `audio`
+    /// feature). It reaches no other bus and no device.
+    #[cfg(feature = "audio")]
+    Audio,
+    /// `ui.scene3d` and `ui.model`: 3D scenes, drawn on the GPU (the
+    /// `scene3d` feature).
+    #[cfg(feature = "scene3d")]
+    Scene3d,
     /// What the app defines (`expose_action`, `expose_shared`): a host
     /// action or shared state a plugin reaches only if granted it.
     Named(String),
@@ -1055,12 +1455,102 @@ pub(crate) type Exposed = Rc<RefCell<HashMap<String, Option<Capability>>>>;
 /// Shared keys plugins read but may not write (`expose_shared_read`).
 pub(crate) type ReadOnly = Rc<RefCell<std::collections::HashSet<String>>>;
 
+/// What a host offers its scripts, by name (`ScriptHost::registry`), each
+/// list sorted.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Registry {
+    /// Its actions (`ScriptHost::action`).
+    pub actions: Vec<String>,
+    /// Its functions (`ScriptHost::function`).
+    pub functions: Vec<String>,
+    /// Its async actions (`ScriptHost::async_action`).
+    pub async_actions: Vec<String>,
+    /// Its shared keys: the host's (`ScriptHost::shared`) and those its
+    /// scripts made (`ui.shared`).
+    pub shared: Vec<String>,
+}
 /// Where a host's files come from: the disk, or a bundle compiled into the
-/// app (which reads nothing from the disk).
-#[derive(Clone, Copy)]
+/// app (which reads nothing from the disk), with what its scripts may be.
+#[derive(Clone)]
 pub(crate) enum Files {
     Disk,
+    Bundle(&'static Bundle, Code),
+    /// Files held in memory (`ScriptHost::from_files`).
+    Memory(std::sync::Arc<MemoryFiles>, Code),
+    /// A bundle's folder on the disk (`zgx build`'s `ui/`), read file by
+    /// file as asked, each checked against its manifest as it is read, and
+    /// loaded as its `Code` allows.
+    Folder(checked_files::Checked, Code),
+}
+// Every host holds one, and each `require` clones it: a pointer and a word,
+// whatever its kind (a larger one moved the heap's layout under every
+// scene of the perf gate).
+const _: () = assert!(std::mem::size_of::<Files>() <= 16);
+/// Why a reload in place (`ScriptHost::retarget`) or a trial load
+/// (`ScriptHost::validate`) failed.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReloadError {
+    /// What went wrong, as a reload reports it.
+    pub message: String,
+    /// Whether the load was stopped for running past its time budget
+    /// (`Limits::load`), rather than failing.
+    pub timed_out: bool,
+}
+impl std::fmt::Display for ReloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for ReloadError {}
+impl ReloadError {
+    /// `message` from a load that began with the last budget stop at
+    /// `mark` (`interrupt::stop_mark`): timed out if one came since.
+    fn of(message: String, mark: Option<u64>) -> Self {
+        Self {
+            timed_out: interrupt::stop_mark() != mark,
+            message,
+        }
+    }
+}
+/// Where an app's scripts come from, other than the disk
+/// (`ScriptHost::from_files`).
+#[doc(hidden)]
+#[derive(Clone)]
+pub enum ScriptFiles {
+    /// A bundle the app's build compiled into it (`include_bundle!`).
     Bundle(&'static Bundle),
+    /// Files held in memory: an update downloaded, say.
+    Memory(std::sync::Arc<MemoryFiles>),
+    /// A bundle's folder on the disk, `zgx build`'s, as `app_bundle::open`
+    /// found it (`Opened::files`): read as its files are asked for, each
+    /// checked against the bundle's manifest as it is read.
+    Folder(checked_files::Checked),
+}
+impl ScriptFiles {
+    fn with(self, code: Code) -> Files {
+        match self {
+            ScriptFiles::Bundle(bundle) => Files::Bundle(bundle, code),
+            ScriptFiles::Memory(memory) => Files::Memory(memory, code),
+            ScriptFiles::Folder(checked) => Files::Folder(checked, code),
+        }
+    }
+}
+/// What a bundle's scripts may be (`ScriptHost::code`). Luau checks no
+/// bytecode it loads: bytecode crafted to corrupt the VM steps out of the
+/// sandbox, so only bytecode the app's own build compiled may load.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Code {
+    /// Source text only, as from the disk: a script in bytecode form is
+    /// refused (it fails to load). For scripts that came from elsewhere
+    /// (an update downloaded), compiled where they run.
+    Source,
+    /// Bytecode or source: a bundle the app's build compiled
+    /// (`build::bundle`, `include_bundle!`), part of the app itself.
+    #[default]
+    VerifiedBytecode,
 }
 impl Files {
     /// A chunk read from here, loading as the files allow: an app's bundle
@@ -1069,38 +1559,79 @@ impl Files {
     /// loads, so a file of crafted bytecode (a plugin's, or a module one
     /// requires) would corrupt the VM and step out of the sandbox: read as
     /// source, it just fails to parse.
-    fn chunk(self, chunk: mlua::chunk::Chunk<'_>) -> mlua::chunk::Chunk<'_> {
+    fn chunk<'a>(&self, chunk: mlua::chunk::Chunk<'a>) -> mlua::chunk::Chunk<'a> {
         match self {
-            Files::Bundle(_) => chunk,
-            Files::Disk => chunk.set_mode(mlua::chunk::ChunkMode::Text),
+            Files::Bundle(_, Code::VerifiedBytecode)
+            | Files::Memory(_, Code::VerifiedBytecode)
+            | Files::Folder(_, Code::VerifiedBytecode) => chunk,
+            Files::Bundle(_, Code::Source)
+            | Files::Memory(_, Code::Source)
+            | Files::Folder(_, Code::Source)
+            | Files::Disk => chunk.set_mode(mlua::chunk::ChunkMode::Text),
         }
     }
-    pub(crate) fn read(self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    pub(crate) fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         match self {
             Files::Disk => std::fs::read(path),
-            Files::Bundle(bundle) => bundle.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
+            Files::Folder(checked, _) => checked.read(path),
+            Files::Memory(files, _) => files.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's files")
+            }),
+            Files::Bundle(bundle, _) => bundle.get(path).map(<[u8]>::to_vec).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in the app's bundle")
             }),
         }
     }
-    fn read_to_string(self, path: &std::path::Path) -> std::io::Result<String> {
+    /// The root its files seem to be under, unless they're the disk's.
+    fn root(&self) -> Option<PathBuf> {
+        match self {
+            Files::Disk => None,
+            Files::Bundle(bundle, _) => Some(PathBuf::from(bundle.root)),
+            Files::Memory(memory, _) => Some(PathBuf::from(memory.root_path())),
+            Files::Folder(checked, _) => Some(checked.dir().to_path_buf()),
+        }
+    }
+    /// The packages it holds (none on the disk: `ScriptHost::package`).
+    fn packages(&self) -> Vec<String> {
+        match self {
+            Files::Disk => Vec::new(),
+            Files::Bundle(bundle, _) => bundle.packages(),
+            Files::Memory(memory, _) => memory.packages(),
+            // As `build::bundle` stores them: `.packages/<name>/`.
+            Files::Folder(checked, _) => {
+                let mut names: Vec<String> =
+                    std::fs::read_dir(checked.dir().join(bundle::build::PACKAGES))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter(|entry| entry.path().is_dir())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect();
+                names.sort();
+                names
+            }
+        }
+    }
+    fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String> {
         String::from_utf8(self.read(path)?).map_err(std::io::Error::other)
     }
-    fn is_dir(self, path: &std::path::Path) -> bool {
+    fn is_dir(&self, path: &std::path::Path) -> bool {
         match self {
-            Files::Disk => path.is_dir(),
-            Files::Bundle(bundle) => bundle.is_dir(path),
+            Files::Disk | Files::Folder(..) => path.is_dir(),
+            Files::Bundle(bundle, _) => bundle.is_dir(path),
+            Files::Memory(files, _) => files.is_dir(path),
         }
     }
     /// The files in directory `dir`.
-    fn list(self, dir: &std::path::Path) -> Vec<PathBuf> {
+    fn list(&self, dir: &std::path::Path) -> Vec<PathBuf> {
         match self {
-            Files::Disk => std::fs::read_dir(dir)
+            Files::Disk | Files::Folder(..) => std::fs::read_dir(dir)
                 .into_iter()
                 .flatten()
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .collect(),
-            Files::Bundle(bundle) => bundle.list(dir),
+            Files::Bundle(bundle, _) => bundle.list(dir),
+            Files::Memory(files, _) => files.list(dir),
         }
     }
 }
@@ -1132,7 +1663,7 @@ impl Script {
         }
     }
     /// Its source, or (from a bundle) its bytecode.
-    fn code(&self, files: Files) -> Result<Vec<u8>, String> {
+    fn code(&self, files: &Files) -> Result<Vec<u8>, String> {
         match self {
             Script::File(path) | Script::Plugin { path, .. } => files
                 .read(path)
@@ -1173,7 +1704,7 @@ fn require_module<const LENDING: bool>(
         plugin_name,
         all_packages,
     } = state;
-    let files = *files;
+    let files = files.clone();
     let plugin = LENDING;
     let plugin_name: &Option<String> = if LENDING { plugin_name } else { &None };
     let Some(root) = &root else {
@@ -1315,6 +1846,20 @@ fn require_module<const LENDING: bool>(
     } else {
         files
     };
+    // A module of the app's own checked bundle (a package it lends, its
+    // design system, say) is the bundle's bytecode whichever VM requires
+    // it: a plugin's reads it as the app's does, and can't change it. (A
+    // VM reading the bundle already, the app's, asks nothing more: `within`
+    // costs each require a walk of its path.)
+    let files = match files {
+        Files::Folder(..) => files,
+        files => match host.upgrade().map(|h| h.files.borrow().clone()) {
+            Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(checked.dir(), &path)) => {
+                app
+            }
+            _ => files,
+        },
+    };
     // While the host watches its files: who requires what (`reloads`).
     let tracker = if LENDING || !reloads::recording() {
         None
@@ -1399,7 +1944,7 @@ fn require_module<const LENDING: bool>(
             .and_then(|h| h.sources.compiled(&path, &code))
             // Compiled ahead while the app's window was made (`compile_ahead`).
             .or_else(|| sources::prefetched(&code)),
-        Files::Bundle(_) => None,
+        Files::Bundle(..) | Files::Memory(..) | Files::Folder(..) => None,
     };
     let bytecode = match package.as_deref() {
         Some(package) => package.bytecode(),
@@ -1616,8 +2161,11 @@ impl IssueLog {
 type ErrorHooks = Rc<RefCell<Vec<Rc<dyn Fn(&str)>>>>;
 struct Inner {
     runtime: Runtime,
-    app: Script,
-    files: Files,
+    /// The app's script, and where its files come from: what `retarget`
+    /// moves to another app's. Shared, so reading it copies no inline
+    /// script's code.
+    app: RefCell<Rc<Script>>,
+    files: RefCell<Files>,
     /// `async_action`s, which `ui.call` runs.
     async_actions: calls::AsyncActions,
     /// The transport `ui.fetch` and remote images use (`fetcher`).
@@ -1628,6 +2176,9 @@ struct Inner {
     fetch_policy: fetch_policy::SharedPolicy,
     /// What each plugin may do beyond its sandbox (`grant`), by name.
     grants: RefCell<HashMap<String, Vec<Capability>>>,
+    /// Each plugin's heap where the app set its own (`plugin_memory`), by
+    /// name; the rest have `Limits::plugin_memory`.
+    plugin_memory: RefCell<HashMap<String, usize>>,
     /// What every plugin may do (`grant_all_plugins`), those loaded later
     /// too.
     all_plugins: RefCell<Vec<Capability>>,
@@ -1645,6 +2196,8 @@ struct Inner {
     platform: io::SharedPlatform,
     /// The files the user picked in this host's dialogs.
     picked: io::Picked,
+    /// Where `d:save_temp` saves (`download_dir`).
+    downloads: Rc<io::Downloads>,
     /// What scripts may have of folders, and the ones kept past a run.
     folders: Rc<folder::Access>,
     /// `ui.args` and `ui.on_open` (`ScriptHost::args`, `open`).
@@ -1676,6 +2229,9 @@ struct Inner {
     /// (`window_chrome`).
     chrome: RefCell<Option<zgx::reactive::Effect>>,
     window_size: RefCell<Option<zgx::reactive::Effect>>,
+    /// The host's view as it's mounted: what `ui.focus_snapshot` asks of
+    /// its window.
+    root: Rc<RefCell<Option<NodeHandle>>>,
     /// `ui.window.full_screen` and `full_screen_transition` kept as the
     /// window says (`ScriptHost::window_full_screen`).
     full_screen: RefCell<Option<zgx::reactive::Effect>>,
@@ -1697,9 +2253,11 @@ struct Inner {
     /// Where focus was as a reload began, before its scripts ran.
     focus: zgx::compose::FocusHold,
     error: Signal<Option<String>>,
-    stamps: RefCell<Vec<(PathBuf, Option<SystemTime>)>>,
+    stamps: RefCell<Vec<(PathBuf, Option<std::time::SystemTime>)>>,
     /// Files scripts `require`d in the last load: watched with the scripts.
     required: RefCell<Vec<PathBuf>>,
+    /// What a load writes to state that outlives it, undone if it fails.
+    journal: Rc<journal::Journal>,
     /// The packages lent to each plugin, and how many of their modules it
     /// required: the load under way's, and the last successful one's
     /// (`contributions`).
@@ -1752,10 +2310,16 @@ struct Inner {
     type_errors: Signal<Option<String>>,
     /// What `zgx lint` finds in the scripts as loaded (debug builds).
     lint: Signal<Option<String>>,
+    /// Where each name was registered from (debug builds).
+    #[cfg(debug_assertions)]
+    registrations: RefCell<Registrations>,
     /// The theme file error shown, if any (cleared when the file reads).
     theme_error: RefCell<Option<String>>,
     /// Collects the VMs' garbage as the host goes idle (`zgx::idle`).
     idle: RefCell<Option<zgx::idle::IdleTrim>>,
+    /// The scripts' `audio`: the host's engine, made at their first call.
+    #[cfg(feature = "audio")]
+    audio: Rc<audio::AudioHost>,
 }
 
 /// A wake-up for one waiting task: `notify` before or during the wait ends it.
@@ -1822,6 +2386,8 @@ impl ScriptHost {
         )
     }
     fn with(runtime: &Runtime, app: Script) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        web::start();
         let elements = Rc::new(element::Elements::default());
         let warnings = SharedWarnings::default();
         if let Some(mode) = DesignLint::from_env() {
@@ -1834,13 +2400,14 @@ impl ScriptHost {
         let persist = persist::Persist::new(runtime, warnings.clone());
         let host = Self(Rc::new(Inner {
             runtime: runtime.clone(),
-            app,
-            files: Files::Disk,
+            app: RefCell::new(Rc::new(app)),
+            files: RefCell::new(Files::Disk),
             async_actions: Rc::default(),
             fetcher: Rc::default(),
             connector: Rc::default(),
             fetch_policy: Rc::default(),
             grants: RefCell::default(),
+            plugin_memory: RefCell::default(),
             all_plugins: RefCell::default(),
             managed: RefCell::default(),
             exposed_actions: Rc::default(),
@@ -1850,6 +2417,7 @@ impl ScriptHost {
             rewatch: RefCell::default(),
             platform: Rc::default(),
             picked: Rc::default(),
+            downloads: Rc::default(),
             folders: Rc::new(folder::Access::new(persist.clone())),
             opens: Rc::default(),
             show_errors: cfg!(debug_assertions),
@@ -1889,6 +2457,7 @@ impl ScriptHost {
             shared: Rc::new(Store::new(runtime)),
             chrome: RefCell::default(),
             window_size: RefCell::default(),
+            root: Rc::default(),
             full_screen: RefCell::default(),
             zoom: RefCell::default(),
             visible: RefCell::default(),
@@ -1901,6 +2470,7 @@ impl ScriptHost {
             error: runtime.signal(None),
             stamps: RefCell::default(),
             required: RefCell::default(),
+            journal: Rc::default(),
             lent: RefCell::default(),
             lent_compiled: RefCell::default(),
             lent_compiles: Cell::new(0),
@@ -1928,14 +2498,26 @@ impl ScriptHost {
             checker: RefCell::default(),
             type_errors: runtime.signal(None),
             lint: runtime.signal(None),
+            #[cfg(debug_assertions)]
+            registrations: RefCell::default(),
             theme_error: RefCell::default(),
             idle: RefCell::default(),
+            #[cfg(feature = "audio")]
+            audio: audio::AudioHost::new(runtime),
         }));
         host.0.assets.connect(
             host.0.timers.clone(),
             host.0.fetcher.clone(),
             host.0.fetch_policy.clone(),
         );
+        #[cfg(feature = "audio")]
+        host.0.audio.set_timers(host.0.timers.clone());
+        // No files in the browser: a sound's are fetched, through the host's
+        // transport and under its policy.
+        #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+        host.0
+            .audio
+            .set_fetch(host.0.fetcher.clone(), host.0.fetch_policy.clone());
         host.trim_when_idle();
         host
     }
@@ -1944,33 +2526,156 @@ impl ScriptHost {
     /// `require`, `.luaurc` aliases, packages, theme files, images and
     /// plugins included, and `watch` watches nothing.
     pub fn bundled(runtime: &Runtime, bundle: &'static Bundle, entry: &str) -> Self {
-        let root = PathBuf::from(bundle.root);
-        let mut host = Self::with(runtime, Script::File(root.join(entry)))
-            .configure(|inner| inner.files = Files::Bundle(bundle));
+        Self::from_files(
+            runtime,
+            ScriptFiles::Bundle(bundle),
+            entry,
+            Code::VerifiedBytecode,
+        )
+    }
+    /// The scripts in `files` (a bundle, or files held in memory, as an
+    /// update brought them), starting at `entry`, loading as `code` allows:
+    /// as `bundled`, nothing read from the disk and nothing watched. Files
+    /// in memory go with the last host holding them.
+    #[doc(hidden)]
+    pub fn from_files(runtime: &Runtime, files: ScriptFiles, entry: &str, code: Code) -> Self {
+        let files = files.with(code);
+        let root = files.root().expect("a bundle or files in memory");
+        let mut host = Self::with(runtime, Script::File(root.join(entry)));
         // Its packages, as `build::bundle` stored them.
-        let mut names: Vec<&str> = bundle
-            .files
-            .iter()
-            .filter_map(|file| {
-                let rest = file.path.strip_prefix(bundle::build::PACKAGES)?;
-                Some(rest.strip_prefix('/')?.split_once('/')?.0)
-            })
-            .collect();
-        names.dedup();
-        for name in names {
-            let dir = root.join(bundle::build::PACKAGES).join(name);
+        for name in files.packages() {
+            let dir = root.join(bundle::build::PACKAGES).join(&name);
             host = host.package(name, dir);
         }
-        host.0.assets.set_files(Files::Bundle(bundle));
-        // Theme files from the bundle; other hosts' still from the disk.
-        zgx::theme::Themes::of(runtime).set_reader(Some(Rc::new(move |path: &std::path::Path| {
-            if path.starts_with(&root) {
-                Files::Bundle(bundle).read_to_string(path)
-            } else {
-                std::fs::read_to_string(path)
-            }
-        })));
+        let host = host.configure(|inner| *inner.files.get_mut() = files);
+        host.read_through_files();
         host
+    }
+    /// The scripts in `files`, starting at `entry`, loaded in place of the
+    /// app's: as a reload, the interface built again with its state kept
+    /// (`ui.state`, `ui.persist`, `ui.shared`, web views), images and theme
+    /// files read from `files` from now on, and what was compiled of the
+    /// old scripts let go. Loads as the host's scripts do (`Code`). If the
+    /// load fails, nothing changes: the app keeps its scripts, files,
+    /// interface and state (writes the failed scripts made undone).
+    #[doc(hidden)]
+    pub fn retarget(&self, files: ScriptFiles, entry: &str) -> Result<(), ReloadError> {
+        let files = files.with(self.code_mode());
+        let root = files.root().expect("a bundle or files in memory");
+        let before = (self.app(), self.files());
+        let app = Script::File(root.join(entry));
+        // Its state, kept by the app's script: the new one's.
+        let keys = (before.0.key(), app.key());
+        self.move_store(&keys.0, &keys.1);
+        // The catalog read anew from the new files, its directory moved to
+        // their root: memory files have no times to tell an edit by, and a
+        // script's `ui.i18n` naming the same directory keeps the one loaded.
+        // Both the app script's directory, which `ui.i18n`'s `dir` is from.
+        let roots = (before.0.dir(), app.dir().unwrap_or_else(|| root.clone()));
+        *self.0.app.borrow_mut() = Rc::new(app);
+        *self.0.files.borrow_mut() = files;
+        self.read_through_files();
+        let catalog = self.0.locales.take();
+        if let (Some(kept), (Some(from), to)) = (&catalog, &roots) {
+            kept.load_in(&self.0.locales, &self.0.runtime, &self.files(), (from, to));
+        }
+        let mark = interrupt::stop_mark();
+        match self.reload_with(None) {
+            Ok(()) => {
+                // The old scripts' bytecode, kept to reload them faster.
+                self.0.sources.keep_only(std::iter::empty());
+                self.0.lent_compiled.borrow_mut().clear();
+                Ok(())
+            }
+            Err(message) => {
+                self.0.locales.put_back(catalog);
+                self.move_store(&keys.1, &keys.0);
+                *self.0.app.borrow_mut() = before.0;
+                *self.0.files.borrow_mut() = before.1;
+                self.read_through_files();
+                *self.0.stamps.borrow_mut() = self.stamps();
+                Err(ReloadError::of(message, mark))
+            }
+        }
+    }
+    /// Whether the scripts in `files`, starting at `entry`, load: run in a
+    /// host of their own, on a runtime of their own, and dropped. Nothing
+    /// of this host is touched (its state, shared and persisted values,
+    /// themes, web views). That host reaches nothing outside: no transport
+    /// for `ui.fetch` or `ui.socket` is given it, no folder, no saved
+    /// state, so a script that asks for them as it loads meets the same
+    /// refusal it would in any host without them (the load goes on, or
+    /// fails, as the script handles it). Same limits and `Code` as this
+    /// host's.
+    #[doc(hidden)]
+    pub fn validate(&self, files: ScriptFiles, entry: &str) -> Result<(), ReloadError> {
+        let runtime = Runtime::new();
+        let limits = self.0.limits;
+        let trial = Self::from_files(&runtime, files, entry, self.code_mode())
+            .limits(limits)
+            .error_banner(false);
+        let mark = interrupt::stop_mark();
+        let loaded = trial.load().map(drop);
+        loaded.map_err(|message| ReloadError::of(message, mark))
+    }
+    /// The state script `from` holds (`ui.state`), held by script `to`.
+    fn move_store(&self, from: &str, to: &str) {
+        let mut stores = self.0.stores.borrow_mut();
+        if let Some(store) = stores.remove(from) {
+            stores.insert(to.to_owned(), store);
+        }
+    }
+    /// How its scripts may load (`Code`): its files', or `Code::Source`
+    /// for the disk's (always read as source).
+    fn code_mode(&self) -> Code {
+        match &*self.0.files.borrow() {
+            Files::Bundle(_, code) | Files::Memory(_, code) | Files::Folder(_, code) => *code,
+            Files::Disk => Code::Source,
+        }
+    }
+    /// Its images and theme files read from its files: a bundle's or those
+    /// in memory (other hosts' still from the disk).
+    fn read_through_files(&self) {
+        let files = self.files();
+        self.0.assets.set_files(files.clone());
+        let Some(root) = files.root() else {
+            return;
+        };
+        zgx::theme::Themes::of(&self.0.runtime).set_reader(Some(Rc::new(
+            move |path: &std::path::Path| {
+                if path.starts_with(&root) {
+                    files.read_to_string(path)
+                } else {
+                    std::fs::read_to_string(path)
+                }
+            },
+        )));
+    }
+    /// What the scripts of its bundle may be (`Code`): `bundled`'s are the
+    /// app's own build's, bytecode included (`Code::VerifiedBytecode`);
+    /// with `Code::Source`, a script in bytecode form is refused, as from
+    /// the disk. Files from the disk are always read as source.
+    #[doc(hidden)]
+    pub fn code(self, code: Code) -> Self {
+        self.configure(|inner| {
+            let files = inner.files.get_mut();
+            match files {
+                Files::Bundle(bundle, _) => *files = Files::Bundle(bundle, code),
+                Files::Memory(memory, _) => *files = Files::Memory(memory.clone(), code),
+                Files::Folder(checked, _) => *files = Files::Folder(checked.clone(), code),
+                Files::Disk => {}
+            }
+        })
+    }
+    /// The folder a page's downloads are saved into with no dialog
+    /// (Luau's `d:save_temp`), each under its suggested name made unique:
+    /// one of the app's own, temporary, which the app clears. Until it
+    /// names one, `d:save_temp` raises. Plugins need `Capability::Files`
+    /// for it, as for `d:save_to`.
+    #[doc(hidden)]
+    pub fn download_dir(self, dir: impl Into<PathBuf>) -> Self {
+        *self.0.downloads.dir.borrow_mut() = Some(dir.into());
+        self
     }
     /// Whether a script error shows over the interface, with where it
     /// happened (development), or not (what ships: the last good interface
@@ -2027,7 +2732,7 @@ impl ScriptHost {
                 },
             };
         };
-        let sources: Vec<(PathBuf, String)> = match &self.0.app {
+        let sources: Vec<(PathBuf, String)> = match &*self.app() {
             Script::Inline { name, code } => vec![(PathBuf::from(name), code.clone())],
             script => script
                 .dir()
@@ -2175,6 +2880,14 @@ impl ScriptHost {
         });
         *self.0.error_watch.borrow_mut() = Some(Box::new(watch));
     }
+    /// The app's script (`app`), as it is now.
+    fn app(&self) -> Rc<Script> {
+        self.0.app.borrow().clone()
+    }
+    /// Where its files come from (`files`), as it is now.
+    fn files(&self) -> Files {
+        self.0.files.borrow().clone()
+    }
     fn configure(self, f: impl FnOnce(&mut Inner)) -> Self {
         let rules = rules::of(&self.0);
         let mut inner = Rc::try_unwrap(self.0)
@@ -2227,7 +2940,7 @@ impl ScriptHost {
         if let Err(dir) = i18n::load_dir(
             &inner.locales,
             &inner.runtime,
-            inner.files,
+            &inner.files.borrow(),
             dir,
             source,
             &inner.warnings,
@@ -2331,40 +3044,205 @@ impl ScriptHost {
         self.0.persist.save();
     }
 
+    /// What the host offers its scripts, by name, each list sorted: its
+    /// actions (`action`), functions (`function`), async actions
+    /// (`async_action`) and shared keys (`shared`), those scripts made as
+    /// they ran included. For an app to keep a record of what its scripts
+    /// can reach (a checked-in list that a change shows in review).
+    #[doc(hidden)]
+    pub fn registry(&self) -> Registry {
+        fn sorted<V>(map: &HashMap<String, V>) -> Vec<String> {
+            let mut names: Vec<String> = map.keys().cloned().collect();
+            names.sort();
+            names
+        }
+        Registry {
+            actions: sorted(&self.0.actions.borrow()),
+            functions: sorted(&self.0.functions.borrow()),
+            async_actions: sorted(&self.0.async_actions.borrow()),
+            shared: self
+                .0
+                .shared
+                .entries()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect(),
+        }
+    }
     /// Registers a Rust function scripts can bind with `ui.action(name, arg)`.
+    /// A name registered again replaces the first; in a debug build, from
+    /// a place in the code it wasn't registered from before, that warns
+    /// (stderr, [`warnings`](Self::warnings), the lint strip): use
+    /// `replace_action` to replace one on purpose.
+    #[track_caller]
     pub fn action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
-        self.0
-            .actions
-            .borrow_mut()
-            .insert(name.into(), Rc::new(action));
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Action,
+            &name,
+            std::panic::Location::caller(),
+            false,
+        );
+        let at = std::panic::Location::caller();
+        self.0.actions.borrow_mut().insert(
+            name,
+            Rc::new(move |arg| zgx::callback_site::run(HOST_ACTION, at, || action(arg))),
+        );
+    }
+    /// `action`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[track_caller]
+    pub fn replace_action(&self, name: impl Into<String>, action: impl Fn(Value) + 'static) {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Action,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        let at = std::panic::Location::caller();
+        self.0.actions.borrow_mut().insert(
+            name,
+            Rc::new(move |arg| zgx::callback_site::run(HOST_ACTION, at, || action(arg))),
+        );
     }
     /// Registers a Rust function scripts call for its value now, with
     /// `ui.call_sync(name, arg)`: a read of data the host keeps (the rows a
     /// virtualized list shows of a large diff), so the data never has to
     /// be copied into the script whole. It runs on the UI thread: keep it
     /// quick (no I/O; `async_action` is for that). Plugins reach it as
-    /// they reach actions (`expose_action`).
+    /// they reach actions (`expose_action`). A name registered twice warns
+    /// as [`action`](Self::action)'s does (`replace_function` doesn't).
+    #[track_caller]
     pub fn function(&self, name: impl Into<String>, function: impl Fn(Value) -> Value + 'static) {
-        self.0
-            .functions
-            .borrow_mut()
-            .insert(name.into(), Rc::new(function));
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Function,
+            &name,
+            std::panic::Location::caller(),
+            false,
+        );
+        self.0.functions.borrow_mut().insert(
+            name,
+            sited_function(function, std::panic::Location::caller()),
+        );
+    }
+    /// `function`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[track_caller]
+    pub fn replace_function(
+        &self,
+        name: impl Into<String>,
+        function: impl Fn(Value) -> Value + 'static,
+    ) {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::Function,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        self.0.functions.borrow_mut().insert(
+            name,
+            sited_function(function, std::panic::Location::caller()),
+        );
     }
     /// Registers an async Rust function scripts call with `ui.call(name,
     /// arg)`, getting a promise of its result: `Ok` settles it with the
     /// value, `Err` rejects it with the message. The future runs on the
     /// window's tasks (the main thread, so it need not be `Send`), woken by
     /// what it waits for; hand blocking work to a thread and await its
-    /// answer (`zgx::task::latest`).
+    /// answer (`zgx::task::latest`). A name registered twice warns as
+    /// [`action`](Self::action)'s does (`replace_async_action` doesn't).
+    #[track_caller]
     pub fn async_action<F, Fut>(&self, name: impl Into<String>, action: F)
     where
         F: Fn(Value) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Value, String>> + 'static,
     {
-        self.0.async_actions.borrow_mut().insert(
-            name.into(),
-            Rc::new(move |arg| -> calls::Call { Box::pin(action(arg)) }),
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::AsyncAction,
+            &name,
+            std::panic::Location::caller(),
+            false,
         );
+        self.0
+            .async_actions
+            .borrow_mut()
+            .insert(name, sited_async(action, std::panic::Location::caller()));
+    }
+    /// `async_action`, replacing one already registered under `name` on
+    /// purpose: never a warning.
+    #[doc(hidden)]
+    #[track_caller]
+    pub fn replace_async_action<F, Fut>(&self, name: impl Into<String>, action: F)
+    where
+        F: Fn(Value) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<Value, String>> + 'static,
+    {
+        let name = name.into();
+        #[cfg(debug_assertions)]
+        self.registered(
+            Registration::AsyncAction,
+            &name,
+            std::panic::Location::caller(),
+            true,
+        );
+        self.0
+            .async_actions
+            .borrow_mut()
+            .insert(name, sited_async(action, std::panic::Location::caller()));
+    }
+    /// A debug build's record of `name` registered from `site`: from a site
+    /// it wasn't registered from before, and not on purpose (`replace`),
+    /// it warns, naming that site and the one it replaces. Each site once.
+    #[cfg(debug_assertions)]
+    #[cold]
+    #[inline(never)]
+    fn registered(&self, kind: Registration, name: &str, site: Site, replace: bool) {
+        let warned = {
+            let mut registrations = self.0.registrations.borrow_mut();
+            let (sites, latest) = registrations
+                .sites
+                .entry((kind, name.to_owned()))
+                .or_insert_with(|| (Vec::new(), site));
+            let new = !sites.contains(&site);
+            let earlier = *latest;
+            *latest = site;
+            if new {
+                sites.push(site);
+            }
+            if !new || replace || sites.len() < 2 {
+                return;
+            }
+            let (what, replace) = kind.describe();
+            let message = format!(
+                "{what} \"{name}\" registered again at {site} replaces the one registered at \
+                 {earlier}: only the later one runs (`{replace}` replaces one on purpose)"
+            );
+            registrations.findings.push(message.clone());
+            message
+        };
+        warning(Some(&self.0.warnings), warned.clone());
+        // Shown with the lint's findings, until the next load lists both.
+        self.0.lint.mutate(|text| {
+            let lines: Vec<&str> = match text.as_deref() {
+                Some(text) => text.lines().skip(1).collect(),
+                None => Vec::new(),
+            };
+            let mut lines: Vec<String> = lines.into_iter().map(str::to_owned).collect();
+            lines.push(warned.clone());
+            *text = Some(lint_text(&lines));
+            true
+        });
     }
     /// An image the app made (a picture it decoded, rendered or processed),
     /// shown by `ui.image { src = "host:<name>" }` and `bg_image =
@@ -2372,6 +3250,12 @@ impl ScriptHost {
     /// clears it.
     pub fn image(&self, name: &str, image: Option<std::sync::Arc<zgx::image::ImageData>>) {
         self.0.assets.set_hosted(name, image, &self.0.runtime);
+    }
+    /// The image `host:<name>` shows now ([`ScriptHost::image`]'s, or a
+    /// native module's), if any.
+    #[doc(hidden)]
+    pub fn hosted_image(&self, name: &str) -> Option<std::sync::Arc<zgx::image::ImageData>> {
+        self.0.assets.hosted_image(name)
     }
     /// A frame the app shows as it is (a video's, as its decoder or
     /// renderer made it), for `ui.image { src = "host:<name>" }`: drawn
@@ -2399,13 +3283,15 @@ impl ScriptHost {
     /// HTTP stack, headers and credentials (a token minted per request), and
     /// answers each `Request` with a `Response`, or an error message that
     /// rejects the script's promise. Without one, `ui.fetch` is an error.
+    #[track_caller]
     pub fn fetcher<F, Fut>(&self, fetch: F)
     where
         F: Fn(Request) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response, String>> + 'static,
     {
+        let at = std::panic::Location::caller();
         *self.0.fetcher.borrow_mut() = Some(Rc::new(move |request, _| -> calls::Fetch {
-            Box::pin(fetch(request))
+            Box::pin(Sited::new(FETCHER, at, || fetch(request)))
         }));
     }
     /// A transport that streams: `fetch` writes the response's body to
@@ -2415,13 +3301,15 @@ impl ScriptHost {
     /// reading the body whole gets it all. Once `Body::is_open` is false the
     /// script has cancelled (or reloaded): the future is dropped at its next
     /// await, and the transport may stop at once. It replaces `fetcher`.
+    #[track_caller]
     pub fn streaming_fetcher<F, Fut>(&self, fetch: F)
     where
         F: Fn(Request, Body) -> Fut + 'static,
         Fut: std::future::Future<Output = Result<Response, String>> + 'static,
     {
+        let at = std::panic::Location::caller();
         *self.0.fetcher.borrow_mut() = Some(Rc::new(move |request, body| -> calls::Fetch {
-            Box::pin(fetch(request, body))
+            Box::pin(Sited::new(FETCHER, at, || fetch(request, body)))
         }));
     }
     /// The transport for `ui.socket`: a connection the script keeps open
@@ -2494,6 +3382,7 @@ impl ScriptHost {
         for old in managed.drain(..) {
             if let Script::Plugin { name, .. } = old {
                 grants.remove(&name);
+                self.0.plugin_memory.borrow_mut().remove(&name);
             }
         }
         for plugin in plugins {
@@ -2503,6 +3392,12 @@ impl ScriptHost {
                 path: plugin.entry,
             });
         }
+    }
+    /// Plugin `name`'s heap, in bytes, in place of `Limits::plugin_memory`
+    /// (a plugin whose manifest asks for more), from its next load. Set
+    /// after `set_plugins`, which forgets those of the plugins it replaces.
+    pub fn plugin_memory(&self, name: impl Into<String>, bytes: usize) {
+        self.0.plugin_memory.borrow_mut().insert(name.into(), bytes);
     }
     /// Let plugins bind, invoke and call host action `name` (`action`,
     /// `async_action`): all of them, or (`Some`) those granted
@@ -2551,6 +3446,25 @@ impl ScriptHost {
         rules.set_guard(Rc::new(guard));
         // The VM already loaded hears it too; a later load's has it from
         // the start.
+        if let Some(loaded) = &*self.0.current.borrow()
+            && let Some(vm) = loaded._vms.last()
+        {
+            vm.lua.set_app_data(rules::Guarded(rules));
+        }
+    }
+    /// Asks `guard` of pages in place of [`guard`](Self::guard)'s
+    /// [`GuardKind::Web`]: each URL the app's scripts load (`:load`, `src`,
+    /// `html`'s base) and each navigation the platform starts, a main
+    /// frame's, an iframe's and a redirect's, told the id the page was made
+    /// under (`ui.web("tab")` gives `Some("tab")`; an anonymous `ui.web(opts)`
+    /// or `ui.webview` without `web`, `None`). An `Err` stops it, as
+    /// `guard`'s does. So one host lets its browser tabs reach what its
+    /// previews may not. Unset, `guard` decides as before. The last one set
+    /// applies, at once.
+    #[doc(hidden)]
+    pub fn web_guard(&self, guard: impl Fn(Option<&str>, &str) -> Result<(), String> + 'static) {
+        let rules = rules::start(&self.0);
+        rules.set_web_guard(Rc::new(guard));
         if let Some(loaded) = &*self.0.current.borrow()
             && let Some(vm) = loaded._vms.last()
         {
@@ -2628,11 +3542,11 @@ impl ScriptHost {
         fn rect(rect: Option<zgx::scene::Rect>) -> Value {
             rect.map_or(Value::Nil, |r| {
                 let n = |v: f32| Value::Num(f64::from(v));
-                Value::Map(Rc::from([
-                    (Rc::from("height"), n(r.height)),
-                    (Rc::from("width"), n(r.width)),
-                    (Rc::from("x"), n(r.x)),
-                    (Rc::from("y"), n(r.y)),
+                Value::Map(crate::Map::from_iter([
+                    (Str::from("height"), n(r.height)),
+                    (Str::from("width"), n(r.width)),
+                    (Str::from("x"), n(r.x)),
+                    (Str::from("y"), n(r.y)),
                 ]))
             })
         }
@@ -2666,6 +3580,18 @@ impl ScriptHost {
             });
             self.0.window_state.borrow_mut().push((false, effect));
         }
+        let popups = ui.observe_popups();
+        let state = self.0.shared.state(
+            windows::POPUPS,
+            popup_value(&popups.with_untracked(Clone::clone)),
+        );
+        let effect = self.0.runtime.effect(move || {
+            let now = popup_value(&popups.get());
+            if state.with_untracked(|was| *was != now) {
+                state.set(now);
+            }
+        });
+        self.0.window_state.borrow_mut().push((false, effect));
     }
     /// Keep `ui.window.full_screen` as whether the window is in full
     /// screen (pass its `WindowInfo::fullscreen`), and
@@ -2924,6 +3850,50 @@ impl ScriptHost {
             w.design = mode;
         }
     }
+    /// The engine scripts' `audio` plays through (the `audio` feature):
+    /// `make` is called the first time a script calls `audio`, so a script
+    /// that never does makes none. A desktop host hands every script host
+    /// the application's one engine; a headless one an offline engine,
+    /// whose renders it runs (`zgx_audio::Audio::offline`). Without it,
+    /// scripts' calls of `audio` are errors saying so.
+    #[cfg(feature = "audio")]
+    pub fn set_audio(&self, make: impl Fn() -> zgx_audio::Audio + 'static) {
+        self.0.audio.set_make(Rc::new(make));
+    }
+    /// The engine, if a script has called `audio` (`set_audio`'s).
+    #[cfg(feature = "audio")]
+    pub fn audio_engine(&self) -> Option<zgx_audio::Audio> {
+        self.0.audio.made()
+    }
+    /// Voices that ended (`zgx_audio::Audio::take_ended`'s ids): their
+    /// `playing` states turn false, and what followed state into them
+    /// stops. A desktop host calls it as the engine wakes it
+    /// (`Audio::on_voices_ended`); an offline one after rendering.
+    #[cfg(feature = "audio")]
+    pub fn voices_ended(&self, ids: &[u64]) {
+        self.0.audio.voices_ended(ids);
+    }
+    /// Holds finished decodes back from the plays waiting on them, until
+    /// called again with `false`: for a test that places how long a play
+    /// waited on a clock of its own, whatever the decode took.
+    #[doc(hidden)]
+    #[cfg(feature = "audio")]
+    pub fn hold_sound_loads(&self, held: bool) {
+        self.0.audio.hold_loads(held);
+    }
+    /// How many sounds the host keeps decoded for its app's scripts
+    /// (`audio.sound`): what a test reads to see a sound let go.
+    #[cfg(feature = "audio")]
+    pub fn sounds_held(&self) -> usize {
+        self.0.audio.sounds_held()
+    }
+    /// The user's interface-sound setting, as the host passes it to the
+    /// engine (`Audio::set_ui_sounds`): what `audio.ui_sounds_enabled`
+    /// reads.
+    #[cfg(feature = "audio")]
+    pub fn set_ui_sounds_enabled(&self, enabled: bool) {
+        self.0.audio.set_ui_sounds(enabled);
+    }
     /// How many times Rust has called into the scripts (a prop, an effect,
     /// a handler, a component built), counting from the host's start: what
     /// a test reads before and after an interaction to check that it runs
@@ -2938,6 +3908,21 @@ impl ScriptHost {
     /// would otherwise stay until the scripts next ran a while.
     pub fn collect_garbage(&self) {
         collect_garbage(&self.0);
+    }
+    /// A full collection in each VM (`collect_garbage`'s, the conversion cache
+    /// let go of too), and what each held before and after, with what is left
+    /// by object type, userdata type and the chunk each function's code came
+    /// from: to tell garbage a collection frees from what scripts keep.
+    #[doc(hidden)]
+    pub fn gc_report(&self, query: &GcQuery) -> Vec<GcVm> {
+        let loaded = self.0.current.borrow().clone();
+        let vms: Vec<Rc<Vm>> = loaded.iter().flat_map(|l| l._vms.iter().cloned()).collect();
+        let before: Vec<usize> = vms.iter().map(|vm| vm.lua.used_memory()).collect();
+        collect_garbage(&self.0);
+        vms.iter()
+            .zip(before)
+            .map(|(vm, before)| gc_vm(vm, before, query))
+            .collect()
     }
     /// A full collection in each VM and nothing else: one the scripts'
     /// allocations bring on as they run, with none of what the host does as
@@ -3099,10 +4084,30 @@ impl ScriptHost {
     }
     /// The application script's file, if it was loaded from one.
     pub fn script_path(&self) -> Option<PathBuf> {
-        match &self.0.app {
+        match &*self.app() {
             Script::File(path) => Some(path.clone()),
             _ => None,
         }
+    }
+    /// A line for the person running the app, from what runs it rather
+    /// than its scripts (`zgx run`'s "module `words` changed: restarted"):
+    /// on stderr, and in the banner while no error is shown, until it is
+    /// dismissed or another notice replaces it. Loads don't clear it. Give
+    /// it before `view`: a view built before a host's first notice shows
+    /// none.
+    #[doc(hidden)]
+    pub fn notice(&self, message: impl Into<String>) {
+        let message = message.into();
+        eprintln!("{message}");
+        let mut notice = self.0.warnings.notice.borrow_mut();
+        let signal = notice.get_or_insert_with(|| self.0.runtime.signal(None));
+        signal.set(Some(message));
+    }
+    /// The notice shown (`notice`), if any.
+    #[doc(hidden)]
+    pub fn notice_shown(&self) -> Option<String> {
+        let notice = self.0.warnings.notice.borrow();
+        notice.as_ref().and_then(|n| n.with_untracked(Clone::clone))
     }
     /// The latest load or script error, shown over the interface until fixed.
     pub fn error(&self) -> Signal<Option<String>> {
@@ -3198,7 +4203,10 @@ impl ScriptHost {
     /// `ZGX_LINT=0`, skip it.
     fn lint_loaded(&self) {
         if !cfg!(debug_assertions)
-            || matches!(self.0.files, Files::Bundle(_))
+            || matches!(
+                *self.0.files.borrow(),
+                Files::Bundle(..) | Files::Memory(..) | Files::Folder(..)
+            )
             || zgx::env::var_os("ZGX_LINT").is_some_and(|v| v == "0")
         {
             return;
@@ -3221,7 +4229,7 @@ impl ScriptHost {
         // An app written inline is no file, but its plugins target what it
         // declares (`unknown-target`): read with them, its own findings left
         // as an inline app's always were.
-        let inline = match &self.0.app {
+        let inline = match &*self.app() {
             Script::Inline { name, code } if !files.is_empty() => {
                 let path = PathBuf::from(format!("<inline {name}>"));
                 sources.push((path.clone(), code.clone()));
@@ -3233,7 +4241,7 @@ impl ScriptHost {
         // or `zgx check` wrote them), as the names change: from every script
         // in its directory, as `zgx types` writes them, not only those this
         // run has loaded (a module not yet required declares tokens too).
-        if let Some(dir) = self.0.app.dir()
+        if let Some(dir) = self.app().dir()
             && app_types::types_file(&dir).is_file()
         {
             let _ = app_types::write_types(&dir);
@@ -3254,20 +4262,19 @@ impl ScriptHost {
             warning(Some(&self.0.warnings), line.clone());
             found.push(line);
         }
-        self.0.lint.set((!found.is_empty()).then(|| {
-            format!(
-                "zgx lint: {} finding{}\n{}",
-                found.len(),
-                if found.len() == 1 { "" } else { "s" },
-                found.join("\n")
-            )
-        }));
+        // The host's own (a name registered twice), first.
+        #[cfg(debug_assertions)]
+        found.splice(0..0, self.0.registrations.borrow().findings.iter().cloned());
+        self.0
+            .lint
+            .set((!found.is_empty()).then(|| lint_text(&found)));
     }
     fn start_check(&self) {
         if self.0.check.get() != Some(true) {
             return;
         }
-        let Script::File(app) = &self.0.app else {
+        let script = self.app();
+        let Script::File(app) = &*script else {
             return;
         };
         let mut paths = vec![app.clone()];
@@ -3318,6 +4325,8 @@ impl ScriptHost {
     /// Loads the scripts again: everything, or with `ran`, in the app's VM
     /// kept, those modules alone run again (`load_kept`).
     fn reload_with(&self, ran: Option<Vec<PathBuf>>) -> Result<(), String> {
+        #[cfg(feature = "audio")]
+        self.0.audio.begin_load();
         self.0.lent.borrow_mut().pending.clear();
         self.0.commands.begin();
         self.0.windows.begin();
@@ -3380,6 +4389,9 @@ impl ScriptHost {
                 });
                 // The replaced scripts' animations end with them.
                 self.0.engine.drop_orphans();
+                // And their sounds, with their fades.
+                #[cfg(feature = "audio")]
+                self.0.audio.end_load(true);
                 if let Some(rewatch) = &*self.0.rewatch.borrow() {
                     rewatch.send(());
                 }
@@ -3391,6 +4403,8 @@ impl ScriptHost {
                 self.0.focus.release();
                 eprintln!("{error}");
                 report(&self.0.error, error.clone());
+                #[cfg(feature = "audio")]
+                self.0.audio.end_load(false);
                 self.start_check();
                 Err(error)
             }
@@ -3402,7 +4416,7 @@ impl ScriptHost {
     /// values change restyles in place.
     pub fn reload_if_changed(&self) -> bool {
         // Locale files, as theme files: what changed shows in place.
-        let themes = self.0.locales.reload_if_changed(self.0.files) | self.reload_themes();
+        let themes = self.0.locales.reload_if_changed(&self.files()) | self.reload_themes();
         // `changed` forgets edited images, so the reload reads them again.
         let assets = self.0.assets.changed();
         // From the first call on, loads keep their files' bytecode.
@@ -3465,7 +4479,7 @@ impl ScriptHost {
     }
     /// The app script's path as `require` keys modules (`module_key`).
     fn app_key(&self) -> Option<PathBuf> {
-        match &self.0.app {
+        match &*self.app() {
             Script::File(path) => Some(module_key(path)),
             _ => None,
         }
@@ -3610,7 +4624,11 @@ impl ScriptHost {
                     host.poll_check();
                 }
             }
-            if matches!(host.0.files, Files::Bundle(_)) && host.0.managed.borrow().is_empty() {
+            if matches!(
+                *host.0.files.borrow(),
+                Files::Bundle(..) | Files::Memory(..) | Files::Folder(..)
+            ) && host.0.managed.borrow().is_empty()
+            {
                 return;
             }
             loop {
@@ -3684,7 +4702,7 @@ impl ScriptHost {
                     let mounted = loaded.mounted.clone();
                     view.on_mount(move |_| {
                         for (vm, f) in mounted {
-                            if let Err(e) = vm.call::<()>(&f, ()) {
+                            if let Err(e) = vm.call_as::<()>("an on_mount function", &f, ()) {
                                 vm.report(e);
                             }
                         }
@@ -3693,6 +4711,8 @@ impl ScriptHost {
             },
         );
         let (error, type_errors) = (self.0.error.clone(), self.0.type_errors.clone());
+        let notice = self.0.warnings.notice.borrow().clone();
+        let dismiss_notice = notice.clone();
         let lint = self.0.lint.clone();
         let (dismiss_error, dismiss_types, dismiss_lint) =
             (error.clone(), type_errors.clone(), lint.clone());
@@ -3707,7 +4727,12 @@ impl ScriptHost {
         let view = component(move |cx| {
             // One frame loop ticks every animation; it idles at rest.
             if let Some(frames) = cx.try_service::<zgx::frame::FrameClock>() {
+                // Bindings driving sound step on the same frames.
+                #[cfg(feature = "audio")]
+                host.0.audio.set_frames((*frames).clone());
                 cx.tasks().spawn(engine.run((*frames).clone()));
+                // `ui.frames` measures on them.
+                timers.set_frames((*frames).clone());
             }
             // `ui.persist` saves on a timer from here, and `ui.every` runs.
             if cx.try_service::<zgx::compose::TaskRunner>().is_some() {
@@ -3779,19 +4804,39 @@ impl ScriptHost {
             root.child_when(
                 move || {
                     show_errors
-                        .then(|| error.get().or_else(|| type_errors.get()))
+                        .then(|| {
+                            error
+                                .get()
+                                .or_else(|| type_errors.get())
+                                .or_else(|| notice.as_ref().and_then(|n| n.get()))
+                        })
                         .flatten()
                 },
                 move |message, cx| {
                     let (error, types) = (dismiss_error.clone(), dismiss_types.clone());
+                    let notice = dismiss_notice.clone();
                     let banner = banner(&message, move || {
-                        error.set(None);
-                        types.set(None);
+                        // What it shows: an error first, the notice when
+                        // there is none.
+                        let shown = error.with_untracked(Option::is_some)
+                            || types.with_untracked(Option::is_some);
+                        match &notice {
+                            Some(notice) if !shown => {
+                                notice.set(None);
+                            }
+                            _ => {
+                                error.set(None);
+                                types.set(None);
+                            }
+                        }
                     });
                     error_layer(banner, cx)
                 },
             )
         });
+        // Its window, for `ui.focus_snapshot`.
+        let root = self.0.root.clone();
+        let view = view.on_mount(move |handle| *root.borrow_mut() = Some(handle));
         match links {
             Some(links) => zgx::compose::provide(links, view),
             None => view,
@@ -3803,7 +4848,7 @@ impl ScriptHost {
             .0
             .plugin_dir
             .as_ref()
-            .map(|dir| self.0.files.list(dir))
+            .map(|dir| self.files().list(dir))
             .into_iter()
             .flatten()
             .filter(|path| path.extension().is_some_and(|ext| ext == "luau"))
@@ -3828,9 +4873,9 @@ impl ScriptHost {
     /// The script files whose bytes differ from what the last load read,
     /// once each: those whose times moved and whose bytes aren't what is
     /// loaded, those new to `stamps`, and those it no longer finds.
-    fn changed(&self, stamps: &[(PathBuf, Option<SystemTime>)]) -> Vec<PathBuf> {
+    fn changed(&self, stamps: &[(PathBuf, Option<std::time::SystemTime>)]) -> Vec<PathBuf> {
         let loaded = self.0.stamps.borrow();
-        let before: HashMap<&std::path::Path, Option<SystemTime>> =
+        let before: HashMap<&std::path::Path, Option<std::time::SystemTime>> =
             loaded.iter().map(|(p, t)| (p.as_path(), *t)).collect();
         let now: HashSet<&std::path::Path> = stamps.iter().map(|(p, _)| p.as_path()).collect();
         let mut seen = HashSet::new();
@@ -3851,7 +4896,7 @@ impl ScriptHost {
             .map(std::path::Path::to_path_buf)
             .collect()
     }
-    fn stamps(&self) -> Vec<(PathBuf, Option<SystemTime>)> {
+    fn stamps(&self) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
         let mut paths: Vec<_> = self
             .scripts()
             .into_iter()
@@ -3860,7 +4905,7 @@ impl ScriptHost {
                 Script::Inline { .. } => None,
             })
             .collect();
-        if let Script::File(path) = &self.0.app {
+        if let Script::File(path) = &*self.app() {
             paths.push(path.clone());
         }
         for script in self.0.managed.borrow().iter() {
@@ -3878,14 +4923,45 @@ impl ScriptHost {
             .collect()
     }
 
+    /// Loads every script anew. One that fails after one that succeeded
+    /// leaves the state its scripts wrote as they ran (`ui.state`,
+    /// `ui.persist`, `ui.shared`) as it was, keys they made gone (a first
+    /// load has nothing to go back to: `journal`), the overrides the last load found as
+    /// they were, and its required files still watched (with those the
+    /// failed load reached: fixing one reloads).
     fn load(&self) -> Result<Loaded, String> {
-        // What `compile_ahead` compiled goes as this load ends.
+        let required = std::mem::take(&mut *self.0.required.borrow_mut());
+        let overrides = std::mem::take(&mut *self.0.overrides.borrow_mut());
+        self.0.journal.begin();
+        let loaded = self.load_anew();
+        match loaded {
+            Ok(_) => self.0.journal.keep(),
+            // What its scripts wrote as they ran undone.
+            Err(_) => self.0.journal.undo(),
+        }
+        if loaded.is_err() {
+            let mut now = self.0.required.borrow_mut();
+            let reached = std::mem::replace(&mut *now, required);
+            for path in reached {
+                if !now.contains(&path) {
+                    now.push(path);
+                }
+            }
+            *self.0.overrides.borrow_mut() = overrides;
+        }
+        loaded
+    }
+    fn load_anew(&self) -> Result<Loaded, String> {
+        // What `compile_ahead` compiled goes as this load ends, and what a
+        // bundle's files read ahead.
         let _ahead = sources::ReleaseAhead;
+        let _read = checked_files::ReleaseRead(match &*self.0.files.borrow() {
+            Files::Folder(checked, _) => Some(checked.clone()),
+            _ => None,
+        });
         if let Some(tracker) = tracking(&self.0) {
             tracker.begin(self.app_key());
         }
-        self.0.required.borrow_mut().clear();
-        self.0.overrides.borrow_mut().clear();
         let mut vms = Vec::new();
         let mut slots = node::Slots::new();
         let mut hooks = lower::Hooks::default();
@@ -3927,7 +5003,7 @@ impl ScriptHost {
             hooks.extend(added);
             vms.push(vm);
         }
-        let (vm, root, contributions, added) = self.run(&self.0.app, false)?;
+        let (vm, root, contributions, added) = self.run(&self.app(), false)?;
         vms.push(vm);
         let plugins = !self.0.plugins.is_empty() || !managed.is_empty();
         self.finish_load(
@@ -3969,7 +5045,7 @@ impl ScriptHost {
         let root = root.ok_or_else(|| {
             format!(
                 "{}: the application script must return a ui node",
-                self.0.app.name()
+                self.app().name()
             )
         })?;
         let mounted = vms
@@ -4059,9 +5135,9 @@ impl ScriptHost {
             .retain(|path| !ran.contains(path));
         self.0.overrides.borrow_mut().clear();
         tracker.begin_kept(self.app_key(), &last, ran);
-        let loaded = self.0.app.code(self.0.files).and_then(|code| {
-            let (root, contributions, added) =
-                self.evaluate(&vm, &self.0.app, self.0.files, &code)?;
+        let (app, files) = (self.app(), self.files());
+        let loaded = app.code(&files).and_then(|code| {
+            let (root, contributions, added) = self.evaluate(&vm, &app, files.clone(), &code)?;
             let empty = (node::Slots::new(), lower::Hooks::default());
             self.finish_load(
                 vec![vm.clone()],
@@ -4148,7 +5224,7 @@ impl ScriptHost {
         let root = dir.map(|d| d.canonicalize().unwrap_or(d));
         let aliases = root
             .as_deref()
-            .map(|root| read_aliases(root, files))
+            .map(|root| read_aliases(root, &files))
             .unwrap_or_default();
         // `@app` and `@app-original` are zgx's own aliases.
         for reserved in ["app", "app-original"] {
@@ -4216,9 +5292,19 @@ impl ScriptHost {
         let name = script.name();
         let fail = |error: mlua::Error| describe(&name, &error);
         // A plugin outside the app's bundle reads from the disk.
-        let files = match (self.0.files, script) {
-            (Files::Bundle(bundle), Script::File(path) | Script::Plugin { path, .. })
+        let files = match (self.files(), script) {
+            (Files::Bundle(bundle, _), Script::File(path) | Script::Plugin { path, .. })
                 if plugin && !path.starts_with(bundle.root) =>
+            {
+                Files::Disk
+            }
+            (Files::Memory(memory, _), Script::File(path) | Script::Plugin { path, .. })
+                if plugin && !path.starts_with(memory.root_path()) =>
+            {
+                Files::Disk
+            }
+            (Files::Folder(checked, _), Script::File(path) | Script::Plugin { path, .. })
+                if plugin && !path.starts_with(checked.dir()) =>
             {
                 Files::Disk
             }
@@ -4237,7 +5323,7 @@ impl ScriptHost {
         } else {
             Grants::All
         });
-        let code = script.code(files)?;
+        let code = script.code(&files)?;
         #[cfg(all(luau_asserts, not(debug_assertions)))]
         warning(
             Some(&self.0.warnings),
@@ -4252,7 +5338,8 @@ impl ScriptHost {
         let lua = Lua::new().clone();
         let limits = self.0.limits;
         let memory = if plugin {
-            limits.plugin_memory
+            let own = self.0.plugin_memory.borrow().get(&name).copied();
+            own.unwrap_or(limits.plugin_memory)
         } else {
             limits.memory
         };
@@ -4281,6 +5368,7 @@ impl ScriptHost {
             locate: self.0.locate.clone(),
             warnings: self.0.warnings.clone(),
             point: Default::default(),
+            gc_mark: Default::default(),
         });
         let store = self
             .0
@@ -4292,6 +5380,7 @@ impl ScriptHost {
         value::install_cache(&lua);
         markdown::install(&lua);
         lua.set_app_data(node::Env {
+            journal: self.0.journal.clone(),
             vm: Rc::downgrade(&vm),
             store,
             shared: self.0.shared.clone(),
@@ -4306,6 +5395,7 @@ impl ScriptHost {
             actions: self.0.actions.clone(),
             platform: self.0.platform.clone(),
             picked: self.0.picked.clone(),
+            downloads: self.0.downloads.clone(),
             functions: self.0.functions.clone(),
             persist: self.0.persist.clone(),
             warnings: self.0.warnings.clone(),
@@ -4339,8 +5429,20 @@ impl ScriptHost {
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
-        lazy.ui(&["path", "linear"], canvas::install);
+        lazy.ui(
+            &[
+                "path",
+                "linear",
+                "radial",
+                "conic",
+                "render_canvas",
+                "measure_text",
+            ],
+            canvas::install,
+        );
         lazy.ui(&["glass"], node::install_glass);
+        lazy.ui(&["host_view"], node::install_host_view);
+        lazy.ui(&["frames"], frames::install);
         lazy.ui(&["map"], node::install_map);
         #[cfg(feature = "scene3d")]
         lazy.ui(
@@ -4348,6 +5450,9 @@ impl ScriptHost {
             scene3d::install,
         );
         lazy.ui(&["json", "number", "sort"], data::install);
+        // (A VM whose scripts call no module makes no `ui.module`: one
+        // closure fewer for every VM to hold and its collector to walk.)
+        lazy.ui(&["module"], modules::install);
         let terms = self.0.terms.clone();
         lazy.ui(&["term"], move |lua, ui| term::install(lua, ui, terms));
         let webs = self.0.webs.clone();
@@ -4360,11 +5465,19 @@ impl ScriptHost {
         lazy.ui(&["shortcut_owner"], move |lua, ui| {
             command::install_owner(lua, ui, commands)
         });
-        i18n::install(&lazy, self.0.locales.clone(), self.0.files);
+        i18n::install(&lazy, self.0.locales.clone(), self.files());
         let (windows, shared) = (self.0.windows.clone(), self.0.shared.clone());
-        lazy.ui(&["window", "window_rect", "windows"], move |lua, ui| {
-            windows::install(lua, ui, windows, &shared)
-        });
+        // The window's focus with it: a module of its own costs every VM
+        // made one more entry, and every name a script reads first one more
+        // to pass.
+        let root = self.0.root.clone();
+        lazy.ui(
+            &["window", "window_rect", "windows", "focus_snapshot"],
+            move |lua, ui| {
+                windows::install(lua, ui, windows, &shared)?;
+                element::install_focus_snapshot(lua, ui, root)
+            },
+        );
         let may = |capability: Capability| grants.allows(&capability);
         let fetch = may(Capability::Fetch).then(|| self.0.fetcher.clone());
         let policy = self.0.fetch_policy.clone();
@@ -4383,10 +5496,12 @@ impl ScriptHost {
         let (platform, picked) = (self.0.platform.clone(), self.0.picked.clone());
         let (clipboard, files_allowed) = (may(Capability::Clipboard), may(Capability::Files));
         let (folders, access) = (may(Capability::Folders), self.0.folders.clone());
+        let fonts = may(Capability::Fonts);
         lazy.ui(
             &[
                 "badge",
                 "clipboard",
+                "load_font",
                 "notify",
                 "open_files",
                 "open_folder",
@@ -4394,10 +5509,11 @@ impl ScriptHost {
                 "remembered_folder",
                 "save_file",
                 "write_file",
+                "zip",
             ],
             move |lua, ui| {
                 folder::install(lua, ui, platform.clone(), folders, access)?;
-                io::install(lua, ui, platform, picked, clipboard, files_allowed)
+                io::install(lua, ui, platform, picked, clipboard, files_allowed, fonts)
             },
         );
         // A plugin's lent packages' tokens too: a lent design system themes it.
@@ -4433,10 +5549,17 @@ impl ScriptHost {
             opens::install(lua, ui, opens, plugin)
         });
         lazy.global(&["anime"], |lua, _| anime::api::install(lua));
+        #[cfg(feature = "audio")]
+        {
+            let (audio, plugin) = (self.0.audio.clone(), plugin.then(|| name.as_str().into()));
+            lazy.global(&["audio"], move |lua, globals| {
+                audio::install(lua, globals, audio, plugin)
+            });
+        }
         self.install_require(
             &lua,
             script.dir(),
-            files,
+            files.clone(),
             plugin.then_some((&*name, &*grants)),
         )
         .map_err(fail)?;
@@ -4472,7 +5595,7 @@ impl ScriptHost {
         let (lua, limits) = (&vm.lua, self.0.limits);
         // Building runs untracked: reading state while describing the tree
         // must not subscribe whatever is currently mounting.
-        let compiled = match (files, script) {
+        let compiled = match (&files, script) {
             (Files::Disk, Script::File(path) | Script::Plugin { path, .. }) => self
                 .0
                 .sources
@@ -4582,6 +5705,30 @@ async fn wake(
 /// Everything `inner`'s loaded VMs can free, freed: two full collections in
 /// each, as one leaves what a userdata's finalizer held (a node's or an
 /// element's, and the closures and values only they reached) for the next.
+/// `ui.window.popups`: each open popup's window as `{ x, y, w, h, kind }`.
+fn popup_value(popups: &[zgx::widgets::PopupInfo]) -> Value {
+    let n = |v: f32| Value::Num(f64::from(v));
+    let list: Vec<Value> = popups
+        .iter()
+        .map(|popup| {
+            let kind = match popup.role {
+                Some(zgx::scene::PopupRole::Menu) => "menu",
+                Some(zgx::scene::PopupRole::Popover) => "popover",
+                Some(zgx::scene::PopupRole::Tooltip) => "tooltip",
+                None => "popup",
+            };
+            // (In key order already: made as a map, not sorted into one.)
+            Value::Map(crate::Map::from([
+                ("h".into(), n(popup.rect.height)),
+                ("kind".into(), Value::from(kind)),
+                ("w".into(), n(popup.rect.width)),
+                ("x".into(), n(popup.rect.x)),
+                ("y".into(), n(popup.rect.y)),
+            ]))
+        })
+        .collect();
+    Value::List(list.into())
+}
 fn collect_garbage(inner: &Inner) {
     let loaded = inner.current.borrow().clone();
     for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
@@ -4595,6 +5742,9 @@ fn collect_garbage(inner: &Inner) {
         collect_fully(&vm.lua);
         vm.interrupt.heap_settled(vm.lua.used_memory());
     }
+    // Sounds only the scripts' collected garbage held.
+    #[cfg(feature = "audio")]
+    inner.audio.trim(0);
 }
 /// Full collections until one frees nothing more: a collection finalizes
 /// the garbage's userdata, and what only they held goes in the next.
@@ -4658,6 +5808,61 @@ pub(crate) fn test_dir(name: &str) -> PathBuf {
         .unwrap_or_else(PoisonError::into_inner)
         .push(dir.clone());
     dir
+}
+
+/// What a contained panic calls a host's callback by, with where it was
+/// registered (`zgx::callback_site`).
+const HOST_ACTION: &str = "a host action";
+const HOST_FUNCTION: &str = "a host function";
+const ASYNC_HOST_ACTION: &str = "an async host action";
+const FETCHER: &str = "the host's fetcher";
+
+/// `function`, noting `at` if it panics (`zgx::callback_site`).
+fn sited_function(
+    function: impl Fn(Value) -> Value + 'static,
+    at: &'static std::panic::Location<'static>,
+) -> Rc<dyn Fn(Value) -> Value> {
+    Rc::new(move |arg| zgx::callback_site::run(HOST_FUNCTION, at, || function(arg)))
+}
+/// `action`'s calls and futures, noting `at` if they panic.
+fn sited_async<F, Fut>(action: F, at: &'static std::panic::Location<'static>) -> calls::AsyncAction
+where
+    F: Fn(Value) -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<Value, String>> + 'static,
+{
+    Rc::new(move |arg| -> calls::Call {
+        Box::pin(Sited::new(ASYNC_HOST_ACTION, at, || action(arg)))
+    })
+}
+
+/// A host's future, noting where it was registered if a poll of it (or
+/// the call that made it) panics.
+struct Sited<F> {
+    kind: &'static str,
+    at: &'static std::panic::Location<'static>,
+    inner: F,
+}
+impl<F> Sited<F> {
+    fn new(
+        kind: &'static str,
+        at: &'static std::panic::Location<'static>,
+        make: impl FnOnce() -> F,
+    ) -> Self {
+        let inner = zgx::callback_site::run(kind, at, make);
+        Self { kind, at, inner }
+    }
+}
+impl<F: std::future::Future> std::future::Future for Sited<F> {
+    type Output = F::Output;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let (kind, at) = (self.kind, self.at);
+        // SAFETY: `inner` is pinned with `self`, never moved out of it.
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
+        zgx::callback_site::run(kind, at, || inner.poll(cx))
+    }
 }
 
 #[cfg(test)]
@@ -4843,6 +6048,7 @@ mod tests {
             locate: Rc::default(),
             warnings: Rc::default(),
             point: Default::default(),
+            gc_mark: Default::default(),
         };
         let host = vm
             .lua
@@ -4889,4 +6095,73 @@ mod budget_tests {
         // A runaway is stopped once it reads a tick beyond.
         assert!(past_budget(60 * MS, 3 * tick, 30 * MS, tick));
     }
+}
+
+/// What one script VM held around a full collection (`ScriptHost::gc_report`).
+#[derive(Debug, Clone, Default)]
+#[doc(hidden)]
+pub struct GcVm {
+    /// The VM's name (the app's, or a plugin's).
+    pub name: String,
+    /// Bytes it held before the collection, garbage included.
+    pub before: usize,
+    /// Bytes it holds after: what live objects need.
+    pub after: usize,
+    /// What is left by object type: its name, objects and bytes (largest first).
+    pub by_type: Vec<(String, usize, u64)>,
+    /// Userdata by type: its name, objects and bytes.
+    pub userdata: Vec<(String, usize, u64)>,
+    /// Compiled code by the chunk it came from: its name, functions and the
+    /// bytes of their code (the largest first).
+    pub chunks: Vec<(String, usize, u64)>,
+    /// The mark, the objects since it and the holders asked for.
+    pub found: GcFound,
+}
+
+fn gc_vm(vm: &Vm, before: usize, query: &GcQuery) -> GcVm {
+    let mut report = GcVm {
+        name: vm.name.clone(),
+        before,
+        after: vm.lua.used_memory(),
+        ..Default::default()
+    };
+    let Ok(dump) = vm.lua.heap_dump() else {
+        return report;
+    };
+    let mut by_type: Vec<(String, usize, u64)> = dump
+        .size_by_type(None)
+        .into_iter()
+        .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
+        .collect();
+    by_type.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.by_type = by_type;
+    let mut userdata: Vec<(String, usize, u64)> = dump
+        .size_by_userdata(None)
+        .into_iter()
+        .map(|(name, (count, bytes))| (name.to_string(), count, bytes))
+        .collect();
+    userdata.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+    report.userdata = userdata;
+    if query.mark || query.since_mark || query.retained.is_some() {
+        report.found = gc_paths::find(dump.to_json(), query, &mut vm.gc_mark.borrow_mut());
+    }
+    // Code by chunk: each function's proto names its source.
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(dump.to_json())
+        && let Some(objects) = json["objects"].as_object()
+    {
+        let mut chunks: std::collections::HashMap<String, (usize, u64)> = Default::default();
+        for object in objects.values() {
+            if object["type"] == "proto" {
+                let source = object["source"].as_str().unwrap_or("?");
+                let entry = chunks.entry(source.to_string()).or_default();
+                entry.0 += 1;
+                entry.1 += object["size"].as_u64().unwrap_or(0);
+            }
+        }
+        let mut chunks: Vec<(String, usize, u64)> =
+            chunks.into_iter().map(|(n, (c, b))| (n, c, b)).collect();
+        chunks.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+        report.chunks = chunks;
+    }
+    report
 }

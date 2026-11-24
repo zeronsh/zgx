@@ -246,8 +246,9 @@ pub(super) struct Selectable {
     /// radius.
     marks: HashMap<NodeId, (Vec<TextMark>, Option<Box<MarkShapes>>)>,
 }
-/// Where each shape of a text's marks ends, and their radius.
-type MarkShapes = (Vec<usize>, f32);
+/// Where each shape of a text's marks ends, their corner radius, and each
+/// one's where they differ (empty when they don't: a text area's chips).
+type MarkShapes = (Vec<usize>, f32, Vec<f32>);
 impl Selectable {
     /// Whether anything allows selection.
     pub(super) fn any(&self) -> bool {
@@ -891,9 +892,27 @@ impl Scene {
         ends: Vec<usize>,
         radius: f32,
     ) {
-        self.set_marks(id, marks, Some((ends, radius.max(0.))));
+        self.set_marks(id, marks, Some((ends, radius.max(0.), Vec::new())));
     }
-    fn set_marks(&mut self, id: NodeId, marks: Vec<TextMark>, shapes: Option<(Vec<usize>, f32)>) {
+    /// `set_text_mark_shapes`, each shape rounded by its own radius
+    /// (`radii`, one for each of `ends`): a text area's chips, each with
+    /// its own corners, beside its search's matches. (Pin line.)
+    #[doc(hidden)]
+    pub fn set_text_mark_shapes_rounded(
+        &mut self,
+        id: NodeId,
+        marks: Vec<TextMark>,
+        ends: Vec<usize>,
+        radii: Vec<f32>,
+    ) {
+        let mut radii: Vec<f32> = radii.into_iter().map(|r| r.max(0.)).collect();
+        let first = radii.first().copied().unwrap_or(0.);
+        if radii.iter().all(|r| *r == first) {
+            radii = Vec::new();
+        }
+        self.set_marks(id, marks, Some((ends, first, radii)));
+    }
+    fn set_marks(&mut self, id: NodeId, marks: Vec<TextMark>, shapes: Option<MarkShapes>) {
         let held = self.selectable.marks.get(&id);
         let old = held.map_or(&[][..], |(marks, _)| marks.as_slice());
         let old_shapes = held.and_then(|(_, shapes)| shapes.as_deref());
@@ -904,7 +923,8 @@ impl Scene {
         let reach = old_shapes
             .into_iter()
             .chain(shapes.as_ref())
-            .map(|(_, radius)| radius + 1.)
+            .flat_map(|(_, radius, radii)| std::iter::once(radius).chain(radii))
+            .map(|radius| radius + 1.)
             .fold(0., f32::max);
         let changed: Vec<Rect> = old
             .iter()
@@ -933,12 +953,13 @@ impl Scene {
         scale: f32,
     ) -> Option<Vec<(HighlightPiece, Color)>> {
         let (_, shapes) = self.selectable.marks.get(&id)?;
-        let (ends, radius) = shapes.as_deref()?;
+        let (ends, radius, radii) = shapes.as_deref()?;
         let marks = self.text_marks(id);
         let mut out = Vec::with_capacity(marks.len() * 2);
         let mut pieces = Vec::new();
         let mut start = 0;
-        for &end in ends {
+        for (i, &end) in ends.iter().enumerate() {
+            let radius = radii.get(i).unwrap_or(radius);
             let Some(shape) = marks.get(start..end.min(marks.len())) else {
                 break;
             };

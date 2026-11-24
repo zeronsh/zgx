@@ -101,6 +101,14 @@ impl std::fmt::Display for NotifyError {
 
 /// The clipboard, the system's URL handler and file dialogs, as a desktop
 /// host provides them (see the module docs).
+///
+/// Most methods have a body that does without (no HTML on the clipboard, no
+/// spelling, no notifications), so a host implements only what it has. A
+/// wrapper around another platform (to log, to check a grant, to fake one
+/// thing in a test) must forward every method, these defaulted ones too:
+/// one it leaves out quietly does without, though the platform it wraps has
+/// it. A wrapper that didn't forward `clipboard_html` lost every copy's
+/// HTML. A test can list what a wrapper leaves out with `unforwarded`.
 pub trait Platform {
     /// The clipboard's text, if it holds text.
     fn clipboard_text(&self) -> Option<String>;
@@ -170,6 +178,22 @@ pub trait Platform {
     fn set_text_language(&self, language: Option<&str>) {
         let _ = language;
     }
+    /// Add the TrueType or OpenType font in `bytes` to every window's text,
+    /// beside the faces it has (another weight of a family it holds): text
+    /// in its families shapes with it from now on, and every text measures,
+    /// lays out and draws again. The family names it holds, or why not (not
+    /// a font). None adds none.
+    fn add_font(&self, bytes: Arc<[u8]>) -> Result<Vec<String>, String> {
+        let _ = bytes;
+        Err("no fonts are added here".into())
+    }
+    /// The fonts the app's windows shape text with beside the system's
+    /// (bundled, or replaced since), each a TrueType or OpenType file, in
+    /// the order they took them: what a renderer of its own installs to
+    /// shape and draw as the windows do (`ui.render_canvas`). None here.
+    fn fonts(&self) -> Vec<Arc<[u8]>> {
+        Vec::new()
+    }
     /// Whether the platform looks words up (`look_up`): macOS's dictionary
     /// panel. A context menu offers Look Up where it does.
     fn looks_up(&self) -> bool {
@@ -187,11 +211,63 @@ pub trait Platform {
     fn clipboard_files(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
+    /// Put `files` on the clipboard, as a file manager's copy does: for a
+    /// test or a driven session (`zgx inspect clipboard set --files`) to
+    /// paste them. Whether it took them; a clipboard of the process's own
+    /// (`ZGX_CLIPBOARD=memory`) does, the system's does not.
+    #[doc(hidden)]
+    fn set_clipboard_files(&self, files: Vec<std::path::PathBuf>) -> bool {
+        let _ = files;
+        false
+    }
+    /// The clipboard's HTML, its rich form (a browser's or a word
+    /// processor's copy: `text/html`, macOS's `public.html`, Windows'
+    /// `HTML Format` fragment), if it holds some; its text is
+    /// `clipboard_text`'s. None reads none.
+    #[doc(hidden)]
+    fn clipboard_html(&self) -> Option<String> {
+        None
+    }
     /// Put `text` on the clipboard with `html`, its rich form, where the
     /// platform takes both; plain text alone otherwise.
     fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
         let _ = html;
         self.set_clipboard_text(text)
+    }
+    /// Put `text` on the clipboard, with `html` (its rich form) where given
+    /// and `types` beside them, in one change of the clipboard: each type a
+    /// MIME type of the app's own (`application/x-anara-citations`) and its
+    /// text, written where a browser's page reads its own (Chromium's web
+    /// custom data), so a page's paste `getData`s them as another page's
+    /// copy put them. Whether it took them. None takes the text and HTML
+    /// alone; no types is a copy of text and HTML as ever.
+    #[doc(hidden)]
+    fn set_clipboard_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+    ) -> bool {
+        let _ = types;
+        match html {
+            Some(html) => self.set_clipboard_rich_text(text, html),
+            None => self.set_clipboard_text(text),
+        }
+    }
+    /// The MIME types of the app's own the clipboard holds (what
+    /// `set_clipboard_typed` wrote, or a web page's copy did), in the order
+    /// they were written; none where it holds none. The text and HTML are
+    /// `clipboard_text`'s and `clipboard_html`'s, not listed here.
+    #[doc(hidden)]
+    fn clipboard_types(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// The text of the clipboard's MIME type `mime` of those
+    /// `clipboard_types` lists, if it holds it. None reads none.
+    #[doc(hidden)]
+    fn clipboard_typed(&self, mime: &str) -> Option<String> {
+        let _ = mime;
+        None
     }
     /// The clipboard's image, if it holds one: a screenshot, an image
     /// editor's copy, a browser's Copy Image. Later, as decoding a large one
@@ -206,6 +282,26 @@ pub trait Platform {
     fn set_clipboard_image(&self, image: Arc<crate::image::ImageData>) -> Pending<bool> {
         let _ = image;
         Box::pin(async { false })
+    }
+    /// Put `png` (an encoded PNG) on the clipboard as the platform's image
+    /// beside `text`, its `html` where given and `types` (as
+    /// `set_clipboard_typed`'s), all in one change of the clipboard: a copy
+    /// a paste takes as the image where an image goes (an image editor, a
+    /// document) and as the text, HTML or types elsewhere. Later, as a
+    /// platform that pastes its images decoded (Windows' DIB) decodes it
+    /// off the UI thread. Whether it took them. None takes the text, HTML
+    /// and types alone.
+    #[doc(hidden)]
+    fn set_clipboard_typed_image(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+        png: Arc<[u8]>,
+    ) -> Pending<bool> {
+        let _ = png;
+        let took = self.set_clipboard_typed(text, html, types);
+        Box::pin(async move { took })
     }
     /// The files the user picks to open: none if they cancel.
     fn open_files(&self, picker: FilePicker) -> Pending<Result<Vec<PathBuf>, String>>;
@@ -281,3 +377,304 @@ pub struct PlatformService(pub Rc<dyn Platform>);
 /// Told the URL.
 #[derive(Clone)]
 pub struct LinkGuard(pub Rc<dyn Fn(&str) -> bool>);
+
+/// What a wrapper around a platform leaves unforwarded: each `Platform`
+/// method `wrap`'s platform, called once, never hands to the one it wraps.
+/// Each is called with nothing in it (an empty text, `about:blank`, no
+/// badge): a wrapper that does a method's work itself does it then.
+/// For a test of an app's wrapper, which should forward every one (see
+/// `Platform`): `assert!(unforwarded(|inner| PlatformService(Rc::new(Mine(inner)))).is_empty())`.
+#[doc(hidden)]
+pub fn unforwarded(wrap: impl FnOnce(PlatformService) -> PlatformService) -> Vec<&'static str> {
+    let probe = Rc::new(Probe::default());
+    let wrapper = wrap(PlatformService(probe.clone())).0;
+    let w = &*wrapper;
+    let picker = FilePicker::default;
+    let folder = std::path::Path::new("/");
+    let image = crate::image::ImageData::new(1, 1, vec![0u8; 4]).expect("a 1x1 image");
+    // Each call, in the trait's order; what a future holds isn't awaited:
+    // a forwarding wrapper reaches the inner platform as it is called.
+    let _ = w.clipboard_text();
+    let _ = w.set_clipboard_text(String::new());
+    let _ = w.primary_text();
+    let _ = w.set_primary_text(String::new());
+    let _ = w.open_url("about:blank");
+    let _ = w.misspellings("");
+    let _ = w.spelling_guesses("");
+    w.learn_spelling("");
+    w.ignore_spelling("");
+    let _ = w.substitutions("", Substitutions::default());
+    let _ = w.correction("", 0..0);
+    w.set_text_language(None);
+    let _ = w.add_font(Arc::from(&[][..]));
+    let _ = w.fonts();
+    let _ = w.looks_up();
+    let _ = w.look_up("", (0., 0.), 0.);
+    let _ = w.clipboard_files();
+    let _ = w.set_clipboard_files(Vec::new());
+    let _ = w.clipboard_html();
+    let _ = w.set_clipboard_rich_text(String::new(), String::new());
+    let _ = w.set_clipboard_typed(String::new(), None, &[]);
+    let _ = w.clipboard_types();
+    let _ = w.clipboard_typed("");
+    drop(w.clipboard_image());
+    drop(w.set_clipboard_image(Arc::new(image)));
+    drop(w.set_clipboard_typed_image(String::new(), None, &[], Arc::from(&[][..])));
+    drop(w.open_files(picker()));
+    drop(w.save_file(picker()));
+    drop(w.open_folder(picker()));
+    let _ = w.bookmark_folder(folder);
+    let _ = w.resolve_folder(&[]);
+    w.release_folder(folder);
+    drop(w.notify(Notification::new("", "")));
+    drop(w.next_notification_click());
+    let _ = w.set_badge(None);
+    let heard = probe.heard.borrow();
+    Probe::METHODS
+        .iter()
+        .copied()
+        .filter(|method| !heard.contains(method))
+        .collect()
+}
+
+/// A platform that notes each method called on it (`unforwarded`).
+#[derive(Default)]
+struct Probe {
+    heard: std::cell::RefCell<Vec<&'static str>>,
+}
+impl Probe {
+    /// Every `Platform` method, in the trait's order.
+    const METHODS: [&'static str; 35] = [
+        "clipboard_text",
+        "set_clipboard_text",
+        "primary_text",
+        "set_primary_text",
+        "open_url",
+        "misspellings",
+        "spelling_guesses",
+        "learn_spelling",
+        "ignore_spelling",
+        "substitutions",
+        "correction",
+        "set_text_language",
+        "add_font",
+        "fonts",
+        "looks_up",
+        "look_up",
+        "clipboard_files",
+        "set_clipboard_files",
+        "clipboard_html",
+        "set_clipboard_rich_text",
+        "set_clipboard_typed",
+        "clipboard_types",
+        "clipboard_typed",
+        "clipboard_image",
+        "set_clipboard_image",
+        "set_clipboard_typed_image",
+        "open_files",
+        "save_file",
+        "open_folder",
+        "bookmark_folder",
+        "resolve_folder",
+        "release_folder",
+        "notify",
+        "next_notification_click",
+        "set_badge",
+    ];
+    fn heard(&self, method: &'static str) {
+        self.heard.borrow_mut().push(method);
+    }
+}
+impl Platform for Probe {
+    fn clipboard_text(&self) -> Option<String> {
+        self.heard("clipboard_text");
+        None
+    }
+    fn set_clipboard_text(&self, _: String) -> bool {
+        self.heard("set_clipboard_text");
+        true
+    }
+    fn primary_text(&self) -> Option<String> {
+        self.heard("primary_text");
+        None
+    }
+    fn set_primary_text(&self, _: String) -> bool {
+        self.heard("set_primary_text");
+        true
+    }
+    fn open_url(&self, _: &str) -> bool {
+        self.heard("open_url");
+        true
+    }
+    fn misspellings(&self, _: &str) -> Vec<std::ops::Range<usize>> {
+        self.heard("misspellings");
+        Vec::new()
+    }
+    fn spelling_guesses(&self, _: &str) -> Vec<String> {
+        self.heard("spelling_guesses");
+        Vec::new()
+    }
+    fn learn_spelling(&self, _: &str) {
+        self.heard("learn_spelling");
+    }
+    fn ignore_spelling(&self, _: &str) {
+        self.heard("ignore_spelling");
+    }
+    fn substitutions(&self, _: &str, _: Substitutions) -> Vec<(std::ops::Range<usize>, String)> {
+        self.heard("substitutions");
+        Vec::new()
+    }
+    fn correction(&self, _: &str, _: std::ops::Range<usize>) -> Option<String> {
+        self.heard("correction");
+        None
+    }
+    fn set_text_language(&self, _: Option<&str>) {
+        self.heard("set_text_language");
+    }
+    fn add_font(&self, _: Arc<[u8]>) -> Result<Vec<String>, String> {
+        self.heard("add_font");
+        Ok(Vec::new())
+    }
+    fn fonts(&self) -> Vec<Arc<[u8]>> {
+        self.heard("fonts");
+        Vec::new()
+    }
+    fn looks_up(&self) -> bool {
+        self.heard("looks_up");
+        true
+    }
+    fn look_up(&self, _: &str, _: (f32, f32), _: f32) -> bool {
+        self.heard("look_up");
+        true
+    }
+    fn clipboard_files(&self) -> Vec<PathBuf> {
+        self.heard("clipboard_files");
+        Vec::new()
+    }
+    fn set_clipboard_files(&self, _: Vec<PathBuf>) -> bool {
+        self.heard("set_clipboard_files");
+        true
+    }
+    fn clipboard_html(&self) -> Option<String> {
+        self.heard("clipboard_html");
+        None
+    }
+    fn set_clipboard_rich_text(&self, _: String, _: String) -> bool {
+        self.heard("set_clipboard_rich_text");
+        true
+    }
+    fn set_clipboard_typed(&self, _: String, _: Option<String>, _: &[(String, String)]) -> bool {
+        self.heard("set_clipboard_typed");
+        true
+    }
+    fn clipboard_types(&self) -> Vec<String> {
+        self.heard("clipboard_types");
+        Vec::new()
+    }
+    fn clipboard_typed(&self, _: &str) -> Option<String> {
+        self.heard("clipboard_typed");
+        None
+    }
+    fn clipboard_image(&self) -> Pending<Option<crate::image::ImageData>> {
+        self.heard("clipboard_image");
+        Box::pin(async { None })
+    }
+    fn set_clipboard_image(&self, _: Arc<crate::image::ImageData>) -> Pending<bool> {
+        self.heard("set_clipboard_image");
+        Box::pin(async { true })
+    }
+    fn set_clipboard_typed_image(
+        &self,
+        _: String,
+        _: Option<String>,
+        _: &[(String, String)],
+        _: Arc<[u8]>,
+    ) -> Pending<bool> {
+        self.heard("set_clipboard_typed_image");
+        Box::pin(async { true })
+    }
+    fn open_files(&self, _: FilePicker) -> Pending<Result<Vec<PathBuf>, String>> {
+        self.heard("open_files");
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn save_file(&self, _: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
+        self.heard("save_file");
+        Box::pin(async { Ok(None) })
+    }
+    fn open_folder(&self, _: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
+        self.heard("open_folder");
+        Box::pin(async { Ok(None) })
+    }
+    fn bookmark_folder(&self, _: &std::path::Path) -> Option<Vec<u8>> {
+        self.heard("bookmark_folder");
+        None
+    }
+    fn resolve_folder(&self, _: &[u8]) -> Option<ResolvedFolder> {
+        self.heard("resolve_folder");
+        None
+    }
+    fn release_folder(&self, _: &std::path::Path) {
+        self.heard("release_folder");
+    }
+    fn notify(&self, _: Notification) -> Pending<Result<(), NotifyError>> {
+        self.heard("notify");
+        Box::pin(async { Ok(()) })
+    }
+    fn next_notification_click(&self) -> Pending<Option<String>> {
+        self.heard("next_notification_click");
+        Box::pin(async { None })
+    }
+    fn set_badge(&self, _: Option<&str>) -> bool {
+        self.heard("set_badge");
+        true
+    }
+}
+
+#[cfg(test)]
+mod forwarding {
+    use super::*;
+
+    /// The probe lists every method the trait has: a method added to
+    /// `Platform` must be added to `Probe` (and called in `unforwarded`) too.
+    #[test]
+    fn the_probe_knows_every_platform_method() {
+        let source = include_str!("platform.rs");
+        let start = source.find("pub trait Platform {").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let methods: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("    fn "))
+            .map(|rest| &rest[..rest.find(['(', '<']).unwrap()])
+            .collect();
+        assert_eq!(methods, Probe::METHODS);
+    }
+
+    /// A wrapper forwarding every method leaves none; one leaving out a
+    /// defaulted method (as an app's left out `clipboard_html`) is named.
+    #[test]
+    fn a_wrapper_leaving_a_method_out_is_named() {
+        assert!(unforwarded(|inner| inner).is_empty(), "the platform itself");
+        struct Partial(PlatformService);
+        impl Platform for Partial {
+            fn clipboard_text(&self) -> Option<String> {
+                self.0.0.clipboard_text()
+            }
+            fn set_clipboard_text(&self, text: String) -> bool {
+                self.0.0.set_clipboard_text(text)
+            }
+            fn open_files(&self, picker: FilePicker) -> Pending<Result<Vec<PathBuf>, String>> {
+                self.0.0.open_files(picker)
+            }
+            fn save_file(&self, picker: FilePicker) -> Pending<Result<Option<PathBuf>, String>> {
+                self.0.0.save_file(picker)
+            }
+            fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
+                self.0.0.set_clipboard_rich_text(text, html)
+            }
+        }
+        let left = unforwarded(|inner| PlatformService(Rc::new(Partial(inner))));
+        assert!(left.contains(&"clipboard_html"), "{left:?}");
+        assert!(!left.contains(&"set_clipboard_rich_text"), "{left:?}");
+        assert!(!left.contains(&"clipboard_text"), "{left:?}");
+    }
+}

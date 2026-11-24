@@ -30,6 +30,7 @@ SMOKES = [
     ("window-controls", "timeout 30s {bin}/window_controls --smoke-test", True),
     ("standard-menu-items", "timeout 30s {bin}/standard_menu_items --smoke-test", True),
     ("form", "python3 scripts/form_smoke.py {bin}/form", True),
+    ("form-raster", "env ZGX_RENDERER=raster ZGX_PRESENT_LOG=1 ZGX_SHADER_LOG=1 python3 scripts/form_smoke.py {bin}/form --log {out}/form.log", True),
     ("terminal", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --output {out}", True),
     ("terminal-2x", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --scale 2 --output {out}", True),
     ("terminal-orca", "python3 scripts/terminal_smoke.py {bin}/terminal_pane --orca --output {out}", True),
@@ -38,7 +39,8 @@ SMOKES = [
     ("progress", "python3 scripts/progress_smoke.py {bin}/progress --output {out}", True),
     ("images", "python3 scripts/images_smoke.py {bin}/images --output {out}", True),
     ("scroll", "python3 scripts/scroll_smoke.py {bin}/scroll --output {out}", True),
-    ("raster-window", "python3 scripts/raster_window_smoke.py {bin}/scroll --menus {bin}/menus --output {out}", False),
+    ("scroll-raster", "env ZGX_RENDERER=raster ZGX_PRESENT_LOG=1 ZGX_SHADER_LOG=1 python3 scripts/scroll_smoke.py {bin}/scroll --output {out}", True),
+    ("raster-window", "python3 scripts/raster_window_smoke.py {bin}/scroll --viewport {bin}/viewport --menus {bin}/menus --output {out}", False),
     ("focus-scroll", "python3 scripts/focus_scroll_smoke.py {bin}/focus_scroll --output {out}", True),
     ("horizontal-scroll", "python3 scripts/horizontal_scroll_smoke.py {bin}/horizontal_scroll --output {out}", True),
     ("scrollbars", "python3 scripts/scrollbars_smoke.py {bin}/scrollbars --output {out}", True),
@@ -59,6 +61,7 @@ SMOKES = [
     ("drag-drop", "python3 scripts/drag_drop_smoke.py {bin}/drag_drop --output {out}", False),
     ("native-menus", "python3 scripts/native_menu_smoke.py {bin}/dynamic_menus --output {out}", False),
     ("native-menus-wayland", "python3 scripts/native_menu_smoke.py {bin}/dynamic_menus --wayland --output {out}", False),
+    ("shortcut-order", "python3 scripts/shortcut_order_smoke.py {bin}/shortcut_order --output {out}", False),
     ("native-services", "python3 scripts/native_services_smoke.py {bin}/platform_services --native-prompts --output {out}", False),
     ("file-drop", "python3 scripts/file_drop_smoke.py {bin}/drag_drop --output {out}", False),
     ("file-drop-scaled", "python3 scripts/file_drop_smoke.py {bin}/drag_drop --output {out} --scale 1.5", False),
@@ -71,6 +74,7 @@ SMOKES = [
     ("native-platform", "python3 scripts/native_platform_smoke.py {bin}/native_platform --output {out}", False),
     ("keyboard-layout", "python3 scripts/keyboard_layout_smoke.py {bin}/primary_selection --output {out}", False),
     ("popup-windows", "python3 scripts/popup_windows_smoke.py {bin}/popup_probe --output {out}", False),
+    ("x11-no-randr", "python3 scripts/x11_no_randr_smoke.py {bin}/popup_probe --output {out}", False),
     ("decision-controls", "python3 scripts/decision_probe_smoke.py {bin}/decision_probe --output {out}", False),
     ("sealed-regions", "python3 scripts/decision_probe_smoke.py {bin}/decision_probe --sealed --output {out}", False),
     ("wayland-popups", "python3 scripts/wayland_popups_smoke.py {bin}/popup_probe --output {out}", False),
@@ -89,6 +93,7 @@ SMOKES = [
     ("wayland-drag-out", "python3 scripts/wayland_drag_out_smoke.py {bin} --output {out}", False),
     ("wayland-drag-out-slow", "python3 scripts/wayland_drag_out_smoke.py {bin} --output {out} --slow-target", False),
     ("zenity-dialog", "python3 scripts/zenity_dialog_smoke.py {bin}/platform_services --output {out}", False),
+    ("kdialog-dialog", "python3 scripts/kdialog_dialog_smoke.py {bin}/platform_services --output {out}", False),
     ("portal-dialog", "python3 scripts/portal_dialog_smoke.py {bin}/platform_services --output {out}", False),
     ("web-view-schemes", "timeout 60s {bin}/web_view_schemes --fixture", True),
     ("web-view", "python3 scripts/web_view_smoke.py {bin}/web_view_probe --output {out}", False),
@@ -129,6 +134,12 @@ SMOKES = [
     ("selection-copy", "python3 scripts/selection_copy_smoke.py {bin}/selectable_text --output {out}", False),
     ("selection-copy-wayland", "python3 scripts/selection_copy_smoke.py {bin}/selectable_text --wayland --output {out}", False),
     ("clipboard-image", "python3 scripts/clipboard_image_smoke.py {bin}/clipboard_image --output {out}", False),
+    ("clipboard-html", "python3 scripts/clipboard_html_smoke.py {bin}/clipboard_html --output {out}", False),
+    ("clipboard-html-x11", "cargo test -p zgx-desktop --lib clipboard::tests::html_and_its_text_round_trip_through_the_system_clipboard --locked -- --ignored --exact --test-threads=1", True),
+    ("clipboard-types", "python3 scripts/clipboard_types_smoke.py {bin}/clipboard_types --output {out}", False),
+    ("clipboard-atoms", "python3 scripts/clipboard_atoms_smoke.py {bin}/clipboard_atoms --output {out}", False),
+    ("clipboard-types-x11", "cargo test -p zgx-desktop --lib clipboard::tests::types_round_trip_through_the_system_clipboard --locked -- --ignored --exact --test-threads=1", True),
+    ("clipboard-typed-image-x11", "cargo test -p zgx-desktop --lib clipboard::tests::an_image_with_its_text_and_types_round_trips_through_the_system_clipboard --locked -- --ignored --exact --test-threads=1", True),
     ("selectable-text", "python3 scripts/selectable_text_smoke.py {bin}/selectable_text --output {out}", False),
     ("find-in-page", "python3 scripts/find_in_page_smoke.py {bin}/selectable_text --output {out}", False),
     ("zoom", "python3 scripts/zoom_smoke.py {bin}/zoom_probe --output {out}", False),
@@ -136,14 +147,18 @@ SMOKES = [
     ("covered-window", "python3 scripts/covered_window_smoke.py {bin}/../zgx-run --output {out}", False),
     ("inspect-memory", "python3 scripts/inspect_memory_smoke.py {bin}/../zgx-run --output {out}", False),
     ("window-state", "python3 scripts/window_state_smoke.py {bin}/../zgx-run --output {out}", False),
+    ("native-modules", "python3 scripts/native_modules_smoke.py {bin}/../zgx-run --output {out}", False),
     ("editor-autoscroll", "python3 scripts/editor_autoscroll_smoke.py {bin}/editor_autoscroll --output {out}", False),
     ("transparency", "python3 scripts/transparency_smoke.py {bin}/transparency --output {out}", False),
     ("wayland-transparency", "python3 scripts/wayland_transparency_smoke.py {bin}/transparency --output {out}", False),
+    ("covers-display-wayland", "python3 scripts/covers_display_smoke.py {bin}/agents_intro --output {out}", False),
     ("native-ime", "python3 scripts/native_ime_smoke.py {bin}/native_ime --output {out}", False),
+    ("native-ime-atom", "python3 scripts/native_ime_smoke.py {bin}/native_ime --atom --output {out}", False),
     ("ime-server-gone", "python3 scripts/native_ime_smoke.py {bin}/native_ime --server-gone --output {out}", False),
     ("ime-server-stopped", "python3 scripts/native_ime_smoke.py {bin}/native_ime --server-stopped --output {out}", False),
     ("ime-password", "python3 scripts/native_ime_smoke.py {bin}/native_ime --password --output {out}", False),
     ("wayland-ime", "python3 scripts/wayland_ime_smoke.py {bin}/native_ime --output {out}", False),
+    ("wayland-ime-atom", "python3 scripts/wayland_ime_smoke.py {bin}/native_ime --atom --output {out}", False),
     ("wayland-input-modes", "python3 scripts/wayland_ime_smoke.py {bin}/native_ime --input-modes --output {out}", False),
     ("wayland-ime-burst", "python3 scripts/wayland_ime_smoke.py {bin}/native_ime --burst --output {out}", False),
     ("wayland-external-ime", "python3 scripts/wayland_external_ime_smoke.py {bin}/external_ime --output {out}", False),
@@ -263,10 +278,41 @@ def run(smoke, args):
                     helper.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     helper.kill()
+    if status == 0 and "ZGX_RENDERER=raster" in command:
+        status = drew_on_raster(output, probe_log, "ZGX_SHADER_LOG=1" in command)
     return name, status, time.monotonic() - started, probe_log
 
 
+def drew_on_raster(output, probe_log, logs_present=False):
+    """A probe run on the raster (`ZGX_RENDERER=raster`, with its present
+    log on) proves it: its logs show raster presents and no GPU render,
+    else it passed on the GPU. With `ZGX_SHADER_LOG=1` (`logs_present`)
+    they show its first present marked too (`zgx: first frame presented`),
+    as a GPU window's is: what a probe waits on before reading pixels, and
+    the menu bar's wait on macOS; and saying the raster drew it (`drawn by
+    the raster`), as a failed probe's evidence names its path. 0, or a
+    status saying why."""
+    logs = [probe_log, *(p for p in output.rglob("*.log") if p.is_file())] if output.exists() else [probe_log]
+    text = "\n".join(p.read_text(errors="replace") for p in logs)
+    raster, gpu = text.count("raster present"), text.count("render forced=")
+    marked = "zgx: first frame presented" in text
+    named = ", drawn by the raster" in text
+    with probe_log.open("a") as log:
+        print(f"raster check: {raster} raster presents, {gpu} GPU renders, first present marked: {marked}", file=log)
+    if not (raster and not gpu):
+        return "not on the raster"
+    if not logs_present:
+        return 0
+    if not marked:
+        return "the raster window never marked its first present"
+    return 0 if named else "the first present's line didn't say the raster drew it"
+
+
 def main():
+    # The GPU renderer, as on a machine with one, unless a probe's command
+    # asks for the raster (`env ZGX_RENDERER=raster ...`): runners have no
+    # GPU, where windows would draw on the raster by default.
+    os.environ.setdefault("ZGX_RENDERER", "gpu")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binaries", type=pathlib.Path, default=pathlib.Path("target/debug/examples"))
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("/tmp"))

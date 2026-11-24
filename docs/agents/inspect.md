@@ -35,7 +35,11 @@ A target matching several nodes is an error listing them (`@n role "name" box`, 
 zgx inspect tree                      # the whole view (200 lines at most; the rest counted)
 zgx inspect tree '#transcript' --depth 3
 zgx inspect node '"Copy"'             # kind, the script line that made it, role, name, value, state, box, text; a scroll view's offset of its range and stretch
+                                      # a paragraph with a citation in it: reads: "step " [button "Citation 1"] "." (what a screen reader hears)
 zgx inspect find '"Copy"'             # every node a target matches
+zgx inspect route 500,320             # where a click there goes, a native view (a page) or the interface, and
+                                      # what decided it: overlay paint, a listener in front, a modal scope left open;
+                                      # each page under the point with every node it is registered at
 zgx inspect state                     # named states (ui.state, ui.persist, ui.shared) and their values
 zgx inspect state messages --full     # one state; long values are cut at 200 bytes unless --full
 zgx inspect errors                    # the script error, type errors, lint findings, layout warnings ("none")
@@ -59,14 +63,14 @@ zgx inspect search --next             # the window's find steps on; --prev back,
   2 @14 [cafe] two
 ```
 
-`frames` is where each frame's time went and why the app did what it did: the frame's time, the states written (named ones by name, the rest counted) and the runs they caused with their total; then its phases, the costliest first (each counted once, with its instructions where the platform counts them); then the costliest runs, each with its time, what it is and the state that queued it:
+`frames` is where each frame's time went and why the app did what it did: the frame's time, the states written (named ones by name; the rest by where the script made them, `40 × rows.luau:12 use_state` for forty rows' own, a `computed` or a `tween` likewise, or what the engine made them for, else the Rust line that made them, `31 × zgx-script/src/lower.rs:8290`; any made before tracing began counted as unnamed) and the runs they caused with their total; then its phases, the costliest first (each counted once, with its instructions where the platform counts them); then the costliest runs, each with its time, what it is (a binding, a script's line, else the Rust line that made it, `zgx/src/compose.rs:812 effect`; one made before tracing began by its number) and the state that queued it:
 
 ```text
-frame 131 (1.42 ms): state.luau::messages, 8 unnamed → 20 runs, 293 µs
+frame 131 (1.42 ms): state.luau::messages, 8 × components/transcript.luau:18 use_state → 20 runs, 293 µs
   phases: update 310 µs (1840K instr), text 402 µs, layout 260 µs (1210K instr), paint 190 µs, encode 120 µs, present 95 µs
   153 µs @67 binding (markdown_view components/transcript.luau:32) ← a state
   28 µs @102 binding #transcript (list #transcript components/transcript.luau:73) ← a state
-  19 µs effect 124 ← state.luau::messages
+  19 µs zgx/src/compose.rs:812 effect ← state.luau::messages
 ```
 
 Where the engine took a slower path, or waited, the frame says why, and where the renderer measures the GPU's own time (macOS's Metal frames) it says that too:
@@ -80,6 +84,8 @@ frame 3230 (6.95 ms, then 6.12 ms waiting for the display): page_scroll, 1 unnam
 ```
 
 The notes say which fast path a frame missed and what stopped it: a scroll that repainted its view rather than moving its pixels (a node drawing over the scroll view, what lies under it showing through, a move between device pixels), a frame that missed its refresh or was held to the last frame's cadence, scroll input applied all at once while the window wasn't presenting. `gpu` is the GPU's time alone; `present` also counts waiting for the window server and the display, so a `present` well above `gpu` is the system's time, not the frame's.
+
+`mark` also answers the frames' clock as it is (`ms` in its JSON, the clock of each frame's `ended_ms`): a tool timing input it makes itself (a key posted through the system, as a person's would come) lines its own clock up with the frames' by it, and reads how long after each key the frame that took it was shown.
 
 An entry `spare 412` rather than `frame 412` is what the window did with time its frames left over (a list's [rows built ahead](../reference/scrolling.md#building-ahead)): nothing waited for it, and a replay's and `summary`'s numbers leave it out.
 
@@ -124,21 +130,41 @@ zgx inspect hover '#row'                               # the pointer there: what
 zgx inspect right-click '#row'                         # its context menu opens; its items are nodes to click
 zgx inspect drag '#card' '#done'                       # from one to another
 zgx inspect drag '#slider' 340,120                     # or to a point, window points
+zgx inspect files hover '#dropzone' a.pdf b.png        # files from a file manager, over a node or x,y (its on_file_hover)
+zgx inspect files drop '#dropzone' a.pdf b.png         # let go there: a FileDrop each, then FilesDrop (its on_file_drop)
+zgx inspect files leave                                # the drag left the window
+zgx inspect text-drop '#field' --text 'Hi' --html '<b>Hi</b>'   # text from another app, let go there
+zgx inspect text-drop '#note' --hover-only             # only over it: whether it would drop (a destination's highlight)
+zgx inspect prefers reduced-motion on                  # what zgx reads as the system's; `system` gives it back
 zgx inspect type '#composer' 'Write me a function'     # clicks it, then types
+zgx inspect type --no-click ' and a test'              # where focus is: no click, so the caret stays where it is
 zgx inspect key Enter                                  # Escape, Tab, cmd+k, alt+ArrowDown, shift+Tab, F5…
 zgx inspect key alt                                    # modifiers alone (ctrl+shift): held, then let go, as a window reports a tap
 zgx inspect scroll '#transcript' 400                   # points; down is positive
+zgx inspect scroll 300,200 0 -120                      # at a point, sideways (dx), as a trackpad's motion
 zgx inspect command new                                # a ui.command, as its menu item or shortcut runs it
 zgx inspect set current '"c1"'                         # a named state, the value as JSON
 zgx inspect wait '"Copy"' --timeout 8000               # until it shows
-zgx inspect wait '#reply' --text 'words'               # until its text holds this
+zgx inspect wait '#reply' --text 'words'               # until its text, or a field's value, holds this
 zgx inspect wait '#spinner' --gone
 zgx inspect sleep 500                                  # let the app run
 ```
 
-`hover`, `right-click` and `drag` take a target, whose middle they use, or `x,y` in window points. `drag` presses, moves past the drag threshold and on in steps, as a hand does, so what lies between sees it pass (`on_drag_over`), then releases. Everything happens within the window: a drag can't leave it, so `on_drag_outside` and other apps' drops need a real one.
+`hover`, `right-click` and `drag` take a target, whose middle they use, or `x,y` in window points. `files` and `text-drop` reach what the desktop host's own events do (files from a file manager, text from another app), so an OS drop is tested headless. A `files drop` delivers in Linux's order, a `FileDrop` for each file and then one `FilesDrop`. macOS and Windows deliver the same events but send `FilesDrop` after a queue, so don't rely on the spacing. `prefers reduced-motion` changes only what this process reads as the system's preference, never the system's setting. `drag` presses, moves past the drag threshold and on in steps, as a hand does, so what lies between sees it pass (`on_drag_over`), then releases. Everything happens within the window: a drag can't leave it, so `on_drag_outside` and other apps' drops need a real one.
 
 `cmd` is Command on macOS and Control elsewhere, as commands' keys are. A key goes where focus is: `type` or `click` an input first. After an action the interface is laid out again before the next command reads it, so `click` then `tree` shows the result; for what takes time (a fetch, a streamed reply, an animation), `wait` on what it will show rather than sleeping.
+
+## Clipboard
+
+```sh
+zgx inspect clipboard                                  # its text, HTML, image's size, files and types (a copy's `types`)
+zgx inspect clipboard set --text "hello"               # or --html "<p>hi</p>" (with --text: a rich copy)
+zgx inspect clipboard set --image shot.png
+zgx inspect clipboard set --files notes.pdf shot.png   # as a file manager copies them: a paste hears them as files
+zgx inspect key cmd+v                                  # pastes it into the focused editor (ctrl+v off macOS)
+```
+
+`key cmd+c`, `cmd+x` and `cmd+v` that nothing in the view takes go to the clipboard as a window's keys do, so an editor's `on_paste` hears a paste driven from here. Start the app with `ZGX_CLIPBOARD=memory` and its clipboard is its own, held in memory: setting it, copying and pasting never touch the person's clipboard. Use that for QA sessions; an off-screen session (`ZGX_OFFSCREEN=1`) has one of its own anyway, unless `ZGX_CLIPBOARD` names another (`system`, the person's). `--files` needs it: the system's clipboard takes no files from here, and the readback's `files:` line lists what a paste would hear.
 
 ## Popovers, menus and other popups
 
@@ -162,7 +188,7 @@ On macOS a popup is a window of its own and may lie past the main window's edge.
 
 ## The app's other windows
 
-`windows` lists the main window and the windows the app declares (`ui.window`, an item of `ui.windows`), each with its id, size, title and popups open. Any command takes `window` (`--window` on the CLI, `window` on every MCP tool) and answers for that window: an id from `windows`, or an item's key, which names its window as `zgx test`'s `app:window` does. Without it, the main window answers. A window answers while it is open; one that closes is gone from `windows`. Popups answer for the window they open from, as above.
+`windows` lists the main window and the windows the app declares (`ui.window`, an item of `ui.windows`), each with its id, size, title and popups open. Each popup it wants open follows its window's line, with its role, its owner window and whether it shows or is held back while the app is at the back (`popup @412  menu  shown  owner main`); the JSON lists them as `panels`. Any command takes `window` (`--window` on the CLI, `window` on every MCP tool) and answers for that window: an id from `windows`, or an item's key, which names its window as `zgx test`'s `app:window` does. Without it, the main window answers. A window answers while it is open; one that closes is gone from `windows`. Popups answer for the window they open from, as above.
 
 ```sh
 zgx inspect windows                       # main  1100x720
@@ -171,6 +197,30 @@ zgx inspect --window img01.png tree       # the detail window's interface
 zgx inspect --window img01.png click '#favorite'
 zgx inspect --window windows1:shots state # states are the app's, from any window
 ```
+
+## A frozen clock
+
+`ZGX_FREEZE_TIME=1` at launch, or `clock freeze` in a running app, holds every animation, tween, timer (`ui.after`, `ui.every`), caret blink, tooltip delay and frame at one time, so a screenshot shows the same spinner, caret and transition each run. `clock advance <ms>` moves it on by hand, waking the timers due by then in order; `clock thaw` lets it run again.
+
+```sh
+zgx inspect clock freeze
+zgx inspect clock advance 250                         # a quarter second on: the tooltip's delay passes
+zgx inspect snapshot '#panel' --out panel.png
+zgx inspect clock thaw
+```
+
+## The Luau heap: garbage or a leak
+
+`gc` runs a full collection in each script VM and prints the heap before and after (what was garbage) and what is left by object type, userdata type and code chunk. Run it again after the same actions: what grows each time is kept, not garbage. `--retained KIND` prints the commonest chains of holders from a root to those objects (a userdata type such as `State`, `table`, `function`, or part of a function's name or chunk), and says how many a Luau holder alone reaches; the rest are held through the handles Rust keeps (`--lua-only` shows the Luau chains instead). `--mark`, then `--since-mark` after more actions, lists what survived that wasn't there before.
+
+```sh
+zgx inspect gc --top 5
+zgx inspect gc --mark
+zgx inspect click '#close-tab'
+zgx inspect gc --since-mark --retained State          # what the closed tab left, and who holds it
+```
+
+`zgx test`'s `app:states()` lists the named states, and `app:retained_states()` counts the States kept after a full collection, for a test that a closed view left none behind.
 
 ## Gestures: record once, replay
 
@@ -283,7 +333,7 @@ zgx inspect switch scroll_copy on
 
 ## As MCP tools
 
-`zgx inspect mcp` serves the same commands as MCP tools on stdio (`zgx_windows`, `zgx_tree`, `zgx_node`, `zgx_find`, `zgx_state`, `zgx_set_state`, `zgx_click`, `zgx_type`, `zgx_key`, `zgx_scroll`, `zgx_command`, `zgx_errors`, `zgx_lint`, `zgx_frames`, `zgx_mark`, `zgx_reloads`, `zgx_switch`, `zgx_search`, `zgx_snapshot`, `zgx_record`, `zgx_replay`, `zgx_wait`, `zgx_sleep`, `zgx_apps`), each answering the text the CLI prints, with `isError` when it failed. Every tool takes an optional `app` (a pid) for when several apps run, and an optional `window` (an id from `zgx_windows`, or an item's key) for another of the app's windows.
+`zgx inspect mcp` serves the same commands as MCP tools on stdio (`zgx_windows`, `zgx_tree`, `zgx_node`, `zgx_find`, `zgx_state`, `zgx_set_state`, `zgx_click`, `zgx_type`, `zgx_key`, `zgx_scroll`, `zgx_command`, `zgx_errors`, `zgx_lint`, `zgx_frames`, `zgx_mark`, `zgx_reloads`, `zgx_switch`, `zgx_clock`, `zgx_gc`, `zgx_search`, `zgx_snapshot`, `zgx_record`, `zgx_replay`, `zgx_wait`, `zgx_sleep`, `zgx_apps`), each answering the text the CLI prints, with `isError` when it failed. Every tool takes an optional `app` (a pid) for when several apps run, and an optional `window` (an id from `zgx_windows`, or an item's key) for another of the app's windows.
 
 ```sh
 claude mcp add zgx -- zgx inspect mcp      # Claude Code; any MCP client runs the same command

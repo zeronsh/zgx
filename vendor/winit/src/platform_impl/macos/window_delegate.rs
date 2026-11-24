@@ -13,8 +13,8 @@ use objc2::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, De
 use objc2_app_kit::{
     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
-    NSColor, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeString,
-    NSRequestUserAttentionType, NSScreen, NSView, NSWindowButton, NSWindowDelegate,
+    NSColor, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard, NSPasteboardTypeHTML,
+    NSPasteboardTypeString, NSRequestUserAttentionType, NSScreen, NSView, NSWindowButton, NSWindowDelegate,
     NSWindowFullScreenButton, NSWindowLevel, NSWindowOcclusionState, NSWindowOrderingMode,
     NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
@@ -28,6 +28,7 @@ use tracing::{trace, warn};
 
 use super::app_state::ApplicationDelegate;
 use super::cursor::cursor_from_icon;
+use super::placement;
 use super::monitor::{self, flip_window_screen_coordinates, get_display_id};
 use super::observer::RunLoop;
 use super::view::WinitView;
@@ -432,10 +433,19 @@ declare_class!(
             let pb: Retained<NSPasteboard> = unsafe { msg_send_id![sender, draggingPasteboard] };
             if self.ivars().text_drag.replace(false) {
                 let text = unsafe { pb.stringForType(NSPasteboardTypeString) };
+                // The same as HTML, where the source offered it (a browser's
+                // selection).
+                let html = unsafe { pb.stringForType(NSPasteboardTypeHTML) }.map(|h| h.to_string());
                 let (x, y) = self.drag_point(sender);
                 let drops = crate::platform::text_drop::text_drops();
                 let taken = match (text, &drops) {
-                    (Some(text), Some(drops)) => drops.dropped(self.public_id(), x, y, &text.to_string()),
+                    (Some(text), Some(drops)) => drops.dropped_with_html(
+                        self.public_id(),
+                        x,
+                        y,
+                        &text.to_string(),
+                        html.as_deref(),
+                    ),
                     _ => false,
                 };
                 if !taken {
@@ -560,9 +570,57 @@ fn new_window(
             Some(Fullscreen::Borderless(None)) => NSScreen::mainScreen(mtm),
             None => None,
         };
-        let frame = match &screen {
-            Some(screen) => screen.frame(),
-            None => {
+        // zgx patch: a window given a position (and no fullscreen screen) is
+        // made on the screen that holds its top left, its rect relative to
+        // that screen and its size read at that screen's scale (see
+        // `placement`). AppKit reads a rect given without a screen relative
+        // to the key window's, and moves a window asked for elsewhere onto
+        // that one, its height mirrored.
+        let screens = NSScreen::screens(mtm);
+        let placed = match (&screen, attrs.position) {
+            (None, Some(position)) => {
+                let frames: Vec<placement::Screen> = screens
+                    .iter()
+                    .map(|screen| {
+                        let frame = screen.frame();
+                        placement::Screen {
+                            x: frame.origin.x,
+                            y: frame.origin.y,
+                            width: frame.size.width,
+                            height: frame.size.height,
+                            scale: screen.backingScaleFactor() as f64,
+                        }
+                    })
+                    .collect();
+                let units = |physical: bool, (a, b): (f64, f64)| {
+                    if physical {
+                        placement::Units::Physical(a, b)
+                    } else {
+                        placement::Units::Logical(a, b)
+                    }
+                };
+                let position = match position {
+                    Position::Physical(p) => units(true, (p.x as f64, p.y as f64)),
+                    Position::Logical(p) => units(false, (p.x, p.y)),
+                };
+                let size = match attrs.inner_size {
+                    Some(Size::Physical(s)) => units(true, (s.width as f64, s.height as f64)),
+                    Some(Size::Logical(s)) => units(false, (s.width, s.height)),
+                    None => units(false, (800.0, 600.0)),
+                };
+                placement::place(&frames, position, size)
+                    // SAFETY: `placed.screen` indexes `frames`, made from `screens`.
+                    .map(|placed| (unsafe { screens.objectAtIndex(placed.screen) }, placed))
+            },
+            _ => None,
+        };
+        let frame = match (&screen, &placed) {
+            (Some(screen), _) => screen.frame(),
+            (None, Some((_, placed))) => NSRect::new(
+                NSPoint::new(placed.x, placed.y),
+                NSSize::new(placed.width, placed.height),
+            ),
+            (None, None) => {
                 let scale_factor = NSScreen::mainScreen(mtm)
                     .map(|screen| screen.backingScaleFactor() as f64)
                     .unwrap_or(1.0);
@@ -573,18 +631,8 @@ fn new_window(
                     },
                     None => NSSize::new(800.0, 600.0),
                 };
-                let position = match attrs.position {
-                    Some(position) => {
-                        let position = position.to_logical(scale_factor);
-                        flip_window_screen_coordinates(NSRect::new(
-                            NSPoint::new(position.x, position.y),
-                            size,
-                        ))
-                    },
-                    // This value is ignored by calling win.center() below
-                    None => NSPoint::new(0.0, 0.0),
-                };
-                NSRect::new(position, size)
+                // This position is ignored by calling win.center() below
+                NSRect::new(NSPoint::new(0.0, 0.0), size)
             },
         };
 
@@ -622,14 +670,28 @@ fn new_window(
             masks |= NSWindowStyleMask::FullSizeContentView;
         }
 
-        let window: Option<Retained<WinitWindow>> = unsafe {
-            msg_send_id![
-                super(mtm.alloc().set_ivars(())),
-                initWithContentRect: frame,
-                styleMask: masks,
-                backing: NSBackingStoreType::NSBackingStoreBuffered,
-                defer: false,
-            ]
+        let window: Option<Retained<WinitWindow>> = match &placed {
+            Some((placed_on, _)) => {
+                unsafe {
+                    msg_send_id![
+                        super(mtm.alloc().set_ivars(())),
+                        initWithContentRect: frame,
+                        styleMask: masks,
+                        backing: NSBackingStoreType::NSBackingStoreBuffered,
+                        defer: false,
+                        screen: &**placed_on,
+                    ]
+                }
+            },
+            None => unsafe {
+                msg_send_id![
+                    super(mtm.alloc().set_ivars(())),
+                    initWithContentRect: frame,
+                    styleMask: masks,
+                    backing: NSBackingStoreType::NSBackingStoreBuffered,
+                    defer: false,
+                ]
+            },
         };
         let window = window?;
 

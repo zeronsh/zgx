@@ -12,6 +12,7 @@ ui.submenu(props: SubmenuProps) -> Node
 context_menu: ((e: PointerEvent) -> ...{ Node }?)?
 context_menu_style: Styles?
 context_menu_below: boolean?
+context_menu_open: State<boolean>? -- internal, subject to change
 ```
 
 | Function | |
@@ -28,7 +29,7 @@ context_menu_below: boolean?
 | Option | Type | Default | |
 | --- | --- | --- | --- |
 | `open` | `State<boolean>`, or `() -> boolean` | required (not `menu_item`) | true while shown; written back as it closes. A function controls it: it shows while the function says so, and its closing (Escape, the backdrop, a choice) goes to `on_close` (a modal route, [routing](state.md#routing)) |
-| `on_close` | `() -> ()` | none | a controlled overlay's closing |
+| `on_close` | `() -> ()` | none | a controlled overlay's closing; on a `modal` whose `open` is a state, it runs as the person closes it (Escape, a press on the backdrop), after the state has been written, and not when the app sets the state itself |
 | `build` (`modal`, `popover`, `menu`) | `() -> Node` | none | its content, built each time it opens and kept while it closes: a form starts from what it edits, its components' state new (as React's conditionally rendered dialog). Children given as well come before it, built once |
 | `anchor` (`popover`, `menu`) | `Node` | required | the trigger, laid out where the popover is |
 | `autofocus` (`modal`, `popover`, `menu`) | `boolean` | `true` | focus its first control as it opens; `false` keeps the panel itself focused (keys still reach it) |
@@ -50,6 +51,7 @@ context_menu_below: boolean?
 | `context_menu` | `(e: PointerEvent) -> { Node }?` | none | `e` is `{ x, y, local_x, local_y }`; return the items, or nothing for no menu |
 | `context_menu_style` | `Styles` | the menu's own | the context menu panel's look, plain values |
 | `context_menu_below` | `boolean` | `false` | open under the node, from its left edge (a tab's), wherever the click was |
+| `context_menu_open` | `State<boolean>` | none | **Internal, subject to change.** Kept saying whether the node's context menu shows: true as it opens, false as it closes however it does (Escape, a pick, a click outside, Tab, the window losing focus, a newer menu, the node going). Writing it false closes the menu. For a floating panel that hides while the page's menu shows, as a browser's selection popover does |
 
 Panels start with 16 points of padding, the theme's surface color and rounded corners; a modal is 360 wide, a popover or menu 240, and each is as tall as its content, at most the window.
 

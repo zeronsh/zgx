@@ -99,6 +99,7 @@ atom_manager! {
     XdndActionCopy,
     TextPlainUtf8: b"text/plain;charset=utf-8",
     TextPlain: b"text/plain",
+    TextHtml: b"text/html",
     None: b"None",
 
     // Miscellaneous Atoms

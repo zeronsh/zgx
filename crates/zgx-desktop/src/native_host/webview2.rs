@@ -527,6 +527,101 @@ impl WebViewBackend for Backend {
             answer(FindResult::default());
         }
     }
+    /// WebView2 keeps no site's records apart: the host's origins' storage
+    /// goes through DevTools' `Storage.clearDataForOrigin`, and the cookies
+    /// a request to the host would carry (its own and its parent domains',
+    /// which a browser never sets on a public suffix) one by one. Another
+    /// subdomain's storage, and cookies one set for itself alone, stay.
+    fn clear_site_data(&self, url: &str, done: SiteAnswer) {
+        let Some(host) = zgx::web_view::site_host(url) else {
+            return done(Err(format!("{url} has no site")));
+        };
+        let page = &self.0;
+        let ready = page.ready.borrow();
+        let Some(ready) = ready.as_ref() else {
+            return done(Err("the web view isn't showing yet".into()));
+        };
+        // The url's own origin (its port included) and the host's plain ones.
+        let named = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.clone()
+        };
+        let mut origins = vec![origin_of(url)];
+        for scheme in ["https", "http"] {
+            let origin = format!("{scheme}://{named}");
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        let tally = Rc::new(SiteClear {
+            answered: Cell::new(0),
+            expected: Cell::new(None),
+            removed: Cell::new(0),
+            error: RefCell::new(None),
+            done: Cell::new(Some(done)),
+        });
+        // Calls started: each answers once.
+        let launched = Cell::new(0);
+        // SAFETY: WebView2 objects on the UI thread, where it calls each
+        // completion back.
+        let started = unsafe {
+            (|| -> windows::core::Result<()> {
+                for origin in &origins {
+                    let params = format!(
+                        r#"{{"origin":"{}","storageTypes":"all"}}"#,
+                        origin.replace('\\', "\\\\").replace('"', "\\\"")
+                    );
+                    let tally = tally.clone();
+                    ready.view.CallDevToolsProtocolMethod(
+                        &HSTRING::from("Storage.clearDataForOrigin"),
+                        &HSTRING::from(params),
+                        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                            move |result, _| {
+                                tally.finished(result.map(|()| 1));
+                                Ok(())
+                            },
+                        )),
+                    )?;
+                    launched.set(launched.get() + 1);
+                }
+                let cookies = ready.view.cast::<ICoreWebView2_2>()?.CookieManager()?;
+                let deleter = cookies.clone();
+                let tally = tally.clone();
+                cookies.GetCookies(
+                    &HSTRING::from(format!("https://{named}/")),
+                    &GetCookiesCompletedHandler::create(Box::new(move |result, list| {
+                        let deleted = result.and_then(|()| {
+                            let Some(list) = list else { return Ok(0) };
+                            let mut count = 0;
+                            list.Count(&mut count)?;
+                            for i in 0..count {
+                                deleter.DeleteCookie(&list.GetValueAtIndex(i)?)?;
+                            }
+                            Ok(count as usize)
+                        });
+                        tally.finished(deleted);
+                        Ok(())
+                    })),
+                )?;
+                launched.set(launched.get() + 1);
+                Ok(())
+            })()
+        };
+        // The calls that started answer; a failure to start one (it never
+        // answers) is answered here.
+        match started {
+            Ok(()) => {
+                tally.expected.set(Some(launched.get()));
+                tally.answer();
+            }
+            Err(error) => {
+                // The calls that started, and this failure.
+                tally.expected.set(Some(launched.get() + 1));
+                tally.finished(Err(error));
+            }
+        }
+    }
     fn clear_find(&self) {
         let page = &self.0;
         *page.finding.borrow_mut() = None;
@@ -2122,6 +2217,49 @@ fn normalized(url: &str) -> String {
         scheme.to_ascii_lowercase(),
         authority.to_ascii_lowercase()
     )
+}
+
+/// Who hears what `clear_site_data` removed (`std`'s `Result`: this file's
+/// glob import has webview2_com's).
+type SiteAnswer = Box<dyn FnOnce(std::result::Result<usize, String>)>;
+/// A `clear_site_data` on WebView2: its calls answered and how many will
+/// (known once all have started), the records they removed, the first
+/// failure, and who gets the answer.
+struct SiteClear {
+    answered: Cell<usize>,
+    expected: Cell<Option<usize>>,
+    removed: Cell<usize>,
+    error: RefCell<Option<String>>,
+    done: Cell<Option<SiteAnswer>>,
+}
+impl SiteClear {
+    /// One call answered.
+    fn finished(&self, result: windows::core::Result<usize>) {
+        match result {
+            Ok(n) => self.removed.set(self.removed.get() + n),
+            Err(error) => {
+                self.error.borrow_mut().get_or_insert(error.message());
+            }
+        }
+        self.answered.set(self.answered.get() + 1);
+        self.answer();
+    }
+    /// Once every call has answered (however their answers and the count
+    /// of them came in order), the caller hears the count, or the first
+    /// failure.
+    fn answer(&self) {
+        if self
+            .expected
+            .get()
+            .is_some_and(|n| self.answered.get() >= n)
+            && let Some(done) = self.done.take()
+        {
+            done(match self.error.borrow_mut().take() {
+                Some(error) => Err(error),
+                None => Ok(self.removed.get()),
+            });
+        }
+    }
 }
 
 /// The origin of `url`: `https://example.com`, `myapp://settings` (a port

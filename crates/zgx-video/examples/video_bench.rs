@@ -28,6 +28,10 @@ fn main() {
         for frame in 0..last {
             stage.step_to(frame).expect("a frame");
             stage.stage.render().expect("drawn");
+            // The gate's output check: each frame drawn whole, so its paint alone.
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::paint_only(&stage.stage.ui().scene.borrow());
+            }
         }
     }
 }

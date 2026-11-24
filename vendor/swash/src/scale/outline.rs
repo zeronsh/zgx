@@ -13,6 +13,9 @@ pub struct Outline {
     points: Vec<Point>,
     verbs: Vec<Verb>,
     is_color: bool,
+    /// zgx: `dilate_box`'s output, kept between glyphs (the outline is
+    /// reused for each glyph a scaler draws), swapped with `points`/`verbs`.
+    dilated: (Vec<Point>, Vec<Verb>),
 }
 
 impl Outline {
@@ -101,6 +104,33 @@ impl Outline {
             if let Some(mut layer) = self.get_mut(i) {
                 layer.embolden(x_strength, y_strength);
             }
+        }
+    }
+
+    /// zgx: CoreGraphics' font-smoothing dilation (macOS's
+    /// `_path_dilator_iterate`, read from the binary): each contour split
+    /// into pieces monotonic in x and y, each piece moved by a corner of an
+    /// axis-aligned box chosen by its direction, and consecutive pieces
+    /// joined by lines. With the contours counter-clockwise outside (y up;
+    /// mirrored otherwise, as its orientation pass does): x by `d` going
+    /// up, `-d` going down, 0 level; y by `2d` going left, 0 going right,
+    /// `d` straight up or down. The ink grows by a box [-d, d] x [0, 2d].
+    /// Single-layer (mask) outlines only.
+    #[doc(hidden)]
+    pub fn dilate_box(&mut self, d: f32) {
+        if d <= 0. || self.is_color || self.layers.len() > 1 {
+            return;
+        }
+        let (points, verbs) = &mut self.dilated;
+        dilate::dilate(&self.points, &self.verbs, d, points, verbs);
+        core::mem::swap(&mut self.points, points);
+        core::mem::swap(&mut self.verbs, verbs);
+        if let Some(layer) = self.layers.first_mut() {
+            *layer = LayerData {
+                points: (0, self.points.len()),
+                verbs: (0, self.verbs.len()),
+                color_index: layer.color_index,
+            };
         }
     }
 
@@ -423,5 +453,253 @@ impl skrifa::outline::OutlinePen for OutlineWriter<'_> {
 
     fn close(&mut self) {
         self.0.close();
+    }
+}
+
+/// zgx: `Outline::dilate_box`.
+mod dilate {
+    use super::{Point, Verb};
+    use alloc::vec::Vec;
+    #[cfg(feature = "libm")]
+    use core_maths::CoreFloat;
+
+    #[derive(Clone, Copy)]
+    enum Seg {
+        Line(Point, Point),
+        Quad(Point, Point, Point),
+        Cubic(Point, Point, Point, Point),
+    }
+    impl Seg {
+        fn start(&self) -> Point {
+            match *self {
+                Seg::Line(a, _) | Seg::Quad(a, _, _) | Seg::Cubic(a, _, _, _) => a,
+            }
+        }
+        fn end(&self) -> Point {
+            match *self {
+                Seg::Line(_, b) | Seg::Quad(_, _, b) | Seg::Cubic(_, _, _, b) => b,
+            }
+        }
+        fn shifted(&self, v: Point) -> Seg {
+            let m = |p: Point| Point::new(p.x + v.x, p.y + v.y);
+            match *self {
+                Seg::Line(a, b) => Seg::Line(m(a), m(b)),
+                Seg::Quad(a, c, b) => Seg::Quad(m(a), m(c), m(b)),
+                Seg::Cubic(a, c1, c2, b) => Seg::Cubic(m(a), m(c1), m(c2), m(b)),
+            }
+        }
+    }
+    fn lerp(a: Point, b: Point, t: f32) -> Point {
+        Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+    }
+    /// Where a curve's derivative is zero in one axis, strictly inside (0, 1).
+    fn quad_root(p0: f32, c: f32, p1: f32, push: &mut impl FnMut(f32)) {
+        let den = p0 - 2. * c + p1;
+        if den != 0. {
+            push((p0 - c) / den);
+        }
+    }
+    fn cubic_roots(p0: f32, c1: f32, c2: f32, p1: f32, push: &mut impl FnMut(f32)) {
+        let a = -p0 + 3. * c1 - 3. * c2 + p1;
+        let b = 2. * (p0 - 2. * c1 + c2);
+        let c = c1 - p0;
+        if a.abs() < 1e-12 {
+            if b != 0. {
+                push(-c / b);
+            }
+            return;
+        }
+        let disc = b * b - 4. * a * c;
+        if disc < 0. {
+            return;
+        }
+        let r = disc.sqrt();
+        push((-b + r) / (2. * a));
+        push((-b - r) / (2. * a));
+    }
+    /// `seg` split where it turns in x or y, each piece passed to `out`:
+    /// at most four turns, so no allocation.
+    fn monotonic(seg: Seg, out: &mut impl FnMut(Seg)) {
+        let mut ts = [0f32; 4];
+        let mut n = 0;
+        let mut push = |t: f32| {
+            if t > 0. && t < 1. && n < 4 {
+                ts[n] = t;
+                n += 1;
+            }
+        };
+        match seg {
+            Seg::Line(..) => {}
+            Seg::Quad(a, c, b) => {
+                quad_root(a.x, c.x, b.x, &mut push);
+                quad_root(a.y, c.y, b.y, &mut push);
+            }
+            Seg::Cubic(a, c1, c2, b) => {
+                cubic_roots(a.x, c1.x, c2.x, b.x, &mut push);
+                cubic_roots(a.y, c1.y, c2.y, b.y, &mut push);
+            }
+        }
+        let ts = &mut ts[..n];
+        ts.sort_unstable_by(|a, b| a.total_cmp(b));
+        let mut rest = seg;
+        let mut done = 0.;
+        for &t in ts.iter() {
+            if t - done < 1e-6 {
+                continue;
+            }
+            let u = ((t - done) / (1. - done)).clamp(0., 1.);
+            let (head, tail) = split_at(rest, u);
+            out(head);
+            rest = tail;
+            done = t;
+        }
+        out(rest);
+    }
+    fn split_at(seg: Seg, u: f32) -> (Seg, Seg) {
+        match seg {
+            Seg::Line(a, b) => {
+                let m = lerp(a, b, u);
+                (Seg::Line(a, m), Seg::Line(m, b))
+            }
+            Seg::Quad(a, c, b) => {
+                let (ac, cb) = (lerp(a, c, u), lerp(c, b, u));
+                let m = lerp(ac, cb, u);
+                (Seg::Quad(a, ac, m), Seg::Quad(m, cb, b))
+            }
+            Seg::Cubic(a, c1, c2, b) => {
+                let (p01, p12, p23) = (lerp(a, c1, u), lerp(c1, c2, u), lerp(c2, b, u));
+                let (p012, p123) = (lerp(p01, p12, u), lerp(p12, p23, u));
+                let m = lerp(p012, p123, u);
+                (Seg::Cubic(a, p01, p012, m), Seg::Cubic(m, p123, p23, b))
+            }
+        }
+    }
+    /// Each segment of the outline in `points`/`verbs`, contour by contour
+    /// (`Some(seg)`, and `None` at each contour's end), closing contours.
+    fn segments(points: &[Point], verbs: &[Verb], mut f: impl FnMut(Option<Seg>)) {
+        let (mut i, mut at, mut first, mut open) = (0, Point::ZERO, Point::ZERO, false);
+        let close = |at: Point, first: Point, open: &mut bool, f: &mut dyn FnMut(Option<Seg>)| {
+            if *open {
+                if at.x != first.x || at.y != first.y {
+                    f(Some(Seg::Line(at, first)));
+                }
+                f(None);
+                *open = false;
+            }
+        };
+        for verb in verbs {
+            match verb {
+                Verb::MoveTo => {
+                    close(at, first, &mut open, &mut f);
+                    at = points[i];
+                    first = at;
+                    open = true;
+                    i += 1;
+                }
+                Verb::LineTo => {
+                    f(Some(Seg::Line(at, points[i])));
+                    at = points[i];
+                    i += 1;
+                }
+                Verb::QuadTo => {
+                    f(Some(Seg::Quad(at, points[i], points[i + 1])));
+                    at = points[i + 1];
+                    i += 2;
+                }
+                Verb::CurveTo => {
+                    f(Some(Seg::Cubic(
+                        at,
+                        points[i],
+                        points[i + 1],
+                        points[i + 2],
+                    )));
+                    at = points[i + 2];
+                    i += 3;
+                }
+                Verb::Close => {
+                    close(at, first, &mut open, &mut f);
+                    at = first;
+                }
+            }
+        }
+        close(at, first, &mut open, &mut f);
+    }
+
+    /// The outline in `points`/`verbs` dilated into `out_points`/`out_verbs`
+    /// (cleared first), allocation-free once they have grown.
+    pub(super) fn dilate(
+        points: &[Point],
+        verbs: &[Verb],
+        d: f32,
+        out_points: &mut Vec<Point>,
+        out_verbs: &mut Vec<Verb>,
+    ) {
+        // Orientation: the whole outline's signed area (y up), as the
+        // dilator's begin pass sums it.
+        let mut area = 0.;
+        segments(points, verbs, |seg| {
+            if let Some(s) = seg {
+                let (a, b) = (s.start(), s.end());
+                area += a.x * b.y - b.x * a.y;
+            }
+        });
+        let o = if area < 0. { -1. } else { 1. };
+        out_points.clear();
+        out_verbs.clear();
+        let mut last: Option<Point> = None;
+        segments(points, verbs, |seg| {
+            let Some(seg) = seg else {
+                if last.take().is_some() {
+                    out_verbs.push(Verb::Close);
+                }
+                return;
+            };
+            monotonic(seg, &mut |s: Seg| {
+                let (a, b) = (s.start(), s.end());
+                // Taken as counter-clockwise (`o`): the shift follows them alone.
+                let (dx, dy) = ((b.x - a.x) * o, (b.y - a.y) * o);
+                let sx = if dy > 0. {
+                    d
+                } else if dy < 0. {
+                    -d
+                } else {
+                    0.
+                };
+                let sy = if dx < 0. {
+                    2. * d
+                } else if dx > 0. {
+                    0.
+                } else {
+                    d
+                };
+                let s = s.shifted(Point::new(sx, sy));
+                match last {
+                    None => {
+                        out_points.push(s.start());
+                        out_verbs.push(Verb::MoveTo);
+                    }
+                    Some(p) if p.x != s.start().x || p.y != s.start().y => {
+                        out_points.push(s.start());
+                        out_verbs.push(Verb::LineTo);
+                    }
+                    _ => {}
+                }
+                match s {
+                    Seg::Line(_, b) => {
+                        out_points.push(b);
+                        out_verbs.push(Verb::LineTo);
+                    }
+                    Seg::Quad(_, c, b) => {
+                        out_points.extend([c, b]);
+                        out_verbs.push(Verb::QuadTo);
+                    }
+                    Seg::Cubic(_, c1, c2, b) => {
+                        out_points.extend([c1, c2, b]);
+                        out_verbs.push(Verb::CurveTo);
+                    }
+                }
+                last = Some(s.end());
+            });
+        });
     }
 }

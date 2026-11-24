@@ -4,11 +4,12 @@
 //! picked in them (`ui.read_file`, `ui.write_file`). A script reaches only
 //! files the user chose, as a web page does; reads and writes run off the
 //! main thread. A plugin gets none of it unless its host grants it.
+use crate::Str;
 use crate::{
     calls::{PromiseUd, pending, settle_failing, settle_with},
     value::Value,
 };
-use mlua::{IntoLua, Lua, Table};
+use mlua::{FromLua, IntoLua, Lua, Table};
 use std::{
     cell::RefCell,
     collections::HashSet,
@@ -24,6 +25,61 @@ pub(crate) type SharedPlatform = Rc<RefCell<Option<PlatformService>>>;
 /// may read or write.
 pub(crate) type Picked = Rc<RefCell<HashSet<PathBuf>>>;
 
+/// Where `d:save_temp` saves (`ScriptHost::download_dir`): nowhere until
+/// the host names a folder; and the paths downloads still going hold, so
+/// two of one name never share a file.
+#[derive(Default)]
+pub(crate) struct Downloads {
+    pub dir: RefCell<Option<PathBuf>>,
+    saving: RefCell<HashSet<PathBuf>>,
+}
+impl Downloads {
+    /// A path in `dir` for a download suggested as `name` that no file and
+    /// no download going has: `name`, else `name (1)`, `name (2)`…, its
+    /// extension kept.
+    pub fn reserve(&self, dir: &Path, name: &str) -> PathBuf {
+        let name = PathBuf::from(safe_name(name));
+        let stem = name
+            .file_stem()
+            .map_or_else(Default::default, |s| s.to_string_lossy().into_owned());
+        let extension = name.extension().map(|e| e.to_string_lossy().into_owned());
+        let mut saving = self.saving.borrow_mut();
+        let mut path = dir.join(&name);
+        let mut n = 0;
+        while saving.contains(&path) || std::fs::symlink_metadata(&path).is_ok() {
+            n += 1;
+            path = dir.join(match &extension {
+                Some(extension) => format!("{stem} ({n}).{extension}"),
+                None => format!("{stem} ({n})"),
+            });
+        }
+        saving.insert(path.clone());
+        path
+    }
+    /// `path`'s download ended: its name is the file's, or free again.
+    pub fn release(&self, path: &Path) {
+        self.saving.borrow_mut().remove(path);
+    }
+}
+/// A suggested name as one file's name in the folder: no folders, no
+/// characters a platform refuses in a name, never empty or `..`.
+fn safe_name(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .take(200)
+        .collect();
+    let name = name.trim().trim_end_matches('.');
+    match name {
+        "" | "." | ".." => "download".into(),
+        name => name.into(),
+    }
+}
+
 pub(crate) fn platform(shared: &SharedPlatform, what: &str) -> mlua::Result<PlatformService> {
     shared.borrow().clone().ok_or_else(|| {
         mlua::Error::runtime(format!(
@@ -37,6 +93,15 @@ pub(crate) fn later(shared: &SharedPlatform, what: &str) -> Result<PlatformServi
     shared.borrow().clone().ok_or_else(|| {
         format!("{what}: no platform here (the clipboard and file dialogs need a desktop window)")
     })
+}
+/// A copy's `types` (`ui.clipboard.write`, a region's `on_copy`): MIME
+/// types of the app's own and their text, `{ [mime] = text }`, in the
+/// order of their names; none where it has none.
+pub(crate) fn clipboard_types(content: &Table) -> mlua::Result<Vec<(String, String)>> {
+    let types: Option<std::collections::BTreeMap<String, String>> = content
+        .get("types")
+        .map_err(|_| mlua::Error::runtime("types is { [mime] = text }, each a string"))?;
+    Ok(types.unwrap_or_default().into_iter().collect())
 }
 pub(crate) fn denied(what: &str, capability: &str) -> mlua::Error {
     mlua::Error::runtime(format!(
@@ -68,7 +133,9 @@ fn listen(
                 continue;
             };
             vm.runtime.clone().batch(|| {
-                if let Err(e) = vm.call::<()>(&on_click, ()) {
+                if let Err(e) =
+                    vm.call_as::<()>("the notification's on_click handler", &on_click, ())
+                {
                     vm.report(e);
                 }
             });
@@ -92,10 +159,10 @@ pub(crate) fn file_value(path: &Path) -> Value {
         .map_or(0, |m| m.len());
     Value::Map(
         vec![
-            (Rc::from("name"), Value::Str(name.into())),
-            (Rc::from("path"), Value::Str(path.to_string_lossy().into())),
-            (Rc::from("size"), Value::Num(size as f64)),
-            (Rc::from("type"), Value::Str(media_type(path).into())),
+            (Str::from("name"), Value::Str(name.into())),
+            (Str::from("path"), Value::Str(path.to_string_lossy().into())),
+            (Str::from("size"), Value::Num(size as f64)),
+            (Str::from("type"), Value::Str(media_type(path).into())),
         ]
         .into(),
     )
@@ -161,7 +228,7 @@ pub(crate) fn picker(opts: Option<Table>, title: &str) -> mlua::Result<FilePicke
 }
 /// A file a script names (`{ path }` from a dialog, or its path), if the
 /// user picked it.
-fn chosen(picked: &Picked, file: &mlua::Value, what: &str) -> mlua::Result<PathBuf> {
+pub(crate) fn chosen(picked: &Picked, file: &mlua::Value, what: &str) -> mlua::Result<PathBuf> {
     let path = match file {
         mlua::Value::String(path) => path.to_str()?.to_string(),
         mlua::Value::Table(file) => file.get::<String>("path")?,
@@ -191,6 +258,11 @@ fn off_thread(
 ) -> mlua::Result<PromiseUd> {
     let (tell, mut heard) = zgx::task::latest::<Result<Option<String>, String>>();
     let promise = pending(lua, name)?;
+    // No threads in the browser (wasm32): the work runs here, and fails
+    // there as its file access does.
+    #[cfg(target_arch = "wasm32")]
+    tell.send(work());
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(move || {
         tell.send(work());
     });
@@ -201,6 +273,76 @@ fn off_thread(
             Some(Err(error)) => Err(error),
             None => Err("the file thread stopped".into()),
         }
+    })?;
+    Ok(PromiseUd(promise))
+}
+
+/// The largest font file `ui.load_font` reads: what `FontData` takes.
+const FONT_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// A font file's bytes, read only if its size is one a font may have.
+fn read_font(path: &Path) -> Result<Vec<u8>, String> {
+    let failed = |e: std::io::Error| format!("{}: {e}", path.display());
+    let size = std::fs::metadata(path).map_err(failed)?.len();
+    if size == 0 || size > FONT_LIMIT {
+        return Err(format!(
+            "{}: a font is 1 byte to 64 MiB, not {size} bytes",
+            path.display()
+        ));
+    }
+    std::fs::read(path).map_err(failed)
+}
+
+/// `ui.load_font(src)`: the font file at `src` (a path from the script's
+/// directory, or a `File` the user picked), or a font's bytes in base64
+/// (`{ base64 = … }`: one a server or a host's call handed over), added to
+/// every window's text, read off the main thread. A promise of the family
+/// names it holds.
+fn load_font(lua: &Lua, src: mlua::Value, shared: SharedPlatform) -> mlua::Result<PromiseUd> {
+    type Read = Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send>;
+    let file = |given: String| -> mlua::Result<(String, Read)> {
+        let vm = crate::node::env(lua)?.vm.upgrade();
+        let vm = vm.ok_or_else(|| mlua::Error::runtime("ui.load_font: its script is gone"))?;
+        let path =
+            crate::lower::resolve_path_of(&vm, &given, "fonts").map_err(mlua::Error::runtime)?;
+        Ok((given, Box::new(move || read_font(&path))))
+    };
+    let (given, read) = match &src {
+        mlua::Value::String(path) => file(path.to_str()?.to_string())?,
+        mlua::Value::Table(t) => match t.get::<Option<mlua::LuaString>>("base64")? {
+            Some(encoded) => {
+                let encoded = encoded.as_bytes().to_vec();
+                let read: Read =
+                    Box::new(move || crate::b64::decode(&encoded, FONT_LIMIT as usize, "a font"));
+                ("{ base64 }".to_string(), read)
+            }
+            None => file(t.get::<String>("path")?)?,
+        },
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "ui.load_font takes a path, a File or {{ base64 = … }}, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let (tell, mut heard) = zgx::task::latest::<Result<Vec<u8>, String>>();
+    let promise = pending(lua, format!("load_font {given}"))?;
+    // No threads in the browser (wasm32): read here.
+    #[cfg(target_arch = "wasm32")]
+    tell.send(read());
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::work::run(move || {
+        tell.send(read());
+    });
+    settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+        let bytes = heard.recv().await.ok_or("the file thread stopped")??;
+        let families = later(&shared, "ui.load_font")?
+            .0
+            .add_font(bytes.into())
+            .map_err(|e| format!("{given}: {e}"))?;
+        Ok(Value::List(
+            families.into_iter().map(|f| Value::Str(f.into())).collect(),
+        ))
     })?;
     Ok(PromiseUd(promise))
 }
@@ -218,9 +360,12 @@ pub(crate) fn pasted_files(lua: &Lua) -> mlua::Result<mlua::Value> {
     Value::List(paths.iter().map(|path| file_value(path)).collect()).into_lua(lua)
 }
 
-/// Installs `ui.clipboard` (text and images), `ui.open_files`, `ui.save_file`, `ui.read_file`
-/// and `ui.write_file`. `clipboard` and `files` are false for a plugin the
-/// host did not grant them.
+/// The most `ui.write_file` decodes from base64.
+const WRITE_LIMIT: usize = 256 << 20;
+
+/// Installs `ui.clipboard` (text and images), `ui.open_files`, `ui.save_file`, `ui.read_file`,
+/// `ui.write_file` and `ui.load_font`. `clipboard`, `files` and `fonts` are
+/// false for a plugin the host did not grant them.
 pub(crate) fn install(
     lua: &Lua,
     ui: &Table,
@@ -228,7 +373,20 @@ pub(crate) fn install(
     picked: Picked,
     clipboard: bool,
     files: bool,
+    fonts: bool,
 ) -> mlua::Result<()> {
+    {
+        let shared = shared.clone();
+        ui.set(
+            "load_font",
+            lua.create_function(move |lua, src: mlua::Value| {
+                if !fonts {
+                    return Err(denied("ui.load_font", "Fonts"));
+                }
+                load_font(lua, src, shared.clone())
+            })?,
+        )?;
+    }
     let board = lua.create_table()?;
     {
         let shared = shared.clone();
@@ -247,14 +405,98 @@ pub(crate) fn install(
         let shared = shared.clone();
         board.set(
             "write",
-            lua.create_function(move |lua, text: String| {
+            // Text, or `{ text, html?, types?, image? }`: HTML and types of
+            // the app's own beside the text, in one change of the
+            // clipboard; with `image` (PNG bytes) too, a promise, as a
+            // platform pasting images decoded decodes it off the main thread.
+            lua.create_function(move |lua, content: mlua::Value| {
                 if !clipboard {
                     return Err(denied("ui.clipboard.write", "Clipboard"));
                 }
                 crate::rules::guard(lua, crate::GuardKind::Clipboard, "write")?;
-                Ok(platform(&shared, "ui.clipboard.write")?
+                let platform = platform(&shared, "ui.clipboard.write")?;
+                let content = match content {
+                    mlua::Value::Table(table) => {
+                        let text: String = table.get("text")?;
+                        let html: Option<String> = table.get("html")?;
+                        let types = clipboard_types(&table)?;
+                        let image: Option<mlua::LuaString> = table.get("image").map_err(|_| {
+                            mlua::Error::runtime("image is a PNG's bytes, a string")
+                        })?;
+                        match image {
+                            Some(png) => {
+                                let png: std::sync::Arc<[u8]> = png.as_bytes().as_ref().into();
+                                if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+                                    return Err(mlua::Error::runtime(
+                                        "ui.clipboard.write: image is a PNG's bytes",
+                                    ));
+                                }
+                                let promise = pending(lua, "clipboard.write".into())?;
+                                let shared = shared.clone();
+                                settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+                                    let platform = later(&shared, "ui.clipboard.write")?;
+                                    let wrote = platform
+                                        .0
+                                        .set_clipboard_typed_image(text, html, &types, png)
+                                        .await;
+                                    Ok(Value::Bool(wrote))
+                                })?;
+                                return PromiseUd(promise).into_lua(lua);
+                            }
+                            None => zgx::widgets::ClipboardContent { text, html, types },
+                        }
+                    }
+                    text => {
+                        let text = String::from_lua(text, lua)?;
+                        return platform.0.set_clipboard_text(text).into_lua(lua);
+                    }
+                };
+                content.write(&*platform.0).into_lua(lua)
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        board.set(
+            "read_html",
+            lua.create_function(move |lua, ()| {
+                if !clipboard {
+                    return Err(denied("ui.clipboard.read_html", "Clipboard"));
+                }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read")?;
+                Ok(platform(&shared, "ui.clipboard.read_html")?
                     .0
-                    .set_clipboard_text(text))
+                    .clipboard_html())
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        board.set(
+            "read_type",
+            lua.create_function(move |lua, mime: String| {
+                if !clipboard {
+                    return Err(denied("ui.clipboard.read_type", "Clipboard"));
+                }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "read")?;
+                Ok(platform(&shared, "ui.clipboard.read_type")?
+                    .0
+                    .clipboard_typed(&mime))
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        board.set(
+            "write_html",
+            lua.create_function(move |lua, (text, html): (String, String)| {
+                if !clipboard {
+                    return Err(denied("ui.clipboard.write_html", "Clipboard"));
+                }
+                crate::rules::guard(lua, crate::GuardKind::Clipboard, "write")?;
+                Ok(platform(&shared, "ui.clipboard.write_html")?
+                    .0
+                    .set_clipboard_rich_text(text, html))
             })?,
         )?;
     }
@@ -456,44 +698,115 @@ pub(crate) fn install(
         let picked = picked.clone();
         ui.set(
             "read_file",
-            lua.create_function(move |lua, file: mlua::Value| {
+            lua.create_function(move |lua, (file, opts): (mlua::Value, Option<Table>)| {
                 if !files {
                     return Err(denied("ui.read_file", "Files"));
                 }
                 let path = chosen(&picked, &file, "ui.read_file")?;
                 crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
+                // Text (a byte that isn't UTF-8 becomes U+FFFD), or with
+                // `base64` every byte, whole (a picture to keep).
+                let encoded = match &opts {
+                    Some(opts) => opts.get::<Option<bool>>("base64")?.unwrap_or(false),
+                    None => false,
+                };
                 off_thread(lua, format!("read {}", path.display()), move || {
+                    use base64::Engine as _;
                     std::fs::read(&path)
-                        .map(|bytes| Some(String::from_utf8_lossy(&bytes).into_owned()))
+                        .map(|bytes| match encoded {
+                            true => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                            false => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                        })
                         .map_err(|e| format!("{}: {e}", path.display()))
                 })
             })?,
         )?;
     }
+    {
+        // A .zip into a file the user picked, an entry at a time (zip.rs).
+        let picked = picked.clone();
+        ui.set(
+            "zip",
+            lua.create_function(move |lua, file: mlua::Value| {
+                if !files {
+                    return Err(denied("ui.zip", "Files"));
+                }
+                let path = chosen(&picked, &file, "ui.zip")?;
+                crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
+                let zip = crate::zip::open(path)
+                    .map_err(|e| mlua::Error::runtime(format!("ui.zip: {e}")))?;
+                lua.create_userdata(zip)
+            })?,
+        )?;
+    }
     ui.set(
         "write_file",
-        lua.create_function(move |lua, (file, text): (mlua::Value, String)| {
-            if !files {
-                return Err(denied("ui.write_file", "Files"));
-            }
-            let path = chosen(&picked, &file, "ui.write_file")?;
-            crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
-            off_thread(lua, format!("write {}", path.display()), move || {
-                // Beside it, then over it: never half a file.
-                let temp = path.with_extension("zgx-write");
-                std::fs::write(&temp, text)
-                    .and_then(|()| std::fs::rename(&temp, &path))
-                    .map(|()| None)
-                    .map_err(|e| format!("{}: {e}", path.display()))
-            })
-        })?,
+        lua.create_function(
+            move |lua, (file, data, opts): (mlua::Value, mlua::Value, Option<mlua::Table>)| {
+                if !files {
+                    return Err(denied("ui.write_file", "Files"));
+                }
+                // `append = true`: onto the end of the file instead of over it,
+                // to write a big file in parts (await each part: they're
+                // written in the order they finish).
+                let append = match &opts {
+                    Some(opts) => opts.get::<Option<bool>>("append")?.unwrap_or(false),
+                    None => false,
+                };
+                let path = chosen(&picked, &file, "ui.write_file")?;
+                crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
+                // A string's bytes as they are (any byte, not only UTF-8), or
+                // bytes in base64 (a PNG a canvas rendered, a server's file).
+                let (bytes, encoded) = match &data {
+                    mlua::Value::String(text) => (text.as_bytes().to_vec(), false),
+                    mlua::Value::Table(t) => match t.get::<Option<mlua::LuaString>>("base64")? {
+                        Some(encoded) => (encoded.as_bytes().to_vec(), true),
+                        None => {
+                            return Err(mlua::Error::runtime(
+                                "ui.write_file: a table gives the bytes as `base64`",
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "ui.write_file writes a string or {{ base64 = … }}, not {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                off_thread(lua, format!("write {}", path.display()), move || {
+                    let bytes = match encoded {
+                        true => {
+                            crate::b64::decode(&bytes, WRITE_LIMIT, &path.display().to_string())?
+                        }
+                        false => bytes,
+                    };
+                    if append {
+                        use std::io::Write as _;
+                        return std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                            .and_then(|mut f| f.write_all(&bytes))
+                            .map(|()| None)
+                            .map_err(|e| format!("{}: {e}", path.display()));
+                    }
+                    // Beside it, then over it: never half a file.
+                    let temp = path.with_extension("zgx-write");
+                    std::fs::write(&temp, bytes)
+                        .and_then(|()| std::fs::rename(&temp, &path))
+                        .map(|()| None)
+                        .map_err(|e| format!("{}: {e}", path.display()))
+                })
+            },
+        )?,
     )?;
     Ok(())
 }
 
 /// `on_download`'s `d`: a download the page started, for the script to save
 /// (`d:save_to(file)`, a file the user picked; `d:ask()`, the save dialog
-/// with its name) or not (`d:cancel()`). One left unanswered is cancelled
+/// with its name; `d:save_temp()`, the host's folder for them) or not (`d:cancel()`). One left unanswered is cancelled
 /// as it's collected: a page saves nothing the app didn't decide on.
 pub(crate) struct DownloadUd {
     request: zgx::web_view::DownloadRequest,
@@ -537,13 +850,23 @@ fn download_status(
     Ok(move |status: DownloadStatus| {
         let Some(vm) = vm.upgrade() else { return };
         let result = match status {
-            DownloadStatus::Progress { received, total } => progress
+            DownloadStatus::Progress { received, total } => progress.as_ref().map(|f| {
+                vm.call_as::<()>(
+                    "the download's on_progress handler",
+                    f,
+                    (received as f64, total.map(|t| t as f64)),
+                )
+            }),
+            DownloadStatus::Finished => finish.as_ref().map(|f| {
+                vm.call_as::<()>(
+                    "the download's on_done handler",
+                    f,
+                    (true, mlua::Value::Nil),
+                )
+            }),
+            DownloadStatus::Failed(why) => finish
                 .as_ref()
-                .map(|f| vm.call::<()>(f, (received as f64, total.map(|t| t as f64)))),
-            DownloadStatus::Finished => finish
-                .as_ref()
-                .map(|f| vm.call::<()>(f, (true, mlua::Value::Nil))),
-            DownloadStatus::Failed(why) => finish.as_ref().map(|f| vm.call::<()>(f, (false, why))),
+                .map(|f| vm.call_as::<()>("the download's on_done handler", f, (false, why))),
             _ => None,
         };
         if let Some(Err(e)) = result {
@@ -597,6 +920,70 @@ impl mlua::UserData for DownloadUd {
                 picked.borrow_mut().insert(path.clone());
                 responder.save_to(path.clone(), status);
                 Ok(file_value(&path))
+            })?;
+            Ok(PromiseUd(promise))
+        });
+        // Saved with no dialog, in the folder the host names for downloads
+        // (`ScriptHost::download_dir`), under its name made unique: a
+        // promise of the file once it is whole, or nil if it stopped. The
+        // file is the script's to read and pass on, as a picked one is.
+        methods.add_method("save_temp", |lua, d, opts: Option<Table>| {
+            let env = crate::node::env(lua)?;
+            if !env.grants.allows(&crate::Capability::Files) {
+                return Err(denied("d:save_temp", "Files"));
+            }
+            let Some(dir) = env.downloads.dir.borrow().clone() else {
+                return Err(mlua::Error::runtime(
+                    "d:save_temp: the host names no folder for downloads \
+                     (`ScriptHost::download_dir`)",
+                ));
+            };
+            if d.responder.borrow().is_none() {
+                return Err(mlua::Error::runtime(
+                    "d:save_temp: this download was answered already",
+                ));
+            }
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                mlua::Error::runtime(format!("d:save_temp: {}: {e}", dir.display()))
+            })?;
+            let path = env.downloads.reserve(&dir, &d.request.name);
+            let mut status =
+                match crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())
+                    .and_then(|()| download_status(lua, opts))
+                {
+                    Ok(status) => status,
+                    Err(e) => {
+                        env.downloads.release(&path);
+                        return Err(e);
+                    }
+                };
+            let (tell, mut heard) = zgx::task::latest::<bool>();
+            let (picked, downloads, saved) =
+                (env.picked.clone(), env.downloads.clone(), path.clone());
+            d.take("d:save_temp")?.save_to(path.clone(), move |s| {
+                use zgx::web_view::DownloadStatus;
+                let ended = match &s {
+                    DownloadStatus::Finished => Some(true),
+                    DownloadStatus::Failed(_) => Some(false),
+                    _ => None,
+                };
+                if let Some(whole) = ended {
+                    downloads.release(&saved);
+                    if whole {
+                        picked.borrow_mut().insert(saved.clone());
+                    }
+                }
+                status(s);
+                if let Some(whole) = ended {
+                    tell.send(whole);
+                }
+            });
+            let promise = pending(lua, "save_temp".into())?;
+            settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+                match heard.recv().await {
+                    Some(true) => Ok(file_value(&path)),
+                    _ => Ok(Value::Nil),
+                }
             })?;
             Ok(PromiseUd(promise))
         });

@@ -63,7 +63,13 @@ def main():
             time.sleep(.05)
 
     def lines(log, prefix):
-        found = re.findall(rf"^{prefix}(?: (.*))?$", log.read_text(errors="replace"), re.M)
+        # The app's lines and the Wayland half's protocol trace are both on
+        # stderr, written apart: a trace line can land in one of the app's
+        # (`LOCK true[ 691886.956] wl_pointer#45.frame()`). So each line is
+        # its prefix, not inside a word (`RELOCK` is not `LOCK`), and what
+        # follows up to the end of the line or a trace's `[` or `(`.
+        found = [value.rstrip() for value in re.findall(
+            rf"(?<![A-Za-z_]){prefix}(?: ([^\[\(\n]*))?", log.read_text(errors="replace"))]
         # `LOCK` is the lock's changes; `LOCK asked` what the press asked.
         return [line for line in found if prefix != "LOCK" or not line.startswith("asked")]
 

@@ -130,7 +130,12 @@ fn main() {
     for _ in 0..ticks {
         host.run_command("tick");
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
     }
     let elapsed = at.elapsed();
     println!(

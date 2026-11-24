@@ -57,13 +57,24 @@ fn main() {
             .child(text_input("Name", value).w(160.))
     }));
     let _handle = ui.mount(view);
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     let mount = started.elapsed();
     let retained = LIVE.load(Relaxed) - before;
     let mount_allocations = ALLOCATIONS.load(Relaxed) - allocations;
     let started = Instant::now();
     for _ in 0..1000 {
-        assert!(ui.scene.borrow_mut().flush().is_idle());
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+            assert!(flushed.is_idle());
+        }
     }
     let idle = started.elapsed();
     // Hover across the first buttons: each enter and leave restyles one.
@@ -72,7 +83,13 @@ fn main() {
     for step in 0..400 {
         let y = 4. + (step % 20) as f32 * 36.;
         ui.dispatch(InputEvent::PointerMove { x: 20., y });
-        painted += ui.scene.borrow_mut().flush().paint_nodes;
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+            painted += flushed.paint_nodes;
+        }
     }
     let hover = started.elapsed();
     println!(
@@ -102,6 +119,9 @@ fn main() {
                 })
                 .unwrap();
             let report = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+            }
             layout += report.layout_nodes;
             paint += report.paint_nodes;
         }

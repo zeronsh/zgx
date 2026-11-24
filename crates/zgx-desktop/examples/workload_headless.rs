@@ -160,6 +160,9 @@ fn main() {
         }
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+        }
         let laid = Instant::now();
         let Some(gpu) = &mut gpu else {
             zgx::profile::frame();

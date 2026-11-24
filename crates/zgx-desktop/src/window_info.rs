@@ -483,7 +483,10 @@ pub(crate) fn attributes(
             attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
         }
     }
-    // Over the whole of its display: its frame, in physical pixels.
+    // Over the whole of its display: its frame, in physical pixels. On
+    // Wayland a window's size is in the compositor's logical pixels, which
+    // winit can't tell a display's in (wayland_output.rs), and where it
+    // shows is the compositor's to choose.
     if options.covers_display {
         let monitor = match &options.display {
             Some(selector) => select_monitor(event_loop, selector),
@@ -492,9 +495,15 @@ pub(crate) fn attributes(
                 .or_else(|| event_loop.available_monitors().next()),
         }
         .ok_or_else(|| "no display to cover".to_owned())?;
-        attrs = attrs
-            .with_inner_size(monitor.size())
-            .with_position(monitor.position());
+        #[cfg(target_os = "linux")]
+        let logical = crate::wayland_output::covering_size(event_loop, &monitor);
+        #[cfg(not(target_os = "linux"))]
+        let logical: Option<winit::dpi::LogicalSize<u32>> = None;
+        attrs = match logical {
+            Some(size) => attrs.with_inner_size(size),
+            None => attrs.with_inner_size(monitor.size()),
+        }
+        .with_position(monitor.position());
     }
     Ok(attrs)
 }

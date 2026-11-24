@@ -71,20 +71,20 @@ def main():
             text = lambda: log.read_text(errors="replace")
             # Configured, and a buffer on its surface: the window is up.
             until("the window configured and drawn",
-                  lambda: "ack_configure(" in text() and re.search(r"-> wl_surface@\d+\.attach\(", text()))
+                  lambda: "ack_configure(" in text() and re.search(r"-> wl_surface[@#]\d+\.attach\(", text()))
             time.sleep(1.5)
             if app.poll() is not None:
                 raise AssertionError(f"glass_counter exited with {app.returncode}; see glass_counter.log")
             log_text = text()
-            if "wl_display@1.error(" in log_text:
+            if re.search(r"wl_display[@#]1\.error\(", log_text):
                 raise AssertionError("a protocol error; see glass_counter.log")
-            advertised = set(re.findall(r'wl_registry@\d+\.global\(\d+, "([a-z0-9_]+)", \d+\)', log_text))
+            advertised = set(re.findall(r'wl_registry[@#]\d+\.global\(\d+, "([a-z0-9_]+)", \d+\)', log_text))
             standard = "ext_background_effect_manager_v1" in advertised
             kwin = "org_kde_kwin_blur_manager" in advertised
-            asked_standard = bool(re.search(r"-> ext_background_effect_manager_v1@\d+\.get_background_effect\(",
+            asked_standard = bool(re.search(r"-> ext_background_effect_manager_v1[@#]\d+\.get_background_effect\(",
                                             log_text)) and bool(
-                re.search(r"-> ext_background_effect_surface_v1@\d+\.set_blur_region\(", log_text))
-            asked_kwin = bool(re.search(r"-> org_kde_kwin_blur_manager@\d+\.create\(", log_text))
+                re.search(r"-> ext_background_effect_surface_v1[@#]\d+\.set_blur_region\(", log_text))
+            asked_kwin = bool(re.search(r"-> org_kde_kwin_blur_manager[@#]\d+\.create\(", log_text))
             checks["advertised"] = {"ext-background-effect": standard, "kwin blur": kwin}
             checks["asked"] = {"ext-background-effect": asked_standard, "kwin blur": asked_kwin}
             if standard and not asked_standard:

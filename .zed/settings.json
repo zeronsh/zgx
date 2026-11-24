@@ -7,7 +7,13 @@
       "settings": {
         "roblox": { "enabled": false },
         // zgx's types need Luau's new type solver; Roblox's flags do not apply.
-        "fflags": { "enable_new_solver": true, "sync": false },
+        // and `zgx check`'s iteration budget (a `Merge` of an element's
+        // props handed back to it needs more than the default's).
+        "fflags": {
+          "enable_new_solver": true,
+          "sync": false,
+          "override": { "LuauTypeInferIterationLimit": "100000" }
+        },
         "definitions": ["crates/zgx-script/types/zgx.d.luau"],
         "luau-lsp": {
           "platform": { "type": "standard" },

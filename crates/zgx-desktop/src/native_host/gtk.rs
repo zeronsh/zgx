@@ -41,6 +41,11 @@ macro_rules! api {
             /// same.
             pub gdk_x11_window_foreign_new_for_display:
                 Option<unsafe extern "C" fn(Ptr, std::ffi::c_ulong) -> Ptr>,
+            /// `atk_bridge_adaptor_init(argc, argv)` and its cleanup: the
+            /// AT-SPI bridge GTK links (`libatk-bridge-2.0`), where it does.
+            pub atk_bridge_adaptor_init:
+                Option<unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char) -> c_int>,
+            pub atk_bridge_adaptor_cleanup: Option<unsafe extern "C" fn()>,
             _libraries: Vec<Library>,
         }
         impl Api {
@@ -70,6 +75,8 @@ macro_rules! api {
                         "gdk_x11_window_foreign_new_for_display",
                     )
                     .ok(),
+                    atk_bridge_adaptor_init: find(&libraries, "atk_bridge_adaptor_init").ok(),
+                    atk_bridge_adaptor_cleanup: find(&libraries, "atk_bridge_adaptor_cleanup").ok(),
                     _libraries: libraries,
                 })
             }
@@ -84,6 +91,8 @@ api! {
     fn g_free(Ptr);
     fn g_strdup(*const c_char) -> *mut c_char;
     fn g_list_free(*mut GList);
+    fn g_list_prepend(*mut GList, Ptr) -> *mut GList;
+    fn g_list_free_full(*mut GList, Option<unsafe extern "C" fn(Ptr)>);
     fn g_type_name_from_instance(Ptr) -> *const c_char;
     fn g_bytes_new(*const c_void, usize) -> Ptr;
     fn g_bytes_get_data(Ptr, *mut usize) -> *const c_void;
@@ -93,6 +102,7 @@ api! {
     fn g_quark_from_static_string(*const c_char) -> u32;
     fn g_object_ref(Ptr) -> Ptr;
     fn g_object_unref(Ptr);
+    fn g_object_weak_ref(Ptr, unsafe extern "C" fn(Ptr, Ptr), Ptr);
     fn g_signal_connect_data(Ptr, *const c_char, GCallback, Ptr, Option<unsafe extern "C" fn(Ptr, Ptr)>, c_int) -> u64;
     fn g_signal_handlers_disconnect_matched(Ptr, c_int, c_uint, u32, Ptr, Ptr, Ptr) -> c_uint;
     fn g_type_query(GType, *mut GTypeQuery);
@@ -136,6 +146,7 @@ api! {
     fn atk_object_get_type() -> GType;
     fn g_type_class_ref(GType) -> Ptr;
     fn atk_object_set_role(Ptr, c_int);
+    fn atk_state_set_remove_state(Ptr, c_int) -> gboolean;
     fn gtk_widget_get_type() -> GType;
     fn g_signal_lookup(*const c_char, GType) -> c_uint;
     fn atk_util_get_type() -> GType;
@@ -245,6 +256,13 @@ api! {
     fn webkit_web_view_download_uri(Ptr, *const c_char) -> Ptr;
     fn webkit_settings_set_enable_developer_extras(Ptr, gboolean);
     fn webkit_settings_set_user_agent(Ptr, *const c_char);
+    fn webkit_web_view_get_website_data_manager(Ptr) -> Ptr;
+    fn webkit_website_data_manager_fetch(Ptr, c_uint, Ptr, Option<unsafe extern "C" fn(Ptr, Ptr, Ptr)>, Ptr);
+    fn webkit_website_data_manager_fetch_finish(Ptr, Ptr, *mut *mut GError) -> *mut GList;
+    fn webkit_website_data_manager_remove(Ptr, c_uint, *mut GList, Ptr, Option<unsafe extern "C" fn(Ptr, Ptr, Ptr)>, Ptr);
+    fn webkit_website_data_manager_remove_finish(Ptr, Ptr, *mut *mut GError) -> gboolean;
+    fn webkit_website_data_get_name(Ptr) -> *const c_char;
+    fn webkit_website_data_unref(Ptr);
     fn webkit_settings_set_hardware_acceleration_policy(Ptr, c_int);
     fn webkit_web_view_load_uri(Ptr, *const c_char);
     fn webkit_web_view_load_html(Ptr, *const c_char, *const c_char);
@@ -464,6 +482,9 @@ pub const WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER: c_int = 2;
 pub const WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE: c_uint = 1 << 0;
 pub const WEBKIT_FIND_OPTIONS_BACKWARDS: c_uint = 1 << 3;
 pub const WEBKIT_FIND_OPTIONS_WRAP_AROUND: c_uint = 1 << 4;
+/// Every kind of website data (`WEBKIT_WEBSITE_DATA_ALL`: cookies, caches,
+/// storage, IndexedDB, service workers, …).
+pub const WEBKIT_WEBSITE_DATA_ALL: c_uint = (1 << 14) - 1;
 pub const GDK_MOTION_NOTIFY: c_int = 3;
 pub const GDK_BUTTON_PRESS: c_int = 4;
 pub const GDK_BUTTON_RELEASE: c_int = 7;

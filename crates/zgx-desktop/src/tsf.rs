@@ -969,6 +969,14 @@ mod tests {
     //! does with it is Windows'.)
     use super::*;
     use windows::Win32::{
+        Foundation::E_FAIL,
+        UI::TextServices::{
+            ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContextComposition,
+            ITfEditSession, ITfEditSession_Impl, TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC,
+            TF_SELECTION,
+        },
+    };
+    use windows::Win32::{
         System::Com::CoTaskMemFree,
         UI::TextServices::{
             IS_DIGITS, IS_EMAIL_SMTPEMAILADDRESS, ITextStoreACPSink_Impl, TsLayoutCode,
@@ -1212,5 +1220,224 @@ mod tests {
         });
         assert!(failed.is_err());
         assert_eq!(shared.borrow().lock, 0, "given back");
+    }
+
+    /// A text service, in the test's own process: the framework's thread
+    /// manager activated for it, composing into zgx's own context as an
+    /// input method composes (edit sessions; a composition started at the
+    /// selection, its text set, then ended).
+    struct Service {
+        client: u32,
+        context: ITfContext,
+        composition: Rc<RefCell<Option<ITfComposition>>>,
+    }
+
+    /// An edit, run with its session's cookie.
+    type Edit = Box<dyn FnOnce(u32) -> Result<()>>;
+    /// One edit session.
+    #[implement(ITfEditSession)]
+    struct Session(RefCell<Option<Edit>>);
+    impl ITfEditSession_Impl for Session_Impl {
+        fn DoEditSession(&self, cookie: u32) -> Result<()> {
+            self.0
+                .borrow_mut()
+                .take()
+                .map_or(Ok(()), |edit| edit(cookie))
+        }
+    }
+
+    /// Told when zgx ends the service's composition itself.
+    #[implement(ITfCompositionSink)]
+    struct Ended(Rc<RefCell<Option<ITfComposition>>>);
+    impl ITfCompositionSink_Impl for Ended_Impl {
+        fn OnCompositionTerminated(&self, _cookie: u32, _view: Ref<ITfComposition>) -> Result<()> {
+            self.0.borrow_mut().take();
+            Ok(())
+        }
+    }
+
+    impl Service {
+        fn new(tsf: &Tsf) -> Self {
+            // SAFETY: the thread manager zgx activated on this thread.
+            let client = unsafe { tsf.thread.Activate() }.unwrap();
+            Self {
+                client,
+                context: tsf._context.clone(),
+                composition: Rc::default(),
+            }
+        }
+        /// `edit` in a synchronous read-write session, as zgx grants it.
+        fn session(&self, edit: impl FnOnce(u32) -> Result<()> + 'static) {
+            let session: ITfEditSession = Session(RefCell::new(Some(Box::new(edit)))).into();
+            // SAFETY: zgx's context and the session, both alive; a
+            // synchronous session runs before the call returns.
+            unsafe {
+                self.context
+                    .RequestEditSession(self.client, &session, TF_ES_SYNC | TF_ES_READWRITE)
+                    .unwrap()
+                    .ok()
+                    .unwrap();
+            }
+        }
+        /// Compose `text` at the selection (a composition started there),
+        /// or in place of what the open composition holds.
+        fn compose(&self, text: &str) {
+            let (context, composition) = (self.context.clone(), self.composition.clone());
+            let text: Vec<u16> = text.encode_utf16().collect();
+            self.session(move |cookie| {
+                // SAFETY: within the session, with its cookie.
+                unsafe {
+                    let open = composition.borrow().clone();
+                    let range = match &open {
+                        Some(open) => open.GetRange()?,
+                        None => {
+                            let mut selection = [TF_SELECTION::default()];
+                            let mut fetched = 0;
+                            context.GetSelection(
+                                cookie,
+                                TF_DEFAULT_SELECTION,
+                                &mut selection,
+                                &mut fetched,
+                            )?;
+                            let [TF_SELECTION { range, .. }] = selection;
+                            std::mem::ManuallyDrop::into_inner(range).ok_or(E_FAIL)?
+                        }
+                    };
+                    if open.is_none() {
+                        // (A null sink is refused: E_INVALIDARG.)
+                        let ended: ITfCompositionSink = Ended(composition.clone()).into();
+                        let started = context
+                            .cast::<ITfContextComposition>()?
+                            .StartComposition(cookie, &range, &ended)?;
+                        *composition.borrow_mut() = Some(started);
+                    }
+                    range.SetText(cookie, 0, &text)
+                }
+            });
+        }
+        /// End the composition with `text` in its place: committed, or
+        /// (empty) cancelled.
+        fn end(&self, text: &str) {
+            let composition = self.composition.borrow_mut().take().expect("composing");
+            let text: Vec<u16> = text.encode_utf16().collect();
+            self.session(move |cookie| {
+                // SAFETY: within the session, with its cookie.
+                unsafe {
+                    composition.GetRange()?.SetText(cookie, 0, &text)?;
+                    composition.EndComposition(cookie)
+                }
+            });
+        }
+    }
+
+    /// An input method composing through the framework itself into zgx's
+    /// context, in a hidden window of the test's (no key, no focus, no
+    /// input method installed): beside an atom it commits without
+    /// splitting it, before it too, a cancelled composition commits nothing,
+    /// and one over a selection into the atom takes it whole. Each step is
+    /// zgx's store's: the composition open only through its
+    /// OnStartComposition, the text changed only under a lock it granted.
+    #[test]
+    fn an_input_method_composes_through_the_framework_beside_an_atom() {
+        use windows::Win32::{
+            System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+            },
+        };
+        // SAFETY: COM on this test's thread, as winit initializes it on the
+        // UI thread (the framework wants a single-threaded apartment).
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        // SAFETY: a plain window of a system class, never shown.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let mut ui = Ui::new(400., 200.);
+        let value = ui.signal("see ".to_owned());
+        let view = ui.mount(text_area("Notes", value.clone()).size(300., 100.));
+        ui.prepare_frame();
+        ui.input.focus(&ui.scene, Some(view.node()));
+        let editor = ui.focused_editor().unwrap();
+        editor.set_selection(4, 4);
+        let id = editor.insert_atom("@file.pdf", None, None, None).unwrap();
+        let atoms = || editor.atoms();
+        let Some(mut tsf) = Tsf::new(hwnd, 1.) else {
+            // SAFETY: the window made above.
+            let _ = unsafe { DestroyWindow(hwnd) };
+            panic!("the framework didn't start");
+        };
+        tsf.focus(ui.focused_editor());
+        let service = Service::new(&tsf);
+        let composing = || tsf.shared.borrow().store.is_composing();
+        let preedit = || editor.editor.borrow().preedit().map(|p| p.text.clone());
+
+        // Right after the atom.
+        editor.set_selection(13, 13);
+        tsf.after_dispatch();
+        service.compose("にほん");
+        assert!(composing(), "zgx's store heard the composition start");
+        assert_eq!(preedit().as_deref(), Some("にほん"));
+        assert_eq!(value.get(), "see @file.pdf", "composing, nothing committed");
+        service.end("日本");
+        tsf.after_dispatch();
+        assert!(!composing(), "and end");
+        assert_eq!(preedit(), None);
+        assert_eq!(value.get(), "see @file.pdf日本");
+        assert_eq!(atoms(), [zgx::text_edit::Atom::new(id, 4..13)]);
+
+        // Right before it.
+        editor.set_selection(4, 4);
+        tsf.after_dispatch();
+        service.compose("ひ");
+        service.end("火");
+        tsf.after_dispatch();
+        assert_eq!(value.get(), "see 火@file.pdf日本");
+        assert_eq!(atoms(), [zgx::text_edit::Atom::new(id, 7..16)]);
+
+        // Cancelled: nothing of it committed.
+        service.compose("x");
+        assert!(composing());
+        service.end("");
+        tsf.after_dispatch();
+        assert_eq!(value.get(), "see 火@file.pdf日本");
+        assert_eq!(atoms().len(), 1);
+
+        // Over a selection from "see" into the atom: it goes whole.
+        editor.set_selection(2, 12);
+        tsf.after_dispatch();
+        service.compose("z");
+        service.end("Z");
+        tsf.after_dispatch();
+        let now = value.get();
+        assert_eq!(
+            now.matches("@fi").count(),
+            now.matches("@file.pdf").count(),
+            "never a piece of the atom: {now:?}"
+        );
+        assert!(
+            atoms()
+                .iter()
+                .all(|a| now.get(a.range.clone()) == Some("@file.pdf")),
+            "an atom left is whole: {now:?} {:?}",
+            atoms()
+        );
+        drop(service);
+        drop(tsf);
+        // SAFETY: the window made above.
+        let _ = unsafe { DestroyWindow(hwnd) };
     }
 }

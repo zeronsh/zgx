@@ -14,6 +14,7 @@ use zgx_script::ScriptHost;
 
 struct Fake {
     clipboard: RefCell<String>,
+    html: RefCell<Option<String>>,
     image: RefCell<Option<std::sync::Arc<zgx::image::ImageData>>>,
     /// What the open dialog picks, and where the save dialog saves.
     opens: PathBuf,
@@ -25,6 +26,15 @@ impl Platform for Fake {
     }
     fn set_clipboard_text(&self, text: String) -> bool {
         *self.clipboard.borrow_mut() = text;
+        *self.html.borrow_mut() = None;
+        true
+    }
+    fn clipboard_html(&self) -> Option<String> {
+        self.html.borrow().clone()
+    }
+    fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
+        *self.clipboard.borrow_mut() = text;
+        *self.html.borrow_mut() = Some(html);
         true
     }
     fn clipboard_image(&self) -> Pending<Option<zgx::image::ImageData>> {
@@ -56,6 +66,13 @@ return ui.column {
         ui.clipboard.write("copied text")
         shown:set(ui.clipboard.read() or "")
     end },
+    ui.button { id = "html", w = 40, h = 20, "h", on_click = function()
+        local none = ui.clipboard.read_html()
+        local written = ui.clipboard.write_html("Rich bold", "<p>Rich <b>bold</b></p>")
+        local html, text = ui.clipboard.read_html(), ui.clipboard.read()
+        ui.clipboard.write("plain")
+        shown:set(`{none == nil} {written} {html} {text} {ui.clipboard.read_html() == nil}`)
+    end },
     ui.button { id = "image", w = 40, h = 20, "i", on_click = function()
         ui.task(function()
             local before = ui.clipboard.read_image():await()
@@ -82,6 +99,28 @@ return ui.column {
     ui.button { id = "sneak", w = 40, h = 20, "x", on_click = function()
         ui.read_file("/etc/hosts")
     end },
+    ui.button { id = "zip", w = 40, h = 20, "z", on_click = function()
+        ui.task(function()
+            local file = ui.save_file({ name = "out.zip" }):await()
+            local z = ui.zip(file)
+            -- (Not awaited one by one: they're written in order anyway.)
+            z:add("01-trang-chủ.png", { base64 = "iVBORw0KGgo=" })
+            z:add("code/index.html", "<p>hi</p>")
+            local fine, why = pcall(function() z:add("../up.txt", "x") end)
+            z:close():await()
+            local after = pcall(function() z:add("late.txt", "x"):await() end)
+            shown:set(`zipped {fine} {string.find(tostring(why), "no `..`", 1, true) ~= nil} {after}`)
+        end)
+    end },
+    ui.button { id = "parts", w = 40, h = 20, "p", on_click = function()
+        ui.task(function()
+            local file = ui.save_file({ name = "out.txt" }):await()
+            ui.write_file(file, "head|"):await()
+            ui.write_file(file, "middle|", { append = true }):await()
+            ui.write_file(file, { base64 = "dGFpbA==" }, { append = true }):await()
+            shown:set("parts written")
+        end)
+    end },
 }
 "#;
 
@@ -93,6 +132,7 @@ fn dir(name: &str) -> PathBuf {
 fn app(dir: &std::path::Path, code: &'static str, plugin: Option<&'static str>) -> Harness {
     let fake = Rc::new(Fake {
         clipboard: RefCell::new(String::new()),
+        html: RefCell::new(None),
         image: RefCell::new(None),
         opens: dir.join("in.txt"),
         saves: dir.join("out.txt"),
@@ -133,6 +173,16 @@ fn the_clipboard_takes_and_gives_text() {
     wait_for(&mut h, "copied text");
 }
 
+/// HTML with its text, as a browser's or word processor's copy: none on a
+/// clipboard of text, read back as written, and gone once text replaces it.
+#[test]
+fn the_clipboard_takes_and_gives_html_with_its_text() {
+    let dir = dir("clipboard-html");
+    let mut h = app(&dir, APP, None);
+    h.click("html");
+    wait_for(&mut h, "true true <p>Rich <b>bold</b></p> Rich bold true");
+}
+
 #[test]
 fn the_clipboard_takes_and_gives_images() {
     let dir = dir("clipboard-image");
@@ -148,6 +198,166 @@ fn a_picked_file_reads_and_a_saved_one_is_written() {
     let mut h = app(&dir, APP, None);
     h.click("open");
     wait_for(&mut h, "in.txt: hello from disk");
+    h.click("save");
+    wait_for(&mut h, "wrote out.txt");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+        "saved text"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Writes `BYTES` (every byte value, then a NUL) as a string, or in base64
+/// from the test, to the file the user saves to.
+const BYTES: &str = r#"
+local shown = ui.state("shown", "")
+local function save(data)
+    ui.task(function()
+        local file = ui.save_file({ name = "out.png" }):await()
+        local ok, why = pcall(function()
+            ui.write_file(file, data):await()
+        end)
+        shown:set(if ok then "wrote" else tostring(why))
+    end)
+end
+return ui.column {
+    ui.text { id = "label", function() return shown:get() end },
+    ui.button { id = "raw", w = 40, h = 20, "r", on_click = function()
+        local bytes = {}
+        for i = 0, 255 do
+            bytes[#bytes + 1] = string.char(i)
+        end
+        save(table.concat(bytes) .. string.char(0))
+    end },
+    ui.button { id = "encoded", w = 40, h = 20, "e", on_click = function()
+        save({ base64 = BASE64 })
+    end },
+    ui.button { id = "broken", w = 40, h = 20, "b", on_click = function()
+        save({ base64 = "not base64!" })
+    end },
+    ui.button { id = "read", w = 40, h = 20, "rd", on_click = function()
+        ui.task(function()
+            local files = ui.open_files():await()
+            local encoded = ui.read_file(files[1], { base64 = true }):await()
+            shown:set(if encoded == BASE64 then "read whole" else encoded)
+        end)
+    end },
+}
+"#;
+
+/// A PNG or any other file: a string's bytes, or bytes in base64, reach
+/// the file as they are, NUL and bytes that aren't UTF-8 too, and read
+/// back whole in base64.
+#[test]
+fn a_saved_file_takes_any_bytes() {
+    use base64::Engine as _;
+    let expected: Vec<u8> = (0..=255u8).chain([0]).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&expected);
+    let code: &'static str = BYTES.replace("BASE64", &format!("{encoded:?}")).leak();
+    for button in ["raw", "encoded"] {
+        let dir = dir(&format!("bytes-{button}"));
+        let mut h = app(&dir, code, None);
+        h.click(button);
+        wait_for(&mut h, "wrote");
+        assert_eq!(
+            std::fs::read(dir.join("out.txt")).unwrap(),
+            expected,
+            "{button}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    // Read back whole: the file the raw string wrote, as base64.
+    let read = dir("bytes-read");
+    let mut h = app(&read, code, None);
+    h.click("raw");
+    wait_for(&mut h, "wrote");
+    std::fs::rename(read.join("out.txt"), read.join("in.txt")).unwrap();
+    h.click("read");
+    wait_for(&mut h, "read whole");
+    std::fs::remove_dir_all(read).unwrap();
+    let dir = dir("bytes-broken");
+    let mut h = app(&dir, code, None);
+    h.click("broken");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !h.text("label").contains("isn't base64") && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        h.text("label").contains("isn't base64"),
+        "{}",
+        h.text("label")
+    );
+    assert!(!dir.join("out.txt").exists());
+}
+
+#[test]
+fn a_zip_goes_into_a_saved_file_an_entry_at_a_time() {
+    let dir = dir("zip");
+    let mut h = app(&dir, APP, None);
+    h.click("zip");
+    wait_for(&mut h, "zipped false true false");
+    // (The fake dialog saves to out.txt.) Read back as unzip would.
+    let bytes = std::fs::read(dir.join("out.txt")).unwrap();
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]) as usize;
+    let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+    let end = bytes.len() - 22;
+    assert_eq!(u32_at(end), 0x0605_4b50);
+    assert_eq!(u16_at(end + 10), 2);
+    let mut at = u32_at(end + 16);
+    let mut entries = Vec::new();
+    for _ in 0..2 {
+        let (size, name_len, offset) = (u32_at(at + 20), u16_at(at + 28), u32_at(at + 42));
+        let name = String::from_utf8(bytes[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        let data_at = offset + 30 + u16_at(offset + 26);
+        entries.push((name, bytes[data_at..data_at + size].to_vec()));
+        at += 46 + name_len;
+    }
+    assert_eq!(
+        entries,
+        vec![
+            (
+                "01-trang-chủ.png".to_string(),
+                b"\x89PNG\r\n\x1a\n".to_vec()
+            ),
+            ("code/index.html".to_string(), b"<p>hi</p>".to_vec()),
+        ]
+    );
+    // Nothing left beside it of the zip being built.
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".zgx-zip"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_plugin_zips_only_with_files() {
+    let dir = dir("zip-plugin");
+    let h = app(
+        &dir,
+        r#"return ui.text { "app", id = "label" }"#,
+        Some(r#"ui.zip("x.zip")"#),
+    );
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("Capability::Files"), "{error}");
+}
+
+#[test]
+fn a_file_is_written_in_parts_with_append() {
+    let dir = dir("append");
+    let mut h = app(&dir, APP, None);
+    h.click("parts");
+    wait_for(&mut h, "parts written");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+        "head|middle|tail"
+    );
+    // Without append, a write replaces it whole again.
     h.click("save");
     wait_for(&mut h, "wrote out.txt");
     assert_eq!(
@@ -708,4 +918,218 @@ return ui.column {
     settle(&mut h, &|_| answers.borrow().len() == 4);
     assert_eq!(answers.borrow()[3], None);
     assert_eq!(h.host.error().get(), None);
+}
+
+/// A host whose page downloads may go, with no dialog, into `downloads`
+/// (`ScriptHost::download_dir`, unless `None`), and a plugin `peek.luau`
+/// with `grants`.
+fn downloads_app(
+    dir: &std::path::Path,
+    downloads: Option<PathBuf>,
+    code: &'static str,
+    plugin: Option<(&'static str, Vec<zgx_script::Capability>)>,
+) -> Harness {
+    let fake = Rc::new(Fake {
+        clipboard: RefCell::new(String::new()),
+        html: RefCell::new(None),
+        image: RefCell::new(None),
+        opens: dir.join("in.txt"),
+        saves: dir.join("out.txt"),
+    });
+    Harness::wrapped(
+        move |runtime| {
+            let mut host = ScriptHost::inline(runtime, "app", code);
+            if let Some(downloads) = downloads {
+                host = host.download_dir(downloads);
+            }
+            if let Some((code, grants)) = plugin {
+                host = host.plugin("peek.luau", code);
+                for grant in grants {
+                    host = host.grant("peek.luau", grant);
+                }
+            }
+            host
+        },
+        move |view| zgx::compose::provide(PlatformService(fake), view),
+    )
+}
+
+/// Starts a download of `name` in the web view `id`, keeping where it was
+/// told to save (`None`, cancelled) and what hears it.
+fn download_into(
+    h: &mut Harness,
+    id: &str,
+    name: &str,
+    answers: &Rc<RefCell<Vec<Option<PathBuf>>>>,
+    statuses: &Rc<RefCell<Vec<zgx::web_view::DownloadStatusFn>>>,
+) {
+    use zgx::{
+        native_view::NativeContent,
+        web_view::{DownloadRequest, DownloadResponder},
+    };
+    let node = h.find(id).unwrap();
+    let Some(NativeContent::Web(web)) = h.natives.content(node) else {
+        panic!("no page {id}")
+    };
+    let (answers, statuses) = (answers.clone(), statuses.clone());
+    web.download(
+        DownloadRequest::new(format!("https://page.test/{name}"), name, "application/pdf"),
+        DownloadResponder::new(move |answer| {
+            answers.borrow_mut().push(answer.map(|(path, status)| {
+                statuses.borrow_mut().push(status);
+                path
+            }))
+        }),
+    );
+}
+
+fn settle_until(h: &mut Harness, until: &dyn Fn(&str) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !until(&h.text("label")) {
+        assert!(
+            Instant::now() < deadline,
+            "label reads {:?} ({:?})",
+            h.text("label"),
+            h.host.error().get()
+        );
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+const SAVE_TEMP: &str = r#"
+local shown = ui.state("shown", "")
+local function note(s) shown:set(shown:get() .. s .. ";") end
+return ui.column {
+    ui.text { id = "label", function() return shown:get() end },
+    ui.webview { id = "page", w = 100, h = 60, on_download = function(d)
+        ui.task(function()
+            local ok, file = pcall(function()
+                return d:save_temp({
+                    on_progress = function(got) note(`{d.name} got {got}`) end,
+                    on_finish = function(ok, err) note(`{d.name} finished {ok} {err}`) end,
+                }):await()
+            end)
+            if not ok then
+                note(`refused {file}`)
+                d:cancel()
+            elseif file then
+                note(`saved {file.name} {file.size} {ui.read_file(file):await()}`)
+            else
+                note(`stopped {d.name}`)
+            end
+        end)
+    end },
+}
+"#;
+
+/// `d:save_temp()`: no dialog; the download goes into the host's folder for
+/// them under its name, made unique while another of that name is going or
+/// a file has it, and the promise gives the file, the script's to read, once
+/// it's whole (nil if it stopped). Its callbacks hear it as `save_to`'s do.
+#[test]
+fn a_download_saves_into_the_hosts_folder_with_no_dialog() {
+    use zgx::web_view::DownloadStatus;
+    let dir = dir("save-temp");
+    let downloads = dir.join("downloads");
+    let _ = std::fs::remove_dir_all(&downloads);
+    let mut h = downloads_app(&dir, Some(downloads.clone()), SAVE_TEMP, None);
+    h.ui.prepare_frame();
+    let answers: Rc<RefCell<Vec<Option<PathBuf>>>> = Rc::default();
+    let statuses: Rc<RefCell<Vec<zgx::web_view::DownloadStatusFn>>> = Rc::default();
+    // Two of one name at once, and a third of it after a file has it.
+    download_into(&mut h, "page", "paper.pdf", &answers, &statuses);
+    download_into(&mut h, "page", "paper.pdf", &answers, &statuses);
+    settle_until(&mut h, &|_| answers.borrow().len() == 2);
+    assert_eq!(
+        *answers.borrow(),
+        [
+            Some(downloads.join("paper.pdf")),
+            Some(downloads.join("paper (1).pdf"))
+        ]
+    );
+    // The backend writes the bytes, then says it's done.
+    std::fs::write(downloads.join("paper.pdf"), "%PDF-1").unwrap();
+    (statuses.borrow_mut()[0])(DownloadStatus::Progress {
+        received: 6,
+        total: Some(6),
+    });
+    (statuses.borrow_mut()[0])(DownloadStatus::Finished);
+    settle_until(&mut h, &|label| label.contains("saved paper.pdf"));
+    let label = h.text("label");
+    assert!(
+        label.contains("paper.pdf got 6;paper.pdf finished true nil;saved paper.pdf 6 %PDF-1;"),
+        "{label}"
+    );
+    // Stopped: nil, and on_finish hears why.
+    (statuses.borrow_mut()[1])(DownloadStatus::Failed("cancelled".into()));
+    settle_until(&mut h, &|label| label.contains("stopped paper.pdf"));
+    assert!(h.text("label").contains("finished false cancelled"));
+    // A file has the name now; the stopped one's is free again.
+    download_into(&mut h, "page", "paper.pdf", &answers, &statuses);
+    settle_until(&mut h, &|_| answers.borrow().len() == 3);
+    assert_eq!(answers.borrow()[2], Some(downloads.join("paper (1).pdf")));
+    // A name with folders in it stays in the folder.
+    download_into(&mut h, "page", "../../up.pdf", &answers, &statuses);
+    settle_until(&mut h, &|_| answers.borrow().len() == 4);
+    assert_eq!(answers.borrow()[3], Some(downloads.join(".._.._up.pdf")));
+    assert!(!dir.join("out.txt").exists(), "a dialog was asked");
+    assert_eq!(h.host.error().get(), None);
+}
+
+/// It's off unless the host names a folder, and a plugin needs the Files
+/// grant: either way the script hears an error and nothing is saved.
+#[test]
+fn a_download_saves_with_no_dialog_only_where_the_host_allows() {
+    use zgx_script::Capability;
+    let dir = dir("save-temp-refused");
+    let answers: Rc<RefCell<Vec<Option<PathBuf>>>> = Rc::default();
+    let statuses: Rc<RefCell<Vec<zgx::web_view::DownloadStatusFn>>> = Rc::default();
+    // No folder named.
+    let mut h = downloads_app(&dir, None, SAVE_TEMP, None);
+    h.ui.prepare_frame();
+    download_into(&mut h, "page", "paper.pdf", &answers, &statuses);
+    settle_until(&mut h, &|label| label.contains("refused"));
+    assert!(
+        h.text("label").contains("ScriptHost::download_dir"),
+        "{}",
+        h.text("label")
+    );
+    settle_until(&mut h, &|_| answers.borrow().len() == 1);
+    assert_eq!(answers.borrow()[0], None);
+    // A plugin with its pages but not the Files grant.
+    const PLUGIN: &str = r#"
+local said = ui.state("said", "")
+ui.contribute("bar", ui.column {
+    ui.text { id = "said", function() return said:get() end },
+    ui.webview { id = "theirs", w = 100, h = 60, on_download = function(d)
+        local ok, err = pcall(function() d:save_temp() end)
+        said:set(`{ok} {err}`)
+        d:cancel()
+    end },
+})
+"#;
+    const APP: &str = r#"
+return ui.column { ui.text { id = "label", "" }, ui.slot("bar") }
+"#;
+    let mut h = downloads_app(
+        &dir,
+        Some(dir.join("downloads")),
+        APP,
+        Some((PLUGIN, vec![Capability::Web])),
+    );
+    h.ui.prepare_frame();
+    download_into(&mut h, "theirs", "paper.pdf", &answers, &statuses);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !h.text("said").contains("Capability::Files") {
+        assert!(Instant::now() < deadline, "said {:?}", h.text("said"));
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(h.text("said").starts_with("false"), "{}", h.text("said"));
+    settle_until(&mut h, &|_| answers.borrow().len() == 2);
+    assert_eq!(answers.borrow()[1], None);
+    assert!(!dir.join("downloads").exists());
 }

@@ -61,6 +61,11 @@ impl View {
         build: impl FnMut(&ContextMenuEvent) -> Vec<View> + 'static,
     ) -> Self {
         let mut build = build;
+        #[cfg(feature = "dom")]
+        if crate::compose::__dom::DOM_ONLY {
+            self.rare_mut().dom_menu = Some(Box::new(move |event, _| build(event)));
+            return self;
+        }
         let rare = self.rare_mut();
         rare.context_menu = Some(Box::new(move |event, _| build(event)));
         rare.context_menu_spans = false;
@@ -75,6 +80,13 @@ impl View {
         mut self,
         mut build: impl FnMut(&ContextMenuEvent, Option<&ContextMenuSpan>) -> Vec<View> + 'static,
     ) -> Self {
+        #[cfg(feature = "dom")]
+        if crate::compose::__dom::DOM_ONLY {
+            // The run is the DOM's (`__dom::DomMenu`); a link with nothing
+            // of the app's for it shows the browser's own menu.
+            self.rare_mut().dom_menu = Some(Box::new(move |event, span| build(event, span)));
+            return self;
+        }
         let rare = self.rare_mut();
         // The run, found as it is asked (`compose_rich::locate_for`): its
         // paragraph keeps what finds it, and nothing else pays for it.
@@ -99,6 +111,17 @@ impl View {
         self.rare_mut().context_menu_below = Some(below);
         self
     }
+    /// Keep `open` saying whether its context menu shows: true as one opens,
+    /// false as it closes, however it does (Escape, a pick, a click outside,
+    /// Tab, the window losing focus, a newer menu, the view going); written
+    /// false, the menu closes. A floating panel hides while it shows, as a
+    /// browser's selection popover does under the page's menu. Hidden until
+    /// its API is settled.
+    #[doc(hidden)]
+    pub fn context_menu_open(mut self, open: crate::reactive::Signal<bool>) -> Self {
+        self.rare_mut().context_menu_open = Some(open);
+        self
+    }
     /// Styles for the context menu's panel, over a menu's defaults.
     pub fn context_menu_style(mut self, styles: Styles) -> Self {
         self.rare_mut().context_menu_style = Some(Box::new(styles));
@@ -111,6 +134,9 @@ impl View {
 struct Open {
     ui: crate::widgets::WeakUi,
     node: Cell<Option<NodeId>>,
+    /// The view's `context_menu_open`, if it keeps one: false once the
+    /// menu it said shows is gone.
+    shows: Option<crate::reactive::Signal<bool>>,
 }
 impl Open {
     fn close(&self) {
@@ -119,6 +145,11 @@ impl Open {
         {
             ui.remove_portal(node);
             ui.remove(node);
+        }
+        if let Some(shows) = &self.shows
+            && shows.with_untracked(|shows| *shows)
+        {
+            shows.set(false);
         }
     }
 }
@@ -134,12 +165,14 @@ pub(crate) fn mount(
     mut build: ContextMenuBuilder,
     style: Option<Styles>,
     below: bool,
+    shows: Option<crate::reactive::Signal<bool>>,
     environment: Environment,
 ) {
     let weak = ui.downgrade();
     let open = Rc::new(Open {
         ui: ui.downgrade(),
         node: Cell::new(None),
+        shows,
     });
     let current = open.clone();
     let binding = ui.input.listen(node, move |cx| {
@@ -215,7 +248,15 @@ pub(crate) fn mount(
             ui.input.focus(&ui.scene, Some(node));
         }
         current.close();
-        let shown = ui.runtime.signal(true);
+        // The view's own, where it keeps one: the menu writes it false as it
+        // closes, the app writing it false closes the menu.
+        let shown = match &current.shows {
+            Some(shows) => {
+                shows.set(true);
+                shows.clone()
+            }
+            None => ui.runtime.signal(true),
+        };
         // An editor it takes the focus from keeps its selection drawn.
         ui.set_context_menu(shown.clone());
         let anchor = if below {

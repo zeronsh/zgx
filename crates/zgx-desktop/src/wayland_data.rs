@@ -73,6 +73,8 @@ pub(crate) enum FileEvent {
         x: f32,
         y: f32,
         text: String,
+        /// The same as HTML, where the source offered `text/html`.
+        html: Option<String>,
         accepted: std::sync::mpsc::Sender<bool>,
     },
 }
@@ -89,6 +91,11 @@ enum Command {
         text: String,
         /// The same as HTML (the clipboard only), offered as `text/html`.
         html: Option<String>,
+        /// Chromium's web custom data (the clipboard only), offered as
+        /// `chromium/x-web-custom-data` (`clipboard::web_custom`).
+        custom: Option<Arc<[u8]>>,
+        /// An encoded PNG (the clipboard only), offered as `image/png`.
+        png: Option<Arc<[u8]>>,
         reply: mpsc::Sender<Result<(), String>>,
     },
     Load {
@@ -106,6 +113,14 @@ enum Command {
     },
     /// The clipboard's `text/uri-list`: the files a file manager copied.
     LoadFiles {
+        reply: mpsc::Sender<Result<Loaded, String>>,
+    },
+    /// The clipboard's `text/html`: a browser's or word processor's copy.
+    LoadHtml {
+        reply: mpsc::Sender<Result<Loaded, String>>,
+    },
+    /// The clipboard's `chromium/x-web-custom-data`: a web page's types.
+    LoadCustom {
         reply: mpsc::Sender<Result<Loaded, String>>,
     },
     /// Raise `window` with an activation token; held here until done, so
@@ -176,20 +191,51 @@ impl WaylandClipboard {
     /// Publish `text`; fails before the seat has delivered any input, as a
     /// selection needs an input serial.
     pub fn store(&self, primary: bool, text: String) -> Result<(), String> {
-        self.publish(primary, text, None)
+        self.publish(primary, text, None, None, None)
     }
     /// Publish the clipboard as plain text and as HTML: rich editors and
     /// browsers paste the HTML, everything else the text.
     pub fn store_rich(&self, text: String, html: String) -> Result<(), String> {
-        self.publish(false, text, Some(html))
+        self.publish(false, text, Some(html), None, None)
     }
-    fn publish(&self, primary: bool, text: String, html: Option<String>) -> Result<(), String> {
+    /// Publish the clipboard as plain text, as HTML where given, and with
+    /// Chromium's web custom data `custom` (a page's types) beside them.
+    pub fn store_custom(
+        &self,
+        text: String,
+        html: Option<String>,
+        custom: Vec<u8>,
+    ) -> Result<(), String> {
+        self.publish(false, text, html, Some(custom.into()), None)
+    }
+    /// Publish the clipboard as plain text, as HTML where given, with
+    /// Chromium's web custom data `custom` where given and the PNG `png`
+    /// (offered as `image/png`) beside them: one selection.
+    pub fn store_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        custom: Option<Vec<u8>>,
+        png: Option<Arc<[u8]>>,
+    ) -> Result<(), String> {
+        self.publish(false, text, html, custom.map(Into::into), png)
+    }
+    fn publish(
+        &self,
+        primary: bool,
+        text: String,
+        html: Option<String>,
+        custom: Option<Arc<[u8]>>,
+        png: Option<Arc<[u8]>>,
+    ) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
         self.0
             .send(Command::Store {
                 primary,
                 text,
                 html,
+                custom,
+                png,
                 reply,
             })
             .map_err(|_| "Wayland data worker stopped".to_string())?;
@@ -229,6 +275,24 @@ impl WaylandClipboard {
         let (reply, answer) = mpsc::channel();
         self.0
             .send(Command::LoadImage { reply })
+            .map_err(|_| "Wayland data worker stopped".to_string())?;
+        Ok(read_loaded(answer)?.0)
+    }
+    /// The clipboard's HTML (`text/html`), as offered: a browser's or a
+    /// word processor's copy.
+    pub fn load_html(&self) -> Result<String, String> {
+        let (reply, answer) = mpsc::channel();
+        self.0
+            .send(Command::LoadHtml { reply })
+            .map_err(|_| "Wayland data worker stopped".to_string())?;
+        Ok(String::from_utf8_lossy(&read_loaded(answer)?.0).into_owned())
+    }
+    /// The clipboard's Chromium web custom data
+    /// (`chromium/x-web-custom-data`), as offered.
+    pub fn load_custom(&self) -> Result<Vec<u8>, String> {
+        let (reply, answer) = mpsc::channel();
+        self.0
+            .send(Command::LoadCustom { reply })
             .map_err(|_| "Wayland data worker stopped".to_string())?;
         Ok(read_loaded(answer)?.0)
     }
@@ -352,9 +416,11 @@ impl NativeData {
                                 primary,
                                 text,
                                 html,
+                                custom,
+                                png,
                                 reply,
                             } => {
-                                let _ = reply.send(state.store(primary, text, html));
+                                let _ = reply.send(state.store(primary, text, html, custom, png));
                             }
                             Command::Load { primary, reply } => {
                                 let _ = reply.send(state.load(primary));
@@ -367,6 +433,12 @@ impl NativeData {
                             }
                             Command::LoadFiles { reply } => {
                                 let _ = reply.send(state.load_files());
+                            }
+                            Command::LoadHtml { reply } => {
+                                let _ = reply.send(state.load_html());
+                            }
+                            Command::LoadCustom { reply } => {
+                                let _ = reply.send(state.load_custom());
                             }
                             Command::Activate { token, window } => state.activate(&token, &window),
                             Command::Drag {
@@ -463,6 +535,10 @@ struct Offer {
     text: Option<usize>,
     /// Whether it offers `image/png`.
     png: bool,
+    /// Whether it offers `text/html`.
+    html: bool,
+    /// Whether it offers Chromium's web custom data.
+    custom: bool,
     /// The compositor's action for it, as last said. Hyprland says it once,
     /// as it makes the offer: before the enter that names it.
     action: Option<DndAction>,
@@ -520,8 +596,16 @@ struct TextDrag {
     y: f32,
     /// Whether the window would take it where it last was.
     accepted: bool,
+    /// Whether the offer has `text/html`: read beside its text as it drops.
+    offers_html: bool,
     /// Let go of: its text being read.
     read: Option<Transfer>,
+    /// Its text, once read (each transfer gives its bytes once).
+    got: Option<Vec<u8>>,
+    /// Its HTML being read, beside its text.
+    html_read: Option<Transfer>,
+    /// Its HTML, once read.
+    html: Option<String>,
 }
 struct Drag {
     offer: wl_data_offer::WlDataOffer,
@@ -579,8 +663,13 @@ struct Completion {
 }
 /// What this process published as the clipboard.
 enum Published {
-    /// Text, and the same as HTML.
-    Text(Arc<str>, Option<Arc<str>>),
+    /// Text, the same as HTML, Chromium's web custom data and a PNG.
+    Text(
+        Arc<str>,
+        Option<Arc<str>>,
+        Option<Arc<[u8]>>,
+        Option<Arc<[u8]>>,
+    ),
     /// An image, as PNG.
     Png(Arc<[u8]>),
 }
@@ -829,7 +918,14 @@ impl State {
         };
         outgoing.end(how);
     }
-    fn store(&mut self, primary: bool, text: String, html: Option<String>) -> Result<(), String> {
+    fn store(
+        &mut self,
+        primary: bool,
+        text: String,
+        html: Option<String>,
+        custom: Option<Arc<[u8]>>,
+        png: Option<Arc<[u8]>>,
+    ) -> Result<(), String> {
         let (seat, serial) = self.serial.ok_or("no input has reached this client yet")?;
         let seat = self
             .seats
@@ -854,11 +950,18 @@ impl State {
                 return Err("the compositor has no data device".into());
             };
             let source = manager.create_data_source(&self.qh, ());
-            for kind in TEXT_TYPES.iter().chain(html.as_ref().map(|_| &"text/html")) {
+            let custom_kind = custom
+                .as_ref()
+                .map(|_| &crate::clipboard::web_custom::FORMAT);
+            for kind in (TEXT_TYPES.iter())
+                .chain(html.as_ref().map(|_| &"text/html"))
+                .chain(custom_kind)
+                .chain(png.as_ref().map(|_| &"image/png"))
+            {
                 source.offer((*kind).into());
             }
             device.set_selection(Some(&source), serial);
-            let published = Published::Text(text, html.map(Into::into));
+            let published = Published::Text(text, html.map(Into::into), custom, png);
             if let Some((previous, _)) = self.source.replace((source, published)) {
                 previous.destroy();
             }
@@ -900,6 +1003,28 @@ impl State {
             return Err("the clipboard holds no files".into());
         }
         offer.proxy.receive("text/uri-list".into(), write.as_fd());
+        drop(write);
+        Ok(Loaded(read, false))
+    }
+    fn load_html(&mut self) -> Result<Loaded, String> {
+        let (read, write) = UnixStream::pair().map_err(|e| e.to_string())?;
+        let offer = self.selection.as_ref().ok_or("the clipboard is empty")?;
+        if !offer.html {
+            return Err("the clipboard holds no HTML".into());
+        }
+        offer.proxy.receive("text/html".into(), write.as_fd());
+        drop(write);
+        Ok(Loaded(read, false))
+    }
+    fn load_custom(&mut self) -> Result<Loaded, String> {
+        let (read, write) = UnixStream::pair().map_err(|e| e.to_string())?;
+        let offer = self.selection.as_ref().ok_or("the clipboard is empty")?;
+        if !offer.custom {
+            return Err("the clipboard holds no web custom data".into());
+        }
+        offer
+            .proxy
+            .receive(crate::clipboard::web_custom::FORMAT.into(), write.as_fd());
         drop(write);
         Ok(Loaded(read, false))
     }
@@ -984,18 +1109,47 @@ impl State {
             bytes: Vec::new(),
             deadline: Instant::now() + Duration::from_secs(3),
         });
+        // Its HTML too, where offered: a rich destination drops that.
+        if text.offers_html
+            && let Ok((read, write)) = UnixStream::pair()
+            && read.set_nonblocking(true).is_ok()
+        {
+            text.offer.receive("text/html".into(), write.as_fd());
+            drop(write);
+            text.html_read = Some(Transfer {
+                stream: read,
+                bytes: Vec::new(),
+                deadline: Instant::now() + Duration::from_secs(3),
+            });
+        }
     }
-    /// The text drag's text, read as it arrives: it drops then.
+    /// The text drag's text, and its HTML where offered, read as they
+    /// arrive: it drops once both have (HTML that fails, with its text
+    /// alone).
     fn read_text(&mut self) {
-        let Some(read) = self.text.as_mut().and_then(|text| text.read.as_mut()) else {
+        let Some(text) = self.text.as_mut() else {
             return;
         };
-        let bytes = match read.poll() {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return,
-            Err(_) => return self.cancel(),
+        let Some(read) = text.read.as_mut() else {
+            return;
         };
+        if text.got.is_none() {
+            match read.poll() {
+                Ok(Some(bytes)) => text.got = Some(bytes),
+                Ok(None) => return,
+                Err(_) => return self.cancel(),
+            }
+        }
+        if let Some(html) = text.html_read.as_mut() {
+            match html.poll() {
+                Ok(Some(bytes)) => text.html = Some(html_text(&bytes)),
+                Ok(None) => return,
+                Err(_) => {}
+            }
+            text.html_read = None;
+        }
         let text = self.text.take().unwrap();
+        let bytes = text.got.unwrap_or_default();
         let (accepted, reply) = std::sync::mpsc::channel();
         (self.handler)(
             text.token,
@@ -1003,6 +1157,7 @@ impl State {
                 x: text.x,
                 y: text.y,
                 text: String::from_utf8_lossy(&bytes).into_owned(),
+                html: text.html,
                 accepted,
             },
         );
@@ -1341,7 +1496,15 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
                     && current == source
                 {
                     match published {
-                        Published::Text(text, html) => {
+                        Published::Text(_, _, Some(custom), _)
+                            if mime_type == crate::clipboard::web_custom::FORMAT =>
+                        {
+                            write_bytes(fd, custom.clone());
+                        }
+                        Published::Text(_, _, _, Some(png)) if mime_type == "image/png" => {
+                            write_bytes(fd, png.clone());
+                        }
+                        Published::Text(text, html, ..) => {
                             let html = html.as_ref().filter(|_| mime_type == "text/html");
                             write_selection(fd, html.unwrap_or(text).clone());
                         }
@@ -1511,6 +1674,8 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
                 if let Some(saved) = state.offers.get_mut(&offer.id().protocol_id()) {
                     saved.uris |= mime_type == "text/uri-list";
                     saved.png |= mime_type == "image/png";
+                    saved.html |= mime_type == "text/html";
+                    saved.custom |= mime_type == crate::clipboard::web_custom::FORMAT;
                     saved.text = preferred(saved.text, &mime_type);
                 }
             }
@@ -1553,6 +1718,8 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                         uris: false,
                         text: None,
                         png: false,
+                        html: false,
+                        custom: false,
                         action: None,
                     },
                 );
@@ -1627,7 +1794,11 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                         x,
                         y,
                         accepted: false,
+                        offers_html: offer.html,
                         read: None,
+                        got: None,
+                        html_read: None,
+                        html: None,
                     });
                     (state.handler)(token, FileEvent::TextOver { x, y });
                     let _ = connection.flush();
@@ -1803,6 +1974,27 @@ impl Transfer {
         }
     }
 }
+/// HTML's bytes as text: UTF-16 after a byte order mark (as Firefox gives
+/// `text/html`), else UTF-8.
+fn html_text(bytes: &[u8]) -> String {
+    let units = |le: bool| {
+        bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| match le {
+                true => u16::from_le_bytes(pair),
+                false => u16::from_be_bytes(pair),
+            })
+            .collect::<Vec<u16>>()
+    };
+    match bytes {
+        [0xff, 0xfe, ..] => String::from_utf16_lossy(&units(true)),
+        [0xfe, 0xff, ..] => String::from_utf16_lossy(&units(false)),
+        [0xef, 0xbb, 0xbf, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
 /// Whether a drop the compositor delivered is taken (read, and finished).
 /// Before version 3 there are no actions. A copy is what was asked for
 /// (`set_actions(copy, copy)`); a move too, as Hyprland chooses move for
@@ -1852,6 +2044,16 @@ mod tests {
         assert!(takes_drop(3, None));
         assert!(!takes_drop(3, Some(DndAction::empty())));
         assert!(!takes_drop(3, Some(DndAction::Ask)));
+    }
+    #[test]
+    fn html_reads_as_utf8_or_utf16_by_its_mark() {
+        assert_eq!(html_text("<b>caf\u{e9}</b>".as_bytes()), "<b>caf\u{e9}</b>");
+        let utf16: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain("<i>\u{e9}</i>".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(html_text(&utf16), "<i>\u{e9}</i>");
+        assert_eq!(html_text(b"\xef\xbb\xbf<p>"), "<p>");
     }
     #[test]
     fn a_uri_list_gives_its_files() {

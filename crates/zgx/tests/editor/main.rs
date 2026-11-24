@@ -10,6 +10,18 @@ mod composition_virtual_keyboard;
 mod editor_accessible_selection;
 #[path = "../editor_answer_history.rs"]
 mod editor_answer_history;
+#[path = "../editor_atom_moves.rs"]
+mod editor_atom_moves;
+#[path = "../editor_atom_pointer.rs"]
+mod editor_atom_pointer;
+#[path = "../editor_atom_style.rs"]
+mod editor_atom_style;
+#[path = "../editor_atom_svg.rs"]
+mod editor_atom_svg;
+#[path = "../editor_atom_units.rs"]
+mod editor_atom_units;
+#[path = "../editor_atoms.rs"]
+mod editor_atoms;
 #[path = "../editor_autocorrect.rs"]
 mod editor_autocorrect;
 #[path = "../editor_autoscroll.rs"]
@@ -20,24 +32,42 @@ mod editor_blur_selection;
 mod editor_caret_blink;
 #[path = "../editor_caret_width.rs"]
 mod editor_caret_width;
+#[path = "../editor_chip_marks.rs"]
+mod editor_chip_marks;
 #[path = "../editor_code.rs"]
 mod editor_code;
 #[path = "../editor_context_menu.rs"]
 mod editor_context_menu;
+#[path = "../editor_copy_hook.rs"]
+mod editor_copy_hook;
+#[path = "../editor_drag_source.rs"]
+mod editor_drag_source;
+#[path = "../editor_edge_caret.rs"]
+mod editor_edge_caret;
 #[path = "../editor_external_edits.rs"]
 mod editor_external_edits;
+#[path = "../editor_focus_snapshot.rs"]
+mod editor_focus_snapshot;
+#[path = "../editor_gap_cursor.rs"]
+mod editor_gap_cursor;
 #[path = "../editor_hints.rs"]
 mod editor_hints;
 #[path = "../editor_ingress_normalization.rs"]
 mod editor_ingress_normalization;
 #[path = "../editor_input_mode.rs"]
 mod editor_input_mode;
+#[path = "../editor_layer_scroll.rs"]
+mod editor_layer_scroll;
+#[path = "../editor_line_marks.rs"]
+mod editor_line_marks;
 #[path = "../editor_long_documents.rs"]
 mod editor_long_documents;
 #[path = "../editor_model_normalization.rs"]
 mod editor_model_normalization;
 #[path = "../editor_native_caret.rs"]
 mod editor_native_caret;
+#[path = "../editor_natural_metrics.rs"]
+mod editor_natural_metrics;
 #[path = "../editor_paging.rs"]
 mod editor_paging;
 #[path = "../editor_pointer_selection.rs"]
@@ -46,6 +76,10 @@ mod editor_pointer_selection;
 mod editor_primary_paste;
 #[path = "../editor_read_only.rs"]
 mod editor_read_only;
+#[path = "../editor_scroll_groups.rs"]
+mod editor_scroll_groups;
+#[path = "../editor_scrollbar.rs"]
+mod editor_scrollbar;
 #[path = "../editor_selection_theme.rs"]
 mod editor_selection_theme;
 #[path = "../editor_shape_reuse.rs"]

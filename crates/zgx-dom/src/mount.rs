@@ -16,7 +16,8 @@ use wasm_bindgen::prelude::*;
 use zgx::{
     compose::{
         __dom::{
-            self, Element, ElementKind, KeyedRegion, Region, Scope, SwitchRegion, VirtualRegion,
+            self, Element, ElementKind, Inline, Inlines, KeyedRegion, Overlay, OverlayKind, Region,
+            Scope, SwitchRegion, VirtualRegion,
         },
         View,
     },
@@ -34,6 +35,23 @@ pub(crate) enum Event {
     /// Width, height, and where it lies in the viewport.
     Resize(f32, f32, f32, f32),
     Visible(bool),
+    /// An overlay shown or hidden by the browser (or by its signal).
+    Toggle(bool),
+    /// A secondary click: where, in the window and in the element, and the
+    /// span of a paragraph it was on (its place, link and text), if any.
+    Menu(
+        zgx::compose::ContextMenuEvent,
+        Option<zgx::compose::ContextMenuSpan>,
+    ),
+    /// An edit asked of a contenteditable (`atom_editor`): a `beforeinput`'s
+    /// input type (or `compositionend`), its text, and the selection then,
+    /// in bytes of its text.
+    Edit {
+        kind: String,
+        data: String,
+        start: usize,
+        end: usize,
+    },
 }
 
 /// What runs for a node's events. A click handler is the view's own closure
@@ -42,6 +60,8 @@ pub(crate) enum Event {
 enum Handler {
     Event(Box<dyn FnMut(Event)>),
     Click(Runtime, Box<dyn FnMut(Modifiers)>),
+    /// An element's `on_event` listeners, and its node.
+    Listeners(Runtime, __dom::Listeners, u32),
 }
 impl Handler {
     fn call(&mut self, event: Event) {
@@ -52,6 +72,7 @@ impl Handler {
                     runtime.batch(|| click(modifiers));
                 }
             }
+            Handler::Listeners(..) => {}
         }
     }
 }
@@ -60,6 +81,8 @@ enum Slot {
     Empty,
     /// Running: put back unless removed meanwhile.
     Taken,
+    /// Running, and replaced meanwhile (`replace_handler`).
+    Replaced(Handler),
     Full(Handler),
 }
 
@@ -78,6 +101,102 @@ thread_local! {
 struct Started {
     _dispatch: Closure<dyn FnMut(u32, u32, f64, Option<String>)>,
     _flush: Closure<dyn FnMut()>,
+    _event: Closure<EventFn>,
+    _keys: Closure<dyn FnMut(String, String, String, u32) -> u32>,
+}
+
+/// An event for an element's listeners: their handler; its kind, phase,
+/// modifiers, click count and repeat, in bits; whether it is for the
+/// element itself (1); where; a wheel's deltas, a button or an action's
+/// number; and its key and code (`key\ncode`). What the listeners decided
+/// comes back.
+pub(crate) type EventFn = dyn FnMut(u32, u32, u32, f64, f64, f64, f64, Option<String>) -> u32;
+
+#[allow(clippy::too_many_arguments)]
+fn element_event(
+    id: u32,
+    bits: u32,
+    at_self: u32,
+    x: f64,
+    y: f64,
+    dx: f64,
+    dy: f64,
+    keys: Option<String>,
+) -> u32 {
+    let taken = HANDLERS.with(|handlers| {
+        let mut handlers = handlers.borrow_mut();
+        match handlers.slots.get_mut(id as usize) {
+            Some(slot @ Slot::Full(Handler::Listeners(..))) => {
+                match std::mem::replace(slot, Slot::Taken) {
+                    Slot::Full(handler) => Some(handler),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    });
+    // A drag's end lets it go, its source's listeners there or not.
+    let ends = bits & 0xff == 17;
+    let Some(mut handler) = taken else {
+        if ends {
+            __dom::end_drag();
+        }
+        return 0;
+    };
+    let (key, code) = keys
+        .as_deref()
+        .and_then(|keys| keys.split_once('\n'))
+        .unwrap_or(("", ""));
+    let outcome = match &mut handler {
+        Handler::Listeners(runtime, listeners, node) => {
+            let event = __dom::DomEvent {
+                kind: bits & 0xff,
+                phase: (bits >> 8) & 0xf,
+                at_self: at_self == 1,
+                node: *node,
+                x: x as f32,
+                y: y as f32,
+                dx: dx as f32,
+                dy: dy as f32,
+                modifiers: modifiers((bits >> 12) & 0xf),
+                clicks: ((bits >> 16) & 0xff) as u8,
+                repeat: bits >> 24 & 1 == 1,
+                key,
+                code,
+                from_outside: bits >> 25 & 1 == 1,
+            };
+            runtime.batch(|| listeners.run(&event))
+        }
+        _ => 0,
+    };
+    let dropped = HANDLERS.with(|handlers| {
+        let mut handlers = handlers.borrow_mut();
+        let slot = &mut handlers.slots[id as usize];
+        match slot {
+            Slot::Taken => {
+                *slot = Slot::Full(handler);
+                None
+            }
+            _ => Some(handler),
+        }
+    });
+    drop(dropped);
+    if ends {
+        __dom::end_drag();
+    }
+    flush();
+    outcome
+}
+
+fn keys(path: String, key: String, code: String, bits: u32) -> u32 {
+    let path: Vec<u32> = path.split(',').filter_map(|n| n.parse().ok()).collect();
+    __dom::resolve_keys(
+        &path,
+        &key,
+        &code,
+        modifiers(bits & 0xf),
+        bits >> 4 & 1 == 1,
+    )
 }
 
 fn handler(f: impl FnMut(Event) + 'static) -> u32 {
@@ -99,6 +218,20 @@ fn register(handler: Handler) -> u32 {
             }
         }
     })
+}
+
+/// Give handler `id` a new closure (a kept span's click, built again).
+fn replace_handler(id: u32, f: impl FnMut(Event) + 'static) {
+    let old = HANDLERS.with(|handlers| {
+        let mut handlers = handlers.borrow_mut();
+        let slot = &mut handlers.slots[id as usize];
+        let new = Handler::Event(Box::new(f));
+        match slot {
+            Slot::Taken | Slot::Replaced(_) => std::mem::replace(slot, Slot::Replaced(new)),
+            _ => std::mem::replace(slot, Slot::Full(new)),
+        }
+    });
+    drop(old);
 }
 
 fn release_handlers(ids: &[u32]) {
@@ -164,7 +297,44 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
             );
             Event::Resize(number as f32, h, x, y)
         }
-        _ => Event::Visible(number == 1.),
+        6 => Event::Visible(number == 1.),
+        20 => {
+            let text = text.unwrap_or_default();
+            let (kind, data) = text.split_once('\0').unwrap_or((&text, ""));
+            // Both ends in one number: the start above 2^26, the end below.
+            let packed = number.max(0.) as u64;
+            Event::Edit {
+                kind: kind.to_owned(),
+                data: data.to_owned(),
+                start: (packed >> 26) as usize,
+                end: (packed & ((1 << 26) - 1)) as usize,
+            }
+        }
+        8 => {
+            let text = text.unwrap_or_default();
+            let mut parts = text.splitn(7, '\n');
+            let mut num = || {
+                parts
+                    .next()
+                    .and_then(|p| p.parse::<f32>().ok())
+                    .unwrap_or(0.)
+            };
+            let (x, y, local_x, local_y, index) = (num(), num(), num(), num(), num());
+            let href = parts.next().filter(|h| !h.is_empty()).map(str::to_owned);
+            let text = parts.next().unwrap_or("");
+            let span =
+                (index >= 0.).then(|| __dom::menu_span(index as usize, href.as_deref(), text));
+            Event::Menu(
+                zgx::compose::ContextMenuEvent {
+                    x,
+                    y,
+                    local_x,
+                    local_y,
+                },
+                span,
+            )
+        }
+        _ => Event::Toggle(number == 1.),
     };
     handler.call(event);
     let dropped = HANDLERS.with(|handlers| {
@@ -175,6 +345,13 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
                 *slot = Slot::Full(handler);
                 None
             }
+            Slot::Replaced(_) => {
+                let Slot::Replaced(new) = std::mem::replace(slot, Slot::Empty) else {
+                    unreachable!()
+                };
+                *slot = Slot::Full(new);
+                Some(handler)
+            }
             // Removed while it ran.
             _ => Some(handler),
         }
@@ -183,7 +360,7 @@ fn dispatch(id: u32, kind: u32, number: f64, text: Option<String>) {
     // What input wrote shows before the browser reads or paints; scroll
     // reads and observers' reports, delivered many at once, are applied
     // together in this task's one flush (scheduled already).
-    if kind <= 3 {
+    if kind <= 3 || kind == 7 || kind == 8 {
         flush();
     }
 }
@@ -204,12 +381,45 @@ fn start() {
         }
         let dispatch = Closure::<dyn FnMut(u32, u32, f64, Option<String>)>::new(dispatch);
         let flush = Closure::<dyn FnMut()>::new(flush);
-        js::zgx_init(sheet::BASE_CSS, &dispatch, &flush);
+        let event = Closure::<EventFn>::new(element_event);
+        let keys = Closure::<dyn FnMut(String, String, String, u32) -> u32>::new(keys);
+        js::zgx_init(sheet::BASE_CSS, &dispatch, &flush, &event, &keys);
+        // Text measured outside a canvas (`ui.measure_text`), as the page
+        // lays it out.
+        __dom::set_text_measure(measure_text);
         *started.borrow_mut() = Some(Started {
             _dispatch: dispatch,
             _flush: flush,
+            _event: event,
+            _keys: keys,
         });
     });
+}
+
+/// The width and height `text` takes at `size` in `font`, wrapped at
+/// `width` or not, as the page lays it out (`zgx_measure_text`).
+fn measure_text(
+    text: &str,
+    size: f32,
+    width: Option<f32>,
+    font: &zgx::text_layout::FontStyle,
+) -> (f32, f32) {
+    let features = font
+        .features
+        .settings()
+        .iter()
+        .map(|(tag, value)| format!("\"{}\" {value}", String::from_utf8_lossy(tag)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let at = js::zgx_measure_text(
+        &__dom::font_css(font, size),
+        text,
+        width.map_or(-1., f64::from),
+        font.line_height.pixels().map_or(0., f64::from),
+        f64::from(font.letter_spacing.pixels()),
+        &features,
+    );
+    (at[0] as f32, at[1] as f32)
 }
 
 /// Apply the DOM operations written since the last flush, now (they are
@@ -260,15 +470,24 @@ impl Block {
         self.ids.push(id);
         id
     }
-    fn effect(&mut self, runtime: &Runtime, f: impl FnMut() + 'static) {
+    /// An effect writing `node`: marked as one a template's clone must reach
+    /// (`template::stamp`).
+    pub(crate) fn effect(&mut self, node: u32, runtime: &Runtime, f: impl FnMut() + 'static) {
+        ops::with(|ops| ops.mark(node));
         self.effects.push(runtime.effect(f));
     }
-    fn on(&mut self, node: u32, kind: u32, f: impl FnMut(Event) + 'static) {
+    /// Keep `held` as long as the block (a text area's model).
+    pub(crate) fn hold(&mut self, held: Rc<dyn Any>) {
+        self.regions.push(held);
+    }
+    pub(crate) fn on(&mut self, node: u32, kind: u32, f: impl FnMut(Event) + 'static) {
+        ops::with(|ops| ops.mark(node));
         let id = handler(f);
         self.handlers.push(id);
         ops::with(|ops| ops.op(&[ops::HANDLER, node, kind, id]));
     }
     fn on_click(&mut self, node: u32, runtime: Runtime, click: Box<dyn FnMut(Modifiers)>) {
+        ops::with(|ops| ops.mark(node));
         let id = register(Handler::Click(runtime, click));
         self.handlers.push(id);
         ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::ON_CLICK, id]));
@@ -288,6 +507,15 @@ impl Mounted {
     }
     fn remove(&mut self) {
         if let Some(block) = self.block.take() {
+            // Context menus mounted in it go with it.
+            if MENU_HOST.with(|host| host.get()) == Some(block.root) {
+                MENU_HOST.with(|host| host.set(None));
+                drop(
+                    CONTEXT_MENU
+                        .with(|menu| menu.borrow_mut().take())
+                        .map(closed),
+                );
+            }
             ops::with(|ops| ops.op(&[ops::REMOVE, block.root]));
             drop(block);
             // The element it mounted into, no longer held.
@@ -301,7 +529,18 @@ impl Mounted {
 /// size and family, and apply its DOM at once.
 pub fn mount(runtime: &Runtime, parent: &web_sys::Element, view: View) -> Mounted {
     start();
+    // The browser's clipboard and links, as a desktop window provides its
+    // own (a view may provide another inside).
+    let view = zgx::compose::provide(
+        zgx::platform::PlatformService(Rc::new(crate::platform::Browser)),
+        view,
+    );
+    // Its tasks, timers and animation frames, run by the browser's event
+    // loop.
+    let (tasks, frames) = crate::tasks::services();
+    let view = zgx::compose::provide(frames, zgx::compose::provide(tasks, view));
     let scope = Scope::root(runtime);
+    crate::idle::watch(runtime);
     // Adopting writes the table at once, so what is pending (a free of the
     // id it reuses, say) goes first.
     flush();
@@ -320,7 +559,7 @@ pub fn mount(runtime: &Runtime, parent: &web_sys::Element, view: View) -> Mounte
             });
             block.root = root;
             let css_scope = scope.clone();
-            block.effect(runtime, move || {
+            block.effect(root, runtime, move || {
                 let css = css_scope.root_css();
                 ops::with(|ops| ops.op_str(ops::STYLE, root, &css));
             });
@@ -328,6 +567,12 @@ pub fn mount(runtime: &Runtime, parent: &web_sys::Element, view: View) -> Mounte
             ops::with(|ops| {
                 ops.op(&[ops::APPEND, root, child]);
                 ops.op(&[ops::APPEND, parent_id, root]);
+            });
+            // Context menus mount beside the first view, in its typography.
+            MENU_HOST.with(|host| {
+                if host.get().is_none() {
+                    host.set(Some(root));
+                }
             });
             block
         })
@@ -394,7 +639,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
                     ops.op_str(ops::TEXT, id, "");
                     id
                 });
-                block.effect(&runtime, move || {
+                block.effect(id, &runtime, move || {
                     let value = text();
                     ops::with(|ops| ops.op_str(ops::SET_TEXT, id, &value));
                 });
@@ -404,8 +649,12 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         }
     }
     let (tag, base) = match &el.kind {
-        ElementKind::Text(_) | ElementKind::BoundText(_) => (Tag::Span, "zt"),
+        ElementKind::Text(_) | ElementKind::BoundText(_) | ElementKind::Rich(_) => {
+            (Tag::Span, "zt")
+        }
         ElementKind::Button => (Tag::Button, "z zb"),
+        // With atoms: a contenteditable over its model (`atom_editor`).
+        ElementKind::Editor { atoms: Some(_), .. } => (Tag::Div, "z ze"),
         ElementKind::Editor {
             multiline: true, ..
         } => (Tag::TextArea, "z ze"),
@@ -414,6 +663,11 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         ElementKind::Progress { .. } => (Tag::Progress, "z"),
         ElementKind::Image { .. } => (Tag::Canvas, "z"),
         ElementKind::Unsupported(_) => (Tag::Div, "z zu"),
+        ElementKind::Overlay(overlay) if overlay.kind == OverlayKind::Dialog => {
+            (Tag::Dialog, "z zd")
+        }
+        ElementKind::Overlay(_) => (Tag::Div, "z zp"),
+        ElementKind::Scroll { .. } => (Tag::Div, "z zo"),
         _ => (Tag::Div, "z"),
     };
     let base = if el.contents { "z zc" } else { base };
@@ -444,7 +698,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         // Inline, over the class; written only when it changes (an empty
         // patch, the commonest, is never written).
         let mut last = String::new();
-        block.effect(&runtime, move || {
+        block.effect(id, &runtime, move || {
             let css = css();
             if css != last {
                 ops::with(|ops| ops.op_str(ops::STYLE, id, &css));
@@ -453,7 +707,7 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
         });
     }
     for (name, mut value) in std::mem::take(&mut el.bound_attrs) {
-        block.effect(&runtime, move || {
+        block.effect(id, &runtime, move || {
             let value = value();
             ops::with(|ops| match value {
                 Some(value) => {
@@ -466,17 +720,14 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
     }
     if let Some(mut disabled) = el.disabled.take() {
         let native = matches!(tag, Tag::Button | Tag::Input | Tag::TextArea);
-        block.effect(&runtime, move || {
+        block.effect(id, &runtime, move || {
             let on = disabled();
             ops::with(|ops| {
                 if native {
                     ops.op_str(ops::PROP, id, "disabled");
                     ops.words.push(on as u32);
-                } else if on {
-                    ops.op_str(ops::ATTR, id, "aria-disabled");
-                    ops.str("true");
                 } else {
-                    ops.op_str(ops::REMOVE_ATTR, id, "aria-disabled");
+                    ops.op(&[ops::OFF, id, on as u32]);
                 }
             });
         });
@@ -484,8 +735,68 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
     if let Some(click) = el.click.take() {
         block.on_click(id, runtime.clone(), click);
     }
+    if let Some(menu) = el.context_menu.take() {
+        let id_handler = handler(menu_opener(
+            scope.clone(),
+            menu,
+            el.context_menu_open.take(),
+        ));
+        block.handlers.push(id_handler);
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::ON_MENU, id_handler]);
+        });
+    }
+    if let Some(listeners) = el.listeners.take() {
+        let handler = register(Handler::Listeners(runtime.clone(), listeners, id));
+        block.handlers.push(handler);
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::ON_EVENT, handler]);
+        });
+    }
+    if let Some(keymap) = el.keymap.take() {
+        block.resources.push(__dom::bind_keymap(id, *keymap));
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::KEYMAP, id]);
+        });
+    }
+    if let Some((axis, chooses)) = el.focus_group {
+        let axis = match axis {
+            zgx::input::FocusGroup::Vertical => 1,
+            zgx::input::FocusGroup::Horizontal => 2,
+            zgx::input::FocusGroup::Both => 3,
+        };
+        ops::with(|ops| {
+            // Named, so a template's clone keeps it.
+            ops.mark(id);
+            ops.op(&[ops::HANDLER, id, ops::GROUP, axis | (chooses as u32) << 2]);
+        });
+    }
     let kind = std::mem::replace(&mut el.kind, ElementKind::Text(String::new()));
-    mount_kind(kind, id, scope, &runtime, block);
+    // A lazy overlay's panel (`View::lazy`) is filled the first time it
+    // opens; made before the overlay's showing, so what's in it is there
+    // to take focus as it shows.
+    if let ElementKind::Overlay(overlay) = &kind
+        && overlay.lazy
+    {
+        let children = std::mem::take(&mut el.children);
+        let conditional = std::mem::take(&mut el.conditional);
+        fill_when_open(
+            overlay.open.clone(),
+            children,
+            conditional,
+            id,
+            scope,
+            &runtime,
+            block,
+        );
+    }
+    let root = mount_kind(kind, id, scope, &runtime, block);
     let mut holds_absolute = false;
     for child in std::mem::take(&mut el.children) {
         let (child, absolute) = mount_placed(child, scope, block);
@@ -521,12 +832,14 @@ fn mount_placed(view: View, scope: &Scope, block: &mut Block) -> (u32, bool) {
                 ..HookState::default()
             }),
         });
+        // Its observers write it, now or later.
+        ops::with(|ops| ops.mark(id));
         block.regions.push(Rc::new(HooksOwner(hooks.clone())));
         for f in on_mount {
             f(__dom::node_handle(id, hooks.clone()));
         }
     }
-    (id, absolute)
+    (root.unwrap_or(id), absolute)
 }
 
 /// A mounted node's measurements, for `NodeHandle`'s observers: a
@@ -621,6 +934,54 @@ impl __dom::Hooks for NodeHooks {
             state.retained.push(resource);
         }
     }
+    fn focus_snapshot(&self) -> Option<__dom::FocusAt> {
+        if !self.state.borrow().alive {
+            return None;
+        }
+        let found = js::zgx_focus_snapshot()?;
+        match *found {
+            [node, tag] => Some((node as u32, tag as u32, None)),
+            [node, tag, anchor, focus] => Some((
+                node as u32,
+                tag as u32,
+                Some((anchor as usize, focus as usize)),
+            )),
+            _ => None,
+        }
+    }
+    fn restore_focus(&self, node: u32, tag: u32, selection: Option<(usize, usize)>) -> bool {
+        if !self.state.borrow().alive {
+            return false;
+        }
+        let (anchor, focus) = selection.map_or((-1., -1.), |(a, f)| (a as f64, f as f64));
+        js::zgx_restore_focus(node, tag, anchor, focus)
+    }
+    fn editor(&self) -> Option<Rc<dyn zgx::widgets::TextEdits>> {
+        if !self.state.borrow().alive {
+            return None;
+        }
+        crate::atom_editor::text_edits(self.node)
+    }
+    fn scroll_into_view(&self, how: &zgx::compose::ScrollIntoView) -> bool {
+        use zgx::compose::RowAlign;
+        if !self.state.borrow().alive {
+            return false;
+        }
+        let name = |align: RowAlign| match align {
+            RowAlign::Start => "start",
+            RowAlign::Center => "center",
+            RowAlign::End => "end",
+            RowAlign::Nearest => "nearest",
+        };
+        // What was made since is in the document first.
+        flush();
+        let animate = match how.animate {
+            None => -1,
+            Some(false) => 0,
+            Some(true) => 1,
+        };
+        js::zgx_scroll_into_view(self.node, name(how.block), name(how.inline), animate)
+    }
 }
 
 /// Ends a node's hooks with its block: handlers released, what was
@@ -634,7 +995,15 @@ impl Drop for HooksOwner {
     }
 }
 
-fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, block: &mut Block) {
+/// The rest of an element of `kind`: what it holds and follows. Returns
+/// the node placed for it, when that isn't the element itself.
+fn mount_kind(
+    kind: ElementKind,
+    id: u32,
+    scope: &Scope,
+    runtime: &Runtime,
+    block: &mut Block,
+) -> Option<u32> {
     match kind {
         ElementKind::Text(text) => ops::with(|ops| {
             let node = block.node(ops);
@@ -648,7 +1017,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                 ops.op(&[ops::APPEND, id, node]);
                 node
             });
-            block.effect(runtime, move || {
+            block.effect(node, runtime, move || {
                 let value = text();
                 ops::with(|ops| ops.op_str(ops::SET_TEXT, node, &value));
             });
@@ -666,10 +1035,31 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                     write.set(value as f32);
                 }
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let value = offset.get();
                 ops::with(|ops| ops.op(&[ops::NUMBER, id, prop, value.to_bits()]));
             });
+        }
+        ElementKind::Editor {
+            label,
+            value,
+            multiline,
+            placeholder,
+            atoms: Some(atoms),
+            ..
+        } => {
+            crate::atom_editor::mount(
+                block,
+                id,
+                runtime,
+                crate::atom_editor::Field {
+                    label,
+                    value,
+                    multiline,
+                    placeholder,
+                },
+                *atoms,
+            );
         }
         ElementKind::Editor {
             label,
@@ -687,7 +1077,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                 }
             });
             if let Some(mut placeholder) = placeholder {
-                block.effect(runtime, move || {
+                block.effect(id, runtime, move || {
                     let text = placeholder();
                     ops::with(|ops| {
                         ops.op_str(ops::ATTR, id, "placeholder");
@@ -701,7 +1091,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                     write.set(text);
                 }
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let text = value.get();
                 ops::with(|ops| ops.op_str(ops::VALUE, id, &text));
             });
@@ -733,12 +1123,12 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                     write.set(on);
                 }
             });
-            block.effect(runtime, move || {
+            block.effect(input, runtime, move || {
                 let on = value.get();
                 ops::with(|ops| ops.op(&[ops::CHECKED, input, on as u32]));
             });
             if let Some(mixed) = mixed {
-                block.effect(runtime, move || {
+                block.effect(input, runtime, move || {
                     let on = mixed.get();
                     ops::with(|ops| {
                         ops.op_str(ops::PROP, input, "indeterminate");
@@ -775,7 +1165,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                     write.set(v as f32);
                 }
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let v = value.get();
                 ops::with(|ops| ops.op(&[ops::NUMBER, id, ops::NUM_VALUE, v.to_bits()]));
             });
@@ -787,7 +1177,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                 ops.op_str(ops::ATTR, id, "aria-label");
                 ops.str(&label);
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let v = value.get();
                 let v = if v.is_nan() { v } else { v.clamp(0., 1.) };
                 ops::with(|ops| ops.op(&[ops::NUMBER, id, ops::NUM_PROGRESS, v.to_bits()]));
@@ -800,7 +1190,7 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
                 ops.op_str(ops::ATTR, id, "aria-label");
                 ops.str(&label);
             });
-            block.effect(runtime, move || {
+            block.effect(id, runtime, move || {
                 let image = source();
                 let (w, h) = (image.width(), image.height());
                 let pixels = image.pixels();
@@ -815,6 +1205,9 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
             });
         }
         ElementKind::Region(region) => mount_region(region, id, scope, block),
+        ElementKind::Canvas(draw) => mount_canvas(draw, id, runtime, block),
+        ElementKind::Overlay(overlay) => return Some(mount_overlay(*overlay, id, runtime, block)),
+        ElementKind::Rich(inlines) => mount_rich(inlines, id, scope, runtime, block),
         ElementKind::Unsupported(name) => ops::with(|ops| {
             let text = block.node(ops);
             ops.op_str(ops::TEXT, text, &format!("{name}: not shown in the DOM"));
@@ -824,6 +1217,450 @@ fn mount_kind(kind: ElementKind, id: u32, scope: &Scope, runtime: &Runtime, bloc
         }),
         ElementKind::Box(_) | ElementKind::Button => {}
     }
+    None
+}
+
+/// A lazy overlay's panel `panel`: its children and conditional regions
+/// mounted the first time `open` is true, and kept.
+fn fill_when_open(
+    open: Signal<bool>,
+    children: Vec<View>,
+    conditional: Vec<Region>,
+    panel: u32,
+    scope: &Scope,
+    runtime: &Runtime,
+    block: &mut Block,
+) {
+    let filled: Rc<RefCell<Option<Block>>> = Rc::default();
+    let mut pending = Some((children, conditional));
+    let (state, scope, untracked) = (filled.clone(), scope.clone(), runtime.clone());
+    block.effect(panel, runtime, move || {
+        if !open.get() {
+            return;
+        }
+        let Some((children, conditional)) = pending.take() else {
+            return;
+        };
+        untracked.untracked(|| {
+            let mut inner = Block::default();
+            for child in children {
+                let child = mount_view(child, &scope, &mut inner);
+                ops::with(|ops| ops.op(&[ops::APPEND, panel, child]));
+            }
+            for region in conditional {
+                let holder = ops::with(|ops| {
+                    let holder = inner.node(ops);
+                    ops.op(&[ops::CREATE, holder, Tag::Div as u32]);
+                    let class = sheet::plain(ops, "z zc");
+                    ops.op(&[ops::CLASS, holder, class]);
+                    ops.op(&[ops::APPEND, panel, holder]);
+                    holder
+                });
+                mount_region(region, holder, &scope, &mut inner);
+            }
+            *state.borrow_mut() = Some(inner);
+        });
+    });
+    block.regions.push(filled);
+}
+
+/// An overlay: its anchor (in the flow) and its panel `panel` in a box
+/// laid out as its children. The browser shows the panel in its top layer
+/// (a modal `<dialog>`, or a popover placed against the anchor), and its
+/// closing it (Escape, a click outside) is reported into `open`.
+fn mount_overlay(overlay: Overlay, panel: u32, runtime: &Runtime, block: &mut Block) -> u32 {
+    let Overlay {
+        kind,
+        open,
+        anchor,
+        outer,
+        side,
+        align,
+        offset,
+        dismiss_backdrop,
+        match_anchor_width,
+        autofocus,
+        delay_ms,
+        interactive,
+        backdrop,
+        lazy,
+        arrow,
+    } = overlay;
+    let anchor = anchor.map(|anchor| mount_view(anchor, &outer, block));
+    let write = open.clone();
+    let reported = handler(move |event| {
+        if let Event::Toggle(on) = event
+            && write.with_untracked(|open| *open) != on
+        {
+            write.set(on);
+        }
+    });
+    block.handlers.push(reported);
+    let flags = dismiss_backdrop as u32
+        | (match_anchor_width as u32) << 1
+        | (autofocus as u32) << 2
+        | (interactive as u32) << 3
+        | (lazy as u32) << 4;
+    let wrapper = ops::with(|ops| {
+        let wrapper = block.node(ops);
+        ops.op(&[ops::CREATE, wrapper, Tag::Div as u32]);
+        let class = sheet::plain(ops, "z zc");
+        ops.op(&[ops::CLASS, wrapper, class]);
+        if let Some(anchor) = anchor {
+            ops.op(&[ops::APPEND, wrapper, anchor]);
+        }
+        ops.op(&[ops::APPEND, wrapper, panel]);
+        ops.op_str(ops::OVERLAY, panel, backdrop.as_deref().unwrap_or(""));
+        ops.words.extend_from_slice(&[
+            kind as u32,
+            anchor.unwrap_or(u32::MAX),
+            reported,
+            side,
+            align,
+            offset.to_bits(),
+            flags,
+            delay_ms,
+            arrow.to_bits(),
+        ]);
+        wrapper
+    });
+    // What the overlay's ops name, kept by a template's clone.
+    ops::with(|ops| {
+        ops.mark(wrapper);
+        if let Some(anchor) = anchor {
+            ops.mark(anchor);
+        }
+    });
+    block.effect(panel, runtime, move || {
+        let on = open.get();
+        ops::with(|ops| ops.op(&[ops::SHOW, panel, on as u32]));
+    });
+    wrapper
+}
+
+/// A span shown: its node (its text alone, or an element), every node it
+/// made, its click's handler, and what it showed.
+struct RichSpan {
+    node: u32,
+    ids: Vec<u32>,
+    handler: Option<u32>,
+    /// Its own context menu's handler.
+    menu: Option<u32>,
+    shown: Inline,
+}
+
+/// A paragraph's spans, let go with its block.
+#[derive(Default)]
+struct RichSpans(Vec<RichSpan>);
+impl Drop for RichSpans {
+    fn drop(&mut self) {
+        for span in self.0.drain(..).rev() {
+            free_span(span);
+        }
+    }
+}
+
+fn free_span(mut span: RichSpan) {
+    for handler in [span.handler, span.menu].into_iter().flatten() {
+        release_handlers(&[handler]);
+    }
+    span.ids.reverse();
+    ops::with(|ops| ops.free(&span.ids));
+}
+
+/// A rich paragraph (`rich_text`): its spans as text nodes, or `<span>`s
+/// and `<a>`s with classes for their looks. As the spans change, those
+/// that still show as they did stay (streamed text appends), their clicks
+/// replaced; from the first that differs on, they are made again.
+fn mount_rich(
+    mut inlines: Inlines,
+    paragraph: u32,
+    scope: &Scope,
+    runtime: &Runtime,
+    block: &mut Block,
+) {
+    let state: Rc<RefCell<RichSpans>> = Rc::default();
+    let spans = state.clone();
+    let clicks = runtime.clone();
+    let scope = scope.clone();
+    block.effect(paragraph, runtime, move || {
+        let mut next = inlines();
+        let mut spans = spans.borrow_mut();
+        let spans = &mut spans.0;
+        let same = spans
+            .iter()
+            .zip(&next)
+            .take_while(|(span, inline)| span.shown.looks_as(inline))
+            .count();
+        for gone in spans.drain(same..).rev() {
+            ops::with(|ops| ops.op(&[ops::REMOVE, gone.node]));
+            free_span(gone);
+        }
+        for (span, inline) in spans.iter_mut().zip(next.iter_mut()) {
+            if let (Some(handler), Some(action)) = (span.handler, inline.action.take()) {
+                let opens = inline.href.is_some();
+                replace_handler(handler, link_click(clicks.clone(), action, opens));
+            }
+            if let (Some(handler), Some(mut menu)) = (span.menu, inline.menu.take()) {
+                replace_handler(
+                    handler,
+                    menu_opener(scope.clone(), move |event, _| menu(event), None),
+                );
+            }
+        }
+        for mut inline in next.drain(same..) {
+            let mut ids = Vec::new();
+            let action = inline.action.take();
+            let node = ops::with(|ops| {
+                let node = make_inline(ops, &inline, &mut ids);
+                ops.op(&[ops::APPEND, paragraph, node]);
+                node
+            });
+            let handler = action.map(|action| {
+                let opens = inline.href.is_some();
+                let id = handler(link_click(clicks.clone(), action, opens));
+                ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::ON_CLICK, id]));
+                id
+            });
+            let index = spans.len() as u32;
+            let menu = inline.menu.take().map(|mut menu| {
+                let id = register(Handler::Event(Box::new(menu_opener(
+                    scope.clone(),
+                    move |event, _| menu(event),
+                    None,
+                ))));
+                ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::ON_MENU, id]));
+                id
+            });
+            // Its place, for a paragraph's menu told the span it was on.
+            if !inline.bare() {
+                ops::with(|ops| ops.op(&[ops::HANDLER, node, ops::SPAN_AT, index]));
+            }
+            spans.push(RichSpan {
+                node,
+                ids,
+                handler,
+                menu,
+                shown: inline,
+            });
+        }
+    });
+    block.regions.push(state);
+}
+
+thread_local! {
+    /// The context menu showing (or last shown): its block and the node
+    /// holding it, replaced by the next.
+    static CONTEXT_MENU: RefCell<Option<OpenMenu>> = const { RefCell::new(None) };
+    /// Where context menus mount: the first mounted view's root.
+    static MENU_HOST: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// A context menu's handler: on a secondary click its entries are built;
+/// none lets the browser's own menu show, else the click's default is
+/// prevented and a menu of them opens at the pointer, replacing the last.
+/// The context menu showing: its block, its wrapper, and its view's
+/// `context_menu_open`, if it keeps one.
+type OpenMenu = (Block, u32, Option<zgx::reactive::Signal<bool>>);
+/// A context menu gone (a newer one opened, or its host went): the state its
+/// view keeps says so.
+fn closed(menu: OpenMenu) -> (Block, u32) {
+    if let Some(shows) = &menu.2
+        && shows.with_untracked(|shows| *shows)
+    {
+        shows.set(false);
+    }
+    (menu.0, menu.1)
+}
+
+fn menu_opener(
+    scope: Scope,
+    mut build: impl FnMut(
+        &zgx::compose::ContextMenuEvent,
+        Option<&zgx::compose::ContextMenuSpan>,
+    ) -> Vec<View>
+    + 'static,
+    // The view's `context_menu_open`: true as its menu opens, and the
+    // menu's own open state, which its closing writes false.
+    shows: Option<zgx::reactive::Signal<bool>>,
+) -> impl FnMut(Event) + 'static {
+    move |event| {
+        let Event::Menu(at, span) = event else {
+            return;
+        };
+        let runtime = scope.runtime().clone();
+        let entries = runtime.untracked(|| build(&at, span.as_ref()));
+        if entries.is_empty() {
+            return;
+        }
+        let Some(host) = MENU_HOST.with(|host| host.get()) else {
+            return;
+        };
+        let last = CONTEXT_MENU
+            .with(|menu| menu.borrow_mut().take())
+            .map(closed);
+        if let Some((block, wrapper)) = last {
+            ops::with(|ops| ops.op(&[ops::REMOVE, wrapper]));
+            drop(block);
+        }
+        let open = match &shows {
+            Some(shows) => {
+                shows.set(true);
+                shows.clone()
+            }
+            None => runtime.signal(true),
+        };
+        let view = __dom::context_menu_view(entries, open);
+        let mut block = Block::default();
+        let wrapper = runtime.batch(|| runtime.untracked(|| mount_view(view, &scope, &mut block)));
+        block.root = wrapper;
+        ops::with(|ops| {
+            ops.op(&[ops::PREVENT]);
+            ops.op(&[ops::APPEND, host, wrapper]);
+            ops.op(&[ops::MENU_AT, wrapper, at.x.to_bits(), at.y.to_bits()]);
+        });
+        CONTEXT_MENU.with(|menu| *menu.borrow_mut() = Some((block, wrapper, shows.clone())));
+    }
+}
+
+/// A link's click: its action run (batched), and its `href` kept from
+/// opening if the action handled it.
+fn link_click(
+    runtime: Runtime,
+    mut action: Box<dyn FnMut(Modifiers) -> bool>,
+    opens: bool,
+) -> impl FnMut(Event) + 'static {
+    move |event| {
+        if let Event::Click(held) = event {
+            let handled = runtime.batch(|| action(held));
+            if handled && opens {
+                ops::with(|ops| ops.op(&[ops::PREVENT]));
+            }
+        }
+    }
+}
+
+/// A span's nodes: its text, alone or in an element with its class, link
+/// attributes, fade and icon.
+fn make_inline(ops: &mut Ops, inline: &Inline, ids: &mut Vec<u32>) -> u32 {
+    let text = ops.id();
+    ids.push(text);
+    if inline.bare() {
+        ops.op_str(ops::TEXT, text, &inline.text);
+        return text;
+    }
+    let element = ops.id();
+    ids.push(element);
+    let tag = if inline.link { Tag::A } else { Tag::Span };
+    ops.op(&[ops::CREATE, element, tag as u32]);
+    if !inline.css.is_empty() || !inline.hover.is_empty() {
+        let class = sheet::rules(ops, &inline.css, &inline.hover);
+        ops.op(&[ops::CLASS, element, class]);
+    }
+    if inline.link {
+        let attrs: &[(&str, &str)] = match &inline.href {
+            Some(href) => &[
+                ("href", href),
+                ("target", "_blank"),
+                ("rel", "noopener noreferrer"),
+            ],
+            // Focusable and pressed from the keyboard as a button is
+            // (Enter, Space), or a link (Enter) where it goes somewhere the
+            // browser isn't given.
+            None if inline.button => &[("tabindex", "0"), ("role", "button")],
+            None => &[("tabindex", "0"), ("role", "link")],
+        };
+        for (name, value) in attrs {
+            ops.op_str(ops::ATTR, element, name);
+            ops.str(value);
+        }
+        // Named apart from its text (a citation's "1"): read once, by it.
+        if let Some(label) = &inline.label {
+            ops.op_str(ops::ATTR, element, "aria-label");
+            ops.str(label);
+        }
+    }
+    if let Some((ms, elapsed)) = inline.fade {
+        ops.op_str(
+            ops::STYLE,
+            element,
+            &format!("animation:zf {ms}ms cubic-bezier(.33,1,.68,1) -{elapsed}ms both;"),
+        );
+    }
+    if let Some(css) = &inline.icon {
+        let icon = ops.id();
+        ids.push(icon);
+        ops.op(&[ops::CREATE, icon, Tag::Span as u32]);
+        let class = sheet::rules(ops, css, "");
+        ops.op(&[ops::CLASS, icon, class]);
+        ops.op(&[ops::APPEND, element, icon]);
+    }
+    ops.op_str(ops::TEXT, text, &inline.text);
+    ops.op(&[ops::APPEND, element, text]);
+    element
+}
+
+/// A drawing (`canvas`): a `<canvas>` filling the element, drawn with
+/// Canvas 2D at the element's size (a ResizeObserver's) and the screen's
+/// pixel ratio, again as the size or what the drawing reads changes, and
+/// only when the commands differ from the last drawn.
+fn mount_canvas(
+    mut draw: Box<dyn FnMut((f32, f32)) -> zgx::canvas::Canvas>,
+    id: u32,
+    runtime: &Runtime,
+    block: &mut Block,
+) {
+    let size = runtime.signal((0_f32, 0_f32));
+    let surface = ops::with(|ops| {
+        let surface = block.node(ops);
+        ops.op(&[ops::CREATE, surface, Tag::Canvas as u32]);
+        let class = sheet::plain(ops, "zcv");
+        ops.op(&[ops::CLASS, surface, class]);
+        ops.op(&[ops::APPEND, id, surface]);
+        // It holds the canvas, positioned over it.
+        let class = sheet::plain(ops, "zr");
+        ops.op(&[ops::CLASS_ADD, id, class]);
+        surface
+    });
+    let write = size.clone();
+    block.on(id, ops::ON_RESIZE, move |event| {
+        if let Event::Resize(width, height, _, _) = event {
+            write.set((width, height));
+        }
+    });
+    let mut last: Option<((f32, f32), zgx::canvas::Canvas)> = None;
+    block.effect(surface, runtime, move || {
+        let (width, height) = size.get();
+        // Measured first: until then there's nothing to draw at.
+        if width <= 0. || height <= 0. {
+            return;
+        }
+        // `canvas::measure_text` measures as Canvas 2D will draw.
+        let drawn = __dom::drawing_with(
+            |text, size, font| {
+                let at = js::zgx_measure(&__dom::font_css(font, size), text);
+                (at[0] as f32, at[1] as f32)
+            },
+            || draw((width, height)),
+        );
+        if last
+            .as_ref()
+            .is_some_and(|(at, was)| *at == (width, height) && *was == drawn)
+        {
+            return;
+        }
+        ops::with(|ops| {
+            ops.op(&[
+                ops::PAINT,
+                surface,
+                width.to_bits(),
+                height.to_bits(),
+                crate::canvas::count(&drawn),
+            ]);
+            crate::canvas::encode(ops, &drawn);
+        });
+        last = Some(((width, height), drawn));
+    });
 }
 
 fn mount_region(region: Region, holder: u32, scope: &Scope, block: &mut Block) {
@@ -847,10 +1684,21 @@ fn child_block(view: View, scope: &Scope, resources: __dom::Resources) -> Block 
     });
     block.root = mount_view(view, scope, &mut block);
     if capturing {
-        ops::with(|ops| {
+        let unused = ops::with(|ops| {
             let captured = ops.captured();
-            template::stamp(ops, captured, &block.ids);
+            let used = std::mem::take(&mut ops.used);
+            let mut unused = Vec::new();
+            template::stamp(ops, captured, &block.ids, &used, &mut unused);
+            ops.used = used;
+            ops.used.clear();
+            // Nodes nothing writes: reached through their parents only,
+            // they take no id.
+            ops.release(&unused);
+            unused
         });
+        if !unused.is_empty() {
+            block.ids.retain(|id| !unused.contains(id));
+        }
     }
     block
 }
@@ -863,7 +1711,7 @@ fn mount_switch(region: SwitchRegion, holder: u32, scope: &Scope, block: &mut Bl
     let shown: Rc<RefCell<Option<Block>>> = Rc::default();
     let runtime = scope.runtime().clone();
     let (state, scope) = (shown.clone(), scope.clone());
-    block.effect(&runtime.clone(), move || {
+    block.effect(holder, &runtime.clone(), move || {
         if !changed() {
             return;
         }
@@ -901,7 +1749,7 @@ fn mount_keyed(region: KeyedRegion, holder: u32, scope: &Scope, block: &mut Bloc
     let build = Rc::new(RefCell::new(build));
     let runtime = scope.runtime().clone();
     let (keyed, scope) = (state.clone(), scope.clone());
-    block.effect(&runtime.clone(), move || {
+    block.effect(holder, &runtime.clone(), move || {
         let mut guard = keyed.borrow_mut();
         let state = &mut *guard;
         keys(&mut state.next);
@@ -1043,28 +1891,48 @@ struct VirtualRow {
     block: Block,
     holder: u32,
     index: Signal<usize>,
+    /// Where it lies and how tall it is, as last written (a measured row's
+    /// height is its own: NaN).
+    place: (f32, f32),
 }
 
+/// A row's place: its top, and its height unless it is measured (then as
+/// tall as it lays out).
+fn row_css(top: f32, height: f32) -> String {
+    match height.is_nan() {
+        true => format!("top:{top}px;"),
+        false => format!("top:{top}px;height:{height}px;"),
+    }
+}
+
+/// A virtual list (`virtual_list`, `variable_virtual_list`,
+/// `measured_virtual_list`): a scroller holding only the rows in view and
+/// its overscan, each at its offset in a space as tall as all of them. A
+/// measured list's rows report their heights (ResizeObserver) into its
+/// heights; as heights change above the view, the first row in view stays
+/// where it shows (or the end, for one anchored there), as the desktop
+/// anchors it.
 fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut Block) {
     let VirtualRegion {
         offset,
-        row_height,
+        heights,
         overscan,
         mut count,
         mut key,
         build,
     } = region;
+    let heights = Rc::new(heights);
     let runtime = scope.runtime().clone();
     let viewport = runtime.signal(0_f32);
     let space = ops::with(|ops| {
-        ops.op_str(
-            ops::STYLE,
-            holder,
-            "overflow:hidden auto;display:block;height:240px;",
-        );
+        // A scroller, 240 tall unless the view sizes it (its own class,
+        // made later, wins over the base class).
+        let class = sheet::plain(ops, "zl");
+        ops.op(&[ops::CLASS_ADD, holder, class]);
+        // The rows' containing block: they lie at their offsets in it.
         let space = block.node(ops);
         ops.op(&[ops::CREATE, space, Tag::Div as u32]);
-        let class = sheet::plain(ops, "z");
+        let class = sheet::plain(ops, "z zr");
         ops.op(&[ops::CLASS, space, class]);
         ops.op(&[ops::APPEND, holder, space]);
         space
@@ -1081,7 +1949,7 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
         }
     });
     let scroll = offset.clone();
-    block.effect(&runtime, move || {
+    block.effect(holder, &runtime, move || {
         let value = scroll.get();
         ops::with(|ops| ops.op(&[ops::NUMBER, holder, ops::NUM_SCROLL_TOP, value.to_bits()]));
     });
@@ -1090,9 +1958,14 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
     let (state, scope) = (rows.clone(), scope.clone());
     let mut wanted: Vec<(usize, u32)> = Vec::new();
     let mut extent = f32::NAN;
-    block.effect(&runtime.clone(), move || {
+    // The row first in view, how far into it the view's top was, and the
+    // offset then: kept where it shows as heights above it change.
+    let mut anchor: Option<(usize, f32, f32)> = None;
+    let mut at_end = false;
+    let measured = heights.measured();
+    block.effect(space, &runtime.clone(), move || {
         let n = count();
-        let total = n as f32 * row_height;
+        let total = heights.total(n);
         if total != extent {
             extent = total;
             ops::with(|ops| {
@@ -1103,13 +1976,44 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
                 )
             });
         }
-        let (top, height) = (offset.get().max(0.), viewport.get().max(row_height));
-        let first = ((top / row_height) as usize).saturating_sub(overscan);
-        let last = (((top + height) / row_height).ceil() as usize + overscan).min(n);
+        let seen = viewport.get();
+        let mut top = offset.get().max(0.);
+        // The view didn't scroll, but heights changed: it stays on its row
+        // (or its end), unless resting at the top.
+        if let Some((index, within, was)) = anchor
+            && top == was
+        {
+            let kept = if at_end {
+                (total - seen).max(0.)
+            } else {
+                heights.top(index.min(n)) + within
+            };
+            if (kept - top).abs() >= 0.5 && top > 0. {
+                top = kept;
+                runtime.untracked(|| offset.set(top));
+            }
+        }
+        let height = seen.max(1.);
+        at_end = heights.anchors_end() && top > 0. && top + height >= total - 1.;
+        let first = heights.row_at(top, n);
+        anchor = (n > 0).then(|| (first, top - heights.top(first), top));
+        let first = first.saturating_sub(overscan);
+        let last = (heights.row_at(top + height, n) + 1 + overscan).min(n);
         wanted.clear();
         for index in first.min(last)..last {
             wanted.push((index, key(index)));
         }
+        let places: Vec<(f32, f32)> = wanted
+            .iter()
+            .map(|&(index, _)| {
+                let height = if measured {
+                    f32::NAN
+                } else {
+                    heights.height(index)
+                };
+                (heights.top(index), height)
+            })
+            .collect();
         runtime.untracked(|| {
             let mut rows = state.borrow_mut();
             let keep: std::collections::HashSet<u32> = wanted.iter().map(|(_, id)| *id).collect();
@@ -1121,17 +2025,16 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
                 }
                 kept
             });
-            for &(index, id) in &wanted {
-                let top = index as f32 * row_height;
-                if let Some(row) = rows.get(&id) {
+            for (&(index, id), &place) in wanted.iter().zip(&places) {
+                if let Some(row) = rows.get_mut(&id) {
                     if row.index.with_untracked(|i| *i) != index {
                         row.index.set(index);
+                    }
+                    // (NaN never equals: compare a measured row's top alone.)
+                    if row.place.0 != place.0 || (!measured && row.place.1 != place.1) {
+                        row.place = place;
                         ops::with(|ops| {
-                            ops.op_str(
-                                ops::STYLE,
-                                row.holder,
-                                &format!("top:{top}px;height:{row_height}px;"),
-                            )
+                            ops.op_str(ops::STYLE, row.holder, &row_css(place.0, place.1))
                         });
                     }
                     continue;
@@ -1146,13 +2049,17 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
                     ops.op(&[ops::CREATE, row_holder, Tag::Div as u32]);
                     let class = sheet::plain(ops, "z zv");
                     ops.op(&[ops::CLASS, row_holder, class]);
-                    ops.op_str(
-                        ops::STYLE,
-                        row_holder,
-                        &format!("top:{top}px;height:{row_height}px;"),
-                    );
+                    ops.op_str(ops::STYLE, row_holder, &row_css(place.0, place.1));
                     row_holder
                 });
+                if measured {
+                    let (heights, index) = (heights.clone(), index_signal.clone());
+                    row_block.on(row_holder, ops::ON_RESIZE, move |event| {
+                        if let Event::Resize(_, height, _, _) = event {
+                            heights.measure(index.with_untracked(|i| *i), height);
+                        }
+                    });
+                }
                 let root = mount_view(view, &scope, &mut row_block);
                 row_block.root = row_holder;
                 ops::with(|ops| {
@@ -1165,6 +2072,7 @@ fn mount_virtual(region: VirtualRegion, holder: u32, scope: &Scope, block: &mut 
                         block: row_block,
                         holder: row_holder,
                         index: index_signal,
+                        place,
                     },
                 );
             }

@@ -31,6 +31,17 @@ impl Modifiers {
             self.control
         }
     }
+    /// Whether a drag dropped with these copies instead of moving: Option
+    /// on macOS, Control elsewhere, as an editor's text drops decide.
+    /// (Pin line.)
+    #[doc(hidden)]
+    pub fn drag_copies(self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.alt
+        } else {
+            self.control
+        }
+    }
     /// Option moves by words on macOS; Control does so on Linux.
     pub fn word_navigation(self) -> bool {
         if cfg!(target_os = "macos") {
@@ -325,6 +336,58 @@ pub enum InputEvent {
     Increment,
     /// Assistive technology asks a slider to step down.
     Decrement,
+}
+#[cfg(feature = "dom")]
+impl EventContext {
+    /// `event` at `target` as a DOM host routes it: in `phase` at
+    /// `current`, with the pointer's modifiers, the press's click count and
+    /// the key's physical code.
+    pub(crate) fn dom(
+        event: InputEvent,
+        target: NodeId,
+        current: NodeId,
+        phase: EventPhase,
+        modifiers: Modifiers,
+        clicks: u8,
+        code: Option<Rc<str>>,
+    ) -> Self {
+        let mut cx = Self::new(event, target);
+        cx.current_target = current;
+        cx.phase = phase;
+        cx.pointer_modifiers = modifiers;
+        cx.click_count = clicks;
+        cx.key_code = code;
+        cx
+    }
+    /// What its listeners decided, for a DOM host: 1 the default
+    /// prevented, 2 propagation stopped, 4 immediately, 8 focus asked for
+    /// the current node, 16 the pointer captured, 32 released.
+    pub(crate) fn dom_outcome(&self) -> u32 {
+        let mut bits =
+            self.prevented as u32 | (self.stopped as u32) << 1 | (self.immediate as u32) << 2;
+        if self.focus.is_some() {
+            bits |= 8;
+        }
+        match self.capture {
+            Some(Some(_)) => bits |= 16,
+            Some(None) => bits |= 32,
+            None => {}
+        }
+        if self.drag_request.is_some() {
+            bits |= 64;
+        }
+        if self.drag_accepted.is_some() {
+            bits |= 128;
+        }
+        bits
+    }
+    /// A drag a listener started (`start_drag`): what it carries, and the
+    /// press it started from, if given.
+    pub(crate) fn take_dom_drag(&mut self) -> Option<(crate::actions::Action, Option<(f32, f32)>)> {
+        self.drag_request
+            .take()
+            .map(|(_, payload, pressed)| (payload, pressed))
+    }
 }
 /// Which part of its route an event is in, as the DOM's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -813,6 +876,10 @@ struct State {
     /// still in the scene, so a zone round a node made again meanwhile
     /// still hears it.
     file_hovered: Vec<NodeId>,
+    /// Where files dragged in from outside are, and the last of them, until
+    /// they leave or drop: a scroll view the drag holds near its edge
+    /// scrolls, then tells what is under them again (`drag_scroll`).
+    file_point: Option<(f32, f32, std::path::PathBuf)>,
     pressed: Option<NodeId>,
     /// What the last press landed on, as its listeners run and after: a
     /// popup opening from a press on its trigger counts it as focused, as a
@@ -2433,6 +2500,45 @@ impl InputDispatcher {
         }
         removed
     }
+    /// Why `node` can't take input now (`enabled` is false), for
+    /// diagnostics (`NativeViews`' `route_explained`): it isn't shown, it
+    /// or an ancestor is disabled or transparent (that node), or it is
+    /// outside the active modal scope (that scope's root).
+    pub(crate) fn why_not_enabled(
+        &self,
+        scene: &Scene,
+        node: NodeId,
+    ) -> crate::native_view::RouteWhy {
+        use crate::native_view::RouteWhy;
+        if !scene.layout_visible(node) {
+            return RouteWhy::NotShown(node);
+        }
+        if !self.enabled_without_scope(scene, node) {
+            let state = self.state.borrow();
+            let mut at = Some(node);
+            while let Some(id) = at {
+                if state
+                    .options
+                    .get(&id)
+                    .is_some_and(|options| options.disabled)
+                {
+                    return RouteWhy::Disabled(id);
+                }
+                if scene.effects(id).opacity <= 0. {
+                    return RouteWhy::NotShown(id);
+                }
+                at = scene.parent(id);
+            }
+            return RouteWhy::Disabled(node);
+        }
+        match self.focus_scope() {
+            Some(scope) => RouteWhy::OutsideScope {
+                native: node,
+                scope,
+            },
+            None => RouteWhy::Disabled(node),
+        }
+    }
     fn enabled_without_scope(&self, scene: &Scene, mut node: NodeId) -> bool {
         if !scene.layout_visible(node) {
             return false;
@@ -3067,7 +3173,7 @@ impl InputDispatcher {
         struct Unwinding<'a>(&'a RefCell<State>);
         impl Drop for Unwinding<'_> {
             fn drop(&mut self) {
-                if std::thread::panicking()
+                if crate::reactive::unwinding()
                     && let Ok(mut state) = self.0.try_borrow_mut()
                 {
                     state.captured = None;
@@ -3305,6 +3411,7 @@ impl InputDispatcher {
             | InputEvent::FilesDrop { .. }
             | InputEvent::FilesDropRejected { .. } => hit,
             InputEvent::FileHoverCancelled => {
+                self.state.borrow_mut().file_point = None;
                 let hovered = std::mem::take(&mut self.state.borrow_mut().file_hovered);
                 let scene = scene.borrow();
                 hovered.into_iter().find(|id| scene.contains(*id))
@@ -3352,14 +3459,20 @@ impl InputDispatcher {
                     .chain(scene.ancestors(target))
                     .collect()
             });
-            self.state.borrow_mut().file_hovered = hovered;
+            let mut state = self.state.borrow_mut();
+            state.file_hovered = hovered;
+            if let InputEvent::FileHover { x, y, path } = &event {
+                state.file_point = Some((*x, *y, path.clone()));
+            }
         } else if matches!(
             event,
             InputEvent::FileDrop { .. }
                 | InputEvent::FilesDrop { .. }
                 | InputEvent::FilesDropRejected { .. }
         ) {
-            self.state.borrow_mut().file_hovered.clear();
+            let mut state = self.state.borrow_mut();
+            state.file_hovered.clear();
+            state.file_point = None;
         }
         let click_count = if let InputEvent::PointerDown { x, y, button } = &event {
             if modifiers.is_some() {

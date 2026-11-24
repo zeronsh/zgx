@@ -2,12 +2,13 @@
 
 use std::cmp::{max, min};
 use std::ops::{Bound, Deref, Index, IndexMut, Range, RangeBounds};
+use std::sync::Arc;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::index::{Column, Line, Point};
-use crate::term::cell::{Flags, ResetDiscriminant};
+use crate::term::cell::{CellExtra, Flags, ResetDiscriminant};
 use crate::vte::ansi::{CharsetIndex, StandardCharset};
 
 pub mod resize;
@@ -16,7 +17,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-pub use self::row::Row;
+pub use self::row::{Cells, Row};
 use self::storage::Storage;
 
 pub trait GridCell: Sized {
@@ -26,8 +27,29 @@ pub trait GridCell: Sized {
     /// Perform an opinionated cell reset based on a template cell.
     fn reset(&mut self, template: &Self);
 
+    /// Each of `cells` reset as `reset` resets it.
+    // zgx: so a cell type can reset a row's at once.
+    #[inline]
+    fn reset_all(cells: &mut [Self], template: &Self) {
+        for cell in cells {
+            cell.reset(template);
+        }
+    }
+
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
+
+    /// zgx: the cell's extra, slot `handle - 1` of its row's table
+    /// (`Row::extras`), or none for 0; a row moving its cells to another
+    /// (reflow) renumbers them. Cells without extras have none.
+    #[inline]
+    fn extra_handle(&self) -> u16 {
+        0
+    }
+
+    /// zgx: the cell's extra set to slot `handle - 1` of its row's table.
+    #[inline]
+    fn set_extra_handle(&mut self, _handle: u16) {}
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -37,6 +59,11 @@ pub struct Cursor<T> {
 
     /// Template cell when using this cursor.
     pub template: T,
+
+    /// zgx: the pen's extra (its underline colour and hyperlink), given the
+    /// cells written with it through their row's table; the template's own
+    /// handle is always none. Saved and restored with the cursor.
+    pub template_extra: Option<Arc<CellExtra>>,
 
     /// Currently configured graphic character sets.
     pub charsets: Charsets,
@@ -135,6 +162,13 @@ pub struct Grid<T> {
 
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
+
+    /// zgx: lines scrolled off the top into the history (or past it, when
+    /// it holds none), ever, and never fewer than the history holds: with a
+    /// line's place, a number for it that stays as it scrolls (`pushed() +
+    /// line`), until a resize reflows it.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) pushed: u64,
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -147,7 +181,16 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             cursor: Cursor::default(),
             lines,
             columns,
+            pushed: 0,
         }
+    }
+
+    /// zgx: lines scrolled off the screen's top since the grid was made; a
+    /// line's number that stays as it scrolls is `pushed() + line` (its
+    /// `Line` negative in the history).
+    #[inline]
+    pub fn pushed(&self) -> u64 {
+        self.pushed
     }
 
     /// Update the size of the scrollback history.
@@ -271,6 +314,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
+            self.pushed += positions as u64;
             // Create scrollback for the new lines.
             self.increase_scroll_limit(positions);
 
@@ -318,7 +362,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         let end = Point::new(Line(self.lines as i32 - 1), Column(self.columns()));
         let mut iter = self.iter_from(end);
         while let Some(cell) = iter.prev() {
-            if !cell.is_empty() || cell.point.line < 0 {
+            if !self[cell.point.line].is_cell_empty(cell.cell) || cell.point.line < 0 {
                 break;
             }
         }
@@ -452,9 +496,23 @@ impl<T> Grid<T> {
         let point = self.cursor.point;
         &mut self[point.line][point.column]
     }
+
+    /// zgx: the extra handle of a cell the cursor's pen writes at `point`:
+    /// none, or its extra's slot in that row (the last one where it's the
+    /// pen's already, as along a hyperlink's run).
+    #[inline]
+    pub(crate) fn pen_handle(&mut self, point: Point) -> u16
+    where
+        T: GridCell,
+    {
+        match &self.cursor.template_extra {
+            None => 0,
+            Some(pen) => self.raw[point.line].slot_for(point.column, pen),
+        }
+    }
 }
 
-impl<T: PartialEq> PartialEq for Grid<T> {
+impl<T: GridCell + Clone + PartialEq> PartialEq for Grid<T> {
     fn eq(&self, other: &Self) -> bool {
         // Compare struct fields and check result of grid comparison.
         self.raw.eq(&other.raw)

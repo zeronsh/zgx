@@ -9,6 +9,7 @@ use super::{
     target::{Key, Target},
     value::V,
 };
+use crate::time::Instant;
 use crate::{
     Vm,
     element::Element,
@@ -18,7 +19,6 @@ use mlua::{Function, Lua, MetaMethod, Table, UserData, UserDataMethods};
 use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
-    time::Instant,
 };
 use zgx::input::{EventContext, InputEvent, PointerButton};
 
@@ -211,7 +211,9 @@ impl Draggable {
                     s.start = start;
                     s.limits = limits;
                     s.velocity = (0., 0.);
-                    s.last = Some((Instant::now(), start.0, start.1));
+                    // The interface's clock, which the throw's speed is
+                    // read on (a test's or an offline render's own).
+                    s.last = Some((zgx::clock::now(), start.0, start.1));
                 }
                 if self.cursor {
                     element.set_style(Prop::Cursor, Lit::Str("grabbing".into()));
@@ -236,7 +238,7 @@ impl Draggable {
                         self.resist(s.start.1 + dy, top, bottom),
                     )
                 };
-                let now = Instant::now();
+                let now = zgx::clock::now();
                 {
                     let mut s = self.state.borrow_mut();
                     if let Some((at, px, py)) = s.last {

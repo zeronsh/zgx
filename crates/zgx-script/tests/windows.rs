@@ -372,6 +372,93 @@ fn a_window_says_its_smallest_and_largest_size() {
     assert!(error.contains("`max_height` go together"), "{error}");
 }
 
+/// A declared window's glass, frame and level reach its host, this
+/// platform's block replacing its own keys per key (`glass` whole); what a
+/// block may not hold, or says wrong, is an error on every platform.
+#[test]
+fn a_window_says_how_it_looks_by_platform() {
+    use zgx_script::window_look::{Glass, Level, Material, this_platform};
+    let here = this_platform();
+    let other = if here == "linux" { "macos" } else { "linux" };
+    let h = Harness::inline(&format!(
+        r##"ui.window {{ id = "intro", open = ui.state("intro", true), transparent = true, decorations = false,
+            level = "always_on_top", glass = {{ material = "sidebar", plain = true }},
+            {here} = {{ decorations = true, glass = {{ material = "hud" }}, title = "Here" }},
+            {other} = {{ shadow = false }}, ui.text("Intro") }}
+        ui.window {{ id = "plain", open = ui.state("plain", true), ui.text("Plain") }}
+        return ui.text("main")"##
+    ));
+    let look = |id: &str| h.host.window_extras(id).look;
+    let intro = look("intro");
+    assert_eq!(intro.decorations, Some(true), "this platform's");
+    assert_eq!(
+        intro.glass,
+        Some(Glass {
+            material: Material::Hud,
+            plain: false
+        }),
+        "the block's glass whole"
+    );
+    assert_eq!(
+        (intro.transparent, intro.level, intro.shadow),
+        (Some(true), Some(Level::AlwaysOnTop), None)
+    );
+    let title = h
+        .host
+        .windows()
+        .get()
+        .iter()
+        .find(|w| w.id == "intro")
+        .unwrap()
+        .title
+        .clone();
+    assert_eq!(title, "Here");
+    assert_eq!(look("plain"), Default::default());
+    let refused = |options: &str| {
+        zgx_script::testing::TestApp::try_new(|runtime| {
+            zgx_script::ScriptHost::inline(
+                runtime,
+                "app",
+                format!(
+                    r##"ui.window {{ id = "w", open = ui.state("w", true), {options}, ui.text("w") }}
+                    return ui.text("main")"##
+                ),
+            )
+        })
+        .err()
+        .expect("it doesn't load")
+    };
+    for (options, said) in [
+        (
+            format!("{other} = {{ open = true }}"),
+            format!("`{other}` has `open`, which isn't a window key"),
+        ),
+        (
+            format!("{other} = {{ {here} = {{}} }}"),
+            format!("`{other}` holds `{here}`"),
+        ),
+        (
+            format!("{other} = {{ level = \"top\" }}"),
+            "`level` is `top`: one of normal, always_on_top".into(),
+        ),
+        (
+            format!("{other} = 3"),
+            format!("`{other}` is not a table of window keys"),
+        ),
+        (
+            "ios = { shadow = false }".into(),
+            "unknown option `ios`".into(),
+        ),
+        (
+            "glass = { material = \"frost\" }".into(),
+            "`glass.material` is `frost`".into(),
+        ),
+    ] {
+        let error = refused(&options);
+        assert!(error.contains(&said), "{options}: {error}");
+    }
+}
+
 /// `ui.window.size`: the window's size in points, followed, for decisions
 /// layout can't make (a sidebar collapsing to icons below a width).
 #[test]
@@ -642,4 +729,73 @@ fn a_windows_content_fills_it() {
     let detail = handle.find("detail").expect("its column");
     let b = window.scene.borrow().bounds(detail);
     assert_eq!((b.width, b.height), (420., 360.), "{b:?}");
+}
+
+/// `ui.window.popups` lists the menus and popovers open, as they open and close.
+#[test]
+fn window_popups_lists_the_open_menus_and_popovers() {
+    let mut h = Harness::inline(
+        r##"
+local open = ui.state("open", false)
+local seen = ui.state("seen", 0)
+return ui.column { w_full = true, h_full = true,
+    ui.text { id = "n", function() return tostring(#ui.window.popups:get()) end },
+    ui.popover { open = open, anchor = ui.button { id = "a", "Anchor" }, ui.text { id = "body", "inside" } },
+}"##,
+    );
+    h.host.window_state(&h.ui);
+    h.frames(3);
+    assert_eq!(h.text("n"), "0");
+    h.host
+        .set_state("open", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frames(4);
+    assert_eq!(h.text("n"), "1");
+    h.host
+        .set_state("open", zgx_script::Value::Bool(false))
+        .unwrap();
+    h.frames(4);
+    assert_eq!(h.text("n"), "0");
+}
+
+/// `zgx inspect windows` lists the popups a window wants open, each with its
+/// role, its owner window and whether it shows or is held back (the app at
+/// the back).
+#[cfg(feature = "inspect")]
+#[test]
+fn inspect_windows_lists_popups_with_their_owner_and_whether_they_show() {
+    use zgx_script::inspect::{Reply, Session};
+    let h = Harness::inline(
+        r##"
+local open = ui.state("open", false)
+return ui.column { w_full = true, h_full = true,
+    ui.menu { open = open, anchor = ui.button { id = "opener", "Open" },
+        ui.menu_item { "One" }, ui.menu_item { "Two" } },
+}"##,
+    );
+    h.ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 800.)]);
+    h.frames(3);
+    h.host
+        .set_state("open", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frames(3);
+    let session = Session::new(&h.ui, h.handle.clone(), &h.host, None);
+    let windows = |session: &Session| match session.answer(r#"{"cmd":"windows"}"#) {
+        Reply::Now(json) => json,
+        Reply::Later(_) => panic!("windows answers at once"),
+    };
+    let shown = windows(&session);
+    assert!(shown.contains("popup") && shown.contains("menu"), "{shown}");
+    assert!(
+        shown.contains("shown") && shown.contains("owner main"),
+        "{shown}"
+    );
+    assert!(shown.contains("\"shown\":true"), "{shown}");
+    h.ui.set_app_active(false);
+    h.frames(2);
+    let held = windows(&session);
+    assert!(
+        held.contains("held") && held.contains("\"held\":true"),
+        "{held}"
+    );
 }

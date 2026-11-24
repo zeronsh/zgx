@@ -17,10 +17,14 @@ mod converted_with_collection;
 mod form_values;
 #[path = "../guard_doors.rs"]
 mod guard_doors;
+#[path = "../host_registration.rs"]
+mod host_registration;
 #[path = "../io.rs"]
 mod io;
 #[path = "../large_data.rs"]
 mod large_data;
+#[path = "../load_font.rs"]
+mod load_font;
 #[path = "../markdown_incremental.rs"]
 mod markdown_incremental;
 #[path = "../module_overrides.rs"]
@@ -63,10 +67,14 @@ mod plugins;
 mod reload_cache;
 #[path = "../reload_shadow.rs"]
 mod reload_shadow;
+#[path = "../retarget.rs"]
+mod retarget;
 #[path = "../router.rs"]
 mod router;
 #[path = "../script.rs"]
 mod script;
+#[path = "../shared_upsert.rs"]
+mod shared_upsert;
 #[path = "../socket.rs"]
 mod socket;
 #[path = "../state.rs"]

@@ -58,7 +58,12 @@ fn mount(view: View) {
     ui.scene.borrow_mut().fonts_replaced();
     let _handle = ui.mount(view);
     ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
 }
 fn main() {
     let n: usize = std::env::var("ROWS")

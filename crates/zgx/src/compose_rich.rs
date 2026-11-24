@@ -20,6 +20,20 @@ impl PartialEq for InlineAction {
         Rc::ptr_eq(&self.0, &other.0)
     }
 }
+#[cfg(feature = "dom")]
+impl SpanMenu {
+    /// Build its entries for `event`.
+    pub(crate) fn build(&self, event: &crate::compose::ContextMenuEvent) -> Vec<View> {
+        (self.0.borrow_mut())(event)
+    }
+}
+#[cfg(feature = "dom")]
+impl InlineAction {
+    /// Run it, told the keys held: whether it handled the click.
+    pub(crate) fn call(&self, held: crate::input::Modifiers) -> bool {
+        (self.0.borrow_mut())(held)
+    }
+}
 /// A span's own context menu (`TextSpan::context_menu`).
 #[derive(Clone)]
 pub(crate) struct SpanMenu(Rc<RefCell<MenuBuild>>);
@@ -45,13 +59,29 @@ pub(crate) struct Link {
     pub href: Option<Arc<str>>,
     /// It restyles under the pointer, so no hover ring.
     pub styled_hover: bool,
+    /// What few runs have: its own menu, its label. One pointer, as the
+    /// menu alone took: most links have neither.
+    pub rare: Option<Rc<LinkRare>>,
+}
+/// A run's options few have, as its link takes them (`Link::rare`,
+/// `SpanExtras::link`): one pointer, shared from the span to its link.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LinkRare {
     /// Its own context menu, in place of a link's.
     pub menu: Option<SpanMenu>,
+    /// What assistive technology reads in place of its text (`TextSpan::label`).
+    pub label: Option<Arc<str>>,
 }
 impl Link {
     /// A link, not a run with only a menu: focusable, with a ring.
     fn is_link(&self) -> bool {
         self.action.is_some() || self.href.is_some()
+    }
+    fn menu(&self) -> Option<&SpanMenu> {
+        self.rare.as_ref()?.menu.as_ref()
+    }
+    fn label(&self) -> Option<&str> {
+        self.rare.as_ref()?.label.as_deref()
     }
 }
 /// A run of the paragraph, for a menu told which was asked on: where it
@@ -139,12 +169,16 @@ pub struct TextSpan {
 pub(crate) struct SpanExtras {
     pub hover: Option<SpanHover>,
     pub icon: Option<SpanIcon>,
-    pub menu: Option<SpanMenu>,
+    /// Its own menu and its label (`TextSpan::context_menu`,
+    /// `TextSpan::label`): what its link takes, as it is.
+    pub link: Option<Rc<LinkRare>>,
     /// Not underlined, though a link (`TextSpan::no_underline`).
     pub plain: bool,
     /// Room after the text, where it isn't `padding`'s across
     /// (`TextSpan::padding_end`).
     pub padding_end: Option<f32>,
+    /// A box of its own (`TextSpan::inline_box`).
+    pub boxed: bool,
     /// Its text fading in (`TextSpan::fade_in`).
     pub fade: Option<TextFade>,
 }
@@ -237,6 +271,17 @@ impl TextSpan {
         self.padding = [x.max(0.), y.max(0.)];
         self
     }
+    /// The span a box of its own, as CSS's `display: inline-flex` makes
+    /// it: its line height and `padding` are its box, baseline-aligned, and
+    /// its line's box grows to hold it as CSS's does (each glyph's
+    /// half-leading its own). A plain span's padding is its background's
+    /// alone, never its line's (CSS's for an inline span): a badge whose
+    /// box is taller than the text's half-leading reaches past its line.
+    #[doc(hidden)]
+    pub fn inline_box(mut self) -> Self {
+        self.extras.get_or_insert_default().boxed = true;
+        self
+    }
     /// Room after the text other than before it (`padding`'s `x` is then
     /// the room before it alone): a chip whose icon sits close to its
     /// edge, its name with more room after it.
@@ -291,8 +336,29 @@ impl TextSpan {
         mut self,
         build: impl FnMut(&crate::compose::ContextMenuEvent) -> Vec<View> + 'static,
     ) -> Self {
-        self.extras.get_or_insert_default().menu = Some(SpanMenu(Rc::new(RefCell::new(build))));
+        self.link_rare().menu = Some(SpanMenu(Rc::new(RefCell::new(build))));
         self
+    }
+    /// What assistive technology reads for this run in place of its text
+    /// (`aria-label`): a citation badge's "Citation 1, Sleep study.pdf".
+    /// Hidden until the API is settled.
+    #[doc(hidden)]
+    pub fn label(mut self, label: impl Into<Arc<str>>) -> Self {
+        self.link_rare().label = Some(label.into());
+        self
+    }
+    /// Its link's rare options, made as the first is set: out of line, so
+    /// a span built with a menu or a label inlines no more than with
+    /// neither.
+    #[cold]
+    #[inline(never)]
+    fn link_rare(&mut self) -> &mut LinkRare {
+        let link = self
+            .extras
+            .get_or_insert_default()
+            .link
+            .get_or_insert_default();
+        Rc::make_mut(link)
     }
     /// A link to `url`: a click (after `on_click`'s, if it has one) opens it
     /// with the system's handler (`Platform::open_url`, a browser for
@@ -495,7 +561,7 @@ impl LinkTarget {
         Self {
             action: link.action.clone(),
             href: link.href.clone(),
-            menu: link.menu.clone(),
+            menu: link.menu().cloned(),
         }
     }
 }
@@ -571,6 +637,7 @@ fn mount_link_menu(
         }),
         None,
         false,
+        None,
         environment,
     );
 }
@@ -682,7 +749,7 @@ impl SpanLocator {
 
 /// Whether a link opens through the system's handler: web and mail links
 /// only (see `TextSpan::href`).
-fn opens(url: &str) -> bool {
+pub(crate) fn opens(url: &str) -> bool {
     url.split_once(':').is_some_and(|(scheme, _)| {
         ["http", "https", "mailto"]
             .iter()
@@ -994,7 +1061,7 @@ pub(crate) fn mount_links(
             }
             // Its context menu, once it has an `href` to open or copy, or a
             // menu of its own.
-            if !entry.menu && (link.href.is_some() || link.menu.is_some()) {
+            if !entry.menu && (link.href.is_some() || link.menu().is_some()) {
                 entry.menu = true;
                 mount_link_menu(
                     &mut ui,
@@ -1006,10 +1073,25 @@ pub(crate) fn mount_links(
                 );
             }
             if link.is_link() {
-                ui.semantics.borrow_mut().set(
-                    entry.node,
-                    SemanticNode::new(Role::Link, &data.rich.text()[link.range.clone()]),
+                let mut semantic = SemanticNode::new(
+                    // A run that only acts is a button (Space too), one that goes somewhere a link.
+                    if link.href.is_some() {
+                        Role::Link
+                    } else {
+                        Role::Button
+                    },
+                    link.label()
+                        .unwrap_or(&data.rich.text()[link.range.clone()]),
                 );
+                // Named apart from its text (a citation's "1"): read once,
+                // as the control, where it is in the paragraph, as a
+                // browser reads an inline link; its text goes from the
+                // paragraph's.
+                if link.label().is_some() {
+                    semantic.logical_parent = Some(paragraph);
+                    semantic.inline_range = Some(link.range.clone());
+                }
+                ui.semantics.borrow_mut().set(entry.node, semantic);
             }
             let rects = &geometry[index];
             let first = rects.first().copied().unwrap_or_default();
@@ -1174,7 +1256,8 @@ pub(crate) fn mount_icons(
                         },
                         style.clone(),
                     );
-                    scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
+                    let drawn = scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
+                    scene.mark_drawn_in_box(drawn);
                     if index < mounted.len() {
                         let old = std::mem::replace(&mut mounted[index], node);
                         drop(scene);
@@ -1201,6 +1284,7 @@ pub(crate) fn mount_icons(
                 let inner = scene.children(node)[0];
                 if !matches!(scene.kind(inner), NodeKind::Svg(svg) if Arc::ptr_eq(svg, &icon.svg)) {
                     scene.set_kind(inner, NodeKind::Svg(icon.svg.clone()));
+                    scene.mark_drawn_in_box(inner);
                 }
                 if scene.style(inner) != glyph {
                     scene.set_style(inner, glyph);
@@ -1208,13 +1292,16 @@ pub(crate) fn mount_icons(
                 continue;
             }
             if index == mounted.len() {
-                mounted.push(scene.append(owner, NodeKind::Svg(icon.svg.clone()), style));
+                let drawn = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                scene.mark_drawn_in_box(drawn);
+                mounted.push(drawn);
             } else {
                 // Unchanged (the paragraph only moved): nothing to lay out.
                 let node = mounted[index];
                 if !matches!(scene.kind(node), NodeKind::Svg(_)) {
                     // (It had a well: the icon alone now.)
                     let fresh = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                    scene.mark_drawn_in_box(fresh);
                     drop(scene);
                     ui.remove(node);
                     mounted[index] = fresh;
@@ -1222,6 +1309,7 @@ pub(crate) fn mount_icons(
                 }
                 if !matches!(scene.kind(node), NodeKind::Svg(svg) if Arc::ptr_eq(svg, &icon.svg)) {
                     scene.set_kind(node, NodeKind::Svg(icon.svg.clone()));
+                    scene.mark_drawn_in_box(node);
                 }
                 if scene.style(node) != style {
                     scene.set_style(node, style);

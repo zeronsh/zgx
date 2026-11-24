@@ -357,22 +357,53 @@ impl Shown {
 
 #[test]
 fn an_unseen_player_draws_nothing_and_seen_again_shows_the_frame_due_then() {
-    let dir = temp_dir("player-unseen");
+    unseen_then_seen("player-unseen", None);
+}
+
+/// As above with each frame slow to draw (~150 ms, a loaded runner's): the
+/// frame under way as it is told it's unseen comes late, and is the last.
+#[test]
+fn a_frame_drawing_as_its_player_goes_unseen_is_the_last_it_shows() {
+    unseen_then_seen("player-unseen-slow", Some(Duration::from_millis(150)));
+}
+
+/// Played, told it's unseen, then seen again: it shows at most the frame
+/// it was drawing when told, however long that takes, then nothing while
+/// unseen; seen again, the frame its clock is at.
+fn unseen_then_seen(name: &str, slow_draw: Option<Duration>) {
+    let dir = temp_dir(name);
     std::fs::write(dir.join("video.luau"), RUN.replace("DURATION", "900")).unwrap();
     let mut shown = shown(&dir, |view| view);
+    if let Some(by) = slow_draw {
+        shown.player.debug_slow_draw(by);
+    }
     shown.player.open("Run", json!({}), 0);
     shown.player.play(true);
     shown.until(|frame| frame.is_some_and(|f| f >= 10));
     shown.player.watch(false);
     let hidden = Instant::now();
-    // A frame on its way as it was told may still come; then none.
-    shown.watch_for(Duration::from_millis(100));
-    let held = shown.frame();
-    let meanwhile = shown.watch_for(Duration::from_millis(600));
-    assert!(
-        meanwhile.iter().all(|f| *f == held),
-        "drew unseen: {meanwhile:?}"
-    );
+    // What it had drawn by then reaches the stage first.
+    std::thread::sleep(Duration::from_millis(20));
+    shown.stage.step().unwrap();
+    let told = shown.frame();
+    // It starts a frame only after reading what it's told, so the frame it
+    // was drawing as it was told may still come, however long it takes;
+    // then none: watched until what it shows has held 600 ms.
+    let (mut seen, mut changed) = (vec![told], Instant::now());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while changed.elapsed() < Duration::from_millis(600) {
+        assert!(Instant::now() < deadline, "still drawing unseen: {seen:?}");
+        shown.stage.step().unwrap();
+        let frame = shown.frame();
+        if Some(&frame) != seen.last() {
+            changed = Instant::now();
+        }
+        seen.push(frame);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let changes = seen.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    assert!(changes <= 1, "drew unseen: {seen:?}");
+    let held = *seen.last().unwrap();
     // Seen again: the frame its clock is at, not the one it left.
     let before = held.unwrap();
     let seen_at = Instant::now();
@@ -557,6 +588,62 @@ fn a_player_keeps_frames_only_paused_and_gives_them_back_at_rest() {
         rest.elapsed() >= Duration::from_millis(250),
         "gave back too soon"
     );
+}
+
+#[test]
+fn a_player_at_rest_gives_back_its_stage_and_draws_the_same_after() {
+    let dir = temp_dir("player-rest-stage");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let path = dir.to_path_buf();
+    let mut held = None;
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Bar", json!({ "color": "#00ff00" }), 30);
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    player.keep_frames_for(Duration::from_millis(200));
+    let before = drawn_at(&mut stage, &player, 30);
+    // Left alone, paused: its stage goes (the script's VM, interface and
+    // renderer), as a gone player's would.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while player.stages_dropped() == 0 {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "kept its stage at rest");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Asked again, it builds it anew and draws as it did.
+    player.seek(20);
+    let at_20 = drawn_at(&mut stage, &player, 20);
+    assert_ne!(at_20, before, "frame 20 drew as 30");
+    player.seek(30);
+    assert_eq!(
+        drawn_at(&mut stage, &player, 30),
+        before,
+        "drew otherwise after rest"
+    );
+    // Played on after rest: it plays.
+    player.play(true);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while player.frame.with_untracked(|f| *f) < 40 {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "it didn't play after rest");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(player.error.with_untracked(Clone::clone), None);
 }
 
 /// Steps `stage` until what it draws shows `player` at `frame` and holds

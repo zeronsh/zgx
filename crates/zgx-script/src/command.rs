@@ -273,7 +273,11 @@ impl Commands {
         let Some(vm) = vm.upgrade() else {
             return false;
         };
-        if let Err(error) = vm.runtime.clone().batch(|| vm.call::<()>(&f, ())) {
+        if let Err(error) = vm
+            .runtime
+            .clone()
+            .batch(|| vm.call_as::<()>("the command's run function", &f, ()))
+        {
             vm.report(error);
         }
         true

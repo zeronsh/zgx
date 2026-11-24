@@ -57,6 +57,10 @@ pub struct Font {
     pub(crate) italic_or_oblique: bool,
     /// zgx: whether it has an optical size axis (`opsz`).
     optical: bool,
+    /// zgx: whether its advances follow the size by a tracking table
+    /// (`trak`), as Core Text and HarfBuzz apply it: shaped at its point
+    /// size, an instance a size.
+    tracked: bool,
     /// zgx: whether its glyphs' shapes are only in a table swash can't draw
     /// (Apple's `hvgl`), for the platform's rasterizer.
     platform_outlines: bool,
@@ -103,6 +107,12 @@ impl Font {
     /// and advances follow the size.
     pub fn has_optical(&self) -> bool {
         self.optical
+    }
+
+    /// zgx: whether it is another instance at each size: an optical size
+    /// axis, or a tracking table (`trak`) its advances follow.
+    pub fn sized(&self) -> bool {
+        self.optical || self.tracked
     }
 
     /// zgx: whether its glyphs' shapes are only where swash can't draw them
@@ -153,16 +163,18 @@ impl Font {
 
 impl Font {
     pub fn new(db: &fontdb::Database, id: fontdb::ID, weight: fontdb::Weight) -> Option<Self> {
-        Self::new_at(db, id, weight, 0)
+        Self::new_at(db, id, weight, 0, false)
     }
 
     /// zgx: instanced at an optical size too (pixels, the `opsz` axis; 0
-    /// leaves the font's default), for fonts that have one.
+    /// leaves the font's default), for fonts that have one; and `track`ed
+    /// at it, where it has a tracking table (`trak`).
     pub fn new_at(
         db: &fontdb::Database,
         id: fontdb::ID,
         weight: fontdb::Weight,
         optical: u16,
+        track: bool,
     ) -> Option<Self> {
         let info = db.face(id)?;
 
@@ -194,6 +206,19 @@ impl Font {
                 .location([(Tag::new(b"wght"), weight.0 as f32)])
         };
         let metrics = font_ref.metrics(Size::unscaled(), &location);
+        // zgx: a tracking table (`trak`) applies at the point size the
+        // shaper is given, as HarfBuzz applies it where Chrome shapes with
+        // it, for a face asked to `track`: one the platform's fallback
+        // chose (Chrome's advances in `.PingFang UI` and `.CJK Symbols
+        // Fallback` include it). Other faces with one (SF) are untracked
+        // here for now, though Chrome tracks them too. With a statistics
+        // table (`STAT`, which harfrust also asks) and no bitmaps (`sbix`:
+        // Blink measures those through Skia, untracked). Optical size 0 is
+        // no size: untracked.
+        let tracked = track
+            && font_ref.table_data(Tag::new(b"trak")).is_some()
+            && font_ref.table_data(Tag::new(b"sbix")).is_none();
+        let point_size = (tracked && optical > 0).then_some(f32::from(optical));
         // zgx patch: a face without units per em (a bitmap-only font such
         // as macOS's GB18030Bitmap, which has no `head` table) lays every
         // glyph out infinitely wide: it can't be shaped, so it is no font
@@ -280,6 +305,7 @@ impl Font {
         Some(Self {
             id: info.id,
             optical: has_optical,
+            tracked,
             platform_outlines,
             monospace_fallback,
             #[cfg(feature = "swash")]
@@ -304,6 +330,7 @@ impl Font {
                     let shaper = shaper_data
                         .shaper(&font_ref)
                         .instance(Some(shaper_instance))
+                        .point_size(point_size)
                         .build();
                     Ok::<_, ReadError>(shaper)
                 },

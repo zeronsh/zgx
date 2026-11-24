@@ -135,7 +135,12 @@ fn main() {
     host.reload().expect("the bench script loads");
     ui.mount(host.view());
     ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     let built = instructions();
     for rep in 1..=reps {
         let change = if follows {
@@ -146,7 +151,12 @@ fn main() {
         host.set_state(change.0, change.1)
             .expect("the scene's state");
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
     }
     if let Some(error) = host.error().get() {
         panic!("{error}");

@@ -77,6 +77,23 @@ def main():
             return (value("Absolute upper-left X"), value("Absolute upper-left Y"),
                     value("Width"), value("Height"))
 
+        def settled(window, seconds=10):
+            # Where `window` rests: the same place read three times 100 ms
+            # apart. A window a drag moves lands over the next moments, the
+            # window manager carrying out its moves as the app sends them,
+            # later on a loaded machine: one read at a fixed time can find it
+            # a step short.
+            deadline, last, same = time.monotonic() + seconds, None, 0
+            while True:
+                at = geometry(window)
+                same = same + 1 if at == last else 0
+                if same >= 2:
+                    return at
+                if time.monotonic() > deadline:
+                    raise AssertionError(f"{window} never came to rest: {at}, {checks}")
+                last = at
+                time.sleep(.1)
+
         def drag(start, end):
             run("xdotool", "mousemove", *start, "mousedown", 1)
             # Past the drag threshold, then on in steps, as a hand moves.
@@ -129,8 +146,7 @@ def main():
         release = (x + 200, y + h + 120)
         drag((x + grab[0], y + grab[1]), release)
         torn = until("the torn-off window", lambda: named("Inbox"), app, log)[0]
-        time.sleep(.5)
-        tx, ty, _, _ = geometry(torn)
+        tx, ty, _, _ = settled(torn)
         checks["torn-off content at"] = [tx, ty]
         checks["expected at"] = [release[0] - grab[0], release[1] - grab[1]]
         checks["torn off under the pointer"] = (abs(tx - release[0] + grab[0]) <= 1
@@ -140,9 +156,11 @@ def main():
         # the pointer, and left on the desktop stays there.
         start = (tx + grab[0], ty + grab[1])
         end = (start[0] + 160, start[1] + 90)
+        ended = log.read_text().count("TAB_END Inbox")
         drag(start, end)
-        time.sleep(.5)
-        mx, my, _, _ = geometry(torn)
+        # The app says the drag is over; then the window comes to rest.
+        until("the moving drag's end", lambda: log.read_text().count("TAB_END Inbox") > ended, app, log)
+        mx, my, _, _ = settled(torn)
         checks["moved window at"] = [mx, my]
         # The point under the pointer as the drag began (past `drag`'s
         # threshold step) stays under it.

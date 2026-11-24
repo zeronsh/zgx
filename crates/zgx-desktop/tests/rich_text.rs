@@ -165,7 +165,7 @@ fn native_bidi_links_use_shaped_fragments_and_expose_clickable_accessibility() {
         .semantics
         .borrow()
         .iter()
-        .find(|(_, s)| s.role == Role::Link)
+        .find(|(_, s)| s.role == Role::Button)
         .unwrap()
         .0;
     let fragments = ui.scene.borrow().children(link).to_vec();
@@ -198,7 +198,7 @@ fn native_bidi_links_use_shaped_fragments_and_expose_clickable_accessibility() {
     let native = &tree
         .nodes
         .iter()
-        .find(|(_, n)| n.role() == accesskit::Role::Link)
+        .find(|(_, n)| n.role() == accesskit::Role::Button)
         .unwrap()
         .1;
     assert!(native.supports_action(accesskit::Action::Click));
@@ -206,7 +206,7 @@ fn native_bidi_links_use_shaped_fragments_and_expose_clickable_accessibility() {
     let consumer = accesskit_consumer::Tree::new(tree, true);
     assert_eq!(
         consumer.state().focus().unwrap().role(),
-        accesskit::Role::Link
+        accesskit::Role::Button
     );
 }
 
@@ -256,4 +256,143 @@ fn software_display_ellipsis_clears_previous_lines_and_restores_full_text() {
     let frame = scene.flush();
     raster.render(&scene, &frame.damage);
     assert_eq!(raster.pixels, full);
+}
+
+/// A control inline in a paragraph and named apart from its text (a
+/// citation's "1", read as "Citation 1") is read once, as a browser reads an
+/// inline link: as the control, between the text around it, its own text
+/// gone from the paragraph's value and runs. Without a label, it reads as
+/// its text, beside the paragraph's.
+#[test]
+fn a_labelled_inline_control_reads_once_where_it_stands() {
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let tree_of = |labelled: bool| {
+        let mut ui = Ui::new(400., 100.);
+        let mut citation = text_span("1").on_click(|| {});
+        if labelled {
+            citation = citation.label("Citation 1");
+        }
+        ui.mount(
+            rich_text()
+                .w(300.)
+                .text_size(14.)
+                .child(text_span("step "))
+                .child(citation)
+                .child(text_span("."))
+                .into(),
+        );
+        ui.prepare_frame();
+        let mut adapter = zgx_desktop::accessibility::AccessibilityTree::new();
+        adapter.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Rich", 1.)
+    };
+    let tree = tree_of(true);
+    let node = |id: accesskit::NodeId| &tree.nodes.iter().find(|(n, _)| *n == id).unwrap().1;
+    let buttons: Vec<_> = (tree.nodes.iter())
+        .filter(|(_, n)| n.role() == accesskit::Role::Button)
+        .collect();
+    assert_eq!(buttons.len(), 1, "one control, nothing else for it");
+    assert_eq!(buttons[0].1.label(), Some("Citation 1"));
+    let (_, paragraph) = (tree.nodes.iter())
+        .find(|(_, n)| n.role() == accesskit::Role::Label)
+        .expect("the paragraph");
+    assert_eq!(paragraph.value(), Some("step ."));
+    // Its children in reading order: the text before, the control, the
+    // text after.
+    let read: Vec<String> = (paragraph.children().iter())
+        .map(|child| {
+            let child = node(*child);
+            match child.role() {
+                accesskit::Role::TextRun => child.value().unwrap_or("").to_owned(),
+                role => format!("[{role:?} {}]", child.label().unwrap_or("")),
+            }
+        })
+        .collect();
+    assert_eq!(read, ["step ", "[Button Citation 1]", "."]);
+    // Unlabelled, its text is the paragraph's, as before.
+    let tree = tree_of(false);
+    let (_, paragraph) = (tree.nodes.iter())
+        .find(|(_, n)| n.role() == accesskit::Role::Label)
+        .expect("the paragraph");
+    assert_eq!(paragraph.value(), Some("step 1."));
+    assert!(
+        !paragraph.children().iter().any(|child| {
+            tree.nodes
+                .iter()
+                .any(|(n, node)| n == child && node.role() == accesskit::Role::Button)
+        }),
+        "an unlabelled control stays where it was"
+    );
+}
+
+/// What `zgx inspect node` says a reader hears (`zgx::semantics::heard`, in
+/// core) is what the accessibility tree says, on the same scene: the
+/// paragraph's text pieces and its controls, in the same order.
+#[test]
+fn what_core_says_a_reader_hears_is_what_the_accessibility_tree_says() {
+    use zgx::{
+        compose::prelude::*,
+        semantics::{Heard, Role},
+        widgets::Ui,
+    };
+    let mut ui = Ui::new(400., 100.);
+    ui.mount(
+        rich_text()
+            .w(360.)
+            .text_size(14.)
+            .child(text_span("See "))
+            .child(text_span("1").label("Citation 1").on_click(|| {}))
+            .child(text_span(" and "))
+            .child(text_span("2").label("Citation 2").on_click(|| {}))
+            .child(text_span(" for more."))
+            .into(),
+    );
+    ui.prepare_frame();
+    let core: Vec<String> = {
+        let semantics = ui.semantics.borrow();
+        let (paragraph, value) = semantics
+            .iter()
+            .find(|(id, s)| s.role == Role::Label && !semantics.inline_controls(*id).is_empty())
+            .map(|(id, s)| (id, s.value.clone().unwrap_or_default()))
+            .expect("the paragraph, with its controls");
+        let controls = semantics.inline_controls(paragraph);
+        zgx::semantics::heard(&value, &controls)
+            .into_iter()
+            .map(|part| match part {
+                Heard::Text(text) => text,
+                Heard::Control(id) => format!("[Button {}]", semantics.get(id).unwrap().label),
+            })
+            .collect()
+    };
+    let mut adapter = zgx_desktop::accessibility::AccessibilityTree::new();
+    let tree = adapter.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Rich", 1.);
+    let node = |id: accesskit::NodeId| &tree.nodes.iter().find(|(n, _)| *n == id).unwrap().1;
+    let (_, paragraph) = (tree.nodes.iter())
+        .find(|(_, n)| n.role() == accesskit::Role::Label)
+        .expect("the paragraph");
+    let platform: Vec<String> = (paragraph.children().iter())
+        .map(|child| {
+            let child = node(*child);
+            match child.role() {
+                accesskit::Role::TextRun => child.value().unwrap_or("").to_owned(),
+                role => format!("[{role:?} {}]", child.label().unwrap_or("")),
+            }
+        })
+        .collect();
+    assert_eq!(
+        core,
+        [
+            "See ",
+            "[Button Citation 1]",
+            " and ",
+            "[Button Citation 2]",
+            " for more."
+        ]
+    );
+    assert_eq!(platform, core, "the accessibility tree reads as core says");
+    let text: String = core
+        .iter()
+        .filter(|p| !p.starts_with('['))
+        .cloned()
+        .collect();
+    assert_eq!(paragraph.value(), Some(text.as_str()));
 }

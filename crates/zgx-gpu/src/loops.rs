@@ -351,7 +351,7 @@ impl GpuRenderer {
         mut items: Vec<PaintItem<'a>>,
     ) -> Vec<PaintItem<'a>> {
         let plays = self.plays_loops();
-        scene.set_plays_loops(plays && zgx::switches::BAKED_LOOPS.on());
+        scene.set_plays_loops(plays && zgx::switches::baked_loops());
         let baked = scene.baked_loops();
         if baked.is_empty() && self.loop_sheets.is_empty() {
             return items;

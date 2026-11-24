@@ -32,9 +32,13 @@ mod image_cache;
 mod image_on_demand;
 #[path = "../image_updates.rs"]
 mod image_updates;
+#[path = "../reactive_outline_width.rs"]
+mod reactive_outline_width;
 #[path = "../repaints.rs"]
 mod repaints;
 #[path = "../rounded_clip.rs"]
 mod rounded_clip;
+#[path = "../scroll_jump_damage.rs"]
+mod scroll_jump_damage;
 #[path = "../svg.rs"]
 mod svg;

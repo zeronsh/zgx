@@ -305,15 +305,18 @@ fn multiline_wheel_scroll_preserves_selection_clamps_and_bubbles_at_edges() {
         delta_x: 0.,
         delta_y,
     };
-    let before = ui.scene.borrow().transform(text);
+    // Where the view is scrolled: the caret, at the text's start, moves with
+    // it (a long text's lines move as a layer, its text node holding none).
+    let caret = editor.caret;
+    let before = ui.scene.borrow().transform(caret);
     assert!(ui.dispatch(scroll(35.)).default_prevented);
-    let after = ui.scene.borrow().transform(text);
+    let after = ui.scene.borrow().transform(caret);
     assert_eq!(after.y, before.y - 35.);
     assert_eq!(value.get(), initial);
     assert_eq!(editor.editor.borrow().selection().range(), 0..0);
     assert_eq!(bubbled.get(), 0);
     assert!(ui.dispatch(scroll(100_000.)).default_prevented);
-    let at_bottom = ui.scene.borrow().transform(text);
+    let at_bottom = ui.scene.borrow().transform(caret);
     let viewport = ui.scene.borrow().children(root)[0];
     let extent = ui.scene.borrow().bounds(text).height - ui.scene.borrow().bounds(viewport).height;
     assert_eq!(
@@ -326,11 +329,11 @@ fn multiline_wheel_scroll_preserves_selection_clamps_and_bubbles_at_edges() {
     assert_eq!(bubbled.get(), 0);
     std::thread::sleep(std::time::Duration::from_millis(350));
     assert!(!ui.dispatch(scroll(100_000.)).default_prevented);
-    assert_eq!(ui.scene.borrow().transform(text), at_bottom);
+    assert_eq!(ui.scene.borrow().transform(caret), at_bottom);
     assert_eq!(bubbled.get(), 1);
     ui.dispatch(InputEvent::Text("X".into()));
     assert_eq!(
-        ui.scene.borrow().transform(text).y,
+        ui.scene.borrow().transform(caret).y,
         0.,
         "editing reveals the caret after wheel scrolling"
     );

@@ -121,6 +121,19 @@ impl VariableHeights {
         self.index.borrow().row_at(offset)
     }
 }
+#[cfg(feature = "dom")]
+impl VariableHeights {
+    /// Measured rows' one-pixel floor, as a measured list applies it.
+    pub(crate) fn floor_measured(&self) {
+        if self.index.borrow_mut().enforce_minimum(1.) {
+            self.changed();
+        }
+    }
+    /// Whether a viewport resting at its end stays there (`anchor_end`).
+    pub(crate) fn anchors_end(&self) -> bool {
+        self.end.get()
+    }
+}
 struct Anchor {
     revision: u64,
     length: usize,
@@ -584,6 +597,12 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
     measured: bool,
 ) -> View {
+    #[cfg(feature = "dom")]
+    if __dom::DOM_ONLY {
+        return __dom::region_only(__dom::variable_region(
+            offset, heights, measured, overscan, key, build,
+        ));
+    }
     let rows = RowSource::new(key, build);
     let source = rows.rows({
         let heights = heights.clone();
@@ -1087,7 +1106,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 }
                 // Measured, anchor on the first row in view measured at this
                 // width: rows coming into view above it, estimates until
-                // measured, grow above it rather than push it down.
+                // measured, grow above it rather than push it down. Resting
+                // at the top, nothing anchors: a row come in above (a feed's
+                // newest) shows from the top as it is measured.
                 let next_anchor = next_anchor.map(|mut anchor| {
                     let measured_row = |key: &K| {
                         entries
@@ -1100,6 +1121,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             })
                     };
                     if measured
+                        && anchor.position > 0.
                         && let Some((_, index, top, _)) =
                             keys.iter().find(|(key, _, top, row_height)| {
                                 top + row_height > anchor.position && measured_row(key)

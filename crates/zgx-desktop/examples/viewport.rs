@@ -5,7 +5,9 @@
 //! Run: cargo run --release -p zgx-desktop --example viewport
 //!
 //! `--smoke-test` draws, spins for a moment, stops, then prints the frames the
-//! view drew and quits.
+//! view drew and quits. `--late` shows the view a second after the window
+//! opens: a window drawn on the software raster (`ZGX_RENDERER=raster`)
+//! then moves to the GPU mid-life.
 use std::{cell::Cell, rc::Rc};
 use zgx::{compose::prelude::*, input::InputEvent, scene::Color};
 use zgx_desktop::{
@@ -16,6 +18,7 @@ use zgx_desktop::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let smoke = std::env::args().any(|arg| arg == "--smoke-test");
+    let late = std::env::args().any(|arg| arg == "--late");
     Application::new()
         .window(WindowOptions {
             title: "zgx GPU view".into(),
@@ -44,6 +47,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let label = spinning.clone();
+            let shown = cx.ui.signal(!late);
+            let cube = {
+                let view = view.clone();
+                let (yaw, pitch) = (yaw.clone(), pitch.clone());
+                let dragging = dragging.clone();
+                move || {
+                    gpu_view("Cube", &view)
+                        .w_full()
+                        .h(340.)
+                        .rounded(16.)
+                        .overflow_hidden()
+                        .bg(Color(20, 26, 34, 255))
+                        .on_event({
+                            let (view, yaw, pitch) = (view.clone(), yaw.clone(), pitch.clone());
+                            let dragging = dragging.clone();
+                            move |event| match event.event {
+                                InputEvent::PointerDown { x, y, .. } => {
+                                    dragging.set(Some((x, y)));
+                                }
+                                InputEvent::PointerMove { x, y } => {
+                                    let Some((from_x, from_y)) = dragging.get() else {
+                                        return;
+                                    };
+                                    dragging.set(Some((x, y)));
+                                    yaw.set(yaw.get() + (x - from_x) * 0.01);
+                                    pitch.set((pitch.get() + (y - from_y) * 0.01).clamp(-1.4, 1.4));
+                                    view.invalidate();
+                                }
+                                InputEvent::PointerUp { .. } | InputEvent::PointerCancel => {
+                                    dragging.set(None)
+                                }
+                                _ => {}
+                            }
+                        })
+                }
+            };
+            if late {
+                let shown = shown.clone();
+                cx.tasks.spawn(async move {
+                    zgx::timer::sleep(std::time::Duration::from_secs(1)).await;
+                    shown.set(true);
+                });
+            }
             cx.render(
                 column()
                     .w_full()
@@ -68,37 +114,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .on_click(toggle.clone()),
                             ),
                     )
-                    .child(
-                        gpu_view("Cube", &view)
-                            .w_full()
-                            .h(340.)
-                            .rounded(16.)
-                            .overflow_hidden()
-                            .bg(Color(20, 26, 34, 255))
-                            .on_event({
-                                let (view, yaw, pitch) = (view.clone(), yaw.clone(), pitch.clone());
-                                move |event| match event.event {
-                                    InputEvent::PointerDown { x, y, .. } => {
-                                        dragging.set(Some((x, y)));
-                                    }
-                                    InputEvent::PointerMove { x, y } => {
-                                        let Some((from_x, from_y)) = dragging.get() else {
-                                            return;
-                                        };
-                                        dragging.set(Some((x, y)));
-                                        yaw.set(yaw.get() + (x - from_x) * 0.01);
-                                        pitch.set(
-                                            (pitch.get() + (y - from_y) * 0.01).clamp(-1.4, 1.4),
-                                        );
-                                        view.invalidate();
-                                    }
-                                    InputEvent::PointerUp { .. } | InputEvent::PointerCancel => {
-                                        dragging.set(None)
-                                    }
-                                    _ => {}
-                                }
-                            }),
-                    ),
+                    .child(switch_or_none(
+                        move || shown.get(),
+                        move |shown, _| shown.then(&cube),
+                    )),
             );
             if smoke {
                 let (window, frames) = (cx.window.clone(), cx.frames.clone());

@@ -12,18 +12,36 @@ use zgx::compose::__dom::Look;
 /// What every element starts from: zgx's layout defaults, which are mostly
 /// CSS flexbox's. `.z` is a box, `.zt` text; `.zb` a button, `.ze` an
 /// editor, their browser looks reset; `.zc` lays out as its child
-/// (`display: contents`); `.zr` holds absolute children.
+/// (`display: contents`); `.zr` holds absolute children. `.zo` is a scroll
+/// view, whose rows keep their size as on the desktop, where they lay out
+/// unbounded in its content, not shrunk to fit it (and a row's own `shrink`
+/// wins: the rule weighs nothing).
 pub(crate) const BASE_CSS: &str = "\
 .z{display:flex;flex-direction:column;box-sizing:border-box;}\
 .zr{position:relative;}\
+:where(.zo>*,.zo>.zc>*,.zo>.zc>.zc>*,.zo>.zc>.zc>.zc>*){flex-shrink:0;}\
 .zv{position:absolute;left:0;right:0;}\
+.zl{display:block;overflow:hidden auto;height:240px;}\
 .zb{font:inherit;color:inherit;background:none;text-align:inherit;cursor:default;margin:0;padding:0;border:0 solid transparent;}\
 .zb:focus-visible,.ze:focus-visible{outline:2px solid Highlight;outline-offset:-2px;}\
 .ze{font:inherit;color:inherit;background:transparent;outline:none;white-space:pre-wrap;margin:0;padding:0;border:0 solid transparent;}\
 .zc{display:contents;}\
+.ze[data-placeholder]:empty::before{content:attr(data-placeholder);color:GrayText;pointer-events:none;}\
 .zt{display:block;box-sizing:border-box;}\
 .zs0{user-select:none;}.zs1{user-select:text;}\
 .zu{align-items:center;justify-content:center;border:1px dashed currentColor;opacity:.6;min-height:24px;}\
+.zd,.zp{color:inherit;background:none;border:0 solid transparent;padding:0;max-width:calc(100vw - 8px);max-height:calc(100vh - 8px);}\
+.zd:not([open]),.zp:not(:popover-open){display:none;}\
+.zd::backdrop{background:var(--zbd,rgba(0,0,0,.5));}\
+.zp{position:fixed;inset:auto;margin:0;overflow:visible;}\
+.zp[data-layer]{inset:0;width:auto;height:auto;max-width:none;max-height:none;pointer-events:none;}\
+.zp[data-layer]>*{pointer-events:auto;}\
+.zp[role=tooltip]{transition:opacity .14s ease-out;}\
+.zp.za{overflow:visible;}\
+.za::before{content:\"\";position:absolute;z-index:-1;left:var(--zx);top:var(--zy);width:var(--zs);height:var(--zs);background:inherit;transform:translate(-50%,-50%) rotate(45deg);}\
+@starting-style{.zp[role=tooltip]:popover-open{opacity:0;}}\
+@keyframes zf{from{opacity:0;}}\
+.zcv{position:absolute;left:0;top:0;width:100%;height:100%;display:block;}\
 ";
 
 /// `base`'s own declarations, folded into a look's rule so its elements
@@ -36,6 +54,9 @@ fn folded(base: &'static str) -> (&'static str, &'static str) {
         "z ze" => (Z, "ze "),
         "z zu" => (Z, "zu "),
         "z zc" => (Z, "zc "),
+        "z zd" => (Z, "zd "),
+        "z zp" => (Z, "zp "),
+        "z zo" => (Z, "zo "),
         _ => ("", ""),
     }
 }
@@ -86,6 +107,30 @@ pub(crate) fn plain(ops: &mut Ops, base: &'static str) -> u32 {
     })
 }
 
+/// The index of a class for a span's CSS and its look under the pointer
+/// (`hover`, may be empty), its rules written the first time.
+pub(crate) fn rules(ops: &mut Ops, css: &str, hover: &str) -> u32 {
+    SHEET.with(|sheet| {
+        let mut sheet = sheet.borrow_mut();
+        let hover = (!hover.is_empty()).then(|| hover.to_owned());
+        let key = ("zi", [Some(css.to_owned()), hover, None, None, None]);
+        if let Some(index) = sheet.by_css.get(&key) {
+            return *index;
+        }
+        let class = sheet.rules;
+        sheet.rules += 1;
+        if !css.is_empty() {
+            ops.define(&[ops::RULE], &format!(".c{class}{{{css}}}"));
+        }
+        if let Some(hover) = &key.1[1] {
+            ops.define(&[ops::RULE], &format!(".c{class}:hover{{{hover}}}"));
+        }
+        let index = sheet.name(ops, &format!("c{class}"));
+        sheet.by_css.insert(key, index);
+        index
+    })
+}
+
 /// The index of the class name for `base` and `look`, its rules written the
 /// first time.
 pub(crate) fn class(ops: &mut Ops, base: &'static str, look: Look) -> u32 {
@@ -130,7 +175,9 @@ pub(crate) fn class(ops: &mut Ops, base: &'static str, look: Look) -> u32 {
                 }
                 if let Some(css) = disabled {
                     rule(
-                        format!(".c{class}:disabled,.c{class}[aria-disabled='true']"),
+                        format!(
+                            ".c{class}:disabled,.c{class}[aria-disabled='true'],[data-off] .c{class}"
+                        ),
                         css,
                     );
                 }

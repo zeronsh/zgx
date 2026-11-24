@@ -751,3 +751,92 @@ fn bands_apart_take_textures_their_size_and_go_at_rest() {
         );
     }
 }
+
+/// A clip at (20, 20), 160 × 160, fading its top and bottom 30 px: in its
+/// bottom band a dark rect over a light one, which stack there (drawn as one),
+/// and in its top band a box with a shadow alone, which `top` makes.
+fn two_bands(top: impl FnOnce(&mut Scene, NodeId)) -> Scene {
+    let mut scene = Scene::new(SIZE as f32, SIZE as f32);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let clip = scene.append(
+        scene.root(),
+        NodeKind::Container(Layout::Overlay),
+        Style {
+            width: Some(160.),
+            height: Some(160.),
+            clip: true,
+            fade_edges: [30., 30.],
+            ..Default::default()
+        },
+    );
+    scene.set_transform(clip, Transform { x: 20., y: 20. });
+    top(&mut scene, clip);
+    for (color, y, width, height) in [(light(), 120., 140., 40.), (dark(), 135., 80., 20.)] {
+        let rect = scene.append(
+            clip,
+            NodeKind::Rect(color),
+            Style {
+                width: Some(width),
+                height: Some(height),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(rect, Transform { x: 10., y });
+    }
+    scene
+}
+
+#[test]
+fn a_band_repainted_alone_draws_as_the_whole_window_draws_it() {
+    // A frame repainting the top band alone (a scroll view's, under the
+    // rows a scroll brought in) draws it as a frame drawing every band: one
+    // band's items stacking (the bottom's) doesn't decide how another's
+    // draw, whichever the frame repaints.
+    let _gpu_fixture = gpu_fixture();
+    for direct in [true, false] {
+        let mut scene = two_bands(|scene, clip| {
+            let shadowed = scene.append(
+                clip,
+                NodeKind::Quad(QuadStyle {
+                    fill: dark(),
+                    radius: 6.,
+                    shadow: Some(BoxShadow {
+                        color: Color(0, 0, 0, 160),
+                        offset: Transform { x: 0., y: 4. },
+                        blur_radius: 6.,
+                        spread: 2.,
+                    }),
+                    ..Default::default()
+                }),
+                Style {
+                    width: Some(100.),
+                    height: Some(16.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(shadowed, Transform { x: 30., y: 6. });
+        });
+        let mut gpu = GpuRenderer::new(SIZE, SIZE).unwrap();
+        gpu.set_direct_metal(direct);
+        let damage = scene.flush().damage;
+        gpu.render(&scene, &damage).unwrap();
+        let whole = gpu.readback().unwrap();
+        let top_band = Rect::new(0., 20., SIZE as f32, 30.);
+        gpu.render(&scene, &[top_band]).unwrap();
+        let alone = gpu.readback().unwrap();
+        let differ: Vec<(u32, u32, u8, u8)> = (0..SIZE * SIZE)
+            .filter_map(|i| {
+                let at = (i * 4) as usize;
+                (0..4)
+                    .any(|c| whole[at + c].abs_diff(alone[at + c]) > 2)
+                    .then(|| (i % SIZE, i / SIZE, whole[at + 3], alone[at + 3]))
+            })
+            .collect();
+        assert!(
+            differ.is_empty(),
+            "direct {direct}: {} pixels differ, first {:?}",
+            differ.len(),
+            &differ[..differ.len().min(4)]
+        );
+    }
+}

@@ -5,6 +5,20 @@ mod common;
 
 use std::{path::PathBuf, process::Command};
 
+#[path = "../src/definitions.rs"]
+mod definitions;
+
+/// Whether this build has the feature a mark in the definitions names.
+fn built_with(feature: &str) -> bool {
+    match feature {
+        "audio" => cfg!(feature = "audio"),
+        "audio-effects" => cfg!(feature = "audio-effects"),
+        "audio-vorbis" => cfg!(feature = "audio-vorbis"),
+        "audio-streams" => cfg!(feature = "audio-streams"),
+        other => panic!("zgx.d.luau marks a part of `{other}`, not a feature of zgx-script's"),
+    }
+}
+
 fn zgx() -> Command {
     Command::new(env!("CARGO_BIN_EXE_zgx"))
 }
@@ -189,6 +203,15 @@ fn every_shipped_example_passes_in_strict_mode() {
             &copies.join("terminal"),
         ),
     ];
+    // The sounds example calls `audio`'s effects and music: a build without
+    // them checks against definitions without them.
+    if !(cfg!(feature = "audio-effects") && cfg!(feature = "audio-streams")) {
+        std::fs::remove_dir_all(copies.join("examples/sounds")).unwrap();
+    }
+    // The plugin example's plugin plays sound.
+    if !cfg!(feature = "audio") {
+        std::fs::remove_dir_all(copies.join("examples/plugin_media")).unwrap();
+    }
     // Strict where no `.luaurc` picks a mode; the terminal's says strict.
     let out = zgx().arg("check").args(&examples).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -304,12 +327,63 @@ fn the_examples_types_files_are_what_zgx_types_writes() {
             .unwrap();
         assert!(committed.status.success(), "git show of {name}");
         assert!(
-            String::from_utf8_lossy(&committed.stdout)
+            without_unbuilt(&String::from_utf8_lossy(&committed.stdout))
                 == zgx_script::app_types::definitions(&sources),
             "{name}, as git holds it, is stale: run `zgx types {}` and add it",
             dir.display()
         );
     }
+}
+
+/// The parts of features this build is without, each a run of whole
+/// lines, taken out of `text` (an app's types file, which `zgx types` writes
+/// with them all): what this build writes, if `text` is current.
+fn without_unbuilt(text: &str) -> String {
+    let full = include_str!("../types/zgx.d.luau");
+    let mut runs: Vec<String> = Vec::new();
+    let mut run = String::new();
+    for (line, kept) in definitions::lines(full, built_with) {
+        match kept {
+            false => run.push_str(&line),
+            true if !run.is_empty() => runs.push(std::mem::take(&mut run)),
+            true => {}
+        }
+    }
+    runs.push(run);
+    let mut text = format!("\n{text}");
+    for run in runs.iter().filter(|run| !run.is_empty()) {
+        text = text.replace(&format!("\n{run}"), "\n");
+    }
+    text.split_off(1)
+}
+
+#[test]
+fn a_build_embeds_the_definitions_of_its_features() {
+    let full = include_str!("../types/zgx.d.luau");
+    assert_eq!(
+        zgx_script::check::DEFINITIONS,
+        definitions::filtered(full, built_with)
+    );
+    let none = definitions::filtered(full, |_| false);
+    assert!(!none.contains("--@") && !none.contains("declare audio"));
+    assert_eq!(
+        definitions::filtered(full, |_| true),
+        definitions::lines(full, |_| true)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect::<String>(),
+        "every part of a feature's is kept with every feature"
+    );
+}
+
+#[test]
+fn a_part_of_a_feature_is_kept_only_with_it() {
+    let full = "a\n--@if x\nb\n--@if y\nc\n--@end\n--@end\nd --@y\ne\n";
+    let keep = |on: &'static [&'static str]| definitions::filtered(full, |f| on.contains(&f));
+    assert_eq!(keep(&[]), "a\ne\n");
+    assert_eq!(keep(&["x"]), "a\nb\ne\n");
+    assert_eq!(keep(&["y"]), "a\nd\ne\n");
+    assert_eq!(keep(&["x", "y"]), "a\nb\nc\nd\ne\n");
 }
 
 #[test]
@@ -409,4 +483,59 @@ fn plugin_targets_by_class_and_chain_type_check() {
     assert!(out.status.success(), "{stdout}");
     assert_eq!(stdout.trim(), "", "no findings");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A props type of the app's own made with `Merge` and handed back to an
+/// element checks (`check::ITERATION_LIMIT`): each property of a type
+/// function's result is a fresh copy, compared by its structure, and an
+/// element's props spend more than luau-lsp's default budget.
+///
+/// It also guards the budget itself. The same file, checked by luau-lsp
+/// with the default budget (20,000), is too complex, so `zgx check`
+/// passing it shows the raised budget took effect. A luau-lsp that renamed
+/// or dropped the flag, ignoring it, fails this test rather than passing it.
+#[test]
+fn a_merged_props_type_handed_to_an_element_checks() {
+    if !installed() {
+        return;
+    }
+    let code = "--!strict\n\
+        type PanelProps = Merge<ContainerProps, { keep_focus: boolean? }>\n\
+        local function panel(props: PanelProps): Node\n\
+        \tprops.keep_focus = nil\n\
+        \treturn ui.column(props)\n\
+        end\n\
+        return panel({ w = 10 })\n";
+    let dir = scripts("merged", &[("app.luau", code)]);
+    let app = dir.join("app.luau");
+    let out = zgx().arg("check").arg(&app).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.trim().is_empty(), "no errors: {stdout}");
+    // zgx's definitions (what `zgx check` gives an app with no tokens of
+    // its own), at luau-lsp's default budget: too complex, so the check
+    // above needed the raised one.
+    let definitions = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("types/zgx.d.luau");
+    let lsp = zgx_script::check::find_luau_lsp().unwrap();
+    let default = Command::new(lsp)
+        .arg("analyze")
+        .arg("--platform=standard")
+        .arg("--flag:LuauSolverV2=true")
+        .arg("--flag:LuauTypeInferIterationLimit=20000")
+        .arg(format!("--definitions={}", definitions.display()))
+        .arg("--formatter=gnu")
+        .arg(&app)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&default.stdout).into_owned()
+        + &String::from_utf8_lossy(&default.stderr);
+    assert!(
+        said.contains("too complex"),
+        "at the default budget the case must be too complex, or it no \
+         longer proves `zgx check`'s budget took effect: {said}"
+    );
 }

@@ -126,7 +126,12 @@ fn run(luau: bool, n: usize) -> ([Phase; 3], usize) {
     measure(&mut phases[1], || {
         ui.mount(view);
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
     });
     let nodes = ui.scene.borrow().len();
     measure(&mut phases[2], || {

@@ -55,7 +55,12 @@ fn run(options: &str) -> Costs {
     settle();
     ui.prepare_frame();
     settle();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     let interval = Duration::from_secs_f64(1. / 120.);
     let start = Instant::now();
     let mut index = 0u64;
@@ -69,6 +74,9 @@ fn run(options: &str) -> Costs {
         settle();
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+        }
         // Tasks the frame woke (the engine, when moves start) run, as a
         // window's executor runs them.
         settle();

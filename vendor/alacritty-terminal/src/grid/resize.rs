@@ -6,7 +6,7 @@ use std::mem;
 use crate::index::{Boundary, Column, Line};
 use crate::term::cell::{Flags, ResetDiscriminant};
 
-use crate::grid::row::Row;
+use crate::grid::row::{Cells, Row};
 use crate::grid::{Dimensions, Grid, GridCell};
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -33,6 +33,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Restore template cell.
         self.cursor.template = template;
+
+        // zgx: lines a reflow moved into the history count as pushed, so a
+        // line's number (`pushed`) is never below zero; numbers may move with
+        // a resize.
+        self.pushed = self.pushed.max(self.history_size() as u64);
     }
 
     /// Add lines to the visible area.
@@ -254,7 +259,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         }
 
         let mut new_raw = Vec::with_capacity(self.raw.len());
-        let mut buffered: Option<Vec<T>> = None;
+        let mut buffered: Option<Cells<T>> = None;
 
         let mut rows = self.raw.take_all();
         for (i, mut row) in rows.drain(..).enumerate().rev() {
@@ -279,7 +284,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                         if reflow && i == cursor_buffer_line && self.cursor.point.column > columns {
                             // If there are empty cells before the cursor, we assume it is explicit
                             // whitespace and need to wrap it like normal content.
-                            Vec::new()
+                            Cells::default()
                         } else {
                             // Since it fits, just push the existing line without any reflow.
                             new_raw.push(row);
@@ -295,8 +300,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     let mut spacer = T::default();
                     spacer.flags_mut().insert(Flags::LEADING_WIDE_CHAR_SPACER);
 
+                    // zgx: with the extra it holds.
+                    let extra = row.slot(row[Column(columns - 1)].extra_handle()).cloned();
                     let wide_char = mem::replace(&mut row[Column(columns - 1)], spacer);
-                    wrapped.insert(0, wide_char);
+                    wrapped.insert_front(wide_char, extra);
                 }
 
                 // Remove wide char spacer before shrinking.
@@ -359,7 +366,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     if occ < columns {
                         wrapped.resize_with(columns, T::default);
                     }
-                    row = Row::from_vec(wrapped, occ);
+                    row = Row::from_cells(wrapped, occ);
 
                     if i < self.display_offset {
                         // Since we added a new line, rotate up the viewport.

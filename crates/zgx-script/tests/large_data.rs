@@ -610,3 +610,60 @@ fn a_find_repeated_on_unchanged_text_finds_the_same_and_follows_a_change() {
         ]
     );
 }
+
+/// A string's length (`len`) and parts (`sub`) are read where it is held,
+/// as `#` and `string.sub` read the string itself, and followed as `get`
+/// is; a long text read again is the same text, and read after a change,
+/// the new one.
+#[test]
+fn a_strings_length_and_parts_read_in_place_as_the_string_does() {
+    let mut h = Harness::inline(
+        r#"
+        local long = string.rep("a line of a long draft, ünïcode too\n", 3000)
+        local short = ui.state("short", "héllo, world")
+        local text = ui.state("text", long)
+        local wrong = {}
+        for _, s in { short, text } do
+            local whole = s:get()
+            if s:len() ~= #whole then table.insert(wrong, `len {s:len()} ~= {#whole}`) end
+            for _, i in { -200000, -#whole - 1, -5, -1, 0, 1, 2, 7, #whole, #whole + 1, 200000 } do
+                for _, j in { -200000, -5, -1, 0, 1, 3, 8, 65536, #whole, #whole + 9 } do
+                    if s:sub(i, j) ~= string.sub(whole, i, j) then table.insert(wrong, `sub({i}, {j})`) end
+                end
+                if s:sub(i) ~= string.sub(whole, i) then table.insert(wrong, `sub({i})`) end
+            end
+        end
+        local runs = ui.state("runs", 0)
+        local seen = ui.state("seen", "")
+        ui.effect(function()
+            text:len()
+            runs:update(function(n) return n + 1 end)
+        end)
+        ui.command { id = "append", run = function()
+            local before = text:get()
+            text:append("tail")
+            local after = text:get()
+            seen:set(`{#after - #before} {string.sub(after, -4)} {text:sub(-4)} {text:get() == after}`)
+        end }
+        ui.command { id = "replace", run = function()
+            text:set(string.rep("another draft, as long\n", 4000))
+            seen:set(`{string.sub(text:get(), 1, 7)} {text:len()}`)
+        end }
+        return ui.column {
+            ui.text { id = "wrong", table.concat(wrong, ", ") },
+            ui.text { id = "seen", "{seen}" },
+            ui.text { id = "runs", function() return tostring(runs:get()) end },
+        }
+        "#,
+    );
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("wrong"), "");
+    run(&mut h, "append");
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("seen"), "4 tail tail true");
+    run(&mut h, "replace");
+    assert_eq!(h.error(), None);
+    assert_eq!(h.text("seen"), format!("another {}", 23 * 4000));
+    // Once as it began, and once for each change.
+    assert_eq!(h.text("runs"), "3");
+}

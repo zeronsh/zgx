@@ -117,6 +117,80 @@ fn a_drag_starts_past_the_systems_drag_threshold() {
     assert!(ui.input.is_dragging());
     up(&ui, 50., 20.);
 }
+/// A source may decline as the pointer passes the threshold (`on_drag_when`
+/// giving none): asked once per press, that press stays a press, with no
+/// preview and no drag events, and let go on the node it clicks. The next
+/// press drags as ever.
+#[test]
+fn a_source_declining_a_press_starts_no_drag_and_still_clicks() {
+    let mut ui = Ui::new(400., 200.);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let (asked, clicked, heard) = (log.clone(), log.clone(), log.clone());
+    let presses = Rc::new(std::cell::Cell::new(0));
+    ui.mount(
+        row()
+            .gap(20.)
+            .child(
+                button()
+                    .size(100., 80.)
+                    .on_click(move || clicked.borrow_mut().push("click".to_owned()))
+                    .on_drag_when(move || {
+                        presses.set(presses.get() + 1);
+                        asked.borrow_mut().push(format!("asked:{}", presses.get()));
+                        // The first two presses are on rows it doesn't drag.
+                        (presses.get() > 2).then_some(Card(5))
+                    })
+                    .drag_preview(|_: &Card| div().id("preview").size(100., 80.)),
+            )
+            .child(
+                div()
+                    .size(100., 80.)
+                    .on_event(move |cx| {
+                        if let InputEvent::Drag(event) = &cx.event {
+                            heard.borrow_mut().push(format!("{:?}", event.phase));
+                        }
+                    })
+                    .on_drop(|_: &Card, _| ()),
+            ),
+    );
+    ui.prepare_frame();
+    let original = ui.scene.borrow().children(ui.root()).len();
+    // Declined: past the threshold within the button, then over a target.
+    down(&ui, 20., 20.);
+    moved(&ui, 40., 20.);
+    moved(&ui, 60., 20.);
+    assert!(!ui.input.is_dragging());
+    assert_eq!(
+        ui.scene.borrow().children(ui.root()).len(),
+        original,
+        "no preview"
+    );
+    up(&ui, 60., 20.);
+    assert_eq!(&*log.borrow(), &["asked:1", "click"]);
+    down(&ui, 20., 20.);
+    moved(&ui, 40., 20.);
+    moved(&ui, 150., 20.);
+    up(&ui, 150., 20.);
+    assert_eq!(
+        &*log.borrow(),
+        &["asked:1", "click", "asked:2"],
+        "nothing heard over the target; let go off the button, no click"
+    );
+    log.borrow_mut().clear();
+    // Taken: the next press drags as ever, and the target hears it.
+    down(&ui, 20., 20.);
+    moved(&ui, 40., 20.);
+    assert!(ui.input.is_dragging());
+    moved(&ui, 150., 20.);
+    up(&ui, 150., 20.);
+    assert_eq!(log.borrow()[0], "asked:3");
+    assert!(
+        log.borrow().iter().any(|l| l.starts_with("Over")),
+        "{:?}",
+        log.borrow()
+    );
+    assert!(!log.borrow().iter().any(|l| l == "click"));
+}
 #[test]
 fn rejected_outside_and_escape_drags_end_without_drop() {
     let mut ui = Ui::new(400., 200.);
@@ -675,6 +749,50 @@ fn a_drag_may_move_its_window() {
     up(&ui, 30., 10.);
     assert!(!ui.input.is_dragging());
 }
+/// The spring-loading delay is counted on the interface's clock: on a
+/// test's own, wall time passing before the drag (a loaded machine) moves
+/// neither when it is due nor when it springs.
+#[test]
+fn a_drag_springs_open_on_the_interfaces_clock() {
+    use std::time::Duration;
+    let clock = zgx::clock::VirtualClock::new();
+    let mut ui = Ui::new(400., 200.);
+    let sprang = Rc::new(RefCell::new(0));
+    let count = sprang.clone();
+    let _view = ui.mount(
+        row()
+            .gap(20.)
+            .child(div().size(80., 80.).on_drag(|| Card(1)))
+            .child(
+                div()
+                    .size(100., 80.)
+                    .on_drop(|_: &Card, _| {})
+                    .on_drag_spring(move |_: &Card| {
+                        *count.borrow_mut() += 1;
+                        true
+                    }),
+            ),
+    );
+    ui.prepare_frame();
+    // The wall clock runs on; the interface's stands where it started.
+    std::thread::sleep(Duration::from_millis(300));
+    down(&ui, 20., 20.);
+    moved(&ui, 110., 20.);
+    let due = ui.input.next_spring_deadline().expect("waiting to spring");
+    assert_eq!(
+        due,
+        clock.now() + zgx::input::SPRING_DELAY,
+        "due its delay after the drag rested, on the interface's clock"
+    );
+    clock.advance(zgx::input::SPRING_DELAY - Duration::from_millis(10), || {});
+    ui.advance_interactions(clock.now()).unwrap();
+    assert_eq!(*sprang.borrow(), 0, "not before");
+    clock.advance(zgx::input::SPRING_DELAY + Duration::from_millis(10), || {});
+    ui.advance_interactions(clock.now()).unwrap();
+    assert_eq!(*sprang.borrow(), 1, "once it has passed");
+    up(&ui, 110., 20.);
+}
+
 #[test]
 fn a_drag_resting_on_a_destination_springs_it_open_once() {
     use std::time::{Duration, Instant};
@@ -774,4 +892,46 @@ fn an_anchored_preview_hangs_below_the_pointer_centred() {
     assert_eq!((at.x, at.y, at.width), (150. - 30., 100. + 16., 60.));
     up(&ui, 150., 100.);
     view.unmount();
+}
+
+/// A drag preview is out of the window's flow, whatever its root is: one
+/// whose root lays out as its children (`contents`, as a Luau component's
+/// does) takes no room from the page while the drag is held, and the page is
+/// where it was after the drop.
+#[test]
+fn a_drag_preview_takes_no_room_from_the_page() {
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        column()
+            .w_full()
+            .h_full()
+            .child(
+                div()
+                    .id("source")
+                    .size(100., 40.)
+                    .on_drag(|| Card(1))
+                    .drag_preview(|_: &Card| {
+                        div().contents().child(div().id("ghost").size(100., 28.))
+                    }),
+            )
+            .child(div().id("page").w_full().grow()),
+    );
+    ui.prepare_frame();
+    let page = view.find("page").unwrap();
+    let bounds = |ui: &Ui| ui.scene.borrow().layout_bounds(page);
+    let before = bounds(&ui);
+    assert_eq!(before.height, 260., "the page takes the rest");
+    down(&ui, 20., 20.);
+    moved(&ui, 40., 60.);
+    assert!(ui.input.is_dragging());
+    assert!(
+        ui.input.drag_state().unwrap().preview.is_some(),
+        "a preview shows"
+    );
+    assert_eq!(bounds(&ui), before, "held: the page as it was");
+    moved(&ui, 200., 200.);
+    assert_eq!(bounds(&ui), before, "moved: the page as it was");
+    up(&ui, 200., 200.);
+    assert!(!ui.input.is_dragging());
+    assert_eq!(bounds(&ui), before, "dropped: the page as it was");
 }

@@ -25,7 +25,8 @@
 //! granted, never more than `expose` offers: `shared:<key>`,
 //! `action:<name>`, `override:<target or @app/module>` (`override:*` is every
 //! element), `override-module:*` (every module: trusts it with the app), and the sandbox's
-//! `fetch`, `clipboard`, `files`, `folders`, `terminals`, `web` and `windows`. A grant
+//! `fetch`, `clipboard`, `files`, `folders`, `fonts`, `terminals`, `web` and `windows`, and
+//! with their features `audio` and `scene3d`. A grant
 //! beyond what is exposed is an error as the app loads, naming the plugin
 //! and the grant.
 use crate::{Capability, Plugin, ScriptHost};
@@ -34,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 /// The keys this reads from `zgx.json`; a host reading the rest (the
 /// window's) accepts these.
-pub const KEYS: &[&str] = &["packages", "expose", "plugins"];
+pub const KEYS: &[&str] = &["packages", "expose", "plugins", "modules", "version"];
 
 /// What `zgx.json` says of an app's host (`read`), to give it (`apply`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -237,15 +238,20 @@ pub fn from_object(dir: &Path, object: &Map<String, Value>) -> Result<AppHost, S
                         "clipboard" => Capability::Clipboard,
                         "files" => Capability::Files,
                         "folders" => Capability::Folders,
+                        "fonts" => Capability::Fonts,
                         "terminals" => Capability::Terminals,
                         "web" => Capability::Web,
                         "windows" => Capability::Windows,
+                        #[cfg(feature = "audio")]
+                        "audio" => Capability::Audio,
+                        #[cfg(feature = "scene3d")]
+                        "scene3d" => Capability::Scene3d,
                         _ => {
                             return Err(format!(
                                 "plugin `{name}`: unknown grant `{grant}` (shared:<key>, \
                                  action:<name>, override:<target>, override-module:<@app/module \
                                  or *>, package:<name>, fetch, \
-                                 clipboard, files, terminals, web or windows)"
+                                 clipboard, files, fonts, terminals, web or windows)"
                             ));
                         }
                     },

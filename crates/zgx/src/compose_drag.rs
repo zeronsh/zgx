@@ -31,6 +31,18 @@ impl View {
     /// this node doesn't stop it: moved, the press drags instead of clicking.
     /// A smaller one keeps its press, as a tab's close button does.
     pub fn on_drag<T: 'static>(self, mut payload: impl FnMut() -> T + 'static) -> Self {
+        self.on_drag_when(move || Some(payload()))
+    }
+    /// `on_drag`, whose payload may say no drag starts from this press
+    /// (`None`), asked as the pointer passes the drag threshold: a row that
+    /// drags only some of what it shows, recycled for another. Declined, the
+    /// press stays a press: no preview, no drag events, and let go on the
+    /// node it clicks.
+    #[doc(hidden)]
+    pub fn on_drag_when<T: 'static>(
+        self,
+        mut payload: impl FnMut() -> Option<T> + 'static,
+    ) -> Self {
         let mut origin = None;
         self.on_event(move |cx| {
             if cx.phase == EventPhase::Capture {
@@ -50,8 +62,9 @@ impl View {
                     if let Some((px, py)) = origin.filter(|(px, py)| (x - px).hypot(y - py) > far) {
                         origin = None;
                         let source = cx.current_target;
-                        let payload = crate::input::starting_drag(source, &mut payload);
-                        cx.start_drag_from(payload, px, py);
+                        if let Some(payload) = crate::input::starting_drag(source, &mut payload) {
+                            cx.start_drag_from(payload, px, py);
+                        }
                     }
                 }
                 InputEvent::PointerUp { .. } | InputEvent::PointerCancel | InputEvent::Blur => {
@@ -275,11 +288,23 @@ pub(crate) fn mount(ui: &mut Ui, source: NodeId, mut builder: PreviewBuilder) {
                     old.unmount();
                 }
                 if let Some(view) = (builder.build)(&event.payload) {
-                    let view = ui.mount(view);
+                    // In a box of its own, out of the window's flow: a
+                    // preview whose root lays out as its children
+                    // (`contents`, as a Luau component's does) has no box
+                    // to take `absolute`, and would take room from the page.
+                    let view = ui.mount(crate::compose::div().child(view));
                     let node = view.node();
                     let mut style = ui.scene.borrow().style(node);
                     style.absolute = true;
-                    ui.scene.borrow_mut().set_style(node, style);
+                    let mut scene = ui.scene.borrow_mut();
+                    scene.set_style(node, style);
+                    // The box moves with the pointer: on whole device pixels
+                    // if the preview asked for its own (`View::pixel_snap`).
+                    let inner = scene.children(node).first().copied();
+                    if inner.is_some_and(|inner| scene.snaps_to_pixels(inner)) {
+                        scene.set_pixel_snap(node, true);
+                    }
+                    drop(scene);
                     ui.input.set_drag_preview(Some(node));
                     // Where popups have windows of their own, so does the
                     // preview: the host moves its window with the pointer,

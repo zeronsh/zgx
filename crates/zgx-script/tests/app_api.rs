@@ -8,7 +8,34 @@ use zgx::{
     input::{InputEvent, PointerButton},
     native_view::NativeContent,
 };
-use zgx_script::{ScriptHost, Value};
+use zgx_script::{Registry, ScriptHost, Value};
+
+#[test]
+fn the_registry_lists_what_the_host_offers_and_the_shared_keys_scripts_made() {
+    let h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "registry",
+            r#"ui.shared("zeta.made", 0)
+            return ui.text { "registry" }"#,
+        );
+        host.action("save", |_| {});
+        host.action("open", |_| {});
+        host.function("width", |_| Value::Num(1.));
+        host.async_action("fetch", |value| async move { Ok(value) });
+        host.shared("alpha.host", 0.);
+        host
+    });
+    assert_eq!(
+        h.host.registry(),
+        Registry {
+            actions: vec!["open".into(), "save".into()],
+            functions: vec!["width".into()],
+            async_actions: vec!["fetch".into()],
+            shared: vec!["alpha.host".into(), "zeta.made".into()],
+        }
+    );
+}
 
 #[test]
 fn commands_are_published_after_a_load_and_run_by_id() {
@@ -223,6 +250,28 @@ fn terminal_sessions_outlive_reloads_and_end_when_closed() {
     assert!(first == again, "a reload keeps the session");
     h.click("close");
     assert!(first.is_closed());
+}
+
+/// `~` is the user's home: their profile on Windows, where `HOME` is
+/// usually unset, so a terminal asked to start in `~` starts somewhere real.
+#[test]
+fn a_terminal_in_the_home_folder_starts_in_the_users_home() {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+        .expect("the platform names a home folder");
+    for (cwd, expected) in [("~", home.clone()), ("~/projects", home.join("projects"))] {
+        let mut h = Harness::inline(&format!(
+            r##"local term = ui.term("home", {{ cwd = "{cwd}" }})
+            return ui.terminal {{ term = term, w = 200, h = 100 }}"##
+        ));
+        let term = terminal(&mut h);
+        assert_eq!(
+            term.options().working_directory.as_deref(),
+            Some(expected.as_path()),
+            "{cwd}"
+        );
+        term.close();
+    }
 }
 
 #[test]

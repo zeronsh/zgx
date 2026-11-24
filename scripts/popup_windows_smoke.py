@@ -188,11 +188,11 @@ def main():
         # show what it leaves clear: a window the panel's size, not the
         # shadow's margin in black, its corners cut to what is under them.
         # The system says nothing shows through.
-        def shadowed(name):
+        def shadowed(name, extra=None):
             nonlocal app
             log = args.output / f"application-{name}.log"
             app = launch(f"application-{name}", [str(args.binary.resolve())],
-                         dict(env, POPUP_PROBE_SHADOW="1"), stdout=log.open("w"))
+                         dict(env, **(extra or {"POPUP_PROBE_SHADOW": "1"})), stdout=log.open("w"))
             until(f"READY {name}", lambda: "READY" in log.read_text())
             main_window = until(f"the window {name}", lambda: (windows(True) or [None])[0])
             run("xdotool", "windowactivate", "--sync", main_window)
@@ -218,6 +218,19 @@ def main():
         checks["no compositor: the system reports reduced transparency"] = until(
             "transparency reported", lambda: "TRANSPARENCY reduced=true" in log.read_text(), 5)
         stop(app)
+        # A rounded panel inset in a root that paints nothing (8 points of
+        # padding), or nested under wrappers: the window is cut to the panel,
+        # its inset and corners the desktop's, not black (Zeron's menus).
+        for panel in ("inset", "nested"):
+            app, log, popup, (px, py, pw, ph), shot = shadowed(f"panel-{panel}", {"POPUP_PROBE_PANEL": panel})
+            image = Image.open(shot).convert("RGB")
+            bottom = min(py + ph - 1, image.height - 1)
+            desktop = (0x30, 0x60, 0xc0)
+            checks[f"{panel} panel: the window's corner is the desktop's"] = image.getpixel((max(px, 0), bottom)) == desktop
+            checks[f"{panel} panel: its own corner is the desktop's"] = image.getpixel((px + 8, bottom - 8)) == desktop
+            middle = image.getpixel((px + pw // 2, py + ph // 2))
+            checks[f"{panel} panel: its middle is drawn"] = middle not in (desktop, (0, 0, 0))
+            stop(app)
         # Under picom, with its shadows on: the window keeps the margin zgx
         # draws its shadow in, and asks picom for no shadow of its own, a box
         # round all of it. Once it composites, the system says so.

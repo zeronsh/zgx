@@ -63,6 +63,21 @@ fn animate_moves_with_the_default_ease_and_goes_idle() {
     );
 }
 
+/// A box an x/y animation moved rests on whole device pixels (a fractional
+/// target at 2x lands on a half point); in flight it moves exactly.
+#[test]
+fn an_animated_box_rests_on_whole_device_pixels() {
+    let mut h = Harness::inline(&script(
+        r##"anime.animate("#box", { x = 10.3, duration = 100, ease = "linear" })"##,
+    ));
+    h.ui.scene.borrow_mut().set_pixel_scale(2.);
+    h.frame();
+    h.run_ms(130.);
+    // The frame painted, as a renderer flushes it.
+    h.ui.scene.borrow_mut().flush();
+    assert_eq!(h.x("box"), 10.5, "rests on a half point at 2x, not at 10.3");
+}
+
 #[test]
 fn stagger_delays_hold_from_values_until_each_target_starts() {
     let mut h = Harness::inline(
@@ -447,6 +462,57 @@ fn springs_set_their_own_duration_and_settle() {
     h.run_ms(duration + 50.);
     close(h.x("box"), 100., "settled");
     assert!(!h.clock.wants_frame());
+}
+
+/// A draggable's throw is timed on the interface's clock: the same drag,
+/// its moves a frame apart on a test's clock, lands in the same place
+/// however long the wall clock takes between them (a loaded machine).
+#[test]
+fn a_throw_is_timed_on_the_interfaces_clock() {
+    use zgx::input::PointerButton::Primary;
+    let throw = |stall: std::time::Duration| {
+        let clock = zgx::clock::VirtualClock::new();
+        let mut h = Harness::inline(
+            r##"anime.createDraggable("#knob", { y = false, snap = 10, container = { 0, 2000, 0, 0 } })
+            return ui.column { ui.div { id = "knob", w = 20, h = 20 } }"##,
+        );
+        let node = h.find("knob").unwrap();
+        let b = h.ui.scene.borrow().bounds(node);
+        let (x, y) = (b.x + 10., b.y + 10.);
+        h.ui.dispatch(InputEvent::PointerDown {
+            x,
+            y,
+            button: Primary,
+        });
+        for step in 1..=2_u32 {
+            std::thread::sleep(stall);
+            clock.advance(
+                std::time::Duration::from_millis(16 * u64::from(step)),
+                || {},
+            );
+            h.ui.dispatch(InputEvent::PointerMove {
+                x: x + 16. * step as f32,
+                y,
+            });
+        }
+        h.ui.dispatch(InputEvent::PointerUp {
+            x: x + 32.,
+            y,
+            button: Primary,
+        });
+        // Its throw plays out, the clock stepped with the frames.
+        for step in 0..90_u64 {
+            clock.advance(std::time::Duration::from_millis(32 + 17 * step), || {});
+            h.run_ms(17.);
+        }
+        h.x("knob")
+    };
+    let (quick, stalled) = (
+        throw(std::time::Duration::ZERO),
+        throw(std::time::Duration::from_millis(40)),
+    );
+    assert!(quick > 32., "thrown past where it was let go: {quick}");
+    assert_eq!(stalled, quick, "the wall clock's stall moves nothing");
 }
 
 #[test]
@@ -1789,7 +1855,11 @@ fn a_window_back_after_a_while_takes_no_huge_step() {
 }
 
 /// What a state does run to 100 from 0, sampled each frame, and how long it went on.
+/// Where a box a spring moves stands, a 17 ms frame at a time, on a clock
+/// of the test's own that the frames step (`zgx::clock`): the wall clock,
+/// a loaded machine's, moves nothing.
 fn spring_to_path(options: &str) -> Vec<f32> {
+    let clock = zgx::clock::VirtualClock::new();
     let mut h = Harness::inline(&format!(
         r##"local at = ui.state("at", 0)
         local shown = ui.state("shown", "going")
@@ -1803,8 +1873,12 @@ fn spring_to_path(options: &str) -> Vec<f32> {
     ));
     h.frames(2);
     h.click("go");
+    // The clock where the frames are: the first, 17 ms after the call, at
+    // the curve's start (it is the first the spring hears of), as frames
+    // read it.
     let path = (0..90)
-        .map(|_| {
+        .map(|step| {
+            clock.advance(std::time::Duration::from_millis(17 * step), || {});
             h.run_ms(17.);
             h.x("box")
         })
@@ -1877,6 +1951,34 @@ fn a_spring_with_little_damping_passes_its_target_and_comes_back() {
     let peak = path.iter().copied().fold(0f32, f32::max);
     assert!(peak > 101., "past it: {peak}");
     assert_eq!(*path.last().unwrap(), 100.);
+}
+
+/// A delay is counted on the interface's clock (`zgx::clock`), not the
+/// wall clock: however long a frame is in coming (a loaded machine), a
+/// spring on a test's clock that hasn't passed its delay hasn't moved. Read
+/// off the wall clock, a 60 ms stall started a 40 ms delay's spring early.
+#[test]
+fn a_delay_is_counted_on_the_interfaces_clock() {
+    let clock = zgx::clock::VirtualClock::new();
+    let mut h = Harness::inline(
+        r##"local at = ui.state("at", 0)
+        return ui.column {
+            ui.div { id = "box", w = 20, h = 20, x = at },
+            ui.button { "Go", id = "go", on_click = function()
+                ui.spring_to(at, 100, { stiffness = 650, damping = 56, delay = 40 })
+            end },
+        }"##,
+    );
+    h.frames(2);
+    h.click("go");
+    // The wall clock runs on past the delay; the interface's stands still.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    clock.advance(std::time::Duration::from_millis(17), || {});
+    h.run_ms(17.);
+    assert_eq!(h.x("box"), 0., "still waiting, 17 ms in");
+    clock.advance(std::time::Duration::from_millis(120), || {});
+    h.run_ms(100.);
+    assert!(h.x("box") > 0., "and moves once it has passed");
 }
 
 #[test]

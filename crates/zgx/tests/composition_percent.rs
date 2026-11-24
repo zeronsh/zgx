@@ -263,3 +263,74 @@ fn growing_split_retains_full_height_siblings_through_editor_refresh_and_window_
     assert_eq!(mounted.find("editor"), Some(editor.node));
     assert!(value.get().contains('!'));
 }
+
+/// A percentage `max-width` on a column's cross axis (`items_end`), its
+/// width fitting wrapping text up to it, resolves against the column's own
+/// content width, as CSS's does: 70% of 574 is 401.8 (Anara's user bubble
+/// was 401.549, 70% of 573.64).
+/// A chat's user bubble (Anara's nesting): a column 574 wide holding a
+/// bubble capped at 70% of it, its text long enough to wrap. Its width
+/// `w` (a CSS size, or none) and the column's and bubble's bounds.
+fn user_bubble(w: Option<&str>) -> (zgx::scene::Rect, zgx::scene::Rect) {
+    let mut ui = Ui::new(800., 400.);
+    let long = "Can you compare the methods in these papers and tell me which one is more \
+                reliable, and why, with the evidence each gives for its claims?";
+    let mut bubble = column()
+        .relative()
+        .max_w_percent(70.)
+        .items_end()
+        .id("bubble")
+        .child(
+            column()
+                .px(12.)
+                .child(text(long).text_size(14.).text_wrap(true)),
+        )
+        .child(row().absolute().size(40., 20.));
+    if let Some(w) = w {
+        bubble = bubble.w_calc(w.parse::<zgx::size_calc::SizeCalc>().unwrap());
+    }
+    let mounted = ui.mount(
+        row().w(600.).p(12.).items_start().child(
+            column().w_full().px(1.).child(
+                column()
+                    .w_full()
+                    .items_end()
+                    .gap(4.)
+                    .pt(24.)
+                    .pb(22.)
+                    .id("column")
+                    .child(bubble),
+            ),
+        ),
+    );
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    (
+        scene.bounds(mounted.find("column").unwrap()),
+        scene.bounds(mounted.find("bubble").unwrap()),
+    )
+}
+
+/// `w = "fit-content"` on a bubble whose text wraps: CSS's
+/// min(max-content, room) is its cap, 70% of its column, as Chrome draws
+/// it (where its widest wrapped line is a little narrower).
+#[test]
+fn a_fit_content_bubble_whose_text_wraps_reaches_its_percentage_cap() {
+    let (column, bubble) = user_bubble(Some("fit-content"));
+    assert_eq!(column.width, 574.);
+    assert!(
+        (bubble.width - 0.7 * 574.).abs() < 0.01,
+        "bubble {} wide in a column {} wide: 70% of {}",
+        bubble.width,
+        column.width,
+        bubble.width / 0.7
+    );
+}
+
+/// With no width, a bubble shrinks to its widest wrapped line (zgx's
+/// default, tighter than CSS's): within its cap, not filling it.
+#[test]
+fn a_bubble_with_no_width_shrinks_to_its_widest_line() {
+    let (_, bubble) = user_bubble(None);
+    assert!(bubble.width < 0.7 * 574. - 0.01, "{}", bubble.width);
+}

@@ -14,6 +14,20 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Luau apps (zgx-script) in the browser. Luau's C++ is built with wasi-sdk:
+# source `luau-env.sh` first.
+luau = ["dep:zgx-script", "dep:wasm-bindgen-futures"]
+# Sound for Luau apps (zgx-script's `audio`): zgx-audio's mixer pulled by an
+# audio worklet (js/zgx-audio.js), the AudioContext made at the first sound.
+# The parts as zgx-run has them.
+audio = ["luau", "zgx-script/audio"]
+audio-effects = ["audio", "zgx-script/audio-effects"]
+audio-vorbis = ["audio", "zgx-script/audio-vorbis"]
+audio-mp3 = ["audio", "zgx-script/audio-mp3"]
+audio-opus = ["audio", "zgx-script/audio-opus"]
+audio-streams = ["audio", "zgx-script/audio-streams"]
+
 # Built for wasm32 only: elsewhere the crate is empty, and zgx's `dom`
 # feature, enabled only here, stays off in every native build.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -21,16 +35,52 @@ zgx = { path = "../zgx", version = "0.1.10", default-features = false, features 
 wasm-bindgen = "=0.2.127"
 js-sys = "0.3.104"
 rustc-hash = "2.1"
-web-sys = { version = "0.3.104", features = ["Document", "Element", "HtmlElement", "Node", "Window"] }
+# The browser's clock, as zgx's timers read it.
+web-time = "1.1"
+web-sys = { version = "0.3.104", features = ["Document", "Element", "HtmlElement", "Node", "Window", "Performance", "console"] }
+zgx-script = { path = "../zgx-script", version = "0.1.10", default-features = false, optional = true }
+# The fetcher's requests awaited (`luau`).
+wasm-bindgen-futures = { version = "0.4.77", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # Tracing on in tests: its clock is the browser's (`zgx::time`).
 zgx = { path = "../zgx", default-features = false, features = ["dom", "trace"] }
 wasm-bindgen-test = "=0.3.77"
 wasm-bindgen-futures = "0.4.77"
-web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlElement", "HtmlInputElement", "HtmlCollection", "MouseEvent", "MouseEventInit", "Node", "NodeList", "Window", "CssStyleDeclaration"] }
+web-sys = { version = "0.3.104", features = ["Document", "DomRect", "Element", "Event", "EventInit", "HtmlButtonElement", "HtmlElement", "HtmlInputElement", "HtmlCollection", "KeyboardEvent", "KeyboardEventInit", "MouseEvent", "MouseEventInit", "Node", "NodeList", "PointerEvent", "PointerEventInit", "Window", "CssStyleDeclaration", "FocusEvent", "CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData", "ClipboardEvent", "ClipboardEventInit", "DataTransfer", "DragEvent", "DragEventInit", "InputEvent", "InputEventInit", "CompositionEvent", "CompositionEventInit", "Selection", "Range", "StaticRange", "StaticRangeInit", "Text"] }
 
 # The table benchmark (`bench/`): a page's module, built for wasm32.
+[[test]]
+name = "luau"
+required-features = ["luau"]
+
+# Its own binary: it counts every allocation of the page.
+[[test]]
+name = "luau_memory"
+required-features = ["luau"]
+
+# `ui.fetch` through the page's `fetch` (`install_fetcher`).
+[[test]]
+name = "fetch"
+required-features = ["luau"]
+
+# A Luau app's `audio` through the audio worklet (`install_audio`).
+[[test]]
+name = "audio"
+required-features = ["audio"]
+
 [[example]]
 name = "bench"
 crate-type = ["cdylib"]
+
+# A Luau app (`bench/build.sh luau`).
+[[example]]
+name = "luau"
+crate-type = ["cdylib"]
+required-features = ["luau"]
+
+# The table benchmark in Luau (`bench/build.sh luau-bench`).
+[[example]]
+name = "luau_bench"
+crate-type = ["cdylib"]
+required-features = ["luau"]

@@ -5,10 +5,16 @@
 #![allow(clippy::duplicate_mod)]
 #[path = "../app_plugins.rs"]
 mod app_plugins;
+#[path = "../build_rev.rs"]
+mod build_rev;
+#[path = "../callback_sites.rs"]
+mod callback_sites;
 #[path = "../check.rs"]
 mod check;
 #[path = "../diagnostics.rs"]
 mod diagnostics;
+#[path = "../errors_say_where.rs"]
+mod errors_say_where;
 #[path = "../hover_frames.rs"]
 mod hover_frames;
 #[path = "../input_hints.rs"]

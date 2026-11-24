@@ -1,0 +1,74 @@
+[package]
+name = "zgx-audio"
+autotests = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+description = "Sound for zgx apps: a sample-accurate mixer with buses, fades and a limiter, WAV files, and an offline renderer. Optional: an app that doesn't depend on it pays nothing."
+keywords = ["audio", "mixer", "sound", "gamedev", "gui"]
+categories = ["multimedia::audio", "game-development"]
+
+[features]
+# The system's default output: through cpal today on every platform. The
+# feature names what it gives, not how, so a platform's backend can change
+# without apps changing features.
+device = ["dep:cpal"]
+# Ogg Vorbis, loaded whole or streamed: lewton, pure Rust (MIT/Apache).
+vorbis = ["dep:lewton"]
+# AAC (MP4/M4A, ADTS), through the platform's own decoder: AudioToolbox
+# on macOS, no crate added. Elsewhere it builds, and AAC is an error that
+# says the platform has none yet.
+aac = []
+# MP3 (and MPEG Layers I and II): nanomp3, pure Rust (MIT/Apache), +65 KiB.
+mp3 = ["dep:nanomp3"]
+# Ogg Opus: opus-pure, pure Rust (BSD-3-Clause), +307 KiB.
+opus = ["dep:opus-pure"]
+# Binaural sound for headphones: effects::Binaural, a partitioned
+# convolution with a spherical head made in code, or the app's own measured
+# head-related impulse responses (HrtfSet). No dependency, no data.
+hrtf = []
+
+[dependencies]
+cpal = { version = "0.18.2", optional = true, default-features = false }
+lewton = { version = "0.10.2", optional = true }
+nanomp3 = { version = "0.2.0", optional = true }
+opus-pure = { version = "0.2.3", optional = true }
+
+# One binary for the area (see AGENTS.md); the ones below count
+# allocations with a global allocator, so each is a process of its own.
+[[test]]
+name = "audio"
+path = "tests/audio/main.rs"
+
+# The audio thread's rules: a counting allocator, and no test harness, so
+# no other thread.
+# The pulled engine on wasm32 itself (wasm-bindgen-test): no threads, no
+# clock there. Empty elsewhere.
+[[test]]
+name = "web"
+
+[[test]]
+name = "realtime"
+harness = false
+
+[[test]]
+name = "effects"
+
+[[test]]
+name = "hostile"
+
+[[test]]
+name = "hrtf_memory"
+
+[[test]]
+name = "rest_memory"
+
+[[example]]
+name = "device_probe"
+required-features = ["device"]
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "=0.3.77"

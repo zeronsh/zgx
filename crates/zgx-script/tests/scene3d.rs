@@ -457,6 +457,40 @@ fn tone_mapping_and_exposure_are_checked() {
     assert!(frame_id(&mut h, "scene").is_some());
 }
 
+/// A flick is timed on the interface's clock: on a test's own, a release a
+/// frame after the last move coasts, however long the wall clock took
+/// before it (a loaded machine read it as held still).
+#[test]
+fn a_flick_is_timed_on_the_interfaces_clock() {
+    use zgx::input::{InputEvent, PointerButton};
+    let clock = zgx::clock::VirtualClock::new();
+    let mut h = Harness::inline(PICKED);
+    h.frames(3);
+    let b = h.bounds("scene");
+    let (x, y) = (b.x + 100., b.y + 100.);
+    let button = PointerButton::Primary;
+    h.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    clock.advance(std::time::Duration::from_millis(16), || {});
+    h.ui.dispatch(InputEvent::PointerMove { x: x + 40., y });
+    // Over the 50 ms a release held still waits, on the wall clock alone.
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    clock.advance(std::time::Duration::from_millis(32), || {});
+    h.ui.dispatch(InputEvent::PointerUp {
+        x: x + 40.,
+        y,
+        button,
+    });
+    h.settle();
+    // The frames after it, the clock stepped with them.
+    let mut frames = std::collections::HashSet::new();
+    for step in 1..=10_u64 {
+        clock.advance(std::time::Duration::from_millis(32 + 17 * step), || {});
+        h.frame();
+        frames.insert(frame_id(&mut h, "scene"));
+    }
+    assert!(frames.len() > 5, "it coasts: {} frames", frames.len());
+}
+
 #[test]
 fn an_orbit_turns_by_keyboard_focused_and_a_flick_coasts_to_a_stop() {
     use zgx::input::{InputEvent, Key, Modifiers};
@@ -822,12 +856,10 @@ fn a_mesh_of_its_own_triangles_is_checked() {
     assert_eq!(made("{ positions = { 0,0,0, 1,0,0, 0,1,0 } }"), "no error");
 }
 
-/// A plugin granted nothing shows a scene of its own triangles, and hears
-/// clicks on them: `ui.scene3d` asks no capability.
-#[test]
-fn a_plugin_granted_nothing_shows_and_picks_its_own_mesh() {
+/// A plugin's scene, of its own triangles, with or without the grant.
+fn plugin_scene(name: &str, grants: Vec<zgx_script::Capability>) -> Harness {
     use zgx_script::{Plugin, ScriptHost};
-    let dir = common::temp_dir("scene3d-plugin");
+    let dir = common::temp_dir(name);
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     let plugin = OWN
@@ -840,7 +872,7 @@ fn a_plugin_granted_nothing_shows_and_picks_its_own_mesh() {
         .to_owned()
         + " }\n";
     std::fs::write(&entry, plugin).unwrap();
-    let mut h = Harness::new(move |runtime| {
+    let h = Harness::new(move |runtime| {
         let host = ScriptHost::inline(
             runtime,
             "app",
@@ -849,15 +881,36 @@ fn a_plugin_granted_nothing_shows_and_picks_its_own_mesh() {
         host.set_plugins(vec![Plugin {
             name: "cad".into(),
             entry,
-            grants: vec![],
+            grants,
         }]);
         host
     });
     h.frames(2);
+    h
+}
+
+/// A plugin granted `scene3d` shows a scene of its own triangles, and hears
+/// clicks on them.
+#[test]
+fn a_plugin_granted_scene3d_shows_and_picks_its_own_mesh() {
+    let mut h = plugin_scene("scene3d-plugin", vec![zgx_script::Capability::Scene3d]);
     assert_eq!(h.error(), None);
     assert!(frame_id(&mut h, "scene").is_some(), "{}", h.tree());
     press(&mut h, "scene", (100., 100.), 0.);
     assert_eq!(h.text("clicked"), "0.50");
+}
+
+/// Without the grant, a plugin's `ui.scene3d` is an error saying so, and
+/// nothing of it is drawn.
+#[test]
+fn a_plugin_not_granted_scene3d_is_refused() {
+    let mut h = plugin_scene("scene3d-refused", vec![]);
+    let error = h.error().unwrap_or_default();
+    assert!(
+        error.contains("ui.scene3d: a plugin does this only if the host grants it"),
+        "{error:?}"
+    );
+    assert!(frame_id(&mut h, "scene").is_none(), "{}", h.tree());
 }
 
 /// A mesh with no triangles (a boolean of two solids that don't meet) is a

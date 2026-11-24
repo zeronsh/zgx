@@ -196,6 +196,10 @@ pub(crate) struct State {
     /// Mounted selectable regions and their highlight colours (in a
     /// focused window, and in one at the back).
     roots: HashMap<NodeId, Palette>,
+    /// What decides a copy out of the few regions asked to
+    /// (`View::on_selection_copy`), by region: a list, as few have one
+    /// (empty, it takes no allocation and less room than a map).
+    copy_hooks: Vec<(NodeId, crate::widgets::SelectionCopyHook)>,
     root: Option<NodeId>,
     anchor: Option<TextPoint>,
     focus: Option<TextPoint>,
@@ -260,6 +264,97 @@ pub(crate) struct State {
 /// Rows a copy takes from one list's row text at most.
 const MAX_PROVIDED_ROWS: usize = 1_000_000;
 
+/// The last row of `rows` at or after `from`, read from its text alone (a
+/// list that doesn't say its length): found in steps doubling, then halving.
+fn last_row(rows: &dyn ListRows, from: usize) -> Option<usize> {
+    rows.text(from)?;
+    let (mut known, mut step) = (from, 1usize);
+    while known
+        .checked_add(step)
+        .is_some_and(|at| rows.text(at).is_some())
+    {
+        known += step;
+        step = step.saturating_mul(2);
+    }
+    // Row `known` is there; `known + step` is not (or past usize).
+    let mut gone = known.saturating_add(step);
+    while gone - known > 1 {
+        let mid = known + (gone - known) / 2;
+        match rows.text(mid) {
+            Some(_) => known = mid,
+            None => gone = mid,
+        }
+    }
+    Some(known)
+}
+
+/// A virtual list a selection spans: its rows' node, its row text, and the
+/// first and last rows (`spanned_lists`).
+type SpannedList = (NodeId, RowText, usize, usize);
+
+/// The selection's ends, start first, and each virtual list with row text
+/// it spans: the node holding its rows, its row text, and the first and
+/// last rows it spans (the last `usize::MAX` where it runs on past the
+/// list's end). `None` with no selection.
+fn spanned_lists(state: &State, scene: &Scene) -> Option<(End, End, Vec<SpannedList>)> {
+    let rows = &state.rows;
+    let end = |point: Option<TextPoint>, row: &Option<RowAddress>| match point {
+        Some(point) => revive(rows, &state.row_texts, scene, point, row.as_ref()),
+        None => End::Gone,
+    };
+    let (anchor, focus) = (
+        end(state.anchor, &state.anchor_row),
+        end(state.focus, &state.focus_row),
+    );
+    if matches!(anchor, End::Gone) || matches!(focus, End::Gone) {
+        return None;
+    }
+    let (start, end) = match order_ends(rows, scene, &anchor, &focus).is_le() {
+        true => (anchor, focus),
+        false => (focus, anchor),
+    };
+    // Where an end lies against a list: its row there, or before (Less)
+    // or after (Greater) the whole list.
+    let place = |end: &End, content: NodeId| -> Result<usize, std::cmp::Ordering> {
+        match end {
+            End::Parked(row, _) if row.content == content => Ok(row.index),
+            End::Parked(row, _) => Err(scene.document_order(row.content, content)),
+            End::Live(point) => match row_of(rows, scene, point.node) {
+                Some((at, index)) if at == content => Ok(index),
+                _ => Err(scene.document_order(point.node, content)),
+            },
+            End::Gone => Err(std::cmp::Ordering::Equal),
+        }
+    };
+    let mut lists = Vec::new();
+    // All of a region: every row of its lists.
+    let all = state.root.filter(|_| state.all);
+    for (content, text) in &state.row_texts {
+        if !scene.contains(*content) {
+            continue;
+        }
+        let (lo, hi) = match all {
+            Some(root) if scene.ancestors(*content).any(|at| at == root) => (0, usize::MAX),
+            Some(_) => continue,
+            None => {
+                let lo = match place(&start, *content) {
+                    Ok(index) => index,
+                    Err(std::cmp::Ordering::Less) => 0,
+                    Err(_) => continue,
+                };
+                let hi = match place(&end, *content) {
+                    Ok(index) => index,
+                    Err(std::cmp::Ordering::Greater) => usize::MAX,
+                    Err(_) => continue,
+                };
+                (lo, hi)
+            }
+        };
+        lists.push((*content, text.clone(), lo, hi));
+    }
+    Some((start, end, lists))
+}
+
 /// A virtual list's rows as a selection reads them (`View::row_text`).
 pub(crate) type RowText = Rc<dyn ListRows>;
 
@@ -270,6 +365,10 @@ pub(crate) type RowText = Rc<dyn ListRows>;
 pub(crate) trait ListRows {
     /// Row `index`'s plain text, `None` past its end.
     fn text(&self, index: usize) -> Option<String>;
+    /// How many rows it has, where it knows without building them.
+    fn len(&self) -> Option<usize> {
+        None
+    }
     /// Row `index`'s key, if the list has keys.
     fn key(&self, _index: usize) -> Option<Rc<dyn Any>> {
         None
@@ -422,10 +521,16 @@ struct RootGuard {
 }
 impl Drop for RootGuard {
     fn drop(&mut self) {
+        // The app's hook goes after the state is let go: dropping it may
+        // run the app's code.
+        let mut hook = None;
         if let Some(ui) = self.ui.upgrade()
             && let Ok(mut state) = ui.selection_state().try_borrow_mut()
         {
             state.roots.remove(&self.root);
+            if let Some(at) = state.copy_hooks.iter().position(|(r, _)| *r == self.root) {
+                hook = Some(state.copy_hooks.swap_remove(at).1);
+            }
             if state.active_root == Some(self.root) {
                 state.active_root = None;
             }
@@ -436,6 +541,7 @@ impl Drop for RootGuard {
                 state.pending = None;
             }
         }
+        drop(hook);
     }
 }
 
@@ -695,6 +801,27 @@ impl Ui {
                 _ => None,
             })
     }
+    /// What select-all selects with no region pressed in yet and no field
+    /// focused: the region under the pointer's last place, else the one
+    /// region if there is only one; with several and none under it,
+    /// nothing, as in a browser with no focus to go by.
+    #[cold]
+    #[inline(never)]
+    fn select_all_fallback(&self) -> Option<NodeId> {
+        let scene = self.scene.borrow();
+        let under = self.input.pointer().and_then(|(x, y)| {
+            let hit = scene.hit_test(x, y)?;
+            scene.selection_root(hit)
+        });
+        if under.is_some() {
+            return under;
+        }
+        // Regions inside another are part of it: the outermost, once each.
+        let state = self.selection_state().borrow();
+        let mut outermost = (state.roots.keys()).filter_map(|root| scene.selection_root(*root));
+        let only = outermost.next()?;
+        outermost.all(|other| other == only).then_some(only)
+    }
     /// Whether `x`, `y` in `root` falls inside its selection, not at an edge.
     fn on_selection(&self, root: NodeId, x: f32, y: f32) -> bool {
         let (anchor, focus) = {
@@ -863,9 +990,17 @@ impl Ui {
     /// own, nor a list's markers.
     fn selectable_leaves(&self, scene: &Scene, root: NodeId, visit: impl FnMut(TextLeaf)) {
         let semantics = self.semantics.borrow();
+        // A button's label isn't text to select, as in a browser: left out
+        // with what it holds unless it says `selectable(true)` itself.
+        let button = |id: NodeId| {
+            semantics
+                .get(id)
+                .is_some_and(|node| node.role == Role::Button)
+                && scene.user_select(id) != Some(true)
+        };
         scene.selectable_text(
             root,
-            |id| self.is_editor(id) || list_marker(scene, &semantics, id).is_some(),
+            |id| self.is_editor(id) || list_marker(scene, &semantics, id).is_some() || button(id),
             visit,
         );
     }
@@ -1397,7 +1532,8 @@ impl Ui {
         if !moving {
             state.scroll = None;
         } else if state.scroll.is_none() {
-            let now = Instant::now();
+            // On the interface's clock, as the steps that scroll it are.
+            let now = crate::clock::now();
             state.scroll = Some((now + Duration::from_millis(16), now));
         }
     }
@@ -1493,6 +1629,110 @@ impl Ui {
         let state = self.selection_state().borrow();
         state.anchor.zip(state.focus)
     }
+    /// `hook` decides what a copy out of selectable region `root` puts on
+    /// the clipboard (`View::on_selection_copy`); it goes as the region does.
+    pub(crate) fn set_selection_copy_hook(
+        &self,
+        root: NodeId,
+        hook: crate::widgets::SelectionCopyHook,
+    ) {
+        let mut state = self.selection_state().borrow_mut();
+        let was = match state.copy_hooks.iter_mut().find(|(r, _)| *r == root) {
+            Some((_, was)) => Some(std::mem::replace(was, hook)),
+            None => {
+                state.copy_hooks.push((root, hook));
+                None
+            }
+        };
+        // The old hook goes after the state is let go, as `RootGuard`'s.
+        drop(state);
+        drop(was);
+    }
+    /// The person copied the selected display text (⌘C, the Edit menu, the
+    /// selection's context menu, `Ui::copy_selection`): its region's
+    /// `View::on_selection_copy` says what goes on the clipboard, else the
+    /// selection's text and HTML, and `write` puts it there. Nothing is
+    /// asked of a region without a hook. Whether the clipboard took it; no
+    /// selection, nothing. (Pin line.)
+    #[doc(hidden)]
+    pub fn copy_selection_from(
+        &self,
+        write: impl FnOnce(crate::widgets::ClipboardContent) -> bool,
+    ) -> bool {
+        if !self.has_text_selection() {
+            return false;
+        }
+        let (text, html) = (self.selected_text(), self.selected_html());
+        let hook = {
+            let state = self.selection_state().borrow();
+            state.root.and_then(|root| {
+                let (_, hook) = state.copy_hooks.iter().find(|(r, _)| *r == root)?;
+                Some((root, hook.clone()))
+            })
+        };
+        // Nothing borrowed: the hook may read the selection or the scene.
+        let content = hook.and_then(|(region, hook)| {
+            let leaves = self.selected_leaves();
+            let rows = self.selected_rows();
+            hook(&crate::widgets::SelectionCopyRequest {
+                text: &text,
+                html: &html,
+                leaves: &leaves,
+                rows: &rows,
+                region,
+                ui: self,
+            })
+        });
+        write(content.unwrap_or_else(|| crate::widgets::ClipboardContent::new(text, Some(html))))
+    }
+    /// Copy the selected display text to `platform`'s clipboard as the
+    /// person would (`Ui::copy_selection_from`). Whether the clipboard took
+    /// it. (Pin line.)
+    #[doc(hidden)]
+    pub fn copy_selection(&self, platform: &crate::platform::PlatformService) -> bool {
+        self.copy_selection_from(|content| crate::widgets::write_clipboard(platform, content))
+    }
+    /// The rows of each virtual list the selection spans, mounted or not,
+    /// in document order: what a Select All over rows scrolled away takes.
+    fn selected_rows(&self) -> Vec<crate::widgets::SelectedRows> {
+        let lists = {
+            let state = self.selection_state().borrow();
+            if state.row_texts.is_empty() {
+                return Vec::new();
+            }
+            let scene = self.scene.borrow();
+            match spanned_lists(&state, &scene) {
+                Some((_, _, lists)) => lists,
+                None => return Vec::new(),
+            }
+        };
+        // Nothing borrowed: a row's text may be built by the app's code.
+        let mut spans: Vec<_> = lists
+            .into_iter()
+            .filter_map(|(list, text, first, last)| {
+                let last = match text.len() {
+                    Some(len) => last.min(len.checked_sub(1)?),
+                    None if last == usize::MAX => last_row(&*text, first)?,
+                    None => last,
+                };
+                (first <= last).then_some(crate::widgets::SelectedRows { list, first, last })
+            })
+            .collect();
+        let scene = self.scene.borrow();
+        spans.sort_by(|a, b| scene.document_order(a.list, b.list));
+        spans
+    }
+    /// The text nodes the selection spans, in order, each once.
+    fn selected_leaves(&self) -> Vec<NodeId> {
+        let state = self.selection_state().borrow();
+        let mut leaves: Vec<NodeId> = Vec::with_capacity(state.shown.len());
+        for part in &state.shown {
+            if leaves.last() != Some(&part.node) {
+                leaves.push(part.node);
+            }
+        }
+        leaves
+    }
     /// Whether some text is selected.
     pub fn has_text_selection(&self) -> bool {
         !self.selection_state().borrow().shown.is_empty()
@@ -1538,6 +1778,31 @@ impl Ui {
             (Some(anchor), Some(focus)) => self.select_text(anchor, focus),
             _ => false,
         }
+    }
+    /// Select All, as the Edit menu's and ⌘A (Ctrl+A elsewhere) do it: all
+    /// of the focused editor's text, else all of the selectable region the
+    /// person last selected in or pressed (else the window's own, if it has
+    /// one). Whether anything took it.
+    #[doc(hidden)]
+    pub fn select_all(&self) -> bool {
+        if let Some(editor) = self.focused_editor() {
+            editor.select_all();
+            return true;
+        }
+        self.select_all_in_region()
+    }
+    /// [`Ui::select_all`] with no editor focused: the region's text.
+    fn select_all_in_region(&self) -> bool {
+        if self.selection_state().borrow().roots.is_empty() {
+            return false;
+        }
+        let root = {
+            let state = self.selection_state().borrow();
+            state.root.or(state.active_root)
+        };
+        let root = root.filter(|root| self.scene.borrow().contains(*root));
+        root.or_else(|| self.select_all_fallback())
+            .is_some_and(|root| self.select_all_text(root))
     }
     /// Select all the text in the selectable region holding `node`.
     pub fn select_all_text(&self, node: NodeId) -> bool {
@@ -1677,58 +1942,12 @@ impl Ui {
         }
         let scene = self.scene.borrow();
         let rows = &state.rows;
-        let end = |point: Option<TextPoint>, row: &Option<RowAddress>| match point {
-            Some(point) => revive(rows, &state.row_texts, &scene, point, row.as_ref()),
-            None => End::Gone,
-        };
-        let (anchor, focus) = (
-            end(state.anchor, &state.anchor_row),
-            end(state.focus, &state.focus_row),
-        );
-        if matches!(anchor, End::Gone) || matches!(focus, End::Gone) {
+        let Some((start, end, lists)) = spanned_lists(&state, &scene) else {
             return Vec::new();
-        }
-        let (start, end) = match order_ends(rows, &scene, &anchor, &focus).is_le() {
-            true => (anchor, focus),
-            false => (focus, anchor),
-        };
-        // Where an end lies against a list: its row there, or before (Less)
-        // or after (Greater) the whole list.
-        let place = |end: &End, content: NodeId| -> Result<usize, std::cmp::Ordering> {
-            match end {
-                End::Parked(row, _) if row.content == content => Ok(row.index),
-                End::Parked(row, _) => Err(scene.document_order(row.content, content)),
-                End::Live(point) => match row_of(rows, &scene, point.node) {
-                    Some((at, index)) if at == content => Ok(index),
-                    _ => Err(scene.document_order(point.node, content)),
-                },
-                End::Gone => Err(std::cmp::Ordering::Equal),
-            }
         };
         let mut provided = Vec::new();
-        // All of a region: every row of its lists.
-        let all = state.root.filter(|_| state.all);
-        for (content, text) in &state.row_texts {
-            if !scene.contains(*content) {
-                continue;
-            }
-            let (lo, hi) = match all {
-                Some(root) if scene.ancestors(*content).any(|at| at == root) => (0, usize::MAX),
-                Some(_) => continue,
-                None => {
-                    let lo = match place(&start, *content) {
-                        Ok(index) => index,
-                        Err(std::cmp::Ordering::Less) => 0,
-                        Err(_) => continue,
-                    };
-                    let hi = match place(&end, *content) {
-                        Ok(index) => index,
-                        Err(std::cmp::Ordering::Greater) => usize::MAX,
-                        Err(_) => continue,
-                    };
-                    (lo, hi)
-                }
-            };
+        for (content, text, lo, hi) in lists {
+            let (content, text) = (&content, &text);
             // A mounted row an end lies in copies as it shows, which may be
             // none of it (the selection collapsed there, or ending at its
             // start); one between the ends that shows no text (drawn, not
@@ -2057,6 +2276,9 @@ impl Ui {
         {
             window_active.set(active);
         }
+        if self.window_is_active() != active {
+            crate::caret_blink::window_active_changed(self, active);
+        }
         let changed = {
             let mut state = self.selection_state().borrow_mut();
             let changed = state.inactive == active;
@@ -2256,19 +2478,10 @@ impl Ui {
                 }
             }
             SelectionEvent::SelectAll => {
-                if result.default_prevented
-                    || self.selection_state().borrow().roots.is_empty()
-                    || self.focused_editor().is_some()
-                {
+                if result.default_prevented || self.focused_editor().is_some() {
                     return;
                 }
-                let root = {
-                    let state = self.selection_state().borrow();
-                    state.root.or(state.active_root)
-                };
-                if let Some(root) = root.filter(|root| self.scene.borrow().contains(*root))
-                    && self.select_all_text(root)
-                {
+                if self.select_all_in_region() {
                     result.default_prevented = true;
                 }
             }
@@ -2347,9 +2560,7 @@ pub(crate) fn context_menu(
                 .id("selection-copy")
                 .on_click(move || {
                     if let (Some(ui), Some(platform)) = (copy.upgrade(), &platform) {
-                        platform
-                            .0
-                            .set_clipboard_rich_text(ui.selected_text(), ui.selected_html());
+                        ui.copy_selection(platform);
                     }
                 }),
             crate::compose::menu_item("Select All")

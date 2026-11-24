@@ -74,6 +74,10 @@ pub struct Frame {
     pub index: u64,
     /// Signals written (their addresses) and how many times each.
     pub writes: Vec<(usize, u32)>,
+    /// Where the signals written were made, those whose maker said
+    /// ([`name_signal`]: a script's line and what made it): kept as they
+    /// were written, the signals may be gone by the time the frame is read.
+    pub sites: Vec<(usize, Rc<str>)>,
     /// Effects run, in the order they ran.
     pub runs: Vec<Run>,
     /// Each phase that ran (`zgx::profile`'s: input, script, update, style,
@@ -145,6 +149,16 @@ struct Log {
     frames: VecDeque<Frame>,
     causes: HashMap<u64, usize>,
     names: HashMap<u64, Rc<str>>,
+    /// Signals' makers, by address ([`name_signal`]), until they drop.
+    sites: HashMap<usize, Rc<str>>,
+    /// The Rust lines that made signals, by address, until they drop: what
+    /// a write no maker named says (`Runtime::signal`'s caller).
+    made: HashMap<usize, &'static std::panic::Location<'static>>,
+    /// Those lines' texts, one each.
+    made_text: HashMap<(&'static str, u32), Rc<str>>,
+    /// The names of effects by the Rust line that made them, one a line
+    /// (`zgx/src/compose.rs:812 effect`).
+    effect_text: HashMap<(&'static str, u32), Rc<str>>,
 }
 thread_local! {
     static LOG: RefCell<Log> = RefCell::default();
@@ -170,6 +184,7 @@ pub fn memory(report: &mut crate::memory::Report) {
         for f in frames.clone() {
             held += size_of::<Frame>()
                 + f.writes.capacity() * size_of::<(usize, u32)>()
+                + f.sites.capacity() * size_of::<(usize, Rc<str>)>()
                 + f.runs.capacity() * size_of::<Run>()
                 + f.phases.capacity() * size_of::<(&'static str, u64, f32)>()
                 + f.notes.capacity() * size_of::<Rc<str>>()
@@ -181,6 +196,13 @@ pub fn memory(report: &mut crate::memory::Report) {
         let mut names = table(log.names.capacity(), size_of::<Rc<str>>())
             + table(log.causes.capacity(), size_of::<usize>());
         names += log.names.values().map(&mut text).sum::<usize>();
+        names += table(log.sites.capacity(), size_of::<Rc<str>>())
+            + log.sites.values().map(&mut text).sum::<usize>();
+        names += table(log.made.capacity(), size_of::<usize>())
+            + table(log.made_text.capacity(), size_of::<Rc<str>>())
+            + log.made_text.values().map(&mut text).sum::<usize>()
+            + table(log.effect_text.capacity(), size_of::<Rc<str>>())
+            + log.effect_text.values().map(&mut text).sum::<usize>();
         for f in frames {
             names += f
                 .runs
@@ -206,6 +228,19 @@ pub fn name(effect: u64, name: impl Into<Rc<str>>) {
         });
     }
 }
+/// Effect `effect` was made at `at` (`Runtime::effect`'s caller): traces
+/// name it by that line (`zgx/src/compose.rs:812 effect`) until its maker
+/// names it ([`name`]).
+pub(crate) fn made_effect(effect: u64, at: &'static std::panic::Location<'static>) {
+    LOG.with_borrow_mut(|log| {
+        let name = log
+            .effect_text
+            .entry((at.file(), at.line()))
+            .or_insert_with(|| Rc::from(format!("{} effect", rust_line(at))))
+            .clone();
+        log.names.insert(effect, name);
+    });
+}
 /// Effect `effect` is gone: its name, and the cause of a run it was queued
 /// for and never made, go too (each mount names its effects anew).
 pub(crate) fn forget(effect: u64) {
@@ -217,12 +252,60 @@ pub(crate) fn forget(effect: u64) {
         }
     });
 }
+/// Name signal `signal` (its address, `Signal::addr`) for traces by where
+/// it was made (`app.luau:30 use_state`): a frame's writes say it, not
+/// "unnamed". Forgotten as the signal drops.
+pub fn name_signal(signal: usize, site: Rc<str>) {
+    if enabled() {
+        LOG.with_borrow_mut(|log| {
+            log.sites.insert(signal, site);
+        });
+    }
+}
+/// Signal `signal` was made at `at` (`Runtime::signal`'s caller): its
+/// writes say so until a maker names it ([`name_signal`]).
+pub(crate) fn made(signal: usize, at: &'static std::panic::Location<'static>) {
+    LOG.with_borrow_mut(|log| {
+        log.made.insert(signal, at);
+    });
+}
+/// Signal `signal` dropped: its address may be another's next.
+pub(crate) fn forget_signal(signal: usize) {
+    // Dropped as the thread ends, the log may be gone already.
+    let _ = LOG.try_with(|log| {
+        if let Ok(mut log) = log.try_borrow_mut() {
+            log.sites.remove(&signal);
+            log.made.remove(&signal);
+        }
+    });
+}
+/// A Rust line as a frame's writes show it: its crate's path and line
+/// (`zgx-script/src/lower.rs:8290`).
+fn rust_line(at: &std::panic::Location<'_>) -> Rc<str> {
+    let parts: Vec<&str> = at.file().split(['/', '\\']).collect();
+    let path = parts[parts.len().saturating_sub(3)..].join("/");
+    Rc::from(format!("{path}:{}", at.line()))
+}
 /// Signal `signal` was written, queueing `queued`.
 pub(crate) fn wrote(signal: usize, queued: &[u64]) {
     LOG.with_borrow_mut(|log| {
         match log.current.writes.iter_mut().find(|(s, _)| *s == signal) {
             Some((_, n)) => *n += 1,
-            None => log.current.writes.push((signal, 1)),
+            None => {
+                log.current.writes.push((signal, 1));
+                let site = match log.sites.get(&signal) {
+                    Some(site) => Some(site.clone()),
+                    None => log.made.get(&signal).copied().map(|at| {
+                        log.made_text
+                            .entry((at.file(), at.line()))
+                            .or_insert_with(|| rust_line(at))
+                            .clone()
+                    }),
+                };
+                if let Some(site) = site {
+                    log.current.sites.push((signal, site));
+                }
+            }
         }
         for id in queued {
             log.causes.entry(*id).or_insert(signal);
@@ -392,7 +475,7 @@ pub fn frames(n: usize) -> Vec<Frame> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::{compose::prelude::*, widgets::Ui};
 
     /// A memory report's devtools lines count a name once, wherever it's
@@ -432,12 +515,87 @@ mod tests {
         assert_eq!(line.bytes, Some(tables + text(&named) + text(&gone)));
     }
 
+    /// A write no maker named says the Rust line that made its signal, as
+    /// a frame's log reads it; one a maker named keeps that name.
+    #[test]
+    fn a_write_no_maker_named_says_the_rust_line_that_made_its_signal() {
+        let _tracing = TRACING.lock().unwrap_or_else(|e| e.into_inner());
+        super::set_enabled(true);
+        let runtime = crate::reactive::Runtime::new();
+        let line = line!() + 1;
+        let plain = runtime.signal(0);
+        let named = runtime.signal(0);
+        super::name_signal(named.addr(), "app.luau:3 use_state".into());
+        plain.set(1);
+        named.set(1);
+        let site = |signal: usize| {
+            super::LOG.with_borrow(|log| {
+                log.current
+                    .sites
+                    .iter()
+                    .find(|(s, _)| *s == signal)
+                    .map(|(_, site)| site.to_string())
+            })
+        };
+        let (plain_site, named_site) = (site(plain.addr()), site(named.addr()));
+        super::set_enabled(false);
+        assert_eq!(plain_site, Some(format!("zgx/src/trace.rs:{line}")));
+        assert_eq!(named_site.as_deref(), Some("app.luau:3 use_state"));
+    }
+
+    /// An effect no maker named is named by the Rust line that made it; one
+    /// its maker named keeps that name.
+    #[test]
+    fn an_effect_no_maker_named_says_the_rust_line_that_made_it() {
+        let _tracing = TRACING.lock().unwrap_or_else(|e| e.into_inner());
+        super::set_enabled(true);
+        let runtime = crate::reactive::Runtime::new();
+        let value = runtime.signal(0);
+        let (a, b) = (value.clone(), value.clone());
+        let line = line!() + 1;
+        let plain = runtime.effect(move || {
+            a.get();
+        });
+        let named = runtime.effect(move || {
+            b.get();
+        });
+        super::name(named.number(), "@12 binding");
+        let now_line = line!() + 1;
+        let now = runtime.effect_now(|| {});
+        value.set(1);
+        let name = |effect: &crate::reactive::Effect| {
+            super::LOG.with_borrow(|log| log.names.get(&effect.number()).map(|n| n.to_string()))
+        };
+        let ran = super::LOG.with_borrow(|log| {
+            log.current
+                .runs
+                .iter()
+                .rev()
+                .find(|run| run.effect == plain.number())
+                .and_then(|run| run.name.as_deref().map(str::to_owned))
+        });
+        let (plain_name, named_name, now_name) = (name(&plain), name(&named), name(&now));
+        super::set_enabled(false);
+        assert_eq!(plain_name, Some(format!("zgx/src/trace.rs:{line} effect")));
+        assert_eq!(ran, plain_name, "its runs say it");
+        assert_eq!(named_name.as_deref(), Some("@12 binding"));
+        assert_eq!(
+            now_name,
+            Some(format!("zgx/src/trace.rs:{now_line} effect"))
+        );
+    }
+
+    /// Held by tests that turn tracing on and off: it is the process's, and
+    /// one turning it off would stop another's mid-test.
+    pub(crate) static TRACING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn sizes() -> (usize, usize) {
         super::LOG.with_borrow(|log| (log.names.len(), log.causes.len()))
     }
 
     #[test]
     fn remounting_while_tracing_keeps_its_names_bounded() {
+        let _tracing = TRACING.lock().unwrap_or_else(|e| e.into_inner());
         super::set_enabled(true);
         let mut ui = Ui::new(200., 200.);
         let count = ui.signal(0u32);

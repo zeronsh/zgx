@@ -76,12 +76,22 @@ fn main() {
     host.reload().expect("the bench script loads");
     let _handle = ui.mount(host.view());
     ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     let chunks = sections * (per + 1);
     for _ in 0..chunks {
         assert!(host.run_command("append"));
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
     }
     // It ran through the text cache: most chunks' paragraphs new texts
     // shaped there (a heading's chunk adds its own), not measured by the

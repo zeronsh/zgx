@@ -4,7 +4,7 @@
 //! for one is guarded, and a cost put in its path shows.
 //! Run: cargo run --release -p zgx-script --example estimate_bench
 //! (`ROWS` sets the rows, `ESTIMATE=0` leaves it off.)
-use std::rc::Rc;
+use zgx_script::Slice;
 use zgx_script::Value;
 use zgx_script::testing::TestApp;
 
@@ -123,15 +123,24 @@ fn main() {
     app.ui.scene.borrow_mut().resize(900., 800.);
     app.host
         .shared("bench.rows", Value::Nil)
-        .set(Value::List(Rc::from(rows.clone())));
+        .set(Value::List(Slice::from(rows.clone())));
     app.frames(10);
+    if zgx_fingerprint::on() {
+        zgx_fingerprint::paint_only(&app.ui.scene.borrow());
+    }
     for _ in 0..200 {
         app.scroll("#bench", 300.);
         app.frame();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::paint_only(&app.ui.scene.borrow());
+        }
     }
     for width in [700., 900.] {
         app.ui.scene.borrow_mut().resize(width, 800.);
         app.frames(5);
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::paint_only(&app.ui.scene.borrow());
+        }
     }
     for i in 0..20 {
         let row = Value::record([
@@ -142,8 +151,11 @@ fn main() {
         rows.push(row);
         app.host
             .shared("bench.rows", Value::Nil)
-            .set(Value::List(Rc::from(rows.clone())));
+            .set(Value::List(Slice::from(rows.clone())));
         app.frames(2);
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::paint_only(&app.ui.scene.borrow());
+        }
     }
     println!("{}", if on { "estimating" } else { "off" });
 }

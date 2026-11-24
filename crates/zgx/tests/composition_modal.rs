@@ -311,3 +311,36 @@ fn nondismissing_backdrop_preserves_focus_and_nested_initial_open_is_ordered() {
     assert!(outer.get());
     assert_eq!(ui.input.focused(), view.find("outer"));
 }
+#[test]
+fn on_dismiss_runs_as_a_modal_closes_and_any_other_view_ignores_it() {
+    let mut ui = Ui::new(400., 300.);
+    let open = ui.signal(false);
+    let dismissed = Rc::new(Cell::new(0));
+    let heard = dismissed.clone();
+    let ignored = Rc::new(Cell::new(0));
+    let never = ignored.clone();
+    ui.mount(
+        column()
+            .on_dismiss(move || never.set(never.get() + 1))
+            .child(
+                modal("Settings", open.clone())
+                    .w(200.)
+                    .h(100.)
+                    .on_dismiss(move || heard.set(heard.get() + 1))
+                    .child(button().w(40.).h(20.).id("ok")),
+            ),
+    );
+    ui.prepare_frame();
+    open.set(true);
+    ui.prepare_frame();
+    escape(&mut ui);
+    ui.prepare_frame();
+    assert!(!open.get(), "Escape closes it");
+    assert_eq!(dismissed.get(), 1, "the person closed it");
+    open.set(true);
+    ui.prepare_frame();
+    open.set(false);
+    ui.prepare_frame();
+    assert_eq!(dismissed.get(), 1, "the app closing it is not a dismissal");
+    assert_eq!(ignored.get(), 0, "a column is never dismissed");
+}

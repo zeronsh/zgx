@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **A copy can carry an image with its text, HTML and types** (zgx-script, zgx-desktop, zgx-dom): `ui.clipboard.write { text, html?, types?, image = png }` puts a PNG on the clipboard as the platform's image beside the rest, in one change, and settles with whether it took them. A figure copied with its citation pastes as the picture into an image editor or a document, as its text in a field, and with its types in a page. The image goes as `public.png` on macOS, `image/png` on X11 and Wayland, and `PNG` with a DIB of it on Windows (decoded off the main thread there). On the web it goes as one `ClipboardItem`, without the types, which can't go with an image there. Rust hosts get `Platform::set_clipboard_typed_image`. On macOS, `clipboard_image` now reads a PNG on the clipboard first (a screenshot's, a browser's Copy Image), where it read only TIFF.

@@ -1456,3 +1456,226 @@ fn closing_a_terminal_asks_for_the_idle_trim() {
     assert!(!zgx::idle::take_request(&runtime));
     drop(app);
 }
+
+/// The fills a search's matches draw over the text: `(matches, selected)`.
+fn search_fills(app: &Harness) -> (usize, usize) {
+    use zgx::canvas::{Brush, Draw};
+    let found = zgx::scene::Color(0xf0, 0xc0, 0x30, 0x60);
+    let selected = zgx::scene::Color(0xff, 0x8c, 0x1a, 0x90);
+    let scene = app.ui.scene.borrow();
+    let (mut matches, mut chosen) = (0, 0);
+    for item in scene.paint_items() {
+        let NodeKind::Canvas(canvas) = item.kind else {
+            continue;
+        };
+        for draw in canvas.commands() {
+            if let Draw::Fill {
+                brush: Brush::Solid(color),
+                ..
+            } = draw
+            {
+                matches += usize::from(*color == found);
+                chosen += usize::from(*color == selected);
+            }
+        }
+    }
+    (matches, chosen)
+}
+
+/// Where the selected match's highlight is drawn, and where `text` is:
+/// the top of each on screen.
+fn selected_and_text_tops(app: &Harness, text: &str) -> (Option<f32>, Option<f32>) {
+    use zgx::canvas::{Brush, Draw, Shape};
+    let selected = zgx::scene::Color(0xff, 0x8c, 0x1a, 0x90);
+    let scene = app.ui.scene.borrow();
+    let (mut fill, mut shown) = (None, None);
+    for item in scene.paint_items() {
+        let top = scene.transformed_bounds(item.id).y;
+        match item.kind {
+            NodeKind::Canvas(canvas) => {
+                for draw in canvas.commands() {
+                    if let Draw::Fill {
+                        path,
+                        brush: Brush::Solid(color),
+                        ..
+                    } = draw
+                        && *color == selected
+                        && let Some(Shape::Rect { rect, .. }) = path.shape()
+                    {
+                        fill = Some(top + rect.y);
+                    }
+                }
+            }
+            NodeKind::Text { text: drawn, .. } if &**drawn == text => shown = Some(top),
+            _ => {}
+        }
+    }
+    (fill, shown)
+}
+
+/// A search through the engine-drawn terminal by Ghostty's bindings: every
+/// match in the scrollback counted into the state, the ones in view
+/// highlighted, the selected one apart and scrolled to, and nothing left
+/// once it ends.
+#[test]
+fn a_search_counts_highlights_and_scrolls_to_its_matches() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let output: String = (0..100)
+        .map(|i| match i % 10 {
+            0 => format!("{i} error here\r\n"),
+            _ => format!("{i} fine\r\n"),
+        })
+        .collect();
+    replay.feed(output.as_bytes());
+    app.ui.prepare_frame();
+    let search = || term.state().get().search;
+    term.binding("search:ERROR");
+    app.ui.prepare_frame();
+    assert_eq!(search().and_then(|s| s.total), Some(0), "case counts");
+    term.binding("search:error");
+    app.ui.prepare_frame();
+    let found = search().expect("open");
+    assert_eq!((found.total, found.selected), (Some(10), None));
+    let (shown, _) = search_fills(&app);
+    assert!(shown >= 1, "the matches in view highlighted: {shown}");
+    // The newest first, then older: the oldest scrolled into view.
+    term.binding("navigate_search:next");
+    app.ui.prepare_frame();
+    assert_eq!(search().and_then(|s| s.selected), Some(0));
+    assert_eq!(search_fills(&app).1, 1, "the selected one apart");
+    for _ in 0..9 {
+        term.binding("navigate_search:next");
+    }
+    app.ui.prepare_frame();
+    assert_eq!(search().and_then(|s| s.selected), Some(9), "the oldest");
+    assert!(
+        app.shows("0 error here"),
+        "scrolled to it: {:?}",
+        app.texts()
+    );
+    assert_eq!(search_fills(&app).1, 1);
+    // Over the rows, so a match on a cell with a background of its own
+    // shows too: the matches' canvas paints after every row's.
+    {
+        let found = zgx::scene::Color(0xf0, 0xc0, 0x30, 0x60);
+        let scene = app.ui.scene.borrow();
+        let canvases: Vec<bool> = scene
+            .paint_items()
+            .filter_map(|item| match item.kind {
+                NodeKind::Canvas(canvas) => Some(canvas.commands().iter().any(|draw| {
+                    matches!(draw, zgx::canvas::Draw::Fill { brush: zgx::canvas::Brush::Solid(color), .. } if *color == found)
+                })),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            canvases.last(),
+            Some(&true),
+            "the matches' canvas paints last"
+        );
+    }
+    // Drawn on the row that shows it, the view scrolled back.
+    let (fill, shown) = selected_and_text_tops(&app, "0 error here");
+    let (fill, shown) = (
+        fill.expect("the selected highlight"),
+        shown.expect("the line"),
+    );
+    assert!(
+        (fill - shown).abs() < 4.,
+        "highlight at {fill}, its line at {shown}"
+    );
+    // Output while it is open: counted as it arrives.
+    replay.feed(b"one more error\r\n");
+    app.ui.prepare_frame();
+    assert_eq!(search().and_then(|s| s.total), Some(11));
+    term.binding("end_search");
+    app.ui.prepare_frame();
+    assert_eq!(search(), None);
+    assert_eq!(search_fills(&app), (0, 0), "no highlights left");
+}
+
+/// A run states its size, its cells on the grid by the line's height
+/// (`CanvasText::known_size`), and the scene keeps it rather than measuring:
+/// what shaping measures, with a wide CJK cell, a glyph from a fallback
+/// font in a run (a braille spinner), a combining accent, a symbol drawn
+/// alone, bold and italic. (A debug build checks each stated size against
+/// shaping as it is kept, `Scene::state_text_size`; this checks the size
+/// layout gave each.)
+#[test]
+fn a_runs_stated_size_is_what_shaping_measures() {
+    use zgx::{
+        text_layout::FontFamily,
+        theme::{ThemeOverride, tok},
+    };
+    let ui = Ui::new(640., 360.);
+    let text = zgx_gpu::TextServices::new();
+    let font = zgx_gpu::text::FontData::new(std::sync::Arc::<[u8]>::from(zgx_workload::FONT_BYTES))
+        .expect("the bundled font");
+    font.install(&mut text.text_system().borrow_mut());
+    text.install(&mut ui.scene.borrow_mut());
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    app.ui.mount(provide(
+        zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view),
+        theme_scope_with(
+            || ThemeOverride::new().with(tok::FONT_MONO, FontFamily::from(zgx_workload::FONT)),
+            zgx::terminal::terminal(&term).w(600.).h(300.),
+        ),
+    ));
+    app.ui.prepare_frame();
+    replay.feed(
+        "\u{280b} Loading 21\u{2103} done\r\n\
+         \u{4e2d}\u{6587} wide, cafe\u{301}\r\n\
+         \x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \u{2714} ok\r\n"
+            .as_bytes(),
+    );
+    app.ui.prepare_frame();
+    for shown in [
+        "\u{280b} Loading 21\u{2103} done",
+        "\u{4e2d}",
+        "\u{6587}",
+        "bold",
+        "italic",
+    ] {
+        assert!(app.shows(shown), "{shown:?} in {:?}", app.texts());
+    }
+    let scene = app.ui.scene.borrow();
+    let mut runs = 0;
+    for item in scene.paint_items() {
+        let NodeKind::Text {
+            text, font_size, ..
+        } = item.kind
+        else {
+            continue;
+        };
+        // Not a run: the input's empty text, where typing composes.
+        if text.is_empty() {
+            continue;
+        }
+        let (width, height) = scene.measure_text_with_font(text, *font_size, None, item.font);
+        assert!(
+            (item.bounds.width - width).abs() <= 1. / 256. && item.bounds.height == height,
+            "{text:?} laid out {:?}, shaped {:?}",
+            (item.bounds.width, item.bounds.height),
+            (width, height)
+        );
+        runs += 1;
+    }
+    assert!(runs >= 8, "{:?}", app.texts());
+}

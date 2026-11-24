@@ -14,7 +14,15 @@ description = "Luau scripts that describe zgx component trees, with hot reload."
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["components", "svg", "png", "jpeg", "gif", "cjk-thai-words"]
+default = ["components", "svg", "png", "jpeg", "gif", "webp", "cjk-thai-words"]
+# Test-only hooks in `zgx test` (none in a default build): a delay an
+# environment variable names, to land a signal in a window on purpose.
+test-hooks = []
+# Native modules (`ScriptHost::load_module`): an app's own Rust, built apart
+# as libraries with the `zgx-module` crate and loaded as the app starts
+# (docs/design/runtime.md). Off by default: a host that loads none links no
+# loader.
+modules = ["dep:libloading"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # The component library's `ui.*` (zgx-components): the data grid, tree,
@@ -26,6 +34,26 @@ components = ["dep:zgx-components"]
 # which a headless host (tests, tools, a server) would not otherwise.
 # zgx-run turns it on, so apps it runs have it.
 scene3d = ["dep:zgx-3d"]
+# The `audio` global (sounds, music, voices and buses on zgx-audio),
+# `sound =` on controls, and their bindings to state. Off by default: an
+# app that plays nothing carries none of it. The host gives scripts its
+# engine (`ScriptHost::set_audio`); this feature opens no device itself
+# (zgx-desktop's `audio` does).
+audio = ["dep:zgx-audio"]
+# `bus:add_effect` with the mixer's stock effects (`audio.low_pass`,
+# `reverb`…) and `bus:duck`. Apart from `audio`: a UI app playing clicks
+# carries none of them.
+audio-effects = ["audio"]
+# Ogg Vorbis for `audio.sound` and `audio.music` (zgx-audio's `vorbis`),
+# besides WAV.
+audio-vorbis = ["audio", "zgx-audio/vorbis"]
+# MP3 (zgx-audio's `mp3`: nanomp3, about 65 KiB) and Ogg Opus (`opus`:
+# opus-pure, about 300 KiB), each besides WAV.
+audio-mp3 = ["audio", "zgx-audio/mp3"]
+audio-opus = ["audio", "zgx-audio/opus"]
+# `audio.music`: files streamed as they decode, on one thread for every
+# stream. Apart from `audio`: a UI app's clicks don't stream.
+audio-streams = ["audio"]
 # Localized messages' plural rules and numbers for every locale (zgx's
 # `i18n`, ICU4X's data: about 90 KB). Off by default: `ui.t` reaches the
 # formatters, so a host would carry them whether or not its scripts call
@@ -38,6 +66,7 @@ gltf = ["scene3d", "zgx-3d/gltf"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
+webp = ["zgx-gpu/webp"]
 gif = ["zgx-gpu/gif"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]
@@ -51,13 +80,23 @@ inspect = ["zgx/trace", "dep:png"]
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 zgx-components = { path = "../zgx-components", version = "0.1.10", optional = true }
 zgx-3d = { path = "../zgx-3d", version = "0.1.10", optional = true }
+zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
-zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
-mlua = { package = "zgx-mlua", version = "0.12.8", path = "../../vendor/mlua", features = ["luau"] }
+mlua = { package = "zgx-mlua", version = "0.12.10", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
+# The system's loader for native modules (`modules`).
+libloading = { version = "0.8", optional = true }
+# `ui.zip`: entries' checksums.
+crc32fast = "1"
+# A font's or a picture's bytes a script hands over as base64 (`b64.rs`),
+# and `ui.zip`'s bytes given as base64.
+base64 = "0.22"
 # `.luaurc` aliases for `require("@alias/...")`.
 serde = "1"
 serde_json = "1"
+# Native modules' keys and a bundle's hashes (`module_build`, `zgx build`,
+# zgx-run's check of a bundle's libraries): SHA-256.
+sha2 = "0.10"
 # Markdown for `ui.markdown` and `zgx_script::markdown`.
 pulldown-cmark = { version = "0.13", default-features = false }
 unicase = "2"
@@ -72,6 +111,25 @@ icu_plurals = { version = "~2.4", default-features = false, features = ["compile
 icu_locale_core = { version = "~2.4", default-features = false }
 
 # The script time budget counts the thread's CPU time (clock_gettime).
+# The renderer: not linked in the browser (wasm32), where zgx-dom shows
+# views (`src/gpu.rs`).
+# The browser's clock (`src/time.rs`).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
+# Native modules' interface: their manifests are read for `zgx types` in
+# every build but the browser's, which loads no library (nothing but std).
+zgx-module = { path = "../zgx-module", version = "0.1.10", default-features = false }
+
+# SHA-256 by the CPU's own instructions on ARM (sha2 uses them there only
+# through `asm`; on x86 it always does): a bundle's files are hashed as
+# they are read, at 3.2 GB/s on an M-series Mac rather than 0.58. Not on
+# Windows, whose ARM build of sha2-asm isn't tried.
+[target.'cfg(all(target_arch = "aarch64", not(windows)))'.dependencies]
+sha2 = { version = "0.10", features = ["asm"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -93,6 +151,10 @@ name = "script_layout_bench"
 path = "examples/layout_bench.rs"
 
 [[example]]
+name = "stream_bench"
+path = "examples/stream_bench.rs"
+
+[[example]]
 name = "script_web_view"
 path = "examples/web_view.rs"
 
@@ -100,15 +162,40 @@ path = "examples/web_view.rs"
 name = "scene3d"
 required-features = ["scene3d"]
 
+[[example]]
+# What a call into a native module costs, against the same function linked in.
+name = "module_call_bench"
+required-features = ["modules"]
+
+[[example]]
+# What a module's reach into its host costs (posting, shared state), against
+# the host's own way of doing the same.
+name = "module_reach_bench"
+required-features = ["modules"]
+
 [dev-dependencies]
+# The perf gate's output check, called by the gate benches each frame.
+zgx-fingerprint = { path = "../../scripts/perf/fingerprint" }
 zgx-desktop = { path = "../zgx-desktop" }
+# Decodes `ui.render_canvas`'s pictures (tests/render_canvas.rs).
+png = "0.18"
 # The benchmark workload of the vlist_luau example.
 zgx-workload = { path = "../../comparisons/workload" }
+# A native module, loaded as a library and linked in (tests/native_modules.rs).
+zgx-module-fixture = { path = "../zgx-module/fixture" }
+zgx-module-fixture-typed = { path = "../zgx-module/fixture-typed" }
 
 # CoreVideo frames for `ScriptHost::surface` (tests/host_surfaces.rs).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-core-foundation = "0.3.2"
 objc2-core-video = "0.3.2"
+
+[[test]]
+# Its own binary: it needs the `modules` feature, and the fixture built as
+# a library beside it.
+name = "native_modules"
+path = "tests/native_modules.rs"
+required-features = ["modules"]
 
 [[test]]
 name = "luau_pages"
@@ -125,6 +212,11 @@ name = "test_runner_temp"
 path = "tests/test_runner_temp.rs"
 
 [[test]]
+# Its own process: it runs itself again as a child, reading its stderr.
+name = "print_whole_lines"
+path = "tests/print_whole_lines.rs"
+
+[[test]]
 # Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
 name = "md_chunk_flat"
 path = "tests/md_chunk_flat.rs"
@@ -133,6 +225,11 @@ path = "tests/md_chunk_flat.rs"
 # Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
 name = "md_chunk_flat_render"
 path = "tests/md_chunk_flat_render.rs"
+
+[[test]]
+# Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
+name = "stream_update"
+path = "tests/stream_update.rs"
 
 [[test]]
 # Its own process: what `compile_ahead` compiled is the process's.

@@ -9,7 +9,7 @@ use crate::{
     reactive::{Runtime, Signal},
     scene::{Align, Color, Justify, Layout},
     semantics::{Live, Role},
-    style::Styles,
+    style::{Styled, Styles},
 };
 use std::{any::Any, cell::RefCell, collections::HashMap, fmt::Write, rc::Rc};
 
@@ -39,7 +39,7 @@ impl Scope {
                 typography,
                 registry: Default::default(),
                 portal: None,
-                menu: None,
+                rare: None,
                 measure: Default::default(),
                 theme,
             },
@@ -75,6 +75,10 @@ impl Scope {
     }
 }
 
+/// The DOM node with the document's focus, its tag, and a field's selection
+/// (`Hooks::focus_snapshot`).
+pub type FocusAt = (u32, u32, Option<(usize, usize)>);
+
 /// What a DOM host measures of a node it mounted, for `NodeHandle`'s
 /// observers (ResizeObserver, IntersectionObserver).
 pub trait Hooks {
@@ -83,6 +87,30 @@ pub trait Hooks {
     fn observe_visibility(&self, margin: f32) -> Option<Signal<bool>>;
     fn is_mounted(&self) -> bool;
     fn retain(&self, resource: Box<dyn Any>);
+    /// `NodeHandle::scroll_into_view`, by the browser's own: whether any
+    /// scroll view moved.
+    fn scroll_into_view(&self, how: &crate::scroll_reveal::ScrollIntoView) -> bool {
+        let _ = how;
+        false
+    }
+    /// `NodeHandle::focus_snapshot`, of the document: the DOM node with
+    /// focus, a tag telling that element from a later one in its slot, and
+    /// a field's selection as `(anchor, focus)` in UTF-8 bytes of its value.
+    fn focus_snapshot(&self) -> Option<FocusAt> {
+        None
+    }
+    /// `NodeHandle::restore_focus`: focus on `node` again, its selection
+    /// set, nothing scrolled; false, and nothing changed, if it's gone (its
+    /// slot holds no element tagged `tag`) or its value no longer holds the
+    /// offsets.
+    fn restore_focus(&self, node: u32, tag: u32, selection: Option<(usize, usize)>) -> bool {
+        let _ = (node, tag, selection);
+        false
+    }
+    /// `NodeHandle::text_edits`: a text area with atoms over its own model.
+    fn editor(&self) -> Option<Rc<dyn crate::widgets::TextEdits>> {
+        None
+    }
 }
 
 /// A handle to a DOM node, for `on_mount`: its measurements from `hooks`,
@@ -143,8 +171,369 @@ pub struct Element {
     pub resources: Resources,
     /// Lays out as its child, in its place (CSS `display: contents`).
     pub contents: bool,
-    /// What of it the DOM can't show (listeners, keymaps…), for a warning.
+    /// What of it the DOM can't show, for a warning.
     pub dropped: Vec<&'static str>,
+    /// Its `on_event` listeners (and what's built on them: `on_action`).
+    pub listeners: Option<Listeners>,
+    /// Its keymap (`View::keymap`).
+    pub keymap: Option<Box<crate::actions::Keymap>>,
+    /// Its context menu (`View::context_menu`): entries for a secondary
+    /// click, told the paragraph's span it was on, if any.
+    pub context_menu: Option<DomMenu>,
+    /// Whether that menu shows (`View::context_menu_open`): written as it
+    /// opens and closes.
+    pub context_menu_open: Option<Signal<bool>>,
+    /// A focus group (`View::focus_group`, or its role's): its arrows, and
+    /// whether moving chooses (a radio group's).
+    pub focus_group: Option<(crate::input::FocusGroup, bool)>,
+}
+
+/// An element's `on_event` listeners, run as the DOM routes an event to
+/// it: each phase (capture, at it, bubbling) a call.
+pub struct Listeners(Vec<super::EventListener>);
+
+/// An event from the DOM, as an element's listeners get it.
+pub struct DomEvent<'a> {
+    /// 0 pointerdown, 1 pointerup, 2 pointermove, 3 pointerenter,
+    /// 4 pointerleave, 5 wheel, 6 keydown, 7 keyup, 8 focusin, 9 focusout,
+    /// 10 click (activation), 11 a keymap's action, 12 pointercancel.
+    pub kind: u32,
+    /// 0 capture, 1 at the element, 2 bubbling.
+    pub phase: u32,
+    /// Whether the element is what the event is for (else something in it).
+    pub at_self: bool,
+    /// The element's node.
+    pub node: u32,
+    pub x: f32,
+    pub y: f32,
+    /// A wheel's deltas, a pointer's button (`dx`), an action's index.
+    pub dx: f32,
+    pub dy: f32,
+    pub modifiers: crate::input::Modifiers,
+    pub repeat: bool,
+    pub clicks: u8,
+    pub key: &'a str,
+    pub code: &'a str,
+    /// A drag from another app or the desktop (the browser's own drag and
+    /// drop), not one a listener started: over it carries text not yet
+    /// known; dropped, `code` is its text, a NUL, and its HTML (or none).
+    pub from_outside: bool,
+}
+
+/// The source of a drag from another app: no node of the document.
+const OUTSIDE: u32 = u32::MAX - 2;
+
+/// A node outside any scene (a DOM node), for an event's target that isn't
+/// the element itself.
+const ELSEWHERE: u32 = u32::MAX - 1;
+
+impl Listeners {
+    /// Run them for `event`: what they decided (`EventContext`'s bits,
+    /// 1 prevented, 2 stopped, 4 immediately, 8 focus, 16 capture,
+    /// 32 release), or 0 for an event they don't take.
+    pub fn run(&mut self, event: &DomEvent) -> u32 {
+        use crate::input::{EventContext, EventPhase, InputEvent, PointerButton};
+        let button = || match event.dx as i32 {
+            0 => PointerButton::Primary,
+            1 => PointerButton::Middle,
+            2 => PointerButton::Secondary,
+            other => PointerButton::Other(other.max(0) as u16),
+        };
+        let (x, y) = (event.x, event.y);
+        let input = match event.kind {
+            0 => InputEvent::PointerDown {
+                x,
+                y,
+                button: button(),
+            },
+            1 => InputEvent::PointerUp {
+                x,
+                y,
+                button: button(),
+            },
+            2 => InputEvent::PointerMove { x, y },
+            3 => InputEvent::PointerEnter,
+            4 => InputEvent::PointerLeave,
+            5 => InputEvent::Scroll {
+                x,
+                y,
+                delta_x: event.dx,
+                delta_y: event.dy,
+            },
+            6 | 7 => {
+                let Some(key) = dom_key(event.key) else {
+                    return 0;
+                };
+                match event.kind {
+                    6 => InputEvent::KeyDown {
+                        key,
+                        modifiers: event.modifiers,
+                        repeat: event.repeat,
+                    },
+                    _ => InputEvent::KeyUp {
+                        key,
+                        modifiers: event.modifiers,
+                    },
+                }
+            }
+            8 => InputEvent::Focus,
+            9 => InputEvent::Blur,
+            10 => InputEvent::Activate,
+            11 => match ACTIONS.with(|actions| actions.borrow().get(event.dx as usize).cloned()) {
+                Some(action) => InputEvent::Action(action),
+                None => return 0,
+            },
+            12 => InputEvent::PointerCancel,
+            // A drag's phases (`DRAG`): over, leave, drop at a
+            // destination; start, move, end at its source.
+            13..=18 => match drag_event(event) {
+                Some(drag) => InputEvent::Drag(drag),
+                None => return 0,
+            },
+            _ => return 0,
+        };
+        let node = crate::scene::NodeId::outside(event.node);
+        let target = match event.at_self {
+            true => node,
+            false => crate::scene::NodeId::outside(ELSEWHERE),
+        };
+        let phase = match event.phase {
+            0 => EventPhase::Capture,
+            1 => EventPhase::Target,
+            _ => EventPhase::Bubble,
+        };
+        let code = (!event.code.is_empty()).then(|| Rc::from(event.code));
+        let mut cx = EventContext::dom(
+            input,
+            target,
+            node,
+            phase,
+            event.modifiers,
+            event.clicks,
+            code,
+        );
+        for listener in &mut self.0 {
+            listener(&mut cx);
+            if cx.dom_outcome() & 4 != 0 {
+                break;
+            }
+        }
+        let outcome = cx.dom_outcome();
+        // A drag started here: kept until it ends.
+        if let Some((payload, pressed)) = cx.take_dom_drag() {
+            let pressed = pressed.unwrap_or((event.x, event.y));
+            DRAG.with(|drag| {
+                *drag.borrow_mut() = Some(Drag {
+                    payload,
+                    source: event.node,
+                    pressed,
+                    grab: (0., 0.),
+                })
+            });
+        }
+        outcome
+    }
+}
+
+/// A DOM `KeyboardEvent.key` as zgx's key: none for a modifier or a key
+/// zgx doesn't name.
+pub fn dom_key(key: &str) -> Option<crate::input::Key> {
+    use crate::input::Key;
+    Some(match key {
+        "Tab" => Key::Tab,
+        "Enter" => Key::Enter,
+        " " => Key::Space,
+        "Escape" => Key::Escape,
+        "Backspace" => Key::Backspace,
+        "Delete" => Key::Delete,
+        "ArrowLeft" => Key::ArrowLeft,
+        "ArrowRight" => Key::ArrowRight,
+        "ArrowUp" => Key::ArrowUp,
+        "ArrowDown" => Key::ArrowDown,
+        "Home" => Key::Home,
+        "End" => Key::End,
+        "PageUp" => Key::PageUp,
+        "PageDown" => Key::PageDown,
+        "Insert" => Key::Insert,
+        "ContextMenu" => Key::ContextMenu,
+        _ => {
+            if let Some(n) = key.strip_prefix('F').and_then(|n| n.parse::<u8>().ok())
+                && (1..=35).contains(&n)
+            {
+                return Some(Key::Function(n));
+            }
+            // A named key (Shift, CapsLock, Unidentified…) is a word; a
+            // character is one grapheme, a few code points at most.
+            if key.is_empty()
+                || (key.chars().count() > 1 && key.chars().all(|c| c.is_ascii_alphanumeric()))
+            {
+                return None;
+            }
+            Key::Character(key.into())
+        }
+    })
+}
+
+/// A drag in the document (`start_drag`): what it carries, its source,
+/// where it was pressed, and that press's distance from the source's edges.
+struct Drag {
+    payload: crate::actions::Action,
+    source: u32,
+    pressed: (f32, f32),
+    grab: (f32, f32),
+}
+
+/// The drag event for a DOM event of kind 13 (over), 14 (leave), 16
+/// (drop) at a destination, or 18 (start: `x`, `y` the source's top left),
+/// 15 (move) and 17 (end: `dx` 1 if accepted) at its source.
+fn drag_event(event: &DomEvent) -> Option<crate::input::DragEvent> {
+    use crate::input::{DragEvent, DragPhase, DraggedText};
+    DRAG.with(|drag| {
+        let mut drag = drag.borrow_mut();
+        // Text from another app (the browser's drag and drop): over, it
+        // carries text known only as it drops, as on the desktop; dropped,
+        // its text and HTML (`DraggedText::html`).
+        if event.from_outside {
+            let text = |plain: &str, html: Option<&str>| {
+                crate::actions::Action::new(DraggedText::with_html(
+                    plain,
+                    html.filter(|h| !h.is_empty()).map(str::to_owned),
+                ))
+            };
+            match (event.kind, drag.as_mut()) {
+                (16, Some(outside)) if outside.source == OUTSIDE => {
+                    let (plain, html) = match event.code.split_once('\0') {
+                        Some((plain, html)) => (plain, Some(html)),
+                        None => (event.code, None),
+                    };
+                    outside.payload = text(plain, html);
+                }
+                (_, Some(outside)) if outside.source == OUTSIDE => {}
+                (_, None) => {
+                    *drag = Some(Drag {
+                        payload: text("", None),
+                        source: OUTSIDE,
+                        pressed: (event.x, event.y),
+                        grab: (0., 0.),
+                    })
+                }
+                // One of the document's own drags is under way.
+                (_, Some(_)) => return None,
+            }
+        } else if drag.as_ref().is_some_and(|d| d.source == OUTSIDE) {
+            // One from another app left behind (given up where the page
+            // heard no end): the document's own drags aren't its.
+            *drag = None;
+        }
+        let drag = drag.as_mut()?;
+        let phase = match event.kind {
+            13 => DragPhase::Over,
+            14 => DragPhase::Leave,
+            15 => DragPhase::Move,
+            16 => DragPhase::Drop,
+            17 => DragPhase::End,
+            _ => {
+                drag.grab = (drag.pressed.0 - event.x, drag.pressed.1 - event.y);
+                DragPhase::Start
+            }
+        };
+        let (x, y) = match phase {
+            DragPhase::Start => drag.pressed,
+            _ => (event.x, event.y),
+        };
+        Some(DragEvent {
+            phase,
+            payload: drag.payload.clone(),
+            source: crate::scene::NodeId::outside(drag.source),
+            x,
+            y,
+            grab_x: drag.grab.0,
+            grab_y: drag.grab.1,
+            accepted: event.dx == 1.,
+            outside: false,
+            visiting: drag.source == OUTSIDE,
+        })
+    })
+}
+
+/// The drag in the document ends (after its source heard `End`).
+pub fn end_drag() {
+    DRAG.with(|drag| drag.borrow_mut().take());
+}
+
+thread_local! {
+    /// The drag in progress, if any.
+    static DRAG: RefCell<Option<Drag>> = const { RefCell::new(None) };
+    /// Every keymap mounted in the document, by its node.
+    static KEYMAPS: Rc<RefCell<crate::actions::Registry>> = Rc::default();
+    /// The actions a key just matched, for the elements it routes them to.
+    static ACTIONS: RefCell<Vec<crate::actions::Action>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `map` bound at node `node`, until what this gives back is dropped.
+pub fn bind_keymap(node: u32, map: crate::actions::Keymap) -> Box<dyn Any> {
+    KEYMAPS.with(|registry| {
+        Box::new(crate::actions::Registry::bind(
+            registry,
+            crate::scene::NodeId::outside(node),
+            map,
+        )) as Box<dyn Any>
+    })
+}
+
+/// What a key does to the keymaps on its way (`path`, the nodes with
+/// keymaps from the focused element out): nothing (0), it's taken with no
+/// action (1: a sequence's first keys, or `NoAction`), or `2 + n` with `n`
+/// actions to route, in turn, until one is handled (`Listeners::run`'s
+/// kind 11 gets them by number).
+pub fn resolve_keys(
+    path: &[u32],
+    key: &str,
+    code: &str,
+    modifiers: crate::input::Modifiers,
+    repeat: bool,
+) -> u32 {
+    use crate::actions::{Keystroke, NoAction, Resolution};
+    let Some(key) = dom_key(key) else {
+        return 0;
+    };
+    let path: Vec<_> = path
+        .iter()
+        .map(|&n| crate::scene::NodeId::outside(n))
+        .collect();
+    let code = (!code.is_empty()).then_some(code);
+    let now = crate::time::Instant::now();
+    KEYMAPS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        // A sequence left waiting too long is dropped: its keys went by.
+        let _ = registry.expired(now);
+        loop {
+            match registry.resolve(
+                path.clone(),
+                Keystroke::new(key.clone(), modifiers),
+                code,
+                repeat,
+                now,
+            ) {
+                Resolution::None => return 0,
+                Resolution::Prefix => return 1,
+                // The keys before didn't finish a sequence: this one alone.
+                Resolution::Retry(_) => continue,
+                Resolution::Matched(replay) => {
+                    if replay
+                        .candidates
+                        .first()
+                        .is_some_and(|a| a.downcast_ref::<NoAction>().is_some())
+                    {
+                        return 1;
+                    }
+                    let n = replay.candidates.len() as u32;
+                    ACTIONS.with(|actions| *actions.borrow_mut() = replay.candidates);
+                    return 2 + n;
+                }
+            }
+        }
+    })
 }
 
 /// An element's static styles, compared as they are: a host keeps the
@@ -153,6 +542,8 @@ pub struct Element {
 pub struct Look {
     base: &'static str,
     text: bool,
+    /// Its translation rests on whole device pixels (`View::pixel_snap`).
+    snap: bool,
     own: Styles,
     hover: Option<Box<Styles>>,
     active: Option<Box<Styles>>,
@@ -165,6 +556,7 @@ impl Look {
         Look {
             base: "",
             text: false,
+            snap: false,
             own: Styles::new(),
             hover: None,
             active: None,
@@ -189,7 +581,7 @@ impl Look {
     /// Its own declarations.
     pub fn css(&self) -> String {
         let mut css = self.base.to_owned();
-        styles_css(&self.own, self.text, &mut css);
+        styles_css_on(&self.own, self.text, self.snap, &mut css);
         css
     }
     /// Its hover, pressed, focus and disabled declarations.
@@ -197,7 +589,7 @@ impl Look {
         let css = |styles: &Option<Box<Styles>>| {
             styles.as_ref().map(|styles| {
                 let mut css = String::new();
-                styles_css(styles, self.text, &mut css);
+                styles_css_on(styles, self.text, self.snap, &mut css);
                 css
             })
         };
@@ -210,6 +602,26 @@ impl Look {
     }
 }
 
+/// What gives a DOM text area's atoms, from its model (`View::atoms_when`).
+#[doc(hidden)]
+pub type AtomsWhen =
+    Box<dyn FnMut(&mut crate::text_edit::TextEditor) -> Vec<crate::text_edit::Atom>>;
+/// A DOM text area's atoms (`ElementKind::Editor`), from its view's options:
+/// what it shows them by, as chips in its text.
+#[doc(hidden)]
+pub struct DomAtoms {
+    /// Its atoms, as the values they read change (`View::atoms_when`), given
+    /// its model.
+    pub when: Option<AtomsWhen>,
+    /// Told what happened to its atoms (`View::on_atoms`).
+    pub on_atoms: Option<crate::widgets::AtomListener>,
+    /// The wash behind atoms with none of their own (`View::atom_wash`).
+    pub wash: Option<crate::scene::Color>,
+    /// How its atoms show beyond a wash (`View::atom_style`).
+    pub style: Option<crate::editor_atom_style::AtomStyle>,
+    /// How its atoms go on the clipboard beyond the page (`View::atom_codec`).
+    pub codec: Option<crate::widgets::AtomCodec>,
+}
 pub enum ElementKind {
     Box(Layout),
     Text(String),
@@ -241,14 +653,139 @@ pub enum ElementKind {
         multiline: bool,
         placeholder: Option<Box<dyn FnMut() -> String>>,
         secure: bool,
+        /// Its atoms (`View::atoms_when`, `on_atoms`, `atom_wash`,
+        /// `atom_style`): none for most, which show as the browser's own
+        /// field.
+        atoms: Option<Box<DomAtoms>>,
     },
     Image {
         label: String,
         source: Box<dyn FnMut() -> std::sync::Arc<crate::image::ImageData>>,
     },
     Region(Region),
+    /// A modal, popover, menu, submenu or tooltip: the element is its panel.
+    Overlay(Box<Overlay>),
+    /// A paragraph of spans (`rich_text`), read again as what it reads
+    /// changes.
+    Rich(Inlines),
+    /// A drawing (`canvas`): its commands for a size, drawn again as what
+    /// they read changes.
+    Canvas(Box<dyn FnMut((f32, f32)) -> crate::canvas::Canvas>),
     /// What only a GPU or native host draws: a labelled box.
     Unsupported(&'static str),
+}
+
+/// What an overlay's panel is to the browser.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum OverlayKind {
+    /// A modal (`modal`): a `<dialog>` shown with `showModal`.
+    Dialog = 0,
+    /// An anchored popup (`popover`): an auto popover.
+    Popover = 1,
+    /// `menu`: an auto popover of menu items.
+    Menu = 2,
+    /// `submenu`: one nested in its menu's.
+    Submenu = 3,
+    /// `View::tooltip`: a manual popover shown on hover and keyboard focus.
+    Tooltip = 4,
+    /// A non-modal layer (`View::layer`): a manual popover over the page.
+    Layer = 5,
+}
+
+/// An overlay (`modal`, `popover`, `menu`, `submenu`, `View::tooltip`): its
+/// panel is the element, its children the panel's.
+pub struct Overlay {
+    pub kind: OverlayKind,
+    /// Whether it shows; the browser closing it (Escape, a click outside)
+    /// sets it false.
+    pub open: Signal<bool>,
+    /// What it is anchored to, in the flow where the overlay is.
+    pub anchor: Option<View>,
+    /// The scope the anchor mounts in (the panel's own holds its menu).
+    pub outer: Scope,
+    /// Its placement against the anchor: side (bottom, top, left, right),
+    /// alignment (start, centre, end) and offset.
+    pub side: u32,
+    pub align: u32,
+    pub offset: f32,
+    /// A click on a modal's backdrop closes it.
+    pub dismiss_backdrop: bool,
+    /// At least as wide as its anchor.
+    pub match_anchor_width: bool,
+    /// Focus moves into it as it opens.
+    pub autofocus: bool,
+    /// A tooltip: how long the pointer rests before it shows, and whether
+    /// the pointer may move into it.
+    pub delay_ms: u32,
+    pub interactive: bool,
+    /// A modal's backdrop, as CSS.
+    pub backdrop: Option<String>,
+    /// Its panel's children are made the first time it opens (`View::lazy`).
+    pub lazy: bool,
+    /// A popover's arrow (`View::arrow`): how far it reaches from the
+    /// panel's edge, 0 for none.
+    pub arrow: f32,
+}
+
+/// A rich paragraph's spans as the DOM shows them (tracked: theme tokens
+/// and what the spans read).
+pub type Inlines = Box<dyn FnMut() -> Vec<Inline>>;
+
+/// A span (`TextSpan`) as the DOM shows it: its text, alone when it has no
+/// CSS, link or icon, else in an element of its own.
+pub struct Inline {
+    pub text: std::sync::Arc<str>,
+    /// Its typography, decorations, background and padding, as CSS.
+    pub css: String,
+    /// Its look under the pointer (`TextSpan::hover`), as CSS.
+    pub hover: String,
+    /// A link (`on_click`, `href`): an `<a>`, focusable.
+    pub link: bool,
+    /// Where it goes, if it is a web or mail link the browser may open.
+    pub href: Option<std::sync::Arc<str>>,
+    /// It only acts, going nowhere (`on_click`, no `href`): a button
+    /// (`role=button`), which Space presses too, as the desktop's.
+    pub button: bool,
+    /// What assistive technology reads for it in place of its text
+    /// (`TextSpan::label`, `aria-label`): a citation's "Citation 1".
+    pub label: Option<std::sync::Arc<str>>,
+    /// Its click, told the keys held: `true` back keeps `href` from
+    /// opening.
+    pub action: Option<Box<dyn FnMut(crate::input::Modifiers) -> bool>>,
+    /// Its icon, as the CSS of an element of its own before the text.
+    pub icon: Option<String>,
+    /// Its text fading in (`TextSpan::fade_in`): how long, in milliseconds,
+    /// and how far in it is already.
+    pub fade: Option<(f32, f32)>,
+    /// Its own context menu (`TextSpan::context_menu`).
+    pub menu: Option<SpanMenuBuild>,
+}
+
+/// A span's own context menu's entries, built for a secondary click.
+pub type SpanMenuBuild = Box<dyn FnMut(&super::ContextMenuEvent) -> Vec<View>>;
+impl Inline {
+    /// Whether it shows as `other` does (its click aside).
+    pub fn looks_as(&self, other: &Inline) -> bool {
+        self.text == other.text
+            && self.css == other.css
+            && self.hover == other.hover
+            && self.link == other.link
+            && self.href == other.href
+            && self.button == other.button
+            && self.label == other.label
+            && self.icon == other.icon
+            && self.action.is_some() == other.action.is_some()
+            && self.menu.is_some() == other.menu.is_some()
+    }
+    /// Whether it needs no element: a bare text node.
+    pub fn bare(&self) -> bool {
+        self.css.is_empty()
+            && !self.link
+            && self.icon.is_none()
+            && self.fade.is_none()
+            && self.menu.is_none()
+    }
 }
 
 /// A part of the tree that changes shape: one view at a time, keyed rows or
@@ -276,12 +813,72 @@ pub struct KeyedRegion {
 
 pub struct VirtualRegion {
     pub offset: Signal<f32>,
-    pub row_height: f32,
+    pub heights: Heights,
     pub overscan: usize,
     pub count: Box<dyn FnMut() -> usize>,
     pub key: Box<dyn FnMut(usize) -> u32>,
     /// A row, given its index signal and key id.
     pub build: BuildListRow,
+}
+
+/// A virtual list's row heights: all one (`virtual_list`), or each its own
+/// (`variable_virtual_list`), measured from the rows mounted
+/// (`measured_virtual_list`, `measured_rows`).
+pub enum Heights {
+    Fixed(f32),
+    Variable {
+        heights: super::VariableHeights,
+        measured: bool,
+    },
+}
+impl Heights {
+    /// Where row `index` starts (tracked).
+    pub fn top(&self, index: usize) -> f32 {
+        match self {
+            Heights::Fixed(height) => index as f32 * height,
+            Heights::Variable { heights, .. } => heights.row_offset(index),
+        }
+    }
+    /// Row `index`'s height (tracked).
+    pub fn height(&self, index: usize) -> f32 {
+        match self {
+            Heights::Fixed(height) => *height,
+            Heights::Variable { heights, .. } => heights.row_height(index).unwrap_or(0.),
+        }
+    }
+    /// All `count` rows' height together (tracked).
+    pub fn total(&self, count: usize) -> f32 {
+        match self {
+            Heights::Fixed(height) => count as f32 * height,
+            Heights::Variable { heights, .. } => heights.content_height(),
+        }
+    }
+    /// The row at `offset` down the list, of `count` (tracked).
+    pub fn row_at(&self, offset: f32, count: usize) -> usize {
+        match self {
+            Heights::Fixed(height) => ((offset.max(0.) / height) as usize).min(count),
+            Heights::Variable { heights, .. } => heights.row_at(offset).unwrap_or(0),
+        }
+    }
+    /// Its rows are measured: each is as tall as it lays out.
+    pub fn measured(&self) -> bool {
+        matches!(self, Heights::Variable { measured: true, .. })
+    }
+    /// A measured row's height, laid out (at least a pixel, as the desktop
+    /// floors it).
+    pub fn measure(&self, index: usize, height: f32) {
+        if let Heights::Variable { heights, .. } = self {
+            let _ = heights.set_height(index, height.max(1.));
+        }
+    }
+    /// It stays at its end through changes when it rests there
+    /// (`VariableHeights::anchor_end`).
+    pub fn anchors_end(&self) -> bool {
+        match self {
+            Heights::Fixed(_) => false,
+            Heights::Variable { heights, .. } => heights.anchors_end(),
+        }
+    }
 }
 
 /// Whether regions keep only their DOM form: in the browser, where no `Ui`
@@ -473,7 +1070,7 @@ pub(crate) fn share_virtual<K: Eq + std::hash::Hash + Clone + 'static>(
         (count.clone(), key.clone(), build.clone(), ids.clone());
     let region = Region::Virtual(VirtualRegion {
         offset,
-        row_height,
+        heights: Heights::Fixed(row_height),
         overscan,
         count: Box::new(move || (dom_count.borrow_mut())()),
         key: Box::new(move |index| {
@@ -494,6 +1091,34 @@ pub(crate) fn share_virtual<K: Eq + std::hash::Hash + Clone + 'static>(
         Box::new(move |index, k, cx| (build.borrow_mut())(index, k, cx)),
         region,
     )
+}
+
+/// A variable or measured list's DOM form (`variable_list`, `DOM_ONLY`):
+/// its count is its heights'.
+pub(crate) fn variable_region<K: Eq + std::hash::Hash + Clone + 'static>(
+    offset: Signal<f32>,
+    heights: super::VariableHeights,
+    measured: bool,
+    overscan: usize,
+    mut key: impl FnMut(usize) -> K + 'static,
+    mut build: impl FnMut(Signal<usize>, K, &mut Context) -> View + 'static,
+) -> Region {
+    if measured {
+        heights.floor_measured();
+    }
+    let ids = Rc::new(RefCell::new(KeyIds::<K>::new()));
+    let (key_ids, count) = (ids.clone(), heights.clone());
+    Region::Virtual(VirtualRegion {
+        offset,
+        heights: Heights::Variable { heights, measured },
+        overscan,
+        count: Box::new(move || count.len()),
+        key: Box::new(move |index| key_ids.borrow_mut().id(&key(index))),
+        build: Box::new(move |index, id, cx| {
+            let key = ids.borrow().keys[&id].clone();
+            build(index, key, cx)
+        }),
+    })
 }
 
 /// Read `view` out as an element in `scope`: components, providers and slots
@@ -584,6 +1209,7 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
                             .as_ref()
                             .and_then(|rare| rare.secure)
                             .unwrap_or(false),
+                        atoms: view.rare.as_deref_mut().and_then(Rare::take_atoms),
                     },
                     Kind::Image { label, source } => ElementKind::Image { label, source },
                     Kind::Region(_) | Kind::VirtualList(_) => {
@@ -592,12 +1218,38 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
                             None => ElementKind::Unsupported("region"),
                         }
                     }
-                    Kind::RichText(_) => ElementKind::Unsupported("rich text"),
-                    Kind::MenuItem(_) | Kind::Submenu { .. } | Kind::Menu { .. } => {
-                        ElementKind::Unsupported("menu")
+                    Kind::MenuItem(label) => {
+                        return menu_item(view, label, parent, scope, resources);
                     }
-                    Kind::Modal { .. } => ElementKind::Unsupported("modal"),
-                    Kind::Canvas(_) => ElementKind::Unsupported("canvas"),
+                    Kind::Submenu { label, open } => {
+                        return submenu(view, label, open, parent, scope, resources);
+                    }
+                    Kind::Menu {
+                        label,
+                        open,
+                        anchor,
+                    } => {
+                        let kind = OverlayKind::Menu;
+                        let anchor = Some(*anchor);
+                        return overlay(view, kind, label, open, anchor, parent, scope, resources);
+                    }
+                    Kind::Modal {
+                        label,
+                        open,
+                        anchor,
+                    } => {
+                        let kind = match anchor {
+                            Some(_) => OverlayKind::Popover,
+                            None => OverlayKind::Dialog,
+                        };
+                        let anchor = anchor.map(|anchor| *anchor);
+                        return overlay(view, kind, label, open, anchor, parent, scope, resources);
+                    }
+                    Kind::RichText(compute) => {
+                        let theme = scope.as_ref().unwrap_or(parent).environment.theme.clone();
+                        ElementKind::Rich(inlines(compute, theme))
+                    }
+                    Kind::Canvas(draw) => ElementKind::Canvas(draw),
                     Kind::Svg { .. } => ElementKind::Unsupported("svg"),
                     #[cfg(target_os = "macos")]
                     Kind::NativeSurface { .. } => ElementKind::Unsupported("native surface"),
@@ -611,6 +1263,580 @@ pub fn element(mut view: View, parent: &Scope) -> Element {
     }
 }
 
+/// `view` (a popover) as a tooltip: the host shows it as the pointer rests
+/// on its anchor for `delay`, or keyboard focus reaches the anchor.
+pub(crate) fn hover(mut view: View, delay: std::time::Duration, interactive: bool) -> View {
+    view.rare_mut().portal.get_or_insert_default().dom_hover = Some((delay, interactive));
+    view
+}
+
+/// A menu item: a button that closes its menu (and the menus it opened
+/// from) before running its click, or a submenu's trigger, which opens it.
+fn menu_item(
+    mut view: View,
+    label: String,
+    parent: &Scope,
+    scope: Option<Scope>,
+    resources: Resources,
+) -> Element {
+    use super::OVERLAY;
+    use crate::theme::tok;
+    super::dim_when_disabled(&mut view);
+    let mut defaults = super::widget_style(|w| &w.menu_item);
+    if OVERLAY.menu_item_min_height.is_some()
+        && (view.styles.height.is_some() || view.styles.height_percent.is_some())
+    {
+        defaults = defaults.min_h(0.);
+    }
+    defaults.merge(&view.styles);
+    view.styles = defaults;
+    if view.variants.hover.is_none() {
+        view.variants.defaults[0] = Some(|| super::widget_style(|w| &w.menu_hover));
+    }
+    if view.variants.focus.is_none() {
+        view.variants.defaults[2] = Some(super::menu_focus(&view.styles));
+    }
+    let menu = scope.as_ref().unwrap_or(parent).environment.menu();
+    let (trigger, check, shortcut) = match view.rare.as_deref_mut() {
+        Some(rare) => (
+            rare.menu_trigger.take(),
+            rare.menu_check.clone(),
+            rare.shortcut.clone(),
+        ),
+        None => (None, None, None),
+    };
+    let named = !view.children.is_empty();
+    if !named {
+        // The check (or a radio's dot) in a gutter of its own.
+        if let Some((checked, radio)) = check.clone() {
+            let mark = if radio { "•" } else { "✓" };
+            view.children.push(
+                super::text_signal(move || {
+                    if checked() {
+                        mark.into()
+                    } else {
+                        String::new()
+                    }
+                })
+                .w(16.)
+                .shrink_0()
+                .accessible_hidden(),
+            );
+        }
+        let drawn = super::menu_text(label.clone(), view.rare.as_deref_mut());
+        if trigger.is_some() || shortcut.is_some() {
+            view.children.push(drawn.flex_grow(1.));
+        } else {
+            view.children.push(drawn);
+        }
+        if let Some(keys) = shortcut {
+            view.children.push(
+                super::text(keys)
+                    .ml(OVERLAY.shortcut_gap)
+                    .text_color(tok::TEXT_TERTIARY)
+                    .accessible_hidden(),
+            );
+        }
+        if trigger.is_some() {
+            view.children.push(
+                super::text("›")
+                    .ml(OVERLAY.shortcut_gap)
+                    .text_color(tok::TEXT_TERTIARY)
+                    .accessible_hidden(),
+            );
+        }
+    }
+    // In a menu the arrows move among its items (one Tab stop: the menu).
+    if menu.is_some() && view.focusable.is_none() {
+        view.focusable = Some(false);
+    }
+    let mut own = view.click.take();
+    view.click = Some(match trigger.clone() {
+        Some(open) => Box::new(move |modifiers| {
+            open.set(true);
+            if let Some(click) = own.as_mut() {
+                click(modifiers);
+            }
+        }),
+        None => Box::new(move |modifiers| {
+            if let Some(menu) = &menu {
+                menu.close_chain();
+            }
+            if let Some(click) = own.as_mut() {
+                click(modifiers);
+            }
+        }),
+    });
+    let mut el = primitive(view, ElementKind::Button, parent, scope, resources);
+    let role = match &check {
+        Some((_, true)) => "menuitemradio",
+        Some(_) => "menuitemcheckbox",
+        None => "menuitem",
+    };
+    el.attrs.insert(0, ("role", role.into()));
+    if named {
+        el.attrs.insert(1, ("aria-label", label));
+    }
+    if let Some((checked, _)) = check {
+        el.bound_attrs
+            .push(("aria-checked", Box::new(move || Some(bool_str(checked())))));
+    }
+    if let Some(open) = trigger {
+        el.attrs.push(("aria-haspopup", "menu".into()));
+        el.bound_attrs.push((
+            "aria-expanded",
+            Box::new(move || Some(bool_str(open.get()))),
+        ));
+    }
+    el
+}
+
+/// A submenu: its trigger (the app's, or a menu item of its label) in the
+/// menu it is in, its panel beside it.
+fn submenu(
+    mut view: View,
+    label: String,
+    open: Signal<bool>,
+    parent: &Scope,
+    scope: Option<Scope>,
+    resources: Resources,
+) -> Element {
+    super::dim_when_disabled(&mut view);
+    let trigger = (view.rare.as_mut())
+        .and_then(|r| r.portal.as_mut())
+        .and_then(|p| p.trigger.take());
+    let mut anchor = match trigger {
+        Some(trigger) => trigger,
+        None => match super::followed_label(view.rare.as_deref_mut()) {
+            Some(followed) => {
+                super::menu_item(label.clone()).accessible_label_when(move || followed.get())
+            }
+            None => super::menu_item(label.clone()),
+        },
+    };
+    anchor.rare_mut().menu_trigger = Some(open.clone());
+    if let Some(id) = view.rare.as_mut().and_then(|r| r.trigger_id.take()) {
+        anchor.id = Some(id);
+    }
+    // Disabled, its trigger is (it never opens).
+    if let Some(disabled) = view.disabled.take() {
+        anchor.disabled = Some(disabled);
+    }
+    let kind = OverlayKind::Submenu;
+    overlay(
+        view,
+        kind,
+        label,
+        open,
+        Some(anchor),
+        parent,
+        scope,
+        resources,
+    )
+}
+
+/// An overlay's panel, with the card a desktop panel of its kind has.
+#[allow(clippy::too_many_arguments)]
+fn overlay(
+    mut view: View,
+    mut kind: OverlayKind,
+    label: String,
+    open: Signal<bool>,
+    mut anchor: Option<View>,
+    parent: &Scope,
+    scope: Option<Scope>,
+    resources: Resources,
+) -> Element {
+    use super::{OVERLAY, PlacementEdge, PlacementSide};
+    use crate::theme::tok;
+    let outer = scope.unwrap_or_else(|| parent.clone());
+    let (options, dismiss, match_anchor_width, hidden) = match view.rare.as_deref_mut() {
+        Some(rare) => (
+            rare.portal.take(),
+            rare.dismiss_backdrop.take(),
+            rare.match_anchor_width,
+            rare.panel_hidden,
+        ),
+        None => (None, None, false, false),
+    };
+    let layer = options.as_ref().is_some_and(|o| o.layer);
+    let hover = options.as_ref().and_then(|o| o.dom_hover);
+    if hover.is_some() {
+        kind = OverlayKind::Tooltip;
+    } else if layer && anchor.is_none() {
+        kind = OverlayKind::Layer;
+    }
+    let anchored = anchor.is_some();
+    let is_menu = matches!(kind, OverlayKind::Menu | OverlayKind::Submenu);
+    // A layer's panel is only what it holds; a dialog's or menu's is a card
+    // (as `mount_portal_panel`).
+    if !layer {
+        let (padding, radius) = match (is_menu, anchored) {
+            (true, _) => (OVERLAY.menu_padding, OVERLAY.menu_radius),
+            (false, true) => (
+                (OVERLAY.popover_padding, OVERLAY.popover_padding),
+                OVERLAY.popover_radius,
+            ),
+            (false, false) => ((16., 16.), crate::theme::Themed::Token(tok::RADIUS_MD.0)),
+        };
+        let card = Styles::new().w(if anchored { 240. } else { 360. });
+        let card = match padding {
+            (x, y) if x == y => card.p(x),
+            (x, y) => card.px(x).py(y),
+        };
+        let card = match (OVERLAY.panel_shadows, anchored) {
+            (Some(shadows), true) => card.shadows(shadows.to_vec()),
+            _ => card,
+        };
+        let mut defaults = card
+            .bg(if is_menu {
+                tok::MENU_BG
+            } else if anchored {
+                tok::POPOVER_BG
+            } else {
+                tok::SURFACE_OVERLAY
+            })
+            .rounded(radius);
+        // Its content clipped to its corners, unless an arrow shows past
+        // its edge.
+        let arrowed = kind == OverlayKind::Popover
+            && options
+                .as_ref()
+                .is_some_and(|o| o.arrow.is_some_and(|a| a > 0.));
+        if !arrowed {
+            defaults = defaults.overflow_hidden();
+        }
+        if is_menu {
+            defaults = defaults.items_stretch();
+        }
+        defaults.merge(&view.styles);
+        view.styles = defaults;
+    }
+    // Focus lands on the panel only with nothing in it to take it.
+    if view.focusable.is_none() && !matches!(kind, OverlayKind::Tooltip | OverlayKind::Layer) {
+        view.focusable = Some(false);
+    }
+    // A bare button opening a menu is a menu button: a press opens it.
+    if kind == OverlayKind::Menu
+        && let Some(anchor) = anchor.as_mut()
+        && anchor.click.is_none()
+        && matches!(anchor.kind, Kind::Button)
+    {
+        let open = open.clone();
+        anchor.click = Some(Box::new(move |_: crate::input::Modifiers| {
+            open.set(true);
+        }));
+    }
+    let mut inner = outer.clone();
+    if is_menu {
+        inner
+            .environment
+            .set_menu(Some(crate::compose_menu::MenuContext::new(
+                open.clone(),
+                outer.environment.menu(),
+                None,
+                kind == OverlayKind::Submenu,
+            )));
+    }
+    let placement = match options.as_ref().and_then(|o| o.placement) {
+        Some(placement) => placement,
+        None if kind == OverlayKind::Submenu => super::Placement {
+            side: PlacementSide::Right,
+            align: PlacementEdge::Start,
+            offset: 0.,
+        },
+        None => Default::default(),
+    };
+    let side = match placement.side {
+        PlacementSide::Bottom => 0,
+        PlacementSide::Top => 1,
+        PlacementSide::Left => 2,
+        PlacementSide::Right => 3,
+    };
+    let align = match placement.align {
+        PlacementEdge::Start => 0,
+        PlacementEdge::Center => 1,
+        PlacementEdge::End => 2,
+    };
+    let (delay, interactive) = hover.unwrap_or_default();
+    let backdrop = (kind == OverlayKind::Dialog)
+        .then(|| color_value(outer.environment.theme.color(tok::BACKDROP)));
+    let overlay = Overlay {
+        kind,
+        open,
+        anchor,
+        outer,
+        side,
+        align,
+        offset: placement.offset,
+        dismiss_backdrop: dismiss.unwrap_or(kind != OverlayKind::Submenu),
+        match_anchor_width,
+        autofocus: options.as_ref().and_then(|o| o.autofocus).unwrap_or(true),
+        delay_ms: delay.as_millis().min(u32::MAX as u128) as u32,
+        interactive,
+        backdrop,
+        lazy: options.as_ref().is_some_and(|o| o.lazy),
+        // Anchored popovers have one; menus none.
+        arrow: match kind {
+            OverlayKind::Popover => options.as_ref().and_then(|o| o.arrow).unwrap_or(0.),
+            _ => 0.,
+        },
+    };
+    let mut el = primitive(
+        view,
+        ElementKind::Overlay(Box::new(overlay)),
+        parent,
+        Some(inner),
+        resources,
+    );
+    let role = match kind {
+        OverlayKind::Popover => Some("dialog"),
+        OverlayKind::Menu | OverlayKind::Submenu => Some("menu"),
+        OverlayKind::Tooltip => Some("tooltip"),
+        OverlayKind::Dialog | OverlayKind::Layer => None,
+    };
+    if !matches!(kind, OverlayKind::Tooltip | OverlayKind::Layer) {
+        el.attrs.insert(0, ("aria-label", label));
+    }
+    if let Some(role) = role {
+        el.attrs.insert(0, ("role", role.into()));
+    }
+    if hidden {
+        el.attrs.push(("aria-hidden", "true".into()));
+    }
+    el
+}
+
+/// A paragraph's spans lowered for the DOM, as the desktop lowers them
+/// into runs (`paragraph_effect`): a link underlined unless it has a hover
+/// style or `no_underline`, tokens resolved from `theme`.
+fn inlines(
+    mut compute: Box<dyn FnMut() -> Vec<crate::compose_rich::TextSpan>>,
+    theme: Rc<crate::theme::ThemeScope>,
+) -> Inlines {
+    Box::new(move || {
+        let spans = compute();
+        let now = crate::compose_rich::fade_now();
+        spans
+            .into_iter()
+            .filter(|span| !span.text.is_empty())
+            .map(|span| inline(span, &theme, now))
+            .collect()
+    })
+}
+
+fn inline(
+    mut span: crate::compose_rich::TextSpan,
+    theme: &crate::theme::ThemeScope,
+    now: f64,
+) -> Inline {
+    use crate::rich_text::{Decoration, LineStyle};
+    let link = span.action.is_some() || span.href.is_some();
+    let extras = span.extras.take().map(|extras| *extras).unwrap_or_default();
+    let styled_hover = extras.hover.is_some();
+    if link && !styled_hover && !extras.plain {
+        span.underline.get_or_insert_with(Default::default);
+    }
+    if span.styles.has_tokens() {
+        crate::theme::resolve(&mut span.styles, theme);
+        span.background = span.background.or(span.styles.background);
+    }
+    let mut css = String::new();
+    styles_css(&span.styles, true, &mut css);
+    if let Some(spacing) = span.styles.rare().letter_spacing
+        && spacing.cell().is_none()
+        && spacing.pixels() != 0.
+    {
+        let _ = write!(css, "letter-spacing:{}px;", num(spacing.pixels()));
+    }
+    if let Some(background) = span.background.filter(|_| span.styles.background.is_none()) {
+        color_decl(&mut css, "background-color", background);
+    }
+    let decorate = |css: &mut String,
+                    underline: Option<Decoration>,
+                    strike: Option<Decoration>,
+                    color: Option<Color>| {
+        let lines = match (underline.is_some(), strike.is_some()) {
+            (true, true) => "underline line-through",
+            (true, false) => "underline",
+            (false, true) => "line-through",
+            (false, false) => return,
+        };
+        let line = underline.or(strike).expect("one of them");
+        let style = match line.line_style() {
+            LineStyle::Solid => "solid",
+            LineStyle::Double => "double",
+            LineStyle::Dotted => "dotted",
+            LineStyle::Dashed => "dashed",
+            LineStyle::Wavy => "wavy",
+        };
+        let _ = write!(
+            css,
+            "text-decoration:{lines} {style};text-decoration-thickness:{}px;",
+            num(line.thickness())
+        );
+        if let Some(color) = color.or(line.color) {
+            color_decl(css, "text-decoration-color", color);
+        }
+        if let Some(offset) = underline.and_then(|u| u.offset_px()) {
+            let _ = write!(css, "text-underline-offset:{}px;", num(offset));
+        }
+    };
+    let themed = |color| crate::compose_style::resolve_color_in(color, Some(theme));
+    let underline_color = span.underline_color.map(themed);
+    decorate(
+        &mut css,
+        span.underline,
+        span.strikethrough,
+        underline_color,
+    );
+    let [x, y] = span.padding;
+    let end = extras.padding_end.unwrap_or(x);
+    if x > 0. || y > 0. || end > 0. {
+        let _ = write!(
+            css,
+            "padding:{}px {}px {}px {}px;box-decoration-break:clone;-webkit-box-decoration-break:clone;",
+            num(y),
+            num(end),
+            num(y),
+            num(x)
+        );
+    }
+    if span.radius > 0. {
+        let _ = write!(css, "border-radius:{}px;", num(span.radius));
+    }
+    // A box of its own (`TextSpan::inline_box`): CSS's own.
+    if extras.boxed {
+        css.push_str("display:inline-flex;align-items:baseline;");
+    }
+    if link {
+        // In the paragraph's colour unless it has its own, as the desktop
+        // draws a link (not the browser's blue).
+        if span.styles.text_color.is_none() {
+            css.push_str("color:inherit;");
+        }
+        css.push_str("cursor:pointer;");
+    }
+    let mut hover = String::new();
+    if let Some(on) = extras.hover.as_ref().filter(|_| link) {
+        decorate(&mut hover, on.underline, None, underline_color);
+        if let Some(color) = on.text_color {
+            color_decl(&mut hover, "color", themed(color));
+        }
+    }
+    let icon = extras.icon.map(|icon| {
+        let mut css = format!(
+            "display:inline-block;vertical-align:middle;box-sizing:content-box;width:{0}px;height:{0}px;margin-right:{1}px;",
+            num(icon.size),
+            num(icon.gap)
+        );
+        let tint = match icon.tint {
+            Some(tint) => Some(color_value(themed(tint))),
+            None if icon.svg.follows_text_color() => Some("currentColor".into()),
+            None => None,
+        };
+        let url = svg_url(icon.svg.bytes());
+        match tint {
+            Some(tint) => {
+                let _ = write!(
+                    css,
+                    "background-color:{tint};-webkit-mask:{url} center/contain no-repeat;mask:{url} center/contain no-repeat;"
+                );
+            }
+            None => {
+                let _ = write!(css, "background:{url} center/contain no-repeat;");
+            }
+        }
+        if let Some(well) = icon.bg {
+            let well = themed(well);
+            // The well is the icon's box, padded, the icon drawn over it:
+            // a background under the mask would be masked too, so a shadow
+            // spreads the well instead.
+            let _ = write!(
+                css,
+                "border-radius:{}px;box-shadow:0 0 0 {}px {};margin:0 {}px 0 {}px;",
+                num(icon.radius),
+                num(icon.pad),
+                color_value(well),
+                num(icon.gap + icon.pad),
+                num(icon.pad)
+            );
+        }
+        css
+    });
+    let fade = extras
+        .fade
+        .filter(|fade| fade.fading(now))
+        .map(|fade| (fade.ms, (now - fade.start).max(0.) as f32));
+    let button = span.action.is_some() && span.href.is_none();
+    let href = span.href.filter(|href| crate::compose_rich::opens(href));
+    let action = span.action.map(|action| {
+        Box::new(move |held| action.call(held)) as Box<dyn FnMut(crate::input::Modifiers) -> bool>
+    });
+    Inline {
+        text: span.text,
+        css,
+        hover,
+        link,
+        href,
+        button,
+        label: extras.link.as_ref().and_then(|link| link.label.clone()),
+        action,
+        icon,
+        fade,
+        menu: extras.link.and_then(|link| link.menu.clone()).map(|menu| {
+            Box::new(move |event: &super::ContextMenuEvent| menu.build(event)) as SpanMenuBuild
+        }),
+    }
+}
+
+/// A view's context menu in the DOM: its entries for a secondary click,
+/// told the span of a paragraph it was on (`context_menu_with_span`).
+pub type DomMenu =
+    Box<dyn FnMut(&super::ContextMenuEvent, Option<&super::ContextMenuSpan>) -> Vec<View>>;
+
+/// The span a secondary click was on: its place among the paragraph's
+/// spans, where it links, and its text.
+pub fn menu_span(index: usize, href: Option<&str>, text: &str) -> super::ContextMenuSpan {
+    super::ContextMenuSpan {
+        index,
+        href: href.map(Into::into),
+        text: text.into(),
+    }
+}
+
+/// A context menu of `entries`, open while `open` is, for the host to show
+/// at the pointer (its anchor holds no place).
+pub fn context_menu_view(entries: Vec<View>, open: Signal<bool>) -> View {
+    super::menu("Context menu", open, super::div().contents())
+        // Its corner at the pointer.
+        .placement(super::Placement {
+            side: super::PlacementSide::Bottom,
+            align: super::PlacementEdge::Start,
+            offset: 0.,
+        })
+        .children(entries)
+}
+
+/// An SVG's bytes as a CSS `url()` of a data URL.
+fn svg_url(bytes: &[u8]) -> String {
+    let mut url = String::with_capacity(bytes.len() + 32);
+    url.push_str("url(\"data:image/svg+xml,");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || b" -_.!~*()/:=;,?@&+$<>'".contains(&byte) {
+            if byte == b' ' {
+                url.push_str("%20");
+            } else {
+                url.push(byte as char);
+            }
+        } else {
+            let _ = write!(url, "%{byte:02X}");
+        }
+    }
+    url.push_str("\")");
+    url
+}
+
 fn primitive(
     mut view: View,
     kind: ElementKind,
@@ -620,9 +1846,11 @@ fn primitive(
 ) -> Element {
     let scope = own_scope.as_ref().unwrap_or(parent);
     let mut dropped = Vec::new();
-    if !view.events.is_empty() {
-        dropped.push("on_event");
-    }
+    let listeners = (!view.events.is_empty()).then(|| Listeners(std::mem::take(&mut view.events)));
+    let mut keymap = None;
+    let mut focus_group = None;
+    let mut context_menu = None;
+    let mut context_menu_open = None;
     let mut attrs = Vec::new();
     let mut bound_attrs: Vec<BoundAttr> = Vec::new();
     let mut conditional = Vec::new();
@@ -634,15 +1862,25 @@ fn primitive(
         Some(false) => attrs.push(("tabindex", "-1".into())),
         None => {}
     }
+    // Read before its rare fields go: its translation on device pixels.
+    let snap = view.pixel_snaps();
     if let Some(rare) = view.rare.take() {
         let Rare {
             accessible_label,
             accessibility,
             dom_conditional,
             selectable,
+            keymap: map,
+            dom_menu,
+            context_menu_open: shows,
             ..
         } = *rare;
+        context_menu = dom_menu;
+        context_menu_open = shows;
         conditional = dom_conditional;
+        if !map.bindings.is_empty() || !map.contexts.is_empty() {
+            keymap = Some(Box::new(map));
+        }
         if let Some(label) = accessible_label {
             attrs.push(("aria-label", label));
         }
@@ -660,6 +1898,9 @@ fn primitive(
             }
             if let Some(level) = a.level {
                 attrs.push(("aria-level", level.to_string()));
+            }
+            if let Some(mut f) = a.level_when {
+                bound_attrs.push(("aria-level", Box::new(move || Some(f().max(1).to_string()))));
             }
             if let Some(live) = a.live {
                 attrs.push((
@@ -684,7 +1925,13 @@ fn primitive(
                 bound_attrs.push(("aria-label", Box::new(move || Some(f()))));
             }
             if let Some(mut f) = a.checked {
-                bound_attrs.push(("aria-checked", Box::new(move || Some(bool_str(f())))));
+                // A toggle button's (`View::pressed_when`) is `aria-pressed`.
+                let name = if a.toggle {
+                    "aria-pressed"
+                } else {
+                    "aria-checked"
+                };
+                bound_attrs.push((name, Box::new(move || Some(bool_str(f())))));
             }
             if let Some(mut f) = a.selected {
                 bound_attrs.push(("aria-selected", Box::new(move || Some(bool_str(f())))));
@@ -692,15 +1939,26 @@ fn primitive(
             if let Some(mut f) = a.expanded {
                 bound_attrs.push(("aria-expanded", Box::new(move || Some(bool_str(f())))));
             }
+
             if let Some(mut f) = a.value {
                 bound_attrs.push(("aria-valuetext", Box::new(move || Some(f()))));
             }
             if let Some(mut f) = a.description_when {
                 bound_attrs.push(("aria-description", Box::new(move || Some(f()))));
             }
-            if a.focus_group.is_some() {
-                dropped.push("focus_group");
-            }
+            // Composite widgets keep one Tab stop, as a browser's do (as
+            // `apply_accessibility`).
+            focus_group = a
+                .focus_group
+                .or(match a.role {
+                    Some(Role::ListBox) => Some(crate::input::FocusGroup::Vertical),
+                    Some(Role::TabList | Role::Toolbar) => {
+                        Some(crate::input::FocusGroup::Horizontal)
+                    }
+                    Some(Role::RadioGroup) => Some(crate::input::FocusGroup::Both),
+                    _ => None,
+                })
+                .map(|axis| (axis, a.role == Some(Role::RadioGroup)));
         }
     }
     let text_like = matches!(kind, ElementKind::Text(_) | ElementKind::BoundText(_));
@@ -720,7 +1978,7 @@ fn primitive(
                 let mut css = String::new();
                 if let Some(mut patch) = patch {
                     crate::theme::resolve(&mut patch, &theme);
-                    styles_css(&patch, text_like, &mut css);
+                    styles_css_on(&patch, text_like, snap, &mut css);
                 }
                 css
             }) as Box<dyn FnMut() -> String>
@@ -740,7 +1998,7 @@ fn primitive(
             }
             crate::theme::resolve(&mut resolved, &theme);
             let mut css = String::new();
-            styles_css(&resolved, text_like, &mut css);
+            styles_css_on(&resolved, text_like, snap, &mut css);
             css
         });
         (Styles::new(), Some(dynamic))
@@ -764,6 +2022,7 @@ fn primitive(
     let look = Look {
         base,
         text: text_like,
+        snap,
         own,
         hover: variant(variants.hover, dh),
         active: variant(variants.active, da),
@@ -785,6 +2044,11 @@ fn primitive(
         resources,
         contents: view.contents != super::Contents::Own,
         dropped,
+        listeners,
+        keymap,
+        focus_group,
+        context_menu,
+        context_menu_open,
     }
 }
 
@@ -950,6 +2214,12 @@ fn edges(css: &mut String, property: &str, insets: crate::scene::Insets, sides: 
 
 /// `styles` as CSS declarations, appended to `css`.
 pub fn styles_css(styles: &Styles, text: bool, css: &mut String) {
+    styles_css_on(styles, text, false, css);
+}
+/// `styles_css`, its translation on whole device pixels when `snap`
+/// (`View::pixel_snap`): rounded by the page to `--zgx-device-px`, one
+/// device pixel, which zgx-dom keeps as the window's resolution changes.
+pub fn styles_css_on(styles: &Styles, text: bool, snap: bool, css: &mut String) {
     let s: &crate::style::StylesFields = styles;
     if let Some(layout) = s.overflow().layout {
         css.push_str(match layout {
@@ -1125,7 +2395,16 @@ pub fn styles_css(styles: &Styles, text: bool, css: &mut String) {
     if let Some(t) = s.transform
         && (t.x != 0. || t.y != 0.)
     {
-        let _ = write!(transform, "translate({}px,{}px) ", num(t.x), num(t.y));
+        if snap {
+            let _ = write!(
+                transform,
+                "translate(round({}px,var(--zgx-device-px,1px)),round({}px,var(--zgx-device-px,1px))) ",
+                num(t.x),
+                num(t.y)
+            );
+        } else {
+            let _ = write!(transform, "translate({}px,{}px) ", num(t.x), num(t.y));
+        }
     }
     let local = s.local_transform;
     if local.set != 0 {
@@ -1478,6 +2757,38 @@ fn cursor_css(cursor: crate::cursor::Cursor) -> String {
         "i-beam" | "ibeam" => "text".into(),
         _ => out,
     }
+}
+
+/// Run `draw` (a canvas's drawing) with `measure` as what
+/// `canvas::measure_text` measures with, as the desktop measures while a
+/// canvas draws.
+pub fn drawing_with<R>(
+    measure: impl Fn(&str, f32, &crate::text_layout::FontStyle) -> (f32, f32) + 'static,
+    draw: impl FnOnce() -> R,
+) -> R {
+    let previous = crate::canvas::DOM_MEASURE.with(|slot| slot.replace(Some(Box::new(measure))));
+    let drawn = draw();
+    crate::canvas::DOM_MEASURE.with(|slot| *slot.borrow_mut() = previous);
+    drawn
+}
+
+/// Make `measure` what `canvas::measure_text_outside` measures with: text
+/// at a size in a font, wrapped at a width or not, as the page lays it out.
+pub fn set_text_measure(
+    measure: impl Fn(&str, f32, Option<f32>, &crate::text_layout::FontStyle) -> (f32, f32) + 'static,
+) {
+    crate::canvas::DOM_TEXT_MEASURE.with(|slot| *slot.borrow_mut() = Some(Box::new(measure)));
+}
+
+/// A canvas text's font, as the CSS `font` shorthand Canvas 2D takes.
+pub fn font_css(font: &crate::text_layout::FontStyle, size: f32) -> String {
+    format!(
+        "{}{} {}px {}",
+        if font.italic { "italic " } else { "" },
+        font.weight,
+        num(size),
+        family_css(&font.family)
+    )
 }
 
 fn family_css(family: &crate::text_layout::FontFamily) -> String {

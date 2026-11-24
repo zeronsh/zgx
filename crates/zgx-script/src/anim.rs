@@ -1,6 +1,7 @@
 //! Runs script-declared animations in Rust. Each animation is one task that
 //! awaits display frames only while it moves; at rest it waits on its source
 //! state and requests nothing.
+use crate::time::Instant;
 use crate::{
     node::{Anim, Curve},
     value::Value,
@@ -10,7 +11,6 @@ use std::{
     future::poll_fn,
     rc::Rc,
     task::{Poll, Waker},
-    time::Instant,
 };
 use zgx::{compose::Context, reactive::Signal};
 
@@ -44,12 +44,23 @@ fn scalar(value: &Value) -> f32 {
     value.as_f64().unwrap_or(0.) as f32
 }
 
+/// `out` named for traces by where the script made `anim`.
+fn named(out: &Signal<f32>, anim: &Anim) {
+    #[cfg(feature = "inspect")]
+    if let Some(site) = &anim.site {
+        zgx::trace::name_signal(out.addr(), site.clone());
+    }
+    #[cfg(not(feature = "inspect"))]
+    let _ = (out, anim);
+}
+
 /// The animated scalar for `anim`, owned by the component in `cx`.
 pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
     let frames = cx.frames();
     let curve = anim.curve.clone();
     let Some(source) = anim.source.clone() else {
         let out = cx.state(0_f32);
+        named(&out, anim);
         let value = out.clone();
         let Curve::Loop {
             ms,
@@ -80,6 +91,7 @@ pub(crate) fn drive(cx: &mut Context, anim: &Anim) -> Signal<f32> {
         return out;
     };
     let out = cx.state(source.with_untracked(scalar));
+    named(&out, anim);
     let target = Rc::new(Cell::new(out.with_untracked(|v| *v)));
     let notify = Rc::new(Notify::default());
     let effect = {

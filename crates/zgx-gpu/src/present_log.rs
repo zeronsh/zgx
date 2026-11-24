@@ -59,6 +59,10 @@ pub fn now_ns() -> u64 {
 /// Logs `what` when `ZGX_PRESENT_LOG` is set; costs one load otherwise.
 pub fn log(what: impl FnOnce() -> String) {
     if enabled() {
-        eprintln!("PRESENT {:.6} {}", now_ns() as f64 / 1e9, what());
+        // One write: another thread's output (libwayland's `WAYLAND_DEBUG`
+        // trace) would otherwise land inside the line, which probes read.
+        let line = format!("PRESENT {:.6} {}\n", now_ns() as f64 / 1e9, what());
+        use std::io::Write;
+        let _ = std::io::stderr().lock().write_all(line.as_bytes());
     }
 }

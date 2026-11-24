@@ -391,3 +391,29 @@ fn wrap_cell(c: char) -> Cell {
     cell.flags.insert(Flags::WRAPLINE);
     cell
 }
+
+/// zgx: lines scrolled off the top are counted, a line's number
+/// (`pushed() + line`) staying as it scrolls: with history, full or not, and
+/// none for a region below the top; a reflow moving lines into the history
+/// keeps the count at least what it holds.
+#[test]
+fn pushed_counts_the_lines_scrolled_off_the_top() {
+    let mut grid = Grid::<Cell>::new(3, 5, 4);
+    grid[Line(1)][Column(0)].c = 'x';
+    let number = grid.pushed() + 1;
+    grid.scroll_up(&(Line(0)..Line(3)), 1);
+    assert_eq!(grid.pushed(), 1);
+    assert_eq!(
+        grid[Line((number - grid.pushed()) as i32)][Column(0)].c,
+        'x'
+    );
+    for _ in 0..9 {
+        grid.scroll_up(&(Line(0)..Line(3)), 1);
+    }
+    assert_eq!(grid.pushed(), 10, "past a full history too");
+    assert_eq!(grid.history_size(), 4);
+    grid.scroll_up(&(Line(1)..Line(3)), 1);
+    assert_eq!(grid.pushed(), 10, "a region below the top keeps its lines");
+    grid.resize(true, 3, 2);
+    assert!(grid.pushed() >= grid.history_size() as u64);
+}

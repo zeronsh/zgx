@@ -1,0 +1,22 @@
+[package]
+name = "zgx-module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Native modules for zgx apps: an app's own Rust, built apart from zgx as a library the runtime loads, and called from Luau."
+keywords = ["gui", "luau", "plugin", "abi"]
+categories = ["gui"]
+
+# `module`, `export` and `Record` (zgx-module-macros): a module's functions
+# as plain Rust functions of typed arguments, and its manifest. On by
+# default; a module registering by hand (`register!`) can leave them out,
+# and then builds nothing but std and its own code.
+[features]
+default = ["macros"]
+macros = ["dep:zgx-module-macros"]
+
+[dependencies]
+zgx-module-macros = { path = "macros", version = "0.1.10", optional = true }

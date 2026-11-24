@@ -4,7 +4,6 @@
 mod common;
 
 use common::Harness;
-use std::rc::Rc;
 use zgx::{
     input::{InputEvent, Key, Modifiers, PointerButton},
     scene::{NodeKind, Rect},
@@ -17,7 +16,7 @@ const APP: &str = concat!(
 );
 
 fn map(fields: &[(&str, Value)]) -> Value {
-    let mut fields: Vec<(Rc<str>, Value)> = fields
+    let mut fields: Vec<(zgx_script::Str, Value)> = fields
         .iter()
         .map(|(k, v)| ((*k).into(), v.clone()))
         .collect();

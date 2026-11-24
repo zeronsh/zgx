@@ -601,14 +601,16 @@ impl Ui {
             let Some(visible) = self.scene.borrow().visible_bounds(viewport) else {
                 continue;
             };
+            // The reveal's rule (`scroll_reveal::shift`), a little room spared.
             let along = |start: f32, size: f32, from: f32, length: f32| {
-                if start < from {
-                    (start - from - ROOM).max(start + size - from - length)
-                } else if start + size > from + length {
-                    (start + size - from - length + ROOM).min(start - from)
-                } else {
-                    0.
-                }
+                crate::scroll_reveal::shift(
+                    crate::compose::RowAlign::Nearest,
+                    start,
+                    size,
+                    from,
+                    length,
+                    ROOM,
+                )
             };
             let dy = along(rect.y, rect.height, visible.y, visible.height);
             let dx = along(rect.x, rect.width, visible.x, visible.width);
@@ -870,6 +872,9 @@ fn status_of(session: &Session) -> FindStatus {
 
 /// After a frame is laid out: what the bar asked for, and the marks again
 /// where text mounted, moved or changed (a list's rows scrolled in).
+/// Inlined: a frame's preparation and one ahead of it both call it, and the
+/// frame's inlined it while it had the one caller.
+#[inline(always)]
 pub(crate) fn sync(ui: &Ui) {
     let Some((asked, marked_at, bar_gone)) = ui.storage.find.borrow_mut().as_mut().map(|s| {
         (

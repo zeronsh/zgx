@@ -12,7 +12,7 @@ categories = ["gui"]
 
 [features]
 # Image formats (see zgx-gpu): all by default.
-default = ["svg", "png", "jpeg", "gif", "private-api", "cjk-thai-words"]
+default = ["svg", "png", "jpeg", "gif", "webp", "private-api", "cjk-thai-words"]
 # Words in Chinese, Japanese and Thai by dictionary (zgx's `cjk-thai-words`).
 cjk-thai-words = ["zgx/cjk-thai-words"]
 # Words break at their hyphenation points where text asks (zgx-gpu's
@@ -21,6 +21,7 @@ hyphens = ["zgx-gpu/hyphens"]
 svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
+webp = ["zgx-gpu/webp"]
 gif = ["zgx-gpu/gif"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]
@@ -56,17 +57,24 @@ webkitgtk = []
 # 9%), for up to 3 MB more resident memory. A program has one allocator:
 # leave this off if yours declares a `#[global_allocator]`.
 mimalloc = ["dep:mimalloc"]
+# Sound (zgx-audio on the system's output): one engine for the app, made
+# when first asked for (`WindowFactory::audio`), voices ending waking the
+# event loop, and the `ui` bus following the user's interface-sound setting.
+# The default output opens at the first sound and closes after the quiet
+# hold. Off by default: an app that plays nothing carries none of it.
+audio = ["dep:zgx-audio", "zgx-audio/device"]
 
 [dependencies]
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 zgx-terminal = { path = "../zgx-terminal", version = "0.1.10", optional = true }
+zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 winit = "0.30.13"
 softbuffer = "0.4.8"
 fontdue = "0.9.3"
 cosmic-text = { package = "zgx-cosmic-text", version = "0.19.14", path = "../../vendor/cosmic-text" }
-arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
+arboard = { package = "zgx-arboard", version = "3.6.3", path = "../../vendor/arboard", default-features = false, features = ["image-data"] }
 accesskit = "0.24.1"
 # The adapters' (through accesskit_winit), named for its `links` metadata:
 # with the repository's (vendor/accesskit_consumer) a field's error message
@@ -123,7 +131,7 @@ objc2-user-notifications = { version = "=0.3.2", default-features = false, featu
 zgx-ghostty-sys = { path = "../zgx-ghostty-sys", version = "0.1.10", optional = true }
 libc = { version = "0.2", optional = true }
 # Native views over zgx (src/native_host): web pages, clipping masks, backdrops.
-objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKBackForwardList", "WKBackForwardListItem", "WKNavigationDelegate", "WKNavigation", "WKNavigationAction", "WKNavigationResponse", "WKWebsiteDataStore", "WKUserContentController", "WKUserScript", "WKScriptMessageHandler", "WKScriptMessage", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKSecurityOrigin", "WKPreferences", "WKURLSchemeHandler", "WKURLSchemeTask", "WKOpenPanelParameters", "WKFindConfiguration", "WKFindResult", "WKDownload", "WKDownloadDelegate"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKBackForwardList", "WKBackForwardListItem", "WKNavigationDelegate", "WKNavigation", "WKNavigationAction", "WKNavigationResponse", "WKWebsiteDataStore", "WKWebsiteDataRecord", "WKUserContentController", "WKUserScript", "WKScriptMessageHandler", "WKScriptMessage", "WKUIDelegate", "WKWindowFeatures", "WKFrameInfo", "WKSecurityOrigin", "WKPreferences", "WKURLSchemeHandler", "WKURLSchemeTask", "WKOpenPanelParameters", "WKFindConfiguration", "WKFindResult", "WKDownload", "WKDownloadDelegate"] }
 # Answers custom-scheme requests on the main queue, from whatever thread served them.
 dispatch2 = "0.3"
 block2 = "0.6"
@@ -160,7 +168,24 @@ zgx-script = { path = "../zgx-script", version = "0.1.10", optional = true }
 name = "menu_services"
 harness = false
 
+# `ZGX_OFFSCREEN`, read once: a process of its own.
+[[test]]
+name = "offscreen"
+harness = false
+
+# On the main thread, where AppKit's windows are made (`fn main`).
+[[test]]
+name = "titlebar_resize"
+harness = false
+
+# On the main thread too: windows are made there (macOS).
+[[test]]
+name = "window_position"
+harness = false
+
 [dev-dependencies]
+# The perf gate's output check, called by the gate benches each frame.
+zgx-fingerprint = { path = "../../scripts/perf/fingerprint" }
 # The components the Linux probe's example shows (`components_probe`).
 zgx-components = { path = "../zgx-components" }
 # The terminal example's interface is a Luau script. Image formats come

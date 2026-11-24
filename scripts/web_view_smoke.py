@@ -12,8 +12,9 @@ the page; that what the page copies reaches other clients and what they
 copy pastes into the page; and that a script evaluates and the page's
 messages carry their origin.
 
-`--wayland`: the app on Wayland (Sway on an X11 output, no DISPLAY for the
-app; the clipboard through wl-clipboard). `--ime`: Pinyin composed into the
+`--wayland`: the app on Wayland (Sway's headless backend, no X server; input
+through Sway's virtual pointer and keyboard, the clipboard through
+wl-clipboard). `--ime`: Pinyin composed into the
 page's field instead (IBus over XIM on X11; Fcitx5 over text-input-v3 in
 Sway with `--wayland`), checked as the page's composition events and value.
 `--slow-replies`: WebKit's answers 800 ms late, as on a loaded machine: on
@@ -24,8 +25,9 @@ caret is, after IBus's candidates showed (they still go under it).
 its box's yellow through it. `--orca` (X11): over a private AT-SPI bus, the
 page's own accessible tree is a child of its box (an internal frame) and
 has the box for its parent, and Orca reads the page's heading from browse
-mode and names its first field as Tab moves focus there from the app's own
-button.
+mode, names its first field as Tab moves focus there from the app's own
+button, follows the next Tab, within the page, to its select, and reads the
+app's toggle button as pressed and not pressed as Space flips it.
 `--media` (X11): a page served from localhost plays a VP8 WebM (GStreamer
 made it), and after a click an `AudioContext` runs. `--inspector`: on a
 page large enough for WebKit to dock Web Inspector in, Ctrl+I opens it in a
@@ -37,6 +39,7 @@ and two dots far apart that it turns green upload as two small parts.
 import argparse
 import functools
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -50,7 +53,9 @@ import threading
 import time
 
 from platform_smoke import private_runtime, stop, use_ibus_engine, wait_for_ibus_xim, wait_for_wm
-from sway_host import wait_for_sway_host, sway_config
+from sway_host import sway_config
+from wayland_keyboard import VirtualKeyboard
+from wayland_pointer import VirtualPointer
 
 # The probe's geometry (window points; probes run at scale 1).
 PAGE = (40, 40, 600, 400)
@@ -69,18 +74,73 @@ def near(found, wanted, tolerance=24):
 
 
 class Session:
-    def __init__(self, output, env, window, origin=(0, 0), wayland=None):
+    def __init__(self, output, env, window, origin=(0, 0), wayland=None, devices=None):
         self.output, self.env, self.window, self.origin = output, env, window, origin
         self.wayland = wayland
+        # Under Sway's headless backend: its virtual pointer and keyboard,
+        # and its output's size (`xdo` speaks through them).
+        self.devices = devices
         # The probe's own lines (stdout), apart from its stderr: GLib's
         # warnings come in pieces, and one of ours landing between two
         # started no line of its own (`PAGE` mid-way through an Avahi
         # warning). The `WEB_` diagnostics are written to stderr in one go.
         self.log = output / "application.log"
         self.stderr = output / "stderr.log"
+        self.presented = False
 
     def xdo(self, *parts):
+        if self.devices:
+            return self.wayland_xdo(*map(str, parts))
         subprocess.run(["xdotool", *map(str, parts)], env=self.env, check=True)
+
+    def wayland_xdo(self, *parts):
+        """xdotool's commands this probe uses, through Sway's virtual pointer
+        and keyboard: `mousemove [--window W] x y [click N]`, `mousedown N`,
+        `mouseup N`, `click [--repeat n --delay ms] N`, `key [--clearmodifiers]
+        names…`, `type [--clearmodifiers] [--delay ms] text`. The window is at
+        the output's top left, so its points are the output's."""
+        pointer, keyboard, (width, height) = self.devices
+        buttons = {"1": 0x110, "2": 0x112, "3": 0x111}
+        # xdotool's wheel buttons: a notch up, down, left, right.
+        wheels = {"4": (0, -1), "5": (0, 1), "6": (1, -1), "7": (1, 1)}
+
+        def press(button):
+            if button in wheels:
+                pointer.wheel(*wheels[button])
+            else:
+                pointer.click(buttons[button])
+        parts = [p for p in parts if p != "--clearmodifiers"]
+        command, rest = parts[0], parts[1:]
+
+        def option(name, default):
+            if name in rest:
+                at = rest.index(name)
+                value = rest[at + 1]
+                del rest[at:at + 2]
+                return value
+            return default
+        if command == "mousemove":
+            option("--window", None)
+            x, y = rest[0], rest[1]
+            pointer.move_to(int(float(x)), int(float(y)), width, height)
+            if rest[2:3] == ["click"]:
+                time.sleep(.05)
+                press(rest[3])
+        elif command in ("mousedown", "mouseup"):
+            pointer.button(command == "mousedown", buttons[rest[0]])
+        elif command == "click":
+            repeat = int(option("--repeat", "1"))
+            delay = int(option("--delay", "0")) / 1000
+            for _ in range(repeat):
+                press(rest[0])
+                time.sleep(delay)
+        elif command == "key":
+            keyboard.key(*rest)
+        elif command == "type":
+            delay = int(option("--delay", "12")) / 1000
+            keyboard.type(rest[0], delay)
+        else:
+            raise ValueError(f"no Wayland input for xdotool {command}")
 
     def click(self, x, y, button=1):
         self.xdo("mousemove", "--window", self.window, x, y, "click", button)
@@ -94,8 +154,47 @@ class Session:
         self.xdo("type", "--clearmodifiers", "--delay", 90, text)
         time.sleep(.5)
 
+    def first_frame(self, seconds=60):
+        """Wait (once) until the window has shown a frame: the app's own line
+        for its first present (`ZGX_SHADER_LOG=1`, set as it launches) and,
+        under Sway, Sway showing the window. A capture before then holds no
+        window, and a pixel check's ten seconds started then were spent on a
+        loaded runner's start (#2291's web-view-wayland-ime: the page loaded,
+        and no frame of zgx's, not even its own paint, had reached Sway)."""
+        if self.presented:
+            return
+        deadline = time.monotonic() + seconds
+        while "zgx: first frame presented" not in (self.stderr.read_text(errors="replace") if self.stderr.exists() else ""):
+            if time.monotonic() > deadline:
+                raise AssertionError("the window never presented a frame; see stderr.log")
+            time.sleep(.1)
+        if self.wayland:
+            sway = dict(self.wayland, SWAYSOCK=str(next(pathlib.Path(self.wayland["XDG_RUNTIME_DIR"]).glob("sway-ipc*.sock"))))
+            def shown():
+                tree = json.loads(subprocess.run(["swaymsg", "-t", "get_tree", "-r"], env=sway, capture_output=True, text=True).stdout or "{}")
+                pending = [tree]
+                while pending:
+                    node = pending.pop()
+                    pending.extend(node.get("nodes", []) + node.get("floating_nodes", []))
+                    if node.get("name") == "Web view probe" and node.get("visible"):
+                        return True
+                return False
+            while not shown():
+                if time.monotonic() > deadline:
+                    raise AssertionError("Sway never showed the window; see sway.log")
+                time.sleep(.1)
+        self.presented = True
+
     def grab(self):
-        from PIL import ImageGrab
+        from PIL import Image, ImageGrab
+        self.first_frame()
+        if self.wayland:
+            # What Sway composed (wlr-screencopy), the window at its output's
+            # top left.
+            shot = subprocess.run(["grim", "-t", "ppm", "-"], env=self.wayland, capture_output=True, check=True, timeout=10)
+            image = Image.open(io.BytesIO(shot.stdout)).convert("RGB")
+            image.save(self.output / "window.png")
+            return lambda x, y: image.getpixel((x, y))
         image = ImageGrab.grab(xdisplay=self.env["DISPLAY"]).convert("RGB")
         image.save(self.output / "window.png")
         # Where the window is now: its window manager may have placed it
@@ -455,7 +554,13 @@ def page_checks(session, ime, transparent=False, unaccelerated=False):
     if json.loads(evaluated) != "probe page 3":
         raise AssertionError(f"evaluated {evaluated}")
     checks["script evaluated"] = evaluated
-    # The page's frame reaches the window a frame after it loads.
+    # The page's own first frame reaching the window (`WEB_DAMAGE`, its
+    # first upload), before its pixels are looked for: the window's first
+    # present (`Session.first_frame`) is zgx's own paint, and a loaded
+    # runner's WebKit may paint the page seconds after it loads (#2324's
+    # web-view-wayland-ime: FINISHED, and every sampled pixel the window's
+    # background for the ten seconds after).
+    session.wait(lambda: session.lines("WEB_DAMAGE "), "the page's frame never reached the window", 60)
     def shown():
         pixel = session.grab()
         found = {name: pixel(*at) for name, (at, _) in colours.items()}
@@ -804,15 +909,41 @@ def start_orca(env, output, owned):
         time.sleep(.1)
     for name in ("IsEnabled", "ScreenReaderEnabled"):
         bus("org.freedesktop.DBus.Properties.Set", "org.a11y.Status", name, "<true>")
+    # What the session bus starts for the app (the desktop portal and its
+    # GTK backend, asked for settings as a window opens) stays off the
+    # accessibility bus: a portal that joined and then never answered held
+    # Orca, which handles one event at a time, for 15 s (its AT-SPI reply
+    # timeout), and the probe's wait for speech ran out behind the backlog.
+    quiet = subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus", "--object-path", "/org/freedesktop/DBus",
+                            "--method", "org.freedesktop.DBus.UpdateActivationEnvironment",
+                            "{'NO_AT_BRIDGE': '1', 'GTK_A11Y': 'none'}"], env=env, capture_output=True, text=True)
+    if quiet.returncode != 0:
+        raise RuntimeError("the session bus didn't take the activation environment: " + quiet.stderr)
     env["AT_SPI_BUS_ADDRESS"] = re.search(r"'([^']+)'", address.stdout).group(1)
     with (output / "orca.log").open("w") as log:
-        orca = subprocess.Popen(["orca", "--replace", "--debug-file=" + str(output / "orca-debug.log")], env=env, stdout=log, stderr=log)
+        # Its debug file written a line at a time (`orca_line_buffered.py`).
+        orca = subprocess.Popen([sys.executable, str(pathlib.Path(__file__).with_name("orca_line_buffered.py")), "--replace",
+                                 "--debug-file=" + str(output / "orca-debug.log")], env=env, stdout=log, stderr=log)
     owned.append(orca)
     deadline = time.monotonic() + 20
     while "Screen reader on." not in spoken(output):
         if time.monotonic() > deadline or orca.poll() is not None:
             raise RuntimeError("Orca never started; see orca.log")
         time.sleep(.2)
+
+
+def orca_follows(output, window, seconds=60):
+    """Wait until Orca has made `window` (a frame's name) its active window:
+    it is handling that app's events as they come, not a backlog behind an
+    app that didn't answer. Typing before then was read late, if at all."""
+    path = output / "orca-debug.log"
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        text = path.read_text(errors="replace") if path.exists() else ""
+        if f"FOCUS MANAGER: Active window is [frame: '{window}'" in text:
+            return
+        time.sleep(.2)
+    raise AssertionError(f"Orca never made '{window}' its active window; see orca-debug.log")
 
 
 def spoken(output):
@@ -823,15 +954,16 @@ def spoken(output):
 
 
 def said(session, output, text, after=0):
-    """Whether Orca said `text` (after its first `after` utterances). Its
-    debug log reaches the file in blocks: a Shift, which it echoes, now and
-    then fills one."""
-    found = any(text in line for line in spoken(output)[after:])
-    if not found and time.monotonic() - said.nudged > 2:
-        said.nudged = time.monotonic()
-        session.xdo("key", "shift")
-    return found
-said.nudged = 0.
+    """Whether Orca said `text` (after its first `after` utterances)."""
+    return any(text in line for line in spoken(output)[after:])
+
+
+def heard(session, output, pattern, after=0):
+    """Whether what Orca said after its first `after` utterances, joined,
+    matches `pattern`: Orca 50 speaks a name and its role apart ("Before
+    page", "button.") where Orca 46 spoke them as one ("Before page push
+    button."), and names some roles differently."""
+    return re.search(pattern, " ".join(spoken(output)[after:]))
 
 
 class Buttons:
@@ -924,7 +1056,8 @@ def read_page(session, output, buttons, checks):
     # previous-heading key reads the heading, in one utterance or two.
     def heading():
         said(session, output, "Probe heading")
-        return re.search(r"Probe heading\.? heading level 1", " ".join(spoken(output)))
+        # Orca 46 says "heading level 1", Orca 50 "heading 1".
+        return re.search(r"Probe heading\.? heading (level )?1", " ".join(spoken(output)))
     # Pressed before the page's first event reached Orca, the key goes to
     # the app's script, which has none: then the heading's own text (Orca
     # reads the line its caret lands on), then the background again.
@@ -944,11 +1077,35 @@ def read_page(session, output, buttons, checks):
     # The app's own button, then Tab into the page, as into a form: the
     # page's first field takes focus, and Orca names it (once, with no retry).
     orca_click(session, buttons, 705, 55)
-    session.wait(lambda: said(session, output, "Before page push button."), "Orca never read the app's button", 15)
+    session.wait(lambda: heard(session, output, r"Before page\.? (push )?button\."), "Orca never read the app's button", 15)
     before = len(spoken(output))
     session.key("Tab")
-    session.wait(lambda: said(session, output, "Probe field entry.", before), "Orca never named the field Tab reached", 15)
-    checks["tabbed into the field"] = "Probe field entry."
+    field = r"Probe field\.?( entry\.)?"
+    session.wait(lambda: heard(session, output, field, before), "Orca never named the field Tab reached", 15)
+    checks["tabbed into the field"] = heard(session, output, field, before).group(0)
+    # Tab again, within the page: from the field to its `<select>`, focus
+    # that moves only in the web process's tree, which Orca follows too.
+    before = len(spoken(output))
+    session.key("Tab")
+    select = r"combo box\.?( Alpha)?"
+    session.wait(lambda: heard(session, output, select, before), "Orca never followed Tab from the field to the select", 15)
+    checks["tabbed within the page"] = heard(session, output, select, before).group(0)
+    # The app's toggle button (`pressed_when`): Orca names it a toggle
+    # button, and says each state Space gives it, pressed or not pressed.
+    before = len(spoken(output))
+    orca_click(session, buttons, 705, 95)
+    session.wait(lambda: heard(session, output, r"Bold\.? toggle button", before),
+                 "Orca never named the toggle button", 15)
+    states = []
+    for _ in range(2):
+        flips, before = len(session.lines("BOLD ")), len(spoken(output))
+        session.key("space")
+        now = session.wait(lambda: session.lines("BOLD ")[flips:], "the toggle never changed", 10)[-1]
+        said_state = r"(?<!not )pressed" if now == "true" else r"not pressed"
+        session.wait(lambda: heard(session, output, said_state, before),
+                     f"Orca never said the toggle is {'pressed' if now == 'true' else 'not pressed'}", 15)
+        states.append(heard(session, output, said_state, before).group(0))
+    checks["toggle button states"] = states
     return checks
 
 
@@ -1057,9 +1214,12 @@ def x11(args, output, private):
         extra += ["--media", serve_media(output)] if args.media else []
         if args.unaccelerated:
             extra.append("--unaccelerated")
-            env["ZGX_WEB_DAMAGE"] = "1"
         with (output / "application.log").open("w") as log, (output / "stderr.log").open("w") as errors:
-            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=env, stdout=log, stderr=errors)
+            # Its first present, logged (`Session.first_frame`), and each of
+            # the page's frames it uploads (`WEB_DAMAGE`, `page_checks`).
+            app = subprocess.Popen([str(args.binary.resolve())] + extra,
+                                   env=dict(env, ZGX_SHADER_LOG="1", ZGX_WEB_DAMAGE="1"), stdout=log,
+                                   stderr=errors)
         owned.append(app)
         deadline = time.monotonic() + 20
         while True:
@@ -1115,14 +1275,8 @@ def wayland(args, output, private):
     for name in ("DISPLAY", "WAYLAND_DISPLAY", "SWAYSOCK", "IBUS_ADDRESS", "XMODIFIERS", "GTK_IM_MODULE", "QT_IM_MODULE"):
         env.pop(name, None)
     owned = []
+    devices = []
     try:
-        with (output / "xvfb.log").open("w") as log:
-            xvfb = subprocess.Popen(["Xvfb", "-r", "-noreset", "-displayfd", "1", "-screen", "0", "1280x960x24", "-ac"],
-                                    stdout=subprocess.PIPE, stderr=log, text=True)
-        owned.append(xvfb)
-        if not select.select([xvfb.stdout], [], [], 30)[0]:
-            raise RuntimeError("Xvfb startup timed out")
-        env["DISPLAY"] = ":" + xvfb.stdout.readline().strip()
         downloads(private)
         env["ZGX_WEB_MENU"] = "1"
         env["ZGX_PROBE_SAVE_DIR"] = save_folder(private)
@@ -1137,9 +1291,6 @@ def wayland(args, output, private):
         if not select.select([bus.stdout], [], [], 10)[0]:
             raise RuntimeError("D-Bus startup timed out")
         env["DBUS_SESSION_BUS_ADDRESS"] = bus.stdout.readline().strip()
-        with (output / "openbox.log").open("w") as log:
-            owned.append(subprocess.Popen(["openbox"], env=env, stdout=log, stderr=log))
-        wait_for_wm(env)
         if args.ime:
             profile = pathlib.Path(private, "config/fcitx5/profile")
             profile.parent.mkdir(parents=True)
@@ -1156,11 +1307,16 @@ def wayland(args, output, private):
                           "xwayland disable\nseat seat0 fallback true\noutput * mode 1260x900\ndefault_border none\n"
                           "default_floating_border none\nfor_window [title=\"^Web view probe$\"] floating enable, move position 0 0\n"
                           "for_window [title=\"^Web Inspector\"] floating enable, move position 1080 0\n")
-        sway_env = dict(env, WLR_BACKENDS="x11", WLR_X11_OUTPUTS="1", WLR_RENDERER="pixman")
+        # Sway's headless backend, no X server under it: on its X11 backend
+        # under CPU load (Xvfb, pixman), Sway composed a correctly declared
+        # shm buffer of the window's sheared across its output, failing the
+        # pixel checks (docs/validation.md). Input comes through Sway's
+        # virtual pointer and keyboard.
+        size = (1260, 900) if args.inspector else (1260, 650)
+        sway_env = dict(env, WLR_BACKENDS="headless", WLR_LIBINPUT_NO_DEVICES="1", WLR_RENDERER="pixman")
         with (output / "sway.log").open("w") as log:
             compositor = subprocess.Popen(["sway", "--unsupported-gpu", "--config", str(config)], env=sway_env, stdout=log, stderr=log)
         owned.append(compositor)
-        window = wait_for_sway_host(env, output, compositor)
         deadline = time.monotonic() + 10
         while not [p for p in pathlib.Path(private).glob("wayland-*") if p.suffix != ".lock"]:
             if time.monotonic() > deadline:
@@ -1168,7 +1324,9 @@ def wayland(args, output, private):
             time.sleep(.05)
         socket = [p for p in pathlib.Path(private).glob("wayland-*") if p.suffix != ".lock"][0].name
         native = dict(env, WAYLAND_DISPLAY=socket, WINIT_UNIX_BACKEND="wayland")
-        native.pop("DISPLAY")
+        pointer = VirtualPointer(private, socket)
+        keyboard = VirtualKeyboard(private, socket)
+        devices.extend([pointer, keyboard])
         if args.ime:
             with (output / "fcitx.log").open("w") as log:
                 ime = subprocess.Popen(["fcitx5", "-D", "--disable=xcb"], env=native, stdout=log, stderr=log, start_new_session=True)
@@ -1182,13 +1340,14 @@ def wayland(args, output, private):
             extra = (["--transparent"] if args.transparent else []) + (["--large-page"] if args.inspector else [])
             if args.unaccelerated:
                 extra.append("--unaccelerated")
-                native["ZGX_WEB_DAMAGE"] = "1"
-            app = subprocess.Popen([str(args.binary.resolve())] + extra, env=native, stdout=log, stderr=errors)
+            # Its first present, logged (`Session.first_frame`), and each of
+            # the page's frames it uploads (`WEB_DAMAGE`, `page_checks`).
+            app = subprocess.Popen([str(args.binary.resolve())] + extra,
+                                   env=dict(native, ZGX_SHADER_LOG="1", ZGX_WEB_DAMAGE="1"), stdout=log,
+                                   stderr=errors)
         owned.append(app)
-        subprocess.run(["xdotool", "windowfocus", "--sync", window], env=env, check=False)
-        info = subprocess.check_output(["xwininfo", "-id", str(window)], env=env, text=True)
-        origin = tuple(int(re.search(rf"Absolute upper-left {axis}:\s+(-?\d+)", info).group(1)) for axis in "XY")
-        session = Session(output, env, window, origin, wayland=native)
+        # Its window at the output's top left (`move position 0 0`).
+        session = Session(output, env, None, (0, 0), wayland=native, devices=(pointer, keyboard, size))
 
         def ime_wayland(session, checks):
             session.click(120, 80)
@@ -1207,6 +1366,8 @@ def wayland(args, output, private):
             return inspector_checks(session), "Wayland"
         return page_checks(session, ime_wayland if args.ime else None, args.transparent, args.unaccelerated), "Wayland"
     finally:
+        for device in devices:
+            device.close()
         end(owned)
 
 
@@ -1224,8 +1385,8 @@ def main():
     parser.add_argument("--slow-replies", action="store_true",
                         help="WebKit's answers come 800 ms late (ZGX_WEBKITGTK_REPLY_DELAY_MS, debug builds only): on keys, after Ctrl is up; on the caret, after its frame")
     args = parser.parse_args()
-    needed = ["Xvfb", "openbox", "xdotool", "xwininfo"]
-    needed += ["sway", "dbus-daemon", "wl-copy", "wl-paste"] + (["fcitx5", "fcitx5-remote"] if args.ime else []) if args.wayland else []
+    needed = ["sway", "swaymsg", "grim", "dbus-daemon", "wl-copy", "wl-paste"] + (["fcitx5", "fcitx5-remote"] if args.ime else []) \
+        if args.wayland else ["Xvfb", "openbox", "xdotool", "xwininfo"]
     needed += ["xclip"] if not args.wayland and not args.ime and not args.orca and not args.media and not args.inspector else []
     needed += ["orca", "gdbus", "dbus-daemon"] if args.orca else []
     needed += ["gst-launch-1.0"] if args.media else []

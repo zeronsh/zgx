@@ -31,7 +31,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plan  # noqa: E402
 
-PREFIX = "gate-bin-"
+# The image the binaries were built on is in it (`u24`: ci.yml's and
+# perf-base.yml's ubuntu-24.04): a base built on another image counts other
+# libc instructions than a head built on this one. Change both with
+# `runs-on`.
+PREFIX = "gate-bin-u24-"
 CANDIDATES = 20  # newest kept commits to try
 
 

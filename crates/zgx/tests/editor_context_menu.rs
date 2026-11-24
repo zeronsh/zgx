@@ -293,6 +293,44 @@ fn a_spellchecked_editor_marks_misspellings_and_its_menu_corrects_them() {
     assert_eq!(*speller.learned.borrow(), ["teh"]);
 }
 
+/// A misspelled word in an atom (a chip's label) has no mark, as a
+/// `contentEditable=false` chip has none on the web; the same word outside
+/// it has one, and its menu offers no guesses for the atom's.
+#[test]
+fn a_misspelling_in_an_atom_is_not_marked() {
+    let mut ui = Ui::new(400., 200.);
+    let speller = Rc::new(Speller::default());
+    let value = ui.signal("ask teh and teh".to_owned());
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(speller.clone()),
+        column().size(400., 200.).child(
+            text_area("Notes", value.clone())
+                .id("field")
+                .spellcheck(true)
+                .w(300.)
+                .h(80.),
+        ),
+    ));
+    ui.prepare_frame();
+    assert_eq!(marks(&ui).len(), 2, "both marked");
+    let editor = ui.editor(view.find("field").unwrap()).unwrap();
+    let id = editor.new_atom_id();
+    editor.set_atoms(vec![zgx::text_edit::Atom::new(id, 4..7)]);
+    ui.prepare_frame();
+    let shown = marks(&ui);
+    assert_eq!(shown.len(), 1, "only the one outside the atom: {shown:?}");
+    let outside = editor.range_boxes(12..15)[0];
+    assert!(
+        (shown[0].x - outside.x).abs() < 1.,
+        "under the word outside: {shown:?} {outside:?}"
+    );
+    // A context click on the atom's word offers no spelling items.
+    let word = editor.range_boxes(4..7)[0];
+    context_click(&mut ui, word.x + word.width / 2., word.y + word.height / 2.);
+    assert!(view.find("editor-copy").is_some(), "its menu shows");
+    assert!(view.find("spelling-learn").is_none());
+}
+
 #[test]
 fn turning_spellcheck_off_clears_the_marks_and_on_checks_again() {
     let mut ui = Ui::new(400., 200.);
@@ -676,4 +714,80 @@ fn an_editor_hearing_pastes_keeps_paste_enabled_on_an_empty_clipboard() {
     choose(&mut ui, &view, "editor-paste");
     assert_eq!(*heard.borrow(), [None, Some("typed".to_owned())]);
     assert_eq!(value.get(), "typed", "not taken, it goes in");
+}
+
+/// A host that learns a word itself (its own menu, through the platform) has the underline go by asking
+/// the editor to check again, as zgx's own menu's Learn Spelling does.
+#[test]
+fn recheck_spelling_forgets_what_the_checker_now_knows() {
+    let mut ui = Ui::new(400., 200.);
+    let speller = Rc::new(Speller::default());
+    let value = ui.signal("fix teh bug".to_owned());
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(speller.clone()),
+        column().size(400., 200.).child(
+            text_area("Notes", value.clone())
+                .id("field")
+                .spellcheck(true)
+                .w(300.)
+                .h(80.),
+        ),
+    ));
+    ui.prepare_frame();
+    assert_eq!(marks(&ui).len(), 1, "teh is marked");
+    let editor = ui.editor(view.find("field").unwrap()).unwrap();
+    // Nothing the checker said has changed: a recheck keeps the mark.
+    editor.recheck_spelling();
+    ui.prepare_frame();
+    assert_eq!(marks(&ui).len(), 1);
+    // The host learns the word through the platform; the mark stays until it is asked to look again.
+    zgx::platform::Platform::learn_spelling(&*speller, "teh");
+    ui.prepare_frame();
+    assert_eq!(marks(&ui).len(), 1, "the text did not change");
+    editor.recheck_spelling();
+    ui.prepare_frame();
+    assert!(marks(&ui).is_empty(), "the underline is gone");
+    // And an edit elsewhere does not bring it back from what was checked before.
+    editor.set_selection(11, 11);
+    editor.paste(" ok");
+    ui.prepare_frame();
+    assert!(marks(&ui).is_empty());
+    // Without spellcheck it is nothing.
+    let mut plain = Ui::new(100., 100.);
+    let unchecked = plain.signal(String::new());
+    let field = plain.mount(text_area("Notes", unchecked).id("plain"));
+    plain.prepare_frame();
+    plain
+        .editor(field.find("plain").unwrap())
+        .unwrap()
+        .recheck_spelling();
+}
+
+/// A spellchecked editor lets go of what it holds as it unmounts: its
+/// recheck held the editor, which held the recheck, so it and everything
+/// its handlers captured were never freed.
+#[test]
+fn a_spellchecked_editor_lets_go_of_its_handlers_as_it_unmounts() {
+    let mut ui = Ui::new(400., 200.);
+    let speller = Rc::new(Speller::default());
+    let value = ui.signal("fix teh bug".to_owned());
+    let held = Rc::new(());
+    let in_handler = held.clone();
+    let view = ui.mount(provide(
+        zgx::platform::PlatformService(speller.clone()),
+        column().size(400., 200.).child(
+            text_area("Notes", value.clone())
+                .id("field")
+                .spellcheck(true)
+                .on_caret(move |_| {
+                    let _ = &in_handler;
+                })
+                .size(300., 100.),
+        ),
+    ));
+    ui.prepare_frame();
+    assert!(Rc::strong_count(&held) > 1, "the handler holds it");
+    view.unmount();
+    ui.prepare_frame();
+    assert_eq!(Rc::strong_count(&held), 1, "unmounted, nothing holds it");
 }

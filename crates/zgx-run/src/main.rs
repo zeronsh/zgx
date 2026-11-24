@@ -2,7 +2,7 @@
 //! hot reload (`zgx_run::run`).
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: zgx-run [--inspect] <app.luau-or-dir> [args…]
+const USAGE: &str = "usage: zgx-run [--inspect] [--window <name>] <app.luau-or-dir> [args…]
 
 Opens the script (a file, or a directory's app.luau) in a window and
 reloads it as its files change. A zgx.json beside it sets the window
@@ -14,6 +14,15 @@ files among them open with it (ui.on_open); with an application_id
 (reverse-DNS) in zgx.json, so do those the system opens with it. Its
 packages ({ \"kit\": \"../shared/kit\" }) are module folders outside the
 script's directory it may require (require(\"@kit/button\")).
+
+Its modules ({ \"words\": \"modules/words\" }) are its own Rust libraries
+(docs/modules.md), loaded before its scripts: each crate's newest build,
+or a library's path. `zgx run` builds them as their sources change and
+hands each over with --module <name>=<library>.
+
+--window <name> opens the window of that name among zgx.json's
+named_windows first, rather than the one its first names (or its top
+level's).
 
 --inspect serves devtools for agents: `zgx inspect help` drives the
 running app (its tree, states, clicks, typing, keys) over a socket only
@@ -53,9 +62,34 @@ fn main() -> ExitCode {
             }
         };
     }
-    if args.first().is_some_and(|a| a == "--inspect") {
-        args.remove(0);
-        zgx_run::set_inspect(true);
+    // Leading flags, in any order.
+    loop {
+        match args.first().map(String::as_str) {
+            Some("--inspect") => {
+                args.remove(0);
+                zgx_run::set_inspect(true);
+            }
+            Some("--module") if args.len() > 1 => {
+                let given = args.remove(1);
+                args.remove(0);
+                let Some((name, library)) = given.split_once('=') else {
+                    eprintln!("zgx-run: --module takes <name>=<library>, not {given}");
+                    return ExitCode::from(2);
+                };
+                zgx_run::set_module(name, library);
+            }
+            Some("--notice") if args.len() > 1 => {
+                let notice = args.remove(1);
+                args.remove(0);
+                zgx_run::set_notice(notice);
+            }
+            Some("--window") if args.len() > 1 => {
+                let window = args.remove(1);
+                args.remove(0);
+                zgx_run::set_window(window);
+            }
+            _ => break,
+        }
     }
     let [path, rest @ ..] = args.as_slice() else {
         eprintln!("{USAGE}");

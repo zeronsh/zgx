@@ -42,6 +42,8 @@ mod layout_fit_content;
 mod layout_growing_boxes;
 #[path = "../layout_history.rs"]
 mod layout_history;
+#[path = "../layout_splitter_drag.rs"]
+mod layout_splitter_drag;
 #[path = "../layout_width_changes.rs"]
 mod layout_width_changes;
 #[path = "../panel_layout.rs"]
@@ -58,6 +60,8 @@ mod rtl_layout;
 mod rtl_scroll;
 #[path = "../size_calc.rs"]
 mod size_calc;
+#[path = "../snap_held_width.rs"]
+mod snap_held_width;
 #[path = "../sticky.rs"]
 mod sticky;
 #[path = "../text_reach.rs"]

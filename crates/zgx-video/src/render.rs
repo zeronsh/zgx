@@ -134,7 +134,13 @@ pub fn render_heard(
     progress: impl FnMut(Progress) -> bool,
 ) -> Result<(Report, Heard), String> {
     let timing = options.timing();
-    if options.concurrency > 1 && options.resolved_format()? != Format::Gif {
+    // A file macOS writes is written whole: ffmpeg's join mistimes its HEVC
+    // chunks (frames of a chunk a tick apart), and may be missing.
+    let format = options.resolved_format()?;
+    if options.concurrency > 1
+        && format != Format::Gif
+        && crate::encode::choice(format).0 != crate::encode::Writer::Native
+    {
         return render_chunks(options, progress);
     }
     render_film(options, progress, |background| {

@@ -98,8 +98,9 @@ fn page_dialog(
 ) {
     use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSModalResponse, NSTextField};
     let mtm = MainThreadMarker::from(view);
-    let Some(window) = view.window() else {
-        // No window to show it on: an alert is dismissed, the rest cancelled.
+    // No window to show it on, or off-screen (`ZGX_OFFSCREEN`, whose sheets
+    // would order the window in): an alert is dismissed, the rest cancelled.
+    let Some(window) = view.window().filter(|_| crate::window_chrome::may_show()) else {
         return answer(matches!(dialog, Dialog::Alert).then(String::new));
     };
     // SAFETY: getters of the frame WebKit passes for this call.
@@ -812,8 +813,7 @@ impl Observer {
         });
     }
     fn failed(&self, view: &WKWebView, error: &NSError) {
-        // NSURLErrorCancelled: a new navigation replaced this one.
-        if error.code() == -999 {
+        if load_cancelled(&error.domain().to_string(), error.code()) {
             return;
         }
         // The URL that failed, not the page still showing (for a provisional
@@ -842,6 +842,16 @@ impl Observer {
             });
         });
         self.changed();
+    }
+}
+
+/// A load that was replaced, not one that failed: a newer navigation (NSURLErrorCancelled), a
+/// policy decision that took the frame over (FrameLoadInterruptedByPolicyChange) or a plug-in that took the load.
+fn load_cancelled(domain: &str, code: isize) -> bool {
+    match domain {
+        "NSURLErrorDomain" => code == -999,
+        "WebKitErrorDomain" => matches!(code, 102 | 204),
+        _ => false,
     }
 }
 
@@ -1359,6 +1369,55 @@ impl WebViewBackend for MacWebView {
             );
         }
     }
+    fn clear_site_data(&self, url: &str, done: Box<dyn FnOnce(Result<usize, String>)>) {
+        let Some(host) = zgx::web_view::site_host(url) else {
+            return done(Err(format!("{url} has no site")));
+        };
+        let mtm = MainThreadMarker::from(&*self.view);
+        let done = Rc::new(Cell::new(Some(done)));
+        // SAFETY: WKWebsiteDataStore's fetch and remove on the main thread,
+        // where WebKit calls both completions, with the records it passes;
+        // the store is the view's own (its profile's), retained by each
+        // block that uses it.
+        unsafe {
+            let store = self.view.configuration().websiteDataStore();
+            let types = WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+            let remover = store.clone();
+            let kinds = types.clone();
+            let fetched = block2::RcBlock::new(
+                move |records: std::ptr::NonNull<NSArray<objc2_web_kit::WKWebsiteDataRecord>>| {
+                    let records = records.as_ref();
+                    // WebKit names each record by its site's registrable
+                    // domain: the url's host or one it is under.
+                    let ours: Vec<_> = (0..records.count())
+                        .map(|i| records.objectAtIndex(i))
+                        .filter(|record| {
+                            zgx::web_view::site_matches(&host, &record.displayName().to_string())
+                        })
+                        .collect();
+                    let count = ours.len();
+                    if count == 0 {
+                        if let Some(done) = done.take() {
+                            done(Ok(0));
+                        }
+                        return;
+                    }
+                    let finished = done.clone();
+                    let removed = block2::RcBlock::new(move || {
+                        if let Some(done) = finished.take() {
+                            done(Ok(count));
+                        }
+                    });
+                    remover.removeDataOfTypes_forDataRecords_completionHandler(
+                        &kinds,
+                        &NSArray::from_retained_slice(&ours),
+                        &removed,
+                    );
+                },
+            );
+            store.fetchDataRecordsOfTypes_completionHandler(&types, &fetched);
+        }
+    }
     fn clear_find(&self) {
         // WebKit selects a match as it finds it, and has no call to stop.
         self.run(WebViewCommand::Evaluate {
@@ -1414,7 +1473,7 @@ pub(crate) fn backend(web: &WebView, mtm: MainThreadMarker) -> Rc<dyn WebViewBac
 
 #[cfg(test)]
 mod tests {
-    use super::json;
+    use super::{json, load_cancelled};
     use objc2::{msg_send, rc::Retained, runtime::AnyObject};
     use objc2_foundation::{NSData, NSError};
 
@@ -1439,5 +1498,15 @@ mod tests {
         let back: serde_json::Value = serde_json::from_str(&json(Some(&object))).unwrap();
         let expected: serde_json::Value = serde_json::from_slice(text).unwrap();
         assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn redirects_and_policy_takeovers_are_not_failures() {
+        assert!(load_cancelled("NSURLErrorDomain", -999));
+        assert!(load_cancelled("WebKitErrorDomain", 102));
+        assert!(load_cancelled("WebKitErrorDomain", 204));
+        assert!(!load_cancelled("NSURLErrorDomain", -1003));
+        assert!(!load_cancelled("NSURLErrorDomain", 102));
+        assert!(!load_cancelled("WebKitErrorDomain", 101));
     }
 }

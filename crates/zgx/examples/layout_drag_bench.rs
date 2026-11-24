@@ -22,14 +22,25 @@ fn main() {
     let _handle = ui.mount(layout_drag_page::page(split.clone(), &runtime));
     for _ in 0..3 {
         ui.prepare_frame();
-        ui.scene.borrow_mut().flush();
+        {
+            let flushed = ui.scene.borrow_mut().flush();
+            if zgx_fingerprint::on() {
+                zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+            }
+        }
     }
     let (mut frames, mut placed) = (0, 0);
     for _ in 0..rounds {
         for width in layout_drag_page::widths(30, 12.) {
             split.set(width);
             ui.prepare_frame();
-            placed += ui.scene.borrow_mut().flush().layout_nodes;
+            {
+                let flushed = ui.scene.borrow_mut().flush();
+                if zgx_fingerprint::on() {
+                    zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+                }
+                placed += flushed.layout_nodes;
+            }
             frames += 1;
         }
     }

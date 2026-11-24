@@ -12,6 +12,7 @@
 //! Their types are `types/zgx-test.d.luau`, which `zgx check` gives test
 //! files alone. A headless app has no fetcher (`ui.fetch` fails as offline
 //! does) and no storage (`ui.persist` keeps its state in memory).
+use crate::time::Instant;
 use crate::{
     ScriptHost, Value,
     testing::{FakeDesktop, TestApp},
@@ -25,7 +26,7 @@ use std::{
         Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use zgx::{reactive::Signal, scene::Rect};
 
@@ -89,6 +90,7 @@ pub fn run(
             dir.display()
         ));
     }
+    remove_stale_storage();
     let mut report = Report::default();
     for file in files {
         let mut record = |name: String, failure: Option<String>, duration| {
@@ -142,6 +144,73 @@ pub fn run(
     Ok(report)
 }
 
+/// The time budgets of an app under test: a test's fixtures can be heavy and
+/// the machine busy (CPU time grows under load too), so a call gets seconds
+/// where an app gets milliseconds; a loop that never ends is still stopped.
+fn test_limits() -> crate::Limits {
+    crate::Limits {
+        load: std::time::Duration::from_secs(30),
+        call: std::time::Duration::from_secs(5),
+        ..crate::Limits::default()
+    }
+}
+
+/// Removes the storage directories of runs that were killed (`SIGKILL`, a
+/// crash, a power cut), which could not remove their own: those of a process
+/// that is gone, or older than a day where that can't be told.
+fn remove_stale_storage() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("zgx-test-storage-"))
+        else {
+            continue;
+        };
+        let pid = rest.split('-').next().and_then(|p| p.parse::<u32>().ok());
+        let gone = match pid {
+            #[cfg(unix)]
+            // SAFETY: signal 0 only asks whether the process exists.
+            Some(pid) => unsafe {
+                libc::kill(pid as i32, 0) != 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            },
+            // No process has the id: OpenProcess refuses it as a bad
+            // parameter (one that exists but isn't ours answers access denied).
+            #[cfg(windows)]
+            Some(pid) => {
+                use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
+                use windows::Win32::System::Threading::{
+                    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+                };
+                // SAFETY: a handle opened only to ask, and closed at once.
+                match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+                    Ok(handle) => {
+                        // SAFETY: the handle just opened.
+                        let _ = unsafe { CloseHandle(handle) };
+                        false
+                    }
+                    Err(e) => e.code() == ERROR_INVALID_PARAMETER.to_hresult(),
+                }
+            }
+            _ => false,
+        };
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > day);
+        if (gone || old) && pid != Some(std::process::id()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// The directories a run's tests made (each test's storage, each mount's
 /// files), to remove: each as its test ends, after its apps; what is left
 /// (an app a file kept past its tests saves as it goes) once the file's VM
@@ -151,14 +220,42 @@ pub fn run(
 #[derive(Clone, Default)]
 struct Made(Rc<RefCell<Vec<PathBuf>>>);
 /// Every run's directories not yet removed, for `remove_made_on_interrupt`.
+/// Held while a test makes or writes in one of them (`Files::write`): an
+/// interrupt's cleanup waits for a write under way, and once it has the
+/// lock it keeps it until the process ends, so nothing is made after it.
 static MADE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+fn made() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    MADE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+/// An interrupt's cleanup removes everything listed, then ends the process
+/// with `code`, the lock still held: a test still running can neither make
+/// a directory nor write in one after the cleanup began.
+#[cfg(any(unix, windows))]
+fn remove_all_and_exit(code: i32) -> ! {
+    let mut dirs = made();
+    for dir in dirs.drain(..) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[cfg(feature = "test-hooks")]
+    if let Some(ms) = std::env::var("ZGX_TEST_EXIT_DELAY_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        // Test-only: a window between the cleanup and the end, in which a
+        // test still running would make its files again without the lock.
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    std::process::exit(code);
+}
 impl Made {
     /// `dir`, to remove when it's done with.
     fn add(&self, dir: PathBuf) -> PathBuf {
+        self.add_held(&mut made(), dir)
+    }
+    /// `add`, with `MADE` already held (`made`).
+    fn add_held(&self, made: &mut Vec<PathBuf>, dir: PathBuf) -> PathBuf {
         self.0.borrow_mut().push(dir.clone());
-        MADE.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(dir.clone());
+        made.push(dir.clone());
         dir
     }
     /// Remove everything listed: what an app held past its test may have
@@ -168,9 +265,7 @@ impl Made {
         for dir in &dirs {
             let _ = std::fs::remove_dir_all(dir);
         }
-        MADE.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|made| !dirs.contains(made));
+        made().retain(|made| !dirs.contains(made));
     }
 }
 /// Removes what its `Made` lists as it goes (`run`).
@@ -202,11 +297,7 @@ pub fn remove_made_on_interrupt() {
         if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
             return;
         }
-        let dirs = std::mem::take(&mut *MADE.lock().unwrap_or_else(PoisonError::into_inner));
-        for dir in dirs {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-        std::process::exit(128 + signal);
+        remove_all_and_exit(128 + signal);
     });
 }
 /// `zgx test`'s Ctrl-C and Ctrl-Break (Windows): the directories its tests
@@ -220,12 +311,8 @@ pub fn remove_made_on_interrupt() {
         if kind != CTRL_C_EVENT && kind != CTRL_BREAK_EVENT {
             return false.into();
         }
-        let dirs = std::mem::take(&mut *MADE.lock().unwrap_or_else(PoisonError::into_inner));
-        for dir in dirs {
-            let _ = std::fs::remove_dir_all(dir);
-        }
         // STATUS_CONTROL_C_EXIT, the code a console interrupt ends with.
-        std::process::exit(0xC000_013A_u32 as i32);
+        remove_all_and_exit(0xC000_013A_u32 as i32);
     }
     // SAFETY: a handler of the signature the console calls, added once.
     let _ = unsafe { SetConsoleCtrlHandler(Some(interrupted), true) };
@@ -314,7 +401,9 @@ fn load(
                 .map_err(|error| mlua::Error::runtime(format!("mount: {error}")))?;
             let storage = launches.next();
             let app = TestApp::try_with_desktop(|runtime| {
-                host.apply(ScriptHost::new(runtime, &path)).storage(storage)
+                host.apply(ScriptHost::new(runtime, &path))
+                    .storage(storage)
+                    .limits(test_limits())
             })
             .map_err(|error| mlua::Error::runtime(format!("mount: {error}")))?;
             launches.hosts.borrow_mut().push(app.host.clone());
@@ -419,6 +508,18 @@ struct Files(OnceCell<PathBuf>, Made);
 impl Files {
     /// Where `name` lies: inside the directory, or an error.
     fn path(&self, name: &str) -> mlua::Result<PathBuf> {
+        self.path_held(&mut made(), name)
+    }
+    /// `op` on `name`'s path, `MADE` held from making the directory to the
+    /// end of `op`: an interrupt's cleanup can't run between them, or leave
+    /// what `op` writes behind.
+    fn write<T>(&self, name: &str, op: impl FnOnce(&Path) -> mlua::Result<T>) -> mlua::Result<T> {
+        let mut made = made();
+        let path = self.path_held(&mut made, name)?;
+        op(&path)
+    }
+    /// `path`, with `MADE` already held (`made`).
+    fn path_held(&self, made: &mut Vec<PathBuf>, name: &str) -> mlua::Result<PathBuf> {
         if !Path::new(name)
             .components()
             .all(|part| matches!(part, std::path::Component::Normal(_)))
@@ -429,11 +530,14 @@ impl Files {
         }
         static MOUNTS: AtomicUsize = AtomicUsize::new(0);
         let dir = self.0.get_or_init(|| {
-            self.1.add(std::env::temp_dir().join(format!(
-                "zgx-test-{}-{}",
-                std::process::id(),
-                MOUNTS.fetch_add(1, Ordering::Relaxed)
-            )))
+            self.1.add_held(
+                made,
+                std::env::temp_dir().join(format!(
+                    "zgx-test-{}-{}",
+                    std::process::id(),
+                    MOUNTS.fetch_add(1, Ordering::Relaxed)
+                )),
+            )
         });
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
@@ -594,13 +698,27 @@ impl UserData for Mounted {
             app.settle();
             Ok(())
         });
+        // An app's own command, else the Edit menu's item of that name,
+        // as the desktop's menu does it (`Ui::edit_command`): whether
+        // anything took it.
         methods.add_method("command", |_, m, id: String| {
+            use zgx::widgets::EditCommand;
+            let desktop = m.desktop();
             let app = m.app()?;
-            if !app.host.run_command(&id) {
-                return Err(mlua::Error::runtime(format!("no command `{id}`")));
+            if app.host.run_command(&id) {
+                app.settle();
+                return Ok(true);
             }
+            let edit = match id.as_str() {
+                "copy" => EditCommand::Copy,
+                "cut" => EditCommand::Cut,
+                "paste" => EditCommand::Paste,
+                "select-all" => EditCommand::SelectAll,
+                _ => return Err(mlua::Error::runtime(format!("no command `{id}`"))),
+            };
+            let took = app.ui.edit_command(edit, desktop.as_ref());
             app.settle();
-            Ok(())
+            Ok(took)
         });
         methods.add_method("text", |_, m, target: String| {
             let mut app = m.app()?;
@@ -658,7 +776,9 @@ impl UserData for Mounted {
             Ok(())
         });
         methods.add_method("write_file", |_, m, (name, text): (String, String)| {
-            std::fs::write(m.files.path(&name)?, text).map_err(mlua::Error::external)
+            m.files.write(&name, |path| {
+                std::fs::write(path, text).map_err(mlua::Error::external)
+            })
         });
         // A fixture of the app's directory (an image, a folder of them),
         // copied in as `name`, for the dialogs to answer with.
@@ -675,8 +795,10 @@ impl UserData for Mounted {
                     "`{from}`: a fixture comes from the app's directory"
                 )));
             }
-            copy(&source, &m.files.path(&name)?)
-                .map_err(|error| mlua::Error::runtime(format!("copy_file `{from}`: {error}")))
+            m.files.write(&name, |path| {
+                copy(&source, path)
+                    .map_err(|error| mlua::Error::runtime(format!("copy_file `{from}`: {error}")))
+            })
         });
         methods.add_method("read_file", |_, m, name: String| {
             std::fs::read_to_string(m.files.path(&name)?).map_err(mlua::Error::external)
@@ -743,6 +865,22 @@ impl UserData for Mounted {
                 }
             },
         );
+        methods.add_method("states", |_, m, ()| {
+            Ok(m.app()?
+                .host
+                .states()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>())
+        });
+        methods.add_method("retained_states", |_, m, ()| {
+            let query = crate::GcQuery {
+                retained: Some("State".into()),
+                ..Default::default()
+            };
+            let reports = m.app()?.host.gc_report(&query);
+            Ok(reports.iter().map(|vm| vm.found.matched).sum::<usize>())
+        });
         methods.add_method("state", |_, m, name: String| {
             let states = m.app()?.host.states();
             let suffix = format!("::{name}");

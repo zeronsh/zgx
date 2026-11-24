@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **A scroll tells what shows by a range check, not a walk** (zgx): every node whose visibility is observed (`NodeHandle::observe_visibility`, `observe_visibility_within`, Luau's `on_visible`) keeps what of it shows inside the clips that move with its nearest scroll content, and a frame that only scrolls checks that, moved with the content, against the clip above it, worked out once for each scroll content. Where it comes within a rounding of an edge, the full walk answers, so observers hear what they did. Any other translation, a change to a clip, a node hidden or shown, an opacity to or from zero, layout or the node's own move works it out again; what was kept goes at rest. In a transcript of rows nested 30 boxes deep with their visibility observed, the visibility pass a frame went from 1.3–1.7 ms to 0.2–0.5 ms on an M5.

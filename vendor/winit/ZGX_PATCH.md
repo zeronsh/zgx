@@ -219,6 +219,17 @@ shows no copy badge and every release would look taken.
       `DragEnter`, `DragOver` and `Drop` get is a `POINTL` by value, as COM
       passes it (`definitions.rs` declared a pointer, never read before).
     Wayland's drags reach zgx's own data device, not winit.
+12. `TextDrops::dropped_with_html`: the same drop with the text as HTML too,
+    where the source offers it (a browser's selection), for a rich
+    destination; by default `dropped` with the text alone.
+    - macOS: the pasteboard's `NSPasteboardTypeHTML` (`public.html`).
+    - X11: `text/html` (atom `TextHtml`), converted after the text arrives
+      (one conversion at a time through `XdndSelection`), the drop waiting
+      for both (`Dnd::text_complete`); UTF-16 after a byte order mark reads
+      as UTF-16.
+    - Windows: the registered `HTML Format` (`CF_HTML`,
+      `RegisterClipboardFormatW`, `Win32_System_DataExchange`), the fragment
+      its header's `StartFragment`/`EndFragment` byte offsets mark.
 
 ## Where dragged files are (macOS, Windows, X11)
 
@@ -433,3 +444,20 @@ on a menu at rest stayed in zgx's queue until something else woke the loop.
 `platform::wayland::wake_for_own_queue` gives the loop a check, asked after a
 read when winit has heard nothing else, whose `true` runs a turn. No check, no
 cost. `scripts/wayland_popups_smoke.py` clicks a menu at rest.
+
+
+## macOS: a window asked for at a position is made there, on any screen
+
+`initWithContentRect:styleMask:backing:defer:` reads its rect relative to the
+key window's screen and moves a window asked for on another screen onto that
+one, its height mirrored. A positioned window (with no fullscreen screen) is
+made with `…defer:screen:` on the screen that holds its top left, its rect
+relative to that screen. A physical position and size are read at that
+screen's scale, not at the key window's screen's. Screens of different scales
+overlap in winit's physical space: a 1x screen right of a 2x one starts
+inside the 2x one's pixels. Where they overlap, the screen whose origin is
+nearest above and left of the point takes it, so `MonitorHandle::position()`
+lands on its own screen. The arithmetic is `platform_impl/macos/placement.rs`,
+which has no AppKit in it. zgx-desktop's `tests/screen_placement.rs` includes
+it and checks screens left, right, above and below of other heights and
+scales on every platform. `tests/window_position` checks the real screens.

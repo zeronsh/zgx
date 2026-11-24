@@ -34,6 +34,11 @@ ui.resource<T>(load: () -> T, opts: { initial: T }?) -> Resource<T>
 ui.fetch(url: string, opts: FetchOptions?) -> Promise<Response>
 ui.clipboard.read() -> string?
 ui.clipboard.write(text: string) -> boolean
+ui.clipboard.write({ text: string, html: string?, types: { [string]: string }? }) -> boolean
+ui.clipboard.write({ text: string, html: string?, types: { [string]: string }?, image: string }) -> Promise<boolean>
+ui.clipboard.read_type(mime: string) -> string?
+ui.clipboard.read_html() -> string?
+ui.clipboard.write_html(text: string, html: string) -> boolean
 ui.clipboard.read_image() -> Promise<Bitmap?>
 ui.clipboard.write_image(image: Bitmap) -> Promise<boolean>
 ui.open_files(opts: FilePickerOptions?) -> Promise<{ File }>
@@ -74,7 +79,7 @@ local tabs = ui.state("tabs", {} :: { Tab })
 
 | Method | | |
 | --- | --- | --- |
-| `get(): T` | the value; inside a computed, effect, function property or text function it subscribes to the state | |
+| `get(): T` | the value; inside a computed, effect, function property or text function it subscribes to the state | a long string (past 64 KiB, a document) is made a script string once for each text, every read of it handed the same until it changes |
 | `peek(): T` | the value, without subscribing | for handlers and for reading what an effect should not follow |
 | `set(value: T)` | replaces the value | |
 | `update(f: (value: T) -> ...T)` | `f` gets a mutable copy: change it and return nothing, or return the new value | copies the whole value into Luau and back |
@@ -86,7 +91,8 @@ local tabs = ui.state("tabs", {} :: { Tab })
 | `push(item)` | appends to a list (`nil` is an empty list) | |
 | `insert(index: number, item)` | inserts at 1 to `len + 1` | |
 | `remove(index: number): item?` | removes and returns the item; nil, and nothing changes, outside the list | |
-| `len(): number` | the list's length (0 for anything else); tracked as `get` is | |
+| `len(): number` | the list's length, a string's in bytes (`#`), 0 for anything else; tracked as `get` is | read where the value is held: a long document isn't copied into the script for it |
+| `sub(i: number, j: number?): string` | `string.sub` of the string held (bytes from 1, negative from the end, `j` its end by default), `""` for anything else; tracked as `get` is | copies only those bytes: a draft's line at its caret, without the rest of a long draft |
 | `index_of(field: string, value): number?` | where the first item whose `field` is `value` is, from 1, or nil (`messages:index_of("id", 42)`); tracked as `get` is | found in Rust, without making the list a table |
 
 `set_key`, `patch`, `insert`, `push` and `remove` copy only the path they change, sharing the rest with the old value; prefer them to `update` for large state. `set_key` writes a list in place while nothing else holds it (no script has read it since the last write): a batch writing 300 rows of a 100,000-row list copies the list once, not 300 times. Scripts reading a long list after `set_key` on one row (or a `push`) get its table back with only that row converted, and a computed that returns rows of a state (a filter) hands its readers the table it built: a write to one message of thousands costs the scripts reading them only their own loops. A write of an equal value notifies nobody.
@@ -393,7 +399,7 @@ In a test, `app:pick_folder(name)` answers the next dialog with a folder of the 
 
 ### The clipboard and files
 
-A desktop window gives scripts its clipboard and file dialogs (`zgx::platform`). `ui.clipboard.read()` returns its text, `ui.clipboard.write(text)` replaces it. `ui.clipboard.read_image()` settles with its image as a full-colour `Bitmap` (`w`, `h`; a screenshot, an image editor's copy, a browser's Copy Image), or nil, and `ui.clipboard.write_image(bitmap)` puts one there (a `ui.bitmap`, or one read before) for other apps to paste, settling with whether it took it: promises, as a large image is decoded and encoded off the main thread (a 4K one took 15 to 70 ms to read and 130 ms to write). State can keep a `Bitmap`, its pixels counted against a plugin's memory limit, and `ui.image { src = state }` shows the one it holds (a pasted picture: `ui.clipboard.read_image():after(function(b) if b then pasted:set(b) end end)`). `ui.open_files({ title, directory, filters = { { "Images", { "png" } } }, multiple })` settles with the files the user picks (an empty list if they cancel) and `ui.save_file({ name })` with where they choose to save (or nil), each a `{ path, name }`. A script reads and writes only files the user picked in this host's dialogs, as a web page does: `ui.read_file(file)` settles with its text and `ui.write_file(file, text)` writes beside it and renames over it (never half a file), both off the main thread. A dialog asked for as a script loads (a task at its top level, before its view mounts in a window) opens once the window is there. Headless, without a window, they are errors, shown as any script error is.
+A desktop window gives scripts its clipboard and file dialogs (`zgx::platform`). `ui.clipboard.read()` returns its text, `ui.clipboard.write(text)` replaces it. `ui.clipboard.read_html()` returns its HTML, or nil: what a browser or word processor copied, with its markup, its text still `read()`'s. `ui.clipboard.write_html(text, html)` puts HTML there with its text beside it, for apps that paste either. `ui.clipboard.write { text = t, html = h, types = { ["application/x-notes"] = data } }` puts the text, the HTML (optional) and types of the app's own (optional; MIME types, each with its text) there in one change: the types go where a web page's copy puts its own (Chromium's web custom data: `org.chromium.web-custom-data` on macOS, `Chromium Web Custom MIME Data Format` on Windows, `chromium/x-web-custom-data` on X11 and Wayland), so a page's paste in Chrome, Edge or an Electron app reads them with `event.clipboardData.getData("application/x-notes")`, and `ui.clipboard.read_type("application/x-notes")` reads them back, from this app or from a page's copy that set them (nil where the clipboard holds none). Firefox and Safari keep a page's types to themselves: there the text and HTML paste. Without `types`, `write` is a copy of text and HTML as ever. With `image`, a PNG's bytes (a canvas rendered with `ui.render_canvas`, a file read with `{ base64 = true }` and decoded, a server's reply), the image goes on the clipboard as the platform's image beside the text, HTML and types, in the same change, and `write` settles with whether it took them: an image editor or a document pastes the picture, a text field its text, a page's paste its types (an image with its citation). The image goes as `public.png` on macOS, `image/png` on X11 and Wayland, and `PNG` with a DIB of it beside on Windows, decoded off the main thread there. Anything but a PNG is an error. On the web it goes as one `ClipboardItem` (`image/png` beside `text/plain` and `text/html`); a page's own types can't go with an image there, and are left out. On the web, a write with types copies as a person's ⌘C does, so it takes them within a click or a key's handler (else the text and HTML alone go), and `read_type` reads the paste being handled. `ui.clipboard.read_image()` settles with its image as a full-colour `Bitmap` (`w`, `h`; a screenshot, an image editor's copy, a browser's Copy Image), or nil, and `ui.clipboard.write_image(bitmap)` puts one there (a `ui.bitmap`, or one read before) for other apps to paste, settling with whether it took it: promises, as a large image is decoded and encoded off the main thread (a 4K one took 15 to 70 ms to read and 130 ms to write). State can keep a `Bitmap`, its pixels counted against a plugin's memory limit, and `ui.image { src = state }` shows the one it holds (a pasted picture: `ui.clipboard.read_image():after(function(b) if b then pasted:set(b) end end)`). `ui.open_files({ title, directory, filters = { { "Images", { "png" } } }, multiple })` settles with the files the user picks (an empty list if they cancel) and `ui.save_file({ name })` with where they choose to save (or nil), each a `{ path, name }`. A script reads and writes only files the user picked in this host's dialogs, as a web page does: `ui.read_file(file)` settles with its text (a byte that isn't UTF-8 becomes U+FFFD), `ui.read_file(file, { base64 = true })` with every byte in base64 (a picture to keep or send), and `ui.write_file(file, data)` writes beside it and renames over it (never half a file), both off the main thread. `data` is a string, written as its bytes (any byte, NUL and those that aren't UTF-8 too), or `{ base64 = text }`, decoded first (a PNG a canvas rendered, a file a server sent; up to 256 MiB); text that isn't base64 rejects and writes nothing. A dialog asked for as a script loads (a task at its top level, before its view mounts in a window) opens once the window is there. Headless, without a window, they are errors, shown as any script error is.
 
 A file, from `ui.open_files`, a drop (`on_file_drop`, [events](events.md)) or `ui.on_open`, is `{ path, name, size, type }` as the web's `File` is: `size` in bytes and `type` its media type by its extension (`"image/png"`, `""` when unknown). `ui.fetch(url, { file = f })` sends it as the request's body with its type (a POST unless `method` says otherwise), and `multipart = { caption = "Hi", attachment = f }` sends a form's fields, text or files, as `multipart/form-data` (the web's `FormData`). The files are read on a thread of their own, so a large one never holds up the window. `on_progress = function(sent, total)` hears the body go out: the transport tells it as it writes (zgx-run's does; a host's streaming fetcher calls `Body::sent`), and one that does not say reports it all at the answer. Cancelling the task or the promise stops the upload, as it stops any fetch. A plugin needs `Capability::Files` as well as `Fetch` to send files.
 
@@ -491,6 +497,30 @@ return ui.list {
 - `ui.number(n, opts)` formats numbers as `Intl.NumberFormat` does: `ui.number(1234.5)` is "1,234.50"; `decimals`, `style = "percent"` (`n` a fraction: 0.05 is "5%"), `notation = "compact"` ("1.2K", "3.4M", "5.6B", "7.8T"), `sign` (`"auto"`, `"always"`, `"except_zero"`, `"never"`), `grouping` (thousands separators, on) and `currency` (`"$"`, before the number).
 
 - `ui.json.encode(value, { pretty })` writes what state could hold as JSON (lists as arrays, tables as objects, `ui.null` as null), and `ui.json.decode(text)` gives back tables the script may change, failing with where the JSON is wrong: a document saved and opened with `ui.write_file` and `ui.read_file`.
+
+## Measuring frames
+
+`ui.frames.measure(fn, { window_ms = 1000 })` runs `fn` (the action: a tab switch, a sort) and gives a promise of how the app's frames came after it, for analytics. It counts as a web page's `requestAnimationFrame` measure does, so the desktop's numbers and the browser's compare:
+
+| field | |
+| --- | --- |
+| `duration_ms` | the second frame's time after the action |
+| `blocked_ms` | the sum of the gaps between frames over 50 ms, whole (the first gap counts from the action) |
+| `settled_ms` | the later of `duration_ms` and the end of the last such gap |
+| `frames`, `long_frames` | the frames in the window, and those after a gap over 50 ms |
+| `times`, `start_ms` | each frame's time from the action (ms), and the action's on `ui.now`'s clock |
+
+```luau
+ui.frames.measure(function()
+	tab:set("files")
+end):after(function(m)
+	analytics.send("tab_switch", { duration_ms = m.duration_ms, settled_ms = m.settled_ms, blocked_ms = m.blocked_ms })
+end)
+```
+
+It settles once frames have come for `window_ms`, two at least. A window that stops showing frames (hidden, minimised) ends it, and a new measure ends the last: a sample cut short has `duration_ms` alone (if two frames came), as the web's does. For a gesture, `local m = ui.frames.begin()` records until `m:finish()` (a promise of the same), 30 s at most (`capped = true`). `times` gives what else to work out (intervals, percentiles, frames dropped against the refresh).
+
+A frame's time is when it is due on screen: the display's refresh on the desktop, `requestAnimationFrame`'s in the browser. While a measure runs, frames come every refresh, as a rAF loop asks them; with none running nothing is recorded or asked for.
 
 ## Refs
 

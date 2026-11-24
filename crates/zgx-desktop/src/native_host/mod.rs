@@ -334,7 +334,9 @@ impl NativeHost {
                 }
             }
         }
-        let (split, damage) = PlaneSplit::compute(scene, &self.natives.nodes(), &self.split);
+        // One node a page: the one that shows (`shown_nodes`).
+        let (split, damage) =
+            PlaneSplit::compute(scene, &self.natives.shown_nodes(scene), &self.split);
         let split = Rc::new(split);
         let surfaces = self.surfaces.as_mut().expect("made above");
         // A new zoom moves every view without the split changing.

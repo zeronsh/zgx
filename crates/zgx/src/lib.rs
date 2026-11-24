@@ -9,6 +9,8 @@ pub mod view;
 pub mod virtual_list;
 
 pub mod input;
+#[doc(hidden)]
+pub mod outside_drag;
 pub mod semantics;
 pub mod text;
 pub mod text_edit;
@@ -41,7 +43,13 @@ pub mod trace;
 
 pub mod caret_blink;
 pub mod clock;
+pub(crate) mod drag_scroll;
+pub(crate) mod editor_atom_clipboard;
+pub(crate) mod editor_atom_pointer;
+pub(crate) mod editor_atom_style;
 pub(crate) mod editor_autocorrect;
+pub(crate) mod editor_edge;
+pub(crate) mod editor_gap;
 pub(crate) mod editor_lines;
 pub(crate) mod editor_menu;
 pub(crate) mod editor_spell;
@@ -51,6 +59,7 @@ mod find_text;
 pub(crate) mod paging;
 pub mod rich_text;
 mod scroll_keys;
+pub(crate) mod scroll_reveal;
 pub mod selection;
 pub mod text_layout;
 mod typeahead;
@@ -89,6 +98,8 @@ pub mod actions;
 
 mod action_context;
 
+#[doc(hidden)]
+pub mod callback_site;
 pub mod canvas;
 
 pub mod animation;

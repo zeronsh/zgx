@@ -5,6 +5,7 @@
 //! shows only at run time: a misspelled property or event, a call with the
 //! wrong arguments, a local function used before its definition (`nil`
 //! until called).
+use crate::time::Instant;
 use std::{
     fmt,
     io::Read,
@@ -14,11 +15,13 @@ use std::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-/// The `ui` and `anime` globals' types, as shipped with this crate.
-pub const DEFINITIONS: &str = include_str!("../types/zgx.d.luau");
+/// The `ui` and `anime` globals' types, as shipped with this crate: the
+/// parts of features this build is without left out (build.rs,
+/// `definitions.rs`).
+pub const DEFINITIONS: &str = include_str!(concat!(env!("OUT_DIR"), "/zgx.d.luau"));
 
 /// How to get luau-lsp, shown when it is missing.
 pub const INSTALL: &str = "luau-lsp is not installed. Download it from \
@@ -132,6 +135,23 @@ impl Default for Options {
     }
 }
 
+/// The type solver's iteration budget `zgx check` gives luau-lsp
+/// (`LuauTypeInferIterationLimit`, 20,000 by default): five times it.
+///
+/// An app's props type made with `Merge` (`Merge<ContainerProps, { … }>`),
+/// handed back to an element (`ui.column(props)`), is compared with the
+/// element's props one property at a time. `Merge` is a type function, and
+/// what a type function returns is built anew: each property's type a copy,
+/// not the one `ContainerProps` holds, so each is compared by its structure
+/// rather than found the same at once (a props table written out in full,
+/// sharing them, costs almost nothing). Each distinct property type costs a
+/// few dozen iterations; the default budget was spent by the frame
+/// profiler's menus at about 270 props, and every prop added tipped it over
+/// ("Code is too complex to typecheck"). Nothing in `Merge` can keep the
+/// copies the originals: the budget is what has room to grow. The tooling
+/// tests fail if luau-lsp stops honouring it.
+pub const ITERATION_LIMIT: u32 = 100_000;
+
 /// `LUAU_LSP`, or `luau-lsp` on the PATH.
 pub fn find_luau_lsp() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("LUAU_LSP").map(PathBuf::from)
@@ -200,6 +220,7 @@ fn check_with(
         .ok_or(CheckError::NotInstalled)?;
     let mut files = Vec::new();
     let mut sources = Vec::new();
+    let mut manifests = Vec::new();
     for path in paths {
         let found = scripts(path);
         if found.is_empty() {
@@ -215,6 +236,9 @@ fn check_with(
         // An app's directory: its tokens' types, for its editor too.
         if path.is_dir() {
             crate::app_types::write_types_of(path, &own)?;
+            // Its native modules' types, checked against too.
+            let (modules, _) = crate::module_types::of_app(path);
+            manifests.extend(modules.into_iter().map(|(_, manifest)| manifest));
         }
         sources.extend(own);
         files.extend(found);
@@ -231,8 +255,11 @@ fn check_with(
     let _cleanup = Cleanup(dir.clone());
     let definitions = dir.join("zgx.d.luau");
     // zgx's, with the apps' own tokens in them (`app_types`).
-    std::fs::write(&definitions, crate::app_types::definitions(&sources))
-        .map_err(CheckError::Io)?;
+    std::fs::write(
+        &definitions,
+        crate::app_types::definitions_with(&sources, &manifests),
+    )
+    .map_err(CheckError::Io)?;
     // An app whose scripts require `@app/…` (its own modules, which a
     // plugin may replace) or `@app-original/…` (a replacement's original)
     // is checked with both aliases naming its directory: the nearest
@@ -281,6 +308,9 @@ fn check_with(
             .arg("analyze")
             .arg("--platform=standard")
             .arg("--flag:LuauSolverV2=true")
+            .arg(format!(
+                "--flag:LuauTypeInferIterationLimit={ITERATION_LIMIT}"
+            ))
             .arg(format!("--definitions={}", definitions.display()))
             .arg("--formatter=gnu");
         if tests {

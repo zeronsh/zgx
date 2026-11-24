@@ -220,3 +220,29 @@ the answer before drawing them, and, where `COLORTERM` isn't set, sets
 `48;2;1;2;3` and turns on direct colour only if `48:2:1:2:3` comes back.
 `report_tests::settings_are_reported_as_set` checks each. Version 0.26.8,
 with `zgx-vte` 0.15.4.
+
+## A cell is 16 bytes, its extra in its row
+
+A `Cell` held its rarely set parts (joined characters, an underline colour,
+a hyperlink) as an `Option<Arc<CellExtra>>`: 24 bytes, and a drop for every
+cell written over or reset. It now holds a `u16` handle into its row's table
+of them (`Row::extras`, slot `handle - 1`; 0 for none): 16 bytes and `Copy`,
+so a row resets by storing the blank over its cells, and a run writes them
+with plain stores. A row's table is shared by its cells: the cursor's pen
+holds its extra (`Cursor::template_extra`, saved and restored with the
+cursor; SGR 58 and OSC 8 change it), and the cells it writes share one slot
+(the row's last, where it's the pen's already), so a hyperlink's run is one.
+A slot is never changed: a cell's extra changed (a mark joined, a wide
+character cleared) is a new slot. Slots no cell holds stay until the row is
+reset or erased, or the table, at `max(width, 8)` slots, is compacted to those
+held. A reflow moves cells with their extras (`Cells`, renumbered into the
+row they join). The extra's parts are read through the row by column:
+`Row::zerowidth`, `underline_color`, `hyperlink`, `extra`; `Cell::has_extra`
+says whether there is one. `GridCell::is_empty` is what a cell holds
+itself; `Row::is_cell_empty` adds its joined characters, so a blank cell
+with only a hyperlink or an underline colour is empty, as before. Rows
+compare by their cells' extras' values, not their handles. `Storage::swap`
+swaps a row's seven words, not four. `term::tests` repaints hyperlinks and
+marks in place 10,000 times with each table bounded, writes a run with the
+pen as one slot, saves the pen with the cursor and reflows extras narrower
+and wider and back.

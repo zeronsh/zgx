@@ -30,6 +30,18 @@ pub(crate) const CLASS_NAME: u32 = 24;
 pub(crate) const CLASS_ADD: u32 = 25;
 pub(crate) const VISIBLE: u32 = 26;
 pub(crate) const TRUNCATE: u32 = 27;
+pub(crate) const PAINT: u32 = 32;
+pub(crate) const WALK: u32 = 28;
+pub(crate) const OVERLAY: u32 = 29;
+pub(crate) const SHOW: u32 = 30;
+pub(crate) const PREVENT: u32 = 31;
+pub(crate) const MENU_AT: u32 = 33;
+/// `SELECT root anchor focus`: a contenteditable's selection, in UTF-16
+/// units of its text (`atom_editor`), while it has the focus.
+pub(crate) const SELECT: u32 = 34;
+/// `OFF id on`: an element that isn't a native control disabled, or not:
+/// it and what it holds take no input or focus and are heard disabled.
+pub(crate) const OFF: u32 = 35;
 
 /// Words a frame holds before it applies what it has (`Ops::op`).
 pub(crate) const EARLY: usize = 1 << 12;
@@ -46,6 +58,8 @@ pub(crate) enum Tag {
     Progress = 5,
     Label = 6,
     Canvas = 8,
+    Dialog = 9,
+    A = 10,
 }
 
 /// Handler kinds (`HANDLER`'s second word).
@@ -54,6 +68,20 @@ pub(crate) const ON_INPUT: u32 = 1;
 pub(crate) const ON_SCROLL: u32 = 2;
 pub(crate) const SCROLL_X: u32 = 3;
 pub(crate) const ON_RESIZE: u32 = 4;
+/// An element's listeners: `HANDLER id ON_EVENT handler`.
+pub(crate) const ON_EVENT: u32 = 5;
+/// A keymap at the element: `HANDLER id KEYMAP node`.
+pub(crate) const KEYMAP: u32 = 6;
+/// A focus group: `HANDLER id GROUP axis` (1 vertical, 2 horizontal,
+/// 3 both; 4 set: moving chooses).
+pub(crate) const GROUP: u32 = 7;
+/// A context menu's handler: `HANDLER id ON_MENU handler`.
+pub(crate) const ON_MENU: u32 = 9;
+/// A span's place in its paragraph: `HANDLER id SPAN_AT index`.
+pub(crate) const SPAN_AT: u32 = 10;
+/// A contenteditable's edits (`beforeinput`, a composition's end):
+/// `HANDLER id ON_EDIT handler`.
+pub(crate) const ON_EDIT: u32 = 11;
 
 /// `NUMBER`'s properties.
 pub(crate) const NUM_VALUE: u32 = 0;
@@ -78,6 +106,10 @@ pub(crate) struct Ops {
     /// Pixels the JS side copies out this frame.
     pub(crate) keep: Vec<std::sync::Arc<zgx::image::ImageData>>,
     scheduled: bool,
+    /// While a block is captured, the nodes something writes after it is
+    /// made (an effect, a handler, a region, an observer): what a template's
+    /// clone must reach (`template::stamp`).
+    pub(crate) used: Vec<u32>,
     /// While a block's structure is captured (`capture`), the frame's own
     /// words, text and text length, set aside.
     main: Option<(Vec<u32>, String, u32)>,
@@ -137,6 +169,7 @@ impl Ops {
     /// wait for its end).
     pub(crate) fn apply(&mut self) {
         if !self.words.is_empty() {
+            crate::idle::wrote();
             crate::js::zgx_apply(
                 &wasm_bindgen::memory(),
                 self.words.as_ptr() as u32,
@@ -160,6 +193,27 @@ impl Ops {
     pub(crate) fn op_str(&mut self, code: u32, id: u32, s: &str) {
         self.op(&[code, id]);
         self.str(s);
+    }
+    /// `node` is written after its block is made (see `used`).
+    #[inline]
+    pub(crate) fn mark(&mut self, node: u32) {
+        if self.main.is_some() {
+            self.used.push(node);
+        }
+    }
+    /// Ids that were never written to the JS side's table, free again.
+    pub(crate) fn release(&mut self, ids: &[u32]) {
+        for &id in ids {
+            if id + 1 == self.next {
+                self.next = id;
+                while self.free.last() == Some(&(self.next - 1)) {
+                    self.free.pop();
+                    self.next -= 1;
+                }
+            } else {
+                self.free.push(id);
+            }
+        }
     }
     pub(crate) fn capturing(&self) -> bool {
         self.main.is_some()

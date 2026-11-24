@@ -340,8 +340,8 @@ fn a_link_covers_its_cells() {
     session.feed(b"\x1b]8;;https://zgx.dev\x07site\x1b]8;;\x07 after");
     let term = session.term();
     let link = |column| {
-        term.grid()[Line(0)][Column(column)]
-            .hyperlink()
+        term.grid()[Line(0)]
+            .hyperlink(Column(column))
             .map(|link| link.uri().to_owned())
     };
     assert_eq!(link(0).as_deref(), Some("https://zgx.dev"));

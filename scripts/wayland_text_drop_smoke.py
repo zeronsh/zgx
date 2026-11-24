@@ -10,7 +10,9 @@ Checks that:
 - hovering over the field changes nothing; let go there, the text lands at
   the drop point (the field's end) and the source hears it taken;
 - let go over the chip (no destination there), nothing is dropped and the
-  source hears it refused."""
+  source hears it refused;
+- let go over a rich destination, it gets the text and the HTML the source
+  offered beside it (`text/html`, read beside the text)."""
 import argparse
 import json
 import os
@@ -31,6 +33,9 @@ OUTPUT = (1600, 1000)
 # and the Words field's far end (its left 10, 240 wide; 104 down, 30 high).
 CHIP = (10 + 60, 10 + 14)
 FIELD_END = (10 + 230, 104 + 15)
+# Its rich destination under the field (144 down, 30 high).
+RICH = (10 + 120, 144 + 15)
+HTML = "<b> and more</b>"
 # The source's button, its window 240 by 120 at (0, 600).
 SOURCE = (120, 660)
 START = "drag these words"
@@ -80,7 +85,7 @@ def main():
             env["WAYLAND_DISPLAY"] = display
             app, app_log = launch("drag_probe", [args.binaries / "drag_probe"], env)
             _, source_log = launch("source", ["python3", "scripts/text_drag_source.py", "Text source", 0, 0,
-                                              " and more"], env)
+                                              " and more", "--html", HTML], env)
             until("the source", lambda: "READY" in source_log.read_text())
 
             def words():
@@ -134,13 +139,25 @@ def main():
             time.sleep(.3)
             checks["over the chip: nothing dropped"] = len(words()) == 2
             checks["over the chip: refused"] = lines(r"^FAILED") == 1
+
+            # Let go over the rich destination: the text, and its HTML with it.
+            time.sleep(.5)
+            at = grab()
+            glide(at, RICH)
+            time.sleep(.4)
+            pointer.button(False)
+            until("the rich drop", lambda: re.search(r"^RICH ", app_log.read_text(), re.M))
+            until("the drag's end", lambda: lines(r"^END$") == 3)
+            checks["rich"] = re.search(r"^RICH .*$", app_log.read_text(), re.M).group(0)
+            checks["rich: the text and its HTML"] = checks["rich"] == 'RICH " and more" Some("<b> and more</b>")'
+            checks["asked for the HTML"] = lines(r"^SENT text/html$") >= 1
             checks["app alive"] = app.poll() is None
 
             (args.output / "result.json").write_text(json.dumps(checks, indent=2) + "\n")
             failed = [key for key, value in checks.items() if value is False or value is None]
             assert not failed, f"failed: {failed}\n{json.dumps(checks, indent=2)}"
             print("PASS: Wayland text drops into zgx: a GTK source's text lands where it was let go over a "
-                  "field; over the chip it is refused")
+                  "field; over the chip it is refused, and a rich destination gets its HTML too")
     finally:
         for process in reversed(processes):
             stop(process)

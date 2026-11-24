@@ -83,6 +83,14 @@ A field with nothing to undo lets ⌘Z go on to the app's commands, and with not
 
 Its element (`on_mount`, a [ref](state.md#refs)) selects text: `el:select_all()`, `el:set_selection(a, b)`, `local a, b = el:selection()`, in characters, or in bytes from 0 as `string.find` counts them, `el:set_selection_bytes(a, b)` and `el:selection_bytes()` (a selection set so scrolls into view, focused or not); `el:replace_selection(text)` types `text` over the selection, one step of undo; `ui.editor.scroll_to_line(el, n, { align })` puts line `n`, from 1, at the `"start"`, `"center"` or `"end"` of the view, or as near as shows it (`"nearest"`, the default), its caret left where it is; `ui.editor.undo(el)` and `ui.editor.redo(el)` step its history as ⌘Z and ⌘⇧Z do, answering whether there was a step, and `ui.editor.can_undo(el)` and `ui.editor.can_redo(el)` say whether there is one (for an app's own stack across panes, with `ui.command { key = "cmd+z", reserved = true }`); `ui.editor.offset_at(el, x, y)` is the byte, from 0, a click at those window points would put the caret at, for a drop that goes where the pointer is or a link in the text ([events](events.md#elements)). Each sees the text a handler just set, and leaves its state holding what it changed.
 
+### Text metrics
+
+`el:text_metrics(width)` measures the editor's text as if it were laid out `width` points wide, whatever its own size: `{ width, unwrapped_width, wrapped_height, line_height, revision, exact = true }`, in points, without borders, padding, the line-number gutter or the placeholder (an empty field measures one empty line, as does a final line break). `unwrapped_width` is its widest hard line, `wrapped_height` its height wrapped at `width`. It is nil for an element that is not an editor, one not mounted, a password field, and a `width` that is not a positive, finite number. Rust has it as `EditorHandle::text_metrics`.
+
+It measures what shows: styled spans that shape (`weight`, `italic`), and an IME composition in place of the selection, though not committed (moving only the composition's cursor is no change). Read in an effect or a computed, it runs again when the text or its typography changes, once laid out, not for focus, selection, scrolling or the field's own size; read through a ref's `get()`, as it mounts and unmounts too. `revision` changes with what it measures.
+
+The first query at a new width, or after an edit, lays out every line (in a cache of its own, so the field's view keeps its own lines); asking again is free. A long document pays for that on each edit it is asked after, so keep `width` steady while the field animates. That time is the calling script's, counted in its budget: a loop measuring at width after width is stopped as any runaway loop is.
+
 ### Styled spans
 
 A `highlight` span is `{ from, to, color }` (`color` may be left out), with these by name:
@@ -93,8 +101,12 @@ A `highlight` span is `{ from, to, color }` (`color` may be left out), with thes
 | `italic` | `boolean` | italic |
 | `strike` | `boolean` | a line through it, in its colour |
 | `bg` | `Color` | a wash behind it (inline code) |
+| `size` | `number` | its font size in points (a note's heading) |
+| `line_height` | `number` | its line pitch in points: the line takes its runs' tallest |
+| `underline` | `boolean` | a line under it (a link) |
+| `font` | `"mono"` | the monospaced font (inline code) |
 
-Where spans overlap, each of `color`, `weight` and `bg` is the first's (by `from`) that gives it, and `italic` and `strike` hold if any gives them: a code span inside bold text keeps the bold weight and shows its own colour, and delimiters greyed inside a bold span stay bold. A line whose spans give a `weight` or `italic` is shaped with them, so its width, wrapping, carets, clicks and selection follow what shows; other lines (colours, strikes and washes only) are shaped as plain text, as before.
+Where spans overlap, each of `color`, `weight`, `bg`, `size` and `line_height` is the first's (by `from`) that gives it, and `italic`, `strike`, `underline` and `font = "mono"` hold if any gives them: a code span inside bold text keeps the bold weight and shows its own colour, and delimiters greyed inside a bold span stay bold. A line whose spans give a `weight`, `italic`, `size`, `line_height` or `font` is shaped with them, so its width, wrapping, carets, clicks and selection follow what shows; other lines (colours, strikes and washes only) are shaped as plain text, as before.
 
 ```lua
 local draft = ui.state("draft", "Some **bold** and `code`")
@@ -128,6 +140,74 @@ return ui.textarea {
 ```
 
 A long text (more than 64 KiB, or 2,000 lines), or one with `highlight`, is laid out by its lines: the lines in view are shaped and drawn, a line keeps its shape until it changes, and where each line starts is a few bytes a line, so a file of 100,000 lines opens in about 20 ms and a keystroke costs about a millisecond ([the code editor example](../../crates/zgx-script/examples/code_editor), `code_editor_bench`). A string over 64 KiB in state is held in chunks of a few kilobytes: the state, the textarea bound to it, its layout and its accessibility value share one copy, and a keystroke's new value shares every chunk but the one it changed (a script reading the state still reads a string). Assistive technology reads such a text a page at a time, as browsers' code editors give it: the lines in view and a page each side (or around the caret, scrolled away), a text run a line, so a keystroke sends the runs of the line it changed.
+
+### Line room
+
+`line_insets = function(line, state) return { left, above, below, hidden } end` gives a textarea's line room of its own, in points: `left` before its text (the line wraps in what it leaves, its carets, clicks and selection moving with it), `above` and `below` it, and `hidden = true` takes the line and its room away (a closed toggle's lines; keep the caret out of them). `state` is what `highlight` was given for the line (what the line before left it; 0 without a highlighter), so a fenced code block's lines know they're inside it. It's asked once for each line text and state, and must depend on nothing but its arguments. A textarea without it lays out and scrolls as before. In the browser, lines take no room of their own yet ([zgx-dom](../dom.md#what-doesnt-map)).
+
+```lua
+return ui.textarea {
+	value = ui.state("note", "# Title\n- one\n- two"),
+	wrap = true,
+	line_insets = function(line, state)
+		if string.sub(line, 1, 2) == "# " then
+			return { above = 16, below = 6 }
+		elseif string.sub(line, 1, 2) == "- " then
+			return { left = 20 }
+		end
+		return nil
+	end,
+}
+```
+
+### Line marks
+
+`line_marks = function(line, state) return { { x, y, w, h, fill, … } } end` draws shapes beside a textarea's line: a quote's rule, the wash behind a code block's line, a horizontal rule, a list item's number. Each is a box in points from the line's left edge (`from_right = true`: its right edge from the area's right edge) and from the top of its text, under any room above it; `w = "fill"` reaches the area's right edge and `h = "fill"` the line's bottom, its wrapped rows and room below included (less `bottom`). It takes `fill`, `radius`, `border_color` and `border_width`, and a `label` (`label_color`, `label_size`; `mono` for the monospaced font, `tabular` for figures of one width, so a list's numbers line up). Marks scroll with their lines, under the text (`over_text = true`: over it). Like `line_insets`, it's given the state `highlight` was given for the line, asked once for each line text and state, and must depend on nothing but its arguments. A textarea without it draws as before. In the browser, lines show no marks yet ([zgx-dom](../dom.md#what-doesnt-map)).
+
+```lua
+return ui.textarea {
+	value = ui.state("note", "> quoted\n---\nplain"),
+	wrap = true,
+	line_marks = function(line, state)
+		if string.sub(line, 1, 2) == "> " then
+			return { { x = 0, w = 3, h = "fill", fill = "$border.strong" } }
+		elseif line == "---" then
+			return { { x = 0, y = 9, w = "fill", h = 1, fill = "$border" } }
+		end
+		return nil
+	end,
+}
+```
+
+### Code blocks
+
+A `line_insets` line with a `group` (a number) scrolls sideways with the other lines of that group, as the web's `overflow-x: auto` does; with `nowrap = true` it never wraps (`white-space: pre`): it's shaped once at its full width and shows from the group's first line's `left` to the area's right edge. A sideways wheel or trackpad motion over a group's line, or a mouse wheel with Shift held, scrolls that group and nothing else; a caret moved into what the group cuts off brings it into view, and one scrolled out of it hides. Carets, clicks and selection follow the group's offset, and its text moves without being laid out again. A mark of a grouped line moves with its text, cut to the group's frame, unless it's `pinned = true` (a block's wash and line numbers stay still). `group_scrollbar = true` shows the scrollbar scroll views do across the bottom of the group that moved last; its drag scrolls it. A textarea without groups lays out and draws as before. In the browser, lines scroll with the text area ([zgx-dom](../dom.md#what-doesnt-map)).
+
+```lua
+return ui.textarea {
+	value = ui.state("note", "Some prose that wraps.\n```\nlocal wide = 'a line wider than the note'\n```"),
+	wrap = true,
+	group_scrollbar = true,
+	highlight = function(line, state)
+		if line == "```" then
+			return {}, if state == "code" then 0 else "code"
+		end
+		return {}, state
+	end,
+	line_insets = function(line, state)
+		if state == "code" and line ~= "```" then
+			return { left = 12, group = 1, nowrap = true }
+		end
+		return nil
+	end,
+	line_marks = function(line, state)
+		if state == "code" and line ~= "```" then
+			return { { x = 0, w = "fill", h = "fill", fill = "$surface.sunken", pinned = true } }
+		end
+		return nil
+	end,
+}
+```
 
 ## checkbox
 

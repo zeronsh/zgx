@@ -343,7 +343,12 @@ fn main() {
     host.reload().expect("the bench script loads");
     ui.mount(host.view());
     ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     let elapsed = at.elapsed();
     if let Some(error) = host.error().get() {
         panic!("script error: {error}");

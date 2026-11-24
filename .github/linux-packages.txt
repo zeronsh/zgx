@@ -17,6 +17,8 @@ hunspell-en-us
 ibus
 ibus-libpinyin
 imagemagick
+# zgx-audio's `device` (cpal's ALSA output), which the release check builds.
+libasound2-dev
 libdbus-1-dev
 libenchant-2-2
 libfontconfig1-dev

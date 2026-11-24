@@ -14,6 +14,25 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// `zgx test` started as a terminal starts it, Ctrl-C (SIGINT) at its
+/// default: a parent that ignores it (a shell's background job, `nohup`)
+/// passes that on through exec, and an ignored signal is discarded, so the
+/// interrupt the test sends would never arrive and the run would end as if
+/// none came (exit 0 after its whole test).
+#[cfg(unix)]
+fn interruptible() -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zgx"));
+    // SAFETY: `signal` is async-signal-safe, as `pre_exec` requires.
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    command
+}
+
 fn entries(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
@@ -123,7 +142,7 @@ end)
 "##,
     )
     .unwrap();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_zgx"))
+    let mut child = interruptible()
         .arg("test")
         .arg(&app)
         .env("TMPDIR", &temp)
@@ -151,6 +170,65 @@ end)
         entries(&temp),
         Vec::<String>::new(),
         "what the interrupted run left"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Ctrl-C while a test keeps writing its files: what it writes after the
+/// cleanup began is never left. The cleanup holds the run's list until the
+/// process ends, and a test writes only under it, so a write waits rather
+/// than making the test's directory again. (`test-hooks`: a window between
+/// the cleanup and the end, which a test writing on would land in.)
+#[cfg(all(unix, feature = "test-hooks"))]
+#[test]
+fn an_interrupt_while_a_test_writes_leaves_nothing() {
+    let _one = one_at_a_time();
+    let root = std::env::temp_dir().join(format!("zgx-runner-writing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (temp, app) = (root.join("temp"), root.join("app"));
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::create_dir_all(app.join("tests")).unwrap();
+    std::fs::write(app.join("app.luau"), "return ui.text { \"hello\" }").unwrap();
+    std::fs::write(
+        app.join("tests/app.test.luau"),
+        r##"test("writes until interrupted", function()
+	local app = mount()
+	local start = os.clock()
+	local n = 0
+	while os.clock() - start < 60 do
+		n += 1
+		app:write_file(`notes{n % 4}.txt`, "hello")
+	end
+end)
+"##,
+    )
+    .unwrap();
+    let mut child = interruptible()
+        .arg("test")
+        .arg(&app)
+        .env("TMPDIR", &temp)
+        .env("ZGX_TEST_EXIT_DELAY_MS", "400")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while entries(&temp).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the test made {:?}",
+            entries(&temp)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // SAFETY: a signal to the child this test started.
+    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(130), "{status:?}");
+    assert_eq!(
+        entries(&temp),
+        Vec::<String>::new(),
+        "what the run left, writing as it was interrupted"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

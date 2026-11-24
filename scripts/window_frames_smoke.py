@@ -209,8 +209,8 @@ def main():
             """The sizes of the buffers clients made (shared memory or dmabuf)."""
             sizes = []
             for line in lines:
-                found = (re.search(r"create_buffer\(new id wl_buffer@\d+, \d+, (\d+), (\d+),", line)
-                         or re.search(r"create_immed\(new id wl_buffer@\d+, (\d+), (\d+),", line))
+                found = (re.search(r"create_buffer\(new id wl_buffer[@#]\d+, \d+, (\d+), (\d+),", line)
+                         or re.search(r"create_immed\(new id wl_buffer[@#]\d+, (\d+), (\d+),", line))
                 if found:
                     sizes.append((int(found.group(1)), int(found.group(2))))
             return sizes

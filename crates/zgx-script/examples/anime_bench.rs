@@ -45,7 +45,12 @@ fn run(
     let settle = || while executor.borrow_mut().tick() > 0 {};
     settle();
     ui.prepare_frame();
-    ui.scene.borrow_mut().flush();
+    {
+        let flushed = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &flushed);
+        }
+    }
     let mounted = built.elapsed();
     let interval = Duration::from_secs_f64(1. / 120.);
     let start = Instant::now();
@@ -62,6 +67,9 @@ fn run(
         let animated = Instant::now();
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
+        if zgx_fingerprint::on() {
+            zgx_fingerprint::frame(&ui.scene.borrow(), &report);
+        }
         std::hint::black_box(report.damage.len());
         animate += animated - began;
         scene += animated.elapsed();

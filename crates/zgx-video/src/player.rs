@@ -41,6 +41,9 @@ pub(crate) enum Ask {
     Pixels(bool),
     /// Lose its renderer's device, as a driver reset would (tests).
     LoseDevice,
+    /// Take this long more over each frame it draws (tests: a slow
+    /// machine's draw, with asks arriving while one is under way).
+    SlowDraw(Duration),
     Quit,
 }
 
@@ -76,7 +79,7 @@ pub enum Event {
 /// playing the composition from its start.
 const CACHE_BYTES: usize = 512 << 20;
 /// How long it keeps them once nothing is asked of it: at rest, a player
-/// holds no frames.
+/// holds no frames, and a while after, no stage either.
 const CACHE_KEPT: Duration = Duration::from_secs(5);
 
 /// A frame kept: its bytes (for a script), its pixel buffer (for a view on
@@ -96,6 +99,8 @@ struct Kept {
 #[derive(Default)]
 pub(crate) struct Counts {
     cached: AtomicUsize,
+    /// Times it dropped its stage at rest.
+    stages_dropped: AtomicUsize,
     #[cfg(target_os = "macos")]
     releases: AtomicUsize,
 }
@@ -344,6 +349,7 @@ pub(crate) fn run(
     // due then. `stale`: a frame it moved to and didn't draw.
     let mut watched = true;
     let mut stale = false;
+    let mut slow_draw = Duration::ZERO;
     let mut keep_for = CACHE_KEPT;
     // Pixel buffers drawn since it last gave back those no one holds: once
     // it rests (paused, nothing asked), a while on, it does (`keep_for`).
@@ -401,6 +407,19 @@ pub(crate) fn run(
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             },
+            // At rest with nothing kept: its stage (the script's VM, its
+            // interface and renderer) goes too, a while on, built again
+            // when it's next asked for a frame. A paused player then holds
+            // what a gone one does.
+            None if preview.stage.is_some() => match asks.recv_timeout(keep_for) {
+                Ok(ask) => Some(ask),
+                Err(RecvTimeoutError::Timeout) => {
+                    preview.stage = None;
+                    counts.stages_dropped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
             None => match asks.recv() {
                 Ok(ask) => Some(ask),
                 Err(_) => return,
@@ -424,6 +443,7 @@ pub(crate) fn run(
                         stage.film.stage.debug_lose_device();
                     }
                 }
+                Ask::SlowDraw(by) => slow_draw = by,
                 Ask::Open(id, props, frame) => {
                     if preview
                         .composition
@@ -540,6 +560,9 @@ pub(crate) fn run(
                         .max(frame * u64::from(preview.composition.is_none())),
                 );
                 if watched {
+                    if !slow_draw.is_zero() {
+                        std::thread::sleep(slow_draw);
+                    }
                     result = preview.show(at, playing.is_none());
                     #[cfg(target_os = "macos")]
                     {
@@ -655,6 +678,11 @@ impl Player {
             surface: runtime.signal(None),
         }))
     }
+    /// Times its thread dropped its stage at rest: for tests.
+    #[doc(hidden)]
+    pub fn stages_dropped(&self) -> usize {
+        self.counts.stages_dropped.load(Ordering::Relaxed)
+    }
     /// Bytes of drawn frames its thread keeps now: for tests.
     #[doc(hidden)]
     pub fn cached_bytes(&self) -> usize {
@@ -666,8 +694,8 @@ impl Player {
     pub fn surface_releases(&self) -> usize {
         self.counts.releases.load(Ordering::Relaxed)
     }
-    /// How long it keeps drawn frames once nothing is asked of it (5 s):
-    /// for tests.
+    /// How long it keeps drawn frames once nothing is asked of it (5 s),
+    /// and its stage that long after: for tests.
     #[doc(hidden)]
     pub fn keep_frames_for(&self, time: Duration) {
         let _ = self.asks.send(Ask::KeepFor(time));
@@ -698,6 +726,13 @@ impl Player {
     #[doc(hidden)]
     pub fn debug_lose_device(&self) {
         let _ = self.asks.send(Ask::LoseDevice);
+    }
+    /// Take `by` more over each frame drawn, as a slow machine would, asks
+    /// that arrive meanwhile waiting for the frame: for tests of a frame
+    /// still on its way as something changes.
+    #[doc(hidden)]
+    pub fn debug_slow_draw(&self, by: Duration) {
+        let _ = self.asks.send(Ask::SlowDraw(by));
     }
     /// Play again from its start at its end (true by default), or stop there.
     pub fn looping(&self, on: bool) {

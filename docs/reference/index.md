@@ -9,6 +9,7 @@ One page per element and API group of [zgx-script](../scripting.md). Each gives 
 | [Controls](controls.md) | `button`, `input`, `textarea`, `checkbox`, `slider`, `progress` |
 | [Images and canvas](media.md) | `image`, `svg`, `canvas`, `path`, `linear`, `bitmap`, `shader` |
 | [3D scenes](3d.md) | `scene3d`, `mesh`, `light`, `group` |
+| [Sound](audio.md) | the `audio` global (`sound`, `music`, `play`, buses), `sound =` on controls |
 | [Scrolling](scrolling.md) | `scroll`, `scroll_x`, `list` |
 | [Dynamic content](dynamic.md) | `show`, `switch`, `each`, `presence` |
 | [Overlays and menus](overlays.md) | `modal`, `popover`, `menu`, `menu_item`, `submenu`, `context_menu` |

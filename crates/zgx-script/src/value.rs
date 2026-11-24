@@ -14,40 +14,47 @@ use std::{
 };
 use zgx::reactive::{Runtime, Signal};
 
+pub use crate::counted::{Field, List, Map, Slice, Str, WeakSlice};
+
 /// A script value. State holds these, so equal writes are suppressed like any
 /// other signal.
+// Its layout is stated, not left to the compiler: a byte saying which, then
+// what it holds (`repr(u8)`, each variant numbered). Native modules read
+// values where they are by it (`modules.rs`, `zgx_module::abi`), so a
+// variant's number never changes and new ones go at the end.
 #[derive(Debug, Default)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum Value {
     /// `nil`.
     #[default]
-    Nil,
+    Nil = 0,
     /// A boolean.
-    Bool(bool),
+    Bool(bool) = 1,
     /// A number.
-    Num(f64),
+    Num(f64) = 2,
     /// A string.
-    Str(Rc<str>),
+    Str(Str) = 3,
     /// A long string (over 64 KiB, as a document is), in chunks: shared
     /// with an editor bound to it and its edits, and a string to scripts.
-    Text(zgx::text::Text),
+    Text(zgx::text::Text) = 4,
     /// A table used as a list (keys 1 to n).
-    List(Rc<[Value]>),
+    List(List) = 5,
     /// A table with string keys, sorted by key so equal tables compare equal
     /// (and `field` finds them by halves): build one with
     /// [`Value::record`], which sorts them.
-    Map(Rc<[(Rc<str>, Value)]>),
+    Map(Map) = 6,
     /// An element a script keeps (`ui.use_state(el)`), or a folder a person
     /// picked (`ui.open_folder`): opaque to Rust, equal only to itself, and
     /// `null` as JSON. Sharing a variant keeps a rare handle off every
     /// conversion's match.
-    Element(ElementHandle),
+    Element(ElementHandle) = 7,
     /// An image a script keeps (a `Bitmap`: `ui.bitmap`'s, or the
     /// clipboard's): equal only to itself, and `null` as JSON.
-    Image(std::sync::Arc<zgx::image::ImageData>),
+    Image(std::sync::Arc<zgx::image::ImageData>) = 8,
     /// A table kept small until it's read (`Value::folded`): to a script, the
     /// table it opens to.
-    Folded(Rc<Folded>),
+    Folded(Rc<Folded>) = 9,
 }
 
 /// A list made from another by changing its end alone (a streamed reply's
@@ -57,13 +64,13 @@ pub enum Value {
 /// change the very chunks of the list it was made from, so making it costs
 /// what changed, not its length.
 pub struct Appended {
-    chunks: Vec<Rc<[Value]>>,
+    chunks: Vec<List>,
     len: usize,
     /// The list it was made from, and how many first items they share.
     from: Option<(std::rc::Weak<Appended>, usize)>,
     /// Its items in one slice, made the first time something reads it as
     /// a list.
-    flat: std::cell::OnceCell<Rc<[Value]>>,
+    flat: std::cell::OnceCell<List>,
 }
 impl std::fmt::Debug for Appended {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -84,14 +91,14 @@ impl Appended {
         let kept = from.map_or(0, |from| {
             (shared.min(from.len).min(len) / Self::CHUNK).min(from.chunks.len())
         });
-        let mut chunks: Vec<Rc<[Value]>> = Vec::with_capacity(len.div_ceil(Self::CHUNK));
+        let mut chunks: Vec<List> = Vec::with_capacity(len.div_ceil(Self::CHUNK));
         if let Some(from) = from {
             chunks.extend(from.chunks[..kept].iter().cloned());
         }
         let mut rest = items(kept * Self::CHUNK);
         for start in (kept * Self::CHUNK..len).step_by(Self::CHUNK) {
             let size = Self::CHUNK.min(len - start);
-            let chunk: Rc<[Value]> = rest.by_ref().take(size).cloned().collect();
+            let chunk: List = rest.by_ref().take(size).cloned().collect();
             assert_eq!(chunk.len(), size, "as many items as said");
             chunks.push(chunk);
         }
@@ -129,7 +136,7 @@ impl Appended {
             .get(index % Self::CHUNK)
     }
     /// Its items as one slice, made once.
-    pub fn flat(&self) -> &Rc<[Value]> {
+    pub fn flat(&self) -> &List {
         self.flat.get_or_init(|| self.iter().cloned().collect())
     }
     /// How many first items it shares with `then`, if it was made from it.
@@ -172,9 +179,6 @@ pub trait Unfold {
     }
 }
 
-/// A table's fields, as `Value::Map` holds them.
-type Fields = [(Rc<str>, Value)];
-
 /// A value kept small until it's read (`Value::Folded`): its id, what makes
 /// it (`source`, the host's), and what it opened to only once it has (most
 /// of a long list's rows never are). The source stays boxed apart: in the
@@ -193,7 +197,7 @@ struct Opened {
     /// What it last opened to, while something holds that: a script's table
     /// of it, through the conversion cache, so reads while that stands find
     /// one table.
-    open: RefCell<Option<std::rc::Weak<Fields>>>,
+    open: RefCell<Option<WeakSlice<Field>>>,
     /// What it opened to for the host's `field`, which hands out a reference.
     kept: std::cell::OnceCell<Value>,
 }
@@ -224,6 +228,13 @@ impl Folded {
         let opened = self.opened.get_or_init(Box::default);
         opened.kept.get_or_init(|| self.opened()).field(key)
     }
+    /// What it opens to, opened for good: a reader given a reference (a
+    /// native module's).
+    #[cfg(feature = "modules")]
+    pub(crate) fn kept(&self) -> &Value {
+        let opened = self.opened.get_or_init(Box::default);
+        opened.kept.get_or_init(|| self.opened())
+    }
     /// The value it opens to, opened again only if nothing holds the last.
     fn opened(&self) -> Value {
         if let Some(value) = self.held() {
@@ -232,7 +243,7 @@ impl Folded {
         let value = self.source.unfold();
         if let Value::Map(fields) = &value {
             let opened = self.opened.get_or_init(Box::default);
-            *opened.open.borrow_mut() = Some(Rc::downgrade(fields));
+            *opened.open.borrow_mut() = Some(Slice::downgrade(fields));
         }
         value
     }
@@ -338,13 +349,13 @@ pub(crate) fn key_eq(a: &str, b: &str) -> bool {
 /// (`key_eq`; most keys differ in length, told at a glance), and only a
 /// key not there, or a larger table, is searched in order.
 #[inline]
-fn find_key(fields: &[(Rc<str>, Value)], key: &str) -> Result<usize, usize> {
+pub(crate) fn find_key(fields: &[Field], key: &str) -> Result<usize, usize> {
     if fields.len() <= 8
-        && let Some(at) = fields.iter().position(|(k, _)| key_eq(k, key))
+        && let Some(at) = fields.iter().position(|Field(k, _)| key_eq(k, key))
     {
         return Ok(at);
     }
-    fields.binary_search_by(|(k, _)| (**k).cmp(key))
+    fields.binary_search_by(|Field(k, _)| (**k).cmp(key))
 }
 
 /// Shared subtrees compare equal without being walked.
@@ -373,16 +384,18 @@ impl PartialEq for Value {
             (Value::Nil, Value::Nil) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Num(a), Value::Num(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b) || key_eq(a, b),
+            (Value::Str(a), Value::Str(b)) => Str::ptr_eq(a, b) || key_eq(a, b),
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Str(s), Value::Text(t)) | (Value::Text(t), Value::Str(s)) => *t == **s,
-            (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b) || a[..] == b[..],
+            (Value::List(a), Value::List(b)) => Slice::ptr_eq(a, b) || a[..] == b[..],
             (Value::Map(a), Value::Map(b)) => {
-                Rc::ptr_eq(a, b)
+                Slice::ptr_eq(a, b)
                     || (a.len() == b.len()
-                        && a.iter().zip(b.iter()).all(|((ka, va), (kb, vb))| {
-                            (Rc::ptr_eq(ka, kb) || key_eq(ka, kb)) && va == vb
-                        }))
+                        && a.iter()
+                            .zip(b.iter())
+                            .all(|(Field(ka, va), Field(kb, vb))| {
+                                (Str::ptr_eq(ka, kb) || key_eq(ka, kb)) && va == vb
+                            }))
             }
             // `{}` is both.
             (Value::List(l), Value::Map(m)) | (Value::Map(m), Value::List(l)) => {
@@ -400,8 +413,9 @@ impl PartialEq for Value {
 /// One step of a path into a value: a map's key or a list's 1-based index.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PathKey {
-    /// A map's key.
-    Key(Rc<str>),
+    /// A map's key: the runtime's own string, so a map given a new key by
+    /// it holds the same string, counted, not copied.
+    Key(Str),
     /// A list's index, from 1.
     Index(usize),
 }
@@ -433,7 +447,7 @@ impl Value {
                 Value::Map(entries) => serde_json::Value::Object(
                     entries
                         .iter()
-                        .map(|(k, v)| (k.to_string(), convert(v)))
+                        .map(|Field(k, v)| (k.to_string(), convert(v)))
                         .collect(),
                 ),
                 Value::Folded(folded) => convert(&folded.opened()),
@@ -453,7 +467,7 @@ impl Value {
             Value::Map(fields) => {
                 16 + fields
                     .iter()
-                    .map(|(_, v)| 16 + SLOT + v.weight())
+                    .map(|Field(_, v)| 16 + SLOT + v.weight())
                     .sum::<usize>()
             }
             Value::Element(_) => 64,
@@ -491,7 +505,7 @@ impl Value {
             Value::Map(fields) => {
                 if seen.insert(fields.as_ptr() as usize) {
                     into.bytes += 16 + fields.len() * (16 + SLOT);
-                    for (_, field) in fields.iter() {
+                    for Field(_, field) in fields.iter() {
                         field.holding(seen, into);
                     }
                 }
@@ -524,9 +538,9 @@ impl Value {
     pub fn reconcile(self, old: &Value) -> Value {
         fn same(a: &Value, b: &Value) -> bool {
             match (a, b) {
-                (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
-                (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
-                (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b),
+                (Value::List(a), Value::List(b)) => Slice::ptr_eq(a, b),
+                (Value::Map(a), Value::Map(b)) => Slice::ptr_eq(a, b),
+                (Value::Str(a), Value::Str(b)) => Str::ptr_eq(a, b),
                 (Value::Text(a), Value::Text(b)) => a.ptr_eq(b),
                 (a, b) => a == b,
             }
@@ -556,7 +570,7 @@ impl Value {
         }
         match (self, old) {
             (Value::List(new), Value::List(was)) => {
-                if Rc::ptr_eq(&new, was) {
+                if Slice::ptr_eq(&new, was) {
                     return old.clone();
                 }
                 // By id when every old item has one; by position when the
@@ -573,22 +587,21 @@ impl Value {
                 let mut unchanged = new.len() == was.len();
                 // Straight into the shared slice: one allocation, not a
                 // vector's and then a copy of it.
-                let items: Rc<[Value]> = new
-                    .iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        let prior = match &ids {
-                            Some(ids) => id_of(item).and_then(|id| ids.get(&id).copied()),
-                            None => was.get(i),
-                        };
-                        let item = match prior {
-                            Some(prior) => item.clone().reconcile(prior),
-                            None => item.clone(),
-                        };
-                        unchanged = unchanged && was.get(i).is_some_and(|w| same(&item, w));
-                        item
-                    })
-                    .collect();
+                // (Each written in its place as it is made, with nothing
+                // checked between them: a long list's every item.)
+                let items: List = List::filled(new.len(), |i| {
+                    let item = &new[i];
+                    let prior = match &ids {
+                        Some(ids) => id_of(item).and_then(|id| ids.get(&id).copied()),
+                        None => was.get(i),
+                    };
+                    let item = match prior {
+                        Some(prior) => item.clone().reconcile(prior),
+                        None => item.clone(),
+                    };
+                    unchanged = unchanged && was.get(i).is_some_and(|w| same(&item, w));
+                    item
+                });
                 if unchanged {
                     old.clone()
                 } else {
@@ -598,32 +611,30 @@ impl Value {
             (Value::Map(new), Value::Map(was)) => {
                 // Equal throughout (most of a republished model): the old
                 // value, found without building a new one first.
-                if Rc::ptr_eq(&new, was) || new == *was {
+                if Slice::ptr_eq(&new, was) || new == *was {
                     return old.clone();
                 }
                 // Both sorted by key: walk them together.
                 let mut unchanged = new.len() == was.len();
                 let mut at = 0;
-                let fields: Rc<[(Rc<str>, Value)]> = new
-                    .iter()
-                    .map(|(key, value)| {
-                        // Most often the same keys: equal is told first.
-                        while at < was.len() && !key_eq(&was[at].0, key) && *was[at].0 < **key {
-                            at += 1;
+                let fields: Map = Map::filled(new.len(), |i| {
+                    let Field(key, value) = &new[i];
+                    // Most often the same keys: equal is told first.
+                    while at < was.len() && !key_eq(&was[at].0, key) && *was[at].0 < **key {
+                        at += 1;
+                    }
+                    match was.get(at) {
+                        Some(Field(k, v)) if key_eq(k, key) => {
+                            let value = value.clone().reconcile(v);
+                            unchanged = unchanged && same(&value, v);
+                            Field(k.clone(), value)
                         }
-                        match was.get(at) {
-                            Some((k, v)) if key_eq(k, key) => {
-                                let value = value.clone().reconcile(v);
-                                unchanged = unchanged && same(&value, v);
-                                (k.clone(), value)
-                            }
-                            _ => {
-                                unchanged = false;
-                                (key.clone(), value.clone())
-                            }
+                        _ => {
+                            unchanged = false;
+                            Field(key.clone(), value.clone())
                         }
-                    })
-                    .collect();
+                    }
+                });
                 if unchanged {
                     old.clone()
                 } else {
@@ -636,12 +647,11 @@ impl Value {
     }
     /// A map of `fields`, in any order: sorted by key, the last of a key
     /// given twice kept (`Value::record([("name", "Ada".into()), ("id", 7.0.into())])`).
-    pub fn record<K: Into<Rc<str>>>(fields: impl IntoIterator<Item = (K, Value)>) -> Value {
-        let mut fields: Vec<(Rc<str>, Value)> =
-            fields.into_iter().map(|(k, v)| (k.into(), v)).collect();
+    pub fn record<F: Into<Field>>(fields: impl IntoIterator<Item = F>) -> Value {
+        let mut fields: Vec<Field> = fields.into_iter().map(Into::into).collect();
         // Stable: of a key given twice, the later stays last, and is kept.
         fields.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut kept: Vec<(Rc<str>, Value)> = Vec::with_capacity(fields.len());
+        let mut kept: Vec<Field> = Vec::with_capacity(fields.len());
         for field in fields {
             match kept.last_mut() {
                 Some(last) if last.0 == field.0 => *last = field,
@@ -653,8 +663,8 @@ impl Value {
     /// A table kept as `source` until it's read: to scripts, what `source`
     /// opens to, its table going when no script holds it. `id` is its `id`
     /// field, read without opening it (a list's key). Equal only to itself.
-    pub fn folded(id: Rc<str>, source: impl Unfold + 'static) -> Value {
-        Folded::value(Value::Str(id), source)
+    pub fn folded(id: impl Into<Str>, source: impl Unfold + 'static) -> Value {
+        Folded::value(Value::Str(id.into()), source)
     }
     /// It to read through, a folded value opened for this reading only: for
     /// a pass over many rows (a list's estimate) that `field` would leave
@@ -663,6 +673,15 @@ impl Value {
         match self {
             Value::Folded(folded) => std::borrow::Cow::Owned(folded.read()),
             _ => std::borrow::Cow::Borrowed(self),
+        }
+    }
+    /// A folded value as the table it opens to, kept open; none for any
+    /// other value.
+    #[cfg(feature = "modules")]
+    pub(crate) fn read_through(&self) -> Option<&Value> {
+        match self {
+            Value::Folded(folded) => Some(folded.kept()),
+            _ => None,
         }
     }
     /// Whether Luau counts it as true: anything but `nil` and `false`.
@@ -735,7 +754,7 @@ impl Value {
         let kind = self.kind();
         match step {
             PathKey::Key(key) => {
-                let fields: &[(Rc<str>, Value)] = match self {
+                let fields: &[Field] = match self {
                     Value::Map(fields) => fields,
                     Value::Nil => &[],
                     Value::List(items) if items.is_empty() => &[],
@@ -764,7 +783,7 @@ impl Value {
                     (Err(i), child) => {
                         let mut out = Vec::with_capacity(fields.len() + 1);
                         out.extend_from_slice(&fields[..i]);
-                        out.push((key.clone(), child));
+                        out.push(Field(key.clone(), child));
                         out.extend_from_slice(&fields[i..]);
                         Value::Map(out.into())
                     }
@@ -826,7 +845,7 @@ impl Value {
         };
         let slot: &mut Value = match (self, step) {
             (Value::List(items), PathKey::Index(i)) if *i >= 1 && *i <= items.len() => {
-                let Some(items) = Rc::get_mut(items) else {
+                let Some(items) = Slice::get_mut(items) else {
                     return Ok(None);
                 };
                 &mut items[i - 1]
@@ -835,7 +854,7 @@ impl Value {
                 let Ok(at) = find_key(fields, key) else {
                     return Ok(None);
                 };
-                let Some(fields) = Rc::get_mut(fields) else {
+                let Some(fields) = Slice::get_mut(fields) else {
                     return Ok(None);
                 };
                 &mut fields[at].1
@@ -866,9 +885,9 @@ impl Value {
         Ok(Some(changed))
     }
     /// A map's fields, sorted by key; an empty map is `{}`, as Luau gives it.
-    fn map(fields: Vec<(Rc<str>, Value)>) -> Value {
+    fn map(fields: Vec<Field>) -> Value {
         if fields.is_empty() {
-            Value::List(Rc::new([]))
+            Value::List(Slice::from([]))
         } else {
             Value::Map(fields.into())
         }
@@ -908,7 +927,7 @@ impl std::fmt::Display for Value {
             }
             Value::Map(fields) => {
                 f.write_str("{")?;
-                for (index, (key, value)) in fields.iter().enumerate() {
+                for (index, Field(key, value)) in fields.iter().enumerate() {
                     if index > 0 {
                         f.write_str(", ")?;
                     }
@@ -922,6 +941,17 @@ impl std::fmt::Display for Value {
 impl From<&str> for Value {
     fn from(value: &str) -> Self {
         Value::Str(value.into())
+    }
+}
+impl From<Rc<str>> for Value {
+    /// A string of this text: held once more, not copied.
+    fn from(text: Rc<str>) -> Self {
+        Value::Str(text.into())
+    }
+}
+impl From<Str> for Value {
+    fn from(text: Str) -> Self {
+        Value::Str(text)
     }
 }
 impl From<f64> for Value {
@@ -1068,13 +1098,13 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
     struct Cx<'a> {
         held: Option<std::cell::Ref<'a, FxHashMap<usize, (Value, usize)>>>,
         /// By the Luau string's address (no script chooses it, so Fx).
-        strings: FxHashMap<usize, Rc<str>>,
+        strings: FxHashMap<usize, Str>,
         /// The items and fields of the tables being read, on one stack each:
         /// a table, once read, is its own moved off into one allocation,
         /// where a vector of its own would grow, then be copied (as
         /// `json::parse` reads).
         items: Vec<(usize, Value)>,
-        keyed: Vec<(Rc<str>, Value)>,
+        keyed: Vec<Field>,
     }
     const TABLE: c_int = 1;
     const IDS: c_int = 2;
@@ -1125,7 +1155,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
             })
         }
     }
-    fn string(cx: &mut Cx, at: usize, bytes: &[u8]) -> Rc<str> {
+    fn string(cx: &mut Cx, at: usize, bytes: &[u8]) -> Str {
         cx.strings
             .entry(at)
             .or_insert_with(|| str_of(bytes))
@@ -1166,7 +1196,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
             }
             let len = ffi::lua_objlen(state, idx);
             let was = old.map_or(&[][..], Value::list);
-            let was_fields: &[(Rc<str>, Value)] = match old {
+            let was_fields: &[Field] = match old {
                 Some(Value::Map(f)) => f,
                 _ => &[],
             };
@@ -1195,15 +1225,15 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
                         let data = ffi::lua_tolstring(state, top - 1, &mut n);
                         let bytes = std::slice::from_raw_parts(data.cast::<u8>(), n);
                         let prior = was_fields
-                            .binary_search_by(|(k, _)| k.as_bytes().cmp(bytes))
+                            .binary_search_by(|Field(k, _)| k.as_bytes().cmp(bytes))
                             .ok()
                             .map(|i| &was_fields[i]);
                         let key = match prior {
-                            Some((k, _)) => k.clone(),
+                            Some(Field(k, _)) => k.clone(),
                             None => string(cx, data as usize, bytes),
                         };
-                        read(state, top, prior.map(|(_, v)| v), depth + 1, cx)
-                            .map(|v| cx.keyed.push((key, v)))
+                        read(state, top, prior.map(|Field(_, v)| v), depth + 1, cx)
+                            .map(|v| cx.keyed.push(Field(key, v)))
                     }
                     _ => Err(Unread::General),
                 };
@@ -1226,7 +1256,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
                 }
                 let keyed = &mut cx.keyed[keyed_from..];
                 keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                let fresh = Value::Map(cx.keyed.drain(keyed_from..).collect());
+                let fresh = Value::Map(Map::taken(&mut cx.keyed, keyed_from));
                 return Ok(match old {
                     Some(old) if *old == fresh => old.clone(),
                     _ => fresh,
@@ -1243,12 +1273,20 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
                 .enumerate()
                 .take_while(|(at, (i, _))| *i == at + 1)
                 .count();
-            let list: Rc<[Value]> = cx
-                .items
-                .drain(items_from..)
-                .take(run)
-                .map(|(_, item)| item)
-                .collect();
+            // (The run's items moved out one after another, with no walk
+            // of an iterator between them: a long list's every item.)
+            let list: List = {
+                let items = &mut cx.items;
+                let rest = items.len() - items_from - run;
+                // (Each of the run's items is read once and the rest dropped
+                // here; the vector then holds only what was before them, so
+                // none is dropped twice.)
+                let base = items.as_mut_ptr().add(items_from);
+                let list = List::filled(run, |i| std::ptr::read(base.add(i)).1);
+                std::ptr::slice_from_raw_parts_mut(base.add(run), rest).drop_in_place();
+                items.set_len(items_from);
+                list
+            };
             Ok(match old {
                 Some(old @ Value::List(o)) if o[..] == list[..] => old.clone(),
                 _ => Value::List(list),
@@ -1324,7 +1362,7 @@ fn table(t: &Table, old: Option<&Value>, depth: u32) -> mlua::Result<Value> {
         keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         // Walk the old fields alongside (both sorted): a key both have
         // keeps its old string and converts against its old value.
-        let was: &[(Rc<str>, Value)] = match old {
+        let was: &[Field] = match old {
             Some(Value::Map(f)) => f,
             _ => &[],
         };
@@ -1335,8 +1373,8 @@ fn table(t: &Table, old: Option<&Value>, depth: u32) -> mlua::Result<Value> {
                 at += 1;
             }
             fields.push(match was.get(at) {
-                Some((k, v)) if **k == *key => (k.clone(), convert(value, Some(v))?),
-                _ => (Rc::from(key), convert(value, None)?),
+                Some(Field(k, v)) if **k == *key => (k.clone(), convert(value, Some(v))?),
+                _ => (Str::from(key), convert(value, None)?),
             });
         }
         let fresh = Value::Map(fields.into());
@@ -1349,7 +1387,7 @@ fn table(t: &Table, old: Option<&Value>, depth: u32) -> mlua::Result<Value> {
     if len == 0 && is_object(t) {
         return Ok(match old {
             Some(old @ Value::Map(f)) if f.is_empty() => old.clone(),
-            _ => Value::Map(Rc::from([])),
+            _ => Value::Map(Map::default()),
         });
     }
     let was = old.map_or(&[][..], Value::list);
@@ -1412,7 +1450,9 @@ pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlu
             table.set_readonly(frozen);
             Ok(mlua::Value::Table(table))
         }
-        Value::Map(fields) if !fields.is_empty() && fields.iter().all(|(_, v)| is_plain(v)) => {
+        Value::Map(fields)
+            if !fields.is_empty() && fields.iter().all(|Field(_, v)| is_plain(v)) =>
+        {
             CONVERTED.set(CONVERTED.get() + 1);
             count_items(fields.len());
             let table = plain_map(lua, fields)?;
@@ -1425,7 +1465,7 @@ pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlu
             }
             CONVERTED.set(CONVERTED.get() + 1);
             let table = lua.create_table_with_capacity(0, fields.len())?;
-            for (key, value) in fields.iter() {
+            for Field(key, value) in fields.iter() {
                 table.raw_set(&**key, to_lua(value, lua, frozen)?)?;
                 count_items(1);
             }
@@ -1460,7 +1500,7 @@ fn raw_tree(value: &Value, depth: u32) -> Option<bool> {
             }
             Value::Map(fields) => {
                 *objects |= fields.is_empty();
-                depth < DEPTH && fields.iter().all(|(_, v)| walk(v, depth + 1, objects))
+                depth < DEPTH && fields.iter().all(|Field(_, v)| walk(v, depth + 1, objects))
             }
             _ => false,
         }
@@ -1522,7 +1562,7 @@ fn raw_to_lua(value: &Value, lua: &Lua, frozen: bool, objects: bool) -> mlua::Re
                     ffi::luaL_checkstack(state, 3, c"a table nested too deep".as_ptr());
                     let n = c_int::try_from(fields.len()).unwrap_or(c_int::MAX);
                     ffi::lua_createtable(state, 0, n);
-                    for (key, field) in fields.iter() {
+                    for Field(key, field) in fields.iter() {
                         ffi::lua_pushlstring(state, key.as_ptr().cast(), key.len());
                         push(state, field, frozen);
                         ffi::lua_rawset(state, -3);
@@ -1648,9 +1688,9 @@ thread_local! {
 /// A Luau string's text, invalid UTF-8 replaced (as `to_string_lossy`), in
 /// one allocation: valid text (nearly every string) is copied once, not
 /// scanned for invalid sequences into a `String` and copied again.
-fn str_of(bytes: &[u8]) -> Rc<str> {
+fn str_of(bytes: &[u8]) -> Str {
     match std::str::from_utf8(bytes) {
-        Ok(text) => Rc::from(text),
+        Ok(text) => Str::from(text),
         Err(_) => String::from_utf8_lossy(bytes).into(),
     }
 }
@@ -1685,20 +1725,8 @@ pub(crate) fn forget_streamed_edits() {
 /// `was` then `text`, made where it is kept: one copy of each, where a
 /// `String` turned into an `Rc<str>` copies the whole again (an append
 /// never costs more than setting the joined text would).
-fn joined(was: &str, text: &str) -> Rc<str> {
-    let mut bytes = Rc::<[u8]>::new_uninit_slice(was.len() + text.len());
-    let slot = Rc::get_mut(&mut bytes).expect("just made");
-    // SAFETY: `slot` has room for both, which don't overlap it, and every
-    // byte of it is written before it is read.
-    let bytes = unsafe {
-        let at = slot.as_mut_ptr().cast::<u8>();
-        std::ptr::copy_nonoverlapping(was.as_ptr(), at, was.len());
-        std::ptr::copy_nonoverlapping(text.as_ptr(), at.add(was.len()), text.len());
-        bytes.assume_init()
-    };
-    // SAFETY: two strings one after the other are UTF-8, and `str` has
-    // `[u8]`'s layout.
-    unsafe { Rc::from_raw(Rc::into_raw(bytes) as *const str) }
+fn joined(was: &str, text: &str) -> Str {
+    Str::joined(was, text)
 }
 /// `text` added to `was` (`state:append`): a long string takes it where it
 /// ends, its chunks shared and the edit kept, so an editor bound to it
@@ -1778,7 +1806,7 @@ fn plain_table(lua: &Lua, items: &[Value]) -> mlua::Result<Table> {
 /// through Luau's C API in one protected call: through mlua each key and
 /// string value is made in a protected call of its own (a closure pushed
 /// and called for each), most of a row's conversion.
-fn plain_map(lua: &Lua, fields: &[(Rc<str>, Value)]) -> mlua::Result<Table> {
+fn plain_map(lua: &Lua, fields: &[Field]) -> mlua::Result<Table> {
     use mlua::ffi;
     let n = std::ffi::c_int::try_from(fields.len())
         .map_err(|_| mlua::Error::runtime("a table with too many fields"))?;
@@ -1789,7 +1817,7 @@ fn plain_map(lua: &Lua, fields: &[(Rc<str>, Value)]) -> mlua::Result<Table> {
     unsafe {
         lua.exec_raw::<Table>((), |state| {
             ffi::lua_createtable(state, 0, n);
-            for (key, value) in fields {
+            for Field(key, value) in fields {
                 ffi::lua_pushlstring(state, key.as_ptr().cast(), key.len());
                 match value {
                     Value::Num(n) => ffi::lua_pushnumber(state, *n),
@@ -1860,7 +1888,7 @@ impl KeyViews {
             lua.exec_raw::<mlua::Value>(&self.partial, |state| {
                 ffi::lua_createtable(state, 0, n);
                 let mut whole = true;
-                for (name, field) in fields.iter() {
+                for Field(name, field) in fields.iter() {
                     let (key, len) = (name.as_ptr().cast(), name.len());
                     match field {
                         Value::Bool(b) => {
@@ -1945,7 +1973,7 @@ fn large(value: &Value) -> bool {
     fn count(value: &Value, left: &mut usize) -> bool {
         let children: &mut dyn Iterator<Item = &Value> = match value {
             Value::List(items) => &mut items.iter(),
-            Value::Map(fields) => &mut fields.iter().map(|(_, v)| v),
+            Value::Map(fields) => &mut fields.iter().map(|Field(_, v)| v),
             _ => return false,
         };
         for child in children {
@@ -1980,6 +2008,7 @@ pub(crate) fn install_cache(lua: &Lua) {
             swept: std::cell::Cell::new(0),
             recent: Default::default(),
             next_recent: std::cell::Cell::new(0),
+            strings: Default::default(),
         });
     }
 }
@@ -2028,6 +2057,8 @@ struct Converted {
     recent: std::cell::RefCell<Vec<(usize, Value, Table)>>,
     /// Where the next one goes once `recent` is full.
     next_recent: std::cell::Cell<usize>,
+    /// The long strings scripts last read (`long_string`), the oldest first.
+    strings: RefCell<Vec<(zgx::text::Text, mlua::LuaString)>>,
 }
 /// Sweeps wait until the cache holds this much (`weight`) at least.
 const SWEPT_FROM: usize = 1 << 12;
@@ -2038,7 +2069,7 @@ fn weight(value: &Value) -> usize {
     fn children(value: &Value) -> Box<dyn Iterator<Item = &Value> + '_> {
         match value {
             Value::List(items) => Box::new(items.iter()),
-            Value::Map(fields) => Box::new(fields.iter().map(|(_, v)| v)),
+            Value::Map(fields) => Box::new(fields.iter().map(|Field(_, v)| v)),
             _ => Box::new(std::iter::empty()),
         }
     }
@@ -2050,7 +2081,7 @@ fn part_weight(value: &Value) -> usize {
     fn all(value: &Value) -> usize {
         1 + match value {
             Value::List(items) => items.iter().map(all).sum::<usize>(),
-            Value::Map(fields) => fields.iter().map(|(_, v)| all(v)).sum::<usize>(),
+            Value::Map(fields) => fields.iter().map(|Field(_, v)| all(v)).sum::<usize>(),
             _ => 0,
         }
     }
@@ -2073,8 +2104,8 @@ pub(crate) fn same(a: &Value, b: &Value) -> bool {
 }
 pub(crate) fn identity(value: &Value) -> usize {
     match value {
-        Value::List(items) => Rc::as_ptr(items) as *const u8 as usize,
-        Value::Map(fields) => Rc::as_ptr(fields) as *const u8 as usize,
+        Value::List(items) => Slice::as_ptr(items) as *const u8 as usize,
+        Value::Map(fields) => Slice::as_ptr(fields) as *const u8 as usize,
         _ => 0,
     }
 }
@@ -2172,7 +2203,7 @@ fn shared_part(value: &Value, lua: &Lua) -> mlua::Result<mlua::Value> {
         }
         Value::Map(fields) => {
             let table = lua.create_table_with_capacity(0, fields.len())?;
-            for (key, value) in fields.iter() {
+            for Field(key, value) in fields.iter() {
                 table.raw_set(&**key, shared_part(value, lua)?)?;
                 count_items(1);
             }
@@ -2191,7 +2222,7 @@ fn has_element(value: &Value) -> bool {
     match value {
         Value::Element(_) | Value::Image(_) | Value::Folded(_) => true,
         Value::List(items) => items.iter().any(has_element),
-        Value::Map(fields) => fields.iter().any(|(_, v)| has_element(v)),
+        Value::Map(fields) => fields.iter().any(|Field(_, v)| has_element(v)),
         _ => false,
     }
 }
@@ -2259,7 +2290,7 @@ fn raw_shared(lua: &Lua, value: &Value) -> mlua::Result<Table> {
                         }
                         Value::Map(fields) => {
                             ffi::lua_createtable(state, 0, fields.len() as c_int);
-                            for (key, item) in fields.iter() {
+                            for Field(key, item) in fields.iter() {
                                 ffi::lua_pushlstring(state, key.as_ptr().cast(), key.len());
                                 push(state, item, made);
                                 ffi::lua_rawset(state, -3);
@@ -2442,6 +2473,7 @@ pub(crate) fn sweep_idle(lua: &Lua) {
         return;
     };
     cache.bases.borrow_mut().clear();
+    cache.strings.borrow_mut().clear();
     drop(cache);
     let _ = sweep_when(lua, true);
     let _ = rebuild_cache(lua);
@@ -2500,7 +2532,7 @@ fn derives_from(lua: &Lua, old: &Value, new: &Value) {
     let (Value::List(before), Value::List(after)) = (old, new) else {
         return;
     };
-    if Rc::ptr_eq(before, after) || !large(new) {
+    if Slice::ptr_eq(before, after) || !large(new) {
         return;
     }
     let Some(cache) = lua.app_data_ref::<Converted>() else {
@@ -2527,7 +2559,7 @@ pub(crate) fn derive(lua: &Lua, old: &Value, new: &Value) -> mlua::Result<()> {
     let (Value::List(before), Value::List(after)) = (old, new) else {
         return Ok(());
     };
-    if Rc::ptr_eq(before, after) || after.len() < before.len() || !large(new) {
+    if Slice::ptr_eq(before, after) || after.len() < before.len() || !large(new) {
         return Ok(());
     }
     let changed = before
@@ -2585,8 +2617,8 @@ pub(crate) fn derive(lua: &Lua, old: &Value, new: &Value) -> mlua::Result<()> {
 /// equal plain values.
 fn same_item(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
-        (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
+        (Value::List(a), Value::List(b)) => Slice::ptr_eq(a, b),
+        (Value::Map(a), Value::Map(b)) => Slice::ptr_eq(a, b),
         (Value::List(_) | Value::Map(_), _) | (_, Value::List(_) | Value::Map(_)) => false,
         (a, b) => a == b,
     }
@@ -2645,8 +2677,8 @@ fn converted_from(t: &Table, lua: &Lua) -> Option<Value> {
 /// Whether the cache holds the only reference to `value`'s contents.
 fn only_cached(value: &Value) -> bool {
     match value {
-        Value::List(items) => Rc::strong_count(items) == 1,
-        Value::Map(fields) => Rc::strong_count(fields) == 1,
+        Value::List(items) => Slice::strong_count(items) == 1,
+        Value::Map(fields) => Slice::strong_count(fields) == 1,
         _ => false,
     }
 }
@@ -2666,21 +2698,24 @@ fn path_in(lua: &Lua, value: mlua::Value, current: &Value) -> mlua::Result<Vec<P
     for step in t.sequence_values::<mlua::Value>() {
         let key = match step? {
             mlua::Value::Table(fields) => {
-                let mut want: Vec<(Rc<str>, Value)> = Vec::new();
+                let mut want: Vec<Field> = Vec::new();
                 for pair in fields.pairs::<String, mlua::Value>() {
                     let (name, v) = pair?;
-                    want.push((name.as_str().into(), convert(v, None)?));
+                    want.push(Field(name.as_str().into(), convert(v, None)?));
                 }
                 let found = at.and_then(|list| {
-                    list.list()
-                        .iter()
-                        .position(|item| want.iter().all(|(name, v)| item.field(name) == Some(v)))
+                    list.list().iter().position(|item| {
+                        want.iter()
+                            .all(|Field(name, v)| item.field(name) == Some(v))
+                    })
                 });
                 match found {
                     Some(i) => PathKey::Index(i + 1),
                     None => {
-                        let said: Vec<String> =
-                            want.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+                        let said: Vec<String> = want
+                            .iter()
+                            .map(|Field(k, v)| format!("{k} = {v}"))
+                            .collect();
                         return Err(mlua::Error::runtime(format!(
                             "no item has {{ {} }} along the state path",
                             said.join(", ")
@@ -2785,6 +2820,419 @@ fn raw_path(lua: &Lua, t: &Table) -> Option<Vec<PathKey>> {
     read.ok().and(path)
 }
 
+/// `rows` written into the list `signal` holds, each by its `key` field (a
+/// string): a row whose key a row of the list has replaces the first such
+/// row, kept where it is (reconciled: its equal parts stay); the others
+/// are added at the end, in the order given. Of two rows of `rows` with
+/// one key, the last is written. The list's other rows are shared, and the
+/// list is written in place where nothing else holds it and nothing is
+/// added. One pass over the list, whatever the number of rows (their keys
+/// are looked up, not searched for). What isn't a list counts as an empty
+/// one. Whether anything changed; an error naming a row with no string at
+/// `key`, writing nothing.
+pub(crate) fn upsert_rows(
+    signal: &Signal<Value>,
+    key: &str,
+    rows: Vec<Value>,
+) -> Result<bool, String> {
+    // The rows by key, the last of a key kept, in the order first given.
+    let mut given: Vec<(Str, Value)> = Vec::with_capacity(rows.len());
+    let mut at: rustc_hash::FxHashMap<Str, usize> = Default::default();
+    at.reserve(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        let Some(Value::Str(id)) = row.field(key) else {
+            return Err(format!("row {} has no string `{key}`", i + 1));
+        };
+        let id = id.clone();
+        match at.get(&id) {
+            Some(&n) => given[n].1 = row,
+            None => {
+                at.insert(id.clone(), given.len());
+                given.push((id, row));
+            }
+        }
+    }
+    // A list, or nothing yet (`nil`, or `{}`: both) to be one.
+    let listed = signal.with_untracked(|held| match held {
+        Value::List(_) | Value::Nil => true,
+        Value::Map(fields) => fields.is_empty(),
+        _ => false,
+    });
+    if !listed {
+        return Err("it holds no list".into());
+    }
+    if given.is_empty() {
+        return Ok(false);
+    }
+    let mut written = vec![false; given.len()];
+    let changed = signal.mutate(|held| {
+        // Where each given row goes: the first row of its key.
+        let mut matched: Vec<(usize, usize)> = Vec::new();
+        if let Value::List(items) = &*held {
+            for (i, item) in items.iter().enumerate() {
+                if let Some(Value::Str(id)) = item.field(key)
+                    && let Some(&n) = at.get(&**id)
+                    && !written[n]
+                {
+                    written[n] = true;
+                    matched.push((i, n));
+                }
+            }
+        }
+        let added: Vec<usize> = (0..given.len()).filter(|n| !written[*n]).collect();
+        // A row reconciled to its own is that row again (`reconcile` gives
+        // the old back when equal): told by identity, not compared again.
+        let kept = |row: &Value, was: &Value| match (row, was) {
+            (Value::Map(a), Value::Map(b)) => Slice::ptr_eq(a, b),
+            (Value::List(a), Value::List(b)) => Slice::ptr_eq(a, b),
+            (a, b) => a == b,
+        };
+        let mut changed = false;
+        // In place: nothing added, and the list held here alone.
+        if added.is_empty()
+            && let Value::List(list) = held
+            && let Some(items) = Slice::get_mut(list)
+        {
+            for (i, n) in matched {
+                let row = std::mem::replace(&mut given[n].1, Value::Nil).reconcile(&items[i]);
+                if !kept(&row, &items[i]) {
+                    items[i] = row;
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+        let mut next: Vec<Value> = match &*held {
+            Value::List(items) => items.to_vec(),
+            _ => Vec::new(),
+        };
+        for (i, n) in matched {
+            let row = std::mem::replace(&mut given[n].1, Value::Nil).reconcile(&next[i]);
+            if !kept(&row, &next[i]) {
+                next[i] = row;
+                changed = true;
+            }
+        }
+        for n in added {
+            next.push(std::mem::replace(&mut given[n].1, Value::Nil));
+            changed = true;
+        }
+        if changed {
+            *held = Value::List(Slice::from(next));
+        }
+        changed
+    });
+    Ok(changed)
+}
+
+/// Where a row given to [`Shared::upsert_at`] goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// Where the list's row of its key is, or at the end if it has none:
+    /// as [`Shared::upsert`] writes it.
+    Stay,
+    /// Just before the row with this key: one of the list's, or one given
+    /// with it (placed where that one goes).
+    Before(String),
+    /// At the end of the list.
+    End,
+}
+
+/// Whether `row` is `was` still: the same parts (as `reconcile` gives an
+/// equal one back), told without comparing them again.
+fn same_row(row: &Value, was: &Value) -> bool {
+    match (row, was) {
+        (Value::Map(a), Value::Map(b)) => Slice::ptr_eq(a, b),
+        (Value::List(a), Value::List(b)) => Slice::ptr_eq(a, b),
+        (a, b) => a == b,
+    }
+}
+
+/// Puts the rows placed before `key` (`anchored`'s, in the order given),
+/// each after the rows placed before it in turn, by `put`: no recursion,
+/// so a long chain (a burst of rows each before the next) costs no stack.
+fn put_before(
+    key: &str,
+    anchored: &mut rustc_hash::FxHashMap<Str, Vec<usize>>,
+    ids: &[Str],
+    mut put: impl FnMut(usize),
+) {
+    let Some(first) = anchored.remove(key) else {
+        return;
+    };
+    let mut stack: Vec<(Option<usize>, std::vec::IntoIter<usize>)> =
+        vec![(None, first.into_iter())];
+    while let Some((_, rows)) = stack.last_mut() {
+        match rows.next() {
+            Some(n) => {
+                let before = anchored.remove(&*ids[n]).unwrap_or_default();
+                stack.push((Some(n), before.into_iter()));
+            }
+            None => {
+                if let Some((Some(n), _)) = stack.pop() {
+                    put(n);
+                }
+            }
+        }
+    }
+}
+
+/// [`upsert_rows`] with a place for each row ([`Place`]): a row placed
+/// before a key goes just before that key's row (the list's first of it,
+/// or one given, wherever that goes), one placed at the end at the end,
+/// each in the order given; one that stays is written as `upsert` writes
+/// it. A row of the list given with a place moves there. The list is
+/// walked once, and the rest of it shared. Of two rows given with one key
+/// the last is written, with its place. An error, nothing written, if a
+/// row has no string at `key`, is placed before itself, before a key
+/// neither the list nor the rows have, or rows are placed before one
+/// another (`a` before `b` before `a`). Whether anything changed.
+pub(crate) fn place_rows(
+    signal: &Signal<Value>,
+    key: &str,
+    given: Vec<(Value, Place)>,
+) -> Result<bool, String> {
+    use rustc_hash::{FxHashMap, FxHashSet};
+    // Nothing placed (rows that changed where they are): `upsert`, which
+    // writes a list held nowhere else in place.
+    if given.iter().all(|(_, place)| *place == Place::Stay) {
+        return upsert_rows(signal, key, given.into_iter().map(|(row, _)| row).collect());
+    }
+    // The rows by key, the last of a key kept (with its place), in the
+    // order first given; `said` is the row's number as given.
+    let mut ids: Vec<Str> = Vec::with_capacity(given.len());
+    let mut rows: Vec<Value> = Vec::with_capacity(given.len());
+    let mut places: Vec<Place> = Vec::with_capacity(given.len());
+    let mut said: Vec<usize> = Vec::with_capacity(given.len());
+    let mut at: FxHashMap<Str, usize> = Default::default();
+    at.reserve(given.len());
+    for (i, (row, place)) in given.into_iter().enumerate() {
+        let Some(Value::Str(id)) = row.field(key) else {
+            return Err(format!("row {} has no string `{key}`", i + 1));
+        };
+        let id = id.clone();
+        match at.get(&id) {
+            Some(&n) => (rows[n], places[n], said[n]) = (row, place, i + 1),
+            None => {
+                at.insert(id.clone(), ids.len());
+                ids.push(id);
+                rows.push(row);
+                places.push(place);
+                said.push(i + 1);
+            }
+        }
+    }
+    let listed = signal.with_untracked(|held| match held {
+        Value::List(_) | Value::Nil => true,
+        Value::Map(fields) => fields.is_empty(),
+        _ => false,
+    });
+    if !listed {
+        return Err("it holds no list".into());
+    }
+    if ids.is_empty() {
+        return Ok(false);
+    }
+    // Before itself, or before one another: told from the rows alone. A
+    // row placed before one that stays or goes to the end is placed where
+    // that one is; before one placed before another, it follows it.
+    let anchor = |n: usize| match &places[n] {
+        Place::Before(key) => Some(key.as_str()),
+        _ => None,
+    };
+    for n in 0..ids.len() {
+        if anchor(n) == Some(&*ids[n]) {
+            return Err(format!(
+                "row {} is placed before itself (`{}`)",
+                said[n], ids[n]
+            ));
+        }
+    }
+    let placed_before = |n: usize| {
+        anchor(n)
+            .and_then(|key| at.get(key).copied())
+            .filter(|m| anchor(*m).is_some())
+    };
+    // 0 not yet seen, 1 on the chain being followed, 2 followed.
+    let mut seen = vec![0u8; ids.len()];
+    for start in 0..ids.len() {
+        let mut chain = Vec::new();
+        let mut n = Some(start);
+        while let Some(at_n) = n {
+            match seen[at_n] {
+                2 => break,
+                1 => {
+                    let from = chain.iter().position(|m| *m == at_n).unwrap_or(0);
+                    let mut keys: Vec<String> = chain[from..]
+                        .iter()
+                        .map(|m: &usize| format!("`{}`", ids[*m]))
+                        .collect();
+                    keys.push(format!("`{}`", ids[at_n]));
+                    return Err(format!(
+                        "rows are placed before one another: {}",
+                        keys.join(" before ")
+                    ));
+                }
+                _ => {
+                    seen[at_n] = 1;
+                    chain.push(at_n);
+                    n = placed_before(at_n);
+                }
+            }
+        }
+        for m in chain {
+            seen[m] = 2;
+        }
+    }
+    // The rows placed before each key, in the order given.
+    let mut anchored: FxHashMap<Str, Vec<usize>> = Default::default();
+    for n in 0..ids.len() {
+        if let Some(key) = anchor(n) {
+            anchored.entry(Str::from(key)).or_default().push(n);
+        }
+    }
+    let placed: FxHashSet<usize> = (0..ids.len())
+        .filter(|n| places[*n] != Place::Stay)
+        .collect();
+    /// The list being made, and where each given row is in it.
+    struct Making<'a> {
+        items: &'a [Value],
+        next: Vec<Value>,
+        rows: Vec<Value>,
+        /// Where its row was in the list, once the walk has met it.
+        old: Vec<Option<usize>>,
+        /// Where it is in `next`, once put.
+        put_at: Vec<Option<usize>>,
+    }
+    impl Making<'_> {
+        /// Given row `n` put next: reconciled with its old one if that is
+        /// known yet (a row moved up meets it later, in the walk).
+        fn put(&mut self, n: usize) {
+            let row = std::mem::replace(&mut self.rows[n], Value::Nil);
+            let row = match self.old[n] {
+                Some(i) => row.reconcile(&self.items[i]),
+                None => row,
+            };
+            self.put_at[n] = Some(self.next.len());
+            self.next.push(row);
+        }
+    }
+    let mut failed = None;
+    let count = ids.len();
+    let changed = signal.mutate(|held| {
+        let items: &[Value] = match &*held {
+            Value::List(items) => items,
+            _ => &[],
+        };
+        let mut m = Making {
+            items,
+            next: Vec::with_capacity(items.len() + count),
+            rows: std::mem::take(&mut rows),
+            old: vec![None; count],
+            put_at: vec![None; count],
+        };
+        for (i, item) in items.iter().enumerate() {
+            let id = match item.field(key) {
+                Some(Value::Str(id)) => Some(&**id),
+                _ => None,
+            };
+            if let Some(id) = id {
+                if let Some(&n) = at.get(id)
+                    && m.old[n].is_none()
+                {
+                    m.old[n] = Some(i);
+                    if placed.contains(&n) {
+                        // Moved: put where it goes (already, if that came
+                        // first: reconciled now).
+                        if let Some(pos) = m.put_at[n] {
+                            m.next[pos] =
+                                std::mem::replace(&mut m.next[pos], Value::Nil).reconcile(item);
+                        }
+                        continue;
+                    }
+                    put_before(id, &mut anchored, &ids, |r| m.put(r));
+                    m.put(n);
+                    continue;
+                }
+                put_before(id, &mut anchored, &ids, |r| m.put(r));
+            }
+            m.next.push(item.clone());
+        }
+        // At the end, in the order given: the new rows that stay, and the
+        // rows placed at the end (each after the rows placed before it).
+        for n in 0..ids.len() {
+            let ends = match places[n] {
+                Place::End => true,
+                Place::Stay => m.old[n].is_none(),
+                Place::Before(_) => false,
+            };
+            if ends {
+                put_before(&ids[n], &mut anchored, &ids, |r| m.put(r));
+                m.put(n);
+            }
+        }
+        // A row placed before a key neither the list nor the rows have
+        // was never put.
+        if let Some(n) = (0..count).find(|n| m.put_at[*n].is_none()) {
+            failed = Some(format!(
+                "row {} is placed before `{}`, which isn't in the list",
+                said[n],
+                anchor(n).unwrap_or("")
+            ));
+            return false;
+        }
+        let next = m.next;
+        let changed = next.len() != items.len()
+            || next.iter().zip(items).any(|(row, was)| !same_row(row, was));
+        if changed {
+            *held = Value::List(Slice::from(next));
+        }
+        changed
+    });
+    match failed {
+        Some(why) => Err(why),
+        None => Ok(changed),
+    }
+}
+
+/// The rows of the list `signal` holds whose `key` field is one of `keys`
+/// removed, every such row; one pass. Whether any was.
+pub(crate) fn remove_rows(signal: &Signal<Value>, key: &str, keys: &[&str]) -> bool {
+    if keys.is_empty() {
+        return false;
+    }
+    let gone: rustc_hash::FxHashSet<&str> = keys.iter().copied().collect();
+    signal.mutate(|held| {
+        let Value::List(items) = held else {
+            return false;
+        };
+        let goes =
+            |item: &Value| matches!(item.field(key), Some(Value::Str(id)) if gone.contains(&**id));
+        // One pass: the rows before the first to go are kept as they are.
+        let Some(first) = items.iter().position(goes) else {
+            return false;
+        };
+        let mut kept: Vec<Value> = Vec::with_capacity(items.len() - 1);
+        kept.extend_from_slice(&items[..first]);
+        kept.extend(
+            items[first + 1..]
+                .iter()
+                .filter(|item| !goes(item))
+                .cloned(),
+        );
+        *held = Value::List(Slice::from(kept));
+        true
+    })
+}
+
+/// `signal` set to `value`, keeping the parts of what it held that are
+/// equal (`Shared::set`, and a native module's): whether anything changed.
+#[inline]
+pub(crate) fn set_reconciled(signal: &Signal<Value>, value: Value) -> bool {
+    let next = signal.with_untracked(|old| value.reconcile(old));
+    signal.set(next)
+}
+
 /// Shared state (`ui.shared`) as Rust holds it: a signal whose `set`
 /// reconciles (`Value::reconcile`), so a model republished whole keeps the
 /// parts that did not change, and what reads them does no work for them.
@@ -2795,8 +3243,32 @@ impl Shared {
     /// Sets the value, keeping the current one's parts where they are
     /// equal; whether anything changed.
     pub fn set(&self, value: Value) -> bool {
-        let next = self.0.with_untracked(|old| value.reconcile(old));
-        self.0.set(next)
+        set_reconciled(&self.0, value)
+    }
+    /// `rows` written into the list it holds by their `key` field (a
+    /// string), one pass over the list: a row whose key the list has
+    /// replaces the first row of that key where it is (its equal parts
+    /// kept), the others are added at the end in the order given, and of
+    /// two rows given with one key the last is written. What a model
+    /// diffed elsewhere publishes: only the rows that changed. Whether
+    /// anything changed. Holding nothing (`nil`) yet, it becomes a list of
+    /// them; an error, writing nothing, if it holds something else or a row
+    /// has no string at `key`.
+    pub fn upsert(&self, key: &str, rows: Vec<Value>) -> Result<bool, String> {
+        upsert_rows(&self.0, key, rows)
+    }
+    /// [`Shared::upsert`] with a place for each row ([`Place`]): before a
+    /// key's row, at the end, or where its key's row is. A row the list has
+    /// moves to its place; the list is walked once. An error, nothing
+    /// written, if a row is placed before itself, before a key neither the
+    /// list nor the rows have, or rows are placed before one another.
+    pub fn upsert_at(&self, key: &str, rows: Vec<(Value, Place)>) -> Result<bool, String> {
+        place_rows(&self.0, key, rows)
+    }
+    /// The rows of the list it holds whose `key` field is one of `keys`
+    /// removed (every such row); whether any was.
+    pub fn remove_rows(&self, key: &str, keys: &[&str]) -> bool {
+        remove_rows(&self.0, key, keys)
     }
     /// The signal itself (its `set` replaces without reconciling).
     pub fn signal(&self) -> Signal<Value> {
@@ -2946,9 +3418,13 @@ impl State {
         written
     }
     fn charge(&self, lua: &Lua, bytes: impl FnOnce(usize) -> usize) -> mlua::Result<()> {
-        let meter = lua
-            .app_data_ref::<crate::node::Env>()
-            .and_then(|env| env.meter.clone());
+        let meter = lua.app_data_ref::<crate::node::Env>().and_then(|env| {
+            // A load running: what this held kept, to undo if it fails.
+            if env.journal.active() {
+                env.journal.write(&self.0);
+            }
+            env.meter.clone()
+        });
         match meter {
             Some(meter) => meter.hold(&self.0, bytes(meter.held_by(&self.0))),
             None => Ok(()),
@@ -3179,6 +3655,9 @@ const OFF_THE_CLOCK_FROM: usize = 256;
 /// transcript took more than the 50 ms a call has, so the script's next
 /// instruction, whatever it was, stopped with its budget spent.
 fn read(value: Value, lua: &Lua) -> mlua::Result<mlua::Value> {
+    if let Value::Text(text) = &value {
+        return script_string(lua, text).map(mlua::Value::String);
+    }
     if value.list().len() < OFF_THE_CLOCK_FROM {
         return value.into_lua(lua);
     }
@@ -3189,6 +3668,71 @@ fn read(value: Value, lua: &Lua) -> mlua::Result<mlua::Value> {
     match vm {
         Some(vm) => vm.off_clock(|| value.into_lua(lua)),
         None => value.into_lua(lua),
+    }
+}
+/// How many long strings a VM keeps as scripts last read them.
+const KEPT_STRINGS: usize = 2;
+/// A long string (`Value::Text`, a document) as a script reads it: made once
+/// for each text and handed to every read of it until it changes. Each
+/// read made it again, copying and hashing the whole of it: a composer whose
+/// draft a dozen bindings read paid a dozen copies of the draft at every
+/// keystroke (5 ms at 30,000 lines). Let go as the host goes idle
+/// (`sweep_idle`), and as other texts are read.
+fn script_string(lua: &Lua, text: &zgx::text::Text) -> mlua::Result<mlua::LuaString> {
+    let Some(cache) = lua.app_data_ref::<Converted>() else {
+        return push_long(lua, text);
+    };
+    if let Some((_, kept)) = cache.strings.borrow().iter().find(|(t, _)| t.ptr_eq(text)) {
+        return Ok(kept.clone());
+    }
+    drop(cache);
+    let made = push_long(lua, text)?;
+    if let Some(cache) = lua.app_data_ref::<Converted>() {
+        let mut strings = cache.strings.borrow_mut();
+        if strings.len() >= KEPT_STRINGS {
+            strings.remove(0);
+        }
+        strings.push((text.clone(), made.clone()));
+    }
+    Ok(made)
+}
+fn push_long(lua: &Lua, text: &zgx::text::Text) -> mlua::Result<mlua::LuaString> {
+    // SAFETY: `push_text` leaves one string, `exec_raw`'s result.
+    unsafe { lua.exec_raw::<mlua::LuaString>((), |state| push_text(state, text)) }
+}
+/// Bytes `from` to `to` (0-based, end excluded, within its length) of the
+/// string `value` holds, read where it is held: a long text's chunks are
+/// copied only where they overlap. Nothing for anything not a string.
+fn byte_range(value: &Value, from: usize, to: usize) -> Vec<u8> {
+    match value {
+        Value::Str(s) => s.as_bytes()[from..to].to_vec(),
+        Value::Text(t) => {
+            let mut out = Vec::with_capacity(to - from);
+            let mut at = 0;
+            for chunk in t.chunks() {
+                let end = at + chunk.len();
+                if end > from && at < to {
+                    let bytes = chunk.as_bytes();
+                    out.extend_from_slice(
+                        &bytes[from.saturating_sub(at)..(to - at).min(bytes.len())],
+                    );
+                }
+                if end >= to {
+                    break;
+                }
+                at = end;
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+/// The byte length of the string `value` holds, else its items' count.
+fn length(value: &Value) -> usize {
+    match value {
+        Value::Str(s) => s.len(),
+        Value::Text(t) => t.len(),
+        v => v.items().len(),
     }
 }
 /// What a state's script handle reads: the same for a state and for a
@@ -3205,8 +3749,23 @@ fn add_reads<T: 'static, M: UserDataMethods<T>>(
     });
     // Of a derived list (a sorted view) as it is now: brought up to date
     // first, as `at` is, inside a batch that wrote what it derives from.
-    methods.add_method("len", move |_, s: &T, ()| {
-        Ok(state(s).fresh().with(|v| v.items().len()))
+    // Of a string, its length in bytes (`#`), tracked as `get` is: a long
+    // document is not copied into the script for it.
+    methods.add_method("len", move |_, s: &T, ()| Ok(state(s).fresh().with(length)));
+    // Of a string, `string.sub`'s bytes (from 1, negative from the end,
+    // `j` the end by default), tracked as `get` is: a long document's
+    // part (a draft's line at the caret) without the rest of it copied.
+    methods.add_method("sub", move |lua, s: &T, (i, j): (i64, Option<i64>)| {
+        let bytes = state(s).fresh().with(|v| {
+            let len = length(v) as i64;
+            let at = |n: i64| if n < 0 { (len + n + 1).max(0) } else { n };
+            let (start, end) = (at(i).max(1), at(j.unwrap_or(-1)).min(len));
+            match start <= end {
+                true => byte_range(v, start as usize - 1, end as usize),
+                false => Vec::new(),
+            }
+        });
+        lua.create_string(bytes)
     });
     // Where the first item whose `field` is `value` is (from 1), or nil,
     // tracked as `get` is: `messages:index_of("id", 42)`, found without
@@ -3483,6 +4042,11 @@ impl Store {
             .or_insert_with(|| self.runtime.signal(initial))
             .clone()
     }
+    /// `key` gone: a load that made it failed (`journal`).
+    pub(crate) fn remove(&self, key: &str) {
+        self.signals.borrow_mut().remove(key);
+        self.provisional.borrow_mut().remove(key);
+    }
     /// The state for `key`, if there is any.
     pub fn get(&self, key: &str) -> Option<Signal<Value>> {
         self.signals.borrow().get(key).cloned()
@@ -3521,7 +4085,7 @@ mod tests {
                 Value::record([("id", Value::from("r1")), ("text", Value::from("hello"))])
             }
         }
-        let value = Value::folded(Rc::from("r1"), Row);
+        let value = Value::folded("r1", Row);
         let Value::Folded(folded) = &value else {
             panic!("folded")
         };
@@ -3654,14 +4218,14 @@ mod tests {
         keys.sort();
         keys.dedup();
         for size in [0, 1, 3, 8, 9, keys.len()] {
-            let fields: Vec<(Rc<str>, Value)> = keys[..size]
+            let fields: Vec<Field> = keys[..size]
                 .iter()
-                .map(|k| (Rc::from(k.as_str()), Value::Nil))
+                .map(|k| Field(Str::from(k.as_str()), Value::Nil))
                 .collect();
             for key in &keys {
                 assert_eq!(
                     find_key(&fields, key),
-                    fields.binary_search_by(|(k, _)| (**k).cmp(key.as_str())),
+                    fields.binary_search_by(|Field(k, _)| (**k).cmp(key.as_str())),
                     "{key:?} in {size}"
                 );
             }
@@ -3715,10 +4279,10 @@ mod tests {
         else {
             panic!("tabs are lists")
         };
-        assert!(!Rc::ptr_eq(old, new));
+        assert!(!Slice::ptr_eq(old, new));
         // Untouched tabs, and the touched tab's untouched root, are shared.
         let ptr = |v: &Value| match v {
-            Value::Map(m) => Rc::as_ptr(m) as *const u8,
+            Value::Map(m) => Slice::as_ptr(m) as *const u8,
             _ => std::ptr::null(),
         };
         assert_eq!(ptr(&old[0]), ptr(&new[0]));
@@ -3757,7 +4321,7 @@ mod tests {
             .unwrap();
         let back = convert(kept, None).unwrap();
         let ptr = |v: &Value| match v {
-            Value::Map(m) => Rc::as_ptr(m) as *const u8,
+            Value::Map(m) => Slice::as_ptr(m) as *const u8,
             _ => std::ptr::null(),
         };
         assert_eq!(back.list().len(), 100);
@@ -3801,7 +4365,7 @@ mod tests {
             panic!("a long string is a text");
         };
         let map = |fields: Vec<(&str, Value)>| {
-            Value::Map(fields.into_iter().map(|(k, v)| (Rc::from(k), v)).collect())
+            Value::Map(fields.into_iter().map(|(k, v)| (Str::from(k), v)).collect())
         };
         let message = |i: usize| {
             map(vec![
@@ -3811,20 +4375,22 @@ mod tests {
                 ("ok", Value::Bool(i.is_multiple_of(2))),
                 (
                     "paragraphs",
-                    Value::List(Rc::from(vec![Value::List(Rc::from(vec![
-                        map(vec![
-                            ("s", Value::Str("bold".into())),
-                            ("t", Value::Str("hi".into())),
-                        ]),
-                        map(vec![("t", Value::Text(text.clone()))]),
-                    ]))])),
+                    Value::List(crate::Slice::from(vec![Value::List(crate::Slice::from(
+                        vec![
+                            map(vec![
+                                ("s", Value::Str("bold".into())),
+                                ("t", Value::Str("hi".into())),
+                            ]),
+                            map(vec![("t", Value::Text(text.clone()))]),
+                        ],
+                    ))])),
                 ),
             ])
         };
         // And a chain 100 lists deep.
         let mut deep = Value::Num(1.);
         for _ in 0..100 {
-            deep = Value::List(Rc::from(vec![deep]));
+            deep = Value::List(Slice::from(vec![deep]));
         }
         let tree = map(vec![
             ("deep", deep),
@@ -3840,7 +4406,7 @@ mod tests {
                     .fold((1, items.len() as u64), |a, b| (a.0 + b.0, a.1 + b.1)),
                 Value::Map(fields) => fields
                     .iter()
-                    .map(|(_, v)| counts(v))
+                    .map(|Field(_, v)| counts(v))
                     .fold((1, fields.len() as u64), |a, b| (a.0 + b.0, a.1 + b.1)),
                 _ => (0, 0),
             }
@@ -3915,7 +4481,7 @@ mod tests {
             .unwrap();
         assert_eq!(v, map(&[("a", map(&[("b", 1.0.into())]))]));
         let v = v.set_path(&[key("a"), key("b")], Value::Nil).unwrap();
-        assert_eq!(v, map(&[("a", Value::List(Rc::new([])))]));
+        assert_eq!(v, map(&[("a", Value::List(Slice::from([])))]));
         let list = Value::List(vec![1.0.into(), 2.0.into()].into());
         assert_eq!(
             list.set_path(&[PathKey::Index(3)], 3.0.into())

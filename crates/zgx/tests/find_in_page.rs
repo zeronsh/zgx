@@ -270,6 +270,47 @@ fn command_f_opens_the_bar_typing_finds_and_escape_selects_the_match() {
     assert!(marked(&ui).is_empty());
 }
 
+/// A character typed in the bar and Enter, both before the next frame (two
+/// keys in one turn of the host's loop): Enter steps through what the
+/// character found, the search applied before Enter is, as each
+/// dispatch's preparation applies what the bar asked for.
+#[test]
+fn typing_then_enter_before_a_frame_steps_through_the_new_query() {
+    let mut ui = Ui::new(500., 400.);
+    let view = ui.mount(
+        column()
+            .selectable(true)
+            .child(text("apple pie"))
+            .child(text("apply now"))
+            .child(text("apple tart"))
+            .child(button().id("button").child(text("Go"))),
+    );
+    ui.prepare_frame();
+    ui.input.focus(&ui.scene, view.find("button"));
+    assert!(key(&mut ui, Key::Character("f".into()), command()));
+    for c in "appl".chars() {
+        ui.dispatch(InputEvent::Text(c.to_string()));
+    }
+    ui.prepare_frame();
+    assert_eq!(ui.find_status().count, 3);
+    // One turn: no frame between the two.
+    ui.dispatch(InputEvent::Text("e".into()));
+    ui.dispatch(InputEvent::KeyDown {
+        key: Key::Enter,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    ui.prepare_frame();
+    let status = ui.find_status();
+    assert_eq!(status.query, "apple", "the character's search applied");
+    assert_eq!(status.count, 2);
+    assert_eq!(
+        status.current,
+        Some(1),
+        "Enter: the next of the new query's"
+    );
+}
+
 #[test]
 fn an_app_binding_command_f_keeps_it_and_find_can_be_turned_off() {
     #[derive(Debug)]

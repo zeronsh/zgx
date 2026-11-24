@@ -28,21 +28,21 @@ impl HeapDump {
 
         let mut buf = Vec::new();
         unsafe {
-            let file = libc::tmpfile();
+            let file = files::tmpfile();
             if file.is_null() {
                 return None;
             }
             ffi::lua_memorydump(state, file as *mut _, Some(category_name));
-            libc::fseek(file, 0, libc::SEEK_END);
-            let len = libc::ftell(file);
-            libc::rewind(file);
+            files::fseek(file, 0, files::SEEK_END);
+            let len = files::ftell(file);
+            files::rewind(file);
             if len > 0 {
                 let len = len as usize;
                 buf.reserve(len);
-                let n = libc::fread(buf.as_mut_ptr() as *mut _, 1, len, file);
+                let n = files::fread(buf.as_mut_ptr() as *mut _, 1, len, file);
                 buf.set_len(n);
             }
-            libc::fclose(file);
+            files::fclose(file);
         }
 
         let buf = String::from_utf8(buf).ok()?.into_boxed_str();
@@ -180,4 +180,23 @@ fn get_key<'a>(objects: &'a HashMap<&'a str, Json>, tbl: &Json, key: &str) -> Op
         }
     }
     None
+}
+
+// zgx patch: the C file functions the dump is read back with. Rust's `libc`
+// declares none for wasm32-unknown-unknown, where zgx-dom links wasi-libc,
+// which has them (and no files: `tmpfile` fails, so there is no dump).
+#[cfg(not(target_arch = "wasm32"))]
+use libc as files;
+#[cfg(target_arch = "wasm32")]
+mod files {
+    use std::ffi::{c_int, c_long, c_void};
+    pub(super) const SEEK_END: c_int = 2;
+    unsafe extern "C" {
+        pub(super) fn tmpfile() -> *mut c_void;
+        pub(super) fn fseek(file: *mut c_void, offset: c_long, whence: c_int) -> c_int;
+        pub(super) fn ftell(file: *mut c_void) -> c_long;
+        pub(super) fn rewind(file: *mut c_void);
+        pub(super) fn fread(ptr: *mut c_void, size: usize, n: usize, file: *mut c_void) -> usize;
+        pub(super) fn fclose(file: *mut c_void) -> c_int;
+    }
 }

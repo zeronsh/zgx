@@ -5,9 +5,9 @@
 #     scripts/release_check.sh [--allow-dirty]
 #
 # 1. The forks zgx publishes as its own crates (vendor/harfrust,
-#    cosmic-text, taffy, mlua, vte, alacritty-terminal, zune-jpeg as
-#    zgx-harfrust, zgx-cosmic-text, zgx-taffy, zgx-mlua, zgx-vte,
-#    zgx-alacritty-terminal, zgx-zune-jpeg) are each packaged and built from
+#    cosmic-text, taffy, mlua, vte, alacritty-terminal, zune-jpeg, arboard
+#    as zgx-harfrust, zgx-cosmic-text, zgx-taffy, zgx-mlua, zgx-vte,
+#    zgx-alacritty-terminal, zgx-zune-jpeg, zgx-arboard) are each packaged and built from
 #    their package, against crates.io and the forks they depend on
 #    (zgx-cosmic-text shapes with zgx-harfrust, zgx-alacritty-terminal
 #    parses with zgx-vte), given from vendor/.
@@ -55,7 +55,7 @@ cd "$(git rev-parse --show-toplevel)"
 # `--allow-dirty`: check uncommitted changes too (a release itself is clean).
 dirty=""
 if [ "${1:-}" = --allow-dirty ]; then dirty=--allow-dirty; fi
-forks="harfrust cosmic-text taffy mlua vte alacritty-terminal zune-jpeg"
+forks="harfrust cosmic-text taffy mlua vte alacritty-terminal zune-jpeg arboard"
 # Where packages are unpacked, the forks' beside the workspace's (3 reads
 # them there).
 target="${CARGO_TARGET_DIR:-target}"
@@ -114,7 +114,7 @@ mkdir -p "$app/src"
     printf '[package]\nname = "zgx-fresh-app"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n\n'
     # A workspace of its own, not a member of zgx's when under its target/.
     printf '[workspace]\n\n[dependencies]\nzgx-script = "=%s"\n\n[patch.crates-io]\n' "$zgx"
-    for crate in zgx zgx-components zgx-gpu zgx-desktop zgx-script zgx-run zgx-terminal zgx-ghostty-sys; do
+    for crate in zgx zgx-components zgx-text zgx-gpu zgx-desktop zgx-script zgx-run zgx-terminal zgx-ghostty-sys; do
         printf '%s = { path = "../package/%s-%s" }\n' "$crate" "$crate" "$zgx"
     done
     for fork in $forks; do

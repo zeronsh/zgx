@@ -7,6 +7,7 @@ ui.webview(props: WebViewProps) -> Node
 ui.web(opts: WebOptions?) -> Web
 ui.web(id: string, opts: WebOptions?) -> Web
 ui.terminal(props: TerminalProps) -> Node
+ui.host_view(props: HostViewProps) -> Node
 ui.term(id: string, opts: TermOptions?) -> Term
 ui.command(opts: CommandOptions) -> ()
 ```
@@ -17,6 +18,7 @@ ui.command(opts: CommandOptions) -> ()
 | `web` | a page's controller, usable before and after its view mounts. `ui.web(opts)` makes a page for this run; `ui.web(id, opts)` returns the host's page for `id`, made with `opts` the first time, kept across reloads until `web:close()` |
 | `terminal` | shows a session (`term = ui.term(id)`) |
 | `term` | the session for `id`, started the first time with `opts`; later calls return the same session, their handlers replacing the previous run's |
+| `host_view` | a view the host made in Rust, registered by name with `zgx_script::host_view(name, || View)` and shown where `ui.host_view { name = … }` puts it. It mounts in the script's tree, so it lays out and clips like any element (give it `w`, `h`, or let it grow) and sits under the script's popups, dialogs and layers, which a view composed beside the script's can't. `make` runs each time the element mounts; a name nothing registered shows an empty box |
 | `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is |
 
 ## Web view options
@@ -41,9 +43,9 @@ ui.command(opts: CommandOptions) -> ()
 | `on_message` | `(value: any, origin: string, main_frame: boolean) -> ()` | none | what the page posted, as Luau data, and who posted it: the sending frame's origin (`https://example.com`) and whether it is the top frame. Any page the view shows, and any iframe in it, can post: check `origin` before acting on a message |
 | `on_error` | `(url: string, err: string) -> ()` | none | a navigation failed, or the page's process ended (`url` empty) |
 | `on_new_window` | `(url: string) -> ()` | none | |
-| `on_download` | `(d: Download) -> ()` | none | a download the page started (a `download` link, an attachment): `d.url`, `d.name` (as the page or its server suggests it) and `d.mime`; save it with `d:save_to(file, opts?)` (a file the user picked, from `ui.save_file`) or `d:ask(opts?)` (the save dialog suggesting `d.name`: a promise of the file saved to, or nil), or `d:cancel()`. `opts` takes `on_progress(received, total)` and `on_finish(ok, err)`. Both need the Files grant. Without `on_download`, and for a `d` never answered, nothing is saved: a page never starts a download into the user's folders without the app deciding |
+| `on_download` | `(d: Download) -> ()` | none | a download the page started (a `download` link, an attachment): `d.url`, `d.name` (as the page or its server suggests it) and `d.mime`; save it with `d:save_to(file, opts?)` (a file the user picked, from `ui.save_file`) or `d:ask(opts?)` (the save dialog suggesting `d.name`: a promise of the file saved to, or nil), or `d:cancel()`. Internal, subject to change: `d:save_temp(opts?)` saves it with no dialog in the folder the host names for downloads (`ScriptHost::download_dir`; it raises until one is named), under `d.name` made unique, and gives a promise of the file once it is whole, readable like a picked one, or nil if it stopped; the browser's own request and cookies fetch it, on macOS, Windows and Linux alike (zgx-dom has no web view, so no such path). `opts` takes `on_progress(received, total)` and `on_finish(ok, err)`. All three need the Files grant. Without `on_download`, and for a `d` never answered, nothing is saved: a page never starts a download into the user's folders without the app deciding |
 
-A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`, `focused`, `error`, `full_screen` (an element of the page is full screen: on macOS in WebKit's window over the screen, on Windows and Linux filling the node, which an app grows to show it so) and `pointer` (`{ x, y }` in points while the pointer is over the page, else nil) are tracked like state: a text or computed reading them follows the page. Its methods: `load(url)`, `html(html, base_url?)`, `back()`, `forward()`, `reload()`, `stop()`, `focus()`, `blur()`, `devtools()`, `exit_full_screen()`, `zoom(z)`, `run(js)`, `eval(js, function(value, err) … end)` (the script's value as Luau data, or nil and the error), and `close()`.
+A `Web` controller's `url`, `title`, `loading`, `progress`, `can_go_back`, `can_go_forward`, `focused`, `error`, `full_screen` (an element of the page is full screen: on macOS in WebKit's window over the screen, on Windows and Linux filling the node, which an app grows to show it so) and `pointer` (`{ x, y }` in points while the pointer is over the page, else nil) are tracked like state: a text or computed reading them follows the page. Its methods: `load(url)`, `html(html, base_url?)`, `back()`, `forward()`, `reload()`, `stop()`, `focus()`, `blur()`, `devtools()`, `exit_full_screen()`, `zoom(z)`, `run(js)`, `eval(js, function(value, err) … end)` (the script's value as Luau data, or nil and the error), `clear_site_data(url)` (a promise of how many records went: everything the page's profile keeps for the url's site, its domain and those under it, for every web on the profile; open pages keep what they hold until they reload; on Windows, storage of the site's other subdomains stays), and `close()`.
 
 ## Terminal options
 
@@ -103,7 +105,28 @@ ui.windows(list: State<{ any }>, build: (item: any) -> ItemWindow, opts: { key: 
 | `under_pointer` | `{ number }` | none | where it opens: its top-left this far up and left of the pointer, as `on_drag_outside`'s `{ e.grab_x, e.grab_y }`, so a tab torn off stays under the grab (macOS, Windows, X11) |
 | `min_width`, `min_height`, `max_width`, `max_height` | `number` | none | its smallest and largest size in points, each width with its height; the same for both makes a window of fixed size that window managers (Raycast, Rectangle) can still move, which they refuse for one that isn't resizable |
 | `visible` | `boolean` or `State<boolean>` | shown | false: made hidden, its content laid out and drawn meanwhile, and shown whole the moment it turns true (on Wayland, where a window appears as it first draws, its first frame is drawn as it shows: whole, with no blank frame, a frame's time later; on X11 its theme's background shows for the few milliseconds from its mapping to its first frame) |
+| `glass` | `boolean` or `{ material, plain }` | none | the desktop blurred behind it: `true` is the HUD material; `material` one of `hud`, `liquid`, `under_window_background`, `under_page_background`, `window_background`, `content_background`, `titlebar`, `header_view`, `sidebar`, `menu`, `popover`, `sheet`, `tool_tip`, `full_screen_ui`, `selection` (macOS's `NSVisualEffectMaterial`; elsewhere the nearest the platform has), `plain` the blur alone, with no tint or saturation of the platform's |
+| `decorations` | `boolean` | `true` | the platform's own frame and title bar |
+| `resizable` | `boolean` | `true` | whether the person can resize it |
+| `transparent` | `boolean` | `false` | see-through where nothing is drawn |
+| `shadow` | `boolean` | `true` | the platform's shadow around it |
+| `covers_display` | `boolean` | `false` | over the whole display, the menu bar and dock included |
+| `level` | `"normal"`, `"always_on_top"` | `"normal"` | where it sits among windows: `always_on_top` over every app's ordinary windows (macOS's floating level, Windows' topmost, where X11's window manager honours it) |
+| `macos`, `windows`, `linux` | a table of the keys above | none | that platform's own: each key it has replaces the window's on that platform, whole (a table such as `glass` isn't merged into); the keys it doesn't have stay the window's. A block holds window keys only, not `id`, `open` or another block, and every block is checked on every platform |
 | `[1]` | `Node` | required | its content |
+
+```lua
+-- Glass everywhere, the platform's own frame on macOS alone.
+ui.window {
+	id = "panel",
+	open = ui.state("panel", true),
+	glass = { material = "under_window_background", plain = true },
+	decorations = false,
+	macos = { decorations = true },
+	ui.text("Panel"),
+}
+return ui.text("main")
+```
 
 ```lua
 local settings = ui.state("settings", false)
@@ -170,7 +193,7 @@ ui.window.titlebar_area: State<WindowRect?>
 ui.window.controls: State<WindowRect?>
 ```
 
-Content under an inset or hidden title bar stays clear of the window's own buttons by reading where it may draw, as the web's Window Controls Overlay gives it. `ui.window.titlebar_area` is the strip the title bar leaves, less the window's buttons. `ui.window.controls` is the buttons. Each is `{ x, y, width, height }` in points from the window's top left, or nil for a standard title bar, in fullscreen, and where the platform does not say (macOS and Linux, for now). Both follow resizes, scale and fullscreen. `zgx run` keeps them; a Rust host passes its window's with `ScriptHost::window_chrome`.
+Content under an inset or hidden title bar stays clear of the window's own buttons by reading where it may draw, as the web's Window Controls Overlay gives it. `ui.window.titlebar_area` is the strip the title bar leaves, less the window's buttons. `ui.window.controls` is the buttons. Each is `{ x, y, width, height }` in points from the window's top left, or nil for a standard title bar and in fullscreen. On macOS they are AppKit's traffic lights where they are (a `zgx.json`'s `traffic_lights` places them) and the strip beside them, 40 points tall or as tall as centres the lights where they sit lower. Both follow resizes, scale and fullscreen. `zgx run` keeps them; a Rust host passes its window's with `ScriptHost::window_chrome`.
 
 ```lua
 return ui.row {
@@ -221,6 +244,14 @@ Something timed by hand (an `anime` animation) can read the transition's own `du
 AppKit animates a snapshot of the window through the transition, and shows the window itself again as it ends. What is drawn meanwhile keeps the content current, but is not on the screen: a tween runs behind the snapshot, and the window shows it finished. `ui.window.shown` stays true through the transition; a window still covered once it is over counts as covered then.
 
 `zgx run` keeps both; a Rust host passes its window's with `ScriptHost::window_full_screen` (`WindowInfo::fullscreen` and `WindowContext::full_screen_transition`).
+
+### Popups open
+
+```luau
+ui.window.popups: State<{ { x: number, y: number, w: number, h: number, kind: string } }>
+```
+
+The menus, popovers and tooltips open, each with its box in window points and its `kind` (`"menu"`, `"popover"` or `"tooltip"`), followed as they open, close and move: for placing something clear of an open menu. Read-only; `zgx run` keeps it, and a Rust host with `ScriptHost::window_state`. In the browser (zgx-dom) the browser's top layer holds popups, and the list stays empty.
 
 ### Zoom
 

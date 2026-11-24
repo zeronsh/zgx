@@ -151,6 +151,37 @@ fn input_reaches_the_program_and_it_echoes() {
     assert_eq!(run.exited(), 0);
 }
 
+/// A stream of small writes (macOS paces its reads) lands whole and in
+/// order.
+#[cfg(unix)]
+#[test]
+fn a_stream_of_small_writes_lands_whole() {
+    let mut run = Scripted::run("seq 1 50000", 10, 4);
+    assert_eq!(run.exited(), 0);
+    assert_eq!(rows(&run.session.term()), ["49998", "49999", "50000", ""]);
+}
+
+/// Typing reaches a program while its output streams in (between the
+/// paced reads, macOS). The answer on a row of its own: `seq`, killed mid
+/// number, leaves its last line unended ("754got hi" on a CI runner).
+#[cfg(unix)]
+#[test]
+fn input_reaches_a_program_while_its_output_streams() {
+    let mut run = Scripted::run(
+        "seq 1 2000000 & read line; kill $!; wait; echo; echo \"got $line\"",
+        20,
+        4,
+    );
+    run.until("the stream", |_, term| {
+        rows(term)
+            .iter()
+            .any(|row| row.parse::<u32>().is_ok_and(|n| n > 1000))
+    });
+    run.session.write(b"hi\r".as_slice());
+    run.until("the line read", |_, term| shows(term, "got hi"));
+    assert_eq!(run.exited(), 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn ctrl_c_interrupts_the_foreground_program() {
@@ -697,8 +728,7 @@ fn an_emoji_asked_for_with_vs16_takes_two_cells() {
     );
     assert_eq!(line[4], ('❤', false, false), "without VS16, one cell");
     assert_eq!(line[5], ('c', false, false));
-    let heart = &grid[Point::new(Line(0), Column(1))];
-    assert_eq!(heart.zerowidth(), Some(&['\u{fe0f}'][..]));
+    assert_eq!(grid[Line(0)].zerowidth(Column(1)), Some(&['\u{fe0f}'][..]));
     // No room at the end of the line: it starts the next, a spacer where
     // it was.
     let line = cells(&term, 1);
@@ -750,13 +780,13 @@ fn an_emoji_asked_for_with_vs16_takes_two_cells() {
 fn clusters(term: &Term, line: i32, count: usize) -> Vec<(String, bool)> {
     let row = &term.grid()[Line(line)];
     (0..term.grid().columns())
-        .map(|column| &row[Column(column)])
-        .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+        .map(Column)
+        .filter(|&column| !row[column].flags.contains(Flags::WIDE_CHAR_SPACER))
         .take(count)
-        .map(|cell| {
-            let mut text = String::from(cell.c);
-            text.extend(cell.zerowidth().into_iter().flatten());
-            (text, cell.flags.contains(Flags::WIDE_CHAR))
+        .map(|column| {
+            let mut text = String::from(row[column].c);
+            text.extend(row.zerowidth(column).into_iter().flatten());
+            (text, row[column].flags.contains(Flags::WIDE_CHAR))
         })
         .collect()
 }

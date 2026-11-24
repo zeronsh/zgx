@@ -4,6 +4,7 @@
 //! app, a link to it, a second launch's), as [`crate::ScriptHost::open`]
 //! delivers them. Files it is given are the user's choice, as a dialog's
 //! are: `ui.read_file` and `ui.write_file` take them.
+use crate::Str;
 use crate::{Vm, io::Picked, value::Value};
 use mlua::{Function, Lua, Table};
 use std::{
@@ -46,7 +47,8 @@ impl Opens {
         }
         let event = event(&files, &urls);
         for (vm, handler) in handlers {
-            if let Err(error) = vm.call::<()>(&handler, event.clone()) {
+            if let Err(error) = vm.call_as::<()>("the ui.on_open handler", &handler, event.clone())
+            {
                 vm.report(error);
             }
         }
@@ -80,8 +82,8 @@ fn event(files: &[PathBuf], urls: &[String]) -> Value {
         .collect();
     Value::Map(
         vec![
-            (Rc::from("files"), Value::List(files.into())),
-            (Rc::from("urls"), Value::List(urls.into())),
+            (Str::from("files"), Value::List(files.into())),
+            (Str::from("urls"), Value::List(urls.into())),
         ]
         .into(),
     )

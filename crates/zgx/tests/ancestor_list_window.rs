@@ -77,3 +77,72 @@ fn lists_the_view_has_scrolled_past_build_nothing_either_way() {
     assert_eq!(top[0], (0..10).collect::<Vec<_>>(), "{top:?}");
     assert!(top[1..].iter().all(Vec::is_empty), "{top:?}");
 }
+
+#[test]
+fn a_scroll_that_shows_the_same_rows_places_no_list_again() {
+    let mut ui = Ui::new(400., 300.);
+    let (offset, built) = transcript(&mut ui);
+    // Into the third list, a row's edge at the view's bottom.
+    offset.set(2500.);
+    ui.prepare_frame();
+    take(&built);
+    let rows = |ui: &Ui| ui.scene.borrow().len();
+    let before = (zgx::compose::virtual_list_passes(), rows(&ui));
+    // A point down: a row more peeks in at the bottom, in the third list alone.
+    offset.set(2501.);
+    ui.prepare_frame();
+    let passes = zgx::compose::virtual_list_passes() - before.0;
+    assert_eq!(take(&built)[2], vec![35], "the row peeking in builds");
+    if cfg!(debug_assertions) {
+        assert_eq!(passes, 1, "only the third list places its rows");
+    }
+    // Another point: the same rows in every list, so no list places any.
+    let before = (zgx::compose::virtual_list_passes(), rows(&ui));
+    offset.set(2502.);
+    ui.prepare_frame();
+    if cfg!(debug_assertions) {
+        assert_eq!(
+            zgx::compose::virtual_list_passes(),
+            before.0,
+            "no list places its rows"
+        );
+    }
+    assert!(take(&built).iter().all(Vec::is_empty), "nothing builds");
+    assert_eq!(rows(&ui), before.1, "every row stays");
+    // And past them: rows the view leaves go, as ever.
+    offset.set(2600.);
+    ui.prepare_frame();
+    assert_eq!(take(&built)[2], (36..40).collect::<Vec<_>>());
+    // Ten rows shown where eleven were: those left behind are gone.
+    assert!(rows(&ui) < before.1, "rows left behind are removed");
+}
+
+#[test]
+fn a_scroll_inside_one_list_runs_that_list_alone() {
+    let mut ui = Ui::new(400., 300.);
+    let (offset, built) = transcript(&mut ui);
+    // Into the third list; the others scrolled past or not reached.
+    offset.set(2500.);
+    ui.prepare_frame();
+    take(&built);
+    for step in 1..=4 {
+        let before = zgx::compose::virtual_list_runs();
+        offset.set(2500. + step as f32 * 3.);
+        ui.prepare_frame();
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                zgx::compose::virtual_list_runs() - before,
+                1,
+                "step {step}: only the third list's rows run"
+            );
+        }
+    }
+    // What shows is what it was: the third list's rows, and no others.
+    let rows = take(&built);
+    assert!(
+        rows.iter()
+            .enumerate()
+            .all(|(list, rows)| list == 2 || rows.is_empty()),
+        "{rows:?}"
+    );
+}

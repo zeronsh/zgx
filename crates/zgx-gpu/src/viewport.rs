@@ -639,7 +639,7 @@ impl GpuRenderer {
     /// the first time one shows; `None` elsewhere, or where it couldn't be
     /// made (its views then draw nothing, as before, and it says so once).
     #[cfg(d3d11)]
-    fn d3d11_view_host(&self) -> Option<&crate::view_host::ViewHost> {
+    pub(crate) fn d3d11_view_host(&self) -> Option<&crate::view_host::ViewHost> {
         let state = self.d3d11.as_ref()?;
         self.view_host
             .get_or_init(|| match crate::view_host::ViewHost::new(&state.device) {

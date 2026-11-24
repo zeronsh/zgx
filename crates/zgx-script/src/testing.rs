@@ -26,10 +26,15 @@
 //! clipboard and file dialogs ([`FakeDesktop`]) that answer as the test
 //! says a person would: open and save run as they do in a window.
 use crate::ScriptHost;
+use crate::time::Instant;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 use zgx::{
     compose::{TaskRunner, View, ViewHandle, provide},
@@ -52,6 +57,13 @@ use zgx::{
 #[derive(Default)]
 pub struct FakeDesktop {
     clipboard: RefCell<String>,
+    html: RefCell<Option<String>>,
+    /// MIME types of the app's own and their text, as last written
+    /// (`Platform::set_clipboard_typed`).
+    types: RefCell<Vec<(String, String)>>,
+    /// The clipboard holds an image alone (its last write was one): no
+    /// text, as a system clipboard after an image's copy.
+    image_only: std::cell::Cell<bool>,
     image: RefCell<Option<std::sync::Arc<zgx::image::ImageData>>>,
     files: RefCell<Vec<std::path::PathBuf>>,
     opens: RefCell<std::collections::VecDeque<Vec<std::path::PathBuf>>>,
@@ -127,6 +139,41 @@ impl FakeDesktop {
     /// Put `text` on the clipboard, as another app copies it.
     pub fn copy(&self, text: impl Into<String>) {
         *self.clipboard.borrow_mut() = text.into();
+        *self.html.borrow_mut() = None;
+        self.types.borrow_mut().clear();
+        self.image_only.set(false);
+    }
+    /// The clipboard's HTML, if it holds some.
+    pub fn clipboard_html(&self) -> Option<String> {
+        self.html.borrow().clone()
+    }
+    /// Put `html` on the clipboard with `text` beside it, as a browser or
+    /// word processor copies rich text.
+    pub fn copy_html(&self, text: impl Into<String>, html: impl Into<String>) {
+        *self.clipboard.borrow_mut() = text.into();
+        *self.html.borrow_mut() = Some(html.into());
+        self.types.borrow_mut().clear();
+        self.image_only.set(false);
+    }
+    /// The clipboard's MIME types of the app's own and their text, as last
+    /// written (`ui.clipboard.write { types = … }`, a region's `on_copy`).
+    #[doc(hidden)]
+    pub fn types(&self) -> Vec<(String, String)> {
+        self.types.borrow().clone()
+    }
+    /// Put `text`, `html` and `types` on the clipboard, as a web page's copy
+    /// with types of its own does.
+    #[doc(hidden)]
+    pub fn copy_typed(
+        &self,
+        text: impl Into<String>,
+        html: Option<String>,
+        types: Vec<(String, String)>,
+    ) {
+        *self.clipboard.borrow_mut() = text.into();
+        *self.html.borrow_mut() = html;
+        *self.types.borrow_mut() = types;
+        self.image_only.set(false);
     }
     /// The clipboard's image: its width, height and RGBA pixels.
     pub fn clipboard_image(&self) -> Option<(u32, u32, Vec<u8>)> {
@@ -145,6 +192,19 @@ impl FakeDesktop {
         *self.files.borrow_mut() = files;
     }
 }
+/// `png` decoded, as a desktop's clipboard holds a copied image: by zgx-gpu,
+/// which a browser build doesn't link (none there: its copy is refused).
+fn decoded(png: &[u8]) -> Option<std::sync::Arc<zgx::image::ImageData>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        zgx_gpu::assets::decode_image(png).ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = png;
+        None
+    }
+}
 impl zgx::platform::Platform for FakeDesktop {
     fn open_url(&self, url: &str) -> bool {
         self.opened.borrow_mut().push(url.to_string());
@@ -153,12 +213,48 @@ impl zgx::platform::Platform for FakeDesktop {
     fn clipboard_files(&self) -> Vec<std::path::PathBuf> {
         self.files.borrow().clone()
     }
+    fn set_clipboard_files(&self, files: Vec<std::path::PathBuf>) -> bool {
+        self.copy_files(files);
+        true
+    }
     fn clipboard_text(&self) -> Option<String> {
-        Some(self.clipboard.borrow().clone())
+        (!self.image_only.get()).then(|| self.clipboard.borrow().clone())
     }
     fn set_clipboard_text(&self, text: String) -> bool {
         *self.clipboard.borrow_mut() = text;
+        *self.html.borrow_mut() = None;
+        self.types.borrow_mut().clear();
+        self.image_only.set(false);
         true
+    }
+    fn clipboard_html(&self) -> Option<String> {
+        self.html.borrow().clone()
+    }
+    fn set_clipboard_rich_text(&self, text: String, html: String) -> bool {
+        *self.clipboard.borrow_mut() = text;
+        *self.html.borrow_mut() = Some(html);
+        self.types.borrow_mut().clear();
+        self.image_only.set(false);
+        true
+    }
+    fn set_clipboard_typed(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+    ) -> bool {
+        self.copy_typed(text, html, types.to_vec());
+        true
+    }
+    fn clipboard_types(&self) -> Vec<String> {
+        let types = self.types.borrow();
+        types.iter().map(|(kind, _)| kind.clone()).collect()
+    }
+    fn clipboard_typed(&self, mime: &str) -> Option<String> {
+        let types = self.types.borrow();
+        types
+            .iter()
+            .find_map(|(kind, value)| (kind == mime).then(|| value.clone()))
     }
     fn clipboard_image(&self) -> zgx::platform::Pending<Option<zgx::image::ImageData>> {
         // A copy sharing the pixels.
@@ -170,6 +266,25 @@ impl zgx::platform::Platform for FakeDesktop {
         &self,
         image: std::sync::Arc<zgx::image::ImageData>,
     ) -> zgx::platform::Pending<bool> {
+        // An image's copy replaces the text and HTML there.
+        *self.image.borrow_mut() = Some(image);
+        *self.html.borrow_mut() = None;
+        self.types.borrow_mut().clear();
+        self.image_only.set(true);
+        Box::pin(async { true })
+    }
+    fn set_clipboard_typed_image(
+        &self,
+        text: String,
+        html: Option<String>,
+        types: &[(String, String)],
+        png: std::sync::Arc<[u8]>,
+    ) -> zgx::platform::Pending<bool> {
+        // The text, HTML, types and image of one copy, side by side.
+        let Some(image) = decoded(&png) else {
+            return Box::pin(async { false });
+        };
+        self.copy_typed(text, html, types.to_vec());
         *self.image.borrow_mut() = Some(image);
         Box::pin(async { true })
     }
@@ -265,6 +380,9 @@ pub struct TestApp {
     pub natives: zgx::native_view::NativeViews,
     /// Its clipboard and file dialogs, made with [`TestApp::with_desktop`].
     pub desktop: Option<Rc<FakeDesktop>>,
+    /// How many times its tasks asked a window's event loop to wake
+    /// ([`TestApp::wakes`]).
+    wakes: Arc<AtomicU64>,
 }
 
 impl TestApp {
@@ -364,7 +482,12 @@ impl TestApp {
         // A lint finding never lies over what a test clicks.
         host.lint_strip(false);
         host.reload().map_err(|error| error.to_string())?;
-        let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+        // (Counted: what an app at rest asks of its window is nothing.)
+        let wakes = Arc::new(AtomicU64::new(0));
+        let woken = wakes.clone();
+        let executor = Rc::new(RefCell::new(LocalExecutor::with_wake(move || {
+            woken.fetch_add(1, Ordering::Relaxed);
+        })));
         let clock = FrameClock::new();
         let natives = zgx::native_view::NativeViews::new();
         let handle = ui.mount(provide(
@@ -385,6 +508,7 @@ impl TestApp {
             start: Instant::now(),
             natives,
             desktop: None,
+            wakes,
         };
         app.settle();
         // A window lays out before its first frame.
@@ -436,6 +560,7 @@ impl TestApp {
             start: self.start,
             natives,
             desktop: self.desktop.clone(),
+            wakes: self.wakes.clone(),
         };
         app.settle();
         app.lay_out();
@@ -465,6 +590,12 @@ impl TestApp {
         })
     }
 
+    /// How many times its tasks have asked a window's event loop to wake
+    /// so far (a task woken from another thread, a timer due): what an app
+    /// at rest asks is none.
+    pub fn wakes(&self) -> u64 {
+        self.wakes.load(Ordering::Relaxed)
+    }
     /// Run what is ready (handlers' tasks, settled host calls) until
     /// nothing is.
     pub fn settle(&self) {
@@ -530,6 +661,12 @@ impl TestApp {
         let interval = Duration::from_secs_f64(1. / 60.);
         self.frame.set(self.frame.get() + n);
         self.run_timers(self.host.0.timers.test_now() + interval * n as u32);
+    }
+    /// Whether anything waits for the next frame (an animation, a
+    /// `ui.frames` measure): a window at rest asks for none.
+    #[doc(hidden)]
+    pub fn wants_frame(&self) -> bool {
+        self.clock.wants_frame()
     }
     /// `n` frames: an animation's worth.
     pub fn frames(&self, n: usize) {

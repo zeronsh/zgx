@@ -25,6 +25,10 @@ type Pending = Pin<Box<dyn Future<Output = ()>>>;
 #[derive(Default)]
 pub(crate) struct Timers {
     tasks: RefCell<Option<zgx::compose::Tasks>>,
+    /// The view's frames, once it mounts (`ui.frames` measures them).
+    frames: RefCell<Option<zgx::frame::FrameClock>>,
+    /// What ends the `ui.frames` measure running now (a new one ends it).
+    measuring: RefCell<Option<Box<dyn FnOnce()>>>,
     pending: RefCell<Vec<Pending>>,
     clocks: Rc<Clocks>,
 }
@@ -70,6 +74,20 @@ impl Timers {
             tasks.spawn(task);
         }
         *self.tasks.borrow_mut() = Some(tasks);
+    }
+    pub fn set_frames(&self, frames: zgx::frame::FrameClock) {
+        *self.frames.borrow_mut() = Some(frames);
+    }
+    /// `end` ends the measure starting now; the last one ends.
+    pub(crate) fn measuring(&self, end: Box<dyn FnOnce()>) {
+        let last = self.measuring.replace(Some(end));
+        if let Some(last) = last {
+            last();
+        }
+    }
+    /// The view's frames, once it has mounted.
+    pub(crate) fn frames(&self) -> Option<zgx::frame::FrameClock> {
+        self.frames.borrow().clone()
     }
     pub(crate) fn spawn(&self, task: impl Future<Output = ()> + 'static) {
         match &*self.tasks.borrow() {
@@ -117,6 +135,13 @@ impl Stop {
     /// Its timer has ended, or been stopped: nothing here to keep.
     pub fn done(&self) -> bool {
         !self.0.get()
+    }
+    /// Lets its timer run on, unstopped, until it ends or its host goes.
+    #[cfg_attr(not(feature = "modules"), allow(dead_code))]
+    pub fn detach(self) {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: The one field, read out once from a value never dropped.
+        drop(unsafe { std::ptr::read(&this.0) });
     }
 }
 impl Drop for Stop {

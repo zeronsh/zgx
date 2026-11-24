@@ -1,0 +1,15 @@
+[package]
+name = "zgx-module-fixture"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "A native module for zgx-script's tests: loaded as a library, and linked in."
+
+[lib]
+# A library to load (`ScriptHost::load_module`), and the same code linked
+# into the test that compares the two.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+zgx-module = { path = ".." }

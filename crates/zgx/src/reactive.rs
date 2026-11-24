@@ -146,6 +146,157 @@ impl Effects {
 /// most nodes' effects join (the inherited typography) is removed from
 /// one by one as they go, in constant time.
 type IdSet = HashSet<EffectId, std::hash::BuildHasherDefault<IdHasher>>;
+/// No effect: `born` stays under `1 << (64 - SLOT_BITS)`, so no id is it.
+const NO_EFFECT: EffectId = EffectId::MAX;
+/// A signal's subscribers: the one or two most signals have inline, a set
+/// past that. No bigger than an empty set, and allocates only at a third.
+enum Subscribers {
+    Inline([EffectId; 2]),
+    Set(IdSet),
+}
+impl Default for Subscribers {
+    fn default() -> Self {
+        Self::Inline([NO_EFFECT; 2])
+    }
+}
+impl Subscribers {
+    /// Whether `id` was not subscribed already.
+    #[inline]
+    fn insert(&mut self, id: EffectId) -> bool {
+        match self {
+            Self::Inline(ids) => {
+                if ids.contains(&id) {
+                    return false;
+                }
+                if let Some(free) = ids.iter_mut().find(|slot| **slot == NO_EFFECT) {
+                    *free = id;
+                    return true;
+                }
+                self.spill(id);
+                true
+            }
+            Self::Set(set) => set.insert(id),
+        }
+    }
+    /// A third subscriber: the set takes the two and it.
+    #[cold]
+    #[inline(never)]
+    fn spill(&mut self, id: EffectId) {
+        if let Self::Inline(ids) = *self {
+            let mut set = IdSet::default();
+            set.extend(ids);
+            set.insert(id);
+            *self = Self::Set(set);
+        }
+    }
+    #[inline]
+    fn remove(&mut self, id: EffectId) {
+        match self {
+            Self::Inline(ids) => {
+                if let Some(slot) = ids.iter_mut().find(|slot| **slot == id) {
+                    *slot = NO_EFFECT;
+                }
+            }
+            Self::Set(set) => {
+                set.remove(&id);
+            }
+        }
+    }
+    #[inline]
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Inline(ids) => ids.iter().all(|id| *id == NO_EFFECT),
+            Self::Set(set) => set.is_empty(),
+        }
+    }
+    /// The one subscriber, when it has exactly one (held inline).
+    #[inline]
+    fn single(&self) -> Option<EffectId> {
+        match self {
+            Self::Inline([a, b]) => match (*a == NO_EFFECT, *b == NO_EFFECT) {
+                (false, true) => Some(*a),
+                (true, false) => Some(*b),
+                _ => None,
+            },
+            Self::Set(_) => None,
+        }
+    }
+    /// Call `f` with each subscriber, in no order.
+    #[inline]
+    fn for_each(&self, mut f: impl FnMut(EffectId)) {
+        match self {
+            Self::Inline(ids) => {
+                for &id in ids {
+                    if id != NO_EFFECT {
+                        f(id);
+                    }
+                }
+            }
+            Self::Set(set) => {
+                for &id in set {
+                    f(id);
+                }
+            }
+        }
+    }
+    /// The room it holds beside itself (a memory report's).
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Inline(_) => 0,
+            Self::Set(set) => crate::memory::set_bytes(set),
+        }
+    }
+}
+/// Queue effect `id` to run, unless it is stopped or queued already: in a
+/// flush, among those it made run; else for the next. Always inline:
+/// each `set` with one subscriber queues it in place, as the loop it
+/// replaces did (left to itself, the compiler made it a call).
+#[inline(always)]
+fn queue_one(inner: &Inner, id: EffectId) {
+    let mut effects = inner.effects.borrow_mut();
+    let Some(record) = effects.get_mut(&id) else {
+        return;
+    };
+    if record.stopped || std::mem::replace(&mut record.queued, true) {
+        return;
+    }
+    match inner.flushing.get() {
+        true => inner.pending.borrow_mut().push(Reverse(id)),
+        false => inner.queued.borrow_mut().push(id),
+    }
+}
+/// `notify`'s loop over a signal's subscribers, one copy for every
+/// signal's type (each `set` holds only the call). `addr` names the
+/// signal to a trace.
+#[inline(never)]
+fn queue_subscribers(inner: &Inner, subscribers: &Subscribers, addr: usize) {
+    let mut effects = inner.effects.borrow_mut();
+    let flushing = inner.flushing.get();
+    let (mut queued, mut pending) = (inner.queued.borrow_mut(), inner.pending.borrow_mut());
+    #[cfg(feature = "trace")]
+    let mut caused: Option<Vec<EffectId>> = crate::trace::enabled().then(Vec::new);
+    #[cfg(not(feature = "trace"))]
+    let _ = addr;
+    subscribers.for_each(|id| {
+        if let Some(record) = effects.get_mut(&id)
+            && !record.stopped
+            && !std::mem::replace(&mut record.queued, true)
+        {
+            #[cfg(feature = "trace")]
+            if let Some(caused) = &mut caused {
+                caused.push(id);
+            }
+            match flushing {
+                true => pending.push(Reverse(id)),
+                false => queued.push(id),
+            }
+        }
+    });
+    #[cfg(feature = "trace")]
+    if let Some(caused) = caused {
+        crate::trace::wrote(addr, &caused);
+    }
+}
 #[derive(Default)]
 struct Inner {
     effects: RefCell<Effects>,
@@ -412,22 +563,33 @@ impl Runtime {
         };
         callback()
     }
-    /// A signal in this runtime holding `value`.
+    /// A signal in this runtime holding `value`. Traced, it is named by the
+    /// line that made it until a maker names it better (a script's line).
+    #[cfg_attr(feature = "trace", track_caller)]
     pub fn signal<T: 'static>(&self, value: T) -> Signal<T> {
-        Signal {
+        let signal = Signal {
             inner: Rc::new(SignalInner {
                 value: RefCell::new(value),
                 version: Cell::new(0),
                 subscribers: RefCell::default(),
                 runtime: Rc::downgrade(&self.inner),
             }),
+        };
+        #[cfg(feature = "trace")]
+        if crate::trace::enabled() {
+            crate::trace::made(signal.addr(), std::panic::Location::caller());
         }
+        signal
     }
     /// Runs immediately. Keep the returned handle alive to keep the subscription.
+    /// Traced, it is named by the line that made it until a maker names it
+    /// better (`@12 binding`, a script's line).
+    #[cfg_attr(feature = "trace", track_caller)]
     pub fn effect(&self, callback: impl FnMut() + 'static) -> Effect {
         self.effect_marked(false, callback)
     }
     /// [`Runtime::effect`], `mount_pure` if it reads no layout.
+    #[cfg_attr(feature = "trace", track_caller)]
     pub(crate) fn effect_marked(
         &self,
         mount_pure: bool,
@@ -442,6 +604,7 @@ impl Runtime {
     pub(crate) fn rest(&self) {
         self.inner.effects.borrow_mut().rest();
     }
+    #[cfg_attr(feature = "trace", track_caller)]
     pub(crate) fn effect_callback(&self, mount_pure: bool, callback: Callback) -> Effect {
         let born = self.inner.next.get();
         self.inner.next.set(born + 1);
@@ -457,6 +620,10 @@ impl Runtime {
                 owns: false,
             },
         );
+        #[cfg(feature = "trace")]
+        if crate::trace::enabled() {
+            crate::trace::made_effect(id, std::panic::Location::caller());
+        }
         self.inner.queue(id);
         let effect = Effect {
             id,
@@ -469,6 +636,7 @@ impl Runtime {
     /// even inside a batch or a flush, where `effect` queues it behind what
     /// is running: a value derived by it is readable at once (a computed
     /// made while a component builds, which `on_mount` then reads).
+    #[cfg_attr(feature = "trace", track_caller)]
     pub fn effect_now(&self, callback: impl FnMut() + 'static) -> Effect {
         if self.inner.batch_depth.get() == 0 && !self.inner.flushing.get() {
             return self.effect(callback);
@@ -488,6 +656,10 @@ impl Runtime {
                 owns: false,
             },
         );
+        #[cfg(feature = "trace")]
+        if crate::trace::enabled() {
+            crate::trace::made_effect(id, std::panic::Location::caller());
+        }
         // Made before it runs: a first run that panics drops it, so
         // nothing is left subscribed with no handle to dispose of it.
         let effect = Effect {
@@ -566,7 +738,7 @@ impl Runtime {
                     .inner
                     .batch_depth
                     .set(self.0.inner.batch_depth.get() - 1);
-                if !std::thread::panicking() {
+                if !unwinding() {
                     self.0.flush();
                 }
             }
@@ -615,7 +787,7 @@ impl Runtime {
                     .inner
                     .batch_depth
                     .set(self.0.inner.batch_depth.get() - 1);
-                if !std::thread::panicking() {
+                if !unwinding() {
                     if (self.2)() {
                         self.0.flush_watched(&mut self.1);
                     } else {
@@ -1027,12 +1199,21 @@ struct SignalInner<T> {
     value: RefCell<T>,
     /// Writes that changed the value (`Signal::version`).
     version: Cell<u64>,
-    subscribers: RefCell<IdSet>,
+    subscribers: RefCell<Subscribers>,
     runtime: Weak<Inner>,
+}
+// A traced signal's maker goes with it: its address may be another's next.
+#[cfg(feature = "trace")]
+impl<T> Drop for SignalInner<T> {
+    fn drop(&mut self) {
+        if crate::trace::enabled() {
+            crate::trace::forget_signal((self as *const Self).cast::<()>() as usize);
+        }
+    }
 }
 impl<T> Dependency for SignalInner<T> {
     fn unsubscribe(&self, id: EffectId) {
-        self.subscribers.borrow_mut().remove(&id);
+        self.subscribers.borrow_mut().remove(id);
     }
     fn bytes(&self) -> usize {
         2 * size_of::<usize>()
@@ -1040,7 +1221,7 @@ impl<T> Dependency for SignalInner<T> {
             + self
                 .subscribers
                 .try_borrow()
-                .map_or(0, |subscribers| crate::memory::set_bytes(&subscribers))
+                .map_or(0, |subscribers| subscribers.bytes())
     }
 }
 /// Effects held by [`Runtime::hold_effects`] until it drops.
@@ -1049,8 +1230,7 @@ impl Drop for HeldEffects {
     fn drop(&mut self) {
         let inner = &self.0.inner;
         inner.batch_depth.set(inner.batch_depth.get() - 1);
-        if !std::thread::panicking()
-            && (!inner.queued.borrow().is_empty() || !inner.pending.borrow().is_empty())
+        if !unwinding() && (!inner.queued.borrow().is_empty() || !inner.pending.borrow().is_empty())
         {
             self.0.flush();
         }
@@ -1124,12 +1304,10 @@ impl<T: 'static> Signal<T> {
                 existing.run = run;
             }
         } else if self.inner.subscribers.borrow_mut().insert(id) {
-            let dependency: Rc<dyn Dependency> = self.inner.clone();
-            record.dependencies.push(Subscription {
-                source: Rc::downgrade(&dependency),
-                key,
-                run,
-            });
+            // Downgraded as it is, unsized as a weak: no strong count to
+            // raise and drop again.
+            let source: Weak<SignalInner<T>> = Rc::downgrade(&self.inner);
+            record.dependencies.push(Subscription { source, key, run });
         }
     }
     /// Whether any effect reads it: for a host dropping data nothing shows.
@@ -1170,33 +1348,23 @@ impl<T: 'static> Signal<T> {
     {
         self.with(Clone::clone)
     }
+    /// Queue its subscribers, then flush. Inline in each `set`: no
+    /// subscriber asks nothing, and one is queued in place; more go to one
+    /// loop every signal's type shares (`queue_subscribers`).
     fn notify(&self) {
         if let Some(inner) = self.inner.runtime.upgrade() {
             {
-                let mut effects = inner.effects.borrow_mut();
-                let flushing = inner.flushing.get();
-                let (mut queued, mut pending) =
-                    (inner.queued.borrow_mut(), inner.pending.borrow_mut());
+                let subscribers = self.inner.subscribers.borrow();
                 #[cfg(feature = "trace")]
-                let mut caused: Option<Vec<EffectId>> = crate::trace::enabled().then(Vec::new);
-                for id in self.inner.subscribers.borrow().iter() {
-                    if let Some(record) = effects.get_mut(id)
-                        && !record.stopped
-                        && !std::mem::replace(&mut record.queued, true)
-                    {
-                        #[cfg(feature = "trace")]
-                        if let Some(caused) = &mut caused {
-                            caused.push(*id);
-                        }
-                        match flushing {
-                            true => pending.push(Reverse(*id)),
-                            false => queued.push(*id),
-                        }
-                    }
-                }
-                #[cfg(feature = "trace")]
-                if let Some(caused) = caused {
-                    crate::trace::wrote(self.addr(), &caused);
+                let traced = crate::trace::enabled();
+                #[cfg(not(feature = "trace"))]
+                let traced = false;
+                if traced {
+                    queue_subscribers(&inner, &subscribers, self.addr());
+                } else if let Some(id) = subscribers.single() {
+                    queue_one(&inner, id);
+                } else if !subscribers.is_empty() {
+                    queue_subscribers(&inner, &subscribers, self.addr());
                 }
             }
             Runtime { inner }.flush();
@@ -1285,6 +1453,20 @@ impl ServiceScope {
     }
 }
 
+/// Whether a panic is unwinding through this frame, so a guard's clean-up
+/// (a flush, a gesture's end) would act on half-made state: where panics
+/// unwind, `std::thread::panicking` itself.
+#[cfg(panic = "unwind")]
+pub(crate) use std::thread::panicking as unwinding;
+/// Where panics abort (wasm32), nothing unwinds, so no guard is ever
+/// dropped by one; `std::thread::panicking` stays true after a panic a host
+/// caught (a trap the page's JS carried on past), and trusting it would
+/// leave every later effect unrun.
+#[cfg(not(panic = "unwind"))]
+#[inline(always)]
+pub(crate) fn unwinding() -> bool {
+    false
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1700,6 +1882,83 @@ mod tests {
             assert!(runtime.inner.queued.borrow().is_empty());
             assert!(runtime.inner.pending.borrow().is_empty());
         });
+    }
+
+    #[test]
+    fn two_subscribers_stay_inline_and_a_third_takes_a_set() {
+        assert!(size_of::<Subscribers>() <= size_of::<IdSet>());
+        let runtime = Runtime::new();
+        let value = runtime.signal(0);
+        let runs = Rc::new(Cell::new(0));
+        let reader = || {
+            let (value, runs) = (value.clone(), runs.clone());
+            runtime.effect(move || {
+                value.get();
+                runs.set(runs.get() + 1);
+            })
+        };
+        let inline = |value: &Signal<i32>| {
+            matches!(*value.inner.subscribers.borrow(), Subscribers::Inline(_))
+        };
+        let (first, second) = (reader(), reader());
+        assert!(inline(&value));
+        assert_eq!(value.inner.subscribers.borrow().bytes(), 0);
+        value.set(1);
+        assert_eq!(runs.get(), 4);
+        // One goes, and the next takes its place: still inline.
+        drop(first);
+        value.set(2);
+        assert_eq!(runs.get(), 5);
+        let third = reader();
+        assert!(inline(&value));
+        let fourth = reader();
+        assert!(!inline(&value));
+        assert!(value.inner.subscribers.borrow().bytes() > 0);
+        value.set(3);
+        assert_eq!(runs.get(), 10);
+        drop((second, third, fourth));
+        assert!(!value.is_observed());
+        value.set(4);
+        assert_eq!(runs.get(), 10);
+    }
+
+    #[test]
+    fn an_inline_subscriber_reading_twice_is_one_subscriber() {
+        let mut subscribers = Subscribers::default();
+        assert!(subscribers.is_empty());
+        assert_eq!(subscribers.single(), None);
+        assert!(subscribers.insert(7));
+        assert_eq!(subscribers.single(), Some(7));
+        assert!(!subscribers.insert(7));
+        assert!(subscribers.insert(9));
+        assert_eq!(subscribers.single(), None, "two");
+        assert!(!subscribers.insert(9));
+        subscribers.remove(7);
+        assert_eq!(
+            subscribers.single(),
+            Some(9),
+            "the one left, in the second slot"
+        );
+        assert!(subscribers.insert(7));
+        assert!(subscribers.insert(11));
+        assert_eq!(subscribers.single(), None, "a set");
+        assert!(!subscribers.insert(7));
+        let mut ids = Vec::new();
+        subscribers.for_each(|id| ids.push(id));
+        ids.sort_unstable();
+        assert_eq!(ids, [7, 9, 11]);
+        subscribers.remove(9);
+        subscribers.remove(9);
+        let mut ids = Vec::new();
+        subscribers.for_each(|id| ids.push(id));
+        ids.sort_unstable();
+        assert_eq!(ids, [7, 11]);
+        let mut subscribers = Subscribers::default();
+        subscribers.insert(3);
+        subscribers.remove(5);
+        subscribers.remove(3);
+        assert!(subscribers.is_empty());
+        subscribers.for_each(|id| panic!("{id} left"));
     }
 
     #[test]

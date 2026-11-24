@@ -1171,9 +1171,36 @@ impl Buffer {
         self.redraw |= reset;
     }
 
+    /// zgx: mark each line with a span that has room before it only
+    /// (`AttrsList::holds_leads`, `BufferLine::set_leads`): after its text is
+    /// set, before it is shaped. Text without such spans needs no call.
+    #[cold]
+    #[inline(never)]
+    pub fn find_leads(&mut self) {
+        let mut reset = false;
+        for line in &mut self.lines {
+            let holds = line.attrs_list().holds_leads();
+            reset |= line.set_leads(holds);
+        }
+        self.redraw |= reset;
+    }
+
     /// True if a redraw is needed
     pub const fn redraw(&self) -> bool {
         self.redraw
+    }
+
+    /// zgx: each line takes CSS's line box (`BufferLine::set_css_line_box`):
+    /// after its text is set, before it is shaped. Text with no span that is
+    /// a box of its own needs no call.
+    #[cold]
+    #[inline(never)]
+    pub fn set_css_line_boxes(&mut self) {
+        let mut reset = false;
+        for line in &mut self.lines {
+            reset |= line.set_css_line_box(true);
+        }
+        self.redraw |= reset;
     }
 
     /// Set redraw needed flag

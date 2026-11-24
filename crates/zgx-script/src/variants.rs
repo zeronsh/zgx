@@ -44,11 +44,13 @@ pub(crate) struct Layer {
 /// The interaction tables' names, in `Layer::interaction`'s order.
 pub(crate) const INTERACTION: [&str; 4] = ["hover", "active", "focus", "disabled"];
 
+#[derive(Clone)]
 struct Axis {
     name: Rc<str>,
     options: Vec<(Rc<str>, Layer)>,
     default: u16,
 }
+#[derive(Clone)]
 struct Compound {
     /// Each axis it names, with the options any of which matches.
     when: Vec<(usize, Vec<u16>)>,
@@ -66,6 +68,9 @@ pub(crate) struct Recipe {
     props: Vec<Prop>,
     /// Whether some layer sets interaction styles.
     interacts: bool,
+    /// An element's `dim`, its last axis (`dimmed`): the element's own
+    /// disabled style, applied over every layer as the axis says.
+    dim: Option<Lits>,
     /// What each choice resolves to, made the first time it is chosen.
     resolved: RefCell<HashMap<Box<[u16]>, Rc<Layer>>>,
 }
@@ -89,16 +94,26 @@ impl Recipe {
                 over_layer(&mut out, &rule.layer);
             }
         }
+        if let Some(own) = &self.dim {
+            dim_layer(&mut out, own, key[self.axes.len() - 1] == 0);
+        }
         let out = Rc::new(out);
         self.resolved.borrow_mut().insert(key.into(), out.clone());
         out
     }
     fn option(&self, axis: usize, value: &Value) -> Result<u16, String> {
         let axis = &self.axes[axis];
-        let name: Rc<str> = match value {
+        // (Read where it is: a chosen option's name is looked up, not kept.)
+        let name: &str = match value {
             Value::Nil => return Ok(axis.default),
-            Value::Str(s) => s.clone(),
-            Value::Bool(b) => if *b { "true" } else { "false" }.into(),
+            Value::Str(s) => s,
+            Value::Bool(b) => {
+                if *b {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
             other => {
                 return Err(format!(
                     "variant `{}` is chosen by name, not {other:?}",
@@ -106,7 +121,11 @@ impl Recipe {
                 ));
             }
         };
-        match axis.options.iter().position(|(option, _)| *option == name) {
+        match axis
+            .options
+            .iter()
+            .position(|(option, _)| **option == *name)
+        {
             Some(i) => Ok(i as u16),
             None => Err(format!(
                 "variant `{}` has no option `{name}` (it has {})",
@@ -262,6 +281,7 @@ pub(crate) fn define(lua: &Lua, definition: Table) -> mlua::Result<RecipeUd> {
         compound: Vec::new(),
         props: Vec::new(),
         interacts: false,
+        dim: None,
         resolved: RefCell::default(),
     };
     if let Some(defaults) = definition.get::<Option<Table>>("defaults")? {
@@ -379,6 +399,7 @@ impl UserData for RecipeUd {
 }
 
 /// How an axis is chosen.
+#[derive(Clone)]
 enum Pick {
     Fixed(u16),
     State(Signal<Value>),
@@ -501,6 +522,105 @@ pub(crate) fn apply(node: &mut node::Node, selection: Rc<Selection>) {
         }
     }
     if selection.interacts() {
-        node.variant_interaction = Some(selection);
+        node.rare_mut().variant_interaction = Some(selection);
+    }
+}
+
+/// A disabled control's dim (zgx's own, `compose::dim_when_disabled`).
+const DISABLED_DIM: f32 = 0.45;
+/// An element's `dim` (`false`, a state or a function), once its fields are
+/// read: one more axis of its variants (of none, if it has none), applied
+/// over all of them (`dim_layer`). Its own disabled style moves into it, so
+/// `dim` decides over that whichever order the two were given in; chosen
+/// by a state, the node follows it in place as variants do (`apply`).
+/// Apart from `fill_from`, which every element runs.
+#[cold]
+#[inline(never)]
+pub(crate) fn dimmed(
+    lua: &Lua,
+    node: &mut node::Node,
+    selection: Option<Rc<Selection>>,
+) -> mlua::Result<Rc<Selection>> {
+    let Some(dim) = node.rare_mut().dim.take() else {
+        unreachable!("called for a `dim`");
+    };
+    let env = node::env(lua)?;
+    let pick = match *dim {
+        Source::Lit(Lit::Bool(dimmed)) => Pick::Fixed(u16::from(!dimmed)),
+        Source::State(state) => Pick::State(state),
+        Source::Computed(f) => Pick::State(node::computed(lua, &env, f)),
+        _ => {
+            return Err(mlua::Error::runtime(
+                "`dim` takes a boolean, a state or a function",
+            ));
+        }
+    };
+    let mut own = Vec::new();
+    node.pseudo.retain(|(pseudo, styles)| {
+        let disabled = *pseudo == node::Pseudo::Disabled;
+        if disabled {
+            own.extend(styles.iter().cloned());
+        }
+        !disabled
+    });
+    own.sort_by_key(|(prop, _)| node::specificity(*prop));
+    // Its options only name the choice: `dim_layer` styles it, last.
+    let axis = Axis {
+        name: "dim".into(),
+        options: vec![
+            ("true".into(), Layer::default()),
+            ("false".into(), Layer::default()),
+        ],
+        default: 0,
+    };
+    let (mut recipe, mut picks) = match &selection {
+        Some(selection) => {
+            let r = &selection.recipe;
+            let recipe = Recipe {
+                base: r.base.clone(),
+                axes: r.axes.clone(),
+                compound: r.compound.clone(),
+                props: r.props.clone(),
+                interacts: true,
+                dim: None,
+                resolved: RefCell::default(),
+            };
+            (recipe, selection.picks.clone())
+        }
+        None => {
+            let recipe = Recipe {
+                base: Layer::default(),
+                axes: Vec::new(),
+                compound: Vec::new(),
+                props: Vec::new(),
+                interacts: true,
+                dim: None,
+                resolved: RefCell::default(),
+            };
+            (recipe, Vec::new())
+        }
+    };
+    recipe.axes.push(axis);
+    recipe.dim = Some(own);
+    picks.push(pick);
+    Ok(Rc::new(Selection {
+        recipe: Rc::new(recipe),
+        picks,
+        warnings: env.warnings.clone(),
+    }))
+}
+/// `dim`'s choice over a resolved layer's disabled style: dimmed, the
+/// element's own over it, and with neither `DISABLED_DIM`; not, the same at
+/// full opacity.
+#[cold]
+#[inline(never)]
+fn dim_layer(out: &mut Layer, own: &[(Prop, Lit)], dimmed: bool) {
+    let disabled = &mut out.interaction[3];
+    over(disabled, own);
+    if dimmed && disabled.is_empty() {
+        disabled.push((Prop::Opacity, Lit::Num(DISABLED_DIM)));
+    }
+    if !dimmed {
+        over(disabled, &[(Prop::Opacity, Lit::Num(1.))]);
     }
 }

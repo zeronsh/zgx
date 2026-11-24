@@ -399,6 +399,20 @@ fn tmux_splits_and_shows_both_panes() {
     );
     run.shows("left side");
     run.until("the status line", |run| run.rows()[29].contains("[0]"));
+    // tmux reads the terminal's answers to its first questions from the
+    // same input as keys: a prefix typed before it has read them can be
+    // taken in with them (Linux CI, once: no `^B`, and the `%` reached the
+    // shell). It knows the client's terminal type once it has.
+    run.until("tmux to have the terminal's answers", |_| {
+        let clients = std::process::Command::new("tmux")
+            .env("PATH", path())
+            .arg("-S")
+            .arg(&socket)
+            .args(["list-clients", "-F", "#{client_termtype}"])
+            .output()
+            .unwrap();
+        !String::from_utf8_lossy(&clients.stdout).trim().is_empty()
+    });
     run.ctrl("b");
     run.type_text("%");
     run.until("a second pane", |run| run.screen().contains('│'));
@@ -443,18 +457,23 @@ fn lazygit_stages_and_commits() {
     run.shows("Commit summary");
     run.type_text("from lazygit");
     run.key(Key::Enter);
-    run.until("the commit", |run| run.screen().contains("from lazygit"));
+    // In the repository, not on the screen: the summary shows in the prompt
+    // as it's typed, and lazygit runs `git commit` in the background, so a
+    // `q` sent on what the screen shows can quit before the commit lands.
+    let log = || {
+        let log = std::process::Command::new("git")
+            .args(["log", "--format=%s"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&log.stdout).into_owned()
+    };
+    run.until("the commit in the repository", |_| {
+        log() == "from lazygit\nfirst\n"
+    });
     run.type_text("q");
     assert_eq!(run.exits(), 0, "{}", run.screen());
-    let log = std::process::Command::new("git")
-        .args(["log", "--format=%s"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&log.stdout),
-        "from lazygit\nfirst\n"
-    );
+    assert_eq!(log(), "from lazygit\nfirst\n");
 }
 
 /// `git add -p`: a hunk shown in colour and staged with `y`.

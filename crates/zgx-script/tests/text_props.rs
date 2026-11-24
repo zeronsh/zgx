@@ -138,6 +138,8 @@ fn a_span_keeps_every_option_it_is_given() {
             ui.span { "f", on_click = function() end },
             ui.span { "g", on_click = function() end, underline = false },
             ui.span { "h", underline = false, underline_color = "#778899" },
+            ui.span { "i", padding = { 4, 2 }, box = true },
+            ui.span { "j", text_size = 13, line_height = 16, padding = { 4, 2 }, box = true },
         }"##,
     );
     h.frames(1);
@@ -178,6 +180,13 @@ fn a_span_keeps_every_option_it_is_given() {
         run("h").underline.is_none(),
         "not underlined, though styled"
     );
+    // A box of its own (CSS's inline-flex), as no other span is.
+    assert!(run("i").font.features.is_box_span());
+    assert!(!run("c").font.features.is_box_span());
+    // Its own line height (a badge's box: it and its padding), where
+    // another span takes the paragraph's.
+    assert_eq!(run("j").font.line_height.resolve(13.), 16.);
+    assert_ne!(run("i").font.line_height.resolve(13.), 16.);
 }
 
 /// A span's table is read as an element's is, a plain table: what its

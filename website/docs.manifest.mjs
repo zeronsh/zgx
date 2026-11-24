@@ -37,6 +37,15 @@ export const internal = [
   'docs/performance-feature-audit.md',
   'docs/gpui-parity.md',
   'docs/design-3d.md',
+  'docs/design-audio.md',
+  'docs/design-audio-luau.md',
+  // Until Wing makes the audio API public (with zgx-dom's): then a page
+  // beside reference/3d.
+  'docs/reference/audio.md',
+  // Native modules and the value layout they read: unstable before 1.0,
+  // then pages beside the Luau set's.
+  'docs/value-types.md',
+  'docs/modules.md',
 ];
 
 export const sets = [
@@ -130,13 +139,13 @@ export const sets = [
       { slug: 'reference', src: 'docs/reference/index.md', title: 'Reading the reference' },
       { slug: 'reference/api', mdx: 'luau/api.mdx' },
       { slug: 'reference/state', src: 'docs/reference/state.md', title: 'State and components', intro: true,
-        sections: ['Making state', 'State methods', 'Actions', 'Computeds, effects, batches', 'Large data', 'Refs', 'Components', 'Example', 'Modules and templates', 'Plugins and slots', 'Gotchas'] },
+        sections: ['Making state', 'State methods', 'Actions', 'Computeds, effects, batches', 'Large data', 'Measuring frames', 'Refs', 'Components', 'Example', 'Modules and templates', 'Plugins and slots', 'Gotchas'] },
       { slug: 'reference/properties', src: 'docs/reference/properties.md', title: 'Properties' },
       { slug: 'reference/events', src: 'docs/reference/events.md', title: 'Events' },
       { slug: 'reference/containers', src: 'docs/reference/containers.md', title: 'Containers' },
       { slug: 'reference/controls', src: 'docs/reference/controls.md', title: 'Controls' },
       { slug: 'reference/text', src: 'docs/reference/text.md', title: 'Text', intro: true,
-        sections: ['Text', 'Text options', 'Rich text and spans', 'Example', 'Markdown', 'Selectable text', 'Gotchas'] },
+        sections: ['Text', 'Text options', 'Rich text and spans', 'Example', 'Markdown', 'Fonts', 'Measuring text', 'Selectable text', 'Gotchas'] },
       { slug: 'reference/dynamic', src: 'docs/reference/dynamic.md', title: 'Dynamic content' },
       { slug: 'reference/scrolling', src: 'docs/reference/scrolling.md', title: 'Scrolling and lists' },
       { slug: 'reference/overlays', src: 'docs/reference/overlays.md', title: 'Overlays and menus' },
@@ -185,10 +194,16 @@ export const sets = [
         description: 'zgx inspect memory: what a running app holds, a line for each holder.' },
       { slug: 'acting', src: 'docs/agents/inspect.md', title: 'Acting', sections: ['Acting'], unwrap: true,
         description: 'click, type, key, scroll, command, set, wait and sleep.' },
+      { slug: 'clipboard', src: 'docs/agents/inspect.md', title: 'Clipboard', sections: ['Clipboard'], unwrap: true,
+        description: 'Read and set the window’s clipboard (its own under ZGX_CLIPBOARD=memory), then paste or copy with key.' },
       { slug: 'popups', src: 'docs/agents/inspect.md', title: 'Popovers and menus', sections: ['Popovers, menus and other popups'], unwrap: true,
         description: 'Open a popover, menu or select, wait for it, and act inside; popups past the window included.' },
       { slug: 'windows', src: 'docs/agents/inspect.md', title: 'Other windows', sections: ["The app's other windows"], unwrap: true,
         description: 'List the windows the app declares and act in one by its id or an item’s key: --window on every command and MCP tool.' },
+      { slug: 'frozen-clock', src: 'docs/agents/inspect.md', title: 'A frozen clock', sections: ['A frozen clock'], unwrap: true,
+        description: 'Hold every animation, timer and caret at one time for screenshots, and move it on by hand.' },
+      { slug: 'heap', src: 'docs/agents/inspect.md', title: 'The Luau heap', sections: ['The Luau heap'], unwrap: true,
+        description: 'zgx inspect gc: garbage or a leak, and who holds what survives.' },
       { slug: 'gestures', src: 'docs/agents/inspect.md', title: 'Record and replay gestures', sections: ['Gestures'], unwrap: true,
         description: 'Record a trackpad gesture once, replay it through the window’s own input path, and read how its frames landed.' },
       { slug: 'interactions', src: 'docs/agents/inspect.md', title: 'An interaction as a whole', sections: ['An interaction as a whole'], unwrap: true,

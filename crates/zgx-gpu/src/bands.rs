@@ -120,6 +120,16 @@ impl Pixels {
     }
 }
 
+/// A run's bands as `GpuRenderer::band_strips` finds them, in device pixels.
+struct BandStrips {
+    /// Where its mask is 1.
+    inner: Pixels,
+    /// Its bands this frame draws as one: in a texture, faded once.
+    as_one: Vec<Pixels>,
+    /// Its bands this frame draws where nothing stacks: item by item.
+    by_item: Vec<Pixels>,
+}
+
 /// `extras` without their fade masks, an outer one's too (shared, for
 /// items sharing them).
 fn unmasked(
@@ -178,7 +188,10 @@ impl GpuRenderer {
     /// inside its bands, and in the bands it reaches through a texture
     /// composited after the run, drawn by the phases returned (the module's
     /// comment). In this target's points, drawing `damage`. Unchanged where
-    /// nothing fades.
+    /// nothing fades. Out of line: called once a frame, its body inlined
+    /// into `render_flat_taking` moved that frame's code for every scene,
+    /// faded or not (fx-layer +0.12%).
+    #[inline(never)]
     pub(crate) fn band<'a>(
         &mut self,
         scene: &Scene,
@@ -198,41 +211,88 @@ impl GpuRenderer {
             return (items, Vec::new());
         };
         // Most frames with a fade have none to draw as one (rows apart):
-        // they go as they came, nothing moved or made.
-        if !self.needs_bands(scene, &items, damage, viewport) {
+        // they go as they came, nothing moved or made. The first run that
+        // does keeps its strips, not worked out again below.
+        let Some((first, found_first)) = self.first_band(scene, &items, reach, target) else {
             return (items, Vec::new());
-        }
+        };
+        let mut found_first = Some(found_first);
+        let total = items.len();
         let mut out: Vec<PaintItem<'a>> = Vec::with_capacity(items.len() + 4);
         let mut phases = Vec::new();
-        let mut items = items.into_iter().peekable();
+        let mut items = items.into_iter();
         while let Some(item) = items.next() {
+            let start = total - items.len() - 1;
             let Some(mask) = item.mask() else {
                 out.push(item);
                 continue;
             };
-            let mut run = vec![item];
-            while let Some(item) = items.next_if(|item| item.mask() == Some(mask)) {
-                run.push(item);
-            }
+            // The run made once at its length: a list's rows under one fade
+            // are hundreds, and pushing them one by one grew it ten times.
+            let len = (items.as_slice().iter())
+                .position(|item| item.mask() != Some(mask))
+                .unwrap_or(items.len());
+            let mut run = Vec::with_capacity(len + 1);
+            run.push(item);
+            run.extend(items.by_ref().take(len));
+            // Runs before the first were found to need none.
+            let found = match start.cmp(&first) {
+                std::cmp::Ordering::Less => None,
+                std::cmp::Ordering::Equal => found_first.take(),
+                std::cmp::Ordering::Greater => self.band_strips(scene, &run, mask, reach, target),
+            };
+            // Its bands apart (a fade at the top and one at the bottom), each
+            // to a texture of its own.
+            let found = found.map(|found| {
+                let groups = apart(found.as_one.clone());
+                (found, groups)
+            });
             // Ids to key its textures: items of it that no layer, cached or
-            // not, has (nor another band).
-            let keys: Vec<NodeId> = run
-                .iter()
-                .filter(|item| {
-                    !item.isolated && item.id != scene.root() && !self.layers.contains_key(&item.id)
-                })
-                .map(|item| item.id)
-                .collect();
-            match (
-                self.band_strips(scene, &run, mask, reach, target),
-                keys.first(),
-            ) {
-                (Some((inner, strips)), Some(&key)) => {
-                    // Bands apart (a fade at the top and one at the bottom)
-                    // each in a texture of their own, as many as it has
-                    // items to key them: one over them all is as large as
-                    // the box (a page-sized texture for two strips).
-                    let groups = apart(strips);
+            // not, has (nor another band), one a texture: looked for only
+            // that far into the run (a transcript's run is hundreds).
+            let keys: Vec<NodeId> = match &found {
+                Some((_, groups)) => run
+                    .iter()
+                    .filter(|item| {
+                        !item.isolated
+                            && item.id != scene.root()
+                            && !self.layers.contains_key(&item.id)
+                    })
+                    .map(|item| item.id)
+                    .take(groups.len().max(1))
+                    .collect(),
+                None => Vec::new(),
+            };
+            match (found, keys.first()) {
+                (
+                    Some((
+                        BandStrips {
+                            inner,
+                            as_one: _,
+                            by_item,
+                        },
+                        groups,
+                    )),
+                    Some(&key),
+                ) => {
+                    // Its bands where nothing stacks, faded item by item:
+                    // each item cut to each, as the run draws with none.
+                    let plain: Vec<PaintItem<'a>> = by_item
+                        .iter()
+                        .flat_map(|strip| {
+                            let within = strip.clip(scale);
+                            // Cut first: only those it cuts cloned.
+                            run.iter().filter_map(move |item| {
+                                let clip = item.clip.unwrap_or(within).intersection(within)?;
+                                let mut item = item.clone();
+                                item.clip = Some(clip);
+                                Some(item)
+                            })
+                        })
+                        .collect();
+                    // Bands apart each in a texture of their own, as many as
+                    // it has items to key them: one over them all is as
+                    // large as the box (a page-sized texture for two strips).
                     if groups.len() > 1 && keys.len() >= groups.len() {
                         for (at, (group, key)) in groups.into_iter().zip(keys).enumerate() {
                             // The interior once, with the first.
@@ -258,6 +318,7 @@ impl GpuRenderer {
                             &mut out,
                         ));
                     }
+                    out.extend(plain);
                 }
                 // None stacking in a band (rows apart), or something there
                 // it can't draw apart (a backdrop filter, a blend): faded
@@ -288,6 +349,18 @@ impl GpuRenderer {
         else {
             return false;
         };
+        self.first_band(scene, items, reach, target).is_some()
+    }
+    /// The first run of `items` under one mask whose bands need drawing as
+    /// one, and its strips (`band_strips`), reaching `reach` in `target`:
+    /// where it starts in `items`. `None` where no run does.
+    fn first_band(
+        &self,
+        scene: &Scene,
+        items: &[PaintItem<'_>],
+        reach: Pixels,
+        target: Pixels,
+    ) -> Option<(usize, BandStrips)> {
         let mut at = 0;
         while at < items.len() {
             let Some(mask) = items[at].mask() else {
@@ -298,15 +371,12 @@ impl GpuRenderer {
                 .iter()
                 .position(|item| item.mask() != Some(mask))
                 .map_or(items.len(), |n| at + n);
-            if self
-                .band_strips(scene, &items[at..end], mask, reach, target)
-                .is_some()
-            {
-                return true;
+            if let Some(found) = self.band_strips(scene, &items[at..end], mask, reach, target) {
+                return Some((at, found));
             }
             at = end;
         }
-        false
+        None
     }
     /// Where `mask` shows (device pixels, in `target`) and where it is 1;
     /// `None` where it shows nowhere in `target`.
@@ -367,10 +437,20 @@ impl GpuRenderer {
             ]),
         ))
     }
-    /// A run's interior and bands (in device pixels) where it needs its
-    /// bands drawn as one: `None` where it can't be (a backdrop filter or
-    /// blend in one), or where nothing in a band overlaps (item by item is
-    /// exact there, a list of rows: drawn as it was).
+    /// A run's interior and bands (in device pixels) where it needs some
+    /// of its bands drawn as one: those (`as_one`), and the rest this frame
+    /// draws, faded item by item (`by_item`). `None` where none needs it:
+    /// nothing in a band overlaps (item by item is exact there, a list of
+    /// rows: drawn as it was), or what does can't be drawn apart (a backdrop
+    /// filter or blend in it).
+    ///
+    /// Each band (with any it overlaps: `apart`) decides alone, from what
+    /// stacks in it, never from what stacks in another: a frame repainting
+    /// one band draws it as a frame repainting them all does. (Decided for
+    /// the run as a whole, a transcript whose bottom band stacked a code
+    /// block's text on its box drew its top band as one in frames repainting
+    /// both, and item by item in a frame repainting the top alone, as a
+    /// scroll's can: a glyph's overlap with the next faded twice.)
     fn band_strips(
         &self,
         scene: &Scene,
@@ -378,7 +458,7 @@ impl GpuRenderer {
         (rect, [top, right, bottom, left]): FadeMask,
         reach: Pixels,
         target: Pixels,
-    ) -> Option<(Pixels, Vec<Pixels>)> {
+    ) -> Option<BandStrips> {
         let scale = self.scale;
         let (mut outer, mut inner) = self.boxes((rect, [top, right, bottom, left]), target)?;
         // Under a second fade too (`PaintItem::outer_mask`): where both
@@ -406,16 +486,10 @@ impl GpuRenderer {
             .filter(|strip| !strip.empty())
             .collect()
         };
-        // Of its bands, what this frame draws.
-        let strips: Vec<Pixels> = strips
-            .into_iter()
-            .map(|strip| strip.meet(reach))
-            .filter(|strip| !strip.empty())
-            .collect();
-        // What each paints that reaches a band: two sharing a pixel there
+        // What each paints that reaches `strips`: two sharing a pixel there
         // stack, faded item by item. Most boxes (a row, a container) paint
-        // nothing of their own. One pass, to the first two that stack.
-        let painted = |item: &PaintItem<'_>| -> Option<Pixels> {
+        // nothing of their own.
+        let painted = |item: &PaintItem<'_>, strips: &[Pixels]| -> Option<Pixels> {
             if item.effects.opacity <= 0. {
                 return None;
             }
@@ -448,27 +522,37 @@ impl GpuRenderer {
                 .any(|strip| !strip.meet(area).empty())
                 .then_some(area)
         };
-        let mut painting: Vec<Pixels> = Vec::new();
-        let stacks = run.iter().filter_map(painted).any(|area| {
-            let stacks = painting.iter().any(|other| {
-                let both = area.meet(*other);
-                !both.empty() && strips.iter().any(|strip| !strip.meet(both).empty())
-            });
-            painting.push(area);
-            stacks
-        });
-        if !stacks {
-            return None;
-        }
-        // What the run can paint, its bands cut to it.
+        // What each item can paint (its clip, in this target), worked out
+        // once for the passes below: a transcript's run is hundreds.
         let reaches = |item: &PaintItem<'_>| {
             item.clip
                 .map_or(target, |clip| Pixels::around(clip, scale).meet(target))
         };
+        let item_reach: Vec<Pixels> = run.iter().map(reaches).collect();
+        // Whether two of the run stack in `strips`. One pass, to the first
+        // two that do; one whose clip reaches none of them paints none
+        // there (what it paints lies in its clip).
+        let stacks = |strips: &[Pixels]| {
+            let mut painting: Vec<Pixels> = Vec::new();
+            run.iter()
+                .zip(&item_reach)
+                .filter(|(_, reach)| strips.iter().any(|strip| !strip.meet(**reach).empty()))
+                .filter_map(|(item, _)| painted(item, strips))
+                .any(|area| {
+                    let stacks = painting.iter().any(|other| {
+                        let both = area.meet(*other);
+                        !both.empty() && strips.iter().any(|strip| !strip.meet(both).empty())
+                    });
+                    painting.push(area);
+                    stacks
+                })
+        };
+        // What the run can paint, its bands cut to it.
         let content = run
             .iter()
-            .filter(|item| item.effects.opacity > 0.)
-            .map(reaches)
+            .zip(&item_reach)
+            .filter(|(item, _)| item.effects.opacity > 0.)
+            .map(|(_, reach)| *reach)
             .reduce(|a, b| {
                 Pixels([
                     a.0[0].min(b.0[0]),
@@ -477,25 +561,46 @@ impl GpuRenderer {
                     a.0[3].max(b.0[3]),
                 ])
             })?;
-        let strips: Vec<Pixels> = strips
-            .into_iter()
-            .map(|strip| strip.meet(content))
-            .filter(|strip| !strip.empty())
-            .collect();
-        let crossing = |item: &PaintItem<'_>| {
-            item.effects.opacity > 0.
-                && strips
-                    .iter()
-                    .any(|strip| !strip.meet(reaches(item)).empty())
+        let mut found = BandStrips {
+            inner,
+            as_one: Vec::new(),
+            by_item: Vec::new(),
         };
-        if run
-            .iter()
-            .filter(|item| crossing(item))
-            .any(|item| !fades_apart(scene, item))
-        {
-            return None;
+        // (Grouped whole, before this frame's reach cuts them: the same
+        // groups whatever it repaints.)
+        for group in apart(strips) {
+            // Of its bands, what this frame draws.
+            let drawn: Vec<Pixels> = group
+                .into_iter()
+                .map(|strip| strip.meet(reach))
+                .filter(|strip| !strip.empty())
+                .collect();
+            if drawn.is_empty() {
+                continue;
+            }
+            if !stacks(&drawn) {
+                found.by_item.extend(drawn);
+                continue;
+            }
+            let cut: Vec<Pixels> = drawn
+                .iter()
+                .map(|strip| strip.meet(content))
+                .filter(|strip| !strip.empty())
+                .collect();
+            let crossing = |item: &PaintItem<'_>, reach: Pixels| {
+                item.effects.opacity > 0. && cut.iter().any(|strip| !strip.meet(reach).empty())
+            };
+            match run
+                .iter()
+                .zip(&item_reach)
+                .filter(|(item, reach)| crossing(item, **reach))
+                .all(|(item, _)| fades_apart(scene, item))
+            {
+                true => found.as_one.extend(cut),
+                false => found.by_item.extend(drawn),
+            }
         }
-        Some((inner, strips))
+        (!found.as_one.is_empty()).then_some(found)
     }
     /// One run under `mask` into `out`, its interior and `bands`
     /// (`band_strips`), and its bands' phase, its texture keyed by `key`.
@@ -539,17 +644,15 @@ impl GpuRenderer {
         let (kind, font, text_options) = (run[0].kind, run[0].font, run[0].text_options);
         // A fade around the run's (one mask, one ancestor: one outer).
         let outer_mask = run[0].outer_mask();
-        let mut items: Vec<PaintItem<'a>> = run
-            .iter()
-            .filter(|item| crossing(item))
-            .filter_map(|item| {
-                let clip = item.clip.unwrap_or(within).intersection(within)?;
-                let mut item = item.clone();
-                item.clip = Some(clip);
-                item.extras = unmasked(&item.extras, &mut last);
-                Some(item)
-            })
-            .collect();
+        // At most the run's: made once, not grown item by item.
+        let mut items: Vec<PaintItem<'a>> = Vec::with_capacity(run.len());
+        items.extend(run.iter().filter(|item| crossing(item)).filter_map(|item| {
+            let clip = item.clip.unwrap_or(within).intersection(within)?;
+            let mut item = item.clone();
+            item.clip = Some(clip);
+            item.extras = unmasked(&item.extras, &mut last);
+            Some(item)
+        }));
         zgx::scene::translate_items(&mut items, -bounds.x, -bounds.y);
         // The interior: drawn as it is, its mask (1 there) dropped, so it
         // takes the plainer shaders (which pay for its bands' pass, GPU).
@@ -678,14 +781,7 @@ impl GpuRenderer {
     ) {
         let (uniform, plain) = self.viewport_uniform(band.viewport);
         let viewport = match regions {
-            Some((offset, size)) => self.viewport_group(
-                &uniform,
-                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: vertices,
-                    offset,
-                    size: wgpu::BufferSize::new(size),
-                }),
-            ),
+            Some(place) => self.regions_group(&uniform, vertices, place),
             None => plain,
         };
         stats.render_passes += 1;

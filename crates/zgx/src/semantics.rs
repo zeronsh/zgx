@@ -186,6 +186,9 @@ pub struct SemanticNode {
     pub modal: bool,
     /// Whether what it opens is open; `None` for nothing to open.
     pub expanded: Option<bool>,
+    /// A toggle button's state (`aria-pressed`): pressed, not pressed, or
+    /// `None` for not a toggle button.
+    pub pressed: Option<bool>,
     /// What it opens, if anything.
     pub has_popup: Option<PopupKind>,
     /// None preserves the vertical default of legacy scroll views.
@@ -213,6 +216,11 @@ pub struct SemanticRare {
     /// Accessible ownership for a portal whose physical parent differs. Native
     /// projection ignores missing, hidden, self-referential or cyclic parents.
     pub logical_parent: Option<NodeId>,
+    /// A control inline in a paragraph's text (a labelled span that acts,
+    /// its `logical_parent` the paragraph): the UTF-8 bytes of that text it
+    /// stands for. A reader hears it there, by its name, in place of them,
+    /// as a browser's inline link; the paragraph's value goes without them.
+    pub inline_range: Option<std::ops::Range<usize>>,
     /// A range's smallest value.
     pub min: Option<f64>,
     /// A range's largest value.
@@ -240,11 +248,24 @@ pub struct SemanticRare {
     pub active_descendant: Option<NodeId>,
     /// Its place in a grid, or a grid's size (boxed: only grids have one).
     pub table: Option<Box<TablePlace>>,
+    /// A text field's atoms (chips): stretches of its value a reader takes
+    /// as one unit, read as their label where they have one.
+    pub text_units: Option<std::sync::Arc<[TextUnit]>>,
+}
+/// One of a text field's atoms as assistive technology reads it
+/// (`SemanticRare::text_units`): its UTF-8 bytes of the value, and what is
+/// read for them where that isn't the text itself (a mention's name).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextUnit {
+    pub range: std::ops::Range<usize>,
+    pub label: Option<String>,
 }
 /// None set, for a node with none to read as.
 static NO_RARE: SemanticRare = SemanticRare {
     text_selection: None,
     logical_parent: None,
+    inline_range: None,
     min: None,
     max: None,
     numeric_value: None,
@@ -257,6 +278,7 @@ static NO_RARE: SemanticRare = SemanticRare {
     shortcut: None,
     active_descendant: None,
     table: None,
+    text_units: None,
 };
 /// A [`SemanticRare`] made as one is first assigned to. A node's copy shares
 /// it until one of them assigns ([`Semantics::update`] copies each node it
@@ -266,12 +288,12 @@ static NO_RARE: SemanticRare = SemanticRare {
 struct RareFields(Option<Rc<SemanticRare>>);
 impl PartialEq for RareFields {
     fn eq(&self, other: &Self) -> bool {
-        if let (Some(a), Some(b)) = (&self.0, &other.0)
-            && Rc::ptr_eq(a, b)
-        {
-            return true;
+        match (&self.0, &other.0) {
+            // Neither made: most nodes, compared without reading a field.
+            (None, None) => true,
+            (Some(a), Some(b)) if Rc::ptr_eq(a, b) => true,
+            _ => self.0.as_deref().unwrap_or(&NO_RARE) == other.0.as_deref().unwrap_or(&NO_RARE),
         }
-        self.0.as_deref().unwrap_or(&NO_RARE) == other.0.as_deref().unwrap_or(&NO_RARE)
     }
 }
 impl std::ops::Deref for SemanticNode {
@@ -299,6 +321,7 @@ impl SemanticNode {
             read_only: false,
             modal: false,
             expanded: None,
+            pressed: None,
             has_popup: None,
             scroll_axis: None,
             selected: None,
@@ -576,6 +599,25 @@ impl Semantics {
         self.revision = self.revision.wrapping_add(1);
         entry.revision = self.revision;
     }
+    /// A text field's atoms as a reader takes them (`text_units`), none for
+    /// no atoms. Missing nodes are ignored.
+    #[doc(hidden)]
+    pub fn update_text_units(&mut self, id: NodeId, units: Vec<TextUnit>) {
+        if self.buried(id) {
+            return;
+        }
+        let Some(entry) = self.nodes.get_mut(&id) else {
+            return;
+        };
+        let node = &mut entry.node;
+        let now = (!units.is_empty()).then(|| std::sync::Arc::from(units));
+        if node.text_units == now {
+            return;
+        }
+        node.text_units = now;
+        self.revision = self.revision.wrapping_add(1);
+        entry.revision = self.revision;
+    }
     /// As `update_text_input` for a long text, shared rather than copied.
     pub fn update_long_text_input(
         &mut self,
@@ -846,6 +888,20 @@ impl Semantics {
             self.revision = self.revision.wrapping_add(1);
         }
     }
+    /// The controls inline in `paragraph`'s text (`SemanticRare::inline_range`):
+    /// each one's range in its text and its node, in the text's order. It
+    /// looks at every node: for devtools and tests (what `heard` takes),
+    /// not for a frame.
+    #[doc(hidden)]
+    pub fn inline_controls(&self, paragraph: NodeId) -> Vec<(std::ops::Range<usize>, NodeId)> {
+        let mut controls: Vec<_> = self
+            .iter()
+            .filter(|(_, s)| s.logical_parent == Some(paragraph))
+            .filter_map(|(id, s)| Some((s.inline_range.clone()?, id)))
+            .collect();
+        controls.sort_by_key(|(range, _)| range.start);
+        controls
+    }
     /// Every node's information, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = (NodeId, &SemanticNode)> {
         self.nodes
@@ -867,6 +923,55 @@ impl Semantics {
         self.revision
     }
 }
+
+/// A part of what a reader hears of a paragraph with controls inline in its
+/// text (`heard`): a stretch of its text, or a control, read where it stands
+/// by its own name.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Heard<T> {
+    /// A stretch of the paragraph's own text.
+    Text(String),
+    /// A control inline in it, read by its own name where it stands.
+    Control(T),
+}
+
+/// What a reader hears of `value`, a paragraph's text, with `controls` (each
+/// one's range in it, in order) inline in it: the text between them, and each
+/// control in its place, its own text left out. What the desktop's
+/// accessibility tree says (`heard_value`, its runs and children) and what
+/// `zgx inspect node` prints, from one place so the two can't drift.
+#[doc(hidden)]
+pub fn heard<T: Clone>(value: &str, controls: &[(std::ops::Range<usize>, T)]) -> Vec<Heard<T>> {
+    let mut parts = Vec::with_capacity(controls.len() * 2 + 1);
+    let mut from = 0;
+    for (range, control) in controls {
+        let start = range.start.clamp(from, value.len());
+        if let Some(text) = value.get(from..start).filter(|t| !t.is_empty()) {
+            parts.push(Heard::Text(text.to_owned()));
+        }
+        parts.push(Heard::Control(control.clone()));
+        from = range.end.clamp(start, value.len());
+    }
+    if let Some(text) = value.get(from..).filter(|t| !t.is_empty()) {
+        parts.push(Heard::Text(text.to_owned()));
+    }
+    parts
+}
+
+/// A paragraph's value as a reader hears it with `controls` inline in it:
+/// its text without theirs (`heard`'s text, joined).
+#[doc(hidden)]
+pub fn heard_value<T: Clone>(value: &str, controls: &[(std::ops::Range<usize>, T)]) -> String {
+    heard(value, controls)
+        .into_iter()
+        .filter_map(|part| match part {
+            Heard::Text(text) => Some(text),
+            Heard::Control(_) => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

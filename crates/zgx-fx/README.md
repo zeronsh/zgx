@@ -1,6 +1,6 @@
 # zgx-fx
 
-Ready-made visual effects for [zgx](../zgx), made with its public API alone: an app that doesn't depend on this crate pays nothing. Luau apps copy `luau/fx.luau` beside their scripts.
+Ready-made visual effects for [zgx](../zgx), made with its public API alone: an app that doesn't depend on this crate links none of it. Luau apps copy `luau/fx.luau` beside their scripts.
 
 ```rust
 use zgx_fx::{FxExt, Glow};

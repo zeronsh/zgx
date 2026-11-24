@@ -1,0 +1,333 @@
+//! A canvas's drawing (`zgx::canvas::Canvas`) written into the frame's
+//! buffer for the JS side to draw with Canvas 2D (`PAINT`): its commands as
+//! words, numbers as their `f32` bits, text in the frame's strings. The
+//! layout matches `paint` in `js/zgx-dom.js`.
+
+use crate::ops::Ops;
+use std::sync::Arc;
+use zgx::{
+    affine::Affine,
+    canvas::{
+        Brush, Draw, FillRule, GradientStop, LineCap, LineJoin, Path, Segment, Shape, TextAnchor,
+        TextBaseline,
+    },
+    image::ImageData,
+    scene::{Color, Rect},
+    style::ObjectFit,
+};
+
+const FILL: u32 = 1;
+const STROKE: u32 = 2;
+const CLIP: u32 = 3;
+const RESTORE: u32 = 4;
+const TEXT: u32 = 5;
+const IMAGE: u32 = 6;
+const SHADOW: u32 = 7;
+
+/// `canvas`'s commands and text, after `PAINT canvas width height count`.
+pub(crate) fn encode(ops: &mut Ops, canvas: &zgx::canvas::Canvas) {
+    for draw in canvas.commands() {
+        match draw {
+            Draw::Fill { path, brush, rule } => {
+                ops.words.extend_from_slice(&[FILL, rule_word(*rule)]);
+                brush_words(ops, brush);
+                path_words(ops, path);
+            }
+            Draw::Stroke { path, brush, style } => {
+                ops.words.extend_from_slice(&[
+                    STROKE,
+                    style.width.to_bits(),
+                    match style.cap {
+                        LineCap::Butt => 0,
+                        LineCap::Round => 1,
+                        LineCap::Square => 2,
+                    },
+                    match style.join {
+                        LineJoin::Miter => 0,
+                        LineJoin::Round => 1,
+                        LineJoin::Bevel => 2,
+                    },
+                    style.miter_limit.to_bits(),
+                    style.dash.len() as u32,
+                ]);
+                ops.words.extend(style.dash.iter().map(|d| d.to_bits()));
+                ops.words.push(style.dash_offset.to_bits());
+                brush_words(ops, brush);
+                path_words(ops, path);
+            }
+            Draw::Clip { path, rule } => {
+                ops.words.extend_from_slice(&[CLIP, rule_word(*rule)]);
+                path_words(ops, path);
+            }
+            Draw::Restore => ops.words.push(RESTORE),
+            Draw::Image {
+                image,
+                rect,
+                fit,
+                radius,
+                opacity,
+            } => image_words(ops, image, *rect, *fit, *radius, *opacity),
+            Draw::Shadow {
+                path,
+                color,
+                offset,
+                blur,
+                spread,
+            } => {
+                ops.words.extend_from_slice(&[
+                    SHADOW,
+                    rgba(*color),
+                    offset.x.to_bits(),
+                    offset.y.to_bits(),
+                    blur.to_bits(),
+                    spread.to_bits(),
+                ]);
+                path_words(ops, path);
+            }
+        }
+    }
+    // Text goes over the shapes, whatever their order, unclipped.
+    for text in canvas.texts() {
+        ops.words.push(TEXT);
+        ops.str(&text.text);
+        ops.str(&zgx::compose::__dom::font_css(&text.font, text.size));
+        ops.words.extend_from_slice(&[
+            text.x.to_bits(),
+            text.y.to_bits(),
+            rgba(text.color),
+            match text.anchor {
+                TextAnchor::Start => 0,
+                TextAnchor::Center => 1,
+                TextAnchor::End => 2,
+            },
+            match text.baseline {
+                TextBaseline::Top => 0,
+                TextBaseline::Middle => 1,
+                TextBaseline::Bottom => 2,
+            },
+        ]);
+    }
+}
+
+/// How many commands `canvas` writes (`PAINT`'s count).
+pub(crate) fn count(canvas: &zgx::canvas::Canvas) -> u32 {
+    (canvas.commands().len() + canvas.texts().len()) as u32
+}
+
+fn rule_word(rule: FillRule) -> u32 {
+    match rule {
+        FillRule::Winding => 0,
+        FillRule::EvenOdd => 1,
+    }
+}
+
+fn rgba(Color(r, g, b, a): Color) -> u32 {
+    (r as u32) << 24 | (g as u32) << 16 | (b as u32) << 8 | a as u32
+}
+
+fn brush_words(ops: &mut Ops, brush: &Brush) {
+    match brush {
+        Brush::Solid(color) => ops.words.extend_from_slice(&[0, rgba(*color)]),
+        Brush::Linear { start, end, stops } => {
+            ops.words.extend_from_slice(&[
+                1,
+                start.x.to_bits(),
+                start.y.to_bits(),
+                end.x.to_bits(),
+                end.y.to_bits(),
+                stops.len() as u32,
+            ]);
+            for stop in stops.iter() {
+                ops.words
+                    .extend_from_slice(&[stop.offset.to_bits(), rgba(stop.color)]);
+            }
+        }
+        Brush::Radial { transform, stops } => {
+            ops.words.push(3);
+            gradient_words(ops, transform, stops);
+        }
+        Brush::Conic { transform, stops } => {
+            ops.words.push(4);
+            gradient_words(ops, transform, stops);
+        }
+        Brush::Slash {
+            background,
+            foreground,
+            spacing,
+            width,
+        } => ops.words.extend_from_slice(&[
+            2,
+            rgba(*background),
+            rgba(*foreground),
+            spacing.to_bits(),
+            width.to_bits(),
+        ]),
+    }
+}
+
+/// A radial or conic gradient's placement and stops: drawn in the unit
+/// space `transform` maps onto the canvas.
+fn gradient_words(ops: &mut Ops, transform: &Affine, stops: &[GradientStop]) {
+    let Affine { a, b, c, d, tx, ty } = *transform;
+    ops.words.extend([a, b, c, d, tx, ty].map(f32::to_bits));
+    ops.words.push(stops.len() as u32);
+    for stop in stops {
+        ops.words
+            .extend_from_slice(&[stop.offset.to_bits(), rgba(stop.color)]);
+    }
+}
+
+/// `IMAGE`: the picture's id (two words, for the JS side's copy of it),
+/// size and pixels' place in memory, kept alive until the frame is applied;
+/// then the box it is cut to, its radius and opacity, and the rect it is
+/// placed in as `fit` fills the box, as the desktop places it. A picture
+/// with no pixels to read (a GPU view's frame) has length 0 and draws
+/// nothing.
+fn image_words(
+    ops: &mut Ops,
+    image: &Arc<ImageData>,
+    rect: Rect,
+    fit: ObjectFit,
+    radius: f32,
+    opacity: f32,
+) {
+    let pixels = image.pixels();
+    let (source_w, source_h) = (image.width() as f32, image.height() as f32);
+    let (horizontal, vertical) = (rect.width / source_w, rect.height / source_h);
+    let (width, height) = match fit {
+        ObjectFit::Fill => (rect.width, rect.height),
+        ObjectFit::None => (source_w, source_h),
+        fit => {
+            let scale = match fit {
+                ObjectFit::Cover => horizontal.max(vertical),
+                ObjectFit::ScaleDown => horizontal.min(vertical).min(1.),
+                _ => horizontal.min(vertical),
+            };
+            (source_w * scale, source_h * scale)
+        }
+    };
+    let id = image.id();
+    ops.words.extend_from_slice(&[
+        IMAGE,
+        id as u32,
+        (id >> 32) as u32,
+        image.width(),
+        image.height(),
+        pixels.as_ptr() as u32,
+        pixels.len() as u32,
+    ]);
+    ops.words.extend(
+        [
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            radius,
+            opacity,
+            rect.x + (rect.width - width) / 2.,
+            rect.y + (rect.height - height) / 2.,
+            width,
+            height,
+        ]
+        .map(f32::to_bits),
+    );
+    ops.keep.push(image.clone());
+}
+
+fn path_words(ops: &mut Ops, path: &Path) {
+    match path.shape() {
+        Some(Shape::Rect { rect, radius }) => ops.words.extend_from_slice(&[
+            0,
+            rect.x.to_bits(),
+            rect.y.to_bits(),
+            rect.width.to_bits(),
+            rect.height.to_bits(),
+            radius.to_bits(),
+        ]),
+        Some(Shape::Ellipse { rect }) => ops.words.extend_from_slice(&[
+            1,
+            rect.x.to_bits(),
+            rect.y.to_bits(),
+            rect.width.to_bits(),
+            rect.height.to_bits(),
+        ]),
+        Some(Shape::Line { from, to }) => ops.words.extend_from_slice(&[
+            2,
+            from.x.to_bits(),
+            from.y.to_bits(),
+            to.x.to_bits(),
+            to.y.to_bits(),
+        ]),
+        None => {
+            let segments = path.segments();
+            ops.words.extend_from_slice(&[3, segments.len() as u32]);
+            for segment in segments {
+                match segment {
+                    Segment::Move(p) => {
+                        ops.words
+                            .extend_from_slice(&[0, p.x.to_bits(), p.y.to_bits()])
+                    }
+                    Segment::Line(p) => {
+                        ops.words
+                            .extend_from_slice(&[1, p.x.to_bits(), p.y.to_bits()])
+                    }
+                    Segment::Quadratic(c, p) => ops.words.extend_from_slice(&[
+                        2,
+                        c.x.to_bits(),
+                        c.y.to_bits(),
+                        p.x.to_bits(),
+                        p.y.to_bits(),
+                    ]),
+                    Segment::Cubic(a, b, p) => ops.words.extend_from_slice(&[
+                        3,
+                        a.x.to_bits(),
+                        a.y.to_bits(),
+                        b.x.to_bits(),
+                        b.y.to_bits(),
+                        p.x.to_bits(),
+                        p.y.to_bits(),
+                    ]),
+                    Segment::Close => ops.words.push(4),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+    use zgx::canvas::{Canvas, CanvasText};
+
+    fn encoded(known_size: Option<(f32, f32)>, anchor: TextAnchor) -> (Vec<u32>, String) {
+        let mut canvas = Canvas::new();
+        canvas.text(CanvasText {
+            text: "a run".into(),
+            x: 16.,
+            y: 0.,
+            size: 13.,
+            color: Color(200, 200, 200, 255),
+            font: Default::default(),
+            anchor,
+            baseline: TextBaseline::Top,
+            width: f32::INFINITY,
+            known_size: known_size.into(),
+        });
+        let mut ops = Ops::default();
+        encode(&mut ops, &canvas);
+        (ops.words, ops.text)
+    }
+
+    /// Canvas 2D places text by its point and anchor alone: a size its
+    /// maker states (a terminal's run on its grid) draws it as without one,
+    /// at any anchor, however far off the stated size is.
+    #[test]
+    fn a_stated_size_draws_as_none() {
+        for anchor in [TextAnchor::Start, TextAnchor::Center, TextAnchor::End] {
+            let none = encoded(None, anchor);
+            assert_eq!(encoded(Some((40., 17.)), anchor), none);
+            assert_eq!(encoded(Some((1., 1.)), anchor), none);
+        }
+    }
+}

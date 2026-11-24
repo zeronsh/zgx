@@ -1,0 +1,275 @@
+//! Canvas drawing (`canvas`) with Canvas 2D: its commands drawn at the
+//! element's size, again as what they read changes.
+#![cfg(target_arch = "wasm32")]
+
+use wasm_bindgen::JsCast;
+use wasm_bindgen_test::*;
+use zgx::{
+    canvas::{
+        Brush, Canvas, CanvasText, FillRule, GradientStop, Path, Point, Stroke, TextAnchor,
+        TextBaseline,
+    },
+    compose::{canvas, column},
+    reactive::Runtime,
+    scene::{Color, Rect},
+    style::Styled,
+};
+
+wasm_bindgen_test_configure!(run_in_browser);
+
+fn host() -> web_sys::Element {
+    let document = web_sys::window().unwrap().document().unwrap();
+    let host = document.create_element("div").unwrap();
+    document.body().unwrap().append_child(&host).unwrap();
+    host
+}
+
+async fn sleep(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        web_sys::window()
+            .unwrap()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
+            .unwrap();
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+}
+
+/// The colour at `x`, `y` (CSS pixels) of the page's canvas in `host`.
+fn pixel(host: &web_sys::Element, x: f64, y: f64) -> [u8; 4] {
+    let canvas: web_sys::HtmlCanvasElement = host
+        .query_selector("canvas")
+        .unwrap()
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    let ratio = web_sys::window().unwrap().device_pixel_ratio();
+    let ctx: web_sys::CanvasRenderingContext2d = canvas
+        .get_context("2d")
+        .unwrap()
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    let data = ctx
+        .get_image_data((x * ratio) as f64, (y * ratio) as f64, 1., 1.)
+        .unwrap()
+        .data();
+    [data[0], data[1], data[2], data[3]]
+}
+
+#[wasm_bindgen_test]
+async fn a_canvas_draws_its_commands_and_again_as_they_change() {
+    let runtime = Runtime::new();
+    let color = runtime.signal(Color(255, 0, 0, 255));
+    let read = color.clone();
+    let sizes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = sizes.clone();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            canvas(move |(width, height)| {
+                seen.borrow_mut().push((width, height));
+                let mut drawing = Canvas::new();
+                drawing
+                    .fill(Path::rectangle(Rect::new(0., 0., 20., 20.)), read.get())
+                    .fill(
+                        Path::ellipse(Rect::new(40., 0., 20., 20.)).unwrap(),
+                        Color(0, 0, 255, 255),
+                    )
+                    .clip(
+                        Path::rectangle(Rect::new(0., 30., 10., 10.)),
+                        FillRule::Winding,
+                    )
+                    .fill(
+                        Path::rectangle(Rect::new(0., 30., 40., 10.)),
+                        Brush::linear(
+                            Point::new(0., 0.),
+                            Point::new(10., 0.),
+                            [
+                                GradientStop {
+                                    offset: 0.,
+                                    color: Color(0, 255, 0, 255),
+                                },
+                                GradientStop {
+                                    offset: 1.,
+                                    color: Color(0, 255, 0, 255),
+                                },
+                            ],
+                        )
+                        .unwrap(),
+                    )
+                    .restore()
+                    .stroke(
+                        Path::line(Point::new(70., 0.), Point::new(70., 40.)).unwrap(),
+                        Color(0, 0, 0, 255),
+                        Stroke {
+                            width: 4.,
+                            ..Default::default()
+                        },
+                    )
+                    .text(CanvasText {
+                        text: "zgx".into(),
+                        x: 80.,
+                        y: 0.,
+                        size: 12.,
+                        color: Color(0, 0, 0, 255),
+                        font: Default::default(),
+                        anchor: TextAnchor::Start,
+                        baseline: TextBaseline::Top,
+                        known_size: zgx::canvas::KnownSize::NONE,
+                        width: f32::INFINITY,
+                    });
+                drawing
+            })
+            .w(120.)
+            .h(40.),
+        ),
+    );
+    sleep(60).await;
+    // Drawn at its element's size, once measured.
+    assert_eq!(sizes.borrow().last(), Some(&(120., 40.)));
+    assert_eq!(pixel(&host, 10., 10.), [255, 0, 0, 255]);
+    assert_eq!(pixel(&host, 50., 10.), [0, 0, 255, 255]);
+    // The clip keeps the gradient's fill to its 10 points.
+    assert_eq!(pixel(&host, 5., 35.), [0, 255, 0, 255]);
+    assert_eq!(pixel(&host, 20., 35.)[3], 0);
+    assert_eq!(pixel(&host, 70., 20.), [0, 0, 0, 255]);
+    // Text drawn: something dark where it is.
+    let inked = (80..100).any(|x| pixel(&host, x as f64, 6.)[3] > 0);
+    assert!(inked);
+    // What it reads changes: drawn again.
+    color.set(Color(0, 128, 0, 255));
+    zgx_dom::flush();
+    assert_eq!(pixel(&host, 10., 10.), [0, 128, 0, 255]);
+    mounted.unmount();
+    host.remove();
+}
+
+#[wasm_bindgen_test]
+async fn a_canvas_draws_pictures_shadows_and_radial_and_conic_gradients() {
+    use zgx::{affine::Affine, image::ImageData, style::ObjectFit};
+    let stops = |a: Color, b: Color| {
+        [
+            GradientStop {
+                offset: 0.,
+                color: a,
+            },
+            GradientStop {
+                offset: 1.,
+                color: b,
+            },
+        ]
+    };
+    let (red, blue) = (Color(255, 0, 0, 255), Color(0, 0, 255, 255));
+    // Two pixels side by side, red then blue.
+    let picture =
+        std::sync::Arc::new(ImageData::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap());
+    let host = host();
+    let runtime = Runtime::new();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            canvas(move |_| {
+                let mut drawing = Canvas::new();
+                drawing
+                    // A radial gradient of radius 10 about (10, 10): red at
+                    // its centre, blue on and past its circle.
+                    .fill(
+                        Path::rectangle(Rect::new(0., 0., 40., 20.)),
+                        Brush::radial(
+                            Affine::scale(10., 10.).then(Affine::translation(10., 10.)),
+                            stops(red, blue),
+                        )
+                        .unwrap(),
+                    )
+                    // A conic one about (60, 10), red all round, as a stroke.
+                    .stroke(
+                        Path::rectangle(Rect::new(50., 0., 20., 20.)),
+                        Brush::conic(Affine::translation(60., 10.), stops(red, red)).unwrap(),
+                        Stroke {
+                            width: 4.,
+                            ..Default::default()
+                        },
+                    )
+                    // A sharp shadow 10 points right of a square at 80, grown
+                    // by 2.
+                    .shadow(
+                        Path::rectangle(Rect::new(80., 0., 10., 10.)),
+                        blue,
+                        Point::new(10., 0.),
+                        0.,
+                        2.,
+                    )
+                    // The picture stretched over 20 by 10 points.
+                    .image(
+                        picture.clone(),
+                        Rect::new(0., 25., 20., 10.),
+                        ObjectFit::Fill,
+                        0.,
+                        1.,
+                    );
+                drawing
+            })
+            .w(120.)
+            .h(40.),
+        ),
+    );
+    sleep(60).await;
+    // Red at its centre (a pixel's middle is a little off it), blue past it.
+    let centre = pixel(&host, 10., 10.);
+    assert!(
+        centre[0] > 200 && centre[2] < 50,
+        "radial centre: {centre:?}"
+    );
+    assert_eq!(pixel(&host, 30., 10.), [0, 0, 255, 255], "past its circle");
+    assert_eq!(pixel(&host, 51., 10.), [255, 0, 0, 255], "the conic stroke");
+    assert_eq!(pixel(&host, 60., 10.)[3], 0, "inside the stroke");
+    // The shadow alone, not its shape, and its spread past the shape.
+    assert_eq!(pixel(&host, 85., 5.)[3], 0, "no shape drawn");
+    assert_eq!(pixel(&host, 95., 5.), [0, 0, 255, 255], "its shadow");
+    assert_eq!(pixel(&host, 101., 5.), [0, 0, 255, 255], "grown by 2");
+    assert_eq!(pixel(&host, 104., 5.)[3], 0, "no further");
+    assert_eq!(pixel(&host, 3., 30.)[0], 255, "the picture's left pixel");
+    assert_eq!(pixel(&host, 17., 30.)[2], 255, "its right one");
+    mounted.unmount();
+    host.remove();
+}
+
+#[wasm_bindgen_test]
+async fn measure_text_measures_while_a_canvas_draws() {
+    let runtime = Runtime::new();
+    let measured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = measured.clone();
+    let host = host();
+    let mounted = zgx_dom::mount(
+        &runtime,
+        &host,
+        column().child(
+            canvas(move |_| {
+                let font = zgx::text_layout::FontStyle::default();
+                seen.borrow_mut().push((
+                    zgx::canvas::measure_text("W", 20., &font),
+                    zgx::canvas::measure_text("WWWW", 20., &font),
+                ));
+                Canvas::new()
+            })
+            .w(50.)
+            .h(20.),
+        ),
+    );
+    sleep(60).await;
+    let (one, four) = *measured.borrow().last().unwrap();
+    let (one, four) = (one.unwrap(), four.unwrap());
+    assert!(one.0 > 5. && one.0 < 40., "{one:?}");
+    assert!((four.0 - 4. * one.0).abs() < 1., "{four:?} against {one:?}");
+    assert!(one.1 >= 18. && one.1 < 40., "a line's height: {one:?}");
+    // Outside a canvas's drawing, none, as on the desktop.
+    assert_eq!(
+        zgx::canvas::measure_text("W", 20., &Default::default()),
+        None
+    );
+    mounted.unmount();
+    host.remove();
+}
