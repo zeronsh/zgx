@@ -1832,8 +1832,12 @@ fn styled_glyphs<'a>(
                 glyph.physical((0., 0.), scale)
             };
             let run_index = style(run.line_i, glyph);
+            let key = p.cache_key;
+            // macOS: hinted at 1x only, as Core Text draws (`hinted_at`).
+            #[cfg(target_os = "macos")]
+            let key = text::hinted_at(key, scale);
             glyphs.push(Glyph {
-                key: p.cache_key,
+                key,
                 run: run_index,
                 x: p.x as f32,
                 // Each line's baseline on a whole device pixel too.
