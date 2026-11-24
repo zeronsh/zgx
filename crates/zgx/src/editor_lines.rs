@@ -177,6 +177,12 @@ impl SpanStyle {
         };
     }
     /// Whether it only colours its text.
+    /// Its background, if it's a chip's (`chip`): the text area draws it
+    /// as a mark, under the selection.
+    fn chip_background(&self) -> Option<crate::scene::Color> {
+        self.background
+            .filter(|_| self.text.is_some() && self.text().padding.is_some())
+    }
     fn colors_only(&self) -> bool {
         self.weight.is_none()
             && !self.italic
@@ -518,22 +524,32 @@ pub(crate) fn styled_line(
             // Edge padding is room before and/or after the atom's text:
             // `padding[1] < 0` encodes `before = 2 * padding[0]`,
             // `after = -(padding[1] + 1)` (`TextRun::across_padding`). A
-            // chip span's room is round its text (`SpanStyle::chip`).
+            // chip span's room across is round its text (`SpanStyle::chip`),
+            // added to an atom's.
             let lead = look.and_then(|l| l.lead).filter(|v| *v > 0.).unwrap_or(0.);
             let trail = look.and_then(|l| l.trail).filter(|v| *v > 0.).unwrap_or(0.);
+            let across = text.padding.map_or(0., |p| p[0].max(0.));
             let padding = if lead > 0. || trail > 0. {
-                [lead / 2., -1. - trail]
+                [(lead + across) / 2., -1. - (trail + across)]
             } else {
                 text.padding.unwrap_or_default()
             };
+            // A chip's background is the text area's to draw, as an atom's
+            // wash is: a mark behind the text, under the selection
+            // (`LineCache::chips_between`). The run keeps its room.
+            let chip = text.padding.is_some();
             crate::rich_text::TextRun {
                 range,
                 font,
                 font_size: text.size.unwrap_or(size),
                 color: style.color.unwrap_or(color),
-                background: style.background,
+                background: style.background.filter(|_| !chip),
                 padding,
-                radius: text.radius.unwrap_or_default(),
+                radius: if chip {
+                    0.
+                } else {
+                    text.radius.unwrap_or_default()
+                },
                 underline: style.underline.then(|| underline(look)),
                 strikethrough: style.strike.then(|| crate::rich_text::Decoration::new(1.)),
             }
@@ -719,6 +735,10 @@ pub(crate) struct LineCache {
     /// own (`SpanStyle::text`: a note's heading): its lines' heights
     /// differ, so each is kept, unwrapped too.
     tall: Cell<bool>,
+    /// The highlighter has given a chip span with a background
+    /// (`SpanStyle::chip`): only then does the text area look for chips to
+    /// draw (`chips_between`). One has a text style, so `tall` comes first.
+    chips: Cell<bool>,
     /// What each line leaves the next, from the first; as far as known.
     states: RefCell<Vec<u32>>,
     /// What the lines below the last edit left before it: once the lines
@@ -982,6 +1002,7 @@ impl LineCache {
         // Lines with room are asked for in `styled` whatever their spans.
         self.shapes.set(self.has_insets());
         self.tall.set(false);
+        self.chips.set(false);
         self.states.borrow_mut().clear();
         *self.tail.borrow_mut() = None;
         self.colored.borrow_mut().clear();
@@ -1069,6 +1090,40 @@ impl LineCache {
                 };
                 let rect = layout.shift(i, Rect::new(x, y, w * size, h * size));
                 shown.push((rect, svg.clone()));
+            }
+        }
+        shown
+    }
+    /// The spans styled as chips with a background (`SpanStyle::chip`) on
+    /// the lines between `top` and `bottom`: each one's range of the whole
+    /// text, its background, its padding down and its corners. The text
+    /// area draws them as it does its atoms' washes, behind the text and
+    /// under the selection.
+    pub(crate) fn chips_between(
+        &self,
+        layout: &LinesLayout,
+        top: f32,
+        bottom: f32,
+    ) -> Vec<(Range<usize>, crate::scene::Color, f32, f32)> {
+        let mut shown = Vec::new();
+        if !self.chips.get() {
+            return shown;
+        }
+        for i in layout.lines_between(top, bottom) {
+            let Some(spans) = self.spans(layout, i) else {
+                continue;
+            };
+            let start = layout.line_range(i).start;
+            for (range, style) in spans.iter() {
+                let text = style.text();
+                if let (Some(padding), Some(background)) = (text.padding, style.chip_background()) {
+                    shown.push((
+                        start + range.start..start + range.end,
+                        background,
+                        padding[1].max(0.),
+                        text.radius.unwrap_or(0.).max(0.),
+                    ));
+                }
             }
         }
         shown
@@ -1162,6 +1217,14 @@ impl LineCache {
         if !self.tall.get() && colors.iter().any(|(_, style)| style.text.is_some()) {
             self.tall.set(true);
             self.restyled.set(true);
+        }
+        if self.tall.get()
+            && !self.chips.get()
+            && colors
+                .iter()
+                .any(|(_, style)| style.chip_background().is_some())
+        {
+            self.chips.set(true);
         }
         let colors = Rc::new(colors);
         let mut colored = self.colored.borrow_mut();
@@ -1893,8 +1956,8 @@ mod tests {
         );
     }
 
-    /// A chip span's background takes room across round its text and has
-    /// round corners; it shapes its line, so carets follow the room.
+    /// A chip span takes room across round its text and shapes its line, so
+    /// carets follow the room; its background is drawn as a mark.
     #[test]
     fn a_chip_span_pads_and_rounds_its_background() {
         use crate::scene::Color;
@@ -1920,8 +1983,10 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(chip.padding, [4., 2.]);
-        assert_eq!(chip.radius, 6.);
-        assert_eq!(chip.background, Some(wash));
+        // Its background and corners are the text area's mark, under the
+        // selection (`LineCache::chips_between`): not the run's.
+        assert_eq!(chip.background, None);
+        assert_eq!(chip.radius, 0.);
         assert!(
             shape_key(&spans).is_some(),
             "its room across reshapes the line"
