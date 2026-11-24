@@ -387,6 +387,31 @@ pub struct EditorHandle {
     hint: Rc<EditorHint>,
     natural: Rc<NaturalMetrics>,
 }
+/// A text area's scrollbar (`View::scrollbar`): what `compose_scrollbar`
+/// reads and writes, set as the editor draws.
+struct EditorScrollbar {
+    /// How far down the text is scrolled: the bar's drag writes it.
+    offset: Signal<f32>,
+    /// The editor's whole box, the bar's track as tall, at its edge.
+    size: Signal<(f32, f32)>,
+    /// What scrolls in that box: the text's height and the box's room
+    /// around its viewport.
+    extent: Signal<f32>,
+    /// The bar's corner, moved from the editor's content corner to its box's.
+    holder: NodeId,
+    origin: Cell<(f32, f32)>,
+    /// What the last draw gave it: the editor's box size, its content's
+    /// corner in it, and its viewport's height and its text's.
+    drawn: Cell<ScrollDrawn>,
+}
+/// What an editor's last draw scrolled, as its scrollbar reads it.
+#[derive(Clone, Copy, Default)]
+struct ScrollDrawn {
+    node: (f32, f32),
+    origin: (f32, f32),
+    view: f32,
+    content: f32,
+}
 /// What an editor shows while it is empty, whether focus selects all, and
 /// the value it is bound to (here, once, for its handle and handlers).
 struct EditorHint {
@@ -664,6 +689,8 @@ struct CodeHint {
     /// layers under and over the lines' (`LineMark::over_text`), and their
     /// nodes. Made when the first mark shows.
     marks_drawn: RefCell<Option<Box<MarksDrawn>>>,
+    /// Its scrollbar (`View::scrollbar`), if it has one.
+    scrollbar: RefCell<Option<Box<EditorScrollbar>>>,
     /// The lines last given assistive technology (`Semantics::set_text_lines`).
     told_lines: RefCell<Vec<(usize, NodeId)>>,
     /// Marks behind the selection (the current line, decorations), made
@@ -786,6 +813,41 @@ impl EditorHint {
             themed: Cell::default(),
             theme_watch: Cell::default(),
         }
+    }
+    /// Tell its scrollbar what the last draw scrolled (after the draw:
+    /// nothing is borrowed, and what follows the signals may draw).
+    fn publish_scroll(&self, scene: &RefCell<Scene>) {
+        let Some(code) = self.code() else {
+            return;
+        };
+        let (offset, size, extent, drawn) = {
+            let bar = code.scrollbar.borrow();
+            let Some(bar) = bar.as_ref() else {
+                return;
+            };
+            let drawn = bar.drawn.get();
+            if bar.origin.replace(drawn.origin) != drawn.origin {
+                let mut scene = scene.borrow_mut();
+                if scene.contains(bar.holder) {
+                    scene.set_transform(
+                        bar.holder,
+                        Transform {
+                            x: -drawn.origin.0,
+                            y: -drawn.origin.1,
+                        },
+                    );
+                }
+            }
+            (
+                bar.offset.clone(),
+                bar.size.clone(),
+                bar.extent.clone(),
+                drawn,
+            )
+        };
+        size.set(drawn.node);
+        extent.set((drawn.content - drawn.view).max(0.) + drawn.node.1);
+        offset.set(self.scrolled.offset.borrow().1);
     }
     /// Redraw `root` when a theme colour it has shown in changes: one
     /// effect, made again only when it shows in another, and stopped when
@@ -1595,6 +1657,79 @@ impl EditorHandle {
     #[doc(hidden)]
     pub fn scroll_offset(&self) -> (f32, f32) {
         *self.hint.scrolled.offset.borrow()
+    }
+    /// Its viewport's height and its text's, as last drawn, for an editor
+    /// with a scrollbar (`View::scrollbar`; none: zero): it scrolls by as
+    /// much as the text is the taller.
+    #[doc(hidden)]
+    pub fn scroll_extent(&self) -> (f32, f32) {
+        self.hint
+            .code()
+            .and_then(|code| code.scrollbar.borrow().as_ref().map(|bar| bar.drawn.get()))
+            .map_or((0., 0.), |drawn| (drawn.view, drawn.content))
+    }
+    /// Scroll its text `y` points down (clamped to what it has), its caret
+    /// and selection left as they are.
+    #[doc(hidden)]
+    pub fn set_scroll_offset(&self, y: f32) {
+        if !self.multiline || !y.is_finite() {
+            return;
+        }
+        let y = y.clamp(0., self.hint.scrolled.limit.get().1.max(0.));
+        if self.hint.scrolled.offset.borrow().1 == y {
+            return;
+        }
+        self.hint.scrolled.offset.borrow_mut().1 = y;
+        self.hint.hold.set(true);
+        self.refresh();
+    }
+    /// Show a scrollbar at its right edge (`View::scrollbar` on a text
+    /// area): the one scroll views show, over its box (it takes no room from
+    /// the text), following and moving its scroll.
+    pub(crate) fn mount_scrollbar(&self, ui: &mut Ui) {
+        if !self.multiline
+            || self
+                .hint
+                .code()
+                .is_some_and(|code| code.scrollbar.borrow().is_some())
+        {
+            return;
+        }
+        let mut style = fixed(0., 0.);
+        style.absolute = true;
+        let holder = ui.container(self.node, Layout::Overlay, style);
+        if let Some(style) = ui.take_scrollbar_style(self.node) {
+            ui.keep_scrollbar_style(holder, style);
+        }
+        let (offset, size, extent) = (
+            ui.signal(0_f32),
+            ui.signal((0_f32, 0_f32)),
+            ui.signal(0_f32),
+        );
+        *self.hint.code_made().scrollbar.borrow_mut() = Some(Box::new(EditorScrollbar {
+            offset: offset.clone(),
+            size: size.clone(),
+            extent: extent.clone(),
+            holder,
+            origin: Cell::new((0., 0.)),
+            drawn: Cell::default(),
+        }));
+        crate::compose_scrollbar::mount(ui, holder, offset.clone(), size, extent, false);
+        // The bar's drag, its track's press and its keys write the offset:
+        // the text follows.
+        let (editor, runtime) = (self.clone(), ui.runtime.clone());
+        ui.bind(self.node, move || {
+            let wanted = offset.get();
+            runtime.untracked(|| {
+                editor.set_scroll_offset(wanted);
+                // Past what it has: the bar shows where the text stopped.
+                let at = editor.scroll_offset().1;
+                if at != wanted {
+                    offset.set(at);
+                }
+            });
+        });
+        self.refresh();
     }
     /// Keep a wheel gesture that starts over it at its edges, as CSS's
     /// `overscroll-behavior: contain`: the scroll views around it don't
@@ -7523,6 +7658,16 @@ impl Ui {
                 (th - inner_height).max(0.),
             );
             draw_scroll_limit.set(limit);
+            if let Some(code) = draw_hint.code()
+                && let Some(bar) = code.scrollbar.borrow().as_ref()
+            {
+                bar.drawn.set(ScrollDrawn {
+                    node: (bounds.width, bounds.height),
+                    origin: (padding.left, padding.top),
+                    view: inner_height,
+                    content: th,
+                });
+            }
             // Unwrapped text aligned right (right to left, by default) or
             // centred lies that far into the field while it is narrower:
             // as a scroll before its start, so the caret, selection and
@@ -8621,6 +8766,7 @@ impl Ui {
                     told.hold.set(held);
                     refresh();
                 }
+                told.publish_scroll(&metric_scene);
                 EditorHint::watch_theme(&told, &storage, root, &watched_theme);
                 // Publish only after layout, with no scene/model borrow held,
                 // and only for an editor something has measured.
