@@ -326,10 +326,36 @@ fn wght(font: CFTypeRef) -> Option<f64> {
     }
 }
 
+#[link(name = "objc")]
+unsafe extern "C" {
+    fn objc_autoreleasePoolPush() -> *mut c_void;
+    fn objc_autoreleasePoolPop(pool: *mut c_void);
+}
+/// An autorelease pool while it lives: what Core Text hands back autoreleased
+/// as a character's face is looked up goes as the lookup ends. Text is laid
+/// out outside a frame's drawing, where only an app's event loop drains a
+/// pool: laid out without one (headless, on a thread of its own), a page's
+/// new characters kept some 9 MB.
+struct Pool(*mut c_void);
+impl Pool {
+    fn push() -> Self {
+        // SAFETY: popped by this value's drop, on this thread (not Send),
+        // after any pool pushed inside it.
+        Self(unsafe { objc_autoreleasePoolPush() })
+    }
+}
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // SAFETY: the pool `push` made, on its thread.
+        unsafe { objc_autoreleasePoolPop(self.0) }
+    }
+}
+
 /// The face Core Text, as Chrome asks it, draws `c` in at `weight` and
 /// `size` (pixels; 0 for 12), for cosmic-text's fallback
 /// (`FontSystem::set_platform_fallback`).
 pub(crate) fn face(c: char, weight: u16, size: u16) -> Option<PlatformFace> {
+    let _pool = Pool::push();
     let size = if size == 0 { 12. } else { f64::from(size) };
     let (font, _) = fallback_font(c, weight, size)?;
     // SAFETY: the font's name and file, read once each.
